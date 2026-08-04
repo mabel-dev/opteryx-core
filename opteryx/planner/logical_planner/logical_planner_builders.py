@@ -35,6 +35,7 @@ from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
 from opteryx.types.logical_type import (
     ARRAY as _CT_ARRAY,
 )
+from opteryx.types.logical_type import integer_bounds
 from opteryx.types.logical_type import (
     BOOLEAN as _CT_BOOLEAN,
 )
@@ -716,6 +717,16 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
             (None, "WithoutTimeZone"),
         ):
             raise UnsupportedSyntaxError("TIMESTAMPS do not support `TIME ZONE`")
+        # FLOAT(p) — the SQL standard's binary precision: p <= 24 is single
+        # precision, above it double. Resolved HERE because the dict flattening
+        # below keeps only the key, which would drop the argument silently — and a
+        # dropped precision means `FLOAT(24)` quietly returning a double, i.e. the
+        # opposite of what was asked for. Bare FLOAT (no precision) is not this
+        # case and stays FLOAT64 (see _normalize_cast_type).
+        if type_key == "Float" and isinstance(data_type[type_key], dict):
+            _precision = data_type[type_key].get("Precision")
+            if _precision is not None:
+                return "FLOAT32" if int(_precision) <= 24 else "FLOAT64"
         data_type = type_key
 
     # Handle custom types
@@ -782,6 +793,31 @@ def _normalize_cast_type(data_type: str) -> str:
     if upper_type in ("UINT8", "UINT16", "UINT32", "UINT64"):
         return upper_type
 
+    # Signed integer widths and FLOAT32 — exact match, and it MUST sit ahead of the
+    # substring table below, which would otherwise never see them anyway but would
+    # catch a future alias.
+    #
+    # ⚠ INT8 HERE MEANS EIGHT BITS, NOT EIGHT BYTES. Postgres spells BIGINT as
+    # `int8` (8 BYTES) and sqlparser-rs's DataType is named after that spelling —
+    # so this is a deliberate divergence from Postgres, not an oversight. It is
+    # forced: this engine's own type vocabulary is INT8/INT16/INT32/INT64 by BIT
+    # width (draken's DrakenType, `str(ColumnType)`, and the catalog's stored
+    # names all agree), and INT8 meaning 8 bytes next to INT64 meaning 8 bytes
+    # would be indefensible. Postgres's `int8` is spelled BIGINT/INTEGER here.
+    if upper_type in ("INT8", "INT16", "INT32", "FLOAT32"):
+        return upper_type
+
+    # FLOAT and FLOAT64 are DOUBLE — one spelling reaches the tables downstream.
+    #
+    # FLOAT means DOUBLE PRECISION here, matching `_SQL_NAME_ALIASES` on the read
+    # side: FLOAT is what the catalog persists for the FLOAT category, so pointing
+    # it at FLOAT32 would narrow every stored float column. REAL is the single-
+    # precision spelling per the standard, and FLOAT32 is the canonical name for
+    # it. FLOAT(p) never reaches here — _extract_data_type resolves the precision
+    # to an exact width first.
+    if upper_type in ("FLOAT", "FLOAT64"):
+        return "DOUBLE"
+
     # IPv4 — exact match, and it MUST sit ahead of the substring rules below:
     # sqlparser hands this through as a custom type name, and "ipv4" contains no
     # mapped substring today, but the substring table is a trap waiting to catch
@@ -816,10 +852,20 @@ def _normalize_cast_type(data_type: str) -> str:
         return "VARBINARY"
 
     # Handle unsupported type aliases with helpful error messages
+    # The suggestion now points at the EXACT width where one exists — TINYINT means
+    # INT8 and REAL means FLOAT32 in this engine's vocabulary (the same mapping
+    # `_SQL_NAME_ALIASES` uses to read a stored schema), so suggesting INTEGER or
+    # DOUBLE for them would send the reader to a wider type than they asked for.
     type_suggestions = {
         ("STRING", "CHAR", "TEXT"): "VARCHAR",
-        ("FLOAT", "NUMERIC", "REAL"): "DOUBLE",
-        ("INT", "SMALLINT", "TINYINT", "BIGINT", "BYTE"): "INTEGER",
+        # NUMERIC is the standard's exact-numeric spelling — DECIMAL, not DOUBLE.
+        # Suggesting DOUBLE sent the reader to a type that cannot hold what they
+        # asked for.
+        ("NUMERIC",): "DECIMAL",
+        ("REAL",): "FLOAT32",
+        ("TINYINT", "BYTE"): "INT8",
+        ("SMALLINT",): "INT16",
+        ("INT", "BIGINT"): "INTEGER",
         ("BOOL", "BIT"): "BOOLEAN",
     }
 
@@ -830,6 +876,91 @@ def _normalize_cast_type(data_type: str) -> str:
             )
 
     raise SqlError(f"Unsupported type for CAST - '{data_type}'.")
+
+
+# The internal temporal forms the SQL rewriter produces for TIMESTAMP[unit], as
+# the TimestampUnit a declared column type resolves to. `_TIMESTAMP_DAYS` is
+# absent deliberately: TimestampUnit has no day resolution, so a column cannot be
+# DECLARED at it (see the raise in column_type_from_ast). It remains valid on a
+# CAST, where it is a scaling instruction and the result is canonical
+# microseconds — a different thing from a storage width.
+def _timestamp_unit_forms():
+    from draken.draken_native import TimestampUnit as _TU
+
+    return {
+        "_TIMESTAMP_NS": _TU.NANOSECONDS,
+        "_TIMESTAMP_MS": _TU.MILLISECONDS,
+        "_TIMESTAMP_S": _TU.SECONDS,
+        "_TIMESTAMP_US": _TU.MICROSECONDS,
+    }
+
+
+def column_type_from_ast(branch) -> "ColumnType":
+    """Resolve a DECLARED column type (its AST `data_type` node) to a ColumnType.
+
+    For anywhere a type is WRITTEN rather than cast to — CREATE TABLE today. It
+    deliberately runs the same two steps a cast target does, `_extract_data_type`
+    then `_normalize_cast_type`, so a type name means the same thing in a DDL
+    column as it does in a CAST. DDL previously carried its own hand-written
+    sqlparser-key → name map, which is how it ended up rejecting NVARCHAR,
+    VARBINARY, DECIMAL, TIME, INTERVAL, IPV4, TIMESTAMP[unit] and every exact
+    integer width, while quietly widening TINYINT and SMALLINT to INTEGER and
+    REAL to DOUBLE — a second vocabulary, free to drift, and drifted (§14: there
+    is ONE type object, from schema through AST to kernels).
+
+    `branch` is the AST node holding a "data_type" key (a column definition).
+    """
+    from opteryx.planner import build_literal_node
+    from opteryx.types.logical_type import TIMESTAMP as _CT_TIMESTAMP_F
+    from opteryx.types.logical_type import parse_column_type, try_parse_column_type
+
+    params: list = []
+    raw_name = _extract_data_type(branch["data_type"], branch, params, build_literal_node)
+    try:
+        normalized = _normalize_cast_type(raw_name)
+    except SqlError:
+        # The cast surface deliberately REFUSES alias spellings (TINYINT, BIGINT,
+        # TEXT, REAL) and points at the exact name instead. A DECLARED type is a
+        # different question: it says what the catalog will STORE, so it accepts
+        # everything a stored schema may say — `_SQL_NAME_ALIASES`, the same table
+        # the schema reader resolves against. Rejecting BIGINT or TEXT in DDL
+        # because a CAST rejects them would break working schemas for a rule that
+        # is about cast targets.
+        #
+        # This is resolution ORDER, not a second vocabulary: canonical names
+        # first, persisted-schema aliases second, and both tables already exist
+        # and are already authoritative for their own surface.
+        _aliased = try_parse_column_type(str(raw_name).upper())
+        if _aliased is not None:
+            return _aliased
+        raise
+
+    # TIMESTAMP[unit] — the unit is part of the type, not a parameter of it.
+    _units = _timestamp_unit_forms()
+    if normalized in _units:
+        return _CT_TIMESTAMP_F(_units[normalized])
+    if normalized == "_TIMESTAMP_DAYS":
+        raise UnsupportedSyntaxError(
+            "TIMESTAMP[d] cannot be a declared column type — there is no day "
+            "resolution to store it at. Declare DATE, or TIMESTAMP[s]."
+        )
+
+    # Parameterized forms. `_extract_data_type` puts the parenthesised arguments
+    # in `params` (the same channel the cast path reads), and parse_column_type
+    # already understands the canonical string spelling of each — so rebuild that
+    # spelling rather than growing a third construction path.
+    if normalized == "DECIMAL":
+        if len(params) < 2:
+            raise UnsupportedSyntaxError("DECIMAL requires a precision and scale, e.g. DECIMAL(10, 2)")
+        return parse_column_type(f"DECIMAL({int(params[0].value)}, {int(params[1].value)})")
+    if normalized == "VECTOR":
+        if not params:
+            raise UnsupportedSyntaxError("VECTOR requires a dimension, e.g. VECTOR(384)")
+        return parse_column_type(f"VECTOR({int(params[0].value)})")
+    if normalized == "ARRAY":
+        return parse_column_type(f"ARRAY<{_array_element_type(params)}>")
+
+    return parse_column_type(normalized)
 
 
 def _array_element_type(params):
@@ -873,8 +1004,8 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     # string arena by concat/LIKE, emitting non-null junk. Stamp the resolved
     # string-family ColumnType so the constant materialises as a typed null
     # string. NVARCHAR/DECIMAL never reach here (routed to the runtime CAST
-    # node); numeric/temporal NULLs keep the untyped NULL — their kernels
-    # short-circuit on the DRAKEN_NULL tag, so the type carries no benefit.
+    # node). NUMERIC targets are stamped too — see the branch below for why the
+    # "kernels short-circuit on DRAKEN_NULL" reasoning did not hold for them.
     if _node_cat == LogicalCategory.NULL:
         if target_type.replace("TRY_", "") == "VARCHAR":
             return Node(NodeType.LITERAL, value=None, type=_CT_VARCHAR, alias=alias)
@@ -892,10 +1023,30 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
                 type=_CT_ARRAY_OF(_array_element_type(params)),
                 alias=alias,
             )
-        # Other targets keep the untyped NULL: a VARBINARY null reaching the
-        # string-concat closure would be stringified (VARBINARY is not in its
-        # string allow-list), and numeric/temporal kernels short-circuit on the
-        # DRAKEN_NULL tag — so the untyped NULL is both safe and correct there.
+        # Numeric targets: stamp the width. The untyped NULL was justified on the
+        # grounds that "numeric kernels short-circuit on the DRAKEN_NULL tag" —
+        # the ARITHMETIC kernels do not. `10 / CAST(NULL AS FLOAT)` reached the
+        # binary op as INT64 / DRAKEN_NULL and died with "cross-type vector
+        # arithmetic not supported", and `id + CAST(NULL AS INTEGER)` was refused
+        # at the compiler gate for the same reason. A typed null constant is a
+        # normal operand of its own type, so both become ordinary promotions.
+        #
+        # `logical is None` deliberately excludes IPV4, whose category is INTEGER
+        # (so ordering/grouping/joins run on the raw uint32) but which carries a
+        # descriptor — stamping that onto a folded null is the attach-vs-skip
+        # question that path answers separately, and this is not the place to
+        # re-answer it. VARBINARY and temporal targets are likewise untouched: a
+        # VARBINARY null reaching the string-concat closure would be stringified
+        # (VARBINARY is not in its string allow-list).
+        from opteryx.types.logical_type import try_parse_column_type as _try_parse_ct
+
+        _null_ct = _try_parse_ct(target_type.replace("TRY_", ""))
+        if (
+            _null_ct is not None
+            and _null_ct.logical is None
+            and _null_ct.category in (LogicalCategory.INTEGER, LogicalCategory.FLOAT)
+        ):
+            return Node(NodeType.LITERAL, value=None, type=_null_ct, alias=alias)
         return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
 
     # Strip TRY_ prefix for type lookup
@@ -1140,6 +1291,21 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
             parsed_value = timestamp_to_int64_us(parsed_value)
         elif isinstance(parsed_value, datetime.date):
             parsed_value = date_to_int64_days(parsed_value)
+        # A literal that does not FIT the declared width is a failed cast, and it
+        # has to be caught HERE: parsing `300` succeeds, so without this the value
+        # sailed through typed INT8 and only blew up later inside the vector
+        # constructor — as a bare OverflowError for plain CAST, and for TRY_CAST
+        # as an error at all, when the whole point of TRY_CAST is a NULL. Raising
+        # inside this try hands both dispositions to the handler below, which
+        # already knows which one applies.
+        _bounds = integer_bounds(sql_type)
+        if _bounds is not None and isinstance(parsed_value, int) and not isinstance(
+            parsed_value, bool
+        ):
+            if parsed_value < _bounds[0] or parsed_value > _bounds[1]:
+                raise ValueError(
+                    f"value {parsed_value} is out of range for {sql_type}"
+                )
         return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
     except Exception as e:
         # For TRY_CAST/SAFE_CAST, return NULL on failure

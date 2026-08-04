@@ -251,7 +251,6 @@ class MabelTable(BaseTable, Diachronic):
         from rugo.parquet import read_metadata_from_memoryview  # type: ignore[import]
 
         from opteryx.connectors._rugo_schema import rugo_to_relation_schema
-        from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
         from opteryx.models.file_entry import FileEntry
         from opteryx.models.manifest import Manifest
         from opteryx.models.manifest_io import is_dataset_manifest
@@ -292,29 +291,20 @@ class MabelTable(BaseTable, Diachronic):
         infos = self.filesystem.get_file_info(data_blobs)
         sizes: Dict[str, int] = {i.path: (getattr(i, "size", 0) or 0) for i in infos}
 
-        file_entries = []
-        for blob_name in data_blobs:
-            file_size = sizes.get(blob_name, 0)
-            try:
-                record_count, footer_size, column_stats = fetch_column_stats(
-                    blob_name, file_size=file_size or -1
-                )
-                if file_size == 0:
-                    file_size = footer_size
-                column_stats.bind_schema([col.name for col in schema.columns])
-            except (OSError, ValueError, RuntimeError):
-                record_count = 0
-                column_stats = None
-
-            file_entries.append(
-                FileEntry(
-                    file_path=blob_name,
-                    file_format="PARQUET",
-                    record_count=record_count,
-                    file_size_in_bytes=file_size,
-                    column_stats=column_stats,
-                )
+        # Mabel computes NO plan-time statistics. The manifest lists the files and
+        # their sizes; every row count and column bound comes from reading them.
+        # record_count is therefore None — UNKNOWN, not 0 (see FileEntry): a
+        # fabricated 0 would let the optimizer answer COUNT(*) from the manifest
+        # without scanning, and delete LIMIT nodes as already-satisfied.
+        file_entries = [
+            FileEntry(
+                file_path=blob_name,
+                file_format="PARQUET",
+                record_count=None,
+                file_size_in_bytes=sizes.get(blob_name, 0),
             )
+            for blob_name in data_blobs
+        ]
 
         self.schema = schema
         self._manifest = Manifest(file_entries, schema)

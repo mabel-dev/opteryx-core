@@ -97,19 +97,6 @@ DEF _BV_IS_NOT_FALSE = 3
 # to disambiguate DATE vs TIMESTAMP from the BC_TYPE_* int codes on the AnyOp paths.
 _CT_TIMESTAMP = _TIMESTAMP_factory()
 
-# Telemetry: count C-native kernel calls for regression detection (Phase 9c).
-cdef uint64_t _c_native_kernel_call_count = 0
-
-
-def get_c_native_kernel_call_count():
-    """Return the current count of C-native kernel calls (telemetry).
-
-    This counter increments each time the executor dispatches to a C ABI kernel.
-    Used for regression detection to ensure C paths are exercised.
-    """
-    return _c_native_kernel_call_count
-
-
 def _is_scalar_value(obj):
     """Deprecated: use is_scalar() from opteryx.utils.vector_types instead."""
     return is_scalar(obj)
@@ -3416,8 +3403,6 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                     # Executor short-circuit: detect all-null inputs (DRAKEN_NULL constant)
                     # and return null result without calling kernel (Defect 2 fix).
                     if (dv_left_ptr.type == DRAKEN_NULL or dv_right_ptr.type == DRAKEN_NULL):
-                        global _c_native_kernel_call_count
-                        _c_native_kernel_call_count += 1  # Count as C-native dispatch
                         dv_result_ptr = Vector(_draken_native.vector_null_from_length(num_rows)).unified()
                         dv_stack[sp] = dv_result_ptr
                         anchor[sp] = None

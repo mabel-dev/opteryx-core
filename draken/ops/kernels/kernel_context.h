@@ -74,6 +74,17 @@ struct binary_op_ctx {
     // ignore the unit (days); only the TIMESTAMP64 side's unit is read.
     unsigned char left_unit;
     unsigned char right_unit;
+    // CAST only: 0 = raise on a row that cannot be converted (`::`, CAST),
+    // 1 = NULL that row (TRY_CAST). Appended LAST so every existing positional
+    // construction keeps its meaning; zero for every binary operator, which is
+    // the correct disposition for one (an arithmetic overflow is not a value
+    // the caller asked to null out).
+    //
+    // ONE kernel serves both dispositions, deliberately — the alternative, a
+    // parallel draken_cast_try_* family, is two implementations of one
+    // conversion, free to disagree about what "converts" means. Same reasoning
+    // as cast_array_ctx.safe above, which this generalises.
+    unsigned char safe;
 };
 
 /**
@@ -199,6 +210,11 @@ struct time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude,
  */
 struct format_ctx {
     uint8_t ts_unit;
+    // CAST only: 1 = TRY_CAST (an unparseable row becomes NULL), 0 = raise. Same
+    // meaning as binary_op_ctx.safe — the string->DATE/TIMESTAMP kernels take
+    // THIS ctx (they need the format pattern), so the disposition has to be
+    // reachable from here too.
+    uint8_t safe;
     int32_t fmt_len;
 };
 
@@ -207,7 +223,7 @@ static inline const char* format_ctx_fmt(const struct format_ctx* c) {
 }
 
 struct format_ctx* kernel_alloc_format_ctx(uint8_t ts_unit, const char* fmt,
-                                           size_t fmt_len);
+                                           size_t fmt_len, uint8_t safe);
 
 /**
  * Context for the VECTOR_FP16 cosine kernels (draken_cosine_{similarity,distance}_vector).

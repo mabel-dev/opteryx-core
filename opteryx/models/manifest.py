@@ -244,9 +244,21 @@ class Manifest:
     # Basic Aggregates
     # ================================================================
 
-    def get_record_count(self) -> int:
-        """Total record count across all files."""
-        return sum(f.record_count for f in self.files)
+    def get_record_count(self) -> Optional[int]:
+        """Total record count across all files, or None when it is UNKNOWN.
+
+        Unknown is not zero. A single file whose `record_count is None` makes the
+        WHOLE total unknown: consumers answer COUNT(*) from this number and delete
+        LIMIT nodes against it, so reporting a partial sum as a total is a wrong
+        answer rather than an approximation. Callers must test `is not None`, not
+        truthiness - a real, empty relation legitimately totals 0.
+        """
+        total = 0
+        for f in self.files:
+            if f.record_count is None:
+                return None
+            total += f.record_count
+        return total
 
     def get_file_count(self) -> int:
         """Number of files in manifest."""
@@ -584,7 +596,12 @@ class Manifest:
         accumulated = 0
         threshold = None
         for position, (lo, hi) in ranked:
-            accumulated += self.files[position].record_count
+            file_rows = self.files[position].record_count
+            # An unknown row count contributes NO rows toward `limit` - it is not
+            # "zero, therefore empty", it is no evidence. The file still tightens
+            # the threshold below, which can only widen what is kept (min for
+            # DESC, max for ASC), never prune on rows we cannot count.
+            accumulated += file_rows if file_rows is not None else 0
             candidate = lo if descending else hi
             if threshold is None:
                 threshold = candidate
@@ -679,6 +696,14 @@ class Manifest:
             RelationStatistics,
         )
         total_rows = self.get_record_count()
+        if total_rows is None:
+            # RelationStatistics.row_count is a real int and selectivity does
+            # arithmetic on it, so an unknown count needs a stand-in. Use the same
+            # no-signal constant statistics_refresh substitutes, so every estimate
+            # in the planner sits on one scale rather than two.
+            from opteryx.planner.optimizer.statistics_refresh import _UNKNOWN_ROW_COUNT
+
+            total_rows = _UNKNOWN_ROW_COUNT
         has_null_counts = any(
             (f.column_stats is not None and f.column_stats.has_any_null_counts())
             or bool(f.null_value_counts)
@@ -1143,7 +1168,9 @@ class Manifest:
             return None
 
         total_rows = self.get_record_count()
-        if total_rows == 0:
+        # None (unknown) as well as 0 - there is no fraction to report without a
+        # denominator, and dividing by an unknown one would be a fabricated ratio.
+        if not total_rows:
             return None
 
         null_count = 0

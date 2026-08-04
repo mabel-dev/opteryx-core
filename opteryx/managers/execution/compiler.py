@@ -759,6 +759,8 @@ class _Compiler:
         this call feeds a compression-aware consumer — currently just computed
         GROUP BY / DISTINCT keys, whose sole consumer is the group/distinct sink."""
         from opteryx.expression.evaluator import compile_eval_nodes
+        from opteryx.expression.formatter import format_expression
+        from opteryx.operators._operators import bytecode_non_c_native_op
         from opteryx.operators._operators import bytecode_ops_all_c_native
 
         layout = self._hoist_array_operands(p, eval_nodes, layout)
@@ -769,10 +771,12 @@ class _Compiler:
             self._rewrite_case(node_))) for node_ in eval_nodes]
 
         ct_by_identity = {}
+        node_by_identity = {}
         for node_ in eval_nodes:
             sc = getattr(node_, "schema_column", None)
             if sc is not None and sc.identity is not None:
                 ct_by_identity[sc.identity] = getattr(sc, "column_type", None)
+                node_by_identity[sc.identity] = node_
 
         layout = list(layout)
         for identity, bc in compile_eval_nodes(eval_nodes):
@@ -805,7 +809,17 @@ class _Compiler:
                             "(binder identity reuse)")
                 continue
             if not bytecode_ops_all_c_native(bc):
-                _unsupported("a computed expression outside the c-native kernel set")
+                # Name the expression AND the operation inside it. The refusal is
+                # correct either way, but "a computed expression outside the
+                # c-native kernel set" alone gave the reader nothing to act on —
+                # not which of a SELECT's expressions, and not which part of it.
+                _offender = node_by_identity.get(identity)
+                _where = (
+                    f" in `{format_expression(_offender)}`" if _offender is not None else ""
+                )
+                _unsupported(
+                    f"{bytecode_non_c_native_op(bc)}{_where}, "
+                    "outside the c-native kernel set,")
             logical = None
             ct = ct_by_identity.get(identity)
             if ct is not None and ct.logical is not None:

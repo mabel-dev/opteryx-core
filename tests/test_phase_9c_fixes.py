@@ -1,9 +1,13 @@
 """
-Phase 9c regression tests — verifying the three defect fixes.
+Phase 9c regression tests — verifying the defect fixes.
 
 Defect 1: _KernelContextWrapper.ctx_ptr AttributeError
 Defect 2: NULL arithmetic SIGBUS
-Defect 3: C-native telemetry counter
+
+Defect 3 (a C-native telemetry counter) was deleted along with the counter: it
+had a single increment site inside a binary op's all-null short-circuit, so it
+never measured dispatch, and that branch is on the Cython VM the native engine
+no longer runs.
 """
 import sys
 import os
@@ -11,7 +15,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import opteryx
-from opteryx.expression.evaluator import evaluation
 
 
 def test_defect1_array_extraction_binds():
@@ -88,32 +91,6 @@ def test_defect2_null_arithmetic():
     return True
 
 
-def test_defect3_telemetry_counter():
-    """Defect 3: Verify C-native kernel calls are counted.
-
-    Tests that the telemetry counter increments when C dispatch is used.
-    """
-    initial_count = evaluation.get_c_native_kernel_call_count()
-
-    session = opteryx.session()
-
-    # Execute NULL + integer (uses executor short-circuit for C-native dispatch).
-    # The executor detects DRAKEN_NULL and returns all-null without calling the kernel,
-    # but still increments the telemetry counter since it's taking the C-native path.
-    result = session.execute_to_morsels("SELECT NULL + 1")
-    for morsel in result:
-        # Verify the result is null
-        values = list(morsel.column(morsel.column_names[0]))
-        assert values[0] is None
-
-    final_count = evaluation.get_c_native_kernel_call_count()
-
-    assert final_count > initial_count, \
-        f"Telemetry counter did not increment (initial={initial_count}, final={final_count})"
-
-    return True
-
-
 if __name__ == "__main__":
     print("Testing Defect 1 (array extraction)...", end=" ")
     test_defect1_array_extraction_binds()
@@ -125,10 +102,6 @@ if __name__ == "__main__":
 
     print("Testing Defect 2 (NULL arithmetic)...", end=" ")
     test_defect2_null_arithmetic()
-    print("✓")
-
-    print("Testing Defect 3 (telemetry counter)...", end=" ")
-    test_defect3_telemetry_counter()
     print("✓")
 
     print("\n✅ All Phase 9c defect fixes verified!")

@@ -23,6 +23,8 @@ Note: MIN/MAX work for DATE, INTEGER and TIMESTAMP types. FLOAT, STRING,
 and complex types lose precision in BRIN bounds and cannot be answered.
 """
 
+from typing import Optional
+
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.planner import build_literal_node
@@ -374,7 +376,7 @@ def _replace_nested_aggregators(node, agg_identity_to_literal: dict):
     return node
 
 
-def get_count_from_manifest(manifest) -> int:
+def get_count_from_manifest(manifest) -> Optional[int]:
     """
     Get total row count from manifest statistics.
 
@@ -384,10 +386,14 @@ def get_count_from_manifest(manifest) -> int:
         manifest: The Manifest object from the Scan node
 
     Returns:
-        The total record count (int), or 0 if manifest is None/empty
+        The total record count (int), or None when the count is UNKNOWN - no
+        manifest, or a manifest holding a file whose row count nobody computed.
+        None is NOT 0: this number is handed straight back as the answer to
+        COUNT(*) with the scan removed, so an unknown reported as 0 is a silent
+        wrong answer. The caller must abandon the rewrite on None.
     """
     if manifest is None:
-        return 0
+        return None
 
     return manifest.get_record_count()
 
@@ -598,6 +604,10 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             # Get the aggregate value based on type
             if agg_func == "COUNT":
                 total_rows = get_count_from_manifest(manifest)
+                if total_rows is None:
+                    # Row count unknown - the manifest cannot answer this, so
+                    # leave the plan alone and let the scan count the rows.
+                    return plan
                 if column_name:
                     # COUNT(col) = total_rows - nulls(col); requires every file
                     # in the manifest to carry null counts for the column.

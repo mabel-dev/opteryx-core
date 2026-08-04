@@ -205,16 +205,19 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
     C-ABI kernel the executor can dispatch zero-Python via BC_INSTR_C_NATIVE, or
     None (those fall back to the resolve_cast closure).
 
-    Y, increment 1: only kernels producing a FIXED-WIDTH result (INT64/FLOAT64/
-    BOOL) — these fold into the frame arena as a dense DV* with no Python object.
-    String- and timestamp-producing kernels (and parametrized/closure casts) are
-    NOT listed yet; they stay on the closure path until later increments wire
-    their result handling. TRY_CAST stays on the closure path (conservative) —
-    EXCEPT for the ARRAY target, whose kernel takes the safe/raise disposition in
-    its ctx and is the only pair admitted with safe=True (see the branch below).
-
     The set grows as kernels become real+registered. This table is the single
     source of truth for which casts run C-native.
+
+    `safe` (TRY_CAST) NO LONGER changes what this table returns. It used to force
+    None, on the theory that TRY_CAST would fall back to a closure — but this
+    engine has no closure fallback, so that made TRY_CAST unrunnable on a column
+    for EVERY target. The disposition now rides in the kernel's ctx
+    (binary_op_ctx.safe, or format_ctx.safe for the two pattern-parsing kernels,
+    or cast_array_ctx.safe for ARRAY), so ONE kernel serves both dispositions and
+    a raise and a NULL can never disagree about what "converts" means.
+
+    A cast that CANNOT fail (a widening, a bool source, a retag) ignores the flag
+    entirely — TRY_CAST over one is just a cast, which is correct.
 
     `source_is_ipv4` is the IPv4 SOURCE discriminant, and it is NOT derivable from
     `source_physical`: an IPv4 column is DRAKEN_UINT32 refined by a
@@ -227,23 +230,27 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
     """
     cdef str s = source_physical
     cdef str t = "BLOB" if target_type == "VARBINARY" else target_type
-    # ---- ARRAY target — the ONE pair that is admitted for safe=True ----
-    # Ahead of the blanket `safe -> None` below, deliberately. That rule keeps
-    # TRY_CAST on the resolve_cast closure path, but this engine has no closure
-    # fallback (the c-native admission gate refuses anything not listed here), so
-    # obeying it would make TRY_CAST(x AS ARRAY<T>) unrunnable — and the architect
-    # ruled that TRY_CAST is exactly how a caller opts into NULL-ing rows whose
-    # JSON is not an array. `safe` rides in cast_array_ctx, so ONE kernel serves
-    # both dispositions; there is no separate safe kernel to fall out of sync.
+    # ---- ARRAY target ----
+    # The first pair to take its disposition through the ctx, and the model the
+    # rest now follow: `safe` rides in cast_array_ctx.
     if t == "ARRAY":
         if s in _CAST_STRINGS or s == "VARIANT":
             return ("draken_cast_to_array", 0)
         # Every other source (a number, a bool, a temporal) is NOT castable to
         # ARRAY. Returning None here is a plan-time refusal, not a fallback.
         return None
-    if s is None or safe:
+    if s is None:
         return None
-    if t in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
+    # FLOAT32 is NOT in this tuple: it is a narrower type with its own kernels.
+    # Routing it here would declare FLOAT32 and produce FLOAT64.
+    if t in ("DOUBLE", "FLOAT", "FLOAT64"):
+        # FLOAT32 → FLOAT64 is a WIDENING, not a retag: the payloads are 4 and 8
+        # bytes wide, so it must run a kernel. It was previously listed as an
+        # identity passthrough in resolve_cast, which the gate then refused —
+        # the refusal was the only thing standing between that entry and a
+        # 4-byte buffer read at an 8-byte stride.
+        if s == "FLOAT32":
+            return ("draken_cast_float_to_float64", 0)
         if s == "INT64":
             return ("draken_cast_int64_to_float64", 0)
         if s in _CAST_NARROW_INT:
@@ -252,8 +259,20 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
             return ("draken_cast_bool_to_float64", 0)
         if s in _CAST_STRINGS:
             return ("draken_cast_string_to_float64", 0)
+        # The source SCALE rides in binary_op_ctx.left_scale — a decimal vector
+        # does not carry it, so this pair is ctx-bearing like decimal→string.
+        if s in ("DECIMAL", "DECIMAL128"):
+            return (f"draken_cast_{s.lower()}_to_float64", 0)
+        # Unsigned → float, direct. NOT via INT64: that route raises above
+        # 2^63-1, which left the top half of the UINT64 range with no way into
+        # float arithmetic at all.
+        if s in _CAST_UNSIGNED_INT:
+            return ("draken_cast_uint_to_float64", 0)
         return None
-    if t in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
+    # INT8/INT16/INT32 are NOT in this tuple. They used to be, which is exactly
+    # why they could not be cast TARGETS: every one of them would have dispatched
+    # an int64-PRODUCING kernel, declaring INT32 and producing INT64.
+    if t in ("INTEGER", "BIGINT", "INT64"):
         if s in _CAST_NARROW_INT:
             return ("draken_cast_integer_to_int64", 0)
         if s in ("FLOAT64", "FLOAT32"):
@@ -270,6 +289,44 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
         # (a UINT64 value > INT64_MAX raises rather than wrapping negative).
         if s in _CAST_UNSIGNED_INT:
             return ("draken_cast_uint_to_int64", 0)
+        # Truncates toward zero (draken_cast_float64_to_int64's convention), and
+        # takes the source scale in binary_op_ctx.left_scale.
+        if s in ("DECIMAL", "DECIMAL128"):
+            return (f"draken_cast_{s.lower()}_to_int64", 0)
+        return None
+    # Narrow signed target (INT8/INT16/INT32). Source families mirror the unsigned
+    # arm below exactly; every narrowing is range-checked in the kernel. The
+    # same-width case (INT32 → INT32) is a copy through the same kernel rather
+    # than a special case — its range check is trivially satisfied.
+    if t in ("INT8", "INT16", "INT32"):
+        if s in _CAST_NARROW_INT or s == "INT64":
+            return (f"draken_cast_integer_to_{t.lower()}", 0)
+        if s in _CAST_UNSIGNED_INT:
+            return (f"draken_cast_uint_to_{t.lower()}", 0)
+        if s in ("FLOAT64", "FLOAT32"):
+            return (f"draken_cast_float_to_{t.lower()}", 0)
+        if s == "BOOL":
+            return (f"draken_cast_bool_to_{t.lower()}", 0)
+        if s in _CAST_STRINGS:
+            return (f"draken_cast_string_to_{t.lower()}", 0)
+        if s in ("DECIMAL", "DECIMAL128"):
+            return (f"draken_cast_{s.lower()}_to_{t.lower()}", 0)
+        return None
+    # FLOAT32 target. Precision loss is the type's contract; only a finite value
+    # with no float32 representation at all raises (see the kernel).
+    if t == "FLOAT32":
+        if s in _CAST_NARROW_INT or s == "INT64":
+            return ("draken_cast_integer_to_float32", 0)
+        if s in _CAST_UNSIGNED_INT:
+            return ("draken_cast_uint_to_float32", 0)
+        if s in ("FLOAT64", "FLOAT32"):
+            return ("draken_cast_float_to_float32", 0)
+        if s == "BOOL":
+            return ("draken_cast_bool_to_float32", 0)
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_float32", 0)
+        if s in ("DECIMAL", "DECIMAL128"):
+            return (f"draken_cast_{s.lower()}_to_float32", 0)
         return None
     # E33 — UINT8/16/32/64 target. Range-checked in the kernel itself (negative,
     # NaN, or out-of-range magnitude raises — never silently truncates/wraps).
@@ -282,6 +339,17 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
             return (f"draken_cast_bool_to_{t.lower()}", 0)
         if s in _CAST_STRINGS:
             return (f"draken_cast_string_to_{t.lower()}", 0)
+        # Unsigned → unsigned, every width pairing. Widenings and the same-width
+        # copy cannot fail; narrowings are range-checked. Without these an
+        # unsigned column could not change width at all — the signed family
+        # above rejects an unsigned source outright.
+        if s in _CAST_UNSIGNED_INT:
+            return (f"draken_cast_uint_to_{t.lower()}", 0)
+        # DECIMAL → unsigned: truncates toward zero like the INTEGER target,
+        # then range-checks. Ctx-bearing (source scale), as every decimal-source
+        # kernel is.
+        if s in ("DECIMAL", "DECIMAL128"):
+            return (f"draken_cast_{s.lower()}_to_{t.lower()}", 0)
         return None
     if t in ("DATE", "DATE32"):
         if s in _CAST_STRINGS:
@@ -293,8 +361,22 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
     if t == "IPV4":
         if s in _CAST_STRINGS:
             return ("draken_cast_string_to_ipv4", 0)
-        # uint32 -> IPv4 is a pure retag: same bits, same physical tag, only the
-        # descriptor is added, and that is the caller's job. No kernel runs.
+        # An IPv4 address IS a uint32, so every integer width reaches it through
+        # the range-checked narrowing to UINT32 — the descriptor is then attached
+        # from the bound output type. `192.168.1.1` and `3232235777` are the same
+        # address, and refusing the integer spelling made the address arithmetic
+        # people actually do (store as INT64, render as an address) impossible.
+        #
+        # Range-checked, never wrapped: a negative INT64 or a value above
+        # 2^32-1 is not an address and raises. UINT32 → IPV4 goes through the
+        # unsigned kernel too — it is a width-preserving copy there, which costs
+        # one pass and keeps this a normal, gate-admissible instruction rather
+        # than a special "no kernel runs" case the compiler had no way to honour
+        # (it refused the query outright).
+        if s in _CAST_NARROW_INT or s == "INT64":
+            return ("draken_cast_integer_to_uint32", 0)
+        if s in _CAST_UNSIGNED_INT:
+            return ("draken_cast_uint_to_uint32", 0)
         return None
     if t == "BOOLEAN":
         if s == "INT64":
@@ -605,10 +687,13 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     # there is no conversion to run. String -> IPV4 parses via the same kernel the
     # C-native path uses.
     if t == "IPV4":
-        if s == "UINT32":
-            return (lambda arr: arr), False, False
         if s in _CAST_STRINGS:
             return vector_cast_string_to_ipv4, True, True
+        # Every integer width: an address IS a uint32, so this is the same
+        # range-checked narrowing the UINT32 target runs, with the IPV4
+        # descriptor attached from the bound result type by the projection.
+        if s in _CAST_NARROW_INT or s == "INT64" or s in _CAST_UNSIGNED_INT:
+            return _int_to_ipv4_native_only, False, False
         raise NotImplementedError(f"No native CAST {source_physical} -> IPV4")
 
     # ---- TIME target (string parse; only TIME64/microseconds is reachable
@@ -620,10 +705,23 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return vector_cast_string_to_time64, True, True
         raise NotImplementedError(f"No native CAST {source_physical} → TIME")
 
+    # ---- FLOAT32 target ----
+    # Native-only: the representability check that separates "lost precision"
+    # (fine) from "became +-Inf" (not fine) lives in the kernel.
+    if t == "FLOAT32":
+        if (s in _CAST_NARROW_INT or s == "INT64" or s in _CAST_UNSIGNED_INT
+                or s in ("FLOAT64", "FLOAT32") or s == "BOOL" or s in _CAST_STRINGS
+                or s in ("DECIMAL", "DECIMAL128")):
+            return _native_only_cast(source_physical, "FLOAT32"), False, False
+        raise NotImplementedError(f"No native CAST {source_physical} → FLOAT32")
+
     # ---- DOUBLE / FLOAT target (→ float64) ----
-    if t in ("DOUBLE", "FLOAT", "FLOAT64", "FLOAT32"):
-        if s in ("FLOAT64", "FLOAT32"):
+    if t in ("DOUBLE", "FLOAT", "FLOAT64"):
+        if s == "FLOAT64":
             return (lambda arr: arr), False, False
+        # NOT an identity — see the widening note in _c_native_cast.
+        if s == "FLOAT32":
+            return _native_only_cast(source_physical, "DOUBLE"), False, False
         if s == "INT64":
             return vector_cast_int64_to_float64, True, True
         if s in _CAST_NARROW_INT:
@@ -632,10 +730,25 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return vector_cast_bool_to_float64, True, True
         if s in _CAST_STRINGS:
             return _draken_native_casts.vector_cast_string_to_float64, True, True
+        if s in ("DECIMAL", "DECIMAL128"):
+            return _decimal_numeric_native_only, False, False
+        if s in _CAST_UNSIGNED_INT:
+            return _native_only_cast(source_physical, "DOUBLE"), False, False
         raise NotImplementedError(f"No native CAST {source_physical} → DOUBLE")
 
+    # ---- Narrow signed target (INT8/INT16/INT32) ----
+    # Native-only: the range check is the kernel's, and a Python row-loop
+    # standing in for it would be a second implementation of the very thing that
+    # makes a narrowing cast correct.
+    if t in ("INT8", "INT16", "INT32"):
+        if (s in _CAST_NARROW_INT or s == "INT64" or s in _CAST_UNSIGNED_INT
+                or s in ("FLOAT64", "FLOAT32") or s == "BOOL" or s in _CAST_STRINGS
+                or s in ("DECIMAL", "DECIMAL128")):
+            return _native_only_cast(source_physical, t), False, False
+        raise NotImplementedError(f"No native CAST {source_physical} → {t}")
+
     # ---- INTEGER target (→ int64) ----
-    if t in ("INTEGER", "BIGINT", "INT64", "INT32", "INT16", "INT8"):
+    if t in ("INTEGER", "BIGINT", "INT64"):
         if s == "INT64":
             return (lambda arr: arr), False, False
         if s in _CAST_NARROW_INT:
@@ -659,15 +772,37 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
                 result = [int(v) if v is not None else None for v in arr]
                 return _draken_native_casts.vector_from_sequence(result)
             return _uint_to_int64_cast, False, True
+        if s in ("DECIMAL", "DECIMAL128"):
+            return _decimal_numeric_native_only, False, False
         raise NotImplementedError(f"No native CAST {source_physical} → INTEGER")
 
     # ---- UINT8/16/32/64 target (E33) ----
-    # No native zero-Python kernel yet (matches DECIMAL/ARRAY/VECTOR above) — a
-    # row-loop closure that parses each value as an integer, then hands the
-    # Python list to the width-specific native constructor, which performs the
-    # actual range check (negative values and out-of-range magnitude both raise
-    # OverflowError there — fail loud, never silently wrap/truncate).
+    # The SOURCE set is enumerated, exactly as every other target arm here does,
+    # and must stay in step with _c_native_cast's UINT arm — those are the pairs
+    # that have a real kernel. It was previously unconditional, which made this
+    # the only arm that accepted a source it cannot convert (DECIMAL, TIMESTAMP,
+    # ARRAY, ...): bind-time resolution then SUCCEEDED, and the query died later
+    # at the compiler's c-native admission gate with the generic "a computed
+    # expression outside the c-native kernel set" — naming neither the cast nor
+    # the types. Failing here instead gives the same loud, specific
+    # "No native CAST DECIMAL → UINT32" the INTEGER/DOUBLE/BOOLEAN targets give.
     if t in ("UINT8", "UINT16", "UINT32", "UINT64"):
+        # Same width in and out — a pure retag, no conversion to run. This is how
+        # IPV4 → UINT32 arrives (an IPv4 column IS a UINT32 carrying a
+        # LogicalKind.IPV4 descriptor, and dropping the descriptor is the
+        # projection's job), and it mirrors the INT64/DATE32/TIME64 passthroughs
+        # in the arms above. A WIDTH-CHANGING unsigned→unsigned cast is NOT this
+        # and still has no kernel — it falls to the refusal below.
+        if s == t:
+            return (lambda arr: arr), False, False
+        if s in _CAST_UNSIGNED_INT or s in ("DECIMAL", "DECIMAL128"):
+            # Range check (and, for decimal, the scale) lives in the kernel; a
+            # Python row-loop standing in would be a second implementation of it.
+            return _native_only_cast(source_physical, t), False, False
+        if not (s in _CAST_NARROW_INT or s == "INT64" or s in ("FLOAT64", "FLOAT32")
+                or s == "BOOL" or s in _CAST_STRINGS):
+            raise NotImplementedError(f"No native CAST {source_physical} → {t}")
+
         def _uint_cast(arr):
             caster = parser_for(LogicalCategory.INTEGER)
             result = [caster(i) if i is not None else None for i in arr]
@@ -751,6 +886,55 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
 
     raise NotImplementedError(
         f"No native CAST kernel for {source_physical} → {target_type}"
+    )
+
+
+def _native_only_cast(str source, str target):
+    """A callable_ref for a pair that runs ONLY in its native kernel.
+
+    Some casts carry their correctness in the kernel — a range check, or a scale
+    that lives on the bind-time ColumnType and not on the runtime vector. A
+    Python row-loop standing in for one of those would be a second, driftable
+    implementation of the very thing that makes the cast correct (§2), so these
+    pairs resolve to a raiser instead. Reaching it means the kernel is missing
+    from the registry, which is a build problem, not a fallback case.
+    """
+    def _raise(arr):
+        raise NotImplementedError(
+            f"CAST {source} → {target} runs only in its native draken kernel; "
+            "there is no Python fallback."
+        )
+    return _raise
+
+
+def _int_to_ipv4_native_only(arr):
+    """callable_ref for <integer> → IPV4: native-only, no Python fallback.
+
+    The range check that separates an address from a number that is not one lives
+    in the kernel (draken_cast_integer_to_uint32 / draken_cast_uint_to_uint32),
+    and this engine dispatches it there for every reachable plan. A Python
+    row-loop standing in would be a second, driftable implementation of that
+    check — the class of thing §2 forbids — so it fails loud instead.
+    """
+    raise NotImplementedError(
+        "CAST <integer> → IPV4 requires the native draken_cast_integer_to_uint32 / "
+        "draken_cast_uint_to_uint32 kernel; there is no Python fallback."
+    )
+
+
+def _decimal_numeric_native_only(arr):
+    """callable_ref for DECIMAL → INTEGER / DOUBLE: native-only, no Python fallback.
+
+    Same reason as the string pair below — the source scale lives on the bind-time
+    ColumnType, not the runtime vector, so a scale-less Python closure could only
+    return the raw unscaled integer, which is a WRONG ANSWER dressed as a cast.
+    The C-native kernel (draken_cast_decimal{,128}_to_{int64,float64}) always
+    services this; reaching here means the kernel is missing from the registry.
+    """
+    raise NotImplementedError(
+        "CAST DECIMAL → INTEGER/DOUBLE requires the native "
+        "draken_cast_decimal*_to_{int64,float64} kernels; there is no Python "
+        "fallback (the source scale is not carried on the runtime vector)."
     )
 
 

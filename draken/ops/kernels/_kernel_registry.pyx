@@ -57,7 +57,8 @@ cdef extern from "ops/kernels/kernel_registry.h":
                                               unsigned char result_scale,
                                               unsigned char result_precision,
                                               unsigned char left_unit,
-                                              unsigned char right_unit)
+                                              unsigned char right_unit,
+                                              unsigned char safe)
     ctypedef struct in_list_ctx_:
         uint32_t count
     ctypedef in_list_ctx_ in_list_ctx
@@ -88,7 +89,8 @@ cdef extern from "ops/kernels/kernel_registry.h":
 
     time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude, uint8_t unit_kind,
                                                   uint8_t ts_unit)
-    format_ctx* kernel_alloc_format_ctx(uint8_t ts_unit, const char* fmt, size_t fmt_len)
+    format_ctx* kernel_alloc_format_ctx(uint8_t ts_unit, const char* fmt, size_t fmt_len,
+                                       uint8_t safe)
 
     ctypedef struct vector_dim_ctx_:
         pass
@@ -171,7 +173,7 @@ def alloc_cast_array_ctx(int element_type, int safe):
 
 def alloc_binary_op_ctx(int op_code, int left_scale=0, int right_scale=0,
                         int result_scale=0, int result_precision=0,
-                        int left_unit=0, int right_unit=0):
+                        int left_unit=0, int right_unit=0, int safe=0):
     """
     Allocate context for binary operation with op_code dispatch.
 
@@ -181,6 +183,8 @@ def alloc_binary_op_ctx(int op_code, int left_scale=0, int right_scale=0,
         result_precision: DECIMAL/DECIMAL128 result precision (descriptor; 0 otherwise).
         left_unit/right_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of TIMESTAMP/TIME
             operands (0 otherwise; date32 ignores it).
+        safe: CAST only — 1 for TRY_CAST (a row that cannot be converted becomes
+            NULL), 0 for a plain cast (it raises). Always 0 for binary operators.
 
     Returns:
         Opaque integer pointer to binary_op_ctx struct
@@ -190,7 +194,8 @@ def alloc_binary_op_ctx(int op_code, int left_scale=0, int right_scale=0,
         <uint16_t>op_code,
         <unsigned char>left_scale, <unsigned char>right_scale,
         <unsigned char>result_scale, <unsigned char>result_precision,
-        <unsigned char>left_unit, <unsigned char>right_unit)
+        <unsigned char>left_unit, <unsigned char>right_unit,
+        <unsigned char>safe)
     return <unsigned long long>ctx
 
 
@@ -311,17 +316,19 @@ def alloc_time_bucket_ctx(long long magnitude, int unit_kind, int ts_unit):
     return <unsigned long long>ctx
 
 
-def alloc_format_ctx(int ts_unit, bytes fmt):
+def alloc_format_ctx(int ts_unit, bytes fmt, int safe=0):
     """Allocate context for the FORMAT_TIMESTAMP kernel (draken_date_format).
 
     Args:
         ts_unit: TimestampUnit (0=s,1=ms,2=us,3=ns) of the `date` operand; DATE32
             operands pass 2 (unused by the kernel).
         fmt: the bind-time pattern LITERAL, UTF-8 encoded.
+        safe: CAST only — 1 for TRY_CAST (an unparseable row becomes NULL).
     """
     cdef const char* fmt_ptr = <const char*>fmt
     cdef size_t fmt_len = <size_t>len(fmt)
-    cdef format_ctx* ctx = kernel_alloc_format_ctx(<uint8_t>ts_unit, fmt_ptr, fmt_len)
+    cdef format_ctx* ctx = kernel_alloc_format_ctx(
+        <uint8_t>ts_unit, fmt_ptr, fmt_len, <uint8_t>safe)
     if ctx == NULL:
         return None
     return <unsigned long long>ctx

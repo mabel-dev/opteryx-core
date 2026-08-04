@@ -67,6 +67,10 @@ VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* v) {
             const char* last  = reinterpret_cast<const char*>(bytes + end);
             fast_float::from_chars_result res = fast_float::from_chars(first, last, value);
             if (first == last || res.ec != std::errc() || res.ptr != last) {
+                if (!kernel_cast_is_safe(ctx)) {
+                    draken_free(out);
+                    return draken_error_sentinel("Invalid number in string literal");
+                }
                 out[j] = 0.0; bad[j] = 1u; any_bad = true;
             } else {
                 out[j] = draken::ops::fp_canon(value);
@@ -77,20 +81,7 @@ VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* v) {
         r.data = out; r.type = DRAKEN_FLOAT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);  // r.validity = input copy (or null)
 
-        if (any_bad) {
-            if (!r.validity) {   // input was all-valid — materialise an all-valid bitmap
-                const uint32_t bmn    = (n + 7u) >> 3;
-                const uint32_t padded = (bmn + 7u) & ~7u;
-                const size_t   vbytes = padded > 0u ? padded : 8u;
-                uint8_t* nv = static_cast<uint8_t*>(draken_malloc(vbytes));
-                if (!nv) { draken_free(out); return draken_error_sentinel("Allocation failed"); }
-                std::memset(nv, 0xFF, vbytes);
-                r.validity = nv;
-            }
-            for (uint32_t i = 0u; i < n; ++i)
-                if (bad[v->selection[i]])
-                    r.validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7u)));
-        }
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());   // TRY_CAST rows -> NULL
         return r;
     });
 }
@@ -116,6 +107,10 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
         for (uint32_t i = 0u; i < n; ++i)
             if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
 
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+
         for (uint32_t j = 0u; j < k; ++j) {
             if (!live[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
@@ -126,13 +121,18 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
             int64_t sign = 1;
             uint32_t p = 0;
             if (slen > 0 && sdata[0] == '-') { sign = -1; p = 1; }
+            bool malformed = false;
             for (; p < slen; ++p) {
                 const uint8_t c = sdata[p];
-                if (c < '0' || c > '9') {
+                if (c < '0' || c > '9') { malformed = true; break; }
+                value = value * 10 + (c - '0');
+            }
+            if (malformed || slen == 0u) {
+                if (!is_safe) {
                     draken_free(out);
                     return draken_error_sentinel("Invalid digit in integer literal");
                 }
-                value = value * 10 + (c - '0');
+                out[j] = 0; bad[j] = 1u; any_bad = true; continue;
             }
             out[j] = sign * value;
         }
@@ -140,6 +140,7 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
         VecResult r;
         r.data = out; r.type = DRAKEN_INT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());   // TRY_CAST rows -> NULL
         return r;
     });
 }
@@ -152,11 +153,11 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
 // calls kernel_preserve_shape. Safe here because UINT8/16/32's full range never
 // exceeds INT64_MAX, so the intermediate int64 accumulation never overflows.
 // No new parsing logic — composition, not duplication (CLAUDE.md §3/§11).
-#define DRAKEN_CAST_STRING_TO_UINT(fn_name, narrow_fn)                                    \
+#define DRAKEN_CAST_STRING_VIA(fn_name, parse_fn, narrow_fn)                              \
 VecResult fn_name(void* ctx, const DrakenVector* v) {                                     \
     DRAKEN_KERNEL_TRY({                                                                  \
         if (!v) return draken_error_sentinel("Input vector is null");                    \
-        VecResult tmp = draken_cast_string_to_int64(ctx, v);                             \
+        VecResult tmp = parse_fn(ctx, v);                                                \
         if (!tmp.data) return tmp;  /* propagate the error sentinel as-is */             \
         DrakenVector tmp_dv;                                                             \
         tmp_dv.data        = tmp.data;                                                   \
@@ -175,11 +176,25 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
     });                                                                                    \
 }
 
-DRAKEN_CAST_STRING_TO_UINT(draken_cast_string_to_uint8,  draken_cast_integer_to_uint8)
-DRAKEN_CAST_STRING_TO_UINT(draken_cast_string_to_uint16, draken_cast_integer_to_uint16)
-DRAKEN_CAST_STRING_TO_UINT(draken_cast_string_to_uint32, draken_cast_integer_to_uint32)
+DRAKEN_CAST_STRING_VIA(draken_cast_string_to_uint8,  draken_cast_string_to_int64, draken_cast_integer_to_uint8)
+DRAKEN_CAST_STRING_VIA(draken_cast_string_to_uint16, draken_cast_string_to_int64, draken_cast_integer_to_uint16)
+DRAKEN_CAST_STRING_VIA(draken_cast_string_to_uint32, draken_cast_string_to_int64, draken_cast_integer_to_uint32)
 
-#undef DRAKEN_CAST_STRING_TO_UINT
+// STRING -> narrow SIGNED target, by the same composition: the int64 parser (one
+// digit-validation contract, one error message) then the range-checked narrowing.
+// Every INT8/16/32 value fits int64 with room to spare, so the intermediate can
+// never overflow — the reason the unsigned family needs a bespoke UINT64 parser
+// does not arise here.
+DRAKEN_CAST_STRING_VIA(draken_cast_string_to_int8,  draken_cast_string_to_int64, draken_cast_integer_to_int8)
+DRAKEN_CAST_STRING_VIA(draken_cast_string_to_int16, draken_cast_string_to_int64, draken_cast_integer_to_int16)
+DRAKEN_CAST_STRING_VIA(draken_cast_string_to_int32, draken_cast_string_to_int64, draken_cast_integer_to_int32)
+
+// STRING -> FLOAT32: the FLOAT64 parser (one number-syntax contract, one error
+// message) then the range-checked narrowing — the same composition, a different
+// parser. This is why the macro takes the parse step as a parameter.
+DRAKEN_CAST_STRING_VIA(draken_cast_string_to_float32, draken_cast_string_to_float64, draken_cast_float_to_float32)
+
+#undef DRAKEN_CAST_STRING_VIA
 
 // E33 — STRING -> UINT64: genuine native parser with a uint64_t accumulator,
 // NOT composed through draken_cast_string_to_int64 like the narrower UINT8/16/32
@@ -205,6 +220,10 @@ VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* v) {
         for (uint32_t i = 0u; i < n; ++i)
             if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
 
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+
         for (uint32_t j = 0u; j < k; ++j) {
             if (!live[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
@@ -212,33 +231,45 @@ VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* v) {
             const uint32_t slen  = str_length(slot);
 
             if (slen > 0 && sdata[0] == '-') {
-                draken_free(out);
-                return draken_error_sentinel(
-                    "cast string->uint64: negative value out of range for uint64_t");
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_error_sentinel(
+                        "cast string->uint64: negative value out of range for uint64_t");
+                }
+                out[j] = 0; bad[j] = 1u; any_bad = true; continue;
             }
             uint64_t value = 0u;
+            bool rejected = false;
             for (uint32_t p = 0u; p < slen; ++p) {
                 const uint8_t c = sdata[p];
                 if (c < '0' || c > '9') {
-                    draken_free(out);
-                    return draken_error_sentinel("Invalid digit in integer literal");
+                    if (!is_safe) {
+                        draken_free(out);
+                        return draken_error_sentinel("Invalid digit in integer literal");
+                    }
+                    rejected = true; break;
                 }
                 const uint64_t digit = static_cast<uint64_t>(c - '0');
                 // Overflow check BEFORE the multiply/add: value*10+digit must not
                 // exceed UINT64_MAX. (UINT64_MAX - digit) / 10 is the largest
                 // `value` for which the next digit still fits.
                 if (value > (0xFFFFFFFFFFFFFFFFull - digit) / 10ull) {
-                    draken_free(out);
-                    return draken_error_sentinel("cast string->uint64: value out of range for uint64_t");
+                    if (!is_safe) {
+                        draken_free(out);
+                        return draken_error_sentinel("cast string->uint64: value out of range for uint64_t");
+                    }
+                    rejected = true; break;
                 }
                 value = value * 10ull + digit;
             }
+            if (rejected) { out[j] = 0; bad[j] = 1u; any_bad = true; continue; }
             out[j] = value;
         }
 
         VecResult r;
         r.data = out; r.type = DRAKEN_UINT64; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
 }
@@ -262,6 +293,10 @@ VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* v) {
         for (uint32_t i = 0u; i < n; ++i)
             if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
 
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+
         for (uint32_t j = 0u; j < k; ++j) {
             if (!live[j]) continue;
             const DrakenStringSlot* slot = &sa->slots[j];
@@ -280,9 +315,12 @@ VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* v) {
             } else if (slen == 2 && (s[0]|32u)=='o' && (s[1]|32u)=='n') { truth = true;
             } else if (slen == 3 && (s[0]|32u)=='o' && (s[1]|32u)=='f' && (s[2]|32u)=='f') { truth = false;
             } else {
-                draken_free(out);
-                return draken_error_sentinel(
-                    "Cannot cast string to BOOL: expected true/false/1/0/yes/no/on/off");
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_error_sentinel(
+                        "Cannot cast string to BOOL: expected true/false/1/0/yes/no/on/off");
+                }
+                bad[j] = 1u; any_bad = true; continue;
             }
             if (truth) out[j >> 3u] |= static_cast<uint8_t>(1u << (j & 7u));
         }
@@ -290,6 +328,7 @@ VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* v) {
         VecResult r;
         r.data = out; r.type = DRAKEN_BOOL; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
 }
@@ -377,6 +416,12 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
         for (uint32_t i = 0u; i < n; ++i)
             if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
 
+        // TRY_CAST rides format_ctx.safe here, not binary_op_ctx — this kernel
+        // needs the format pattern, so it takes that ctx.
+        const bool is_safe = (c != nullptr && c->safe != 0u);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+
         for (uint32_t j = 0u; j < k; ++j) {
             if (!live[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
@@ -394,19 +439,25 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
                 int usec;
                 if (!sql_parse_exec(prog, reinterpret_cast<const char*>(s), len,
                                      &year, &month, &day, &hour, &minute, &second, &usec)) {
-                    draken_free(out);
-                    return draken_error_sentinel_fmt(
-                        "Cannot cast string to DATE: got %.*s",
-                        (int)(len < 20u ? len : 20u), s);
+                    if (!is_safe) {
+                        draken_free(out);
+                        return draken_error_sentinel_fmt(
+                            "Cannot cast string to DATE: got %.*s",
+                            (int)(len < 20u ? len : 20u), s);
+                    }
+                    out[j] = 0; bad[j] = 1u; any_bad = true; continue;
                 }
                 days = civil_to_days(year, month, day);
             } else {
                 days = parse_iso_date(s, len);
                 if (days == INT32_MIN) {
-                    draken_free(out);
-                    return draken_error_sentinel_fmt(
-                        "Cannot cast string to DATE: expected YYYY-MM-DD, got %.*s",
-                        (int)(len < 20u ? len : 20u), s);
+                    if (!is_safe) {
+                        draken_free(out);
+                        return draken_error_sentinel_fmt(
+                            "Cannot cast string to DATE: expected YYYY-MM-DD, got %.*s",
+                            (int)(len < 20u ? len : 20u), s);
+                    }
+                    out[j] = 0; bad[j] = 1u; any_bad = true; continue;
                 }
             }
             out[j] = days;
@@ -415,6 +466,7 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
         VecResult r;
         r.data = out; r.type = DRAKEN_DATE32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
 }
@@ -455,6 +507,10 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
         for (uint32_t i = 0u; i < n; ++i)
             if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
 
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+
         for (uint32_t j = 0u; j < k; ++j) {
             if (!live[j]) { out[j] = 0u; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
@@ -462,10 +518,16 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
             const uint32_t len = str_length(slot);
             uint32_t addr = 0u;
             if (!draken::ipv4::parse(s, len, &addr)) {
-                draken_free(out);
-                return draken_error_sentinel_fmt(
-                    "Cannot cast string to IPV4: expected A.B.C.D, got %.*s",
-                    (int)(len < 32u ? len : 32u), s);
+                // Plain CAST still refuses: a typo in an ACL silently becoming
+                // 0.0.0.0 is the failure this kernel was written to prevent.
+                // TRY_CAST is how a caller opts into NULLing those rows instead.
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "Cannot cast string to IPV4: expected A.B.C.D, got %.*s",
+                        (int)(len < 32u ? len : 32u), s);
+                }
+                out[j] = 0u; bad[j] = 1u; any_bad = true; continue;
             }
             out[j] = addr;
         }
@@ -473,6 +535,7 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
         VecResult r;
         r.data = out; r.type = DRAKEN_UINT32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
         kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
 }

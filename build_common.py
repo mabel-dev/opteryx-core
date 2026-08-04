@@ -303,7 +303,33 @@ if OPTERYX_ENABLE_PGO and not is_win():
 # runtime dependency on host-provided newer libstdc++ which can require
 # GLIBCXX/GLIBC versions not available on older manylinux targets.
 # macOS/Clang does not support -static-libgcc
-LD_EXTRA = ["-static-libstdc++"] if is_mac() else ["-static-libstdc++", "-static-libgcc"]
+#
+# `--exclude-libs,ALL` is load-bearing, not tidiness. It marks every symbol pulled
+# in from a static ARCHIVE (libstdc++.a, libgcc.a, libgcc_eh.a) as hidden in this
+# extension's dynamic symbol table. Without it, `-fvisibility=default` (set above)
+# EXPORTS this extension's private copy of the C++ runtime — `__cxa_throw`,
+# `__gxx_personality_v0`, the `_Unwind_*` family — and draken/__init__.py loads
+# draken_native under RTLD_GLOBAL, publishing that private copy into the
+# process-global symbol table. Extensions linked against the SHARED libstdc++
+# (opteryx.connectors.parquet_io.pool_reader takes no LD_EXTRA, so it does) then
+# bind their throw path to draken's private runtime while their handler search
+# stays in the shared one. The two disagree, no handler is found, and
+# std::terminate() aborts the process — turning what should be a catchable
+# `except +` RuntimeError into a hard crash with no traceback. Observed in
+# production as a Cloud Run 503 with a faulthandler dump whose C stack shows
+# __cxa_throw resolved inside draken_native.so under a throw raised in
+# pool_reader.so.
+#
+# Symbols from this extension's OWN objects — PyInit_*, and the bridge symbols
+# draken_vector_unwrap / draken_vector_own_raw that the Cython shims resolve via
+# RTLD_GLOBAL — come from .o files, not archives, so they are unaffected and stay
+# exported. macOS is immune (two-level namespaces bind each image to its own
+# runtime) and its linker does not accept the flag.
+LD_EXTRA = (
+    ["-static-libstdc++"]
+    if is_mac()
+    else ["-static-libstdc++", "-static-libgcc", "-Wl,--exclude-libs,ALL"]
+)
 
 # Enable LTO for non-Windows when requested (must be after LD_EXTRA initialization)
 if OPTERYX_ENABLE_LTO and not is_win():
@@ -423,11 +449,6 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
         depends = ["draken/core/buffers.h", "draken/core/vector_alloc.h"]
 
     sources = [f"draken/{source_file}"]
-    # Include SIMD implementations for all draken vector modules so
-    # simd_mix_hash, simd_popcount, and related functions are available at link time.
-    for s in ("src/cpp/simd_hash.cpp", "src/cpp/simd_bitops.cpp"):
-        if s not in sources:
-            sources.append(s)
 
     # Unified DrakenVector constructors (one copy per extension; globals are
     # extension-local — owned-vs-shared discrimination lives in the Cython
@@ -435,10 +456,26 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
     if "draken/core/vector_alloc.cpp" not in sources:
         sources.append("draken/core/vector_alloc.cpp")
 
-    # Common SIMD/environment sources - CPU features and SIMDs
-    for s in ("src/cpp/simd_env.cpp", "src/cpp/cpu_features.cpp", "src/cpp/simd_search.cpp"):
-        if s not in sources:
-            sources.append(s)
+    # simd_bitops is still compiled in, unlike the rest of the shared SIMD layer:
+    # it cannot be moved into draken_native because its `simd_popcount` collides
+    # with draken/core/bitmap_ops.cpp's (see the note in draken_native's source
+    # list). Removing it here without resolving that collision leaves these modules
+    # with no definition at all.
+    if "src/cpp/simd_bitops.cpp" not in sources:
+        sources.append("src/cpp/simd_bitops.cpp")
+
+    # The rest of the shared SIMD layer — simd_hash, simd_env, cpu_features,
+    # simd_search — is NOT compiled in. draken_native is its single compiled home
+    # (see its source list), and draken/__init__.py loads draken_native under
+    # RTLD_GLOBAL before any of these modules can be imported, so they resolve at
+    # runtime exactly as the bridge symbols do. Each of these four extensions used to
+    # carry its own copy of all five.
+    #
+    # These modules link with -undefined dynamic_lookup / --allow-shlib-undefined,
+    # so an unresolvable symbol is a crash at first call, NOT a link error. After
+    # changing this list, verify every project-prefixed undefined symbol
+    # (_simd_*, _draken_*, _opteryx_*, _kernel_*, _rugo_*, _avx_*, _neon_*) in each
+    # rebuilt .so is exported by draken_native. A green build proves nothing here.
 
     # draken uses the system allocator (draken/core/alloc.h); mimalloc is not
     # linked — see the note in build_extensions for why it was removed.
@@ -706,6 +743,35 @@ def draken_rugo_extensions(parquet_created_by):
                 "src/cpp/simd_hash.cpp",
                 "src/cpp/simd_env.cpp",
                 "src/cpp/cpu_features.cpp",
+                # draken_native is the single compiled home of the shared SIMD layer
+                # for the draken unit (simd_hash / simd_env / cpu_features above).
+                # The vector/morsel/sort modules built by make_draken_extension
+                # resolve those at runtime through the RTLD_GLOBAL load in
+                # draken/__init__.py instead of each compiling its own copy. Do not
+                # remove one without putting it back into every module that
+                # make_draken_extension builds: those link with -undefined
+                # dynamic_lookup / --allow-shlib-undefined, where a missing symbol is
+                # a crash at first call, not a link error.
+                #
+                # src/cpp/simd_search.cpp is deliberately NOT here. Nothing in draken
+                # references simd_search_substring — it was carried by all four
+                # make_draken_extension modules as dead weight, and adding it here
+                # merely moved the waste (the linker dead-stripped it; draken_native
+                # exported no simd_search symbol). Other units (opteryx strings /
+                # vector_ops, rugo) use it and compile it themselves.
+                #
+                # src/cpp/simd_bitops.cpp CANNOT join this list: it defines
+                # `size_t simd_popcount(const uint8_t*, size_t)` with external
+                # linkage, and so does draken/core/bitmap_ops.cpp (line 69) which is
+                # already compiled in above. Adding it is an ld "duplicate symbols"
+                # failure. The two are DIFFERENT implementations — bitmap_ops walks
+                # byte-at-a-time with __builtin_popcount, simd_bitops does 8 bytes at
+                # a time with __builtin_popcountll — so today which one a module
+                # executes depends on which .cpp its source list happens to include,
+                # and on Linux (RTLD_GLOBAL + -fvisibility=default) on which .so
+                # loaded first. Same answer, materially different speed. Resolving
+                # which implementation is canonical is a prerequisite to moving this
+                # file, and is an architecture decision, not a build one.
                 "third_party/ulfjack/ryu/d2fixed.c",
                 "third_party/ulfjack/ryu/d2s.c",
                 # extraction.cpp's `->`/`->>` kernels parse with yyjson.
@@ -743,68 +809,30 @@ def draken_rugo_extensions(parquet_created_by):
             ],
         ),
         # Phase 9a: C kernel registry lookup wrapper (Cython interface for bytecode builder/executor)
+        #
+        # Sources are the .pyx ONLY. Every kernel this module talks to already lives in
+        # draken_native.so, which draken/__init__.py loads under RTLD_GLOBAL before any
+        # consumer can reach this module (importing it runs the draken package init
+        # first). So the small extern "C" surface it actually uses — kernel_registry_
+        # lookup / _register and the kernel_alloc_*_ctx family, all declared in
+        # kernel_registry.h — is resolved at runtime from draken_native, exactly as the
+        # vector/morsel shims above resolve draken_vector_unwrap.
+        #
+        # This used to recompile ~45 of draken_native's own sources: the entire kernel
+        # set plus its vendored digest/codec/ryu/yyjson backing. That put a SECOND copy
+        # of kernel_registry.cpp's `static std::map` registry in the process. It worked
+        # only by an unstated invariant — the single writer (register_kernel) and the
+        # single reader (lookup_kernel) both live in this .pyx, so a register/lookup
+        # pair always hit the same copy: bound locally on macOS, interposed onto
+        # draken_native's copy by RTLD_GLOBAL on Linux. Nothing enforced that. A C-side
+        # kernel_registry_lookup from draken_native would, on macOS, have read a map the
+        # Python registrations never reached. One copy, and the invariant is moot.
         Extension(
             "draken.ops.kernels._kernel_registry",
-            sources=[
-                "draken/ops/kernels/_kernel_registry.pyx",
-                "draken/ops/kernels/error_handling.cpp",
-                "draken/ops/kernels/result_helpers.cpp",  # Phase 9c: string VecResult builder
-                "draken/ops/kernels/kernel_registry.cpp",
-                "draken/ops/kernels/cast_numeric.cpp",
-                "draken/ops/kernels/cast_string.cpp",
-                "draken/ops/kernels/cast_temporal.cpp",
-                "draken/ops/kernels/cast_dispatch.cpp",
-                "draken/ops/kernels/extraction.cpp",
-                "draken/ops/kernels/binary_op_arithmetic.cpp",
-                "draken/ops/kernels/binary_op_other.cpp",
-                "draken/ops/kernels/binary_op_temporal.cpp",
-                "draken/ops/kernels/binop_dispatch.cpp",  # P9.1: unified draken_binop (canonical binop kernel)
-                "draken/ops/kernels/function_kernels.cpp",  # Phase 9a-fn: scalar function kernels (C ABI)
-                "draken/ops/kernels/string_trim.cpp",  # Phase 9a-fn: TRIM/LTRIM/RTRIM (C ABI)
-                "draken/ops/kernels/string_reverse_initcap.cpp",  # Phase 9a-fn: REVERSE/INITCAP (C ABI)
-                "draken/ops/kernels/string_pad.cpp",  # Phase 9a-fn: LPAD/RPAD (C ABI)
-                "draken/ops/kernels/string_replace_soundex.cpp",  # Phase 9a-fn: REPLACE/SOUNDEX (C ABI)
-                "draken/ops/kernels/string_humanize.cpp",  # Phase 9a-fn: HUMANIZE (C ABI)
-                "draken/ops/kernels/function_hash_encoding.cpp",  # Phase 9a-fn: MD5/SHA* (C ABI)
-                "draken/ops/kernels/function_codec.cpp",  # Phase 9a-fn: HEX/BASE64/BASE85 ENCODE/DECODE (C ABI)
-                "draken/ops/kernels/function_array_json.cpp",  # Phase 9a-fn: JSONB_OBJECT_KEYS (C ABI)
-                "draken/ops/kernels/function_temporal.cpp",  # Phase 9a-fn: FROM_UNIXTIME (C ABI)
-                "draken/ops/kernels/function_numeric.cpp",  # Phase 9a-fn: POWER/LOG/TRUNC (C ABI)
-                "draken/ops/kernels/function_string_extra.cpp",  # Phase 9a-fn: OCTET_LENGTH/POSITION/LEVENSHTEIN/TO_ASCII (C ABI)
-                "draken/ops/kernels/function_null_conditional.cpp",  # Phase 9a-fn: COALESCE/IFNULL/IFNOTNULL/IIF (C ABI)
-                "draken/ops/kernels/function_vector_distance.cpp",  # Phase 9a-fn: EMBED/COSINE_SIMILARITY/COSINE_DISTANCE (C ABI)
-                "draken/ops/kernels/function_rlike.cpp",  # RLIKE/NOT RLIKE over a plan-time-compiled DFA blob (C ABI, no RE2)
-                "draken/ops/kernels/function_like_any.cpp",  # LIKE ANY/ILIKE ANY over a plan-time-compiled matcher blob (C ABI, no RE2)
-                # Vendored digest cores backing function_hash_encoding.cpp (see above).
-                "third_party/crypto/md5.cpp",
-                "third_party/crypto/sha1.cpp",
-                "third_party/crypto/sha2.cpp",
-                "third_party/crypto/sha512.cpp",
-                "third_party/mabel/base16/_base16.c",
-                # Vendored mabel base64/base85 backing function_codec.cpp (see above).
-                "third_party/mabel/base64/_base64.c",
-                "third_party/mabel/base64/_base64_dispatch.c",
-                "third_party/mabel/base64/_base64_neon.c",
-                "third_party/mabel/base64/_base64_avx2.c",
-                "third_party/mabel/base64/_base64_rvv.c",
-                "third_party/mabel/base85/_base85.c",
-                "src/cpp/simd_hash.cpp",
-                "src/cpp/simd_env.cpp",
-                "src/cpp/cpu_features.cpp",
-                "third_party/ulfjack/ryu/d2fixed.c",
-                "third_party/ulfjack/ryu/d2s.c",
-                # extraction.cpp's `->`/`->>` kernels parse with yyjson.
-                "third_party/yyjson/src/yyjson.c",
-            ],
-            include_dirs=include_dirs
-            + [
-                # function_vector_distance.cpp -> core/fp16.h -> <fp16/fp16.h>.
-                # draken_native already carries this; the two extensions compile the
-                # same kernel sources, so they need the same include set.
-                "third_party/usearch/fp16/include",
-            ],
+            sources=["draken/ops/kernels/_kernel_registry.pyx"],
+            include_dirs=include_dirs,
             extra_compile_args=CPP_FLAGS,
-            extra_link_args=LD_EXTRA,
+            extra_link_args=LD_EXTRA + _shim_bridge_link_args,
             language="c++",
             depends=[
                 "draken/ops/kernels/c_kernel_abi.h",

@@ -2269,55 +2269,27 @@ def plan_create_table(statement, **kwargs):
     if not column_defs:
         raise UnsupportedSyntaxError("CREATE TABLE requires at least one column")
 
-    # Type mapping from sqloxide to LogicalCategory
-    type_mapping = {
-        "BigInt": "INTEGER",
-        "Int": "INTEGER",
-        "Integer": "INTEGER",
-        "SmallInt": "INTEGER",
-        "TinyInt": "INTEGER",
-        "Varchar": "VARCHAR",
-        "Text": "VARCHAR",
-        "String": "VARCHAR",
-        "Char": "VARCHAR",
-        "Double": "DOUBLE",
-        "Float": "DOUBLE",
-        "Real": "DOUBLE",
-        "Boolean": "BOOLEAN",
-        "Bool": "BOOLEAN",
-        "Date": "DATE",
-        "Timestamp": "TIMESTAMP",
-        "Blob": "BLOB",
-        "Bytea": "BLOB",
-        "Bytes": "BLOB",
-    }
-
     for col_def in column_defs:
         col_name = col_def["name"]["value"]
-        col_type_data = col_def["data_type"]
 
-        # Extract the type key. sqloxide returns either:
-        # - A dict like {"BigInt": None}
-        # - A string like "Boolean" or "Date"
-        if isinstance(col_type_data, str):
-            type_key = col_type_data
-        elif isinstance(col_type_data, dict):
-            type_key = next(iter(col_type_data.keys()))
-        else:
+        # ONE vocabulary: a declared column type resolves exactly as a CAST target
+        # does (logical_planner_builders.column_type_from_ast). This used to be a
+        # hand-written sqlparser-key → name map living only here, which is how DDL
+        # came to reject NVARCHAR, VARBINARY, DECIMAL, TIME, INTERVAL, IPV4,
+        # TIMESTAMP[unit] and every exact integer width — while silently widening
+        # TINYINT/SMALLINT to INTEGER and REAL to DOUBLE (§14).
+        from opteryx.planner.logical_planner.logical_planner_builders import (
+            column_type_from_ast,
+        )
+
+        from opteryx.exceptions import SqlError as _SqlError
+
+        try:
+            sql_type_ct = column_type_from_ast(col_def)
+        except (_SqlError, ValueError) as err:
             raise UnsupportedSyntaxError(
-                f"unsupported column type in CREATE TABLE: {col_type_data}"
-            )
-
-        if type_key not in type_mapping:
-            raise UnsupportedSyntaxError(f"unsupported column type in CREATE TABLE: {type_key}")
-
-        # Map sqloxide type key to canonical SQL name, then resolve via the
-        # single authoritative SQL-name-to-ColumnType table (logical_type.py
-        # §14 vocabulary — LogicalCategory has no alias members for DOUBLE/BLOB).
-        sql_type_str = type_mapping[type_key]
-        from opteryx.types.logical_type import parse_column_type
-
-        sql_type_ct = parse_column_type(sql_type_str)
+                f"unsupported column type in CREATE TABLE for '{col_name}': {err}"
+            ) from err
 
         # Check for NOT NULL constraint
         col_nullable = True

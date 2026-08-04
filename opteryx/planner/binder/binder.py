@@ -177,6 +177,14 @@ def _bound_cast_node(source, target):
             Node(node_type=NodeType.LITERAL, value=int(target.logical.precision), type=_lt.INT64),
             Node(node_type=NodeType.LITERAL, value=int(target.logical.scale), type=_lt.INT64),
         )
+    elif target.category in (LogicalCategory.TIMESTAMP, LogicalCategory.TIME):
+        # Same rule as DECIMAL above, for the same reason. `str(ColumnType)` now
+        # carries the unit ("TIMESTAMP[ms]") so that a PERSISTED type does not
+        # silently read back as the default — but that display form matches no
+        # resolver arm either. The unit does not need to travel in the name here:
+        # the rescale kernel reads the target unit off the binder-declared result
+        # ColumnType (schema_column below), never off the type string.
+        value = "TIMESTAMP" if target.category == LogicalCategory.TIMESTAMP else "TIME"
     else:
         value = str(target)
     return Node(

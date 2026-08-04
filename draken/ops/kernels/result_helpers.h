@@ -12,6 +12,7 @@
 #include "ops/vec_result.h"
 #include "core/buffers.h"
 #include "core/string_slot.h"
+#include "ops/kernels/kernel_context.h"   // binary_op_ctx — the TRY_CAST disposition
 
 #ifdef __cplusplus
 extern "C" {
@@ -113,6 +114,46 @@ static inline uint8_t* kernel_copy_validity(const DrakenVector* dv) {
     if (!out) throw std::bad_alloc();
     std::memcpy(out, dv->validity, vbytes);
     return out;
+}
+
+// TRY_CAST support: NULL the rows a cast could not convert.
+//
+// `bad` is indexed the same way the kernel's OUTPUT buffer is:
+//   - shape-preserving kernels (data_length values, kernel_preserve_shape) index
+//     it by PHYSICAL value, so one bad dictionary entry nulls every logical row
+//     referencing it — hence the selection lookup below;
+//   - dense kernels (length values, identity selection) index it by logical row,
+//     where selection[i] == i makes the same lookup a no-op.
+// One helper serves both because the unified access model makes them the same
+// expression (CLAUDE.md §11).
+//
+// Call AFTER the shape finalizer, since it may have to materialise a bitmap the
+// input did not have. `in` is the kernel's input vector (for its selection and
+// logical length). Throws std::bad_alloc on failure (caught by the kernel's
+// DRAKEN_KERNEL_TRY).
+static inline void kernel_null_bad_rows(VecResult& r, const DrakenVector* in,
+                                        const uint8_t* bad) {
+    const uint32_t n = in->length;
+    if (!r.validity) {   // input was all-valid — materialise an all-valid bitmap
+        const uint32_t bm     = (n + 7u) >> 3;
+        const uint32_t padded = (bm + 7u) & ~7u;
+        const size_t   vbytes = padded > 0u ? padded : 8u;
+        uint8_t* nv = static_cast<uint8_t*>(draken_malloc(vbytes));
+        if (!nv) throw std::bad_alloc();
+        std::memset(nv, 0xFF, vbytes);
+        r.validity = nv;
+    }
+    for (uint32_t i = 0u; i < n; ++i)
+        if (bad[in->selection[i]])
+            r.validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7u)));
+}
+
+// The TRY_CAST disposition, read off whichever binary_op_ctx the cast was given.
+// A null ctx means a plain cast: raise. Casts whose ctx is a DIFFERENT struct
+// (format_ctx, cast_array_ctx, cast_timestamp_ctx) must NOT use this — they carry
+// their own disposition field.
+static inline bool kernel_cast_is_safe(const void* ctx) noexcept {
+    return ctx != nullptr && static_cast<const binary_op_ctx*>(ctx)->safe != 0u;
 }
 
 // Compression-preserving finalizer. A compression-aware cast produces

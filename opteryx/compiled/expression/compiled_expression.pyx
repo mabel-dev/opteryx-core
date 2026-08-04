@@ -2930,7 +2930,8 @@ cdef Py_ssize_t _linearize(
                     raise ValueError("CAST to DECIMAL requires (precision, scale)")
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
                 _cn_arg = (0, _binop_dec_scale(source_sql), 0,
-                           int(cast_params[1]), int(cast_params[0]), 0, 0)
+                           int(cast_params[1]), int(cast_params[0]), 0, 0,
+                           1 if cast_is_try else 0)
             elif _cn[0] == "draken_cast_to_array":
                 # CAST(json AS ARRAY<T>): the kernel needs the ELEMENT type, which
                 # a DrakenVector cannot carry (the parent's tag is just ARRAY), and
@@ -2951,10 +2952,16 @@ cdef Py_ssize_t _linearize(
                     )
                 from draken.ops.kernels._kernel_registry import alloc_cast_array_ctx as _cn_alloc
                 _cn_arg = (int(_cn_elem.physical.value), 1 if cast_is_try else 0)
-            elif _cn[0] in ("draken_cast_decimal_to_string",
-                            "draken_cast_decimal128_to_string",
-                            "draken_cast_decimal_to_blob",
-                            "draken_cast_decimal128_to_blob"):
+            elif _cn[0].startswith("draken_cast_decimal"):
+                # EVERY decimal-SOURCE kernel — → VARCHAR/BLOB, → INT64, → FLOAT64,
+                # → UINT8/16/32/64 — reads exactly one ctx field and the same one:
+                # the source scale. Matched by prefix rather than an enumerated
+                # list so adding a decimal-source kernel cannot silently arrive
+                # here with a null ctx (which would mean "scale 0" — every value
+                # off by a power of ten). The one decimal-source kernel that needs
+                # MORE than this, decimal→decimal, is claimed by the `_to_decimal`
+                # branch above and never reaches here.
+                #
                 # DECIMAL → VARCHAR/BLOB: the SOURCE scale (LogicalType, absent from
                 # the runtime vector) rides in binary_op_ctx.left_scale. Read it off
                 # the bound source ColumnType (source_sql is set for any typed decimal
@@ -2963,7 +2970,8 @@ cdef Py_ssize_t _linearize(
                 # retagging the result (see cast_numeric.cpp), so it needs the
                 # identical ctx shape as its _to_string sibling.
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
-                _cn_arg = (0, _binop_dec_scale(source_sql), 0, 0, 0, 0, 0)
+                _cn_arg = (0, _binop_dec_scale(source_sql), 0, 0, 0, 0, 0,
+                           1 if cast_is_try else 0)
             elif _cn[0] in _CAST_FORMAT_AWARE_KERNELS:
                 # CAST ... FORMAT '<pattern>' (or the ISO-8601 default when absent) —
                 # the pattern must be a compile-time literal (enforced in
@@ -2987,7 +2995,17 @@ cdef Py_ssize_t _linearize(
                     if source_sql is not None and source_sql.logical is not None:
                         _fc_ts_unit = int(source_sql.logical.unit.value)
                 from draken.ops.kernels._kernel_registry import alloc_format_ctx as _cn_alloc
-                _cn_arg = (_fc_ts_unit, _fc_fmt_bytes)
+                _cn_arg = (_fc_ts_unit, _fc_fmt_bytes, 1 if cast_is_try else 0)
+            if cast_is_try and _cn_alloc is None:
+                # TRY_CAST over a kernel that needs no other parameter: allocate a
+                # binary_op_ctx whose ONLY meaningful field is `safe`. Without
+                # this the kernel sees a null ctx, reads the disposition as
+                # "raise", and TRY_CAST silently becomes CAST — which is why this
+                # is not conditional on the kernel being one that can fail. A
+                # kernel that cannot fail ignores the flag; one that can must
+                # never be handed a null ctx under TRY_CAST.
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
+                _cn_arg = (0, 0, 0, 0, 0, 0, 0, 1)
             fn_ptr, ctx_wrapper = _resolve_kernel_and_context(_cn[0], _cn_alloc, _cn_arg)
             if fn_ptr is not None:
                 slot.kernel_fn = <void*>(<unsigned long long>fn_ptr)

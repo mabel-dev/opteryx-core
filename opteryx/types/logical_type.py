@@ -329,9 +329,19 @@ class ColumnType:
             return f"DECIMAL({self.logical.precision}, {self.logical.scale})"
         if self.physical == DrakenType.VECTOR_FP16:
             return f"VECTOR({self.logical.dimension})"
+        # The UNIT is part of the type, and this string is what gets PERSISTED —
+        # a schema stored at ms and read back as the us default reads every value
+        # 1000x off, silently. Emitted always rather than only for non-default
+        # units, so a reader never has to know what the default is; the parse side
+        # still accepts the bare name, which is what every schema written before
+        # this says.
         if self.physical == DrakenType.TIMESTAMP64:
+            if self.logical is not None and self.logical.unit in _UNIT_TO_SQL:
+                return f"TIMESTAMP[{_UNIT_TO_SQL[self.logical.unit]}]"
             return "TIMESTAMP"
         if self.physical in (DrakenType.TIME32, DrakenType.TIME64):
+            if self.logical is not None and self.logical.unit in _UNIT_TO_SQL:
+                return f"TIME[{_UNIT_TO_SQL[self.logical.unit]}]"
             return "TIME"
         if self.physical == DrakenType.ARRAY:
             return f"ARRAY<{self.element}>"
@@ -496,6 +506,18 @@ _SQL_NAME_ALIASES: dict = {
 }
 
 
+# The canonical spelling of a TimestampUnit, both directions. It matches the SQL
+# surface (`TIMESTAMP[ms]`), so a serialized type string is also a valid declared
+# type — the property DECIMAL(p, s), ARRAY<T> and VECTOR(n) already have.
+_UNIT_TO_SQL = {
+    TimestampUnit.SECONDS: "s",
+    TimestampUnit.MILLISECONDS: "ms",
+    TimestampUnit.MICROSECONDS: "us",
+    TimestampUnit.NANOSECONDS: "ns",
+}
+_SQL_TO_UNIT = {v: k for k, v in _UNIT_TO_SQL.items()}
+
+
 def serialize_column_type(ct) -> Optional[str]:
     """Canonical string for a ColumnType (None -> None)."""
     if ct is None:
@@ -537,6 +559,16 @@ def try_parse_column_type(s: str) -> Optional[ColumnType]:
             return VECTOR(int(parts[0]))
         return None
 
+    # TIMESTAMP[unit] / TIME[unit] — the form `str(ColumnType)` writes and the
+    # form SQL declares. The BARE names remain valid and mean the canonical
+    # microseconds: that is what every schema persisted before the unit was
+    # serialized says, and re-reading those must not change their meaning.
+    if upper.startswith("TIMESTAMP[") and upper.endswith("]"):
+        _u = _SQL_TO_UNIT.get(upper[len("TIMESTAMP[") : -1].strip().lower())
+        return None if _u is None else TIMESTAMP(_u)
+    if upper.startswith("TIME[") and upper.endswith("]"):
+        _u = _SQL_TO_UNIT.get(upper[len("TIME[") : -1].strip().lower())
+        return None if _u is None else TIME(_u)
     if upper == "TIMESTAMP":
         return TIMESTAMP()
     if upper == "TIME":
@@ -639,6 +671,36 @@ _UNSIGNED_OF = {
     DrakenType.UINT32: UINT32,
     DrakenType.UINT64: UINT64,
 }
+
+
+# Inclusive value range of each integer width. These are the SAME bounds the
+# draken kernels range-check against (they are fixed by the width, not tunable),
+# and they exist here so the BIND-TIME literal path can reach the same verdict as
+# the runtime kernel: `CAST(300 AS INT8)` must fail at plan time with a readable
+# error rather than at vector-construction time with a bare OverflowError, and
+# `TRY_CAST(300 AS INT8)` must fold to NULL exactly as the kernel would null the
+# row.
+_INTEGER_BOUNDS = {
+    DrakenType.INT8: (-128, 127),
+    DrakenType.INT16: (-32768, 32767),
+    DrakenType.INT32: (-2147483648, 2147483647),
+    DrakenType.INT64: (-9223372036854775808, 9223372036854775807),
+    DrakenType.UINT8: (0, 255),
+    DrakenType.UINT16: (0, 65535),
+    DrakenType.UINT32: (0, 4294967295),
+    DrakenType.UINT64: (0, 18446744073709551615),
+}
+
+
+def integer_bounds(column_type) -> Optional[tuple]:
+    """(low, high) for an integer-width ColumnType, else None.
+
+    None means "not an integer width" — a float, a decimal, a string; NOT "no
+    limits". Callers must treat None as "this check does not apply".
+    """
+    if column_type is None:
+        return None
+    return _INTEGER_BOUNDS.get(getattr(column_type, "physical", None))
 
 
 def find_compatible_type(types: list) -> Optional["ColumnType"]:

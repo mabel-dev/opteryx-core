@@ -744,39 +744,6 @@ cpdef dict fetch_column_chunk_info(
     return result
 
 
-cpdef tuple fetch_column_stats(
-    str path,
-    int64_t file_size = -1,
-    ParquetFooterBytesCache footer_bytes_cache = None,
-):
-    """Fast planning-phase stats: aggregate column min/max/null_count in C++.
-
-    Returns (num_rows, footer_bytes, FileColumnStats) where FileColumnStats
-    holds decoded values lazily — nothing is decoded until get_min/get_max
-    is called.
-
-    Pass file_size=-1 to auto-detect via stat()/HEAD.
-    """
-    cdef bytes envelope
-    cdef int64_t footer_bytes
-    cdef const uint8_t* buf_ptr
-    cdef size_t buf_size
-    cdef FileStats fs
-    cdef vector[AggColumnStat] agg_stats
-
-    if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
-        envelope, footer_bytes = _read_footer_payload(path, file_size, footer_bytes_cache)
-        buf_ptr = <const uint8_t*>envelope
-        buf_size = <size_t>len(envelope)
-        fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
-        _PARSED_FOOTER_CACHE.put_fs(path, fs)
-    else:
-        footer_bytes = 0
-    agg_stats = AggregateColumnStats(fs)
-
-    return fs.num_rows, footer_bytes, file_column_stats_from_agg(agg_stats)
-
-
 cdef inline bint _is_local_path(str path):
     """True for filesystem paths the C++ bloom probe (ifstream) can open."""
     return not (path.startswith("gs://") or path.startswith("s3://")
@@ -1462,6 +1429,92 @@ cdef void _parse_and_cache_footer(
     _PARSED_FOOTER_CACHE.put_fs(path, fs)
     if footer_map != NULL:
         footer_map[0][path.encode('utf-8')] = fs
+
+
+cpdef list fetch_column_stats_many(
+    object filesystem,
+    list paths,
+    dict file_sizes = None,
+    ParquetFooterBytesCache footer_bytes_cache = None,
+):
+    """Planning-phase stats for MANY files in ONE signed, concurrent acquisition.
+
+    Returns [(num_rows, FileColumnStats), ...] parallel to `paths`; FileColumnStats
+    holds its values lazily — nothing is decoded until get_min/get_max is called.
+
+    This is the ONLY plan-time stats entry point, and it is batched because a
+    per-file one CANNOT serve a private remote bucket (the per-file form that used
+    to live here was removed for exactly that reason). The C++ libcurl footer
+    fetches carry no Authorization header — filesystem.hpp's `gcs_to_https` only
+    swaps the scheme — so a `gs://` path must be rewritten to a signed URL before
+    it reaches C++, and it must NOT carry that signature when it is used as a
+    cache key: signatures expire, so a persistent cache keyed by the fetch URL
+    would miss on every query and grow without bound. `_acquire_remote_footers`
+    already owns both halves of that split (fetch by URL, cache by ORIGINAL path),
+    and brings the shared cross-instance tier and ONE concurrent GIL-released
+    batch fetch in place of the serial, GIL-held, one-round-trip-per-file loop its
+    own docstring forbids callers from writing.
+
+    Stats are aggregated from the footers acquired HERE (via `footer_map`), never
+    from a follow-up `_PARSED_FOOTER_CACHE` lookup: that cache evicts, and a miss
+    would fall through to an UNSIGNED per-file fetch — the exact 403 this function
+    exists to prevent.
+
+    Local paths need no signing — `rewrite_to_signed_url` is absent on the local
+    filesystem, so `_sign_paths` returns empty maps and every path reads through
+    unchanged — and are footer-read directly below.
+
+    A footer that fails to fetch or parse raises for the WHOLE call: the C++ batch
+    (`FetchParquetFootersMany`) is all-or-nothing, so one unreadable file costs the
+    caller every file's stats, not just its own.
+    """
+    cdef list out = []
+    cdef dict orig_to_cpp
+    cdef unordered_map[string, FileStats] footer_map
+    cdef string path_bytes
+    cdef const FileStats* fsp
+    cdef FileStats fs
+    cdef vector[AggColumnStat] agg_stats
+    cdef bytes envelope
+    cdef const uint8_t* buf_ptr
+    cdef size_t buf_size
+    cdef str path, fetch_url
+
+    if not paths:
+        return out
+
+    orig_to_cpp, _ = _sign_paths(filesystem, paths)
+    _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
+                            &footer_map, None)
+
+    for path in paths:
+        path_bytes = path.encode("utf-8")
+        # Every remote file is in `footer_map` — that is _acquire_remote_footers'
+        # postcondition, and it holds for its cache hits as well as its fetches.
+        # Probe with count() first: indexing a std::unordered_map default-constructs
+        # an empty FileStats on a miss, which reads downstream as "zero row groups".
+        if footer_map.count(path_bytes) != 0:
+            fsp = &footer_map[path_bytes]
+        else:
+            # Local file (or a remote one this build classifies as local). No
+            # signing applies, so the original path IS the fetch path.
+            fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
+            if fsp == NULL:
+                fetch_url = orig_to_cpp.get(path, path)
+                envelope, _ = _read_footer_payload(
+                    fetch_url,
+                    file_sizes.get(path, -1) if file_sizes else -1,
+                    footer_bytes_cache,
+                )
+                buf_ptr = <const uint8_t*>envelope
+                buf_size = <size_t>len(envelope)
+                fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+                _PARSED_FOOTER_CACHE.put_fs(path, fs)
+                fsp = &fs
+        agg_stats = AggregateColumnStats(fsp[0])
+        out.append((fsp.num_rows, file_column_stats_from_agg(agg_stats)))
+
+    return out
 
 
 cpdef IpcRowGroupSource open_ipc_source(

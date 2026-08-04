@@ -107,8 +107,11 @@ allow-list, not a bare op-name lookup.
 - Add the binder registry-lookup gate for BC_BINARY_OP (mirror BC_FUNCTION).
 - Add a parity-assertion in the C-ABI test that every registered kernel returns a
   non-error VecResult on a representative input (catches "registered but stub").
-- Verify telemetry (`get_c_native_kernel_call_count`) and that nothing newly
-  dispatches C-native yet (only casts already do). Suite identical.
+- Verify that nothing newly dispatches C-native yet (only casts already do).
+  Suite identical. (The `get_c_native_kernel_call_count` telemetry this step
+  originally named has been DELETED: its single increment site was inside a
+  binary op's all-null short-circuit, so it never measured dispatch, and that
+  branch is on the Cython VM the native engine no longer runs.)
 
 **P9.1 — Executor branch: BC_BINARY_OP C-native.**
 - Add the `if (slot.flags & BC_INSTR_C_NATIVE)` branch calling

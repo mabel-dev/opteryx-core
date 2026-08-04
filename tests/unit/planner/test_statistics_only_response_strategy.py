@@ -178,8 +178,10 @@ def test_strategy_no_manifest_leaves_plan_unchanged():
 def test_get_count_from_manifest():
     m = MockManifest(123)
     assert get_count_from_manifest(m) == 123
-    # missing manifest returns 0
-    assert get_count_from_manifest(None) == 0
+    # A missing manifest is UNKNOWN, not 0. This number is handed straight back
+    # as the answer to COUNT(*) with the scan deleted, so reporting 0 for "nobody
+    # counted" is a silent wrong answer - the caller must abandon the rewrite.
+    assert get_count_from_manifest(None) is None
 
 
 def test_is_simple_aggregate_rejects_count_distinct():

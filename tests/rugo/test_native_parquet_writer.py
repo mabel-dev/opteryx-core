@@ -558,21 +558,23 @@ def test_all_valid_no_nulls():
 
 def test_interior_nulls_keep_type():
     """A column with SOME nulls keeps its physical type and round-trips. (An
-    ALL-null column collapses to DRAKEN_NULL at the morsel level — see
-    test_null_typed_column_writes_as_int32 — a separate, typeless case.)"""
+    ALL-null column keeps its declared type too — see
+    test_all_null_column_keeps_declared_type.)"""
     sql = "SELECT i FROM (VALUES (1),(CAST(NULL AS INTEGER)),(3)) AS t(i)"
     cols, types = _read_pyarrow(_write(sql))
     assert cols["i"] == [1, None, 3]
     assert types["i"] == "int64"
 
 
-def test_null_typed_column_writes_as_int32():
-    """An all-null projection becomes DRAKEN_NULL (typeless). The writer emits
-    it as an all-null INT32 column (readable, no values)."""
+def test_all_null_column_keeps_declared_type():
+    """An all-null projection keeps the type the CAST declared — it does NOT
+    collapse to a typeless column. INTEGER is the SQL spelling of INT64 (there is
+    no narrower INTEGER and no BIGINT alias), so the writer emits an all-null
+    INT64 column, readable with no values."""
     sql = "SELECT CAST(NULL AS INTEGER) AS i FROM (VALUES (1),(2),(3)) AS t(x)"
     cols, types = _read_pyarrow(_write(sql))
     assert cols["i"] == [None, None, None]
-    assert types["i"] == "int32"
+    assert types["i"] == "int64"
 
 
 def test_rugo_can_parse_own_footer():
@@ -622,8 +624,7 @@ if __name__ == "__main__":
     test_decimal_stats_numeric_order()
     test_all_valid_no_nulls()
     test_interior_nulls_keep_type()
-    test_null_typed_column_writes_as_int32()
+    test_all_null_column_keeps_declared_type()
     test_rugo_can_parse_own_footer()
-    test_unsupported_type_fails_loud()
     test_two_string_array_columns_keep_values()
     print("✅ okay")

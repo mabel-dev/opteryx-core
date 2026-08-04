@@ -307,16 +307,40 @@ def test_float_stays_double_while_real_is_single():
     assert try_parse_column_type("DOUBLE") == FLOAT64
 
 
-@pytest.mark.parametrize("spelling", ["TINYINT", "SMALLINT", "REAL", "FLOAT32", "INT8"])
-def test_schema_spellings_do_not_widen_the_cast_dialect(spelling):
+@pytest.mark.parametrize("spelling", ["TINYINT", "SMALLINT", "REAL"])
+def test_schema_alias_spellings_do_not_widen_the_cast_dialect(spelling):
     """`_SQL_NAME_ALIASES` is read-side only. Cast targets go through
     `_extract_data_type`'s own mapping, which never consults it — so teaching the
-    schema reader a spelling must not teach the SQL dialect one."""
+    schema READER an alias spelling must not teach the SQL dialect one.
+
+    The CANONICAL widths (INT8/INT16/INT32/FLOAT32) are a different matter: they
+    became real cast targets once per-width kernels existed, and are asserted
+    below. These three are aliases for those widths, not names of their own, and
+    are still rejected — with a suggestion naming the exact width."""
     import opteryx
     from opteryx.exceptions import SqlError
 
     with pytest.raises(SqlError):
         list(opteryx.session().execute_to_morsels(f"SELECT CAST(1 AS {spelling}) AS v"))
+
+
+@pytest.mark.parametrize(
+    "spelling, physical",
+    [
+        ("INT8", DrakenType.INT8),
+        ("INT16", DrakenType.INT16),
+        ("INT32", DrakenType.INT32),
+        ("FLOAT32", DrakenType.FLOAT32),
+    ],
+)
+def test_canonical_widths_are_cast_targets_and_produce_that_width(spelling, physical):
+    """The declared type and the ACTUAL vector type must agree. This is the whole
+    reason these names were refused until per-width kernels existed: the target
+    arm mapped them onto INT64/FLOAT64-producing kernels, so accepting the name
+    would have declared INT32 and produced INT64."""
+    session = opteryx.session()
+    for morsel in session.execute_to_morsels(f"SELECT CAST(1 AS {spelling}) AS v"):
+        assert morsel.column("v").type == physical, (spelling, morsel.column("v").type)
 
 
 def test_unparseable_stored_type_still_falls_back_rather_than_raising():
@@ -658,6 +682,41 @@ def test_ipv4_format_binding_matches_the_vector_renderer():
     assert ipv4_vector(RENDER_EXAMPLES).to_pylist() == [
         ipv4_format(ip(a)) for a in RENDER_EXAMPLES
     ]
+
+
+def test_every_integer_width_casts_to_ipv4():
+    """An address IS a uint32, so the integer spelling of one must reach IPV4 from
+    every width — signed and unsigned, column and literal. Before this, storing an
+    address as an INT64 was a one-way door: it rendered as a number for ever."""
+    assert rows("SELECT CAST(3232235777 AS IPV4)") == ["192.168.1.1"]
+    assert rows("SELECT CAST(CAST(3232235777 AS UINT32) AS IPV4)") == ["192.168.1.1"]
+    assert rows("SELECT CAST(CAST(3232235777 AS UINT64) AS IPV4)") == ["192.168.1.1"]
+    # Columns, not just folded literals — the kernel path, not the bind-time one.
+    assert rows(
+        "SELECT CAST(a AS IPV4) FROM (SELECT 3232235777 AS a) AS t"
+    ) == ["192.168.1.1"]
+    assert rows(
+        "SELECT CAST(CAST(a AS UINT32) AS IPV4) FROM (SELECT 16843009 AS a) AS t"
+    ) == ["1.1.1.1"]
+
+
+def test_integer_to_ipv4_round_trips_through_integer():
+    """The two directions must compose: an address rendered as a number and read
+    back is the same address."""
+    assert rows(
+        "SELECT CAST(CAST(CAST('192.168.1.1' AS IPV4) AS INTEGER) AS IPV4)"
+    ) == ["192.168.1.1"]
+
+
+def test_integer_to_ipv4_refuses_a_value_that_is_not_an_address():
+    """Range-checked, never wrapped — a negative or >2^32-1 integer is not an
+    address and must fail loud rather than silently become one."""
+    with pytest.raises(Exception):
+        rows("SELECT CAST(4294967296 AS IPV4)")
+    with pytest.raises(Exception):
+        rows("SELECT CAST(-1 AS IPV4)")
+    with pytest.raises(Exception):
+        rows("SELECT CAST(0 - a AS IPV4) FROM (SELECT 1 AS a) AS t")
 
 
 if __name__ == "__main__":  # pragma: no cover

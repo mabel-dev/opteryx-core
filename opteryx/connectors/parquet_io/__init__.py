@@ -19,13 +19,13 @@ from opteryx.connectors.parquet_io import pool_reader  # noqa: F401, E402
 sys.setdlopenflags(_flags)
 
 from opteryx.connectors.parquet_io.pool_reader import fetch_column_chunk_info
-from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
+from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
 from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc as iter_row_groups
 from opteryx.connectors.parquet_io.pool_reader import iter_pass2_row_groups_ipc
 
 __all__ = [
     "fetch_column_chunk_info",
-    "fetch_column_stats",
+    "fetch_column_stats_many",
     "iter_row_groups",
     "iter_pass2_row_groups_ipc",
     "ParquetFooterBytesCache",

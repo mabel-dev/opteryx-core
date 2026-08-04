@@ -151,6 +151,79 @@ VecResult draken_cast_decimal128_to_decimal(void* ctx, const DrakenVector* vecto
 VecResult draken_cast_int64_to_decimal(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_decimal(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_uint_to_decimal(void* ctx, const DrakenVector* vector);
+
+// DECIMAL -> INT64 / FLOAT64, named by the SOURCE tier. ctx reads ONLY
+// binary_op_ctx.left_scale (the source scale, which the vector does not carry).
+// INT64 truncates toward zero, matching draken_cast_float64_to_int64; an
+// out-of-INT64-range magnitude raises.
+VecResult draken_cast_decimal_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_int64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_float64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_float64(void* ctx, const DrakenVector* vector);
+
+// Unsigned (UINT8/16/32/64) -> the named unsigned width, range-checked. The
+// unsigned counterpart of the draken_cast_integer_to_uint* family, which takes
+// signed sources only — without these an unsigned column could not change width
+// at all. The uint32 member also serves CAST(<unsigned> AS IPV4).
+VecResult draken_cast_uint_to_uint8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_uint16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_uint32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_uint64(void* ctx, const DrakenVector* vector);
+
+// Unsigned -> FLOAT64. No range check (every uint64 is representable; >2^53 loses
+// low bits, which is floating point, not an error). The only route to float for
+// the top half of the UINT64 range — via INT64 it raises.
+VecResult draken_cast_uint_to_float64(void* ctx, const DrakenVector* vector);
+
+// ---- Narrow signed (INT8/INT16/INT32) and FLOAT32 targets ----------------------
+// These widths were SOURCE-only until the cast targets were opened up; the source
+// families mirror the unsigned family exactly (signed int, unsigned int, float,
+// bool, string, decimal). Every narrowing is range-checked and raises.
+VecResult draken_cast_integer_to_int8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_int16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_int32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_int8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_int16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_int32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_int8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_int16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_int32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_int8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_int16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_int32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_int8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_int16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_int32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_int8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_int8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_int16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_int16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_int32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_int32(void* ctx, const DrakenVector* vector);
+
+// -> FLOAT32. Precision loss is the type's contract, not an error; a finite value
+// with no float32 representation at all (would become +-Inf) raises. An input that
+// is already +-Inf/NaN passes through.
+VecResult draken_cast_float_to_float64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_integer_to_float32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_float32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_float_to_float32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_bool_to_float32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_string_to_float32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_float32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_float32(void* ctx, const DrakenVector* vector);
+
+// DECIMAL -> the named unsigned width, named by the SOURCE tier. Source scale in
+// binary_op_ctx.left_scale; truncates toward zero like the INT64 twin, then
+// range-checks (negative or over-width raises).
+VecResult draken_cast_decimal_to_uint8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_uint8(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_uint16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_uint16(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_uint32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_uint32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal_to_uint64(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_decimal128_to_uint64(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_date32_to_timestamp(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* vector);
 // Implemented as draken_cast_date_to_string (the registered/forward-declared name).

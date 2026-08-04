@@ -312,6 +312,11 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_integer_to_uint32", (kernel_fn_t)&draken_cast_integer_to_uint32},
     {"draken_cast_integer_to_uint64", (kernel_fn_t)&draken_cast_integer_to_uint64},
     {"draken_cast_uint_to_int64", (kernel_fn_t)&draken_cast_uint_to_int64},
+    {"draken_cast_uint_to_uint8", (kernel_fn_t)&draken_cast_uint_to_uint8},
+    {"draken_cast_uint_to_uint16", (kernel_fn_t)&draken_cast_uint_to_uint16},
+    {"draken_cast_uint_to_uint32", (kernel_fn_t)&draken_cast_uint_to_uint32},
+    {"draken_cast_uint_to_uint64", (kernel_fn_t)&draken_cast_uint_to_uint64},
+    {"draken_cast_uint_to_float64", (kernel_fn_t)&draken_cast_uint_to_float64},
 
     // E33 — FLOAT64/FLOAT32 → the named unsigned target, range-checked.
     {"draken_cast_float_to_uint8", (kernel_fn_t)&draken_cast_float_to_uint8},
@@ -368,6 +373,51 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_int64_to_decimal", (kernel_fn_t)&draken_cast_int64_to_decimal},
     {"draken_cast_integer_to_decimal", (kernel_fn_t)&draken_cast_integer_to_decimal},
     {"draken_cast_uint_to_decimal", (kernel_fn_t)&draken_cast_uint_to_decimal},
+    // DECIMAL → INT64 / FLOAT64, keyed on the source tier; the SOURCE scale comes
+    // from the ctx (left_scale) — the vector does not carry it.
+    {"draken_cast_decimal_to_int64", (kernel_fn_t)&draken_cast_decimal_to_int64},
+    {"draken_cast_decimal128_to_int64", (kernel_fn_t)&draken_cast_decimal128_to_int64},
+    {"draken_cast_decimal_to_float64", (kernel_fn_t)&draken_cast_decimal_to_float64},
+    {"draken_cast_decimal128_to_float64", (kernel_fn_t)&draken_cast_decimal128_to_float64},
+    {"draken_cast_decimal_to_uint8", (kernel_fn_t)&draken_cast_decimal_to_uint8},
+    {"draken_cast_decimal128_to_uint8", (kernel_fn_t)&draken_cast_decimal128_to_uint8},
+    {"draken_cast_decimal_to_uint16", (kernel_fn_t)&draken_cast_decimal_to_uint16},
+    {"draken_cast_decimal128_to_uint16", (kernel_fn_t)&draken_cast_decimal128_to_uint16},
+    {"draken_cast_decimal_to_uint32", (kernel_fn_t)&draken_cast_decimal_to_uint32},
+    {"draken_cast_decimal128_to_uint32", (kernel_fn_t)&draken_cast_decimal128_to_uint32},
+    {"draken_cast_decimal_to_uint64", (kernel_fn_t)&draken_cast_decimal_to_uint64},
+    {"draken_cast_decimal128_to_uint64", (kernel_fn_t)&draken_cast_decimal128_to_uint64},
+
+    // Narrow signed (INT8/16/32) and FLOAT32 targets.
+    {"draken_cast_integer_to_int8", (kernel_fn_t)&draken_cast_integer_to_int8},
+    {"draken_cast_uint_to_int8", (kernel_fn_t)&draken_cast_uint_to_int8},
+    {"draken_cast_float_to_int8", (kernel_fn_t)&draken_cast_float_to_int8},
+    {"draken_cast_bool_to_int8", (kernel_fn_t)&draken_cast_bool_to_int8},
+    {"draken_cast_string_to_int8", (kernel_fn_t)&draken_cast_string_to_int8},
+    {"draken_cast_decimal_to_int8", (kernel_fn_t)&draken_cast_decimal_to_int8},
+    {"draken_cast_decimal128_to_int8", (kernel_fn_t)&draken_cast_decimal128_to_int8},
+    {"draken_cast_integer_to_int16", (kernel_fn_t)&draken_cast_integer_to_int16},
+    {"draken_cast_uint_to_int16", (kernel_fn_t)&draken_cast_uint_to_int16},
+    {"draken_cast_float_to_int16", (kernel_fn_t)&draken_cast_float_to_int16},
+    {"draken_cast_bool_to_int16", (kernel_fn_t)&draken_cast_bool_to_int16},
+    {"draken_cast_string_to_int16", (kernel_fn_t)&draken_cast_string_to_int16},
+    {"draken_cast_decimal_to_int16", (kernel_fn_t)&draken_cast_decimal_to_int16},
+    {"draken_cast_decimal128_to_int16", (kernel_fn_t)&draken_cast_decimal128_to_int16},
+    {"draken_cast_integer_to_int32", (kernel_fn_t)&draken_cast_integer_to_int32},
+    {"draken_cast_uint_to_int32", (kernel_fn_t)&draken_cast_uint_to_int32},
+    {"draken_cast_float_to_int32", (kernel_fn_t)&draken_cast_float_to_int32},
+    {"draken_cast_bool_to_int32", (kernel_fn_t)&draken_cast_bool_to_int32},
+    {"draken_cast_string_to_int32", (kernel_fn_t)&draken_cast_string_to_int32},
+    {"draken_cast_decimal_to_int32", (kernel_fn_t)&draken_cast_decimal_to_int32},
+    {"draken_cast_decimal128_to_int32", (kernel_fn_t)&draken_cast_decimal128_to_int32},
+    {"draken_cast_float_to_float64", (kernel_fn_t)&draken_cast_float_to_float64},
+    {"draken_cast_integer_to_float32", (kernel_fn_t)&draken_cast_integer_to_float32},
+    {"draken_cast_uint_to_float32", (kernel_fn_t)&draken_cast_uint_to_float32},
+    {"draken_cast_float_to_float32", (kernel_fn_t)&draken_cast_float_to_float32},
+    {"draken_cast_bool_to_float32", (kernel_fn_t)&draken_cast_bool_to_float32},
+    {"draken_cast_string_to_float32", (kernel_fn_t)&draken_cast_string_to_float32},
+    {"draken_cast_decimal_to_float32", (kernel_fn_t)&draken_cast_decimal_to_float32},
+    {"draken_cast_decimal128_to_float32", (kernel_fn_t)&draken_cast_decimal128_to_float32},
     {"draken_cast_date32_to_int64", (kernel_fn_t)&draken_cast_date32_to_int64},
     {"draken_cast_timestamp_to_int64", (kernel_fn_t)&draken_cast_timestamp_to_int64},
     {"draken_cast_timestamp_to_string", (kernel_fn_t)&draken_cast_timestamp_to_string},
@@ -648,7 +698,8 @@ binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
                                           unsigned char result_scale,
                                           unsigned char result_precision,
                                           unsigned char left_unit,
-                                          unsigned char right_unit) {
+                                          unsigned char right_unit,
+                                          unsigned char safe) {
     auto* ctx = static_cast<binary_op_ctx*>(malloc(sizeof(binary_op_ctx)));
     if (ctx) {
         ctx->op_code = op_code;
@@ -658,6 +709,7 @@ binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
         ctx->result_precision = result_precision;
         ctx->left_unit = left_unit;
         ctx->right_unit = right_unit;
+        ctx->safe = safe;
     }
     return ctx;
 }
@@ -732,11 +784,13 @@ time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude, unsigned char u
     return ctx;
 }
 
-format_ctx* kernel_alloc_format_ctx(unsigned char ts_unit, const char* fmt, size_t fmt_len) {
+format_ctx* kernel_alloc_format_ctx(unsigned char ts_unit, const char* fmt, size_t fmt_len,
+                                    unsigned char safe) {
     if (fmt == nullptr) fmt_len = 0u;
     auto* ctx = static_cast<format_ctx*>(malloc(sizeof(format_ctx) + fmt_len));
     if (!ctx) return nullptr;
     ctx->ts_unit = ts_unit;
+    ctx->safe = safe;
     ctx->fmt_len = static_cast<int32_t>(fmt_len);
     if (fmt_len > 0u)
         memcpy(reinterpret_cast<unsigned char*>(ctx) + sizeof(format_ctx), fmt, fmt_len);

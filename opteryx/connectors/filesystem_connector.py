@@ -336,52 +336,57 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         bounds_are_ordinal = bool(manifest_bounds)
 
         # Miss (or first build): build the manifest from file metadata.
-        # Build FileEntry objects from file metadata
+        #
+        # ONE batched acquisition for the whole file set, not a fetch per file. A
+        # gs:// dataset (this connector backs `gcs_connector()`) REQUIRES it: the
+        # C++ footer fetches carry no Authorization header, so each path has to be
+        # rewritten to a signed URL before it reaches C++ while the caches stay
+        # keyed by the original path. fetch_column_stats_many owns that split, and
+        # fetches the whole set concurrently with the GIL released instead of one
+        # serial, GIL-held round trip (plus a signing round trip) per file.
+        stats_by_name: Dict[str, tuple] = {}
+        try:
+            from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
+
+            schema_column_names = [col.name for col in schema.columns]
+            # strict: the returned list is parallel to ordered_names by contract,
+            # and a silent zip truncation here would hand a file another file's
+            # statistics from that point on.
+            for blob_name, (record_count, column_stats) in zip(
+                ordered_names,
+                fetch_column_stats_many(self.filesystem, ordered_names, sizes),
+                strict=True,
+            ):
+                column_stats.bind_schema(schema_column_names)
+                stats_by_name[blob_name] = (record_count, column_stats)
+        except (OSError, ValueError, RuntimeError):
+            # No statistics for this dataset. The C++ footer batch is
+            # all-or-nothing, so one unreadable file costs the whole set, and
+            # every entry below falls back to record_count=None — UNKNOWN, never
+            # a fabricated 0, which would let the optimizer answer COUNT(*) as 0
+            # and delete LIMIT nodes. Files are still listed and still read.
+            stats_by_name = {}
+
+        # Build FileEntry objects from file metadata. Every name in ordered_names
+        # yields exactly one entry, in order, whether or not it has statistics —
+        # the sketch vectors are positional to this list (row i describes
+        # ordered_names[i]), so skipping an entry here would read one file's
+        # sketch against another's.
         file_entries = []
         for blob_name in ordered_names:
-            try:
-                file_format = "PARQUET"
-                record_count = 0
-                file_size = sizes.get(blob_name, 0)
-
-                column_stats = None
-
-                try:
-                    from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats
-
-                    record_count, footer_size, column_stats = fetch_column_stats(
-                        blob_name, file_size=file_size or -1
-                    )
-                    if file_size == 0:
-                        file_size = footer_size
-
-                    column_stats.bind_schema([col.name for col in schema.columns])
-                except Exception:
-                    record_count = 0
-                    column_stats = None
-
-                manifest_lower, manifest_upper = manifest_bounds.get(blob_name, (None, None))
-                entry = FileEntry(
+            record_count, column_stats = stats_by_name.get(blob_name, (None, None))
+            manifest_lower, manifest_upper = manifest_bounds.get(blob_name, (None, None))
+            file_entries.append(
+                FileEntry(
                     file_path=blob_name,
-                    file_format=file_format,
+                    file_format="PARQUET",
                     record_count=record_count,
-                    file_size_in_bytes=file_size,
+                    file_size_in_bytes=sizes.get(blob_name, 0),
                     column_stats=column_stats,
                     lower_bounds=manifest_lower,
                     upper_bounds=manifest_upper,
                 )
-                file_entries.append(entry)
-
-            except (OSError, ValueError, RuntimeError):
-                # Skip files we can't read metadata from. This breaks the 1:1
-                # positional pairing the sketch vectors rely on (row i describes
-                # ordered_names[i]), so the sketches are dropped rather than
-                # silently read against the wrong file — stats are an accelerator,
-                # a misaligned one is a wrong answer.
-                min_k_vector = None
-                histogram_vector = None
-                char_class_vector = None
-                continue
+            )
 
         # Cache an INDEPENDENT copy of the file list (the returned manifest below
         # may be mutated by the optimizer); hand the caller its own Manifest.

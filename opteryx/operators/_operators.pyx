@@ -2075,8 +2075,43 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
     projection) — _dv_eval_span_cxx deep-copies whatever the result DV is, so the
     "last op must be an arena compute" restriction the GIL path needs does not
     apply. Mirrors build_bytecode's per-instruction admission exactly."""
+    return _first_non_c_native(bc) < 0
+
+
+# Opcode -> the operation a reader recognises, for the refusal message only.
+# Not a debug aid: the gate this feeds is the ONLY thing standing between an
+# unsupported expression and the user, and "outside the c-native kernel set"
+# with no operation named made every refusal look identical.
+_BC_OP_NAMES = {
+    1: "a column load", 2: "a boolean literal", 3: "a scalar literal",
+    4: "a set literal", 5: "AND", 6: "OR", 7: "XOR", 8: "NOT",
+    9: "a DNF predicate", 10: "a CNF predicate", 11: "a comparison",
+    13: "an arithmetic/binary operator", 14: "a unary operator",
+    15: "a function call", 16: "a subscript/extraction (-> ->> [i])",
+    17: "a CAST", 18: "a CASE", 19: "a constant literal",
+}
+
+
+def bytecode_non_c_native_op(CompiledBytecode bc):
+    """The operation that made `bytecode_ops_all_c_native` say no, named — or ""
+    when the program IS admissible.
+
+    Shares `_first_non_c_native` with the gate itself, so the message can never
+    name a different instruction than the one that was actually refused."""
     if bc.count == 0:
-        return False
+        return "an empty program"
+    cdef Py_ssize_t k = _first_non_c_native(bc)
+    if k < 0:
+        return ""
+    return _BC_OP_NAMES.get(bc.instrs[k].opcode, f"opcode {bc.instrs[k].opcode}")
+
+
+cdef Py_ssize_t _first_non_c_native(CompiledBytecode bc):
+    """Index of the first instruction the C-native path cannot run, or -1 when
+    every instruction is admissible. The SINGLE admission loop — both the gate
+    and the message that explains it read this, so they cannot disagree."""
+    if bc.count == 0:
+        return 0
     cdef Py_ssize_t k
     cdef int op, fl, opc
     for k in range(bc.count):
@@ -2089,24 +2124,24 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
             opc = bc.instrs[k].op_code
             if (fl & BC_CMP_INLIST_INLINE) == 0 and 1 <= opc <= 6:
                 continue
-            return False
+            return k
         if op == BC_UNARY_OP:
             opc = bc.instrs[k].op_code
             if (opc == UOP_IS_NULL or opc == UOP_IS_NOT_NULL
                     or opc == UOP_IS_TRUE or opc == UOP_IS_FALSE
                     or opc == UOP_IS_NOT_TRUE or opc == UOP_IS_NOT_FALSE):
                 continue
-            return False
+            return k
         if op == BC_BINARY_OP or op == BC_CAST:
             if (fl & BC_INSTR_C_NATIVE) != 0 and \
                     (fl & (BC_C_NATIVE_FIXED | BC_C_NATIVE_STRING
                            | BC_C_NATIVE_DESC | BC_C_NATIVE_ARRAY)) != 0:
                 continue
-            return False
+            return k
         if op == BC_FUNCTION:
             if (fl & BC_INSTR_C_NATIVE) != 0:
                 continue
-            return False
+            return k
         if op == BC_EXTRACTION:
             # `->`, `->>` and str[i] carry a resolved C-ABI kernel whose path/index is
             # bound into extraction_ctx. arr[i] additionally carries the operand's
@@ -2115,9 +2150,9 @@ def bytecode_ops_all_c_native(CompiledBytecode bc):
             # compiler's array hoist guarantees.
             if (fl & BC_INSTR_C_NATIVE) != 0:
                 continue
-            return False
-        return False
-    return True
+            return k
+        return k
+    return -1
 
 
 cdef class NativePlan:

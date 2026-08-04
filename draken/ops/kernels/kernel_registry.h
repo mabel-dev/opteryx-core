@@ -65,7 +65,9 @@ binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
                                           unsigned char result_scale,
                                           unsigned char result_precision,
                                           unsigned char left_unit,
-                                          unsigned char right_unit);
+                                          unsigned char right_unit,
+                                          // CAST only: 1 = TRY_CAST (bad row -> NULL).
+                                          unsigned char safe);
 // Allocate a BC_EXTRACTION context. `nav` (nav_len bytes, may be null) is the raw
 // path/key from the binder; for JSON sub-ops it is converted to an RFC 6901 pointer
 // here and the converted form is stored. `index` is the subscript for the MAP_*
@@ -78,7 +80,9 @@ extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code, const char* na
 // pattern LITERAL's bytes, trailing the struct — see kernel_context.h).
 time_bucket_ctx* kernel_alloc_time_bucket_ctx(int64_t magnitude, unsigned char unit_kind,
                                               unsigned char ts_unit);
-format_ctx* kernel_alloc_format_ctx(unsigned char ts_unit, const char* fmt, size_t fmt_len);
+format_ctx* kernel_alloc_format_ctx(unsigned char ts_unit, const char* fmt, size_t fmt_len,
+                                    // CAST only: 1 = TRY_CAST (bad row -> NULL).
+                                    unsigned char safe);
 
 // Vector/distance kernels (function_vector_distance.cpp). The _vector/_text suffixes are
 // catalog OVERLOAD ids: compiled_expression.pyx probes draken_{overload_id} before the

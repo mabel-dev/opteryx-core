@@ -24,7 +24,13 @@ class FileEntry:
 
     file_path: str
     file_format: str  # "PARQUET", "ORC", etc.
-    record_count: int
+    # None means UNKNOWN, and unknown is NOT zero. A producer with no row count
+    # for a file - one that computes no plan-time statistics (MabelTable), or a
+    # footer read that failed - must pass None rather than 0: a fabricated 0 is
+    # indistinguishable from a genuinely empty file, and Manifest.get_record_count
+    # feeds strategies that answer COUNT(*) straight from the manifest and delete
+    # LIMIT nodes. Both turn a fabricated 0 into a silent wrong answer.
+    record_count: Optional[int]
     file_size_in_bytes: int
     uncompressed_size_in_bytes: Optional[int] = None
 

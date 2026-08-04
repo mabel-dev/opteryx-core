@@ -4,7 +4,12 @@ Phase 9c regression tests — defects introduced by C dispatch path.
 Tests for:
 1. Defect 1: Extraction + parameterized casts (bind-time crash)
 2. Defect 2: Null arithmetic (SIGBUS in C kernels)
-3. Defect 3: C-native telemetry counter
+
+Defect 3 (a C-native telemetry counter) was deleted along with the counter it
+asserted on: it had ONE increment site, inside a binary op's all-null
+short-circuit, so it never measured kernel dispatch — and that branch lives in
+the Cython VM, which the native engine no longer runs. Verified dead: neither
+`SELECT id + 2` nor `SELECT id * gravity` moved it.
 """
 import sys
 import os
@@ -12,15 +17,20 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import opteryx
-from opteryx.expression.evaluator import evaluation
 
 
 def _extract_column_values(morsels, column_index=0):
-    """Extract values from a column across all morsels."""
+    """Extract values from a column across all morsels.
+
+    `morsel[i]` is ROW i, not column i — `.column(name)` is the column accessor
+    (draken's morsel API deliberately splits the two). Reading the subscript here
+    returned the first ROW, so a three-row single-column result measured as one
+    value and every length assertion below was checking the wrong thing.
+    """
     values = []
     for morsel in morsels:
-        vec = morsel[column_index]
-        values.extend(list(vec))
+        name = morsel.column_names[column_index]
+        values.extend(morsel.column(name).to_pylist())
     return values
 
 
@@ -155,30 +165,6 @@ def test_null_modulo():
     assert values[0] is None
 
 
-def test_c_native_kernel_counter():
-    """Test that C-native kernel calls are counted (Defect 3).
-
-    Verifies that the telemetry counter is incremented when C dispatch path is used.
-    """
-    session = opteryx.session()
-
-    # Get initial count
-    initial_count = evaluation.get_c_native_kernel_call_count()
-
-    # Execute a query with binary arithmetic (uses C kernels)
-    result = session.execute_to_morsels("SELECT 1 + 2")
-    values = _extract_column_values(result)
-    assert len(values) == 1, f"Expected 1 value, got {len(values)}"
-    assert values[0] == 3
-
-    final_count = evaluation.get_c_native_kernel_call_count()
-
-    # The counter should have incremented (at least 1 call for the binary op)
-    assert final_count > initial_count, \
-        f"C-native kernel counter did not increment (initial={initial_count}, final={final_count}). " \
-        f"This may indicate C-native dispatch is not being used."
-
-
 if __name__ == "__main__":
     test_extraction_array_subscript()
     print("✓ test_extraction_array_subscript")
@@ -207,7 +193,5 @@ if __name__ == "__main__":
     test_null_modulo()
     print("✓ test_null_modulo")
 
-    test_c_native_kernel_counter()
-    print("✓ test_c_native_kernel_counter")
 
     print("\nAll Phase 9c regression tests passed!")

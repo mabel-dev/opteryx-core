@@ -475,6 +475,12 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
         for (uint32_t i = 0u; i < n; ++i)
             if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
 
+        // TRY_CAST rides format_ctx.safe (this kernel takes that ctx for the
+        // pattern), the same field the string->DATE twin reads.
+        const bool is_safe = (c != nullptr && c->safe != 0u);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+
         for (uint32_t j = 0u; j < k; ++j) {
             if (!live[j]) { out[j] = 0; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
@@ -496,10 +502,13 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
                 ok = parse_iso_timestamp(s, len, &year, &month, &day, &hour, &minute, &second, &usec);
             }
             if (!ok) {
-                draken_free(out);
-                return draken_error_sentinel_fmt(
-                    "Cannot cast string to TIMESTAMP: got %.*s",
-                    (int)(len < 32u ? len : 32u), s);
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "Cannot cast string to TIMESTAMP: got %.*s",
+                        (int)(len < 32u ? len : 32u), s);
+                }
+                out[j] = 0; bad[j] = 1u; any_bad = true; continue;
             }
             const int64_t days = civil_to_days(year, month, day);
             out[j] = days * 86400000000LL
@@ -513,6 +522,7 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
         r.data = out; r.type = DRAKEN_TIMESTAMP64; r.validity_embedded = 0u;
         r.ts_unit = static_cast<uint8_t>(TimestampUnit::MICROSECONDS);
         kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
         return r;
     });
 }
