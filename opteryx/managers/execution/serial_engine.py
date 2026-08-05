@@ -213,8 +213,18 @@ def explain(
     # Real operator children of a node, transparently skipping the Exit/Explain
     # wrappers so the rendered tree starts at the first data operator.
     def _real_children(node_id):
+        # Ordered by edge label so a join's legs render left-then-right. The
+        # label is what the physical plan reads to pick the build side, and
+        # ingoing_edges yields in storage order, which for a swapped join is
+        # the pre-swap order -- rendering that order makes a correct
+        # smallest-table-left swap read as inverted. Unlabelled edges keep
+        # their relative order.
+        _leg_rank = {"left": 0, "right": 1}
         kids = []
-        for edge in plan.ingoing_edges(node_id):
+        edges = sorted(
+            plan.ingoing_edges(node_id), key=lambda edge: _leg_rank.get(edge[2], 2)
+        )
+        for edge in edges:
             child_id = edge[0]
             child = plan[child_id]
             if isinstance(child, (ExitNode, ExplainNode)):

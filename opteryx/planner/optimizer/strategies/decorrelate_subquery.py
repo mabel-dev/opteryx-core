@@ -306,6 +306,43 @@ def _find_outer_reference(node):
     return None
 
 
+def _split_outer_referencing(condition):
+    """
+    Split a conjunction into (correlated, local).
+
+    `correlated` is the conjunction of conjuncts that reference the enclosing
+    scope; `local` is the conjunction of those that do not. Either may be None.
+
+    A conjunct that reads only the subquery's own columns filters the inner
+    relation and belongs INSIDE it, where predicate pushdown can reach the scan.
+    Only what still points outwards has to ride on the join as a residual,
+    because SEMI/ANTI evaluate it per candidate pair.
+    """
+    condition = _unwrap(condition)
+    if condition is None:
+        return None, None
+
+    if condition.node_type == NodeType.AND:
+        left_corr, left_local = _split_outer_referencing(_unwrap(condition.left))
+        right_corr, right_local = _split_outer_referencing(_unwrap(condition.right))
+
+        def _conjoin(left, right):
+            if left is None:
+                return right
+            if right is None:
+                return left
+            joined = Node(node_type=NodeType.AND, do_not_create_column=True)
+            joined.left = left
+            joined.right = right
+            return joined
+
+        return _conjoin(left_corr, right_corr), _conjoin(left_local, right_local)
+
+    if _find_outer_reference(condition) is None:
+        return None, condition
+    return condition, None
+
+
 def _reject_residual_correlation(plan: LogicalPlan) -> None:
     """
     Fail loudly if the subquery still depends on the outer row after the equi
@@ -613,15 +650,30 @@ def _lift_correlations(inner_plan: LogicalPlan):
         else:
             key_pairs.append((correlation.left, correlation.right))
 
-    # Whatever still points outwards is a correlated non-equality.
+    # Whatever still points outwards is a correlated non-equality. Only that part
+    # becomes the residual: a filter can mix a correlated conjunct with purely
+    # local ones (`l3.l_suppkey <> l1.l_suppkey AND l3.l_receiptdate >
+    # l3.l_commitdate`, canonical TPC-H Q21). Lifting the whole condition out
+    # stranded the local conjuncts on the join, where predicate pushdown can no
+    # longer reach the scan — Q21's `l3` scan read all 6.0M lineitem rows instead
+    # of the 3.8M that satisfy the local test.
     residual = None
     for inner_nid, inner_node in list(inner_plan.nodes(True)):
         if inner_node.node_type != LogicalPlanStepType.Filter:
             continue
         if _find_outer_reference(inner_node.condition) is None:
             continue
-        residual = inner_node.condition if residual is None else residual
-        inner_plan.remove_node(inner_nid, heal=True)
+        correlated, local = _split_outer_referencing(inner_node.condition)
+        residual = correlated if residual is None else residual
+        if local is None:
+            inner_plan.remove_node(inner_nid, heal=True)
+        else:
+            inner_node.condition = local
+            inner_node.columns = [
+                column
+                for column in (inner_node.columns or [])
+                if not column.is_outer_reference
+            ]
 
     return key_pairs, residual
 

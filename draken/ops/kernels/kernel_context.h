@@ -88,26 +88,69 @@ struct binary_op_ctx {
 };
 
 /**
+ * A resolved reference token of a JSON path. Mirrors draken::ops::JsonPtrToken
+ * (draken/ops/json_path.h) — same layout, declared here so the C ABI header does
+ * not depend on the C++ one.
+ *
+ * `off`/`len` address the trailing token blob; `index` is the parsed array
+ * subscript, or JSON_PTR_NOT_INDEX when the token is not a valid RFC 6901 index.
+ */
+#define JSON_PTR_NOT_INDEX 0xFFFFFFFFu
+
+struct json_ptr_token {
+    uint32_t off;
+    uint32_t len;
+    uint32_t index;
+};
+
+/**
  * Context for BC_EXTRACTION operations.
  *
  * Carries everything the extraction kernels need that is known at bind time, so
  * the C ABI's `key` operand is unused: BC_EXTRACTION pops exactly one vector.
  *
- * The navigation path is stored as `nav_len` bytes placed IMMEDIATELY AFTER this
- * struct in the same malloc block (see kernel_alloc_extraction_ctx), which keeps
- * the generic kernel_free_context() -> free(ctx) correct. For JSON sub-ops the
- * bytes are the RFC 6901 pointer ALREADY converted from dot-notation, so
- * dotpath_to_jsonptr runs once per bind rather than once per morsel.
+ * Everything variable-length lives IMMEDIATELY AFTER this struct in the same
+ * malloc block, which keeps the generic kernel_free_context() -> free(ctx)
+ * correct. The tail differs by sub-op, because the two kinds of navigation have
+ * nothing in common:
+ *
+ *   JSON sub-ops (BC_EXTR_JSON_PTR / BC_EXTR_JSON_KEY):
+ *       [struct][blob_len bytes: token text][ntokens * struct json_ptr_token]
+ *     The path is fully resolved at bind time — dot-notation converted to an RFC
+ *     6901 pointer, the pointer split into tokens, ~0/~1 escapes applied, and
+ *     array indices parsed. None of that depends on the document, so none of it
+ *     runs per row; the kernel is left with container lookups only. nav_len is 0:
+ *     the pointer STRING is not kept, because nothing reads it.
+ *
+ *   Non-JSON sub-ops (BC_EXTR_MAP_STRING / BC_EXTR_MAP_ARRAY):
+ *       [struct][nav_len bytes: key verbatim]
+ *     ntokens/blob_len are 0; these sub-ops navigate by `index`, not by path.
  */
 struct extraction_ctx {
-    int32_t sub_op_code;  // BC_EXTR_MAP_STRING, BC_EXTR_MAP_ARRAY, BC_EXTR_JSON_PTR, BC_EXTR_JSON_KEY
-    int32_t nav_len;      // bytes of path/key following this struct (0 = none)
-    int64_t index;        // subscript for BC_EXTR_MAP_STRING / BC_EXTR_MAP_ARRAY
+    int32_t  sub_op_code;  // BC_EXTR_MAP_STRING, BC_EXTR_MAP_ARRAY, BC_EXTR_JSON_PTR, BC_EXTR_JSON_KEY
+    int32_t  nav_len;      // bytes of verbatim key following this struct (0 = none)
+    int64_t  index;        // subscript for BC_EXTR_MAP_STRING / BC_EXTR_MAP_ARRAY
+    uint32_t ntokens;      // resolved path tokens (JSON sub-ops; 0 = navigate to root)
+    uint32_t blob_len;     // bytes of token text the tokens index into
 };
 
-/* Path/key bytes trailing the struct. NOT NUL-terminated — pair with nav_len. */
+/* Verbatim key bytes trailing the struct. NOT NUL-terminated — pair with nav_len. */
 static inline const char* extraction_ctx_nav(const struct extraction_ctx* c) {
     return (const char*)((const unsigned char*)c + sizeof(struct extraction_ctx));
+}
+
+/* Token text blob (JSON sub-ops). NOT NUL-terminated — tokens carry their lengths. */
+static inline const char* extraction_ctx_blob(const struct extraction_ctx* c) {
+    return (const char*)((const unsigned char*)c + sizeof(struct extraction_ctx)
+                         + (size_t)c->nav_len);
+}
+
+/* Resolved token array, 4-byte aligned after the blob (see kernel_alloc_extraction_ctx). */
+static inline const struct json_ptr_token* extraction_ctx_tokens(
+        const struct extraction_ctx* c) {
+    size_t off = sizeof(struct extraction_ctx) + (size_t)c->nav_len + (size_t)c->blob_len;
+    off = (off + 3u) & ~(size_t)3u;
+    return (const struct json_ptr_token*)((const unsigned char*)c + off);
 }
 
 /**
@@ -133,6 +176,14 @@ struct case_ctx {
  *         draken_in_list does not binary-search this kind). Consumed today
  *         only by draken_array_contains (function_array_json.cpp), which
  *         always packs a single entry; draken_in_list has no kind-2 arm.
+ * kind 3: count x uint64 SORTED ASCENDING (UNSIGNED int family raw values).
+ *         A separate kind from 0 on purpose: a UINT64 value above INT64_MAX
+ *         has no int64 spelling, so packing it as kind 0 would reinterpret it
+ *         as negative and silently mismatch. The bind-time packer drops any
+ *         literal outside [0, UINT64_MAX] — such a literal can never equal an
+ *         unsigned column value, so dropping it is exact, not a degradation.
+ *         kind 0 accepts SIGNED operands only and kind 3 UNSIGNED only; a
+ *         mismatched operand is a loud error, never a reinterpretation.
  * The list never contains NULL (the plan compiler rejects those lists).
  */
 struct in_list_ctx {

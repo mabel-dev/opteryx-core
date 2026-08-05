@@ -76,14 +76,16 @@ cdef extern from "core/markers.hpp" namespace "rugo::_jsonl":
 
 cdef extern from "core/interpreter.hpp" namespace "rugo::_jsonl":
     # Flat-arena document map. Opaque to Cython: spans/offsets stay in C++; the only
-    # introspection the edge needs (first record's keys for column-name discovery) goes
-    # through first_record_keys().
+    # introspection the edge needs (the sampled records' keys for column-name discovery)
+    # goes through sample_record_keys().
     cppclass RecordSet:
         size_t num_records()
         bint malformed
         uint32_t malformed_pos
+        uint32_t malformed_count
 
-    vector[string] first_record_keys(const RecordSet& rs, const uint8_t* buffer) nogil
+    vector[string] sample_record_keys(
+        const RecordSet& rs, const uint8_t* buffer, size_t sample_records) nogil
 
 
 cdef extern from "core/field_span.hpp" namespace "rugo::_jsonl":
@@ -200,7 +202,13 @@ cdef object _maybe_prefilter(const uint8_t* buf, size_t buf_len, predicates):
     if first[ki + len(key):ki + len(key) + 1] != b'"':
         return None                     # bare value -> skip (numeric hazard)
 
-    needle = b'"' + str(val).encode("utf-8") + b'"'
+    # val is bytes for every real Opteryx-pushed VARCHAR literal (its VARCHAR storage is
+    # byte-based, not str) -- str(b'commit') == "b'commit'", the Python repr, not the
+    # string's own bytes, so that needle would never be found and this prefilter would
+    # silently return an empty buffer (0 rows) instead of skipping/no-oping. Same bug and
+    # fix as the predicate-value encoding above.
+    val_bytes = val if isinstance(val, bytes) else str(val).encode("utf-8")
+    needle = b'"' + val_bytes + b'"'
     if len(needle) < 8:                 # short/low-entropy value -> skip won't pay off
         return None
 
@@ -298,7 +306,8 @@ def read_jsonl(
         'column_names': [],
         'num_rows': 0,
         'columns': [],
-        'schema': {}
+        'schema': {},
+        'malformed_count': 0,
     }
 
     # mmap state for the file-path case (freed in the finally below). `in_memory_data`
@@ -323,7 +332,19 @@ def read_jsonl(
         for col, op, val in predicates:
             pred.column = col.encode('utf-8')
             pred.op = <uint8_t>_jsonl_parse_op(op)
-            pred.value = str(val).encode('utf-8')
+            if isinstance(val, bool):
+                # JSON's boolean literals are lowercase ("true"/"false"), not Python's
+                # str(True) == "True" -- evaluate_predicate compares these bytes against
+                # the raw JSON token, so this must match JSON's spelling, not Python's.
+                pred.value = b'true' if val else b'false'
+            elif isinstance(val, bytes):
+                # Opteryx's bound VARCHAR literal values arrive as bytes (its VARCHAR
+                # storage is byte-based, not str). str(b'commit') == "b'commit'" -- the
+                # Python repr, quotes/b-prefix and all -- not the string's own bytes, so
+                # this must pass the bytes through unchanged rather than str()'ing them.
+                pred.value = val
+            else:
+                pred.value = str(val).encode('utf-8')
             context.predicates.push_back(pred)
 
     if explicit_schema:
@@ -335,6 +356,13 @@ def read_jsonl(
                 )
             context.explicit_schema[col.encode('utf-8')] = declared_type.encode('utf-8')
         declared_schema = dict(explicit_schema)
+
+    # Guard before the cast to uint32_t: infer_sample_size bounds BOTH the type-inference
+    # window and (since it also drives column discovery) how many records are consulted for
+    # the key set, so 0 would silently yield a zero-column relation and a negative would
+    # wrap to a huge window. Matches the CSV reader's identical guard on its own sample size.
+    if not isinstance(infer_sample_size, int) or isinstance(infer_sample_size, bool) or infer_sample_size <= 0:
+        raise ValueError("read_jsonl: infer_sample_size must be a positive integer")
 
     context.infer_schema = infer_schema
     context.infer_sample_size = infer_sample_size
@@ -404,15 +432,19 @@ def read_jsonl(
                     buf_data, buf_len, context, predictor, 0
                 )
 
+            result['malformed_count'] = interp_result.all_records.malformed_count
+
             if context.fail_on_error and interp_result.all_records.malformed:
                 raise ValueError(_jsonl_malformed_error(
                     buf_data, buf_len, interp_result.all_records.malformed_pos
                 ))
 
             if interp_result.all_records.num_records() > 0:
-                # Read column names from the first record BEFORE moving the
+                # Read column names from the sampled records BEFORE moving the
                 # records out (no projection = all columns).
-                column_names_cpp = first_record_keys(interp_result.all_records, buf_data)
+                column_names_cpp = sample_record_keys(
+                    interp_result.all_records, buf_data, context.infer_sample_size
+                )
                 total_rows = interp_result.num_records_passed
                 # Move (not copy) the record structure — tens of millions of
                 # FieldSpans + their per-record vectors.
@@ -477,8 +509,11 @@ def benchmark_document_map(
         interp_result = interpret_jsonl(buf_data, buf_len, markers, context, predictor)
     interp_ms = (time.perf_counter() - interp_start) * 1000
 
-    # First record's keys (column names) for inspection.
-    sample_keys = [k.decode('utf-8') for k in first_record_keys(interp_result.all_records, buf_data)]
+    # The sampled records' keys (column names) for inspection.
+    sample_keys = [
+        k.decode('utf-8')
+        for k in sample_record_keys(interp_result.all_records, buf_data, context.infer_sample_size)
+    ]
 
     return {
         'num_records': interp_result.num_records_passed,

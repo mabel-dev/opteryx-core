@@ -1188,6 +1188,51 @@ class Manifest:
     # Column Statistics
     # ================================================================
 
+    def get_value_range(self, column: str) -> Optional[Tuple[Any, Any]]:
+        """Aggregated DECODED (min, max) for `column` across all live files.
+
+        Distinct from ``get_column_bounds``, which reads only the
+        ``lower_bounds``/``upper_bounds`` dict form and returns the raw
+        serialized bytes. That dict form is populated on the catalog path but
+        is ``None`` for a parquet-footer manifest built by the filesystem
+        connector -- which is exactly where TPC-H/JOB relations come from, so
+        every blob-backed relation reported "no bounds" despite the footer
+        carrying real per-row-group min/max.
+
+        Reads the two-tier source the rest of the codebase already treats as
+        canonical (see statistics_only_response._manifest_bound): typed
+        ``FileEntry.column_stats`` first -- the lazy Cython view over the
+        parquet footer -- then the field-id-keyed bounds dicts. Never indexes
+        the positional ``min_values``/``max_values`` lists by field_id; that
+        list is ordered by write position and reads a DIFFERENT column
+        whenever field_id != position.
+
+        Returns None when no file carries a usable bound for the column.
+        """
+        field_id = self._resolve_field_id(column)
+        if field_id is None:
+            return None
+
+        min_val = None
+        max_val = None
+        for file in self.files:
+            if file.column_stats is not None:
+                file_min = file.column_stats.get_min(field_id)
+                file_max = file.column_stats.get_max(field_id)
+            elif file.lower_bounds is not None or file.upper_bounds is not None:
+                file_min = (file.lower_bounds or {}).get(field_id)
+                file_max = (file.upper_bounds or {}).get(field_id)
+            else:
+                continue
+            if file_min is not None and (min_val is None or file_min < min_val):
+                min_val = file_min
+            if file_max is not None and (max_val is None or file_max > max_val):
+                max_val = file_max
+
+        if min_val is None or max_val is None:
+            return None
+        return (min_val, max_val)
+
     def get_column_bounds(self, column: str) -> Optional[Tuple[bytes, bytes]]:
         """
         Get aggregated min/max bounds for column across all files.

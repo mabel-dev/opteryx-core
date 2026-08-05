@@ -162,7 +162,12 @@ def read_csv(
         for col, op, val in predicates:
             pred_cpp.column = col.encode('utf-8')
             pred_cpp.op     = <uint8_t>_csv_parse_op(op)
-            pred_cpp.value  = str(val).encode('utf-8')
+            # val is bytes for every real Opteryx-pushed VARCHAR literal (its VARCHAR
+            # storage is byte-based, not str) -- str(b'foo') == "b'foo'", the Python repr,
+            # not the string's own bytes. Same bug/fix as rugo/src/jsonl/_jsonl_reader.pxi's
+            # predicate-value encoding. CSV never produces a BOOL column (see
+            # opteryx/planner/binder/dataset.py's _CSV_SUPPORTED_TYPES), so no bool case here.
+            pred_cpp.value  = val if isinstance(val, bytes) else str(val).encode('utf-8')
             ctx.predicates.push_back(pred_cpp)
 
     # ---- Load buffer ----

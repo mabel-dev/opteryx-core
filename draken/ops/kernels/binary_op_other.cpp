@@ -5,6 +5,7 @@
 #include "core/string_slot.h"
 #include "core/alloc.h"
 #include "ops/int64_compare.h"   // cmp_alloc_bool_buf
+#include "ops/ipv4_predicates.h" // draken::ops::ipv4_in_cidr (shared with the nanobind twin)
 #include <cstring>
 
 /**
@@ -121,16 +122,10 @@ VecResult draken_ipv4_in_cidr(void* ctx, const DrakenVector* const* args, uint32
         if (dst == nullptr)
             return draken_error_sentinel("draken_ipv4_in_cidr: bool buffer alloc failed");
 
-        const uint32_t* codes = addr->selection;
-        const uint32_t* data  = static_cast<const uint32_t*>(addr->data);
-        const uint8_t*  nulls = addr->validity;
-        for (uint32_t i = 0u; i < n; ++i) {
-            // A NULL address is contained by nothing → false, not NULL. Matches
-            // the behaviour the string-based predicate has always had.
-            if (nulls != nullptr && !((nulls[i >> 3] >> (i & 7)) & 1u)) continue;
-            if ((data[codes[i]] & netmask) == base_ip)
-                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
+        // Shared with the nanobind twin (vector_misc.cpp) so the two cannot
+        // answer differently. NULL address → false, not NULL; dense vectors take
+        // a vectorisable non-gather path. See ops/ipv4_predicates.h.
+        draken::ops::ipv4_in_cidr(addr, netmask, base_ip, dst);
 
         VecResult r;
         r.data           = dst;

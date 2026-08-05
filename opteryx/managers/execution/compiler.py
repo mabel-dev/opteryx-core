@@ -748,6 +748,118 @@ class _Compiler:
         operand.node_type = NodeType.EVALUATED
         return layout
 
+    # `->` and `->>`. MapAccess is excluded: it is INTEGER-keyed subscripting, not a
+    # JSON path, and does not go through the JSON parse this fusion exists to share.
+    _JSON_EXTRACT_OPS = frozenset({"Arrow", "LongArrow"})
+    _JSON_SOURCE_TYPES = frozenset({
+        DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY, DrakenType.VARIANT,
+    })
+
+    def _collect_json_extractions(self, node, layout, groups):
+        """Depth-first: record every `->`/`->>` whose operand is a column the stream
+        already carries, keyed by that operand's identity, then by the extraction's
+        own identity (two Node objects for the same expression — the WHERE copy and
+        the SELECT copy — share an identity and want ONE output column between them).
+
+        Descends into an extraction's own operand, so the inner half of a chained
+        `(x -> 'a') -> 'b'` can still group with other extractions on `x`. The outer
+        half is skipped this pass: its operand is not in `layout` yet."""
+        if node is None:
+            return
+        for child in (getattr(node, "parameters", None) or []):
+            self._collect_json_extractions(child, layout, groups)
+        for attr in ("left", "right"):
+            self._collect_json_extractions(getattr(node, attr, None), layout, groups)
+
+        if node.node_type != NodeType.EXTRACTION_OPERATOR:
+            return
+        if node.value not in self._JSON_EXTRACT_OPS:
+            return
+
+        left = node.left
+        if left is None or left.node_type not in (
+            NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR
+        ):
+            return   # not a plain column — nothing to share a parse against
+        src_sc = getattr(left, "schema_column", None)
+        if src_sc is None or src_sc.identity is None or src_sc.identity not in layout:
+            return
+        if _physical_type(src_sc) not in self._JSON_SOURCE_TYPES:
+            return   # binder should have rejected this; don't guess, just don't fuse
+
+        out_sc = getattr(node, "schema_column", None)
+        if out_sc is None or out_sc.identity is None:
+            return   # unbound — leave it for the normal path to handle or reject
+        if node.right is None or node.right.value is None:
+            return   # pathless — the normal lowering raises on this, not us
+
+        groups.setdefault(src_sc.identity, {}).setdefault(
+            out_sc.identity, {"nodes": [], "op": node.value, "path": node.right.value}
+        )["nodes"].append(node)
+
+    def _fuse_json_extractions(self, p, eval_nodes, layout):
+        """Compute 2+ `->`/`->>` on the same column with ONE parse per row.
+
+        Parsing dominates JSON extraction — navigation and emit are noise beside it —
+        so N extractions on one column cost N parses today and barely more than one
+        fused. This appends a JsonExtractMultiOperator producing all N columns, then
+        rewrites each extraction node to EVALUATED so it reads its column, exactly as
+        _hoist_array_operands does for ARRAY operands.
+
+        Scope is deliberately ONE compile point: only extractions that would already
+        run together, over the same rows, are fused. Nothing moves across an
+        operator, so this can only ever do strictly less work — never the same
+        extraction on more rows than before. Returns the grown layout."""
+        groups = {}
+        for node_ in eval_nodes or []:
+            self._collect_json_extractions(node_, layout, groups)
+
+        layout = list(layout)
+        for src_identity, by_out in groups.items():
+            fusable = [(out_id, info) for out_id, info in by_out.items()
+                       if out_id not in layout]
+            if len(fusable) < 2:
+                continue   # one path (or already materialized) — the normal path is fine
+
+            from draken.ops.kernels._kernel_registry import alloc_extraction_ctx
+            from opteryx.compiled.expression.compiled_expression import (
+                _KernelContextWrapper,
+            )
+
+            ctx_ptrs = []
+            holders = []
+            names = []
+            for out_id, info in fusable:
+                path = info["path"]
+                nav = path if isinstance(path, bytes) else str(path).encode("utf-8")
+                # BC_EXTR_JSON_PTR = 3 (`->`), BC_EXTR_JSON_KEY = 4 (`->>`) —
+                # compiled_expression.pxd's BCExtractionOpCode. Same allocator the
+                # single-extraction bind uses, so there is no second bind-time path
+                # for a JSON path to be resolved by.
+                sub_op = 3 if info["op"] == "Arrow" else 4
+                ctx_ptr = alloc_extraction_ctx(sub_op, nav, 0)
+                if ctx_ptr is None:
+                    raise NotSupportedError(
+                        "native engine: could not allocate a JSON extraction context"
+                    )
+                ctx_ptrs.append(ctx_ptr)
+                holders.append(_KernelContextWrapper(ctx_ptr))
+                names.append(out_id)
+
+            self.nplan.add_json_extract_multi(
+                p, layout.index(src_identity), ctx_ptrs, names, holders
+            )
+            layout.extend(names)
+
+            # Compiled and projected under their own identities, so reading them as
+            # columns is now the truth rather than a rewrite — same handover
+            # _hoist_array_in_tree performs for a materialized ARRAY operand.
+            for _out_id, info in fusable:
+                for n_ in info["nodes"]:
+                    n_.node_type = NodeType.EVALUATED
+
+        return layout
+
     def _add_computed(self, p, eval_nodes, layout, preserve_shape=False):
         """Append one ExprProject per computed expression (bind order preserved —
         later programs may reference earlier outputs). DECIMAL/TIMESTAMP results
@@ -764,6 +876,14 @@ class _Compiler:
         from opteryx.operators._operators import bytecode_ops_all_c_native
 
         layout = self._hoist_array_operands(p, eval_nodes, layout)
+        # NOT fused here — deliberately. _fuse_json_extractions is called from the
+        # FilterNode path only; see the note on that call site for the measurement
+        # that decided it. Fusing a PROJECTION's extractions measured SLOWER at the
+        # degrees of parallelism we actually run at (+6.7% at dop 8, +8.3% at dop 16
+        # over 1M rows), even though it does a quarter of the parsing: the unfused
+        # form spreads its extra parses across workers, while the fused operator's
+        # per-morsel cost does not amortize once the query is scan-bound. It only
+        # wins where there is nothing to parallelize into (-47.7% at dop 1).
 
         # Same plan-time tree rewrites the filter path gets (CASE→IF_THEN_ELSE,
         # BETWEEN→compares, decimal literal rescale) — applied BEFORE lowering.
@@ -1096,6 +1216,22 @@ class _Compiler:
             # hoisted column is a filter-internal helper, not something anything above
             # the filter asked for.
             hoisted_layout = self._hoist_array_operands(p, [node.filter], list(layout))
+            # A predicate with 2+ `->`/`->>` on one column (the shape jsonbench Q3/Q4/Q5
+            # have) parses each document once per extraction. Fuse them to one parse;
+            # the narrow-back below drops the helper columns again, so nothing above
+            # the filter sees them.
+            #
+            # THE FILTER PATH ONLY. Measured over 1M Bluesky rows, fusion here is
+            # -3.9%/-4.3% at dop 8 and -5.6% at dop 16; doing the same to a
+            # PROJECTION's extractions measured +6.7%/+8.3% at those same degrees of
+            # parallelism (see the note in _add_computed). The difference is what the
+            # produced columns are for: here they are consumed by the predicate and
+            # discarded at the narrow-back, so the fused operator replaces work the
+            # filter program was doing anyway. Do not add the projection call site
+            # back without re-measuring at the dop we actually run at — the kernel
+            # being 2.6x faster in isolation is NOT sufficient evidence, and was
+            # exactly what made the projection version look like a free win.
+            hoisted_layout = self._fuse_json_extractions(p, [node.filter], hoisted_layout)
             bc = self._lower_expression(node.filter, "a filter predicate")
             const_col_idx, const_scalar_vecs = self._resolve_const_replacements(node, hoisted_layout)
             self.nplan.add_expr_filter(p, bc, hoisted_layout, const_col_idx, const_scalar_vecs)

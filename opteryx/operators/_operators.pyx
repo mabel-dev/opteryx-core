@@ -237,6 +237,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               cppvector[void*] lit_dv, ExprEvalFn fn, string name,
                               int lt_kind, int lt_unit, int lt_precision, int lt_scale,
                               int lt_dimension)
+        void add_json_extract_multi(size_t p, int src_col_idx,
+                                    cppvector[void*] ctxs,
+                                    cppvector[string] names)
         void add_limit(size_t p, int64_t offset, int64_t limit)
         void add_unnest(size_t p, uint32_t array_idx, string target_name, bint drop_source)
         void add_unnest_literal(size_t p, shared_ptr[CxxMorsel] lit, string target_name)
@@ -2542,6 +2545,37 @@ cdef class NativePlan:
                               else _expr_eval_tramp)
         self._e.add_expr_project(p, <void*>bc.instrs, <int>bc.count, col_idx, lit_dv,
                                  fn, nm, lk, lu, lp, lsc, ld)
+
+    def add_json_extract_multi(self, size_t p, int src_col_idx, list ctx_ptrs,
+                               list names, list ctx_holders):
+        """Append N `->`/`->>` columns computed from ONE parse per row of the source
+        column at ``src_col_idx``.
+
+        ``ctx_ptrs`` are integer extraction_ctx pointers (one per output, from
+        draken's alloc_extraction_ctx) and ``names`` the matching output identities.
+        ``ctx_holders`` are the Python wrapper objects that OWN those ctx blocks —
+        held for the plan's lifetime, because the operator borrows the pointers and
+        a freed ctx would be read on every morsel.
+
+        Emitted by the compiler when 2+ extractions share an operand at one point in
+        the plan; parsing dominates extraction, so N paths cost barely more than one.
+        """
+        if len(ctx_ptrs) != len(names):
+            raise ValueError("native engine: add_json_extract_multi needs one name "
+                             "per ctx")
+        if len(ctx_ptrs) < 2:
+            raise ValueError("native engine: add_json_extract_multi is for 2+ paths — "
+                             "a single extraction belongs in its own expression program")
+        cdef cppvector[void*] ctxs
+        cdef cppvector[string] nms
+        cdef unsigned long long raw
+        for raw in ctx_ptrs:
+            ctxs.push_back(<void*>raw)
+        for name in names:
+            nms.push_back(<string>(name if isinstance(name, bytes)
+                                   else (<str>name).encode("utf-8")))
+        self.held.append(ctx_holders)
+        self._e.add_json_extract_multi(p, src_col_idx, ctxs, nms)
 
     def add_limit(self, size_t p, offset, limit):
         """LIMIT/OFFSET on pipeline ``p``. ``limit`` None = unbounded (OFFSET-only)."""

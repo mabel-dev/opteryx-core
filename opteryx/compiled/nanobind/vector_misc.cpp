@@ -54,6 +54,7 @@
 #include "ops/string_predicates.h"  // draken::ops::str_in_list
 #include "ops/float_ops.h"          // draken::ops::f32_in_list, f64_in_list, fp_canon, fp_bits64
 #include "ops/bool_logical.h"       // bool_get_val
+#include "ops/ipv4_predicates.h"    // draken::ops::ipv4_in_cidr (shared with the C-ABI kernel)
 #include "ops/int64_compare.h"      // cmp_alloc_bool_buf, cmp_copy_validity
 
 // Hashing
@@ -467,8 +468,7 @@ void register_vector_misc(nb::module_ &m) {
             }
             const uint32_t netmask = draken::ipv4::netmask(prefix);
 
-            const uint32_t  n     = dv->length;
-            const uint8_t*  nulls = dv->validity;
+            const uint32_t n = dv->length;
             uint8_t* dst = draken::ops::cmp_alloc_bool_buf(n);
             if (dst == nullptr)
                 throw std::bad_alloc();
@@ -477,16 +477,12 @@ void register_vector_misc(nb::module_ &m) {
             // GIL is released for the scan itself.
             {
                 nb::gil_scoped_release _gil;
-                const uint32_t* codes = dv->selection;
-                const uint32_t* data  = static_cast<const uint32_t*>(dv->data);
-                for (uint32_t i = 0; i < n; ++i) {
-                    // A NULL address is not contained by anything. Left as 0 (false)
-                    // rather than propagated as NULL, matching vector_ip_in_cidr.
-                    if (nulls != nullptr && !((nulls[i >> 3] >> (i & 7)) & 1u))
-                        continue;
-                    if ((data[codes[i]] & netmask) == base_ip)
-                        dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-                }
+                // Shared with the registered draken_ipv4_in_cidr kernel so the
+                // executor path and this evaluator path cannot answer
+                // differently. A NULL address is not contained by anything
+                // (false, not NULL), matching vector_ip_in_cidr; a dense vector
+                // skips the gather. See draken/ops/ipv4_predicates.h.
+                draken::ops::ipv4_in_cidr(dv, netmask, base_ip, dst);
             }
 
             VecResult r;

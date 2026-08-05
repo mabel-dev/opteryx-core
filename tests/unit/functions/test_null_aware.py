@@ -293,12 +293,17 @@ def test_nullif_without_a_null_operand_is_unchanged():
 
 
 def test_folded_nullif_keeps_its_output_column_name():
-    """Folding to `a` must not silently rename the result column to `a`."""
+    """Folding to `a` must not silently rename the result column to `a`.
+
+    The NULL operand renders as SQL's `null`, not Python's `None` — the literal
+    formatter dispatches on the ColumnType, so a NULL literal is spelled the way
+    the query spelled it.
+    """
     for morsel in opteryx.session().execute_to_morsels(
         "SELECT NULLIF(name, NULL) FROM $planets"
     ):
         names = [c.decode() if isinstance(c, bytes) else c for c in morsel.column_names]
-        assert names == ["NULLIF(name,None)"], names
+        assert names == ["NULLIF(name,null)"], names
         return
 
 

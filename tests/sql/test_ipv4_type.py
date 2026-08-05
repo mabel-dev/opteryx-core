@@ -41,6 +41,8 @@ from opteryx.types.logical_type import (
     VARIANT,
     ColumnType,
     LogicalCategory,
+    column_type_from_vector,
+    morsel_column_types,
     parse_column_type,
     serialize_column_type,
     try_parse_column_type,
@@ -459,6 +461,162 @@ def test_containment_on_a_non_address_column_fails_loud():
 
 
 # ---------------------------------------------------------------------------
+# CIDR containment against a LITERAL network is rewritten to a range so it can
+# prune at the scan (PredicateRewriteStrategy.rewrite_cidr_to_range). These
+# defend the EQUIVALENCE of the two forms — the rewrite is only legitimate
+# because `(ip & mask) == base` and `base <= ip <= broadcast` select the same
+# rows, and a rewrite that is merely *faster* is a wrong-answer bug.
+# ---------------------------------------------------------------------------
+
+# Addresses chosen to sit on the boundaries the rewrite is most likely to get
+# wrong: either side of 10/8, either side of the signed/unsigned midpoint
+# (128.0.0.0 is 2**31, which is negative if anything treats it as int32), and
+# both extremes of the space.
+_RANGE_ADDRESSES = [
+    "0.0.0.0",
+    "9.255.255.255",
+    "10.0.0.0",
+    "10.0.0.1",
+    "10.255.255.255",
+    "11.0.0.0",
+    "127.255.255.255",
+    "128.0.0.0",
+    "192.168.1.1",
+    "255.255.255.255",
+]
+_RANGE_SOURCE = " UNION ALL ".join(f"SELECT '{a}' AS a" for a in _RANGE_ADDRESSES)
+
+
+@pytest.mark.parametrize(
+    "cidr",
+    [
+        "10.0.0.0/8",
+        "0.0.0.0/0",  # /0 — netmask() special-case; must match everything
+        "192.168.1.0/24",
+        "192.168.1.1/32",  # /32 — rewritten to Eq, not a range
+        "128.0.0.0/1",  # bounds above INT32_MAX
+        "172.16.0.0/12",  # matches nothing
+        "255.255.255.255/32",  # the very top of the space
+        "0.0.0.0/32",  # the very bottom
+        "10.0.0.0/31",  # a two-host network
+    ],
+)
+def test_containment_range_rewrite_matches_the_mask_and_compare(cidr):
+    """The rewritten range must select exactly the addresses the network holds.
+
+    Truth is computed here from the closed interval rather than by re-running
+    the kernel, so this fails if the rewrite and the kernel ever disagree about
+    what a network contains.
+    """
+    from draken.draken_native import ipv4_parse, ipv4_parse_cidr
+
+    base, upper, _ = ipv4_parse_cidr(cidr)
+    expected = sorted(a for a in _RANGE_ADDRESSES if base <= ipv4_parse(a) <= upper)
+
+    contained = rows(f"SELECT a FROM ({_RANGE_SOURCE}) AS t WHERE CAST(a AS IPV4) <<= '{cidr}'")
+    contains = rows(f"SELECT a FROM ({_RANGE_SOURCE}) AS t WHERE '{cidr}' >>= CAST(a AS IPV4)")
+
+    assert sorted(contained) == expected
+    assert sorted(contains) == expected, "`>>=` must rewrite identically to `<<=`"
+
+
+def test_containment_rewrite_actually_fires():
+    """Guards the optimization itself: if the rewrite silently stops matching,
+    the queries above still pass (the kernel answers them) and the pruning win
+    is lost with no test failing."""
+    from opteryx.models import QueryTelemetry
+
+    session = opteryx.session()
+    list(
+        session.execute_to_morsels(
+            f"SELECT a FROM ({_RANGE_SOURCE}) AS t WHERE CAST(a AS IPV4) <<= '10.0.0.0/8'"
+        )
+    )
+    telemetry = QueryTelemetry(getattr(session, "query_id", ""))
+    assert telemetry.optimization_predicate_rewriter_cidr_to_range == 1
+
+
+def test_containment_rewrite_declines_an_invalid_cidr_rather_than_raising_early():
+    """A malformed CIDR must still fail, and must fail with the kernel's error —
+    the rewrite is an optimization and does not get to change when or how a bad
+    query breaks."""
+    with pytest.raises(Exception):
+        one(f"SELECT COUNT(*) AS c FROM ({_RANGE_SOURCE}) AS t WHERE CAST(a AS IPV4) <<= '10.0.0.0/33'")
+
+
+def test_containment_rewrite_preserves_null_handling():
+    """A NULL address is contained by nothing. The kernel returns FALSE and the
+    range returns NULL; WHERE discards both, which is the only reason the
+    rewrite is sound. If containment ever escapes a Filter, this stops holding."""
+    src = (
+        "SELECT '10.0.0.1' AS a UNION ALL SELECT NULL UNION ALL SELECT '192.168.1.1'"
+    )
+    assert one(f"SELECT COUNT(*) AS c FROM ({src}) AS t WHERE CAST(a AS IPV4) <<= '10.0.0.0/8'") == [1]
+    assert one(f"SELECT COUNT(*) AS c FROM ({src}) AS t WHERE CAST(a AS IPV4) <<= '0.0.0.0/0'") == [2]
+
+
+# ---------------------------------------------------------------------------
+# Literal comparison against an address column.
+#
+# These pin a SAFETY property, not a feature: an address column compared against
+# dotted-decimal TEXT must never quietly answer. The column is a uint32 and the
+# literal is a string, so any path that reinterpreted one as the other would
+# return wrong rows in exactly the ACL-shaped query this type exists to serve.
+#
+# Today every shape below fails. One is an open gap worth knowing:
+#   * `IN (a, b)` with 2+ members is unsupported for EVERY unsigned integer
+#     width (UINT8..UINT64), not just IPv4 — the in-list kernel path admits
+#     signed integers only. Signed columns run the same query fine.
+# The single-member and multi-member string forms now fail at BIND time with
+# IncompatibleTypesError — the binder validates IN-list element types against
+# the left operand's type, the same as it does for `=`. What these tests
+# defend is that they stay LOUD, at plan time or otherwise.
+# ---------------------------------------------------------------------------
+
+
+_IN_LIST_SOURCE = (
+    "SELECT '10.0.0.1' AS a UNION ALL SELECT '10.0.0.2' UNION ALL SELECT '192.168.1.1'"
+)
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        "CAST(a AS IPV4) = '10.0.0.1'",
+        "CAST(a AS IPV4) IN ('10.0.0.1')",
+        "CAST(a AS IPV4) IN ('10.0.0.1', '10.0.0.2')",
+    ],
+)
+def test_address_column_against_dotted_text_never_silently_answers(predicate):
+    """Dotted text is not an address until something parses it. Until the
+    coercion exists, these must raise — a result here would mean a uint32 and a
+    string were compared as if one were the other."""
+    with pytest.raises(Exception):
+        one(f"SELECT COUNT(*) AS c FROM ({_IN_LIST_SOURCE}) AS t WHERE {predicate}")
+
+
+def test_address_column_against_an_integer_literal_works():
+    """The control for the tests above: the same comparison in the address's own
+    domain resolves, so what fails there is the string coercion and not the
+    comparison itself. 167772161 is 10.0.0.1."""
+    assert one(
+        f"SELECT COUNT(*) AS c FROM ({_IN_LIST_SOURCE}) AS t "
+        "WHERE CAST(a AS IPV4) = 167772161"
+    ) == [1]
+    assert one(
+        f"SELECT COUNT(*) AS c FROM ({_IN_LIST_SOURCE}) AS t "
+        "WHERE CAST(a AS IPV4) IN (167772161)"
+    ) == [1]
+
+
+def test_multi_member_in_list_on_an_address_column():
+    assert one(
+        f"SELECT COUNT(*) AS c FROM ({_IN_LIST_SOURCE}) AS t "
+        "WHERE CAST(a AS IPV4) IN (167772161, 167772162)"
+    ) == [2]
+
+
+# ---------------------------------------------------------------------------
 # IP_TRUNC
 # ---------------------------------------------------------------------------
 
@@ -717,6 +875,117 @@ def test_integer_to_ipv4_refuses_a_value_that_is_not_an_address():
         rows("SELECT CAST(-1 AS IPV4)")
     with pytest.raises(Exception):
         rows("SELECT CAST(0 - a AS IPV4) FROM (SELECT 1 AS a) AS t")
+
+
+# ---------------------------------------------------------------------------
+# Result schema — what a consumer of query RESULTS is told the columns are
+#
+# Everything above tests IPv4 inside the engine. These test the SCHEMA-level
+# report, which is all a consumer outside the process ever sees: a job runner
+# writing a sidecar next to a result file has nothing else to record, and
+# Parquet cannot express IPv4, so a schema that says UINT32 makes the address
+# unrecoverable for ever.
+# ---------------------------------------------------------------------------
+
+
+def schema_types(sql):
+    """The ColumnTypes of a query's result columns, as a consumer would read them."""
+    session = opteryx.session()
+    for morsel in session.execute_to_morsels(sql):
+        return morsel_column_types(morsel)
+    return []
+
+
+def column_names(sql):
+    session = opteryx.session()
+    for morsel in session.execute_to_morsels(sql):
+        return [
+            n.decode("utf-8") if isinstance(n, bytes) else n for n in morsel.column_names
+        ]
+    return []
+
+
+def test_column_type_from_vector_reads_the_descriptor_not_the_tag():
+    """The shared reconstructor, on the two vectors that are physically the same
+    32 bits. This is the single place the (tag, descriptor) pair becomes a
+    ColumnType — the four independent copies of this logic are what put UINT32
+    in the sidecar."""
+    assert column_type_from_vector(ipv4_vector(["192.168.1.1"])) == IPV4
+    assert (
+        column_type_from_vector(Vector(vector_uint32_from_sequence([3232235777]))) == UINT32
+    )
+
+
+def test_result_schema_reports_ipv4_not_uint32():
+    """`Morsel.column_types` reports the bare DrakenType, and an address and an
+    unsigned integer share one — so the tag alone cannot say which this is.
+    `morsel_column_types` reads the descriptor beside it."""
+    session = opteryx.session()
+    for morsel in session.execute_to_morsels("SELECT CAST('192.168.1.1' AS IPV4) AS ip"):
+        assert morsel.column_types == [DrakenType.UINT32]  # the tag, still just the tag
+        assert morsel_column_types(morsel) == [IPV4]
+        break
+
+
+def test_result_schema_round_trips_ipv4_through_a_string():
+    """The whole point: a consumer serializes the schema, and reading it back
+    yields the same type. Without this the sidecar says UINT32 and the address
+    is gone."""
+    types = schema_types("SELECT CAST('192.168.1.1' AS IPV4) AS ip")
+    serialized = [serialize_column_type(t) for t in types]
+    assert serialized == ["IPV4"]
+    assert [parse_column_type(s) for s in serialized] == [IPV4]
+
+
+def test_result_schema_round_trips_a_plain_uint32_as_an_integer():
+    """The negative case. The failure mode of every bug in this family is reading
+    the descriptor's ABSENCE as if it were present — every integer column
+    becoming an address."""
+    types = schema_types("SELECT CAST(3232235777 AS UINT32) AS n")
+    serialized = [serialize_column_type(t) for t in types]
+    assert serialized == ["UINT32"]
+    assert [parse_column_type(s) for s in serialized] == [UINT32]
+    assert types != [IPV4]
+    assert types[0].logical is None
+
+
+def test_result_schema_reports_both_side_by_side():
+    """The two columns are physically identical uint32s. Reported side by side,
+    nothing may blur them together."""
+    types = schema_types(
+        "SELECT CAST('192.168.1.1' AS IPV4) AS ip, CAST(3232235777 AS UINT32) AS n"
+    )
+    assert [serialize_column_type(t) for t in types] == ["IPV4", "UINT32"]
+
+
+def test_unaliased_ipv4_expression_is_named_as_an_address():
+    """An unaliased expression is named after its own rendering, and an IPv4
+    literal folds to the uint32 the address IS — so a category-keyed renderer
+    names the column '3232235777'."""
+    assert column_names("SELECT CAST('192.168.1.1' AS IPV4)") == ["192.168.1.1"]
+    assert column_names("SELECT CAST(16843009 AS IPV4)") == ["1.1.1.1"]
+
+
+def test_aliased_ipv4_expression_keeps_its_alias():
+    """An alias is the user's name for the column and outranks any rendering."""
+    assert column_names("SELECT CAST('192.168.1.1' AS IPV4) AS ip") == ["ip"]
+
+
+def test_unaliased_uint32_expression_is_named_with_its_integer():
+    """The negative case, again — a plain integer names itself with its integer.
+    An address-shaped name here would mean the renderer keyed on the category
+    (INTEGER, which IPv4 shares) instead of the descriptor."""
+    assert column_names("SELECT CAST(3232235777 AS UINT32)") == ["3232235777"]
+    assert column_names("SELECT 3232235777") == ["3232235777"]
+
+
+def test_ipv4_and_same_valued_integer_literals_are_distinct_columns():
+    """They render differently BECAUSE they are different types. Sharing a
+    rendering made them one column — an expression's rendering is its identity."""
+    assert column_names("SELECT 3232235777, CAST('192.168.1.1' AS IPV4)") == [
+        "3232235777",
+        "192.168.1.1",
+    ]
 
 
 if __name__ == "__main__":  # pragma: no cover

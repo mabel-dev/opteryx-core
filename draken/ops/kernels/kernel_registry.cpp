@@ -8,7 +8,19 @@
 
 #include "ops/kernels/kernel_registry.h"
 #include "ops/kernels/error_handling.h"
-#include "ops/json_path.h"   // dotpath_to_jsonptr — bind-time path normalization
+#include "ops/json_path.h"   // dotpath_to_jsonptr / tokenize_jsonptr — bind-time path resolution
+
+// The C-ABI token struct and the C++ one it is copied from must agree byte for
+// byte: kernel_alloc_extraction_ctx memcpy's a std::vector<JsonPtrToken> straight
+// into the ctx tail, which the kernel then reads back as json_ptr_token.
+static_assert(sizeof(json_ptr_token) == sizeof(draken::ops::JsonPtrToken),
+              "json_ptr_token must match draken::ops::JsonPtrToken");
+static_assert(offsetof(json_ptr_token, off) == offsetof(draken::ops::JsonPtrToken, off) &&
+              offsetof(json_ptr_token, len) == offsetof(draken::ops::JsonPtrToken, len) &&
+              offsetof(json_ptr_token, index) == offsetof(draken::ops::JsonPtrToken, index),
+              "json_ptr_token field order must match draken::ops::JsonPtrToken");
+static_assert(JSON_PTR_NOT_INDEX == draken::ops::kJsonPtrNotIndex,
+              "JSON_PTR_NOT_INDEX must match draken::ops::kJsonPtrNotIndex");
 #include <cstring>
 #include <cstdlib>
 #include <map>
@@ -485,21 +497,27 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // null-correct replacement (no beside-fallback); these get re-added real then.
 
     // ========================================================================
-    // Extraction kernels (4). draken_json_extract (`->`/`->>`, sub-op in ctx),
-    // draken_map_access_string (str[i]) and draken_pointer_extract are REAL and
-    // dispatched by the nogil VM straight from kernel_fn.
+    // Extraction kernels (3). All REAL, all dispatched by the nogil VM straight
+    // from kernel_fn: draken_json_extract (`->`/`->>`, sub-op in ctx),
+    // draken_map_access_string (str[i]) and draken_array_map_access (arr[i]).
     //
-    // draken_array_map_access remains a stub and is deliberately unreachable: the
-    // ARRAY child vector hangs off the VectorOwner, not off DrakenVector, so this
-    // signature cannot reach it. The binder does not flag BC_EXTR_MAP_ARRAY as
-    // C-native, so it routes to the GIL VM. Making it real needs the
-    // BC_C_NATIVE_CHILD plumbing the ARRAY→VARCHAR cast uses.
+    // draken_array_map_access reaches the ARRAY's child vector — which hangs off
+    // the VectorOwner, not off DrakenVector — through the ABI's otherwise-unused
+    // key slot: the binder flags BC_EXTR_MAP_ARRAY with BC_C_NATIVE_CHILD when
+    // the operand lowers to BC_LOAD_COL, and the VM resolves the child per morsel
+    // from the column owner. Same plumbing the ARRAY→VARCHAR cast uses.
+    //
+    // draken_pointer_extract (top-level key via yyjson_obj_getn) was removed
+    // 2026-08-05: no sub-op could ever reach it. The dialect's only string-keyed
+    // JSON navigation is `->`/`->>`, which draken_json_extract serves, and
+    // MapAccess is INTEGER-keyed everywhere in the operator map — subscripting a
+    // VARIANT is refused outright as ambiguous (operator_map.py). The nanobind
+    // vector_map_access binding still exercises that mode of extract_rows.
     // ========================================================================
 
     {"draken_map_access_string", (kernel_fn_t)&draken_map_access_string},
     {"draken_array_map_access", (kernel_fn_t)&draken_array_map_access},
     {"draken_json_extract", (kernel_fn_t)&draken_json_extract},
-    {"draken_pointer_extract", (kernel_fn_t)&draken_pointer_extract},
 
     // ========================================================================
     // Temporal function kernels (Phase 9a-fn, function_temporal.cpp)
@@ -716,25 +734,44 @@ binary_op_ctx* kernel_alloc_binary_op_ctx(uint16_t op_code,
 
 extraction_ctx* kernel_alloc_extraction_ctx(uint16_t sub_op_code, const char* nav,
                                             size_t nav_len, int64_t index) {
-    // JSON sub-ops navigate by RFC 6901 pointer. Convert dot-notation ONCE here,
-    // at bind time, so the per-morsel kernel call is parse + navigate + serialise
-    // with no path work. Non-JSON sub-ops store the key bytes verbatim.
-    std::string converted;
-    if (sub_op_code == 3 /* BC_EXTR_JSON_PTR */ || sub_op_code == 4 /* BC_EXTR_JSON_KEY */) {
-        if (nav == nullptr) nav_len = 0u;
-        converted = draken::ops::dotpath_to_jsonptr(nav, nav_len);
-        nav = converted.data();
-        nav_len = converted.size();
-    }
+    const bool is_json = (sub_op_code == 3 /* BC_EXTR_JSON_PTR */ ||
+                          sub_op_code == 4 /* BC_EXTR_JSON_KEY */);
     if (nav == nullptr) nav_len = 0u;
 
-    auto* ctx = static_cast<extraction_ctx*>(malloc(sizeof(extraction_ctx) + nav_len));
+    // JSON sub-ops resolve the ENTIRE path here, once per bind: dot-notation to an
+    // RFC 6901 pointer, the pointer split into tokens, ~0/~1 escapes applied, array
+    // indices parsed. None of it depends on the document, so the per-morsel kernel
+    // call is left with parse + container lookups + emit and no path work at all.
+    // The pointer string itself is then dead and is not stored.
+    //
+    // Non-JSON sub-ops navigate by `index` and keep their key bytes verbatim.
+    draken::ops::JsonPtrPath path;
+    if (is_json) {
+        const std::string converted = draken::ops::dotpath_to_jsonptr(nav, nav_len);
+        path    = draken::ops::tokenize_jsonptr(converted.data(), converted.size());
+        nav_len = 0u;
+    }
+
+    const size_t blob_len   = path.blob.size();
+    const size_t ntokens    = path.tokens.size();
+    const size_t tokens_off = (sizeof(extraction_ctx) + nav_len + blob_len + 3u) & ~(size_t)3u;
+    const size_t total      = tokens_off + ntokens * sizeof(json_ptr_token);
+
+    auto* ctx = static_cast<extraction_ctx*>(malloc(total));
     if (!ctx) return nullptr;
     ctx->sub_op_code = static_cast<int32_t>(sub_op_code);
     ctx->nav_len     = static_cast<int32_t>(nav_len);
     ctx->index       = index;
+    ctx->ntokens     = static_cast<uint32_t>(ntokens);
+    ctx->blob_len    = static_cast<uint32_t>(blob_len);
+
+    auto* base = reinterpret_cast<unsigned char*>(ctx);
     if (nav_len > 0u)
-        memcpy(reinterpret_cast<unsigned char*>(ctx) + sizeof(extraction_ctx), nav, nav_len);
+        memcpy(base + sizeof(extraction_ctx), nav, nav_len);
+    if (blob_len > 0u)
+        memcpy(base + sizeof(extraction_ctx) + nav_len, path.blob.data(), blob_len);
+    if (ntokens > 0u)
+        memcpy(base + tokens_off, path.tokens.data(), ntokens * sizeof(json_ptr_token));
     return ctx;
 }
 

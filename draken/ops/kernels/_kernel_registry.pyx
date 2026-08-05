@@ -47,6 +47,8 @@ cdef extern from "ops/kernels/kernel_registry.h":
         int32_t sub_op_code
         int32_t nav_len
         int64_t index
+        uint32_t ntokens
+        uint32_t blob_len
     ctypedef extraction_ctx_ extraction_ctx
 
     cast_timestamp_ctx* kernel_alloc_cast_timestamp_ctx(int unit)

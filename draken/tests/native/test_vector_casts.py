@@ -206,9 +206,16 @@ class TestStringToInt:
         with pytest.raises(ValueError):
             vc.vector_cast_string_to_int(sv(["42abc"]))
 
-    def test_empty_string_returns_zero(self):
-        # Matches old .pyx behaviour: empty string → loop never executes → 0.
-        assert vals(vc.vector_cast_string_to_int(sv([""]))) == [0]
+    def test_empty_string_raises(self):
+        # Confirmed deliberate (2026-08-04): the strict-parse direction the
+        # cast kernels have moved in — empty string is not a valid integer
+        # literal. Matches the Python literal-fold path (int('') raises) and
+        # the running column path (CAST(col AS INTEGER) on '' raises the same
+        # "Invalid digit in integer literal"); see
+        # cast-literal-vs-kernel-parser-parity. The old "loop never executes
+        # -> 0" .pyx behaviour is superseded, not a regression.
+        with pytest.raises(ValueError):
+            vc.vector_cast_string_to_int(sv([""]))
 
     def test_leading_space_raises(self):
         with pytest.raises(ValueError):

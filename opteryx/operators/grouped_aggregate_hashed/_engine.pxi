@@ -381,11 +381,17 @@ cdef class GroupHashEngine:
             self._state_indices_buf.resize(n_rows)
         self._new_row_scratch.clear()
         self._new_row_scratch.reserve(<size_t>n_rows)
-        self._index.reserve(<size_t>(self._num_groups + n_rows))
+        # Reserve the true insert bound: the compressed loop probes each of the
+        # kdist distinct codes once, so at most kdist new groups can appear this
+        # morsel — sizing to n_rows would balloon the table for dict-encoded
+        # low-cardinality keys (64K-row morsel, 100-value dict → ~131K slots).
         if compressed:
             kdist = <Py_ssize_t>huv.data_length
             if <Py_ssize_t>self._code_state.size() < kdist:
                 self._code_state.resize(kdist)
+            self._index.reserve(<size_t>(self._num_groups + kdist))
+        else:
+            self._index.reserve(<size_t>(self._num_groups + n_rows))
         err.code = 0
         err.msg = NULL
         self.nogil_ingest_morsels += 1
@@ -618,14 +624,18 @@ cdef class GroupHashEngine:
         # probing from n to k. Only when carchar is the active map — parvi keeps
         # its per-row loop (its 8-slot cache already absorbs repeats at tiny k).
         compressed = (not self._use_parvi) and (draken_is_compressed(huv) != 0)
-        # Reserve worst-case index capacity (every row a new group) BEFORE probing
-        # so find_or_insert_id's internal resize — its only throw path — cannot
+        # Reserve the worst-case insert bound BEFORE probing so
+        # find_or_insert_id's internal resize — its only throw path — cannot
         # fire inside the nogil keying loop below. Idempotent: no-ops once capacity
         # is sufficient, so steady state is a single hoisted resize, not per-row.
+        # Compressed probes each of the data_length distinct codes once, so that
+        # is the true bound; dense worst-case is every row a new group.
         # Parvi (low-cardinality) has fixed capacity and promotes under the GIL, so
         # it needs no reserve here.
         if not self._use_parvi:
-            self._index.reserve(<size_t>(num_groups + n_rows))
+            self._index.reserve(<size_t>(
+                num_groups + (<Py_ssize_t>huv.data_length if compressed else n_rows)
+            ))
         if self._telemetry_enabled:
             phase_start = _now_ns()
 

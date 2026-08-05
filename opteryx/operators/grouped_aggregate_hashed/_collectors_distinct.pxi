@@ -29,11 +29,9 @@ cdef extern from "carchar_set.hpp" namespace "opteryx::carchar":
 # COUNT(DISTINCT col) — one CarcharSet* per group
 #
 # Hot-path summary (accumulate):
-#   Dict-encoded StringVector: precompute dict-entry hashes once per morsel,
-#   then scatter via dict-code lookup — no intermediate _scratch_buf write.
-#   All other vectors: zero _scratch_buf, call c_hash_into() nogil, scatter
-#   non-null hashes to per-group scratch vectors, bulk-insert into CarcharSets.
-#   NULL values (SQL92: not counted) are filtered by null_marker comparison.
+#   Hash all rows via c_hash_single() into _scratch_buf, scatter non-null
+#   hashes to per-group scratch vectors, bulk-insert into CarcharSets.
+#   NULL values (SQL92: not counted) are filtered by the validity bitmap.
 # ---------------------------------------------------------------------------
 
 cdef class CountDistinctCollector(BaseCollector):
@@ -98,7 +96,6 @@ cdef class CountDistinctCollector(BaseCollector):
         cdef vector[uint64_t]* scratch
         cdef Py_ssize_t i, g
         cdef vector[uint64_t]* per_group
-        cdef uint64_t null_marker = mix_hash(0, NULL_HASH)
 
         if self._col_idx < 0:
             self._col_idx = morsel._column_index_from_name(self.column_name)
@@ -127,7 +124,7 @@ cdef class CountDistinctCollector(BaseCollector):
                     scratch.push_back(self._scratch_buf[i])
             else:
                 for i in range(n_rows):
-                    if self._scratch_buf[i] == null_marker:
+                    if not _num_bitmap_valid(null_bitmap, i):
                         continue
                     scratch = &self._scratch_per_group[state_indices[i]]
                     scratch.push_back(self._scratch_buf[i])

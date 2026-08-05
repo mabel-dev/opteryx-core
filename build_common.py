@@ -514,7 +514,11 @@ def get_zstd_vendor_sources():
 
 def get_text_writer_cast_sources():
     """draken batch cast-to-string kernels (int/bool/date/timestamp) used by the
-    rugo CSV/JSONL writers, plus their deps (ryu for the float caster symbol)."""
+    rugo CSV/JSONL writers, plus their deps (ryu for the float caster symbol).
+    f2s.c is the FLOAT32-precision shortest-round-trip formatter — d2s.c alone
+    is not a substitute: promoting a float to double before calling d2s_buffered_n
+    finds the shortest string for the WIDENED double, not the original float, and
+    the two can disagree (draken/interop/value_format.hpp fmt_float)."""
     return [
         "draken/ops/kernels/cast_numeric.cpp",
         "draken/ops/kernels/cast_temporal.cpp",
@@ -522,6 +526,7 @@ def get_text_writer_cast_sources():
         "draken/core/vector_alloc.cpp",
         "third_party/ulfjack/ryu/d2fixed.c",
         "third_party/ulfjack/ryu/d2s.c",
+        "third_party/ulfjack/ryu/f2s.c",
     ]
 
 
@@ -774,6 +779,7 @@ def draken_rugo_extensions(parquet_created_by):
                 # file, and is an architecture decision, not a build one.
                 "third_party/ulfjack/ryu/d2fixed.c",
                 "third_party/ulfjack/ryu/d2s.c",
+                "third_party/ulfjack/ryu/f2s.c",
                 # extraction.cpp's `->`/`->>` kernels parse with yyjson.
                 "third_party/yyjson/src/yyjson.c",
                 "third_party/nanobind/src/nb_combined.cpp",

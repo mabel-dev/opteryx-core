@@ -539,6 +539,18 @@ public:
             std::vector<std::string>{std::move(name)},
             std::vector<const LogicalType*>{logical}));
     }
+    // N `->`/`->>` extractions on ONE source column, sharing one parse per row.
+    // `ctxs` are extraction_ctx blocks owned by the NativePlan (held for the run).
+    // Deliberately NOT fused into a neighbouring op the way add_expr_project fuses
+    // into ExprMultiProjectOperator: this operator's whole point is that its outputs
+    // come from a single kernel call, and later programs that load those outputs are
+    // separate operators that must run after it.
+    void add_json_extract_multi(size_t p, int src_col_idx,
+                                std::vector<void*> ctxs,
+                                std::vector<std::string> names) {
+        add_op_(p, std::make_unique<JsonExtractMultiOperator>(
+                       src_col_idx, std::move(ctxs), std::move(names)));
+    }
     void add_limit(size_t p, int64_t offset, int64_t limit) {
         add_op_(p, std::make_unique<LimitOperator>(offset, limit, &pipelines[p]->halt));
     }

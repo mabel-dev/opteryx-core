@@ -141,7 +141,9 @@ cdef extern from "decode.hpp":
         vector[int32_t] def_levels
         vector[int32_t] int32_values
         vector[int64_t] int64_values
-        vector[string] string_values
+        vector[uint8_t] string_arena
+        vector[uint32_t] string_offsets
+        vector[int32_t] string_lens
         vector[int32_t] dict_indices
         vector[int32_t] dict_int32_values
         vector[int64_t] dict_int64_values

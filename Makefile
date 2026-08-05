@@ -230,6 +230,107 @@ kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	@/tmp/opteryx-tests/c_abi_test
 	$(call print_green,"✓ C ABI parity test passed")
 
+# The draken C-ABI kernel TUs. kernel_registry.cpp's registry table names every
+# kernel, so the whole set has to be linked even when a standalone binary only
+# calls one of them. Mirrors the list in build_common.py — keep them in step.
+DRAKEN_KERNEL_SRCS := \
+	$(CURDIR)/draken/core/vector_alloc.cpp \
+	$(CURDIR)/draken/ops/compare_dv.cpp \
+	$(CURDIR)/draken/ops/arithmetic_dv.cpp \
+	$(CURDIR)/draken/ops/kernels/error_handling.cpp \
+	$(CURDIR)/draken/ops/kernels/result_helpers.cpp \
+	$(CURDIR)/draken/ops/kernels/kernel_registry.cpp \
+	$(CURDIR)/draken/ops/kernels/cast_numeric.cpp \
+	$(CURDIR)/draken/ops/kernels/cast_string.cpp \
+	$(CURDIR)/draken/ops/kernels/cast_temporal.cpp \
+	$(CURDIR)/draken/ops/kernels/cast_dispatch.cpp \
+	$(CURDIR)/draken/ops/kernels/extraction.cpp \
+	$(CURDIR)/draken/ops/kernels/binary_op_arithmetic.cpp \
+	$(CURDIR)/draken/ops/kernels/binary_op_other.cpp \
+	$(CURDIR)/draken/ops/kernels/binary_op_temporal.cpp \
+	$(CURDIR)/draken/ops/kernels/binop_dispatch.cpp \
+	$(CURDIR)/draken/ops/kernels/function_kernels.cpp \
+	$(CURDIR)/draken/ops/kernels/string_trim.cpp \
+	$(CURDIR)/draken/ops/kernels/string_reverse_initcap.cpp \
+	$(CURDIR)/draken/ops/kernels/string_pad.cpp \
+	$(CURDIR)/draken/ops/kernels/string_replace_soundex.cpp \
+	$(CURDIR)/draken/ops/kernels/string_humanize.cpp \
+	$(CURDIR)/draken/ops/kernels/function_hash_encoding.cpp \
+	$(CURDIR)/draken/ops/kernels/function_codec.cpp \
+	$(CURDIR)/draken/ops/kernels/function_array_json.cpp \
+	$(CURDIR)/draken/ops/kernels/function_temporal.cpp \
+	$(CURDIR)/draken/ops/kernels/function_numeric.cpp \
+	$(CURDIR)/draken/ops/kernels/function_string_extra.cpp \
+	$(CURDIR)/draken/ops/kernels/function_null_conditional.cpp \
+	$(CURDIR)/draken/ops/kernels/function_vector_distance.cpp \
+	$(CURDIR)/draken/ops/kernels/function_rlike.cpp \
+	$(CURDIR)/draken/ops/kernels/function_like_any.cpp \
+	$(CURDIR)/draken/core/frame_arena.cpp \
+	$(CURDIR)/third_party/crypto/md5.cpp \
+	$(CURDIR)/third_party/crypto/sha1.cpp \
+	$(CURDIR)/third_party/crypto/sha2.cpp \
+	$(CURDIR)/third_party/crypto/sha512.cpp \
+	$(CURDIR)/src/cpp/simd_hash.cpp \
+	$(CURDIR)/src/cpp/simd_env.cpp \
+	$(CURDIR)/src/cpp/cpu_features.cpp
+
+# C (not C++) TUs. The vendored mabel codecs are C99 and do NOT compile as C++
+# (designated initializers, char-array init rules), so they get their own pass
+# with a C compiler — the same split setuptools does for them in the real build.
+DRAKEN_KERNEL_C_SRCS := \
+	$(CURDIR)/third_party/mabel/base16/_base16.c \
+	$(CURDIR)/third_party/mabel/base64/_base64.c \
+	$(CURDIR)/third_party/mabel/base64/_base64_dispatch.c \
+	$(CURDIR)/third_party/mabel/base64/_base64_neon.c \
+	$(CURDIR)/third_party/mabel/base64/_base64_avx2.c \
+	$(CURDIR)/third_party/mabel/base64/_base64_rvv.c \
+	$(CURDIR)/third_party/mabel/base85/_base85.c \
+	$(CURDIR)/third_party/ulfjack/ryu/d2fixed.c \
+	$(CURDIR)/third_party/ulfjack/ryu/d2s.c \
+	$(CURDIR)/third_party/yyjson/src/yyjson.c
+
+DRAKEN_KERNEL_INCLUDES := \
+	-I$(CURDIR) \
+	-I$(CURDIR)/src/cpp \
+	-I$(CURDIR)/draken \
+	-I$(CURDIR)/draken/core \
+	-I$(CURDIR)/third_party/boost_math \
+	-I$(CURDIR)/third_party/cyan4973 \
+	-I$(CURDIR)/third_party/utf8h \
+	-I$(CURDIR)/third_party/mabel \
+	-I$(CURDIR)/third_party/mabel/base16 \
+	-I$(CURDIR)/third_party/mabel/base64 \
+	-I$(CURDIR)/third_party/mabel/base85 \
+	-I$(CURDIR)/third_party/mabel/carchar \
+	-I$(CURDIR)/third_party/mabel/parvi \
+	-I$(CURDIR)/third_party/mabel/perfect_hash \
+	-I$(CURDIR)/third_party/crypto \
+	-I$(CURDIR)/third_party/pcg \
+	-I$(CURDIR)/third_party/fastfloat \
+	-I$(CURDIR)/third_party/fastfloat/fast_float \
+	-I$(CURDIR)/third_party/ulfjack/ryu \
+	-I$(CURDIR)/third_party/yyjson/src \
+	-I$(CURDIR)/third_party/usearch/fp16/include \
+	-I$(CURDIR)/third_party/tdigest-c/src
+
+# JSON_BENCH_ARGS is passed straight through, e.g.
+#   make json-extract-bench JSON_BENCH_ARGS="--rows 500000 --csv /tmp/je.csv --label after"
+JSON_BENCH_ARGS ?=
+JSON_BENCH_DIR := /tmp/opteryx-tests/json-extract-bench
+
+json-extract-bench: ## Build + run the draken `->`/`->>` kernel microbenchmark (JSON_BENCH_ARGS="...")
+	$(call print_blue,"Building JSON extraction microbenchmark...")
+	@mkdir -p $(JSON_BENCH_DIR)
+	@cd $(JSON_BENCH_DIR) && \
+	  clang -std=c11 -O3 -w $(DRAKEN_KERNEL_INCLUDES) -c $(DRAKEN_KERNEL_C_SRCS)
+	@cd $(JSON_BENCH_DIR) && \
+	  clang++ -std=c++20 -O3 -w $(DRAKEN_KERNEL_INCLUDES) \
+	    $(CURDIR)/draken/ops/kernels/json_extract_bench.cpp \
+	    $(DRAKEN_KERNEL_SRCS) \
+	    $(JSON_BENCH_DIR)/*.o \
+	    -o json_extract_bench
+	@cd $(CURDIR) && $(JSON_BENCH_DIR)/json_extract_bench $(JSON_BENCH_ARGS)
+
 tpch: ## Run TPC-H benchmark vs DuckDB (defaults to SF=1)
 	$(call print_blue,"Running TPC-H benchmark vs DuckDB...")
 	@clear || true
@@ -260,7 +361,7 @@ clickbench-profile: ## ClickBench + per-operator self-time profile (where the ti
 clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/results.local.json)
 	@$(PYTHON) tests/performance/clickbench/duckdb/runner.py
 
-jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via rugo's JSONL reader (JSONBENCH_SIZE=1|10|100, default 10)
+jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via Opteryx SQL / READ_JSONL (JSONBENCH_SIZE=1|10|100, default 10)
 	@clear || true
 	@$(PYTHON) tests/performance/jsonbench/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
 

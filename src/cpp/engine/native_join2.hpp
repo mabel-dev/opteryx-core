@@ -26,11 +26,13 @@
 // Anything outside a mode's contract sets ErrCtx — loud, never silently wrong.
 
 #include <algorithm>   // sort/lower_bound/upper_bound — ASOF probe
+#include <atomic>      // parallel CSR build (histogram + scatter cursors)
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>      // finalize pool-let for the parallel CSR build
 #include <unordered_map>
 #include <vector>
 
@@ -65,6 +67,60 @@ struct Join2BuildLocal : LocalSinkState {
     uint32_t next_row = 0;
     bool saw_null_key = false;
 };
+// ---- the join build table: a hash-bucketed CSR, built in parallel ------------------
+// Every non-ASOF join builds this. ASOF is the ONE exception (see Join2BuildSink::
+// combine) because it reads the build through CarcharJoinIndex::items()/
+// rows_from_payload(), which a CSR does not provide.
+//
+// The build used to insert every row into a global CarcharJoinIndex one at a time,
+// under g.mtx in combine(). That made it the engine's dominant serial region: the
+// build scaled 1.15x across 1→8 workers where a probe-heavy join scaled 2.59x, and it
+// held TPC-H's parallel fraction down to 0.55. It is replaced by a two-pass scatter
+// built once in finalize(): a per-bucket histogram, a prefix sum, then a scatter in
+// which every row's destination is computed in advance. Nothing is merged, each row is
+// written exactly once, and the per-key std::vector overflow lists are gone.
+//
+// GROUP BY has to merge its partitions because two workers holding the same group hold
+// partial aggregates that must combine. A join build combines nothing — it only
+// collects row ids — so placement can be precomputed and the merge disappears.
+//
+// Match semantics are IDENTICAL to the index this replaced: CarcharJoinIndex keys on
+// the 64-bit draken hash alone (index_.lookup_fast(hash)), and so does this — bucket by
+// that hash, then compare the stored hash. Measured on TPC-H SF1: the isolated
+// build-heavy join went 1.15x → 2.88x across 1→8 workers (parallel fraction 0.15 →
+// 0.75), the 21-query total 1.93x → 2.48x (0.55 → 0.68), and Q21 480ms → 165ms.
+struct JoinCsr {
+    size_t mask = 0;
+    std::vector<uint32_t> off;      // bucket offsets, size N+1
+    std::vector<int64_t> rows;      // build row ids, grouped by bucket
+    std::vector<uint64_t> hashes;   // parallel to `rows`: the stored key hash
+    bool built = false;
+
+    // Mirrors CarcharJoinIndex::append_probe_matches — const and thread-safe: the
+    // data is read-only once built, so N probe workers share one CSR with no scratch.
+    void append_probe_matches(uint64_t key, int64_t probe_row,
+                              std::vector<int64_t>& build_out,
+                              std::vector<int64_t>& probe_out) const {
+        if (!built) return;
+        const size_t b = static_cast<size_t>(key) & mask;
+        for (uint32_t i = off[b]; i < off[b + 1]; ++i) {
+            if (hashes[i] == key) {
+                build_out.push_back(rows[i]);
+                probe_out.push_back(probe_row);
+            }
+        }
+    }
+
+    size_t row_count_for(uint64_t key) const {
+        if (!built) return 0;
+        const size_t b = static_cast<size_t>(key) & mask;
+        size_t n = 0;
+        for (uint32_t i = off[b]; i < off[b + 1]; ++i)
+            if (hashes[i] == key) ++n;
+        return n;
+    }
+};
+
 struct Join2BuildGlobal : GlobalSinkState {
     std::mutex mtx;
     // Global build table, keyed on the 64-bit draken hash → build-row-list. Built in
@@ -88,7 +144,120 @@ struct Join2BuildGlobal : GlobalSinkState {
     std::vector<std::vector<int64_t>> asof_sorted;
     uint32_t total_rows = 0;
     bool saw_null_key = false;
+
+    // `csr_active` is set in combine() and is the single discriminant every probe
+    // reads. It is true for every join except ASOF, which keeps `index` above — see
+    // the JoinCsr comment and combine().
+    JoinCsr csr;
+    std::vector<std::vector<uint64_t>> hash_chunks;   // per-worker hashes, queued O(1)
+    bool csr_active = false;
+
+    // The two build-table operations the probe modes use. Routing them through the
+    // global keeps the ASOF carve-out in ONE place rather than at each call site.
+    void probe_append(uint64_t key, int64_t probe_row,
+                      std::vector<int64_t>& build_out,
+                      std::vector<int64_t>& probe_out) const {
+        if (csr_active) csr.append_probe_matches(key, probe_row, build_out, probe_out);
+        else            index.append_probe_matches(key, probe_row, build_out, probe_out);
+    }
+    size_t probe_row_count(uint64_t key) const {
+        return csr_active ? csr.row_count_for(key) : index.row_count_for(key);
+    }
 };
+
+// Two-pass parallel CSR construction. Called once from finalize(), which the executor
+// runs single-threaded, so it spawns its own one-shot pool-let — the same pattern
+// GroupBySink::finalize uses for its partition merge. Row ids are global build row ids:
+// chunks were queued in combine() in the same order as row_m/row_r, so chunk c covers
+// [base_c, base_c + chunk_c.size()).
+inline void build_join_csr(Join2BuildGlobal& g) {
+    const size_t total = g.total_rows;
+    if (total == 0) return;
+    size_t n = 1;
+    while (n < total) n <<= 1;    // one bucket per row: ~0.36 distinct keys/bucket here
+
+    JoinCsr& c = g.csr;
+    c.mask = n - 1;
+    c.off.assign(n + 1, 0);
+    c.rows.resize(total);
+    c.hashes.resize(total);
+
+    // Flat view of the queued chunks: (chunk index, base global row id).
+    std::vector<size_t> base(g.hash_chunks.size(), 0);
+    size_t running = 0;
+    for (size_t i = 0; i < g.hash_chunks.size(); ++i) {
+        base[i] = running;
+        running += g.hash_chunks[i].size();
+    }
+
+    unsigned hw = std::thread::hardware_concurrency();
+    unsigned nt = hw > 2 ? hw - 2 : 1;
+    if (nt > 16) nt = 16;
+    if (total < 65536) nt = 1;   // small build: the threads cost more than they save
+
+    std::vector<std::atomic<uint32_t>> counts(n);
+    for (size_t i = 0; i < n; ++i) counts[i].store(0, std::memory_order_relaxed);
+
+    // Pass 1: per-bucket histogram. Chunks are claimed atomically so a skewed chunk
+    // distribution cannot leave a thread idle.
+    {
+        std::atomic<size_t> next{0};
+        auto work = [&](unsigned) {
+            for (;;) {
+                size_t ci = next.fetch_add(1);
+                if (ci >= g.hash_chunks.size()) break;
+                for (uint64_t h : g.hash_chunks[ci])
+                    counts[static_cast<size_t>(h) & c.mask].fetch_add(1, std::memory_order_relaxed);
+            }
+        };
+        std::vector<std::thread> th;
+        th.reserve(nt - 1);
+        for (unsigned t = 1; t < nt; ++t) th.emplace_back(work, t);
+        work(0);
+        for (auto& x : th) x.join();
+    }
+
+    // Prefix sum over buckets — O(n), no hashing and no allocation.
+    uint32_t run = 0;
+    for (size_t b = 0; b < n; ++b) {
+        c.off[b] = run;
+        run += counts[b].load(std::memory_order_relaxed);
+    }
+    c.off[n] = run;
+
+    // Pass 2: scatter. cursor[b] hands each writer a slot inside bucket b that no other
+    // writer can receive, so the passes need no merge and no per-key allocation.
+    {
+        std::vector<std::atomic<uint32_t>> cursor(n);
+        for (size_t b = 0; b < n; ++b)
+            cursor[b].store(c.off[b], std::memory_order_relaxed);
+        std::atomic<size_t> next{0};
+        auto work = [&](unsigned) {
+            for (;;) {
+                size_t ci = next.fetch_add(1);
+                if (ci >= g.hash_chunks.size()) break;
+                const std::vector<uint64_t>& chunk = g.hash_chunks[ci];
+                const size_t b0 = base[ci];
+                for (size_t r = 0; r < chunk.size(); ++r) {
+                    const uint64_t h = chunk[r];
+                    const size_t b = static_cast<size_t>(h) & c.mask;
+                    const uint32_t p = cursor[b].fetch_add(1, std::memory_order_relaxed);
+                    c.rows[p] = static_cast<int64_t>(b0 + r);
+                    c.hashes[p] = h;
+                }
+            }
+        };
+        std::vector<std::thread> th;
+        th.reserve(nt - 1);
+        for (unsigned t = 1; t < nt; ++t) th.emplace_back(work, t);
+        work(0);
+        for (auto& x : th) x.join();
+    }
+
+    c.built = true;
+    g.hash_chunks.clear();
+    g.hash_chunks.shrink_to_fit();
+}
 
 struct Join2BuildSink : Sink {
     std::vector<size_t> key_idx;
@@ -209,15 +378,32 @@ struct Join2BuildSink : Sink {
             g.row_r.push_back(l.row_r[r]);
         }
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
-        // Insert this worker's rows into the global index at the global row offset.
-        // row_hashes[r] is the key hash of local build row r → global row row_off+r.
-        g.index.reserve(g.total_rows + l.next_row);
-        for (uint32_t r = 0; r < l.next_row; ++r)
-            g.index.insert_row(l.row_hashes[r], static_cast<int64_t>(row_off + r));
+        // Queue this worker's key hashes — an O(1) move, NOT O(rows) inserts under the
+        // lock — and build the CSR once, in parallel, in finalize(). row_hashes[r] is
+        // the key hash of local build row r → global row row_off+r, and chunks are
+        // queued in the same order as row_m/row_r above, which is what lets finalize()
+        // recover each chunk's global row base by a running sum.
+        //
+        // ASOF is the exception: it reads the build through CarcharJoinIndex::items()/
+        // rows_from_payload() to materialize its per-key sorted view, so it keeps the
+        // index and pays the serial insert. Porting ASOF onto the CSR is the remaining
+        // work that would let CarcharJoinIndex leave this file entirely.
+        if (asof_idx < 0) {
+            g.csr_active = true;
+            g.hash_chunks.push_back(std::move(l.row_hashes));
+        } else {
+            g.index.reserve(g.total_rows + l.next_row);
+            for (uint32_t r = 0; r < l.next_row; ++r)
+                g.index.insert_row(l.row_hashes[r], static_cast<int64_t>(row_off + r));
+        }
         g.total_rows += l.next_row;
     }
 
-    void finalize(GlobalSinkState&, ErrCtx&) override {}
+    void finalize(GlobalSinkState& gs, ErrCtx&) override {
+        // No-op for ASOF, whose combine() populated `index` instead of queuing chunks.
+        auto& g = static_cast<Join2BuildGlobal&>(gs);
+        if (g.csr_active) build_join_csr(g);
+    }
 };
 
 struct Join2Ref {
@@ -367,8 +553,8 @@ struct Join2ProbeOperator : Operator {
                 size_t before = build_rows.size();
                 // const + thread-safe fan-out: appends (build_row, probe_row) for every
                 // build row whose key hash matches. Equality is 64-bit hash identity.
-                g.index.append_probe_matches(st.rowh[row], static_cast<int64_t>(row),
-                                             build_rows, probe_rows);
+                g.probe_append(st.rowh[row], static_cast<int64_t>(row),
+                               build_rows, probe_rows);
                 if (build_rows.size() == before && left_outer) {
                     build_rows.push_back(static_cast<int64_t>(kNoBuildRow));
                     probe_rows.push_back(static_cast<int64_t>(row));
@@ -635,8 +821,8 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
                         if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
                     }
                     if (any_null) continue;   // NULL key never equi-matches
-                    g.index.append_probe_matches(rowh[i], static_cast<int64_t>(i),
-                                                 build_rows, probe_rows);
+                    g.probe_append(rowh[i], static_cast<int64_t>(i),
+                                   build_rows, probe_rows);
                     // Bound the pair batch: fan-out is probe_rows x rows-per-key, which
                     // is unbounded in general. Flushing after a COMPLETE probe row keeps
                     // every row's pairs contiguous (a single high-fan-out row may push
@@ -669,7 +855,7 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
             // hash identity (const, thread-safe probe).
             bool found = residual_fn != nullptr
                              ? (matched[i] != 0)
-                             : (!build_empty && g.index.row_count_for(rowh[i]) > 0);
+                             : (!build_empty && g.probe_row_count(rowh[i]) > 0);
             if (found != anti) survivors.push_back(i);
         }
         if (survivors.empty()) return OpResult::NEED_INPUT;

@@ -5609,7 +5609,14 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
     }
 
     VectorOwner result = [&]() -> VectorOwner {
-        if (is_varchar_family(type))
+        // VARIANT shares VARCHAR's German-string arena storage exactly (see the
+        // is_varchar_family(...) || type == DRAKEN_VARIANT precedent at this file's
+        // max_display_width binding) -- concat_string is generic over that storage
+        // and only needs `type` to propagate correctly to the result, which it
+        // already does. Not routing VARIANT here isn't a deliberate exclusion (unlike
+        // VARIANT's CAST/comparison/GROUP-BY-key blocks elsewhere): concatenation is
+        // a valid, meaningful operation on VARIANT, just a missed case.
+        if (is_varchar_family(type) || type == DRAKEN_VARIANT)
             return concat_string(parts, type);
         if (type == DRAKEN_BOOL)
             return concat_bool(parts);
@@ -10164,6 +10171,64 @@ NB_MODULE(draken_native, m) {
         "Render a uint32 IPv4 address as dotted-decimal text using "
         "draken::ipv4::format — the same renderer the CAST kernel and the value "
         "writers use.");
+
+    // ipv4_parse_cidr — scalar "A.B.C.D/prefix" -> (base, broadcast, prefix),
+    // for the PLANNER. Third member of the ipv4_parse/ipv4_format family above
+    // and it exists for the same reason.
+    //
+    // The optimizer rewrites `addr <<= '10.0.0.0/8'` into the equivalent range
+    // `addr >= base AND addr <= broadcast` so the predicate can prune manifests
+    // and row groups instead of being an opaque kernel call over every row. That
+    // rewrite is only sound if the planner's idea of a network is bit-identical
+    // to the kernel's, so it parses through draken::ipv4::parse_cidr and derives
+    // the upper bound through draken::ipv4::broadcast — the exact functions
+    // draken_ipv4_in_cidr uses. A CIDR parser written in Python would be free to
+    // drift on the forms ipv4.h deliberately refuses (shorthand, leading zeros,
+    // a bare address with no '/'), and a planner and an engine disagreeing about
+    // which addresses a network contains is a silently-wrong ACL, not a
+    // cosmetic difference.
+    //
+    // Returns the bounds as a pair so the caller cannot recompute the upper one
+    // itself and get it wrong for /0 or /32 — the two prefixes where the naive
+    // shift is undefined behaviour or a no-op respectively.
+    //
+    // Raises ValueError on a rejected CIDR; the caller decides what that means.
+    m.def("ipv4_parse_cidr",
+        [](nb::object text) -> nb::tuple {
+            const char* ptr = nullptr;
+            Py_ssize_t  len = 0;
+            PyObject*   obj = text.ptr();
+            if (PyUnicode_Check(obj)) {
+                ptr = PyUnicode_AsUTF8AndSize(obj, &len);
+                if (ptr == nullptr) throw nb::python_error();
+            } else if (PyBytes_Check(obj)) {
+                if (PyBytes_AsStringAndSize(obj, const_cast<char**>(&ptr), &len) < 0)
+                    throw nb::python_error();
+            } else {
+                throw std::invalid_argument("ipv4_parse_cidr: expected str or bytes");
+            }
+            // Bound the length before narrowing to uint32, exactly as ipv4_parse
+            // does: anything longer than "255.255.255.255/32" is trailing junk,
+            // which parse_cidr rejects anyway — this only stops a >4GB input from
+            // wrapping the cast into a length that would look valid.
+            uint32_t base = 0u, prefix = 0u;
+            if (len < 0 || len > static_cast<Py_ssize_t>(draken::ipv4::MAX_CIDR_TEXT_LENGTH) ||
+                !draken::ipv4::parse_cidr(reinterpret_cast<const uint8_t*>(ptr),
+                                          static_cast<uint32_t>(len), &base, &prefix)) {
+                const size_t echo = (len < 0) ? 0u : (len > 64 ? 64u : static_cast<size_t>(len));
+                throw std::invalid_argument(
+                    "ipv4_parse_cidr: '" + std::string(ptr, echo) +
+                    "' is not a valid IPv4 CIDR (expected A.B.C.D/prefix with a "
+                    "prefix of 0-32, four decimal octets 0-255, and no leading "
+                    "zeros, shorthand or trailing characters)");
+            }
+            return nb::make_tuple(base, draken::ipv4::broadcast(base, prefix), prefix);
+        },
+        nb::arg("text"),
+        "Parse an IPv4 CIDR (str or bytes) using draken::ipv4::parse_cidr — the "
+        "same strict parser the containment kernel uses. Returns "
+        "(base, broadcast, prefix): the inclusive uint32 bounds of the network "
+        "and its prefix length. Raises ValueError on an invalid CIDR.");
 
     // vector_retag_array_child_as_timestamp64 — the ARRAY twin of the retag above.
     //

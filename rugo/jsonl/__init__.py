@@ -113,7 +113,16 @@ def read_jsonl(
         (the underlying Draken vectors are always typed the same way regardless — this
         only gates the reported metadata). Declared (explicit_schema) columns are always
         reported.
-    infer_sample_size: caps how many leading rows of a non-declared column are consulted
+    infer_sample_size: how many leading records are consulted to decide BOTH which columns
+        exist and what type each one is. Must be a positive integer; defaults to 5.
+
+        Columns: the relation's column set is the UNION of the keys across these records,
+        in first-seen order. NDJSON is not required to be homogeneous, so a key that is
+        absent from record 0 but present in record 3 is still a real column at the default
+        of 5. A key that first appears only AFTER this window is not a column at all, and
+        its values are unreachable — raise infer_sample_size to see it.
+
+        Types: caps how many leading rows of a non-declared column are consulted
         for its type hint (the first non-null value in that window). Whatever hint is
         picked, the WHOLE column is still validated against it and falls back to VARCHAR
         on any mismatch, so no value is ever misparsed or lost — but if the sample window

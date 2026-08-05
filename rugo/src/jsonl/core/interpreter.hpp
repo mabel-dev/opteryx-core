@@ -21,6 +21,19 @@ struct WantedColumn {
     uint32_t    len;
     uint8_t     first;     // name[0], for fast reject
     int         pred_idx;  // predicate index, or -1
+
+    // Optional ONE-LEVEL nested sub-key: when `sub_len` is non-zero, the wanted value is
+    // not this key's value but the value of `sub` INSIDE it (`commit` + `collection` =>
+    // `commit.collection`). The container's bytes are then never materialised — the same
+    // marker walk that bounds the container also matches the sub-key inside it and emits a
+    // span for the sub-value alone. This is what lets a nested projection be read at scan
+    // time instead of materialising the whole object and re-parsing it per row downstream.
+    //
+    // Matched at nesting depth 1 ONLY: `commit.collection` must never match
+    // `commit.record.collection`. Depth is tracked explicitly by the walk.
+    const char* sub     = nullptr;
+    uint32_t    sub_len = 0;
+    uint8_t     sub_first = 0;  // sub[0], for fast reject
 };
 
 // Projection + predicate pushdown for build_map. nullptr => emit every field (data-blind
@@ -58,12 +71,17 @@ struct RecordSet {
     std::vector<uint32_t>  offsets;   // size = num_records + 1; starts {0}
 
     // First malformed input detected while building this set (dropped/abandoned line,
-    // unterminated container, ...). `malformed_pos` is the absolute byte offset of the
-    // FIRST such occurrence, valid iff `malformed` is true. Only ever consulted when
-    // ParseContext.fail_on_error is true — otherwise the record producing it was already
-    // silently skipped, matching pre-existing lenient behaviour.
+    // unterminated container, a raw unescaped control character inside a string, a
+    // record left open with no closing brace at buffer/chunk end, ...). `malformed_pos`
+    // is the absolute byte offset of the FIRST such occurrence, valid iff `malformed` is
+    // true. Only ever consulted when ParseContext.fail_on_error is true — otherwise the
+    // record producing it was already silently skipped, matching pre-existing lenient
+    // behaviour. `malformed_count` is the total across every occurrence (not just the
+    // first), so a caller running with fail_on_error=false can still report how many
+    // rows it silently dropped instead of the drop being invisible.
     bool     malformed = false;
     uint32_t malformed_pos = 0;
+    uint32_t malformed_count = 0;
 
     size_t     num_records() const { return offsets.empty() ? 0 : offsets.size() - 1; }
     size_t     size()        const { return num_records(); }
@@ -77,6 +95,7 @@ struct RecordSet {
         if (offsets.empty()) offsets.push_back(0);
         for (size_t i = 1; i < other.offsets.size(); ++i)
             offsets.push_back(base + other.offsets[i]);
+        malformed_count += other.malformed_count;
         if (other.malformed && (!malformed || other.malformed_pos < malformed_pos)) {
             malformed = true;
             malformed_pos = other.malformed_pos;
@@ -100,9 +119,22 @@ RecordSet build_map(
     const MapProjection* proj = nullptr
 );
 
-// Collect the keys of a RecordSet's first record as strings (for column-name discovery at
-// the Cython edge, so RecordSet's internals stay opaque to Cython).
-std::vector<std::string> first_record_keys(const RecordSet& rs, const uint8_t* buffer);
+// Collect the union of keys across the RecordSet's first `sample_records` records, in
+// first-seen order (for column-name discovery at the Cython edge, so RecordSet's internals
+// stay opaque to Cython).
+//
+// NDJSON is not required to be homogeneous: a key absent from record 0 but present in
+// record 3 is a real column, and typing the relation off record 0 alone silently drops it.
+// `sample_records` is ParseContext.infer_sample_size — the SAME window that bounds per-column
+// type inference (see column_builder.cpp's "first non-null value inside the sample window"),
+// so a column discovered inside the window is always typed from inside it too. Any record
+// past the window cannot introduce a column.
+//
+// First-seen order, not sorted: record 0's keys keep their document order, and each later
+// record appends only what is new. Column order is therefore stable for the common
+// homogeneous case and deterministic for the heterogeneous one.
+std::vector<std::string> sample_record_keys(
+    const RecordSet& rs, const uint8_t* buffer, size_t sample_records);
 
 // Helper for interpreting a single JSON record (deprecated, use build_map)
 class RecordInterpreter {

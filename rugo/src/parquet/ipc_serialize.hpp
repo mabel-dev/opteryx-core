@@ -583,16 +583,18 @@ static void serialize_string_dict(ByteSink& out, const DecodedColumn& col) {
 }
 
 static void serialize_string_plain(ByteSink& out, const DecodedColumn& col) {
-    // Fallback: plain std::string values (no dict).
+    // Fallback: dense string arena values (no dict). Wire format unchanged:
+    // per-value u32 length + bytes.
     write_u8(out, 7);
     write_u32(out, static_cast<uint32_t>(col.num_rows));
     write_null_bitmap(out, col);
 
-    uint32_t n = static_cast<uint32_t>(col.string_values.size());
+    uint32_t n = static_cast<uint32_t>(col.string_lens.size());
     write_u32(out, n);
-    for (const auto& s : col.string_values) {
-        write_u32(out, static_cast<uint32_t>(s.size()));
-        write_bytes(out, s.data(), s.size());
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t len = static_cast<uint32_t>(col.string_lens[i]);
+        write_u32(out, len);
+        write_bytes(out, col.string_arena.data() + col.string_offsets[i], len);
     }
 }
 
@@ -798,13 +800,13 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
                     ce.ptr = col.string_dict_arena.data() + col.string_dict_offsets[code];
                     ce.len = static_cast<uint32_t>(col.string_dict_lens[code]);
                 } else if (use_dix) {
-                    const auto& s = col.string_values[col.dict_indices[val_idx++]];
-                    ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
-                    ce.len = static_cast<uint32_t>(s.size());
+                    const int32_t code = col.dict_indices[val_idx++];
+                    ce.ptr = col.string_arena.data() + col.string_offsets[code];
+                    ce.len = static_cast<uint32_t>(col.string_lens[code]);
                 } else {
-                    const auto& s = col.string_values[val_idx++];
-                    ce.ptr = reinterpret_cast<const uint8_t*>(s.data());
-                    ce.len = static_cast<uint32_t>(s.size());
+                    ce.ptr = col.string_arena.data() + col.string_offsets[val_idx];
+                    ce.len = static_cast<uint32_t>(col.string_lens[val_idx]);
+                    ++val_idx;
                 }
                 children.push_back(ce);
             } else if (leaf_tag == CHILD_BOOL) {
@@ -825,7 +827,7 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
             }
         } else {   // def == max_def - 1 : null leaf element within a present list
             // A null leaf has NO slot in any decoded value stream — Parquet stores
-            // only defined values, so string_values / dict_indices / the numeric
+            // only defined values, so the string arena / dict_indices / the numeric
             // buffers contain non-null values only. val_idx must NOT advance here;
             // advancing it consumes the next defined value's slot, shifting every
             // subsequent element in the list.
@@ -972,22 +974,14 @@ static void serialize_core(const DecodedColumn& col,
         } else if ((!col.dict_indices.empty() || !col.dict_codes_array.empty()) &&
             !col.string_dict_lens.empty()) {
             serialize_string_dict(out, col);
-        } else if (!col.dict_indices.empty() && !col.string_values.empty()) {
-            // dict_indices present but old-style string_values dict — build arena
-            // by promoting string_values to flat arena format first.
-            DecodedColumn promoted = col;  // shallow copy is fine (vectors share data)
-            size_t total = 0;
-            for (const auto& s : col.string_values) total += s.size();
-            promoted.string_dict_arena.reserve(total);
-            promoted.string_dict_offsets.clear();
-            promoted.string_dict_lens.clear();
-            for (const auto& s : col.string_values) {
-                uint32_t off = static_cast<uint32_t>(promoted.string_dict_arena.size());
-                promoted.string_dict_offsets.push_back(off);
-                promoted.string_dict_lens.push_back(static_cast<int32_t>(s.size()));
-                promoted.string_dict_arena.insert(
-                    promoted.string_dict_arena.end(), s.begin(), s.end());
-            }
+        } else if (!col.dict_indices.empty() && !col.string_lens.empty()) {
+            // dict_indices present but the dict table lives in the dense string
+            // arena (old-style producer) — the triples share a layout, so the
+            // promotion is a straight copy into the dict fields.
+            DecodedColumn promoted = col;
+            promoted.string_dict_arena   = col.string_arena;
+            promoted.string_dict_offsets = col.string_offsets;
+            promoted.string_dict_lens    = col.string_lens;
             promoted.code_width = col.code_width;
             serialize_string_dict(out, promoted);
         } else {

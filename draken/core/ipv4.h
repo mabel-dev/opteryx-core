@@ -22,6 +22,9 @@ namespace ipv4 {
 // Maximum characters in a rendered address: "255.255.255.255".
 constexpr uint32_t MAX_TEXT_LENGTH = 15u;
 
+// Maximum characters in a CIDR: "255.255.255.255/32" — the address plus "/nn".
+constexpr uint32_t MAX_CIDR_TEXT_LENGTH = MAX_TEXT_LENGTH + 3u;
+
 // ---------------------------------------------------------------------------
 // Parse dotted-decimal text -> uint32. Returns true on success.
 //
@@ -62,6 +65,25 @@ inline bool parse(const uint8_t* text, uint32_t length, uint32_t* out) noexcept 
     if (i != length) return false;            // trailing junk
     *out = result;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Exact rendered length of `value`, WITHOUT rendering it.
+//
+// Must agree with format() for every input — it exists so a caller that needs
+// to size a buffer before filling it (the VARCHAR cast arena) does not have to
+// render every value twice. Kept adjacent to format() for the same reason the
+// parse/render pair lives together: the two must move as one. The three dots
+// are unconditional; each octet is 1, 2 or 3 digits with no leading zeros, so
+// its width is a pair of threshold tests rather than a divide chain.
+// ---------------------------------------------------------------------------
+inline uint32_t text_length(uint32_t value) noexcept {
+    uint32_t total = 3u;   // "a.b.c.d" — three separators, always
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        const uint32_t octet = (value >> shift) & 0xFFu;
+        total += 1u + (octet >= 10u ? 1u : 0u) + (octet >= 100u ? 1u : 0u);
+    }
+    return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +130,20 @@ inline uint32_t format(uint32_t value, char* dst) noexcept {
 // ---------------------------------------------------------------------------
 inline uint32_t netmask(uint32_t prefix) noexcept {
     return prefix == 0u ? 0u : (0xFFFFFFFFu << (32u - prefix));
+}
+
+// ---------------------------------------------------------------------------
+// Last (highest) address of the network `base`/`prefix`. `base` must already be
+// masked — parse_cidr returns it that way.
+//
+// Because the 32 bits ARE the address, a network is exactly the closed unsigned
+// interval [base, broadcast]: `(ip & netmask) == base` and `base <= ip <=
+// broadcast` select the same set. That equivalence is what lets the planner
+// rewrite a literal-CIDR containment into a range predicate that storage can
+// prune on, so the two forms must derive their bounds from this one function.
+// ---------------------------------------------------------------------------
+inline uint32_t broadcast(uint32_t base, uint32_t prefix) noexcept {
+    return base | ~netmask(prefix);
 }
 
 // ---------------------------------------------------------------------------

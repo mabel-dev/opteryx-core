@@ -69,6 +69,33 @@ inline void fmt_ipv4(std::string &out, uint32_t v) {
   out.append(buf, draken::ipv4::format(v, buf));
 }
 
+// JSON form: quotes baked into the same stack buffer, one append per cell.
+inline void fmt_ipv4_quoted(std::string &out, uint32_t v) {
+  char buf[draken::ipv4::MAX_TEXT_LENGTH + 2];
+  buf[0] = '"';
+  uint32_t n = draken::ipv4::format(v, buf + 1);
+  buf[n + 1] = '"';
+  out.append(buf, n + 2);
+}
+
+// Append `"` + s + `"` for a payload that is ALREADY valid JSON string content
+// (no escaping needed) — the cast-kernel text for dates and timestamps. Short
+// payloads go through a stack buffer so the cell costs one append instead of
+// three calls; longer ones are not worth the extra copy.
+inline void append_quoted_raw(std::string &out, const char *s, size_t n) {
+  if (n <= 62) {
+    char buf[64];
+    buf[0] = '"';
+    std::memcpy(buf + 1, s, n);
+    buf[n + 1] = '"';
+    out.append(buf, n + 2);
+    return;
+  }
+  out.push_back('"');
+  out.append(s, n);
+  out.push_back('"');
+}
+
 inline void fmt_int64(std::string &out, int64_t v) {
   char buf[24];
   std::to_chars_result r = std::to_chars(buf, buf + sizeof(buf), v);
@@ -113,56 +140,86 @@ inline char *put6(char *p, int v) { // v in [0,999999] (microseconds)
 
 inline bool double_is_nan_or_inf(double v) { return std::isnan(v) || std::isinf(v); }
 
-// Render a finite double as Python-style decimal text: plain fixed-point for
-// ordinary magnitudes, scientific (lowercase e, signed 2+ digit exponent)
-// only outside that range -- the same threshold CPython's repr()/json.dumps
-// use (fixed for -4 <= exp < 16, scientific otherwise). ryu's d2s gives the
-// shortest round-trippable digits but always in scientific form ("5.5E0");
-// this reshapes those digits into the OData-compatible style.
-inline void fmt_double(std::string &out, double v) {
-  char sci[32];
-  int n = d2s_buffered_n(v, sci);
-  sci[n] = '\0'; // d2s_buffered_n does not null-terminate
-  bool neg = sci[0] == '-';
-  int p = neg ? 1 : 0;
-  std::string digits;
-  digits.push_back(sci[p++]);
-  if (p < n && sci[p] == '.') {
-    p++;
-    while (sci[p] != 'E') digits.push_back(sci[p++]);
-  }
-  p++; // skip 'E'
-  int exp = std::atoi(sci + p);
-
+// Reshape already-parsed shortest-round-trip digits into Python-style decimal
+// text: plain fixed-point for ordinary magnitudes, scientific (lowercase e,
+// signed 2+ digit exponent) only outside that range -- the same threshold
+// CPython's repr()/json.dumps use (fixed for -4 <= exp < 16, scientific
+// otherwise). Pure text layout: does not care whether `digits` came from
+// ryu's double or float algorithm, so fmt_double and fmt_float share it.
+inline void fmt_shortest_digits(std::string &out, bool neg, const char *digits, int nd, int exp) {
+  // Reshape into a stack buffer, appended once. Worst case is "0." plus three
+  // leading zeros plus 17 digits (23 bytes incl. sign) — 40 leaves headroom.
+  char buf[40];
+  char *q = buf;
+  if (neg) *q++ = '-';
   if (exp >= -4 && exp < 16) {
-    if (neg) out.push_back('-');
     if (exp < 0) {
-      out.append("0.");
-      out.append((size_t)(-exp - 1), '0');
-      out.append(digits);
+      *q++ = '0'; *q++ = '.';
+      for (int k = 0; k < -exp - 1; k++) *q++ = '0';
+      std::memcpy(q, digits, nd); q += nd;
     } else {
-      size_t intDigits = (size_t)exp + 1;
-      if (digits.size() <= intDigits) {
-        out.append(digits);
-        out.append(intDigits - digits.size(), '0');
-        out.append(".0");
+      int intDigits = exp + 1;
+      if (nd <= intDigits) {
+        std::memcpy(q, digits, nd); q += nd;
+        for (int k = nd; k < intDigits; k++) *q++ = '0';
+        *q++ = '.'; *q++ = '0';
       } else {
-        out.append(digits, 0, intDigits);
-        out.push_back('.');
-        out.append(digits, intDigits, std::string::npos);
+        std::memcpy(q, digits, intDigits); q += intDigits;
+        *q++ = '.';
+        std::memcpy(q, digits + intDigits, nd - intDigits); q += nd - intDigits;
       }
     }
   } else {
-    if (neg) out.push_back('-');
-    out.push_back(digits[0]);
-    if (digits.size() > 1) { out.push_back('.'); out.append(digits, 1, std::string::npos); }
-    out.push_back('e');
-    out.push_back(exp < 0 ? '-' : '+');
+    *q++ = digits[0];
+    if (nd > 1) { *q++ = '.'; std::memcpy(q, digits + 1, nd - 1); q += nd - 1; }
+    *q++ = 'e';
+    *q++ = exp < 0 ? '-' : '+';
     int aexp = exp < 0 ? -exp : exp;
-    char ebuf[8];
-    int en = std::snprintf(ebuf, sizeof(ebuf), "%02d", aexp);
-    out.append(ebuf, en);
+    if (aexp >= 100) { *q++ = (char)('0' + aexp / 100); aexp %= 100; }
+    q = put2(q, aexp); // %02d: two digits minimum
   }
+  out.append(buf, q - buf);
+}
+
+// Parse ryu's "D[.DDDD]E[-]DD" scientific text (as returned by d2s_buffered_n
+// / f2s_buffered_n — same shape for both) into sign + digit run + exponent,
+// then reshape. `digits` is sized for the double case (<= 17 significant
+// digits); float's <= 9 fits with room to spare.
+inline void fmt_shortest(std::string &out, const char *sci, int n) {
+  bool neg = sci[0] == '-';
+  int p = neg ? 1 : 0;
+  char digits[24];
+  int nd = 0;
+  digits[nd++] = sci[p++];
+  if (p < n && sci[p] == '.') {
+    p++;
+    while (sci[p] != 'E') digits[nd++] = sci[p++];
+  }
+  p++; // skip 'E'
+  bool eneg = sci[p] == '-';
+  if (eneg) p++;
+  int exp = 0;
+  while (p < n) exp = exp * 10 + (sci[p++] - '0');
+  if (eneg) exp = -exp;
+  fmt_shortest_digits(out, neg, digits, nd, exp);
+}
+
+inline void fmt_double(std::string &out, double v) {
+  char sci[32];
+  int n = d2s_buffered_n(v, sci);
+  fmt_shortest(out, sci, n);
+}
+
+// FLOAT32 counterpart. MUST NOT be reached by promoting a float to double
+// first: d2s_buffered_n on the widened value finds the shortest string that
+// round-trips THAT double, which is a different (typically much longer)
+// value than the shortest string that round-trips the original 32-bit float
+// -- widening is exact but not distance-preserving among neighbouring
+// doubles. f2s_buffered_n runs ryu's algorithm on the actual 24-bit mantissa.
+inline void fmt_float(std::string &out, float v) {
+  char sci[32];
+  int n = f2s_buffered_n(v, sci);
+  fmt_shortest(out, sci, n);
 }
 
 // Howard Hinnant's civil-from-days (days since 1970-01-01).
@@ -178,20 +235,45 @@ inline void civil_from_days(int64_t z, int &y, int &m, int &d) {
   y = (int)(yoe + era * 400 + (m <= 2));
 }
 
-inline void fmt_date(std::string &out, int32_t days) {
+// ---- buffer-writing cores ----
+//
+// Each wr_* writes the rendering at `p` and returns one past the last byte. The
+// caller owns the buffer, so it can bake the surrounding JSON quotes into the
+// same buffer and hand the whole cell to std::string::append in ONE call — the
+// row loop's push_back('"') pairs were the second-hottest frame in the writer
+// profile, and every one of them was an out-of-line libc++ call.
+//
+// Buffer sizes below are the caller's contract; kDateText / kTimestampText /
+// kTimeText are the maxima these can emit, quotes excluded.
+static constexpr size_t kDateText = 24;
+static constexpr size_t kTimestampText = 48;
+static constexpr size_t kTimeText = 24;
+
+inline char *wr_date(char *p, int32_t days) {
   int y, m, d;
   civil_from_days(days, y, m, d);
   if (y >= 0 && y <= 9999) { // fast path covers every representable calendar date
-    char buf[10];
-    char *p = put4(buf, y);
-    *p++ = '-'; p = put2(p, m);
-    *p++ = '-'; p = put2(p, d);
-    out.append(buf, p - buf);
-    return;
+    char *q = put4(p, y);
+    *q++ = '-'; q = put2(q, m);
+    *q++ = '-'; q = put2(q, d);
+    return q;
   }
-  char buf[16]; // years outside [0,9999]: keep snprintf's %04d/sign behaviour
-  int n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
-  out.append(buf, n);
+  // years outside [0,9999]: keep snprintf's %04d/sign behaviour
+  return p + std::snprintf(p, kDateText, "%04d-%02d-%02d", y, m, d);
+}
+
+inline void fmt_date(std::string &out, int32_t days) {
+  char buf[kDateText];
+  out.append(buf, wr_date(buf, days) - buf);
+}
+
+// JSON form: quotes written into the same buffer, one append for the cell.
+inline void fmt_date_quoted(std::string &out, int32_t days) {
+  char buf[kDateText + 2];
+  buf[0] = '"';
+  char *p = wr_date(buf + 1, days);
+  *p++ = '"';
+  out.append(buf, p - buf);
 }
 
 inline int64_t to_micros(int64_t v, int unit) {
@@ -203,7 +285,7 @@ inline int64_t to_micros(int64_t v, int unit) {
   }
 }
 
-inline void fmt_timestamp(std::string &out, int64_t v, int unit) {
+inline char *wr_timestamp(char *p, int64_t v, int unit) {
   int64_t us = to_micros(v, unit);
   int64_t day = 86400000000LL;
   int64_t days = us >= 0 ? us / day : -((-us + day - 1) / day); // floor div
@@ -217,51 +299,66 @@ inline void fmt_timestamp(std::string &out, int64_t v, int unit) {
   // RFC 3339 / ISO 8601 extended: 'T' separator, '+00:00' (UTC) zone offset
   // -- matches the OData sanitizer's prior output format.
   if (y >= 0 && y <= 9999) { // table-driven fast path (see put2/put4)
-    char buf[40];
-    char *p = put4(buf, y);
-    *p++ = '-'; p = put2(p, mo);
-    *p++ = '-'; p = put2(p, d);
-    *p++ = 'T'; p = put2(p, h);
-    *p++ = ':'; p = put2(p, mi);
-    *p++ = ':'; p = put2(p, s);
-    if (frac) { *p++ = '.'; p = put6(p, frac); }
-    *p++ = '+'; *p++ = '0'; *p++ = '0'; *p++ = ':'; *p++ = '0'; *p++ = '0';
-    out.append(buf, p - buf);
-    return;
+    char *q = put4(p, y);
+    *q++ = '-'; q = put2(q, mo);
+    *q++ = '-'; q = put2(q, d);
+    *q++ = 'T'; q = put2(q, h);
+    *q++ = ':'; q = put2(q, mi);
+    *q++ = ':'; q = put2(q, s);
+    if (frac) { *q++ = '.'; q = put6(q, frac); }
+    *q++ = '+'; *q++ = '0'; *q++ = '0'; *q++ = ':'; *q++ = '0'; *q++ = '0';
+    return q;
   }
-  char buf[40];
-  int n;
   if (frac)
-    n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%06d+00:00",
-                      y, mo, d, h, mi, s, frac);
-  else
-    n = std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d+00:00",
-                      y, mo, d, h, mi, s);
-  out.append(buf, n);
+    return p + std::snprintf(p, kTimestampText,
+                             "%04d-%02d-%02dT%02d:%02d:%02d.%06d+00:00",
+                             y, mo, d, h, mi, s, frac);
+  return p + std::snprintf(p, kTimestampText, "%04d-%02d-%02dT%02d:%02d:%02d+00:00",
+                           y, mo, d, h, mi, s);
 }
 
-inline void fmt_time(std::string &out, int64_t v, int unit) {
+inline void fmt_timestamp(std::string &out, int64_t v, int unit) {
+  char buf[kTimestampText];
+  out.append(buf, wr_timestamp(buf, v, unit) - buf);
+}
+
+inline void fmt_timestamp_quoted(std::string &out, int64_t v, int unit) {
+  char buf[kTimestampText + 2];
+  buf[0] = '"';
+  char *p = wr_timestamp(buf + 1, v, unit);
+  *p++ = '"';
+  out.append(buf, p - buf);
+}
+
+inline char *wr_time(char *p, int64_t v, int unit) {
   int64_t us = to_micros(v, unit);
   int h = (int)(us / 3600000000LL);
   int mi = (int)((us / 60000000LL) % 60);
   int s = (int)((us / 1000000LL) % 60);
   int frac = (int)(us % 1000000LL);
   if (h >= 0 && h <= 99) { // TIME-of-day is [0,23]; guard covers the field width
-    char buf[24];
-    char *p = put2(buf, h);
-    *p++ = ':'; p = put2(p, mi);
-    *p++ = ':'; p = put2(p, s);
-    if (frac) { *p++ = '.'; p = put6(p, frac); }
-    out.append(buf, p - buf);
-    return;
+    char *q = put2(p, h);
+    *q++ = ':'; q = put2(q, mi);
+    *q++ = ':'; q = put2(q, s);
+    if (frac) { *q++ = '.'; q = put6(q, frac); }
+    return q;
   }
-  char buf[24];
-  int n;
   if (frac)
-    n = std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%06d", h, mi, s, frac);
-  else
-    n = std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, mi, s);
-  out.append(buf, n);
+    return p + std::snprintf(p, kTimeText, "%02d:%02d:%02d.%06d", h, mi, s, frac);
+  return p + std::snprintf(p, kTimeText, "%02d:%02d:%02d", h, mi, s);
+}
+
+inline void fmt_time(std::string &out, int64_t v, int unit) {
+  char buf[kTimeText];
+  out.append(buf, wr_time(buf, v, unit) - buf);
+}
+
+inline void fmt_time_quoted(std::string &out, int64_t v, int unit) {
+  char buf[kTimeText + 2];
+  buf[0] = '"';
+  char *p = wr_time(buf + 1, v, unit);
+  *p++ = '"';
+  out.append(buf, p - buf);
 }
 
 // Unsigned __int128 -> decimal digits appended; returns nothing.
@@ -307,55 +404,122 @@ inline void fmt_decimal_ptr128(std::string &out, const void *p, int s) {
 
 // ---- escaping ----
 
+// Byte offset of the first byte in [i, n) that forces RFC 4180 quoting
+// (`delim`, '"', '\n' or '\r'), or n if none. Same SWAR haszero technique as
+// json_scan_clean below, generalized to a runtime delimiter byte broadcast
+// across the word.
+inline size_t csv_scan_clean(const char *s, size_t i, size_t n, char delim) {
+  constexpr uint64_t ONES = 0x0101010101010101ULL, HIGH = 0x8080808080808080ULL;
+  const uint64_t DELIM = (uint64_t)(unsigned char)delim * ONES;
+  while (i + 8 <= n) {
+    uint64_t w;
+    std::memcpy(&w, s + i, 8);
+    uint64_t dd = w ^ DELIM;
+    uint64_t q  = w ^ 0x2222222222222222ULL; // '"'
+    uint64_t nl = w ^ 0x0A0A0A0A0A0A0A0AULL; // '\n'
+    uint64_t cr = w ^ 0x0D0D0D0D0D0D0D0DULL; // '\r'
+    uint64_t hit = (((dd - ONES) & ~dd) | ((q - ONES) & ~q) |
+                    ((nl - ONES) & ~nl) | ((cr - ONES) & ~cr)) & HIGH;
+    if (hit) return i + ((size_t)__builtin_ctzll(hit) >> 3);
+    i += 8;
+  }
+  for (; i < n; i++) {
+    char c = s[i];
+    if (c == delim || c == '"' || c == '\n' || c == '\r') break;
+  }
+  return i;
+}
+
+// Byte offset of the first '"' in [i, n), or n if none — the only byte that
+// needs escaping once a field is already inside quotes.
+inline size_t csv_scan_dquote(const char *s, size_t i, size_t n) {
+  constexpr uint64_t ONES = 0x0101010101010101ULL, HIGH = 0x8080808080808080ULL;
+  while (i + 8 <= n) {
+    uint64_t w;
+    std::memcpy(&w, s + i, 8);
+    uint64_t q = w ^ 0x2222222222222222ULL;
+    uint64_t hit = ((q - ONES) & ~q) & HIGH;
+    if (hit) return i + ((size_t)__builtin_ctzll(hit) >> 3);
+    i += 8;
+  }
+  for (; i < n; i++)
+    if (s[i] == '"') break;
+  return i;
+}
+
 // Append a CSV field, quoting per RFC 4180 if it contains the delimiter, a
 // quote, CR or LF. A zero-length field is also quoted, so an empty string
 // ("") is distinguishable from a NULL cell (which never calls this
-// function at all). Quotes are doubled.
+// function at all). Quotes are doubled. Clean runs (the common case, and the
+// whole field the overwhelming majority of the time) are appended in bulk —
+// see json_string below for the same pattern.
 inline void csv_field(std::string &out, const char *s, size_t n, char delim) {
-  bool quote = n == 0;
-  for (size_t i = 0; i < n; i++) {
-    char c = s[i];
-    if (c == delim || c == '"' || c == '\n' || c == '\r') { quote = true; break; }
-  }
-  if (!quote) { out.append(s, n); return; }
+  if (n != 0 && csv_scan_clean(s, 0, n, delim) == n) { out.append(s, n); return; }
   out.push_back('"');
-  for (size_t i = 0; i < n; i++) {
-    if (s[i] == '"') out.push_back('"');
-    out.push_back(s[i]);
+  size_t i = csv_scan_dquote(s, 0, n);
+  out.append(s, i);
+  while (i < n) {
+    out.append("\"\"", 2); // the '"' itself, doubled
+    size_t run = ++i;
+    i = csv_scan_dquote(s, i, n);
+    if (i > run) out.append(s + run, i - run);
   }
   out.push_back('"');
 }
 
-// Append a JSON string (quoted + escaped).
+// Byte offset of the first byte in [s+i, s+n) needing a JSON escape ('"', '\\'
+// or a control byte < 0x20), or n if none. SWAR, 8 bytes per step: haszero(v)
+// = (v-0x01..01) & ~v & 0x80..80 flags every zero byte exactly, plus possible
+// false positives only ABOVE (more significant than) a true zero — so on a
+// little-endian OR of the three predicates, ctz still lands on the first true
+// hit. UTF-8 continuation/lead bytes (>= 0x80) are never flagged.
+inline size_t json_scan_clean(const char *s, size_t i, size_t n) {
+  constexpr uint64_t ONES = 0x0101010101010101ULL, HIGH = 0x8080808080808080ULL;
+  while (i + 8 <= n) {
+    uint64_t w;
+    std::memcpy(&w, s + i, 8);
+    uint64_t q = w ^ 0x2222222222222222ULL;           // '"'
+    uint64_t b = w ^ 0x5C5C5C5C5C5C5C5CULL;           // '\\'
+    uint64_t c = w & 0xE0E0E0E0E0E0E0E0ULL;           // zero byte iff < 0x20
+    uint64_t hit = (((q - ONES) & ~q) | ((b - ONES) & ~b) | ((c - ONES) & ~c)) & HIGH;
+    if (hit) return i + ((size_t)__builtin_ctzll(hit) >> 3);
+    i += 8;
+  }
+  for (; i < n; i++) {
+    unsigned char ch = (unsigned char)s[i];
+    if (ch == '"' || ch == '\\' || ch < 0x20) break;
+  }
+  return i;
+}
+
+// Append a JSON string (quoted + escaped). Clean runs between escapes are
+// appended in bulk, never byte-at-a-time.
 inline void json_string(std::string &out, const char *s, size_t n) {
   static const char *HEX = "0123456789abcdef";
+  // Clean string (the overwhelming majority) is a whole cell on its own, so it
+  // goes out as one append rather than push_back / append / push_back.
+  size_t i = json_scan_clean(s, 0, n);
+  if (i == n) { append_quoted_raw(out, s, n); return; }
   out.push_back('"');
-  size_t i = 0;
-  for (; i < n; i++) {
-    unsigned char c = (unsigned char)s[i];
-    if (c == '"' || c == '\\' || c < 0x20) break;
-  }
-  if (i == n) { out.append(s, n); out.push_back('"'); return; }
   out.append(s, i);
-  for (; i < n; i++) {
+  while (i < n) {
     unsigned char c = (unsigned char)s[i];
     switch (c) {
-    case '"':  out.append("\\\""); break;
-    case '\\': out.append("\\\\"); break;
-    case '\n': out.append("\\n"); break;
-    case '\r': out.append("\\r"); break;
-    case '\t': out.append("\\t"); break;
-    case '\b': out.append("\\b"); break;
-    case '\f': out.append("\\f"); break;
-    default:
-      if (c < 0x20) {
-        out.append("\\u00");
-        out.push_back(HEX[c >> 4]);
-        out.push_back(HEX[c & 0xF]);
-      } else {
-        out.push_back((char)c);
-      }
+    case '"':  out.append("\\\"", 2); break;
+    case '\\': out.append("\\\\", 2); break;
+    case '\n': out.append("\\n", 2); break;
+    case '\r': out.append("\\r", 2); break;
+    case '\t': out.append("\\t", 2); break;
+    case '\b': out.append("\\b", 2); break;
+    case '\f': out.append("\\f", 2); break;
+    default: // remaining control bytes
+      out.append("\\u00", 4);
+      out.push_back(HEX[c >> 4]);
+      out.push_back(HEX[c & 0xF]);
     }
+    size_t run = ++i;
+    i = json_scan_clean(s, i, n);
+    if (i > run) out.append(s + run, i - run);
   }
   out.push_back('"');
 }
@@ -384,7 +548,7 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
   // hands back for an IPv4 column; with no descriptor it stays a plain number.
   case DRAKEN_UINT32:
     if (d.kind == LogicalKind::IPV4) {
-      out.push_back('"'); fmt_ipv4(out, ((const uint32_t *)dv->data)[p]); out.push_back('"');
+      fmt_ipv4_quoted(out, ((const uint32_t *)dv->data)[p]);
     } else {
       fmt_uint64(out, ((const uint32_t *)dv->data)[p]);
     }
@@ -397,24 +561,24 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
     break;
   }
   case DRAKEN_FLOAT32: {
-    double d = ((const float *)dv->data)[p];
-    if (double_is_nan_or_inf(d)) out.append("null"); else fmt_double(out, d);
+    float f = ((const float *)dv->data)[p];
+    if (double_is_nan_or_inf((double)f)) out.append("null"); else fmt_float(out, f);
     break;
   }
   case DRAKEN_BOOL:
     out.append((((const uint8_t *)dv->data)[p >> 3] >> (p & 7)) & 1 ? "true" : "false");
     break;
   case DRAKEN_DATE32:
-    out.push_back('"'); fmt_date(out, ((const int32_t *)dv->data)[p]); out.push_back('"');
+    fmt_date_quoted(out, ((const int32_t *)dv->data)[p]);
     break;
   case DRAKEN_TIMESTAMP64:
-    out.push_back('"'); fmt_timestamp(out, ((const int64_t *)dv->data)[p], d.unit); out.push_back('"');
+    fmt_timestamp_quoted(out, ((const int64_t *)dv->data)[p], d.unit);
     break;
   case DRAKEN_TIME64:
-    out.push_back('"'); fmt_time(out, ((const int64_t *)dv->data)[p], d.unit); out.push_back('"');
+    fmt_time_quoted(out, ((const int64_t *)dv->data)[p], d.unit);
     break;
   case DRAKEN_TIME32:
-    out.push_back('"'); fmt_time(out, ((const int32_t *)dv->data)[p], d.unit); out.push_back('"');
+    fmt_time_quoted(out, ((const int32_t *)dv->data)[p], d.unit);
     break;
   case DRAKEN_DECIMAL:    fmt_decimal(out, (__int128)((const int64_t *)dv->data)[p], d.scale); break;
   case DRAKEN_DECIMAL128: { __int128 v; std::memcpy(&v, (const uint8_t *)dv->data + (size_t)p * 16, 16); fmt_decimal(out, v, d.scale); break; }

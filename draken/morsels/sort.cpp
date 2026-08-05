@@ -60,12 +60,8 @@
         "name": "draken.morsels.sort",
         "sources": [
             "draken/morsels/sort.pyx",
-            "src/cpp/simd_hash.cpp",
-            "src/cpp/simd_bitops.cpp",
             "draken/core/vector_alloc.cpp",
-            "src/cpp/simd_env.cpp",
-            "src/cpp/cpu_features.cpp",
-            "src/cpp/simd_search.cpp"
+            "src/cpp/simd_bitops.cpp"
         ]
     },
     "module_name": "draken.morsels.sort"

@@ -3,19 +3,21 @@
 JSONBench benchmark + DuckDB comparison runner.
 
 Runs the 5 upstream JSONBench queries (github.com/ClickHouse/JSONBench)
-against rugo's JSONL reader (warm, multi-iteration; see ./rugo/runner.py for
-why this is a hand-written Python scan-and-aggregate rather than SQL —
-neither Opteryx nor rugo can run SQL against JSON), compares each query's
-best time to the DuckDB baseline, and writes per-iteration results to
-`results/<sha>-<ts>.csv`.
+as real Opteryx SQL against READ_JSONL(path) (warm, multi-iteration; see
+./opteryx/runner.py) and compares each query's best time to the DuckDB
+baseline, writing per-iteration results to `results/<sha>-<ts>.csv`.
+
+This used to run a hand-written Python scan-and-aggregate over rugo's JSONL
+reader instead (see ./rugo/runner.py, kept for its own test coverage of
+rugo's raw kernels) — READ_JSONL had no support for the nested-object
+(VARIANT) and array columns this dataset needs. That gap is closed now (see
+docs/json_variant_type_plan.md), so this runs the actual SQL queries.
 
 This is NOT an apples-to-apples engine comparison like ClickBench/TPC-H: the
 DuckDB baseline times query execution against an already-loaded native-
-storage table (load time excluded), while the rugo numbers are a full
+storage table (load time excluded), while the Opteryx numbers are a full
 scan-and-parse of the raw NDJSON on every iteration (there is no persisted
-storage to query against). See README.md for the full set of caveats. The
-purpose of this benchmark is to gauge the scale of that gap and inform
-whether Opteryx should gain native JSON reading.
+storage to query against). See README.md for the full set of caveats.
 
 Usage:
     make jsonbench                              # default: 10m rows, 2 warm iterations
@@ -37,10 +39,10 @@ _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 
-# Load fetch_data.py + rugo/runner.py by explicit file path rather than putting this
-# directory on sys.path — this dir's `rugo/` subpackage would otherwise shadow the real
-# installed `rugo` package that rugo/runner.py itself needs to import (same trap as
-# clickbench/runner.py's comment on opteryx/runner.py).
+# Load fetch_data.py + opteryx/runner.py by explicit file path rather than putting this
+# directory on sys.path — this dir's `opteryx/` subpackage would otherwise shadow the
+# real installed `opteryx` package that opteryx/runner.py itself needs to import (same
+# trap as clickbench/runner.py's comment on its own opteryx/runner.py).
 import importlib.util  # noqa: E402
 
 
@@ -53,7 +55,9 @@ def _load_module(name: str, rel_path: str):
 
 
 fetch = _load_module("_jsonbench_fetch_data", "fetch_data.py").fetch
-QUERIES = _load_module("_jsonbench_rugo_runner", os.path.join("rugo", "runner.py")).QUERIES
+_opteryx_runner = _load_module("_jsonbench_opteryx_runner", os.path.join("opteryx", "runner.py"))
+QUERIES = _opteryx_runner.QUERIES
+shard_glob = _opteryx_runner.shard_glob
 
 from _common import (  # noqa: E402
     open_results_csv,
@@ -86,16 +90,16 @@ def _load_jsonbench_baseline(path: str) -> tuple[dict[str, float], str | None]:
     return by_name, data.get("machine")
 
 
-def _run_query(fn, paths) -> tuple[float, int]:
+def _run_query(fn, glob_path) -> tuple[float, int]:
     gc.collect()
     t0 = time.monotonic_ns()
-    rows = fn(paths)
+    rows = fn(glob_path)
     elapsed_ms = (time.monotonic_ns() - t0) / 1e6
     return elapsed_ms, len(rows)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="JSONBench benchmark vs DuckDB (rugo JSONL reader)")
+    parser = argparse.ArgumentParser(description="JSONBench benchmark vs DuckDB (Opteryx SQL via READ_JSONL)")
     parser.add_argument("--size", type=int, default=10, choices=(1, 10, 100), help="Dataset size in millions of rows (default: 10)")
     parser.add_argument("--iterations", type=int, default=2, help="Warm iterations per query (default: 2)")
     parser.add_argument("--skip-fetch", action="store_true", help="Don't fetch/decompress data; fail if missing")
@@ -118,10 +122,12 @@ def main() -> int:
     baseline_path = args.duckdb_baseline or os.path.join(_DUCKDB_DIR, f"results.local.{args.size}m.json")
     duckdb_min, duckdb_machine = _load_jsonbench_baseline(baseline_path)
 
+    import opteryx as _opteryx
+
     data_size = sum(os.path.getsize(p) for p in paths)
     print_banner(
-        title="JSONBENCH BENCHMARK (rugo)",
-        opteryx_version="n/a — rugo has no SQL layer; queries are hand-written Python scans",
+        title="JSONBENCH BENCHMARK",
+        opteryx_version=_opteryx.__version__,
         metadata=[
             ("Dataset", f"Bluesky NDJSON, {args.size}m rows ({data_size / 1e9:.2f}GB decompressed)"),
             ("Queries", str(len(QUERIES))),
@@ -130,6 +136,12 @@ def main() -> int:
         duckdb_machine=duckdb_machine if duckdb_min else None,
         duckdb_query_count=len(duckdb_min) if duckdb_min else None,
     )
+
+    # Scope a glob to exactly this run's shards (see opteryx/runner.py's
+    # shard_glob). Done here, before the timed loop, so the symlink-directory
+    # setup is never absorbed into whichever query happens to run first. The
+    # shards themselves are read unmodified — nothing rewrites the dataset.
+    glob_path = shard_glob(paths)
 
     print_header("Query", args.iterations, has_baseline=bool(duckdb_min))
 
@@ -142,7 +154,7 @@ def main() -> int:
     failed = 0
     failures: list[tuple[str, str]] = []
     suite_start = time.monotonic_ns()
-    rugo_total_min = 0.0
+    opteryx_total_min = 0.0
     duckdb_total_min = 0.0
     compared = 0
 
@@ -153,7 +165,7 @@ def main() -> int:
             had_failure = False
             for run_ix in range(1, args.iterations + 1):
                 try:
-                    elapsed_ms, rows = _run_query(fn, paths)
+                    elapsed_ms, rows = _run_query(fn, glob_path)
                 except Exception as err:
                     msg = f"{type(err).__name__}: {err}"
                     failures.append((name, msg))
@@ -191,7 +203,7 @@ def main() -> int:
             passed += 1
             print_row(name, times, args.iterations, d_ms)
             if d_ms is not None:
-                rugo_total_min += min(times)
+                opteryx_total_min += min(times)
                 duckdb_total_min += d_ms
                 compared += 1
     finally:
@@ -199,7 +211,7 @@ def main() -> int:
 
     print("─" * 100)
     if compared:
-        print_total_row(rugo_total_min, duckdb_total_min, compared, args.iterations)
+        print_total_row(opteryx_total_min, duckdb_total_min, compared, args.iterations)
     print()
 
     elapsed_s = (time.monotonic_ns() - suite_start) / 1e9

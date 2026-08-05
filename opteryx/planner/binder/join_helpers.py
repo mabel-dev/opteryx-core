@@ -58,8 +58,6 @@ def get_mismatched_condition_column_types(
 
     elif node.node_type == NodeType.COMPARISON_OPERATOR:
         if node.value in (
-            "InList",
-            "NotInList",
             "Arrow",
             "LongArrow",
             "AtQuestion",
@@ -72,7 +70,18 @@ def get_mismatched_condition_column_types(
         ) or node.value.startswith(("AllOp", "AnyOp")):
             return None  # Some ops are meant to have different types
         left_type = node.left.schema_column.category if node.left.schema_column else None
-        right_type = node.right.schema_column.category if node.right.schema_column else None
+        if node.value in ("InList", "NotInList"):
+            # The right side is an ARRAY literal; the type that must agree with
+            # the left operand is the array's ELEMENT type, not LC.ARRAY itself.
+            # Without this, a mistyped IN-list (`int_col IN ('Earth')`) sails
+            # through here and is only caught later — or not at all — by
+            # kernel strictness deep in execution (see the architect's report:
+            # rewrite_in_to_eq's single-member IN retype is the only remaining
+            # guard, and a looser kernel would turn this into silent wrong rows).
+            right_ct = getattr(node.right, "type", None)
+            right_type = right_ct.element.category if right_ct is not None and right_ct.element is not None else None
+        else:
+            right_type = node.right.schema_column.category if node.right.schema_column else None
 
         if left_type and right_type and left_type != right_type:
             if (

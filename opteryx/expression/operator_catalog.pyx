@@ -53,6 +53,18 @@ cpdef get_operator_sql_symbol(str operator):
     return get_operator_token(operator)
 
 
+cpdef get_operator_for_sql_symbol(str symbol):
+    """Map a SQL spelling (`<<=`) back to its canonical operator name (`IPContainedBy`).
+
+    The inverse of `get_operator_sql_symbol`. The dialect puts the SQL spelling of
+    its custom operators into the AST so that serialising the AST back to SQL - how
+    a view is stored - produces text that re-parses; this turns that spelling back
+    into the name every downstream stage keys on. Returns None for an unknown
+    symbol so the caller can report the text it actually received.
+    """
+    return SQL_SYMBOLS_TO_OPERATORS.get(symbol)
+
+
 def get_operator_node_type(operator):
     from opteryx.expression import NodeType
 
@@ -390,3 +402,21 @@ OPERATOR_DEFINITIONS = {
         notes="Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension.",
     ),
 }
+
+
+# Reverse index of the vocabulary above: SQL spelling -> canonical operator name.
+# Built from the definitions rather than hand-listed so the two directions cannot
+# drift. A spelling that names two operators is a defect in the catalog - it makes
+# the mapping ambiguous - so it fails here, at import, rather than silently
+# resolving to whichever definition happened to be last.
+SQL_SYMBOLS_TO_OPERATORS = {}
+for _operator, _definition in OPERATOR_DEFINITIONS.items():
+    _symbol = _definition.sql_symbol or _definition.token
+    if _symbol is None:
+        continue
+    if _symbol in SQL_SYMBOLS_TO_OPERATORS:
+        raise ValueError(
+            f"Operator catalog is ambiguous: SQL symbol '{_symbol}' is claimed by both "
+            f"'{SQL_SYMBOLS_TO_OPERATORS[_symbol]}' and '{_operator}'."
+        )
+    SQL_SYMBOLS_TO_OPERATORS[_symbol] = _operator

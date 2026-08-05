@@ -77,16 +77,16 @@ static nb::object impl_lowercase(nb::object in_obj) {
     const DrakenVector* dv = draken_vector_unwrap(in_obj.ptr());
     if (!dv) throw nb::python_error();
 
-    // Type check. VARBINARY takes the same ASCII-only byte fold as VARCHAR —
-    // same DrakenStringSlot/arena layout, non-ASCII bytes pass through
-    // unchanged either way, so folding opaque bytes is safe; it just isn't
-    // NVARCHAR's UTF-8-aware path.
+    // Type check. Per the [[draken-string-type-family]] architect ruling
+    // (and E.26's acceptance criteria), case ops on VARBINARY are
+    // unsupported — opaque bytes carry no character semantics to fold.
+    if (dv->type == DRAKEN_VARBINARY)
+        throw nb::value_error(
+            "vector_lowercase: case ops on VARBINARY are unsupported");
     const bool is_nvarchar = (dv->type == DRAKEN_NVARCHAR);
-    if (dv->type != DRAKEN_VARCHAR &&
-        dv->type != DRAKEN_NVARCHAR &&
-        dv->type != DRAKEN_VARBINARY)
+    if (dv->type != DRAKEN_VARCHAR && dv->type != DRAKEN_NVARCHAR)
         throw nb::type_error(
-            "vector_lowercase: expected VARCHAR, NVARCHAR, or VARBINARY Vector");
+            "vector_lowercase: expected VARCHAR or NVARCHAR Vector");
 
     // GIL-free compute: in_obj keeps the source arena alive for the whole call
     // and everything below — allocation, the fold loop, native cleanup — touches

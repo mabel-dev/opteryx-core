@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -7,6 +8,35 @@
 #include "carchar_common.hpp"
 
 namespace opteryx::carchar {
+
+namespace detail {
+// Allocator adaptor that DEFAULT-initializes elements instead of
+// value-initializing them. For trivial types that means "allocate and leave
+// the bytes alone" — std::vector otherwise has no way to allocate without
+// filling. Every other vector behaviour (growth, copy, move, data()) is
+// unchanged, which matters because CarcharIndex must stay copyable
+// (CarcharJoinIndex holds one by value and is copied into vectors).
+template <typename T>
+struct uninitialized_allocator : std::allocator<T> {
+    using std::allocator<T>::allocator;
+
+    template <typename U>
+    struct rebind {
+        using other = uninitialized_allocator<U>;
+    };
+
+    template <typename U>
+    void construct(U* ptr) noexcept(std::is_nothrow_default_constructible_v<U>) {
+        ::new (static_cast<void*>(ptr)) U;   // default-init: no fill for trivial U
+    }
+
+    template <typename U, typename... Args>
+    void construct(U* ptr, Args&&... args) {
+        std::allocator_traits<std::allocator<T>>::construct(
+            static_cast<std::allocator<T>&>(*this), ptr, std::forward<Args>(args)...);
+    }
+};
+}  // namespace detail
 
 class CarcharIndex {
    public:
@@ -186,9 +216,21 @@ class CarcharIndex {
 
     void initialize_storage(std::size_t capacity) {
         capacity_ = capacity;
+        // control_ IS initialized: kEmpty is the authority on slot occupancy and
+        // every probe reads it. hashes_/payload_refs_ are deliberately left
+        // UNINITIALIZED (make_unique_for_overwrite default-initializes) — an
+        // empty slot's hash and payload are never read. Proof: key_tag() is
+        // (key >> 57) & 0x7F, so a tag is always <= 0x7F while kEmpty is 0x80;
+        // a tag can therefore never match an empty slot, so the probe never
+        // confirms against hashes_[empty], and every payload read is guarded by
+        // result.found (items()/resize() guard on control_ directly). Filling
+        // them was a dead memset of 16 bytes/slot on every alloc AND every
+        // doubling — GB-scale on high-cardinality GROUP BY, never read once.
         control_.assign(capacity_ + (kGroupWidth - 1U), kEmpty);
-        hashes_.assign(capacity_, 0U);
-        payload_refs_.assign(capacity_, -1);
+        hashes_.clear();
+        hashes_.resize(capacity_);
+        payload_refs_.clear();
+        payload_refs_.resize(capacity_);
         size_ = 0;
         probe_finder_ = detail::select_probe_finder();
     }
@@ -274,8 +316,10 @@ class CarcharIndex {
 
     std::size_t capacity_ = 0;
     std::vector<std::uint8_t> control_;
-    std::vector<std::uint64_t> hashes_;
-    std::vector<std::int64_t> payload_refs_;
+    // Uninitialized-allocator vectors: allocated but never pre-filled, because
+    // an empty slot's hash/payload are never read (see initialize_storage).
+    std::vector<std::uint64_t, detail::uninitialized_allocator<std::uint64_t>> hashes_;
+    std::vector<std::int64_t, detail::uninitialized_allocator<std::int64_t>> payload_refs_;
     std::size_t size_ = 0;
     double load_factor_ = 0.80;
     detail::ProbeFn probe_finder_ = nullptr;

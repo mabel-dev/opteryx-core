@@ -95,6 +95,14 @@ void prepare_predicate(Predicate& pred) {
             pred.pred_float
         );
     }
+    // "true"/"false" never also parses as int64/float64, so this is independent of the
+    // numeric attempts above — a predicate literal is exactly one of int/float/bool/string.
+    pred.pred_parsed_bool = parse_bool(
+        reinterpret_cast<const uint8_t*>(pred.value.c_str()),
+        0,
+        pred.value.length() - 1,
+        pred.pred_bool
+    );
 }
 
 bool evaluate_predicate(
@@ -143,6 +151,19 @@ bool evaluate_predicate(
         }
         const double cmp_val = pred_parsed_float ? pred_float : static_cast<double>(pred_int);
         return apply_op_f64(pred.op, val_float, cmp_val);
+
+    } else if (value_span.type == static_cast<uint8_t>(ValueType::Boolean)) {
+        if (!pred.pred_parsed_bool) {
+            return false;  // predicate literal is not "true"/"false" — no comparison possible
+        }
+        bool field_bool;
+        const uint32_t fend = value_span.value_start + value_span.value_width - 1;
+        if (!parse_bool(buffer, value_span.value_start, fend, field_bool)) {
+            return false;
+        }
+        // false=0 < true=1 (SQL boolean ordering) — reuse the int comparator so all six
+        // ops (EQ/NE/LT/LE/GT/GE) behave consistently with numeric predicates.
+        return apply_op_i64(pred.op, field_bool ? 1 : 0, pred.pred_bool ? 1 : 0);
 
     } else if (value_span.type == static_cast<uint8_t>(ValueType::String)) {
         std::string val_str = extract_string(buffer, value_span.value_start, value_span.value_start + value_span.value_width - 1);

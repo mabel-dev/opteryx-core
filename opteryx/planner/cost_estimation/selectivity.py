@@ -252,6 +252,36 @@ def _selectivity_range(
             if op in ("Lt", "LtEq"):
                 return _clamp01(fraction_below)
             return _clamp01(1.0 - fraction_below)
+
+    # No histogram: interpolate uniformly across the column's known min/max.
+    # Coarser than a histogram (it cannot see skew) but vastly better than a
+    # blind constant, because a constant charges the SAME 0.25 to a bound that
+    # excludes nothing as to one that excludes almost everything.
+    #
+    # That mattered as soon as Scan statistics started carrying real manifest
+    # bounds: CorrelatedFiltersStrategy pushes each join key's range onto the
+    # opposite leg, and those pushed bounds sit just inside the target's own
+    # range. JOB 10a pushed `t.id >= 2` and `t.id <= 2525745` onto a column
+    # spanning 1..2528312 -- excluding 3 rows in 2.5 million -- and the flat
+    # 0.25 charged each of them a 4x reduction. Four such bounds took title's
+    # estimate from 632,077 rows to 2,469, and the join's own selectivity for
+    # the very same constraint was applied on top: the same predicate paid for
+    # twice. Interpolation returns ~1.0 for those bounds, which is the honest
+    # answer and leaves the join as the single place the constraint is priced.
+    #
+    # Where a pushed range genuinely narrows, this stays consistent with the
+    # join estimate rather than compounding it: the scan is charged the real
+    # fraction, _narrow_filter_columns tightens the column's value_range, and
+    # _value_range_span caps the join's tdom to that same narrowed span.
+    if lit_f is not None and col is not None and col.value_range is not None:
+        lower = _to_float(col.value_range.lower_bound)
+        upper = _to_float(col.value_range.upper_bound)
+        if lower is not None and upper is not None and upper > lower:
+            fraction_below = (lit_f - lower) / (upper - lower)
+            if op in ("Lt", "LtEq"):
+                return _clamp01(fraction_below)
+            return _clamp01(1.0 - fraction_below)
+
     return 0.25
 
 

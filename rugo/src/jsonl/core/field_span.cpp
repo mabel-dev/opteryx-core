@@ -130,11 +130,44 @@ static void finalize_records(
         return nullptr;
     };
 
+    // Per-projected-column ordinal cache. A bare `find` per column is O(fields), making the
+    // projection loop below O(wanted x fields) per record — the dominant cost whenever
+    // interpret_jsonl's wide_projection guard sends a full data-blind map here. Measured on
+    // a 197MB/105-column file: explicitly projecting all 105 columns cost 37% MORE than
+    // projecting nothing at all (91.6ms vs 66.7ms), for byte-identical output. NDJSON holds
+    // key order stable across records, so remembering each column's last span index makes
+    // the steady state one memcmp per column. Same ordinal-stability assumption — and the
+    // same "first match wins only while layout is stable" caveat under duplicate keys in one
+    // object — as extract_column's predictor in column_builder.cpp.
+    constexpr uint32_t NO_ORD = 0xFFFFFFFFu;
+    std::vector<uint32_t> col_ord(jcols.size(), NO_ORD);
+
+    auto find_projected = [&](const RecordView& rec, size_t j) -> const FieldSpan* {
+        const Col& c = jcols[j];
+        const uint32_t hint = col_ord[j];
+        if (hint < rec.size()) {
+            const FieldSpan& f = rec[hint];
+            if (f.key_width == c.len && buffer_data[f.key_start] == c.first &&
+                std::memcmp(buffer_data + f.key_start, c.name, c.len) == 0)
+                return &f;
+        }
+        for (uint32_t i = 0; i < rec.size(); ++i) {
+            const FieldSpan& f = rec[i];
+            if (f.key_width == c.len && buffer_data[f.key_start] == c.first &&
+                std::memcmp(buffer_data + f.key_start, c.name, c.len) == 0) {
+                col_ord[j] = i;
+                return &f;
+            }
+        }
+        return nullptr;
+    };
+
     RecordSet& out = result.all_records;
     out.offsets.clear();
     out.offsets.push_back(0);
     out.malformed = all_records.malformed;
     out.malformed_pos = all_records.malformed_pos;
+    out.malformed_count = all_records.malformed_count;
     out.spans.reserve(all_records.spans.size());
     const size_t nrec = all_records.num_records();
     for (size_t r = 0; r < nrec; ++r) {
@@ -154,7 +187,7 @@ static void finalize_records(
             for (const auto& f : rec) out.spans.push_back(f);  // predicates only — keep all cols
         } else {
             for (size_t i = 0; i < context.projected_columns.size(); ++i) {
-                const FieldSpan* f = find(rec, jcols[i]);
+                const FieldSpan* f = find_projected(rec, i);
                 if (f != nullptr) out.spans.push_back(*f);
             }
         }
@@ -296,6 +329,38 @@ InterpreterResult interpret_jsonl_threaded(
 
     // Newline-aligned ranges. Each range ends just after a newline, so every range
     // holds complete records and the next range starts at a record boundary.
+    //
+    // "Next newline" is NOT sufficient on its own: the dump can contain a raw,
+    // unescaped newline inside a string (see interpreter.cpp / the JSONBench defect in
+    // tests/performance/jsonbench/README.md), and landing a range boundary on THAT
+    // newline splits one record in half. The first range then ends mid-record (harmless
+    // -- MapBuilder::finish discards the truncated fragment) but the second range starts
+    // mid-record on arbitrary garbage, and every nested `{...}` still sitting in that
+    // tail gets banked as a phantom record. Observed exactly: shard 6's boundary landed
+    // inside a malformed labeler-service record and its ~30 nested policy objects each
+    // became a spurious row.
+    //
+    // Every record in JSONL is an object, so a range may only begin at a line whose
+    // first non-whitespace byte is '{' (the same assumption the FSA's START_RECORD
+    // transition already encodes). Skip forward line-by-line until that holds; the
+    // malformed record is then wholly contained in -- and discarded by -- the preceding
+    // range, rather than being half-parsed by two.
+    auto next_record_boundary = [&](size_t after_newline) -> size_t {
+        size_t q = after_newline;
+        while (q < buffer_length) {
+            size_t r = q;
+            while (r < buffer_length &&
+                   (buffer_data[r] == ' ' || buffer_data[r] == '\t' || buffer_data[r] == '\r'))
+                ++r;
+            if (r >= buffer_length) return buffer_length;
+            if (buffer_data[r] == '{') return q;  // clean start-of-record
+            while (r < buffer_length && buffer_data[r] != '\n') ++r;  // garbage line: skip it
+            if (r >= buffer_length) return buffer_length;
+            q = r + 1;
+        }
+        return buffer_length;
+    };
+
     std::vector<std::pair<size_t, size_t>> ranges;
     ranges.reserve(nt);
     size_t start = 0;
@@ -305,8 +370,11 @@ InterpreterResult interpret_jsonl_threaded(
         size_t p = target;
         while (p < buffer_length && buffer_data[p] != '\n') ++p;
         if (p >= buffer_length) break;  // no more newlines; last range takes the rest
-        ranges.push_back({start, p + 1});
-        start = p + 1;
+        const size_t split = next_record_boundary(p + 1);
+        if (split >= buffer_length) break;  // rest of the buffer is one final range
+        if (split <= start) continue;
+        ranges.push_back({start, split});
+        start = split;
     }
     if (start < buffer_length) ranges.push_back({start, buffer_length});
 

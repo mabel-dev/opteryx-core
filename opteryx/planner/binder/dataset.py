@@ -16,20 +16,48 @@ from opteryx.exceptions import (
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binding_context import BindingContext
-from opteryx.types.logical_type import LogicalCategory, ColumnType, _NUMERIC_TYPES, _TEMPORAL_TYPES
+from opteryx.types.logical_type import (
+    LogicalCategory,
+    ColumnType,
+    _NUMERIC_TYPES,
+    _TEMPORAL_TYPES,
+    column_type_from_vector,
+)
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn, RelationSchema, mint_column_identity
 from opteryx.utils import random_string
 
 # JSONL columns rugo's decoder can currently produce that READ_JSONL knows how to
-# describe as a ColumnType. Anything else (ARRAY, nested object/VARIANT, ...) is
-# out of scope for Stage 1 and fails loud rather than being silently mistyped.
+# describe as a ColumnType.
+#
+# ARRAY: rugo's parse_array_column (rugo/src/jsonl/core/column_builder.cpp) only
+# produces a DRAKEN_ARRAY vector for a uniform, scalar-element JSON array (e.g.
+# ["en"], [1, 2, 3]) -- non-uniform/nested arrays fall back to raw-text VARCHAR,
+# which is already covered above. column_type_from_vector (opteryx/types/
+# logical_type.py) is the sanctioned reconstructor for ARRAY<element> and is used
+# below in place of the bare ColumnType(physical) construction; it degrades a
+# parameterized or nested element to ARRAY<VARIANT> rather than guessing, which
+# rugo's JSONL sampling never produces here in practice (its element is always a
+# plain scalar), but the fallback still applies uniformly if that ever changes.
+#
+# VARIANT: a nested JSON object column (rugo's parse_objects=True default, see
+# docs/json_variant_type_plan.md -- VARIANT is already a fully-wired, extraction-
+# only physical type: unparameterized, so column_type_from_vector's plain
+# `ColumnType(physical)` fallback is already correct for it with no new branch.
+# Every place VARIANT is invalid (CAST, GROUP BY/DISTINCT/ORDER BY keys, ARRAY_AGG,
+# comparison/arithmetic operators, [i] subscript) already raises a clear error
+# (VariantKeyError / operator_map misses) regardless of which reader produced the
+# column, so no JSONL-specific enforcement belongs here -- only `->`/`->>` (and
+# CAST of the *extracted* NVARCHAR text) are how a VARIANT column is meant to be
+# used, same as a VARIANT produced by any other path.
 _JSONL_SUPPORTED_TYPES = {
     DrakenType.INT64,
     DrakenType.FLOAT64,
     DrakenType.BOOL,
     DrakenType.VARCHAR,
     DrakenType.NULL,
+    DrakenType.ARRAY,
+    DrakenType.VARIANT,
 }
 
 # CSV columns rugo's decoder can currently produce (rugo's sniff_csv_column_types
@@ -261,6 +289,12 @@ def visit_function_dataset(
         else:
             infer_schema = True
 
+        # `infer_sample_size` sets how many leading records are read to decide BOTH the
+        # column set (the union of their keys, first-seen order) and each column's type.
+        # NDJSON is not required to be homogeneous, so a key absent from record 0 but
+        # present in record 3 is still a column at the default of 5; a key that first
+        # appears only past the window is not visible at all. There is no free choice of
+        # default here -- some number has to be picked, and 5 is it.
         if "infer_sample_size" in named_args:
             arg = _literal_value("infer_sample_size")
             if (
@@ -270,6 +304,13 @@ def visit_function_dataset(
             ):
                 raise InvalidFunctionParameterError(
                     "READ_JSONL option 'infer_sample_size' must be an integer literal."
+                )
+            # Rejected here rather than left to rugo's own guard so the error names the SQL
+            # option the user actually wrote instead of the reader's parameter.
+            if arg.value <= 0:
+                raise InvalidFunctionParameterError(
+                    "READ_JSONL option 'infer_sample_size' must be greater than 0; "
+                    f"received {arg.value}."
                 )
             infer_sample_size = arg.value
         else:
@@ -397,12 +438,12 @@ def visit_function_dataset(
                 raise NotSupportedError(
                     f"READ_JSONL column '{physical_name}' has inferred type "
                     f"{physical_type!r}, which Stage 1 does not support (only "
-                    "INT64/FLOAT64/BOOL/VARCHAR/NULL are supported)."
+                    "INT64/FLOAT64/BOOL/VARCHAR/NULL/ARRAY/VARIANT are supported)."
                 )
             schema_columns.append(
                 SchemaColumn(
                     name=external_name,
-                    column_type=ColumnType(physical=physical_type),
+                    column_type=column_type_from_vector(vector),
                     identity=mint_column_identity(relation_name, external_name),
                 )
             )

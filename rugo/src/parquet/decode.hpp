@@ -78,17 +78,21 @@ struct DecodedColumnMeta {
 // Reuse contract: a DecodedColumn may be reused across column decodes via
 // reset() (retains vector capacity — the whole point). reset() MUST clear every
 // owning container below AND slice-assign the scalar base; the completeness test
-// test_decoded_column_reset_is_complete enforces this. 28 owning containers
-// (26 std::vector + `type` + `error_message`) + scalars (in DecodedColumnMeta).
+// test_decoded_column_reset_is_complete enforces this. 30 owning containers
+// (28 std::vector + `type` + `error_message`) + scalars (in DecodedColumnMeta).
 struct DecodedColumn : DecodedColumnMeta {
   std::vector<uint8_t> valid_bits;       // Arrow-style validity bitmap: 1=valid, 0=null; empty=all-valid
   std::vector<int32_t> int32_values;
   std::vector<int64_t> int64_values;
   std::vector<__int128> int128_values;   // FIXED_LEN_BYTE_ARRAY DECIMAL with width 9..16
                                          //   (precision > 18 → DECIMAL128). type == "int128".
-  std::vector<std::string> string_values; // For byte_array: either flat values (dict_indices empty)
-                                           //   or the compact dictionary (dict_indices non-empty)
-  std::vector<int32_t> dict_indices;      // non-empty → string_values is the dict; per-row indices
+  // Flat arena for dense (non-dict) byte_array values — one entry per PRESENT
+  // value, in stream order. Mirrors the string_dict_* triple below; replaces the
+  // old std::vector<std::string> string_values (one heap allocation per value).
+  std::vector<uint8_t>  string_arena;    // packed bytes for all dense values
+  std::vector<uint32_t> string_offsets;  // byte start offset per value
+  std::vector<int32_t>  string_lens;     // byte length per value
+  std::vector<int32_t> dict_indices;      // non-empty → dict codes; per-row indices
   std::vector<int32_t> dict_int32_values; // compact dictionary payload for int32 columns
   std::vector<int64_t> dict_int64_values; // compact dictionary payload for int64 columns
   std::vector<__int128> dict_int128_values; // compact dictionary payload for int128 (DECIMAL128) columns
@@ -137,15 +141,23 @@ struct DecodedColumn : DecodedColumnMeta {
   std::vector<uint32_t> rle_str_offsets;     // byte offset per run in arena [num_runs]
   std::vector<int32_t>  rle_str_lens;        // byte length per run value [num_runs]
 
+  // Append one dense byte_array value to the string arena triple.
+  void append_string(const void* p, size_t len) {
+    string_offsets.push_back(static_cast<uint32_t>(string_arena.size()));
+    string_lens.push_back(static_cast<int32_t>(len));
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    string_arena.insert(string_arena.end(), b, b + len);
+  }
+
   // Reset to the default-constructed state WITHOUT releasing vector capacity, so
   // the buffers are reused by the next decode. clear() retains capacity for the
-  // trivially-destructible containers; for `string_values` the inner std::strings
-  // are freed (outer array retained). The base slice-assign resets all 18 scalars
+  // trivially-destructible containers. The base slice-assign resets all 18 scalars
   // completely (incl. rle_last_code == -1). Keep this in sync with the member
   // list above — test_decoded_column_reset_is_complete is the guard.
   void reset() {
     valid_bits.clear();          int32_values.clear();        int64_values.clear();
-    int128_values.clear();       string_values.clear();       dict_indices.clear();
+    int128_values.clear();       dict_indices.clear();
+    string_arena.clear();        string_offsets.clear();       string_lens.clear();
     dict_int32_values.clear();   dict_int64_values.clear();    dict_int128_values.clear();
     dict_float32_values.clear();
     dict_float64_values.clear(); boolean_values.clear();       float32_values.clear();

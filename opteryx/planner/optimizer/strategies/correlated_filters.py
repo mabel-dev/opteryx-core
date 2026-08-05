@@ -68,6 +68,39 @@ def _key_value_range(stats, col):
     return value_range
 
 
+def _tightens(candidate, existing) -> bool:
+    """True if *candidate* constrains a column more tightly than *existing*.
+
+    A correlated filter only earns its keep when it removes rows the target
+    scan could otherwise return. Once Scan statistics carry the manifest's real
+    min/max (they did not before -- ``value_range`` was left empty for any
+    column without a predicate on it), the unfiltered case makes both sides of
+    a PK/FK join report the SAME full range, and pushing that back is a
+    tautology: `l_partkey BETWEEN 1 AND 200000` over a column whose manifest
+    bounds are already 1..200000 excludes nothing. It still costs a real
+    per-row filter at runtime, and the selectivity estimator charges it the
+    0.25 default per bound -- six such bounds took TPC-H lineitem's estimate
+    from 6,001,215 rows to 1,465.
+
+    Unknown/incomparable bounds return True: that is the pre-existing
+    behaviour (push and let the scan sort it out), so this gate only ever
+    suppresses a push it can PROVE is redundant.
+    """
+    if existing is None:
+        return True
+
+    def _tighter(new_bound, old_bound, keep_greater: bool) -> bool:
+        if new_bound is None or old_bound is None:
+            return False
+        if type(new_bound) is not type(old_bound):
+            return True  # incomparable -> don't claim redundancy
+        return new_bound > old_bound if keep_greater else new_bound < old_bound
+
+    return _tighter(candidate.lower_bound, existing.lower_bound, True) or _tighter(
+        candidate.upper_bound, existing.upper_bound, False
+    )
+
+
 def _get_equi_join_pairs(on_node):
     """
     Extract (left_col, right_col) identifier pairs from a (possibly AND-nested) equi-join
@@ -196,6 +229,13 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             # IS the target column's relation.
             scan_names = {getattr(scan, "alias", None), getattr(scan, "relation", None)}
             if target_relation not in scan_names:
+                continue
+
+            # REDUNDANCY GUARD: compare against the SCAN's own range, not the
+            # join's. _intersect_join_keys has already replaced both keys'
+            # ranges on the join node with their intersection, so at that level
+            # every pair looks identical and nothing would ever push.
+            if not _tightens(value_range, _key_value_range(getattr(scan, "statistics", None), target_col)):
                 continue
 
             connector = getattr(scan, "connector", None)

@@ -15,14 +15,16 @@ struct Predicate {
     uint8_t op;  // Op enum value (0-5)
     std::string value;  // Raw JSON value as string
 
-    // Cached numeric parse of `value`, populated once by value_parser::prepare_predicate
-    // before the per-record evaluation loop starts — evaluate_predicate() must not
-    // re-parse `value` itself, or a selective predicate re-parses the same constant on
-    // every row it's checked against.
+    // Cached numeric/boolean parse of `value`, populated once by
+    // value_parser::prepare_predicate before the per-record evaluation loop starts —
+    // evaluate_predicate() must not re-parse `value` itself, or a selective predicate
+    // re-parses the same constant on every row it's checked against.
     int64_t pred_int = 0;
     double  pred_float = 0.0;
     bool    pred_parsed_int = false;
     bool    pred_parsed_float = false;
+    bool    pred_bool = false;
+    bool    pred_parsed_bool = false;
 };
 
 // Parse context: projection, predicates, schema (immutable per Reader session)

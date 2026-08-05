@@ -465,7 +465,10 @@ cdef inline bint _ks_reserve_fixed_direct(
 
     if not _ks_ensure_fixed_capacity(buf, required_rows):
         return False
-    if needs_null_bitmap:
+    # A bitmap allocated by an earlier morsel must keep covering every row this
+    # morsel appends, even when this morsel itself contains no nulls — the store
+    # loop sets/clears bits at out_row unconditionally once the bitmap exists.
+    if needs_null_bitmap or null_bitmap_ref[0] != NULL:
         if not _ks_ensure_bitmap_capacity(null_bitmap_ref, current_rows, required_rows):
             return False
     return True
@@ -592,6 +595,11 @@ cdef inline bint _ks_store_fixed_bulk_dict(
     cdef const int8_t*  d1 = <const int8_t*>dict_data
 
     if not _ks_ensure_fixed_capacity(buf, start_row + n_new): return False
+    # A bitmap allocated by an earlier morsel only covers rows up to the point
+    # where it was first allocated — grow it up front so the unconditional
+    # set/clear at out_row below can never write past its capacity.
+    if null_bitmap_ref[0] != NULL:
+        if not _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new): return False
 
     dst = <int64_t*>buf.data
     for ri in range(n_new):
@@ -647,6 +655,8 @@ cdef inline bint _ks_store_fixed128_bulk_dict(
     cdef const int128_t* src = <const int128_t*>dict_data
 
     if not _ks_ensure_fixed_capacity(buf, start_row + n_new): return False
+    if null_bitmap_ref[0] != NULL:
+        if not _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new): return False
 
     dst = <int128_t*>buf.data
     for ri in range(n_new):
@@ -715,6 +725,8 @@ cdef inline bint _ks_store_multi_bool_bulk(
     cdef int64_t* dst
 
     if not _ks_ensure_fixed_capacity(buf, start_row + n_new): return False
+    if null_bitmap_ref[0] != NULL:
+        if not _ks_ensure_bitmap_capacity(null_bitmap_ref, start_row, start_row + n_new): return False
     dst = <int64_t*>buf.data
 
     for ri in range(n_new):

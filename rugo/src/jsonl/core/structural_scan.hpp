@@ -148,22 +148,36 @@ inline void scan_structural_masked(const uint8_t* data, size_t length, Emit&& em
     const uint8x16_t cl = vdupq_n_u8(':'),  cm = vdupq_n_u8(',');
     const uint8x16_t nl = vdupq_n_u8('\n');
     for (; i + 64 <= length; i += 64) {
-        uint64_t quote = 0, bslash = 0, structb = 0;
+        uint64_t quote = 0, bslash = 0, structb = 0, newline = 0;
         for (int b = 0; b < 4; ++b) {
             const uint8x16_t v = vld1q_u8(data + i + b * 16);
+            const uint8x16_t nl_eq = vceqq_u8(v, nl);
+            // `nl_eq` deliberately does NOT feed into `st`/`structb` (which IS dropped
+            // inside a string below) -- a raw, unescaped 0x0A can never legitimately
+            // appear inside a valid JSON string (a real newline there must be the TWO
+            // bytes '\'+'n', not this single control byte), so it must always be
+            // surfaced as a marker regardless of the in-string mask, exactly like a real
+            // delimiter quote already is (`| real_q` below). Without this, a raw newline
+            // mid-string was silently swallowed as ordinary "string content" by this
+            // masked path — confirmed against a real defect in the JSONBench Bluesky
+            // dump (tests/performance/jsonbench/README.md's "Known data-quality defect")
+            // that fabricated garbage records from fragments of 2+ real lines; the
+            // unmasked scan_structural() above never had this bug (it has no in-string
+            // concept to wrongly suppress a newline with), only this adaptive path did.
             const uint8x16_t st = vorrq_u8(
                 vorrq_u8(vorrq_u8(vceqq_u8(v, bo), vceqq_u8(v, bc)),
                          vorrq_u8(vceqq_u8(v, so), vceqq_u8(v, sc))),
-                vorrq_u8(vorrq_u8(vceqq_u8(v, cl), vceqq_u8(v, cm)), vceqq_u8(v, nl)));
+                vorrq_u8(vceqq_u8(v, cl), vceqq_u8(v, cm)));
             quote  |= static_cast<uint64_t>(_mask_movemask16(vceqq_u8(v, qq))) << (b * 16);
             bslash |= static_cast<uint64_t>(_mask_movemask16(vceqq_u8(v, bs))) << (b * 16);
             structb|= static_cast<uint64_t>(_mask_movemask16(st))             << (b * 16);
+            newline|= static_cast<uint64_t>(_mask_movemask16(nl_eq))          << (b * 16);
         }
         const uint64_t escaped = _mask_find_escaped(bslash, &prev_escaped);
         const uint64_t real_q  = quote & ~escaped;
         const uint64_t in_str  = _mask_prefix_xor(real_q) ^ prev_in_string;
         prev_in_string = static_cast<uint64_t>(0) - (in_str >> 63);   // all-ones if still in string
-        uint64_t emit_bits = (structb & ~in_str) | real_q;
+        uint64_t emit_bits = (structb & ~in_str) | real_q | newline;
         while (emit_bits) {
             const uint32_t pos = static_cast<uint32_t>(i + __builtin_ctzll(emit_bits));
             emit(pos, data[pos]);
@@ -180,6 +194,7 @@ inline void scan_structural_masked(const uint8_t* data, size_t length, Emit&& em
             if (esc)            { esc = false; continue; }
             if (c == '\\')      { esc = true;  continue; }
             if (c == '"')       { in_s = false; emit(static_cast<uint32_t>(i), c); continue; }
+            if (c == '\n')      { emit(static_cast<uint32_t>(i), c); continue; }  // see NEON block's comment above
         } else {
             if (c == '"')       { in_s = true;  emit(static_cast<uint32_t>(i), c); continue; }
             if (lut[c])         { emit(static_cast<uint32_t>(i), c); }

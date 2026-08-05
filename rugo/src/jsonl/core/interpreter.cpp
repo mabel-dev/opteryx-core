@@ -1,8 +1,11 @@
 #include "interpreter.hpp"
 #include "field_span.hpp"
 #include "value_parser.hpp"   // evaluate_predicate (inline filter pushdown)
+#include <algorithm>
 #include <array>
 #include <cstring>
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace rugo::_jsonl {
@@ -155,31 +158,64 @@ inline bool is_ws(uint8_t c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-// Bound a container value whose opening '[' or '{' is at `start`. Walks raw bytes
-// tracking string state and backslash escapes so interior commas, brackets and braces
-// — including those inside quoted strings — do not close it early. Returns the index of
-// the matching closing bracket/brace, or `limit - 1` if the container never closes (and
-// sets `closed` to false in that case — a truncated/unterminated array or object).
-inline uint32_t scan_container(const uint8_t* buf, uint32_t start, uint32_t limit, bool& closed) {
+// Bound a container value whose opening '[' or '{' is markers[open_idx]. Walks the
+// marker list (not raw bytes — every byte that can change string/escape/depth state IS
+// a structural marker, so the SIMD scan already found them all) tracking string state
+// and backslash escapes so interior commas, brackets and braces — including those
+// inside quoted strings — do not close the container early. With markers from the
+// masked scan the same state machine degenerates correctly: backslashes and in-string
+// structurals are simply absent, and every emitted quote is a real delimiter.
+//
+// On success sets `closed`, `close_pos` to the matching close bracket/brace, and
+// returns its marker index. On a truncated/unterminated container returns markers.size()
+// with `close_pos = limit - 1`; on a raw, unescaped newline inside a nested string
+// (invalid JSON — RFC 8259 requires the two bytes '\'+'n', not this control byte;
+// confirmed against a real defect in the JSONBench Bluesky dump, see
+// tests/performance/jsonbench/README.md's "Known data-quality defect") returns the
+// newline's marker index with `close_pos` at the newline, so the caller resyncs at the
+// line boundary rather than silently absorbing garbage as string content.
+inline size_t scan_container_markers(
+    const std::vector<MarkerPosition>& markers,
+    size_t open_idx,
+    uint32_t limit,
+    bool& closed,
+    uint32_t& close_pos) {
     int depth = 0;
     bool in_string = false;
-    bool escaped = false;
-    for (uint32_t p = start; p < limit; ++p) {
-        const uint8_t c = buf[p];
+    uint32_t escaped_until = 0xFFFFFFFFu;  // byte position escaped by a preceding '\'
+    const size_t M = markers.size();
+    for (size_t j = open_idx; j < M; ++j) {
+        const uint32_t p = markers[j].position;
+        const uint8_t t = markers[j].marker_type;
         if (in_string) {
-            if (escaped)          escaped = false;
-            else if (c == '\\')   escaped = true;
-            else if (c == '"')    in_string = false;
-        } else if (c == '"') {
+            if (p == escaped_until) { escaped_until = 0xFFFFFFFFu; continue; }  // escaped content
+            switch (static_cast<MarkerType>(t)) {
+            case MarkerType::BACKSLASH: escaped_until = p + 1; break;  // escapes next byte
+            case MarkerType::QUOTE:     in_string = false; break;
+            case MarkerType::NEWLINE:   closed = false; close_pos = p; return j;
+            default:                    break;  // in-string structural — content
+            }
+            continue;
+        }
+        switch (static_cast<MarkerType>(t)) {
+        case MarkerType::QUOTE:
             in_string = true;
-        } else if (c == '[' || c == '{') {
+            break;
+        case MarkerType::BRACE_OPEN:
+        case MarkerType::BRACKET_OPEN:
             ++depth;
-        } else if (c == ']' || c == '}') {
-            if (--depth == 0) { closed = true; return p; }
+            break;
+        case MarkerType::BRACE_CLOSE:
+        case MarkerType::BRACKET_CLOSE:
+            if (--depth == 0) { closed = true; close_pos = p; return j; }
+            break;
+        default:
+            break;  // ':', ',', '\n', '\\' outside a string — not structure for bounding
         }
     }
     closed = false;
-    return limit - 1;
+    close_pos = limit - 1;
+    return M;
 }
 
 // Coarse value-type tag from the first non-whitespace byte of the slice.
@@ -197,6 +233,131 @@ inline ValueType classify_first(uint8_t c) {
     }
 }
 
+// Find a ONE-LEVEL nested key inside an already-bounded object container and report its
+// value's span. `open_idx`/`close_idx` are the container's own marker indices (its '{' and
+// matching '}') as returned by scan_container_markers. Walks only markers — the same bytes
+// the SIMD scan already classified — so reading `commit.collection` costs a fraction of the
+// container's extent instead of materialising it and re-parsing it per row downstream.
+//
+// DEPTH SAFETY IS STRUCTURAL, not tracked: `commit.collection` must never match
+// `commit.record.collection`, and here it cannot, because any nested container met in value
+// position is skipped WHOLESALE via scan_container_markers (j jumps to its close). The walk
+// therefore only ever sees depth-1 keys — there is no depth counter to get wrong.
+//
+// Value semantics mirror the top-level path exactly (END_STRING_VAL / emit_unquoted /
+// emit_container in MapBuilder), because a nested projection must be byte-identical to what
+// the downstream yyjson extraction would have produced for the same path:
+//   string    -> the content BETWEEN the quotes (unquoted), ValueType::String
+//   container -> the whole `{...}` / `[...]` slice as JSON text
+//   scalar    -> the ws-trimmed slice, coarse-classified by first byte
+// Returns false when the container is not an object, the key is absent, or the value is
+// JSON null — all of which mean a NULL output cell.
+inline bool find_nested_field(
+    const uint8_t* buf,
+    const std::vector<MarkerPosition>& markers,
+    size_t open_idx,
+    size_t close_idx,
+    const char* sub,
+    uint32_t sub_len,
+    uint8_t sub_first,
+    uint32_t& out_start,
+    uint32_t& out_width,
+    ValueType& out_type) {
+
+    if (buf[markers[open_idx].position] != '{') return false;  // an array has no keys
+
+    // Close an unquoted scalar running from the ':' to `end` (exclusive terminator).
+    auto emit_scalar = [&](uint32_t colon_pos, uint32_t end) -> bool {
+        uint32_t vs = colon_pos + 1;
+        while (vs < end && is_ws(buf[vs])) ++vs;
+        if (vs >= end || buf[vs] == 'n') return false;   // empty, or JSON null => NULL cell
+        uint32_t ve = end - 1;
+        while (ve > vs && is_ws(buf[ve])) --ve;
+        out_start = vs;
+        out_width = ve - vs + 1;
+        out_type  = classify_first(buf[vs]);
+        return true;
+    };
+
+    enum St : uint8_t { KEY_EXPECT, KEY_IN, COLON_EXPECT, VALUE_EXPECT, VALUE_STR_IN, AFTER_VALUE };
+    St st = KEY_EXPECT;
+    bool wanted = false;
+    uint32_t key_start = 0, val_start = 0, colon_pos = 0;
+    uint32_t escaped_until = 0xFFFFFFFFu;
+    const uint32_t close_byte = markers[close_idx].position;
+
+    for (size_t j = open_idx + 1; j < close_idx; ++j) {
+        const uint32_t p = markers[j].position;
+        const MarkerType t = static_cast<MarkerType>(markers[j].marker_type);
+
+        switch (st) {
+        case KEY_EXPECT:
+            if (t == MarkerType::QUOTE) { key_start = p + 1; st = KEY_IN; }
+            break;
+
+        case KEY_IN:
+            if (p == escaped_until) { escaped_until = 0xFFFFFFFFu; break; }
+            if (t == MarkerType::BACKSLASH) { escaped_until = p + 1; break; }
+            if (t == MarkerType::QUOTE) {
+                const uint32_t klen = p - key_start;
+                wanted = (klen == sub_len && buf[key_start] == sub_first &&
+                          std::memcmp(buf + key_start, sub, sub_len) == 0);
+                st = COLON_EXPECT;
+            }
+            break;
+
+        case COLON_EXPECT:
+            if (t == MarkerType::COLON) { colon_pos = p; st = VALUE_EXPECT; }
+            break;
+
+        case VALUE_EXPECT:
+            if (t == MarkerType::QUOTE) {
+                val_start = p + 1; st = VALUE_STR_IN;
+            } else if (t == MarkerType::BRACE_OPEN || t == MarkerType::BRACKET_OPEN) {
+                bool closed = false;
+                uint32_t cpos = 0;
+                const size_t cidx = scan_container_markers(markers, j, close_byte + 1, closed, cpos);
+                if (!closed || cidx >= close_idx) return false;   // malformed/overrunning
+                if (wanted) {
+                    out_start = p;
+                    out_width = cpos - p + 1;
+                    out_type  = (buf[p] == '[') ? ValueType::Array : ValueType::Object;
+                    return true;
+                }
+                j  = cidx;          // skip the whole container — this is the depth guard
+                st = AFTER_VALUE;
+            } else if (t == MarkerType::COMMA) {
+                if (wanted) return emit_scalar(colon_pos, p);
+                st = KEY_EXPECT;
+            }
+            break;
+
+        case VALUE_STR_IN:
+            if (p == escaped_until) { escaped_until = 0xFFFFFFFFu; break; }
+            if (t == MarkerType::BACKSLASH) { escaped_until = p + 1; break; }
+            if (t == MarkerType::QUOTE) {
+                if (wanted) {
+                    out_start = val_start;
+                    out_width = p - val_start;
+                    out_type  = ValueType::String;
+                    return true;
+                }
+                st = AFTER_VALUE;
+            }
+            break;
+
+        case AFTER_VALUE:
+            if (t == MarkerType::COMMA) st = KEY_EXPECT;
+            break;
+        }
+    }
+
+    // The wanted key was the container's LAST member and its unquoted scalar value is
+    // terminated by the closing '}' rather than by a comma.
+    if (st == VALUE_EXPECT && wanted) return emit_scalar(colon_pos, close_byte);
+    return false;
+}
+
 } // anonymous namespace
 
 // Document-map builder. Value shape is coarse and read only from the structural
@@ -209,6 +370,7 @@ namespace {
 struct MapBuilder {
     RecordSet rs;
     const uint8_t* buffer;
+    uint32_t buffer_length;
     State state = State::EXPECT_RECORD_START;
     uint32_t key_start = 0, key_end = 0, key_width = 0;
     uint32_t value_start = 0, value_end = 0, value_width = 0;
@@ -225,6 +387,10 @@ struct MapBuilder {
     size_t found = 0;
     int cur_pred_idx = -1;
     bool cur_wanted = true;
+    // The matched wanted column for the key currently in hand, or nullptr. Only needed to
+    // carry its optional nested sub-key to the container branch in build_map; the flat
+    // path reads cur_wanted/cur_pred_idx as before.
+    const WantedColumn* cur_col = nullptr;
     bool skip_rest = false;
     bool record_dead = false;
     uint32_t escaped_until = 0xFFFFFFFFu;  // byte escaped by a preceding '\' in a key/string
@@ -244,12 +410,26 @@ struct MapBuilder {
     bool saw_open_brace_since_newline = false;
     bool malformed_found = false;
     uint32_t malformed_at = 0;
+    uint32_t malformed_count = 0;
     inline void flag_malformed(uint32_t pos) {
         if (!malformed_found) { malformed_found = true; malformed_at = pos; }
+        ++malformed_count;
     }
 
-    MapBuilder(const uint8_t* buf, const MapProjection* p)
-        : buffer(buf), proj(p), num_wanted(p ? p->num_wanted : 0) {
+    // Set to the byte offset where a malformed record was detected; the driver then
+    // resyncs at the next PHYSICAL line boundary (see build_map). NO_RESYNC = nothing
+    // pending. Resyncing has to be line-based, not structure-based: after a raw newline
+    // splits one JSON record across two physical lines, the tail left on the second line
+    // is arbitrary garbage that still contains perfectly well-formed-looking `{...}`
+    // fragments (Bluesky's nested JSON is full of them). Letting the FSA resume on that
+    // tail makes it bank those fragments as extra spurious records — the observed
+    // ~27-29 phantom rows per affected shard. A JSONL record is defined by its line, so
+    // the only sound recovery point is the next '\n'.
+    static constexpr uint32_t NO_RESYNC = 0xFFFFFFFFu;
+    uint32_t resync_from = NO_RESYNC;
+
+    MapBuilder(const uint8_t* buf, uint32_t buf_len, const MapProjection* p)
+        : buffer(buf), buffer_length(buf_len), proj(p), num_wanted(p ? p->num_wanted : 0) {
         rs.offsets.push_back(0);
     }
 
@@ -275,6 +455,22 @@ struct MapBuilder {
         }
         ++ordinal;
         return stop;
+    }
+
+    // A wanted column that resolved to NOTHING (nested sub-key absent, or its value was
+    // JSON null). Emits NO span — which is exactly how an absent top-level column already
+    // represents a NULL cell, since column lookup is by key and a missing key yields null —
+    // but still advances the ordinal and the found count so minimal-extent stops the record
+    // on schedule rather than scanning the tail for a column that will never arrive.
+    //
+    // Deliberately does NOT kill the record when the column carries a predicate: an absent
+    // top-level predicate column doesn't drop the row today either (no span => the
+    // predicate is never evaluated), and silently diverging from that here would make
+    // nested and flat predicates mean different things. Nested predicate pushdown has to
+    // settle that question explicitly when it is built.
+    inline bool miss_field() {
+        ++ordinal;
+        return proj && ++found >= num_wanted;
     }
 
     // Unquoted scalar slice (number / true / false / null), ws-trimmed; coarse type
@@ -318,6 +514,22 @@ struct MapBuilder {
         }
         CharClass cls = char_class_table[ch];
         if (cls == CharClass::NEWLINE) {
+            // A raw, unescaped newline while a key/string is still open is not ordinary
+            // content -- RFC 8259 requires control characters (U+0000-U+001F) inside a
+            // JSON string to be escaped. Confirmed against a real defect in the JSONBench
+            // Bluesky dump (tests/performance/jsonbench/README.md's "Known data-quality
+            // defect"): left unchecked, the FSA just kept consuming bytes as "string
+            // content" until it happened to find some LATER, unrelated quote to treat as
+            // the close -- silently fabricating garbage records from fragments of 2+ real
+            // records instead of ever failing loud. Abandon this record immediately
+            // rather than let one bad byte corrupt everything the scan reads afterward.
+            if (state == State::IN_KEY || state == State::IN_STRING_VALUE) {
+                flag_malformed(cur_record_start_pos);
+                discard_record();
+                state = State::EXPECT_RECORD_START;
+                resync_from = pos;  // driver skips to the next physical line boundary
+                return;
+            }
             // A top-level newline (still EXPECT_RECORD_START) that closes a line which
             // never even opened a record, yet held non-whitespace content, is a line that
             // was never JSON at all — e.g. "NOT JSON AT ALL". Today that's silently
@@ -352,12 +564,12 @@ struct MapBuilder {
             if (proj) {
                 // Exact match against the wanted set — length + first-byte reject, then
                 // memcmp. No hashing.
-                cur_wanted = false; cur_pred_idx = -1;
+                cur_wanted = false; cur_pred_idx = -1; cur_col = nullptr;
                 const uint8_t first = buffer[key_start];
                 for (const WantedColumn& w : *proj->columns) {
                     if (key_width == w.len && first == w.first &&
                         std::memcmp(buffer + key_start, w.name, w.len) == 0) {
-                        cur_wanted = true; cur_pred_idx = w.pred_idx; break;
+                        cur_wanted = true; cur_pred_idx = w.pred_idx; cur_col = &w; break;
                     }
                 }
             }
@@ -390,8 +602,22 @@ struct MapBuilder {
         state = tr.next_state;
     }
 
-    inline void finish(bool emit_trailing) {
-        if (emit_trailing && rs.spans.size() > record_start()) bank_record();
+    inline void finish() {
+        // A record with committed field-spans but no closing brace by the time the scan
+        // ends is truncated, not complete -- a record that closed normally already
+        // banked via Action::PUSH_RECORD, so record_start() == spans.size() here and this
+        // is a no-op for it (see commit_field()/bank_record()). What reaches this branch
+        // is genuine end-of-file mid-record, OR (before the raw-newline check above
+        // existed) a threaded chunk boundary (interpret_jsonl_threaded's own newline
+        // scan is exactly as JSON-unaware as this one used to be) landing on a malformed
+        // embedded newline. Previously this unconditionally banked the fragment as if it
+        // were a real row -- the second, silent source (alongside the raw-newline case
+        // above) of the extra/garbage rows described in
+        // tests/performance/jsonbench/README.md's "Known data-quality defect" section.
+        if (rs.spans.size() > record_start()) {
+            flag_malformed(cur_record_start_pos);
+            discard_record();
+        }
     }
 };
 }  // namespace
@@ -401,7 +627,7 @@ RecordSet build_map(
     size_t buffer_length,
     const std::vector<MarkerPosition>& markers,
     const MapProjection* proj) {
-    MapBuilder b(buffer, proj);
+    MapBuilder b(buffer, static_cast<uint32_t>(buffer_length), proj);
     b.rs.offsets.reserve(markers.size() / 20 + 2);
     b.rs.spans.reserve(markers.size() / 3 + 1);
     const size_t M = markers.size();
@@ -414,14 +640,65 @@ RecordSet build_map(
         // the whole slice, then skip every marker the container swallowed.
         if ((ch == '[' || ch == '{') && b.state == State::EXPECT_VALUE) {
             bool closed = false;
-            const uint32_t close = scan_container(buffer, pos, static_cast<uint32_t>(buffer_length), closed);
-            if (!closed) b.flag_malformed(pos);  // truncated/unterminated array or object
-            if (b.emit_container(pos, close, ch == '[' ? ValueType::Array : ValueType::Object))
-                b.skip_rest = true;
-            b.state = State::EXPECT_SEPARATOR;
-            while (i + 1 < M && markers[i + 1].position <= close) ++i;
+            uint32_t close = 0;
+            const size_t close_idx = scan_container_markers(
+                markers, i, static_cast<uint32_t>(buffer_length), closed, close);
+            if (!closed) {
+                // Truncated/malformed container value (ran out of buffer, or a raw
+                // newline inside a nested string -- see scan_container) means this
+                // record's JSON was never valid. The whole record must be dropped, not
+                // banked with this one field's value silently replaced by a truncated
+                // slice -- a wrong-but-plausible-looking row is worse than no row. Do
+                // NOT emit_container() the truncated slice: that would stage a bogus
+                // field value AND leave the FSA mid-record on garbage.
+                b.flag_malformed(pos);
+                b.discard_record();
+                b.state = State::EXPECT_RECORD_START;
+                b.resync_from = close;  // resync at the next physical line boundary below
+            } else {
+                // Nested projection: the wanted column named a sub-key inside this
+                // container (`commit.collection`), so emit a span for the SUB-VALUE and
+                // never materialise the container itself. A miss — key absent, value JSON
+                // null, or the container is an array — is a NULL cell, which is what
+                // commit_field() records when cur_wanted is left false, matching what the
+                // downstream extraction would have produced for the same path.
+                if (b.cur_wanted && b.cur_col && b.cur_col->sub_len) {
+                    uint32_t nstart = 0, nwidth = 0;
+                    ValueType ntype = ValueType::Unknown;
+                    if (find_nested_field(buffer, markers, i, close_idx,
+                                          b.cur_col->sub, b.cur_col->sub_len,
+                                          b.cur_col->sub_first, nstart, nwidth, ntype)) {
+                        if (b.emit_container(nstart, nstart + nwidth - 1, ntype))
+                            b.skip_rest = true;
+                    } else {
+                        // Absent/null: still counts as this wanted column being resolved,
+                        // so minimal-extent can stop the record on schedule. commit_field
+                        // is bypassed (no span) but the ordinal must still advance.
+                        if (b.miss_field()) b.skip_rest = true;
+                    }
+                } else if (b.emit_container(pos, close, ch == '[' ? ValueType::Array : ValueType::Object)) {
+                    b.skip_rest = true;
+                }
+                b.state = State::EXPECT_SEPARATOR;
+                i = close_idx;  // every marker the container swallowed is now behind us
+            }
         } else {
             b.step(pos, ch);
+        }
+        // A malformed record was detected (here or inside step()): recover at the next
+        // PHYSICAL line boundary. Deliberately a dumb byte scan for '\n' rather than
+        // resuming the FSA on the corrupt tail -- see MapBuilder::resync_from. Markers
+        // inside the skipped span are dropped wholesale, so no `{` in the garbage can
+        // start a phantom record.
+        if (b.resync_from != MapBuilder::NO_RESYNC) {
+            uint32_t r = b.resync_from + 1;
+            while (r < static_cast<uint32_t>(buffer_length) && buffer[r] != '\n') ++r;
+            b.resync_from = MapBuilder::NO_RESYNC;
+            b.state = State::EXPECT_RECORD_START;
+            b.line_start = r + 1;
+            b.saw_open_brace_since_newline = false;
+            while (i + 1 < M && markers[i + 1].position <= r) ++i;
+            continue;
         }
         // Minimal extent: an inline predicate failed (discard the record) OR all wanted
         // columns are found (bank it) — either way jump to the record's newline, skipping
@@ -434,18 +711,31 @@ RecordSet build_map(
             while (i + 1 < M && markers[i + 1].marker_type != NL) ++i;
         }
     }
-    b.finish(true);
+    b.finish();
     if (b.malformed_found) { b.rs.malformed = true; b.rs.malformed_pos = b.malformed_at; }
+    b.rs.malformed_count = b.malformed_count;
     return std::move(b.rs);
 }
 
-std::vector<std::string> first_record_keys(const RecordSet& rs, const uint8_t* buffer) {
+std::vector<std::string> sample_record_keys(
+    const RecordSet& rs, const uint8_t* buffer, size_t sample_records) {
     std::vector<std::string> keys;
-    if (rs.num_records() == 0) return keys;
-    const RecordView rec = rs[0];
-    keys.reserve(rec.size());
-    for (const FieldSpan& f : rec)
-        keys.emplace_back(reinterpret_cast<const char*>(buffer + f.key_start), f.key_width);
+    const size_t limit = std::min(sample_records, rs.num_records());
+    if (limit == 0) return keys;
+
+    // Views into `buffer`, which outlives this call — the returned strings own their bytes,
+    // the set only dedupes while we build.
+    std::unordered_set<std::string_view> seen;
+    keys.reserve(rs[0].size());
+    seen.reserve(rs[0].size());
+
+    for (size_t r = 0; r < limit; ++r) {
+        for (const FieldSpan& f : rs[r]) {
+            const std::string_view key(
+                reinterpret_cast<const char*>(buffer + f.key_start), f.key_width);
+            if (seen.insert(key).second) keys.emplace_back(key);
+        }
+    }
     return keys;
 }
 

@@ -171,30 +171,93 @@ VecResult draken_json_extract(void* ctx, const DrakenVector* json_vec, const Dra
             return draken_error_sentinel("draken_json_extract: unexpected sub-op code");
 
         const bool text_mode = (c->sub_op_code == kExtrJsonKey);
+        // The path arrives fully resolved (tokens, escapes applied, indices parsed)
+        // from kernel_alloc_extraction_ctx — this only points the loop at it.
+        draken::ops::JsonNav nav;
+        nav.tokens  = reinterpret_cast<const draken::ops::JsonPtrToken*>(
+                          extraction_ctx_tokens(c));
+        nav.ntokens = c->ntokens;
+        nav.blob    = extraction_ctx_blob(c);
+        nav.mode    = 0;
         auto rows = draken::ops::extract_rows(
-            json_vec, extraction_ctx_nav(c), static_cast<size_t>(c->nav_len),
-            /*mode=*/0, text_mode,
+            json_vec, nav, text_mode,
             text_mode ? "vector_json_extract_text" : "vector_json_extract");
         return finalize(rows);
     });
 }
 
-// Top-level object key via yyjson_obj_get. Registered but currently unreferenced by
-// the binder (no sub-op maps to it); kept as a real kernel rather than a stub so a
-// future MapAccess-on-JSON lowering has a correct target.
-VecResult draken_pointer_extract(void* ctx, const DrakenVector* ptr_vec, const DrakenVector*) {
-    DRAKEN_KERNEL_TRY({
-        auto* c = static_cast<const extraction_ctx*>(ctx);
-        if (!c || !ptr_vec)
-            return draken_error_sentinel("draken_pointer_extract: null ctx or operand");
-        if (!is_string_family(ptr_vec->type) && ptr_vec->type != DRAKEN_VARIANT)
+// N `->`/`->>` extractions over ONE parse per row (sibling-extraction fusion).
+//
+// NOT a VM kernel — it does not take or return the kernel_fn_t shape and is not in
+// the registry. It backs a physical operator (JsonExtractMultiOperator), because a
+// VM instruction pops one operand and pushes one result, while this produces N
+// columns from one. The compiler emits it when it finds 2+ extractions on the same
+// operand at the same point in the plan; each consumer then reads a column.
+//
+// `ctxs` are ordinary extraction_ctx blocks — the SAME ones a single extraction
+// binds, one per path, so no separate bind-time path machinery exists to drift.
+//
+// Returns nullptr on success, having filled out[0..n-1]. On failure returns the
+// error message and fills nothing; the pointer is this thread's error buffer, valid
+// only until the next kernel call on this thread (same contract as
+// VecResult::error_msg — copy it before then).
+const char* draken_json_extract_multi(const void* const* ctxs, uint32_t n,
+                                      const DrakenVector* json_vec, VecResult* out) {
+    try {
+        if (!ctxs || !json_vec || !out || n == 0u)
             return draken_error_sentinel(
-                "draken_pointer_extract: operand must be a string-family or VARIANT vector");
-        auto rows = draken::ops::extract_rows(
-            ptr_vec, extraction_ctx_nav(c), static_cast<size_t>(c->nav_len),
-            /*mode=*/1, /*text_mode=*/false, "vector_map_access");
-        return finalize(rows);
-    });
+                "draken_json_extract_multi: null ctx array, operand or output").error_msg;
+        if (!is_string_family(json_vec->type) && json_vec->type != DRAKEN_VARIANT)
+            return draken_error_sentinel(
+                "draken_json_extract_multi: operand must be a string-family or "
+                "VARIANT vector").error_msg;
+
+        std::vector<draken::ops::JsonNav> navs(n);
+        std::vector<bool> text_modes(n);
+        for (uint32_t k = 0u; k < n; ++k) {
+            const auto* c = static_cast<const extraction_ctx*>(ctxs[k]);
+            if (!c)
+                return draken_error_sentinel(
+                    "draken_json_extract_multi: null ctx entry").error_msg;
+            if (c->sub_op_code != kExtrJsonPtr && c->sub_op_code != kExtrJsonKey)
+                return draken_error_sentinel(
+                    "draken_json_extract_multi: every path must be a `->` or `->>` "
+                    "sub-op").error_msg;
+            navs[k].tokens  = reinterpret_cast<const draken::ops::JsonPtrToken*>(
+                                  extraction_ctx_tokens(c));
+            navs[k].ntokens = c->ntokens;
+            navs[k].blob    = extraction_ctx_blob(c);
+            navs[k].mode    = 0;
+            text_modes[k]   = (c->sub_op_code == kExtrJsonKey);
+        }
+
+        // std::vector<bool> is a bitfield, so it cannot hand out a `const bool*`.
+        std::vector<char> tm_bytes(n);
+        for (uint32_t k = 0u; k < n; ++k) tm_bytes[k] = text_modes[k] ? 1 : 0;
+
+        std::vector<draken::ops::StringRows> rows(n);
+        draken::ops::extract_rows_multi(
+            json_vec, navs.data(), reinterpret_cast<const bool*>(tm_bytes.data()),
+            n, rows.data(), "vector_json_extract_multi");
+
+        // Consolidate each path's buffers into the single owned block a string
+        // DrakenVector requires. finalize() CONSUMES them, success or failure; a
+        // failure part-way leaves the already-consolidated results for the caller
+        // to free, which it does on seeing a non-null return.
+        for (uint32_t k = 0u; k < n; ++k) {
+            out[k] = finalize(rows[k]);
+            if (out[k].data == nullptr) {
+                for (uint32_t j = k + 1u; j < n; ++j) draken::ops::sr_free(rows[j]);
+                return out[k].error_msg ? out[k].error_msg
+                                        : "draken_json_extract_multi: consolidation failed";
+            }
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what()).error_msg;
+    } catch (...) {
+        return draken_error_sentinel("draken_json_extract_multi: unknown error").error_msg;
+    }
 }
 
 }  // extern "C"

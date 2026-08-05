@@ -69,8 +69,7 @@ static const DrakenVector* unwrap_str_vec(nb::object obj, const char* fn) {
 
 static nb::object impl_extract(
     nb::object  docs_obj,
-    const char* nav_arg,   // RFC 6901 pointer (mode 0) or raw key (mode 1)
-    size_t      nav_len,
+    const draken::ops::JsonPtrPath& path,  // resolved before the row loop
     int         mode,
     bool        text_mode, // false: `->` → VARIANT (JSON text); true: `->>` → NVARCHAR text
     const char* fn_name)
@@ -78,9 +77,19 @@ static nb::object impl_extract(
     // The row loop lives in draken/ops/json_extract.h — the SAME code the C-ABI
     // kernel (draken/ops/kernels/extraction.cpp) runs. This wrapper only unwraps
     // the Python operand and re-wraps the produced buffers as a Vector.
+    //
+    // The kernel gets its resolved path from extraction_ctx (built once per bind);
+    // here there is no bind step, so the equivalent resolution happens once per
+    // call — still outside the row loop, which is the property that matters.
+    draken::ops::JsonNav nav;
+    nav.tokens  = path.tokens.data();
+    nav.ntokens = static_cast<uint32_t>(path.tokens.size());
+    nav.blob    = path.blob.data();
+    nav.mode    = mode;
+
     const DrakenVector* dv = unwrap_str_vec(docs_obj, fn_name);
     draken::ops::StringRows rows =
-        draken::ops::extract_rows(dv, nav_arg, nav_len, mode, text_mode, fn_name);
+        draken::ops::extract_rows(dv, nav, text_mode, fn_name);
 
     PyObject* out = draken_vector_own_string(
         rows.slots, rows.arena, rows.arena_len, rows.validity, rows.length, rows.type);
@@ -100,11 +109,13 @@ static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes, bool 
     const char* raw = path_bytes.c_str();
     const size_t raw_len = path_bytes.size();
 
-    // Convert dot-notation to RFC 6901 JSON Pointer once, before the row loop.
-    std::string json_ptr = draken::ops::dotpath_to_jsonptr(raw, raw_len);
+    // Resolve the path once, before the row loop: dot-notation → RFC 6901 pointer
+    // → tokens with escapes applied and array indices parsed.
+    const std::string json_ptr = draken::ops::dotpath_to_jsonptr(raw, raw_len);
+    const draken::ops::JsonPtrPath path =
+        draken::ops::tokenize_jsonptr(json_ptr.data(), json_ptr.size());
 
-    return impl_extract(docs, json_ptr.c_str(), json_ptr.size(),
-                        0 /* PtrGet */, text_mode,
+    return impl_extract(docs, path, 0 /* token walk */, text_mode,
                         text_mode ? "vector_json_extract_text" : "vector_json_extract");
 }
 
@@ -113,8 +124,11 @@ static nb::object impl_json_extract(nb::object docs, nb::bytes path_bytes, bool 
 // ---------------------------------------------------------------------------
 
 static nb::object impl_map_access(nb::object docs, nb::bytes key_bytes) {
-    return impl_extract(docs, key_bytes.c_str(), key_bytes.size(),
-                        1 /* ObjGet */, false /* VARIANT */, "vector_map_access");
+    // Verbatim top-level key: no pointer syntax, no escape resolution, never an
+    // array index.
+    const draken::ops::JsonPtrPath path =
+        draken::ops::single_key_path(key_bytes.c_str(), key_bytes.size());
+    return impl_extract(docs, path, 1 /* ObjGet */, false /* VARIANT */, "vector_map_access");
 }
 
 // ---------------------------------------------------------------------------

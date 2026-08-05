@@ -691,6 +691,13 @@ cdef inline bytes _dict_str_at(parquet_reader.DecodedColumn& col, Py_ssize_t idx
     return (<char*>(base + start))[:ln]
 
 
+cdef inline bytes _dense_str_at(parquet_reader.DecodedColumn& col, Py_ssize_t idx):
+    cdef uint32_t start = col.string_offsets[idx]
+    cdef int32_t ln = col.string_lens[idx]
+    cdef const uint8_t* base = col.string_arena.data()
+    return (<char*>(base + start))[:ln]
+
+
 cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
                       bint from_int32):
     # FLATTEN-TO-PYTHON BY DESIGN (see module banner). This is rugo's standalone
@@ -994,7 +1001,7 @@ cdef list _string_list(parquet_reader.DecodedColumn& col, int32_t num_rows):
     for i in range(num_rows):
         if has_v and not _row_valid(col, i):
             continue
-        out[i] = bytes(col.string_values[vi])
+        out[i] = _dense_str_at(col, vi)
         vi += 1
     return out
 
@@ -1372,7 +1379,7 @@ cdef list _array_leaf_values(parquet_reader.DecodedColumn& col):
             elif has_dict:
                 vals.append(_dict_str_at(col, col.dict_indices[vi]).decode("utf-8")); vi += 1
             else:
-                vals.append(bytes(col.string_values[vi]).decode("utf-8")); vi += 1
+                vals.append(_dense_str_at(col, vi).decode("utf-8")); vi += 1
     elif col_type == b"float64":
         for i in range(n_levels):
             if col.def_levels[i] != max_def:

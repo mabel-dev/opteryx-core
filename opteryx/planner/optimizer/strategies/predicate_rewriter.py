@@ -36,6 +36,8 @@ CONCAT(x, y, z)                             → x || y || z (CONCAT to operators
 CONCAT_WS(x, y, z)                          → y || x || z (CONCAT_WS to operators)
 x = 'a' OR x = 'b' OR x = 'c'               → x IN ('a', 'b', 'c') (for ORed Equals conditions)
 a = ANY(z) OR b = ANY(z) OR c = ANY(z)      → (a, b, c) @> z
+addr <<= '10.0.0.0/8'                       → addr >= base AND addr <= broadcast (so it prunes)
+addr <<= '1.2.3.4/32'                       → addr = 16909060 (a /32 is one host)
 
 #### IN THE PREDICATE ORDERING STRATEGY
 a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
@@ -486,7 +488,6 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
             # (b'x' -> "b'x'") instead of round-tripping them.
             values = sorted(set(data["values"]), key=str)
             node.value = "InList"
-            node.right.display_values = [str(v) for v in values]
             node.right.value = values
             # Phase 2: build ARRAY ColumnType from old element type.
             _old_elem_ct_3 = node.right.type
@@ -857,6 +858,108 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
+    """
+    Rewrite IPv4 CIDR containment against a LITERAL network into a range.
+
+        addr <<= '10.0.0.0/8'   → addr >= 167772160 AND addr <= 184549375
+        '10.0.0.0/8' >>= addr   → the same (the operands are order-agnostic)
+        addr <<= '1.2.3.4/32'   → addr = 16909060
+
+    Because the 32 bits ARE the address (draken/core/ipv4.h), a network is
+    exactly the closed unsigned interval [base, broadcast]: `(ip & mask) == base`
+    and `base <= ip <= broadcast` select precisely the same rows.
+
+    This is the difference between a full scan and a pruned one. Containment is
+    otherwise an opaque native kernel call, so it can only run AFTER every row
+    has been read and materialised: it is not in `_SIMPLE_COMPARISON_OPS`, so it
+    never reaches the connector, never prunes a manifest or a row group, and has
+    no selectivity estimate beyond the flat default. A range on the underlying
+    UINT32 gets all of that for free, which for a selective network over a large
+    partitioned table decides how much data is read at all — the dominant cost.
+
+    The bounds come from draken's own parser via `ipv4_parse_cidr`, never from a
+    parser written here: the planner and the kernel disagreeing about which
+    addresses '10.0.0.0/8' contains would be a silently-wrong ACL. An
+    unparseable CIDR is left ALONE rather than raised on — this is an
+    optimisation, and declining leaves the kernel to raise the error it always
+    raised, at the point it always raised it.
+
+    NULL: the kernel yields FALSE for a NULL address where the range yields NULL.
+    WHERE discards both, and this strategy only ever visits Filter conditions
+    (see PredicateRewriteStrategy.visit), so the distinction is unobservable. If
+    this is ever reached from a projection, that stops being true.
+    """
+    if predicate.node_type != NodeType.COMPARISON_OPERATOR:
+        return predicate
+    if predicate.value not in ("IPContainedBy", "IPContains"):
+        return predicate
+
+    # Identify the literal (network) side by NODE TYPE rather than by which
+    # operator spelling was used — `<<=` and `>>=` are the same predicate with
+    # the operands swapped, exactly as the kernel treats them.
+    left, right = predicate.left, predicate.right
+    if right.node_type == NodeType.LITERAL and left.node_type != NodeType.LITERAL:
+        addr_node, cidr_node = left, right
+    elif left.node_type == NodeType.LITERAL and right.node_type != NodeType.LITERAL:
+        addr_node, cidr_node = right, left
+    else:
+        # Both literals (constant folding's job) or neither (a column of CIDRs):
+        # the kernel remains the only thing that can evaluate this.
+        return predicate
+
+    if not isinstance(cidr_node.value, (str, bytes)):
+        return predicate
+
+    # An IPv4 column's category IS INTEGER (the descriptor is not visible to
+    # LogicalCategory), so this is what "the address side" means here. The binder
+    # runs first and only admits that pairing, but the range is only equivalent
+    # to the mask-and-compare for an integer, so it is checked rather than
+    # assumed — the cost is one comparison at plan time.
+    addr_cat = getattr(getattr(addr_node, "schema_column", None), "category", None)
+    if addr_cat != LogicalCategory.INTEGER:
+        return predicate
+
+    from draken.draken_native import ipv4_parse_cidr
+
+    try:
+        base, upper, prefix = ipv4_parse_cidr(cidr_node.value)
+    except ValueError:
+        # Not a CIDR we can bound. Leave the predicate for the kernel to reject
+        # at runtime with its own message — see the docstring.
+        return predicate
+
+    telemetry.optimization_predicate_rewriter_cidr_to_range += 1
+
+    # A /32 is a single host: one equality prunes better than two bounds.
+    if prefix == 32:
+        predicate.value = "Eq"
+        predicate.left = addr_node
+        predicate.right = build_literal_node(int(base))
+        return predicate
+
+    lower_pred = Node(
+        node_type=NodeType.COMPARISON_OPERATOR,
+        value="GtEq",
+        left=addr_node,
+        right=build_literal_node(int(base)),
+        schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
+    )
+    upper_pred = Node(
+        node_type=NodeType.COMPARISON_OPERATOR,
+        value="LtEq",
+        left=addr_node,
+        right=build_literal_node(int(upper)),
+        schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
+    )
+
+    predicate.node_type = NodeType.AND
+    predicate.value = "And"
+    predicate.left = lower_pred
+    predicate.right = upper_pred
+    return predicate
+
+
 def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry):
     """
     Rewrite `integer_expr <op> float_literal` to an equivalent integer comparison.
@@ -1093,6 +1196,15 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
         if predicate.node_type != NodeType.COMPARISON_OPERATOR:
             return predicate
 
+    # Rewrite `addr <<= '10.0.0.0/8'` to the equivalent range on the underlying
+    # UINT32, so the predicate can prune at the scan instead of being an opaque
+    # kernel call over every materialised row. Becomes an AND of two bounds
+    # (or an Eq for a /32), so return early once it is no longer a comparison.
+    if predicate.node_type == NodeType.COMPARISON_OPERATOR:
+        predicate = rewrite_cidr_to_range(predicate, telemetry)
+        if predicate.node_type != NodeType.COMPARISON_OPERATOR:
+            return predicate
+
     if predicate.right.type == _lt.VARCHAR:
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
             if "%%" in predicate.right.value:
@@ -1260,7 +1372,14 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
             and len(predicate.right.value) == 1
         ):
             telemetry.optimization_predicate_rewriter_in_to_equals += 1
-            return dispatcher["rewrite_in_to_eq"](predicate)
+            predicate = dispatcher["rewrite_in_to_eq"](predicate)
+            # The rewrite may hand back a plain numeric-vs-numeric Eq (e.g. an
+            # INTEGER column against a FLOAT literal) that still needs the
+            # cross-numeric-family handling (rewrite_int_vs_fractional_const)
+            # a directly-written `col = 1.5` would have gone through above —
+            # re-enter so it gets the same treatment instead of reaching the
+            # native kernel as a raw, unnormalised Eq.
+            return _rewrite_predicate(predicate, telemetry)
 
     if (
         predicate.node_type == NodeType.COMPARISON_OPERATOR

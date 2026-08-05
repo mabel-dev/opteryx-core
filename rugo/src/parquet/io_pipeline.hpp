@@ -498,9 +498,9 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     if (t == "float64" && _fixed_eligible(d.float64_values.size(), n, nullable)) return DK_FLOAT64;
     if (t == "boolean" && _fixed_eligible(d.boolean_values.size(), n, nullable)) return DK_BOOL;
     // Stage 4b: plain (non-dict, non-RLE, non-list) byte_array → direct dense
-    // VARCHAR. string_values is one entry per row (incl null rows); only take the
-    // positional case so the per-row slot build below is exact.
-    if ((t == "string" || t == "byte_array") && d.string_values.size() == n)
+    // VARCHAR. The string arena triple is one entry per row (incl null rows);
+    // only take the positional case so the per-row slot build below is exact.
+    if ((t == "string" || t == "byte_array") && d.string_lens.size() == n)
         return DK_VARCHAR;
     return DK_POOL;
 }
@@ -508,8 +508,9 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
 // Build a positional DrakenStringSlot array (+ long-string arena + validity) for a
 // plain byte_array column, mirroring the Cython _build_string_plain EXACTLY: one
 // slot per row; strings > STR_INLINE_MAX live in the arena (hash from the bytes),
-// inline strings live in the slot; null rows get an init-null slot. string_values
-// has one entry per row. Allocates via `alloc`; frees what it took on failure.
+// inline strings live in the slot; null rows get an init-null slot. The string
+// arena triple has one entry per row. Allocates via `alloc`; frees what it took
+// on failure.
 // `length_only`: the planner proved every read of this column is
 // length-answerable, so long-form payload bytes are never read. Each value's
 // true length (and its free 4-byte prefix) is still recorded; only the payload
@@ -522,14 +523,17 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
     const uint8_t* nb = nullable ? d.valid_bits.data() : nullptr;
-    const auto& vals = d.string_values;
+    const uint8_t*  vbytes = d.string_arena.data();
+    const uint32_t* voffs  = d.string_offsets.data();
+    const int32_t*  vlens  = d.string_lens.data();
+    const size_t    vcount = d.string_lens.size();
 
     // Pass 1: arena bytes (long, non-null strings only).
     size_t total_arena = 0;
     if (!length_only) {
         for (uint32_t i = 0; i < n; ++i) {
             if (nullable && !((nb[i >> 3] >> (i & 7)) & 1)) continue;
-            const size_t slen = (i < vals.size()) ? vals[i].size() : 0u;
+            const size_t slen = (i < vcount) ? (size_t)vlens[i] : 0u;
             if (slen > STR_INLINE_MAX) total_arena += slen;
         }
     }
@@ -564,9 +568,8 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
             if (keyhash) keyhash[i] = 0u;   // null row: seed unused
             continue;
         }
-        const std::string& s = vals[i];
-        const uint8_t* sp = reinterpret_cast<const uint8_t*>(s.data());
-        const uint32_t slen = static_cast<uint32_t>(s.size());
+        const uint8_t* sp = vbytes + voffs[i];
+        const uint32_t slen = static_cast<uint32_t>(vlens[i]);
         if (slen > STR_INLINE_MAX && length_only) {
             if (want_seed) draken::ops::draken_build_string_slot_seed(
                                slot, sp, slen, STR_ELIDED_PAYLOAD_OFFSET, &keyhash[i]);

@@ -495,47 +495,21 @@ class Session(DataFrame):
         """
         from draken.morsels.morsel import Morsel
 
-        from opteryx.types import logical_type as _lt
-        from draken.draken_native import DrakenType as _DT
-        _DRAKEN_TO_LT = {
-            _DT.INT8: _lt.INT8, _DT.INT16: _lt.INT16,
-            _DT.INT32: _lt.INT32, _DT.INT64: _lt.INT64,
-            _DT.FLOAT32: _lt.FLOAT32, _DT.FLOAT64: _lt.FLOAT64,
-            _DT.DATE32: _lt.DATE, _DT.TIMESTAMP64: _lt.TIMESTAMP(),
-            _DT.INTERVAL: _lt.INTERVAL, _DT.BOOL: _lt.BOOLEAN,
-            _DT.VARCHAR: _lt.VARCHAR, _DT.NVARCHAR: _lt.NVARCHAR,
-            _DT.VARIANT: _lt.VARIANT, _DT.ARRAY: _lt.ARRAY(_lt.VARIANT),
-            _DT.VARBINARY: _lt.VARBINARY, _DT.NULL: _lt.NULL,
-        }
-
-        from draken.draken_native import TimestampUnit as _TU
-        _STR_TO_TU = {
-            "s": _TU.SECONDS, "ms": _TU.MILLISECONDS,
-            "us": _TU.MICROSECONDS, "ns": _TU.NANOSECONDS,
-        }
+        from opteryx.types.logical_type import column_type_from_vector
 
         def _schema_from_morsel(morsel: Morsel):
             from opteryx.types.schema import mint_column_identity
             columns = []
-            for name, dtype in zip(morsel.column_names, morsel.column_types):
+            for name in morsel.column_names:
                 col_name = name.decode("utf-8") if isinstance(name, bytes) else name
-                # DECIMAL/TIMESTAMP carry precision/scale/unit out-of-band on the
-                # vector's logical_type (the DrakenType tag alone can't). Recover them
-                # from the column's descriptor so the result schema reports the true
-                # parameterized type instead of a bare/defaulted one (a plain
-                # DrakenType→LogicalType map has no DECIMAL entry and a unit-less
-                # TIMESTAMP). `._nb` is the sanctioned shim access point (E.24).
-                if dtype == _DT.DECIMAL or dtype == _DT.DECIMAL128:
-                    nb = morsel.column(name)._nb
-                    prec = nb.logical_type_precision
-                    scale = nb.logical_type_scale
-                    ct = (_lt.DECIMAL(prec, scale) if prec is not None and scale is not None
-                          else _DRAKEN_TO_LT.get(dtype, _lt.VARCHAR))
-                elif dtype == _DT.TIMESTAMP64:
-                    unit = morsel.column(name)._nb.logical_type_unit
-                    ct = _lt.TIMESTAMP(unit=_STR_TO_TU[unit]) if unit in _STR_TO_TU else _lt.TIMESTAMP()
-                else:
-                    ct = _DRAKEN_TO_LT.get(dtype, _lt.VARCHAR)
+                # A vector's DrakenType tag is only half of its type — the unit of a
+                # TIMESTAMP, the (precision, scale) of a DECIMAL and the IPv4-ness of a
+                # UINT32 all live on the descriptor beside it. `column_type_from_vector`
+                # is the single reconstructor for that pair; keeping a local
+                # tag->type map here is what let the result schema report a bare
+                # UINT32 for an address column (and, via its VARCHAR default, a
+                # STRING for every unsigned integer column).
+                ct = column_type_from_vector(morsel.column(name))
                 columns.append(SchemaColumn(name=col_name, column_type=ct, identity=mint_column_identity("table", col_name)))
             return RelationSchema(name="table", columns=columns)
 

@@ -32,14 +32,27 @@ def _write(table, tmp, **kwargs):
 
 
 def _read_all(path, columns, **pipeline_kwargs):
-    """Read every row group via the C++ pipeline; return {col: [values...]}."""
+    """Read every row group via the C++ pipeline; return {col: [values...]} in file order.
+
+    The pipeline delivers row groups in COMPLETION order, at any decode_workers
+    setting: a consumer blocked in wait_and_get_result claims a pending item and
+    decodes it itself rather than waiting (the Gap #3 Phase 2b deadlock fix in
+    io_pipeline.hpp), so the consumer thread always races the pool workers.
+    decode_workers=1 does not mean file order and never did after that fix.
+
+    So reassemble by the (path, rg_idx) the pipeline reports. This keeps the
+    assertions exact and row-aligned — strictly stronger than a multiset compare,
+    and it still catches a genuinely missing or short row group, which a caller
+    that discards rg_idx cannot distinguish from reordering.
+    """
     from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc
 
-    out = {c: [] for c in columns}
-    for _scan_rg, rg in iter_row_groups_ipc(None, [path], columns, **pipeline_kwargs):
-        for c in columns:
-            out[c].extend(rg[c.encode("utf-8")].to_pylist())
-    return out
+    by_rg = {}
+    for scan_rg, rg in iter_row_groups_ipc(None, [path], columns, **pipeline_kwargs):
+        key = (scan_rg.path, scan_rg.rg_idx)
+        assert key not in by_rg, f"row group {key} delivered twice"
+        by_rg[key] = {c: rg[c.encode("utf-8")].to_pylist() for c in columns}
+    return {c: [v for key in sorted(by_rg) for v in by_rg[key][c]] for c in columns}
 
 
 def test_mixed_types_with_nulls_roundtrip():
@@ -63,8 +76,8 @@ def test_mixed_types_with_nulls_roundtrip():
         path = _write(
             table, tmp, row_group_size=1000, use_dictionary=["lowcard"], compression="zstd"
         )
-        # decode_workers=1 so row groups arrive in file order — lets us assert
-        # exact, row-aligned equality (multi-worker yields completion order).
+        # _read_all reassembles by rg_idx, so this is exact, row-aligned equality
+        # regardless of the completion order the pipeline delivers in.
         got = _read_all(path, cols, decode_workers=1)
 
     expected = {c: table.column(c).to_pylist() for c in cols}
@@ -81,31 +94,44 @@ def test_high_cardinality_strings_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write(table, tmp, row_group_size=4000, compression="zstd")
         # decode_workers=4 deliberately exercises concurrent reserve into the
-        # pool; row groups arrive in completion order, so compare as a multiset
-        # (still catches any value corruption from a size/write divergence).
+        # pool; _read_all restores file order from rg_idx, so compare exactly.
         got = _read_all(path, ["s"], decode_workers=4)
-    assert sorted(got["s"]) == sorted(vals)
+    assert got["s"] == vals
 
 
 def test_pool_exhaustion_is_clean_error():
     """When the pool cannot fit a column, the worker surfaces a clean error
     rather than crashing or hanging. Drives the low-level CppIOPipeline with a
-    deliberately tiny pool."""
-    import pytest
+    deliberately tiny pool.
 
+    The column MUST be a shape that still serializes through the pool. WP-6b
+    routes fixed-width columns and plain/dict strings — nullable or not — to the
+    direct path (a worker-allocated Draken buffer, zero pool bytes), where a tiny
+    pool is never touched and there is nothing to exhaust. A LIST column is
+    unconditionally DK_POOL (direct_kind_for bails on a non-empty rep_levels),
+    so it still exercises the reserve failure.
+
+    """
     from opteryx.connectors.parquet_io.pool_reader import (
         CppIOPipeline,
         fetch_column_chunk_info,
     )
 
-    n = 200000
-    table = pa.table({"v": pa.array(list(range(n)), type=pa.int64())})
+    n = 100000
+    table = pa.table(
+        {
+            "v": pa.array(
+                [[f"cat_{i % 50}", f"cat_{(i + 1) % 50}"] for i in range(n)],
+                type=pa.list_(pa.string()),
+            )
+        }
+    )
     with tempfile.TemporaryDirectory() as tmp:
-        path = _write(table, tmp, row_group_size=n)  # one big row group
+        path = _write(table, tmp, row_group_size=n, use_dictionary=True)  # one big row group
         col_info = fetch_column_chunk_info(path, 0, ["v"])
         stats = [col_info["v"]]
 
-        # Pool far too small to hold the serialized int64 column (~1.6MB).
+        # Pool far too small to hold the serialized list column (megabytes).
         pipe = CppIOPipeline(decode_workers=1, queue_capacity=4, pool_size=4096)
         try:
             pipe.submit_work(path, 0, ["v"], stats)
@@ -115,6 +141,143 @@ def test_pool_exhaustion_is_clean_error():
             assert "exhaust" in result["error"].lower(), result["error"]
         finally:
             pipe.close()
+
+
+def test_column_chunk_info_feeds_submit_work_without_dictionary_page():
+    """fetch_column_chunk_info's output must be directly consumable by
+    submit_work — they are two halves of one public API.
+
+    They disagreed on how to spell "absent": the reader emits None, rugo's
+    ColumnStats uses a -1 sentinel. submit_work's `.get(key, -1)` default never
+    fires on a present-but-None value, so every column WITHOUT a dictionary page
+    (any plain-encoded column) raised `TypeError: an integer is required` at
+    submission. Covers plain and dict, compressed and not, nullable and not.
+    """
+    from opteryx.connectors.parquet_io.pool_reader import (
+        CppIOPipeline,
+        fetch_column_chunk_info,
+    )
+
+    n = 20000
+    cases = {
+        "plain_i64": (pa.array(list(range(n)), type=pa.int64()), {"use_dictionary": False}),
+        "plain_str": (pa.array([f"{i:020x}" for i in range(n)]), {"use_dictionary": False}),
+        "plain_f64_nulls": (
+            pa.array([i * 1.5 if i % 3 else None for i in range(n)], type=pa.float64()),
+            {"use_dictionary": False},
+        ),
+        "zstd_plain_i64": (
+            pa.array(list(range(n)), type=pa.int64()),
+            {"use_dictionary": False, "compression": "zstd"},
+        ),
+        "dict_str": (pa.array([f"c{i % 50}" for i in range(n)]), {"use_dictionary": True}),
+    }
+    for label, (arr, write_kwargs) in cases.items():
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(pa.table({"v": arr}), tmp, row_group_size=n, **write_kwargs)
+            col_info = fetch_column_chunk_info(path, 0, ["v"])
+            pipe = CppIOPipeline(decode_workers=1, queue_capacity=4, pool_size=64 * 1024 * 1024)
+            try:
+                pipe.submit_work(path, 0, ["v"], [col_info["v"]])
+                result = pipe.wait_result()
+                assert result is not None, f"{label}: pipeline drained without a result"
+                assert result["success"] is True, f"{label}: {result.get('error')}"
+                got = {**result["ref_ids"], **result["direct"]}[b"v"]
+                assert got.to_pylist() == arr.to_pylist(), f"{label}: values diverged"
+            finally:
+                pipe.close()
+
+
+def test_submit_work_refuses_undecodable_metadata():
+    """The absent-field translation must not invent a value where none is sound:
+    an absent codec would silently decode as UNCOMPRESSED, and an absent
+    definition/repetition level drives the decoder's nullability and list
+    branches. Both refuse at submission."""
+    import pytest
+
+    from opteryx.connectors.parquet_io.pool_reader import CppIOPipeline
+
+    base = {
+        "name": "v",
+        "physical_type": "int64",
+        "compression_codec": "SNAPPY",
+        "encodings": ["PLAIN"],
+        "max_definition_level": 0,
+        "max_repetition_level": 0,
+        "data_page_offset": 4,
+        "dictionary_page_offset": None,  # the legitimately-absent field
+        "total_compressed_size": 10,
+        "num_values": 1,
+    }
+    pipe = CppIOPipeline(decode_workers=1, queue_capacity=4, pool_size=4096)
+    try:
+        for field in ("compression_codec", "max_definition_level", "max_repetition_level"):
+            with pytest.raises(ValueError, match="absent"):
+                pipe.submit_work("/nonexistent.parquet", 0, ["v"], [{**base, field: None}])
+
+        # A NAME neither table recognises (typo, corruption, a future spec value
+        # this build predates) must refuse too — codec_map.get(name, 0) used to
+        # silently coerce it to UNCOMPRESSED; encoding_map's membership filter
+        # used to silently drop it from the list.
+        with pytest.raises(ValueError, match="unrecognised"):
+            pipe.submit_work("/nonexistent.parquet", 0, ["v"], [{**base, "compression_codec": "BOGUS_CODEC"}])
+        with pytest.raises(ValueError, match="unrecognised"):
+            pipe.submit_work(
+                "/nonexistent.parquet", 0, ["v"], [{**base, "encodings": ["PLAIN", "BOGUS_ENC"]}]
+            )
+    finally:
+        pipe.close()
+
+
+def test_submit_work_accepts_every_spec_codec_and_encoding_name():
+    """codec_map/encoding_map must cover every name
+    CompressionCodecToString/EncodingToString (rugo/src/parquet/metadata.cpp)
+    can produce, not just the ones common test fixtures happen to hit —
+    otherwise a real column using LZ4_RAW compression or a DELTA_BINARY_PACKED-
+    only encoding (typical for a non-dictionary int column) either silently
+    mis-decodes (codec coerced to UNCOMPRESSED) or is falsely rejected as
+    unsupported (a recognised-but-unmapped encoding filtered to nothing).
+
+    Recognised-by-spec is not the same as decodable-by-rugo: BROTLI is a valid
+    codec name this layer must accept, but the C++ decoder doesn't support it —
+    that must surface as a clean per-row-group result['success'] is False, not
+    a Python-level exception and not silent corruption.
+    """
+    from opteryx.connectors.parquet_io.pool_reader import CppIOPipeline, fetch_column_chunk_info
+
+    n = 20000
+
+    def submit(arr, **write_kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(pa.table({"v": arr}), tmp, row_group_size=n, **write_kwargs)
+            col_info = fetch_column_chunk_info(path, 0, ["v"])
+            pipe = CppIOPipeline(decode_workers=1, queue_capacity=4, pool_size=64 * 1024 * 1024)
+            try:
+                pipe.submit_work(path, 0, ["v"], [col_info["v"]])
+                return pipe.wait_result()
+            finally:
+                pipe.close()
+
+    # LZ4_RAW: previously missing from codec_map -> coerced to UNCOMPRESSED.
+    r = submit(pa.array(list(range(n)), type=pa.int64()), use_dictionary=False, compression="lz4_raw")
+    assert r["success"] is True, r.get("error")
+    got = {**r["ref_ids"], **r["direct"]}[b"v"]
+    assert got.to_pylist() == list(range(n))
+
+    # DELTA_BINARY_PACKED-only encoding: previously filtered to an empty list ->
+    # falsely reported unsupported by the has_supported_encoding gate downstream.
+    r = submit(
+        pa.array(list(range(n)), type=pa.int64()),
+        use_dictionary=False,
+        column_encoding={"v": "DELTA_BINARY_PACKED"},
+    )
+    assert r["success"] is True, r.get("error")
+
+    # BROTLI: a spec-valid codec name (must be accepted here) that rugo's decoder
+    # does not support (must fail cleanly downstream, not silently or in Python).
+    r = submit(pa.array(list(range(n)), type=pa.int64()), use_dictionary=False, compression="brotli")
+    assert r["success"] is False
+    assert r["error"], "unsupported codec must surface a reason, not a silent empty result"
 
 
 def _serialized_bytes(path, columns, **kw):
@@ -233,6 +396,12 @@ if __name__ == "__main__":
     print("high-cardinality strings: OK")
     test_pool_exhaustion_is_clean_error()
     print("pool exhaustion clean error: OK")
+    test_column_chunk_info_feeds_submit_work_without_dictionary_page()
+    print("chunk info feeds submit_work: OK")
+    test_submit_work_refuses_undecodable_metadata()
+    print("submit_work refuses undecodable metadata: OK")
+    test_submit_work_accepts_every_spec_codec_and_encoding_name()
+    print("submit_work accepts every spec codec/encoding name: OK")
     test_direct_path_nonnull_numeric_roundtrip()
     print("direct path non-null numeric: OK")
     test_direct_path_nullable_bool_decimal_roundtrip()

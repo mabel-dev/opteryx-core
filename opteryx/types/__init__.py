@@ -13,8 +13,13 @@ This module provides:
 from opteryx.types.logical_type import (
     PYTHON_TO_SQL_MAP,
     SQL_TO_PYTHON_MAP,
+    ColumnType,
     LogicalCategory,
+    column_type_from_vector,
     find_compatible_type,
+    morsel_column_types,
+    parse_column_type,
+    serialize_column_type,
 )
 from opteryx.types.scalars._null_handling import (
     count_nulls,
@@ -59,10 +64,15 @@ __all__ = [
     "extract_python_scalar",
     "unwrap_scalar",
     # type vocabulary
+    "ColumnType",
     "LogicalCategory",
     "PYTHON_TO_SQL_MAP",
     "SQL_TO_PYTHON_MAP",
+    "column_type_from_vector",
     "find_compatible_type",
+    "morsel_column_types",
+    "parse_column_type",
+    "serialize_column_type",
     # Null handling primitives
     "is_null",
     "is_nan",

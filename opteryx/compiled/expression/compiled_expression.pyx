@@ -555,7 +555,9 @@ def _pack_membership_blob(vals, int kind, int negate):
     the sortedness is load-bearing, not cosmetic); kind 1 is (u32 len + bytes)
     entries; kind 2 is float64 in GIVEN order (draken_array_contains's only
     consumer never has more than one entry, so there is no binary-search
-    invariant to preserve — draken_in_list has no kind-2 arm). Shared by the
+    invariant to preserve — draken_in_list has no kind-2 arm); kind 3 is uint64
+    SORTED ASCENDING (UNSIGNED int family — a separate kind from 0 so a value
+    above INT64_MAX is never reinterpreted as negative). Shared by the
     IN-list lowering and the ARRAY_CONTAINS_ANY/ALL/single-item lowerings so
     they cannot drift on the byte format or the kind-0 sort invariant.
     Duplicates are collapsed (set()) — membership is unaffected, and for
@@ -567,6 +569,10 @@ def _pack_membership_blob(vals, int kind, int negate):
         items = sorted(set(int(v) for v in vals))
         blob = _struct.pack("<IBBH", len(items), 0, negate, 0)
         return blob + b"".join(_struct.pack("<q", v) for v in items)
+    if kind == 3:
+        items = sorted(set(int(v) for v in vals))
+        blob = _struct.pack("<IBBH", len(items), 3, negate, 0)
+        return blob + b"".join(_struct.pack("<Q", v) for v in items)
     if kind == 2:
         items = sorted(set(float(v) for v in vals))
         blob = _struct.pack("<IBBH", len(items), 2, negate, 0)
@@ -605,6 +611,14 @@ def _build_in_list_blob(values, left_type, int negate):
     if phys in ("INT8", "INT16", "INT32", "INT64") and all(
             isinstance(v, int) and not isinstance(v, bool) for v in vals):
         return _pack_membership_blob(vals, 0, negate)
+    if phys in ("UINT8", "UINT16", "UINT32", "UINT64") and all(
+            isinstance(v, int) and not isinstance(v, bool) for v in vals):
+        # An unsigned column can never hold a value outside [0, UINT64_MAX] —
+        # dropping such literals from the set is exact (they can never match),
+        # not a narrowing. An empty resulting set still lowers correctly: kind-3
+        # with count=0 is "matches nothing" (negate=True → "matches everything").
+        in_range = [v for v in vals if 0 <= v <= 0xFFFFFFFFFFFFFFFF]
+        return _pack_membership_blob(in_range, 3, negate)
     if phys in ("VARCHAR", "NVARCHAR") and all(
             isinstance(v, (str, bytes)) for v in vals):
         return _pack_membership_blob(vals, 1, negate)

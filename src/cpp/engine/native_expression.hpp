@@ -23,6 +23,7 @@
 #include "core/vector_owner.h"
 #include "core/draken_bridge.h"   // draken_vecresult_child_owner_new_c — ARRAY child adoption
 #include "logical_type.h"   // LogicalType / logical_type_intern — descriptor re-attachment
+#include "ops/kernels/extraction_kernels.h"   // draken_json_extract_multi — fused `->`/`->>`
 
 namespace opteryx::engine {
 
@@ -197,6 +198,80 @@ struct ExprMultiProjectOperator : Operator {
             m->columns.push_back(std::move(nc));
             m->names.push_back(out_names[k]);
         }
+        out = std::move(m);
+        return OpResult::EMIT;
+    }
+};
+
+// ---- JsonExtractMultiOperator: N `->`/`->>` columns from ONE parse per row --------
+// Parsing dominates JSON extraction — navigation and emit are noise beside it — so
+// N extractions on the SAME column cost N parses today and barely more than one when
+// fused. The compiler emits this operator when it finds 2+ `->`/`->>` nodes sharing
+// an operand at the same point in the plan (see _fuse_json_extractions in
+// compiler.py); each original node is then rewritten to read one of the appended
+// columns.
+//
+// This is an operator rather than a VM instruction because a VM instruction pops one
+// operand and pushes one result, while this produces N columns from one — a shape
+// BC_EXTRACTION cannot express. The expression VM is untouched.
+//
+// `ctxs` are ordinary extraction_ctx blocks, kept alive by the NativePlan (they are
+// bound exactly as a single extraction's ctx is, so there is no second bind path).
+struct JsonExtractMultiOperator : Operator {
+    int                      src_col_idx;   // resolved at plan time
+    std::vector<void*>       ctxs;          // one extraction_ctx per output
+    std::vector<std::string> out_names;     // one identity per output
+
+    JsonExtractMultiOperator(int src, std::vector<void*> cs,
+                             std::vector<std::string> names)
+        : src_col_idx(src), ctxs(std::move(cs)), out_names(std::move(names)) {}
+
+    std::unique_ptr<OperatorState> make_state() override {
+        return std::make_unique<OperatorState>();
+    }
+
+    OpResult execute(const MorselPtr& in, OperatorState&, MorselPtr& out,
+                     ErrCtx& err) override {
+        if (in->num_rows() == 0) return OpResult::NEED_INPUT;   // same drop as the project ops
+        if (src_col_idx < 0 || static_cast<size_t>(src_col_idx) >= in->columns.size()) {
+            err.code = 1;
+            err.msg = "JsonExtractMultiOperator: source column index out of range";
+            return OpResult::NEED_INPUT;
+        }
+
+        const size_t n = ctxs.size();
+        std::vector<VecResult> results(n);
+        const char* kernel_err = draken_json_extract_multi(
+            ctxs.data(), static_cast<uint32_t>(n),
+            &in->columns[static_cast<size_t>(src_col_idx)].view, results.data());
+        if (kernel_err != nullptr) {
+            err.code = 1;
+            // The kernel's message lives in this thread's error buffer, valid only
+            // until the next kernel call — copy it into ErrCtx's own storage the
+            // same way format_kernel_error does for the expression operators.
+            err.msg = format_kernel_error("JsonExtractMultiOperator: extraction failed",
+                                          0, kernel_err);
+            return OpResult::NEED_INPUT;
+        }
+
+        auto m = std::make_shared<CxxMorsel>();
+        m->columns.reserve(in->columns.size() + n);
+        for (const CxxColumn& c : in->columns) m->columns.push_back(c);  // shared once
+        m->names = in->names;
+        m->zero_col_rows = in->num_rows();
+        m->state = in->state;
+
+        for (size_t k = 0; k < n; ++k) {
+            CxxColumn nc;
+            // MOVES ownership out of results[k]; VARIANT/NVARCHAR results are one
+            // consolidated block with the null bitmap embedded, so this is the whole
+            // handover — no separate validity or selection buffer to adopt.
+            nc.own.reset(draken_vecresult_child_owner_new_c(results[k]));
+            nc.view = nc.own->vec;
+            m->columns.push_back(std::move(nc));
+            m->names.push_back(out_names[k]);
+        }
+
         out = std::move(m);
         return OpResult::EMIT;
     }

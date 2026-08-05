@@ -40,6 +40,8 @@ from draken.draken_native import TimestampUnit
 __all__ = [
     "LogicalCategory",
     "ColumnType",
+    "column_type_from_vector",
+    "morsel_column_types",
     "find_compatible_type",
     "PYTHON_TO_SQL_MAP",
     "SQL_TO_PYTHON_MAP",
@@ -601,6 +603,103 @@ def parse_column_type(s: Optional[str]) -> Optional[ColumnType]:
     if parsed is None:
         raise ValueError(f"parse_column_type: unknown type {s!r}")
     return parsed
+
+
+# ---------------------------------------------------------------------------
+# Reconstruction from a live column — the ONE place a runtime vector's
+# (physical tag, logical descriptor) pair becomes a ColumnType.
+#
+# A vector's `type` is only HALF of its type. DrakenType.UINT32 is both a plain
+# unsigned column and an IPv4 address column; DrakenType.TIMESTAMP64 is every
+# unit at once; DrakenType.DECIMAL is every (precision, scale) at once. Anything
+# that reports a result column's type from the tag alone therefore reports a
+# type that is not the column's type — and the loss is unrecoverable once it has
+# been serialized. That defect has now been fixed four times independently (the
+# catalog schema reader, the CTAS write path, the text writers, and the result
+# schema), so the reconstruction lives here ONCE and every reporter calls it.
+#
+# The pairing with `str(ColumnType)` / `parse_column_type` is the point: this
+# produces a ColumnType, those two are an exact round-trip through a string, so
+# a consumer that serializes a result schema can recover the real type.
+# ---------------------------------------------------------------------------
+def column_type_from_vector(vector) -> ColumnType:
+    """The ColumnType a draken Vector actually carries — tag AND descriptor.
+
+    Raises for a physical type with no ColumnType spelling, rather than
+    substituting a plausible one: a wrong type reported as fact is worse than a
+    loud failure, and the caller cannot tell a real VARCHAR from a defaulted one.
+    """
+    physical = vector.type
+    nb = vector._nb  # E.24 — the sanctioned handle for descriptor introspection
+    kind = nb.logical_type_kind
+
+    if kind is not None and kind != LogicalKind.NONE:
+        if kind == LogicalKind.IPV4:
+            return IPV4
+        if kind == LogicalKind.DECIMAL:
+            precision = nb.logical_type_precision
+            scale = nb.logical_type_scale
+            if precision is None or scale is None:
+                raise ValueError(
+                    f"{physical!r} column carries a DECIMAL descriptor with no "
+                    "precision/scale"
+                )
+            return DECIMAL(precision, scale)
+        if kind == LogicalKind.VECTOR:
+            dimension = nb.logical_type_dimension
+            if dimension is None:
+                raise ValueError(
+                    f"{physical!r} column carries a VECTOR descriptor with no dimension"
+                )
+            return VECTOR(dimension)
+        if kind == LogicalKind.TIMESTAMP or kind == LogicalKind.TIME:
+            # The unit IS part of the type — a TIMESTAMP reported without one and
+            # read back at the microsecond default is every value 1000x off when the
+            # column was milliseconds. (`offset_minutes` is deliberately not carried:
+            # `str(ColumnType)` has no spelling for it, so returning it here would
+            # produce a type that cannot survive the round-trip this exists to serve.)
+            unit = _SQL_TO_UNIT.get(nb.logical_type_unit)
+            if unit is None:
+                raise ValueError(
+                    f"{physical!r} column carries a {kind!r} descriptor with an "
+                    f"unrecognized unit {nb.logical_type_unit!r}"
+                )
+            return TIMESTAMP(unit) if kind == LogicalKind.TIMESTAMP else TIME(unit)
+        raise NotImplementedError(f"no ColumnType for logical kind {kind!r}")
+
+    if physical == DrakenType.ARRAY:
+        # Draken carries the array child structurally on the vector, so the ELEMENT's
+        # own physical TAG is recoverable — but only the tag. The child's descriptor
+        # and its own child are not exposed at this layer (the open ARRAY
+        # element-descriptor gap), so an element that is incomplete without one is
+        # reported as VARIANT — this system's spelling for "element type unknown",
+        # and what this path said for EVERY array before. An ARRAY of IPv4 reads back
+        # as ARRAY<UINT32> for the same reason: the tag survives, the refinement does
+        # not. Do not paper either over with a guessed unit/scale/element.
+        child = nb.array_child_type
+        if (
+            child is None
+            or child in _PARAMETERIZED_PHYSICAL
+            or child == DrakenType.ARRAY
+        ):
+            return ARRAY(VARIANT)
+        return ARRAY(ColumnType(child))
+
+    # No descriptor: the tag is the whole type. ColumnType.__post_init__ rejects a
+    # parameterized physical arriving here, which is exactly right — a DECIMAL or
+    # TIMESTAMP vector with no descriptor is a broken vector, not a defaultable one.
+    return ColumnType(physical)
+
+
+def morsel_column_types(morsel) -> list:
+    """A morsel's column types as `ColumnType` — the descriptor-aware counterpart
+    of `Morsel.column_types`, which reports the bare `DrakenType` tag.
+
+    Lives here rather than on `Morsel` because `ColumnType` is Opteryx's and
+    `Morsel` is Draken's: Draken cannot import it, and duplicating the type
+    vocabulary on the Draken side is the drift this helper exists to prevent.
+    """
+    return [column_type_from_vector(morsel.column(name)) for name in morsel.column_names]
 
 
 

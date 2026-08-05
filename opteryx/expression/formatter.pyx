@@ -4,9 +4,14 @@ Recursive walk over a bound expression tree producing a SQL-like string.
 Not on the per-row hot path — called once per shown expression.
 """
 
+import datetime
 from dataclasses import dataclass
 
-from opteryx.types.logical_type import LogicalCategory
+from draken.draken_native import DrakenType
+from draken.draken_native import LogicalKind
+from draken.draken_native import ipv4_format
+
+from opteryx.types.logical_type import ColumnType
 from opteryx.types.schema import SchemaColumn
 from opteryx.utils import random_string
 
@@ -21,6 +26,52 @@ class ExpressionColumn(SchemaColumn):
         if self.identity is None:
             self.identity = f"$derived_{random_string(8)}".encode("utf-8")
         super().__post_init__()
+
+
+cdef inline tuple _civil_from_days(long long days):
+    """(year, month, day) from days since 1970-01-01 (Hinnant's civil_from_days).
+
+    The one implementation. A DATE literal is stored as days and a TIMESTAMP
+    literal as microseconds, so both the plan-time CAST-to-VARCHAR fold in
+    logical_planner_builders and the rendering below need this — and two copies
+    of a calendar algorithm is two calendars.
+    """
+    cdef long long z = days + 719468
+    cdef long long era = (z if z >= 0 else z - 146096) // 146097
+    cdef long long doe = z - era * 146097
+    cdef long long yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    cdef long long yr = yoe + era * 400
+    cdef long long doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    cdef long long mp = (5 * doy + 2) // 153
+    cdef long long d = doy - (153 * mp + 2) // 5 + 1
+    cdef long long m = mp + 3 if mp < 10 else mp - 9
+    return (yr + (1 if m <= 2 else 0), m, d)
+
+
+cpdef str _format_date_days(long long days):
+    """Days since the epoch -> 'YYYY-MM-DD' — the physical form of a DATE literal
+    rendered as the date it is."""
+    y, m, d = _civil_from_days(days)
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+
+cpdef str _format_timestamp_micros(long long us):
+    """Microseconds since the epoch -> 'YYYY-MM-DDTHH:MM:SS.ffffff'.
+
+    Matches draken_cast_timestamp_to_string (the runtime kernel), so a folded
+    literal and a scanned column render a timestamp identically. Floor division
+    carries the borrow for pre-epoch values without a sign correction: Python's
+    `//` and `%` floor, so the remainders here are never negative.
+    """
+    cdef long long sec = us // 1000000
+    cdef long long usec = us % 1000000
+    cdef long long days64 = sec // 86400
+    cdef long long tod = sec % 86400
+    cdef long long hh = tod // 3600
+    cdef long long mm = (tod % 3600) // 60
+    cdef long long ss = tod % 60
+    y, m, d = _civil_from_days(days64)
+    return f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}.{usec:06d}"
 
 
 cpdef str _format_interval(value):
@@ -99,6 +150,79 @@ cpdef str _format_interval_iso8601(value):
     return "".join(parts)
 
 
+cdef str _format_literal(root):
+    """Render a LITERAL node as the value a user wrote, not as the bits it is stored as.
+
+    A literal's `.type` is a `ColumnType` (§14), so the PHYSICAL tag plus its
+    descriptor decides the rendering. This used to compare `.type` against
+    `LogicalCategory` members; since the type unification every one of those
+    comparisons was permanently False (`ColumnType.__eq__` on a `LogicalCategory`
+    returns NotImplemented), so every literal fell through to `str(value)` and was
+    named with its raw PHYSICAL value — an INTERVAL as the `(months, microseconds)`
+    tuple it is stored as, a TIMESTAMP as int64 microseconds, a DATE as
+    days-since-epoch, a NULL as Python's `None`, a string unquoted.
+
+    Every case here must be INJECTIVE within its type: this rendering doubles as an
+    expression's identity (the binder resolves a literal to an existing column by
+    it, and the planner dedups projections by it), so two distinct literals that
+    render alike become one column carrying one value.
+    """
+    literal_type = root.type
+    value = root.value
+
+    # An unbound or synthetic literal with no ColumnType has nothing to dispatch on.
+    if not isinstance(literal_type, ColumnType):
+        return str(value)
+
+    cdef object physical = literal_type.physical
+
+    # NULL first: a typed NULL (`CAST(NULL AS VARCHAR)`) is physically VARCHAR but
+    # holds no value, and every branch below would be rendering `None`.
+    if value is None or physical == DrakenType.NULL:
+        return "null"
+
+    # IPv4 renders from its DESCRIPTOR, never its category — the category is
+    # deliberately INTEGER, so an address would otherwise print as the uint32 it is.
+    # Routed through draken.ipv4_format, the same writer the kernel and to_pylist
+    # use, so a literal and a column cannot spell an address differently.
+    if (
+        literal_type.logical is not None
+        and literal_type.logical.kind == LogicalKind.IPV4
+        and isinstance(value, int)
+    ):
+        return ipv4_format(value)
+
+    if physical == DrakenType.VARCHAR or physical == DrakenType.NVARCHAR:
+        # Bound VARCHAR literals carry bytes, unbound ones str — this runs on both
+        # sides of the binder. Quoting is what keeps a string literal distinct from
+        # anything else that renders the same text: without it `'192.168.1.1'` and
+        # an IPv4 literal are the same expression.
+        text = value.decode("utf-8") if isinstance(value, bytes) else value
+        return "'" + text.replace("'", "''") + "'"
+
+    # Temporal literals carry their type word. Quoting alone is not enough: the
+    # string literal `'2020-01-01'` and `CAST('2020-01-01' AS DATE)` are different
+    # expressions of different types that would otherwise both render
+    # `'2020-01-01'` — and two expressions with one rendering are one column.
+    if physical == DrakenType.TIMESTAMP64 and isinstance(value, int):
+        return "TIMESTAMP '" + _format_timestamp_micros(value) + "'"
+
+    if physical == DrakenType.DATE32 and isinstance(value, int):
+        return "DATE '" + _format_date_days(value) + "'"
+
+    if (physical == DrakenType.TIME32 or physical == DrakenType.TIME64) and isinstance(
+        value, datetime.time
+    ):
+        return "TIME '" + value.isoformat() + "'"
+
+    if physical == DrakenType.INTERVAL and isinstance(value, tuple):
+        return _format_interval(value)
+
+    # BOOL, the integer and float widths, DECIMAL, VARBINARY and ARRAY already
+    # render as themselves, and their `str()` is injective.
+    return str(value)
+
+
 def format_expression(root, qualify=False, cache=None):
     """Render an expression tree as a SQL-like string.
 
@@ -146,23 +270,7 @@ def _format_expression_inner(root, qualify, cache):
 
     # LITERALS
     if node_type == NodeType.LITERAL:
-        literal_type = root.type
-        if literal_type == LogicalCategory.VARCHAR:
-            return "'" + root.value.replace("'", "'") + "'"
-        if literal_type == LogicalCategory.TIMESTAMP:
-            return "'" + str(root.value) + "'"
-        if literal_type == LogicalCategory.INTERVAL:
-            return _format_interval(root.value)
-        if literal_type == LogicalCategory.NULL:
-            return "null"
-        if literal_type == LogicalCategory.ARRAY:
-            display = getattr(root, "display_values", None)
-            if display is not None:
-                shown = display[:3]
-                rest = len(display) - len(shown)
-                items = ", ".join(shown)
-                return "{" + items + (f", ...{rest} more" if rest else "") + "}"
-        return str(root.value)
+        return _format_literal(root)
 
     if node_type == NodeType.CASE:
         parts = "".join(

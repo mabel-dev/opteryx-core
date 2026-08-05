@@ -23,6 +23,10 @@ typedef struct _object PyObject;
 
 namespace rugo::_jsonl {
 
+// Row-range parallel executor (defined in column_builder.cpp). Only ever passed by pointer
+// here, so the thread-pool header stays out of this one. nullptr == run serially.
+class RowExec;
+
 enum class ColumnType : uint8_t {
     Int64   = 0,
     Float64 = 1,
@@ -76,7 +80,10 @@ StringColumnResult extract_column(
     // ever misparsed — but if the sample window is entirely null, no hint forms at all
     // and the column is typed VARCHAR even where a larger sample would have picked a
     // narrower type.
-    size_t                                     sample_size = SIZE_MAX
+    size_t                                     sample_size = SIZE_MAX,
+    // Splits the row walk across workers. nullptr (the default) runs it serially in the
+    // calling thread — required when the caller is itself already one task per column.
+    const RowExec*                             rows = nullptr
 );
 
 // Build an owned Draken VARCHAR Vector from an extracted column. Slice bytes are read

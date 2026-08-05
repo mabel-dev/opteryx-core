@@ -2151,6 +2151,26 @@ VecResult draken_in_list(void* ctx, const DrakenVector* const* args, uint32_t na
             bool hit = std::binary_search(items, items + c->count, val);
             if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
+    } else if (c->kind == 3) {   // uint64 raw, sorted ascending — binary search per row
+        const auto* items = reinterpret_cast<const uint64_t*>(payload);
+        uint64_t val;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) continue;
+            uint32_t phys = v->selection[i];
+            switch (v->type) {
+                case DRAKEN_UINT8:  val = static_cast<const uint8_t*>(v->data)[phys]; break;
+                case DRAKEN_UINT16: val = static_cast<const uint16_t*>(v->data)[phys]; break;
+                case DRAKEN_UINT32: val = static_cast<const uint32_t*>(v->data)[phys]; break;
+                case DRAKEN_UINT64: val = static_cast<const uint64_t*>(v->data)[phys]; break;
+                default:
+                    draken_free(out);
+                    if (validity != nullptr) draken_free(validity);
+                    return draken_error_sentinel(
+                        "draken_in_list: unsigned-integer operand required for kind-3 set");
+            }
+            bool hit = std::binary_search(items, items + c->count, val);
+            if (hit != negate) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
     } else {              // string entries: (u32 len + bytes), linear scan
         if (!fk_is_string(v->type)) {
             draken_free(out);

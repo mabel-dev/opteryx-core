@@ -155,11 +155,22 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             # a UNION leg itself contains a further UNION — context.bag holds one
             # slot, last-write-wins. No known query pattern in the current test
             # suite exercises that; flagged rather than solved speculatively.
+            #
+            # is_pushable_function_dataset (READ_JSONL/READ_PARQUET/READ_CSV) belongs
+            # here too: the "push all" branch above (lines ~91-100) already treats it
+            # identically to Scan/Subquery, so it hits the exact same identity-
+            # collision shortfall this fallback exists for — `SELECT * FROM
+            # READ_JSONL(...) AS s1 UNION ALL SELECT * FROM READ_JSONL(...) AS s2`
+            # pruned s1 (or s2)'s columns to empty before this was added, and
+            # JsonlReadNode.read_morsels then failed loud with "this file's columns
+            # [...] do not match the expected []" — not a silent wrong answer, but
+            # a real query this engine should run. Omitting it here while including
+            # it above was the gap, not a deliberate narrower scope.
             if (
-                node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.Subquery)
-                and context.seen_unions > 0
-                and node.schema.columns
-            ):
+                node.node_type
+                in (LogicalPlanStepType.Scan, LogicalPlanStepType.Subquery)
+                or is_pushable_function_dataset
+            ) and context.seen_unions > 0 and node.schema.columns:
                 width = context.bag.get("_union_leg_width", len(node.schema.columns))
                 if len(node_columns) < width:
                     node_columns = [

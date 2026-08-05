@@ -23,6 +23,60 @@
 
 namespace rugo::_jsonl {
 
+// Smallest row count worth handing to its own thread; below this the submit/join overhead
+// outweighs the work, so split() collapses to a single inline range.
+static constexpr size_t kMinRowsPerChunk = 4096;
+
+// Half-open row range [begin, end) handed to one worker.
+struct RowRange { size_t begin; size_t end; };
+
+// Row-range parallel executor for column building. A default-constructed RowExec (or any
+// RowExec whose split() yields one range) runs bodies inline in the calling thread, so the
+// serial path costs nothing and stays bit-identical.
+//
+// NEVER NESTED: parse_all_columns picks EITHER column parallelism (wide) OR row parallelism
+// (narrow), never both. Nesting would let an outer task occupy a worker while blocking on
+// inner tasks queued behind it — a self-deadlock once every worker is an outer task.
+class RowExec {
+public:
+    RowExec() = default;
+    RowExec(BS::thread_pool<>* pool, size_t workers)
+        : pool_(pool), workers_(workers > 1 ? workers : 1) {}
+
+    // Contiguous row ranges covering [0, n). Every range except the last is a multiple of
+    // `align` rows: pass 8 whenever the body writes a BIT-PACKED buffer (validity masks,
+    // BOOL data) so two threads can never write the same byte.
+    std::vector<RowRange> split(size_t n, size_t align) const {
+        if (pool_ == nullptr || workers_ <= 1 || n == 0) return {{0, n}};
+        size_t w = std::min(workers_, n / kMinRowsPerChunk);
+        if (w <= 1) return {{0, n}};
+        size_t step = (n + w - 1) / w;
+        step = ((step + align - 1) / align) * align;  // round up to the alignment quantum
+        std::vector<RowRange> out;
+        out.reserve(w);
+        for (size_t b = 0; b < n; b += step) out.push_back({b, std::min(n, b + step)});
+        return out;
+    }
+
+    // Run fn(range_index) for every range, inline when there is only one.
+    template <class F>
+    void run(const std::vector<RowRange>& ranges, F&& fn) const {
+        if (pool_ == nullptr || ranges.size() <= 1) {
+            for (size_t i = 0; i < ranges.size(); ++i) fn(i);
+            return;
+        }
+        std::vector<std::future<void>> futs;
+        futs.reserve(ranges.size());
+        for (size_t i = 0; i < ranges.size(); ++i)
+            futs.push_back(pool_->submit_task([&, i]() { fn(i); }));
+        for (auto& f : futs) f.get();
+    }
+
+private:
+    BS::thread_pool<>* pool_    = nullptr;
+    size_t             workers_ = 1;
+};
+
 namespace {
 
 static inline bool key_matches(
@@ -155,7 +209,8 @@ StringColumnResult extract_column(
     OrdinalPredictor&                         predictor,
     bool                                       copy_bytes,
     bool                                       may_have_escapes,
-    size_t                                     sample_size)
+    size_t                                     sample_size,
+    const RowExec*                             rows)
 {
     const size_t num_rows = records.size();
     const size_t col_len  = column_name.size();
@@ -191,69 +246,101 @@ StringColumnResult extract_column(
     // Checking the first byte first turns most of those into a single byte compare.
     const uint8_t col_first = col_len ? static_cast<uint8_t>(column_name[0]) : 0;
 
-    auto candidates = predictor.get_candidates(column_name);
-    uint16_t last_seen = candidates.empty() ? 0xFFFF : candidates[0];
-    bool inferred = false;
-    bool col_has_escape = false;
+    // Row ranges for the resolve and emit walks. Aligned to 8 rows because both write the
+    // bit-packed null bitmap, so no two workers ever touch the same byte. A caller that
+    // passes no executor gets exactly one range and runs everything inline.
+    const RowExec serial_rows;
+    const RowExec& rex = rows ? *rows : serial_rows;
+    const std::vector<RowRange> ranges = rex.split(num_rows, 8);
 
-    for (size_t row = 0; row < num_rows; ++row) {
-        const auto& record = records[row];
-        const FieldSpan* found = nullptr;
+    // Every caller builds a fresh predictor per column, so this seed is 0xFFFF in practice
+    // and each chunk pays one linear scan on its first row before riding the hint — exactly
+    // what the serial walk did at row 0. The history is deliberately NOT written back: it is
+    // per-column scratch no caller ever reads, and its std::map is not thread-safe.
+    const std::vector<uint16_t> candidates = predictor.get_candidates(column_name);
+    const uint16_t seed = candidates.empty() ? 0xFFFF : candidates[0];
 
-        // Fast path: try predicted ordinal first
-        if (last_seen != 0xFFFF && last_seen < record.size()) {
-            const auto& f = record[last_seen];
-            if (f.key_width == col_len && buffer[f.key_start] == col_first &&
-                std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                found = &f;
-            }
-        }
+    std::vector<uint8_t> chunk_seen(ranges.size(), 0);
+    std::vector<uint8_t> chunk_esc(ranges.size(), 0);
 
-        // Slow path: linear scan (fallback if prediction missed)
-        if (found == nullptr) {
-            for (size_t i = 0; i < record.size(); ++i) {
-                const auto& f = record[i];
+    rex.run(ranges, [&](size_t ri) {
+        uint16_t last_seen = seed;
+        bool seen = false;
+        bool esc  = false;
+        for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
+            const auto& record = records[row];
+            const FieldSpan* found = nullptr;
+
+            // Fast path: try predicted ordinal first
+            if (last_seen != 0xFFFF && last_seen < record.size()) {
+                const auto& f = record[last_seen];
                 if (f.key_width == col_len && buffer[f.key_start] == col_first &&
                     std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
-                    last_seen = static_cast<uint16_t>(i);
-                    predictor.update_history(column_name, last_seen);
                     found = &f;
-                    break;
                 }
             }
-        }
 
-        if (found != nullptr) {
-            resolved[row] = found;
-            const bool val_null =
-                is_null(buffer, found->value_start, found->value_start + found->value_width - 1);
-            if (!val_null) {
-                result.any_value_seen = true;
-                if (!inferred && row < sample_size) {
-                    uint8_t vt = found->type;
-                    if (vt == static_cast<uint8_t>(ValueType::String))
-                        result.inferred_type = ColumnType::String;
-                    else if (vt == static_cast<uint8_t>(ValueType::Boolean))
-                        result.inferred_type = ColumnType::Bool;
-                    else if (vt == static_cast<uint8_t>(ValueType::Integer))
-                        result.inferred_type = ColumnType::Int64;
-                    else if (vt == static_cast<uint8_t>(ValueType::Double))
-                        result.inferred_type = ColumnType::Float64;
-                    else if (vt == static_cast<uint8_t>(ValueType::Array))
-                        result.inferred_type = ColumnType::Array;
-                    else if (vt == static_cast<uint8_t>(ValueType::Object))
-                        result.inferred_type = ColumnType::Variant;
-                    inferred = true;
-                }
-                if (may_have_escapes && !col_has_escape &&
-                    found->type == static_cast<uint8_t>(ValueType::String) &&
-                    std::memchr(buffer + found->value_start, '\\', found->value_width) != nullptr) {
-                    col_has_escape = true;
+            // Slow path: linear scan (fallback if prediction missed)
+            if (found == nullptr) {
+                for (size_t i = 0; i < record.size(); ++i) {
+                    const auto& f = record[i];
+                    if (f.key_width == col_len && buffer[f.key_start] == col_first &&
+                        std::memcmp(buffer + f.key_start, column_name.data(), col_len) == 0) {
+                        last_seen = static_cast<uint16_t>(i);
+                        found = &f;
+                        break;
+                    }
                 }
             }
-        } else {
-            result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
+
+            if (found != nullptr) {
+                resolved[row] = found;
+                const bool val_null =
+                    is_null(buffer, found->value_start, found->value_start + found->value_width - 1);
+                if (!val_null) {
+                    seen = true;
+                    if (may_have_escapes && !esc &&
+                        found->type == static_cast<uint8_t>(ValueType::String) &&
+                        std::memchr(buffer + found->value_start, '\\', found->value_width) != nullptr) {
+                        esc = true;
+                    }
+                }
+            } else {
+                result.null_bitmap[row >> 3] &= ~(uint8_t(1u << (row & 7u)));
+            }
         }
+        chunk_seen[ri] = seen ? 1 : 0;
+        chunk_esc[ri]  = esc  ? 1 : 0;
+    });
+
+    bool col_has_escape = false;
+    for (size_t ri = 0; ri < ranges.size(); ++ri) {
+        if (chunk_seen[ri]) result.any_value_seen = true;
+        if (chunk_esc[ri])  col_has_escape = true;
+    }
+
+    // Type hint: the first non-null value inside the sample window, in ROW ORDER. Its own
+    // serial pass, so the hint can never depend on which chunk happened to finish first.
+    // The window is infer_sample_size rows (default 5), so this costs nothing.
+    const size_t sample_rows = std::min(num_rows, sample_size);
+    for (size_t row = 0; row < sample_rows; ++row) {
+        const FieldSpan* f = resolved[row];
+        if (f == nullptr) continue;
+        if (is_null(buffer, f->value_start, f->value_start + f->value_width - 1)) continue;
+        const uint8_t vt = f->type;
+        if (vt == static_cast<uint8_t>(ValueType::String))
+            result.inferred_type = ColumnType::String;
+        else if (vt == static_cast<uint8_t>(ValueType::Boolean))
+            result.inferred_type = ColumnType::Bool;
+        else if (vt == static_cast<uint8_t>(ValueType::Integer))
+            result.inferred_type = ColumnType::Int64;
+        else if (vt == static_cast<uint8_t>(ValueType::Double))
+            result.inferred_type = ColumnType::Float64;
+        else if (vt == static_cast<uint8_t>(ValueType::Array))
+            result.inferred_type = ColumnType::Array;
+        else if (vt == static_cast<uint8_t>(ValueType::Object))
+            result.inferred_type = ColumnType::Variant;
+        break;
     }
 
     const bool do_unescape = col_has_escape && result.inferred_type == ColumnType::String;
@@ -286,9 +373,22 @@ StringColumnResult extract_column(
         }
     };
 
-    for (size_t row = 0; row < num_rows; ++row) {
-        const FieldSpan* f = resolved[row];
-        if (f != nullptr) emit_value(*f, row);
+    if (result.data_owned) {
+        // copy / unescape mode: every row appends to ONE growing arena, so each row's offset
+        // depends on all preceding rows. Order-dependent — this pass stays serial.
+        for (size_t row = 0; row < num_rows; ++row) {
+            const FieldSpan* f = resolved[row];
+            if (f != nullptr) emit_value(*f, row);
+        }
+    } else {
+        // Zero-copy mode: a row writes only its own offsets/lengths slot (offsets index into
+        // `buffer`), and bitmap writes are 8-row aligned, so the ranges are independent.
+        rex.run(ranges, [&](size_t ri) {
+            for (size_t row = ranges[ri].begin; row < ranges[ri].end; ++row) {
+                const FieldSpan* f = resolved[row];
+                if (f != nullptr) emit_value(*f, row);
+            }
+        });
     }
 
     return result;
@@ -329,17 +429,32 @@ static uint8_t* own_validity_from_scr(StringColumnResult& scr, uint32_t n) {
 // ---------------------------------------------------------------------------
 // Parse a column into VARCHAR string buffers (slots + arena + validity). No Python —
 // safe off the GIL. Wrapped into a Vector later by wrap_column().
-static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult& scr) {
+static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult& scr,
+                                         const RowExec& rows) {
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
     const bool has_nulls = !scr.null_bitmap.empty();
     const uint8_t* src = base;  // slices live at base + offsets[i]
 
+    // Slots and the arena are both indexed per row, so the two passes parallelise once each
+    // chunk knows where its own arena bytes start. Alignment 1: nothing here is bit-packed
+    // (the validity mask is built separately, serially, by own_validity_from_scr).
+    const std::vector<RowRange> ranges = rows.split(n, 1);
+
     // Pass 1: size the arena — long-form slots (> STR_INLINE_MAX) only, valid rows only.
-    size_t arena_size = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) continue;
-        if (scr.lengths[i] > STR_INLINE_MAX) arena_size += scr.lengths[i];
-    }
+    // Per-chunk subtotals, then a prefix sum giving each chunk its base arena offset.
+    std::vector<size_t> chunk_bytes(ranges.size(), 0);
+    rows.run(ranges, [&](size_t ri) {
+        size_t sz = 0;
+        for (size_t i = ranges[ri].begin; i < ranges[ri].end; ++i) {
+            if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) continue;
+            if (scr.lengths[i] > STR_INLINE_MAX) sz += scr.lengths[i];
+        }
+        chunk_bytes[ri] = sz;
+    });
+    std::vector<size_t> chunk_base(ranges.size() + 1, 0);
+    for (size_t ri = 0; ri < ranges.size(); ++ri)
+        chunk_base[ri + 1] = chunk_base[ri] + chunk_bytes[ri];
+    const size_t arena_size = chunk_base.back();
 
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         draken_malloc(static_cast<size_t>(n) * sizeof(DrakenStringSlot)));
@@ -347,24 +462,28 @@ static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult
         ? static_cast<uint8_t*>(draken_malloc(arena_size))
         : nullptr;
 
-    // Pass 2: populate slots (and arena for long strings).
-    uint32_t arena_offset = 0;
-    for (uint32_t i = 0; i < n; ++i) {
-        if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) {
-            str_init_null(&slots[i]);
-            continue;
+    // Pass 2: populate slots (and arena for long strings). Each chunk walks its own rows and
+    // fills the arena from its prefix-sum base, so the byte layout is identical to the serial
+    // pass — the slot's stored offset stays the GLOBAL offset into the arena.
+    rows.run(ranges, [&](size_t ri) {
+        uint32_t arena_offset = static_cast<uint32_t>(chunk_base[ri]);
+        for (size_t i = ranges[ri].begin; i < ranges[ri].end; ++i) {
+            if (has_nulls && !((scr.null_bitmap[i >> 3] >> (i & 7)) & 1)) {
+                str_init_null(&slots[i]);
+                continue;
+            }
+            const uint32_t off = scr.offsets[i];
+            const uint32_t len = scr.lengths[i];
+            const uint8_t* bytes = len ? src + off : reinterpret_cast<const uint8_t*>("");
+            if (len > STR_INLINE_MAX) {
+                std::memcpy(arena + arena_offset, bytes, len);
+                draken_build_string_slot(&slots[i], bytes, len, arena_offset);
+                arena_offset += len;
+            } else {
+                draken_build_string_slot(&slots[i], bytes, len, 0);
+            }
         }
-        const uint32_t off = scr.offsets[i];
-        const uint32_t len = scr.lengths[i];
-        const uint8_t* bytes = len ? src + off : reinterpret_cast<const uint8_t*>("");
-        if (len > STR_INLINE_MAX) {
-            std::memcpy(arena + arena_offset, bytes, len);
-            draken_build_string_slot(&slots[i], bytes, len, arena_offset);
-            arena_offset += len;
-        } else {
-            draken_build_string_slot(&slots[i], bytes, len, 0);
-        }
-    }
+    });
 
     ParsedColumn pc;
     pc.is_string = true;
@@ -379,7 +498,7 @@ static ParsedColumn parse_varchar_column(const uint8_t* base, StringColumnResult
 }
 
 PyObject* build_varchar_vector(const uint8_t* base, StringColumnResult& scr) {
-    ParsedColumn pc = parse_varchar_column(base, scr);
+    ParsedColumn pc = parse_varchar_column(base, scr, RowExec{});
     return wrap_column(pc);
 }
 
@@ -390,22 +509,43 @@ static inline bool row_valid(const StringColumnResult& scr, uint32_t i) {
 }
 
 // Parse every valid slice (at base + offsets[i]) as int64 into data[i] (0 for nulls).
-// False on first miss.
-static bool try_fill_int64(const uint8_t* base, StringColumnResult& scr, uint32_t n, int64_t* data) {
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!row_valid(scr, i)) { data[i] = 0; continue; }
-        const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-        if (len == 0 || !fast_parse_int64(base, off, off + len - 1, data[i])) return false;
-    }
+// False if ANY row misses. data[] is one fixed-width element per row, so chunks write
+// disjoint memory and need no alignment quantum. A chunk abandons its range on the first
+// miss; the caller frees `data` wholesale and falls back, so the rows a losing chunk left
+// unwritten are never read.
+static bool try_fill_int64(const uint8_t* base, StringColumnResult& scr, uint32_t n,
+                           int64_t* data, const RowExec& rows) {
+    const std::vector<RowRange> ranges = rows.split(n, 1);
+    std::vector<uint8_t> ok(ranges.size(), 1);
+    rows.run(ranges, [&](size_t ri) {
+        for (size_t i = ranges[ri].begin; i < ranges[ri].end; ++i) {
+            if (!row_valid(scr, static_cast<uint32_t>(i))) { data[i] = 0; continue; }
+            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+            if (len == 0 || !fast_parse_int64(base, off, off + len - 1, data[i])) {
+                ok[ri] = 0;
+                return;
+            }
+        }
+    });
+    for (uint8_t v : ok) if (!v) return false;
     return true;
 }
 
-static bool try_fill_float64(const uint8_t* base, StringColumnResult& scr, uint32_t n, double* data) {
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!row_valid(scr, i)) { data[i] = 0.0; continue; }
-        const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-        if (len == 0 || !fast_parse_float64(base, off, off + len - 1, data[i])) return false;
-    }
+static bool try_fill_float64(const uint8_t* base, StringColumnResult& scr, uint32_t n,
+                             double* data, const RowExec& rows) {
+    const std::vector<RowRange> ranges = rows.split(n, 1);
+    std::vector<uint8_t> ok(ranges.size(), 1);
+    rows.run(ranges, [&](size_t ri) {
+        for (size_t i = ranges[ri].begin; i < ranges[ri].end; ++i) {
+            if (!row_valid(scr, static_cast<uint32_t>(i))) { data[i] = 0.0; continue; }
+            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
+            if (len == 0 || !fast_parse_float64(base, off, off + len - 1, data[i])) {
+                ok[ri] = 0;
+                return;
+            }
+        }
+    });
+    for (uint8_t v : ok) if (!v) return false;
     return true;
 }
 
@@ -611,7 +751,8 @@ static bool fill_string_array_column(
 // or a genuine mix of kinds fall back to raw JSON text (parse_varchar_column), same as
 // parse_arrays=False, with ParsedColumn.array_fallback set so the Cython edge can warn
 // (this function runs off the GIL and must not touch Python itself).
-static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& scr) {
+static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& scr,
+                                      const RowExec& rows) {
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
     ArrayElementSurvey survey;
@@ -627,7 +768,7 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
     const bool out_of_scope = !parse_ok || survey.saw_nested || kinds > 1;
 
     if (out_of_scope) {
-        ParsedColumn pc = parse_varchar_column(base, scr);
+        ParsedColumn pc = parse_varchar_column(base, scr, rows);
         pc.array_fallback = true;
         return pc;
     }
@@ -662,21 +803,22 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
 // parse_typed_column — extracted column → owned typed buffers, with fallback.
 // No Python — safe off the GIL. Wrapped into a Vector by wrap_column().
 // ---------------------------------------------------------------------------
-static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& scr, const ParseContext& context) {
+static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& scr,
+                                       const ParseContext& context, const RowExec& rows) {
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
     // String / all-null columns: nothing to parse.
     if (scr.inferred_type == ColumnType::String ||
         scr.inferred_type == ColumnType::Null || n == 0) {
-        return parse_varchar_column(base, scr);
+        return parse_varchar_column(base, scr, rows);
     }
 
     // Object columns (parse_objects): VARIANT is physically identical to VARCHAR
     // (German-string storage holding raw JSON text) — only the type tag differs, so
     // this reuses parse_varchar_column verbatim rather than duplicating it.
     if (scr.inferred_type == ColumnType::Variant) {
-        if (!context.parse_objects) return parse_varchar_column(base, scr);
-        ParsedColumn pc = parse_varchar_column(base, scr);
+        if (!context.parse_objects) return parse_varchar_column(base, scr, rows);
+        ParsedColumn pc = parse_varchar_column(base, scr, rows);
         pc.type = DRAKEN_VARIANT;
         return pc;
     }
@@ -684,8 +826,8 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
     // Array columns (parse_arrays): real structural materialization, scoped to
     // uniform-scalar-element arrays (see parse_array_column).
     if (scr.inferred_type == ColumnType::Array) {
-        if (!context.parse_arrays) return parse_varchar_column(base, scr);
-        return parse_array_column(base, scr);
+        if (!context.parse_arrays) return parse_varchar_column(base, scr, rows);
+        return parse_array_column(base, scr, rows);
     }
 
     if (scr.inferred_type == ColumnType::Bool) {
@@ -708,13 +850,13 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
             return pc;
         }
         draken_free(data);
-        return parse_varchar_column(base, scr);
+        return parse_varchar_column(base, scr, rows);
     }
 
     // Numeric: speculate int64, widen to float64, else fall back to VARCHAR.
     {
         int64_t* data = static_cast<int64_t*>(draken_malloc(static_cast<size_t>(n) * sizeof(int64_t)));
-        if (try_fill_int64(base, scr, n, data)) {
+        if (try_fill_int64(base, scr, n, data, rows)) {
             ParsedColumn pc; pc.type = DRAKEN_INT64; pc.length = n;
             pc.data = data; pc.validity = own_validity_from_scr(scr, n);
             return pc;
@@ -723,18 +865,18 @@ static ParsedColumn parse_typed_column(const uint8_t* base, StringColumnResult& 
     }
     {
         double* data = static_cast<double*>(draken_malloc(static_cast<size_t>(n) * sizeof(double)));
-        if (try_fill_float64(base, scr, n, data)) {
+        if (try_fill_float64(base, scr, n, data, rows)) {
             ParsedColumn pc; pc.type = DRAKEN_FLOAT64; pc.length = n;
             pc.data = data; pc.validity = own_validity_from_scr(scr, n);
             return pc;
         }
         draken_free(data);
     }
-    return parse_varchar_column(base, scr);
+    return parse_varchar_column(base, scr, rows);
 }
 
 PyObject* build_typed_vector(const uint8_t* base, StringColumnResult& scr) {
-    ParsedColumn pc = parse_typed_column(base, scr, ParseContext());
+    ParsedColumn pc = parse_typed_column(base, scr, ParseContext(), RowExec{});
     return wrap_column(pc);
 }
 
@@ -764,18 +906,22 @@ PyObject* wrap_column(ParsedColumn& pc) {
 // parse as that type or this throws std::invalid_argument (a declared-schema mismatch is a
 // real data/schema error — unlike the speculative path, it must never silently fall back to
 // VARCHAR). "string" always succeeds (any JSON scalar's raw bytes are valid as a string).
+// The strict per-row loops below stay serial: each throws on the first bad value, and
+// reporting the FIRST offending row (not whichever chunk raced there first) is part of the
+// contract. The row walk in extract_column and the VARCHAR builder still parallelise.
 static ParsedColumn parse_column_explicit(
     const uint8_t* buffer, const RecordSet& records, const std::string& name,
-    const std::string& declared, bool may_have_escapes) {
+    const std::string& declared, bool may_have_escapes, const RowExec& rows) {
 
     OrdinalPredictor pred;
     StringColumnResult scr = extract_column(buffer, records, name, pred,
-                                            /*copy_bytes=*/false, may_have_escapes);
+                                            /*copy_bytes=*/false, may_have_escapes,
+                                            SIZE_MAX, &rows);
     const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
     if (declared == "string") {
-        return parse_varchar_column(base, scr);
+        return parse_varchar_column(base, scr, rows);
     }
     if (declared == "int64") {
         int64_t* data = static_cast<int64_t*>(draken_malloc(std::max<size_t>(n, 1) * sizeof(int64_t)));
@@ -853,26 +999,53 @@ std::vector<ParsedColumn> parse_all_columns(
 
     size_t hw = std::thread::hardware_concurrency();
     if (hw == 0) hw = 1;
-    size_t nt = std::min(std::min(hw, max_threads ? max_threads : hw), ncols);
+    const size_t cap = std::min(hw, max_threads ? max_threads : hw);
+    size_t nt = std::min(cap, ncols);
 
-    auto do_one = [&](size_t c) {
+    auto do_one = [&](size_t c, const RowExec& rows) {
         const auto it = context.explicit_schema.find(column_names[c]);
         if (it != context.explicit_schema.end()) {
-            out[c] = parse_column_explicit(buffer, records, column_names[c], it->second, may_have_escapes);
+            out[c] = parse_column_explicit(buffer, records, column_names[c], it->second,
+                                           may_have_escapes, rows);
             return;
         }
         OrdinalPredictor pred;  // thread-local; per-column, no sharing
         StringColumnResult scr = extract_column(buffer, records, column_names[c], pred,
                                                 /*copy_bytes=*/false, may_have_escapes,
-                                                context.infer_sample_size);
+                                                context.infer_sample_size, &rows);
         // Unescaped (or copied) columns own their bytes in scr.data; zero-copy columns
         // reference the original buffer.
         const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
-        out[c] = parse_typed_column(base, scr, context);
+        out[c] = parse_typed_column(base, scr, context, rows);
     };
 
+    // Two parallel shapes, chosen by width and NEVER combined (see RowExec: nesting one
+    // inside the other self-deadlocks the pool).
+    //
+    // Narrow (ncols*4 <= cap): column parallelism alone caps utilisation at `ncols`, leaving
+    // most of the box idle — measured 4.7 of 18 cores busy reading one column out of a
+    // 459MB 4-column file. Run the columns one at a time instead, each split across ALL
+    // workers by row: that single-column read went to 11.0 of 18 cores and 75ms -> 36ms.
+    //
+    // The threshold is deliberately tight. Serialising the columns turns wall time from a
+    // MAX over columns into a SUM, which is a bad trade once column parallelism can fill a
+    // decent share of the box — and JSONL columns are wildly unbalanced (one fat object
+    // column next to three scalars), so the max is naturally cheap. Measured crossover on
+    // an 18-core box: at 9 columns the row-parallel path (21.2ms) lost to column-parallel
+    // at 10 columns (20.6ms) despite doing more work. Engaging only when column parallelism
+    // would waste three quarters of the cores keeps the measured wins (1-4 columns, the
+    // projection-pushdown shape) and stays out of the wash.
+    if (ncols * 4 <= cap && cap > 1) {
+        BS::thread_pool<> pool(cap);
+        const RowExec rows(&pool, cap);
+        for (size_t c = 0; c < ncols; ++c) do_one(c, rows);
+        return out;
+    }
+
+    // Wide: one task per column, rows walked serially inside each. Unchanged.
+    const RowExec serial_rows;
     if (nt <= 1) {
-        for (size_t c = 0; c < ncols; ++c) do_one(c);
+        for (size_t c = 0; c < ncols; ++c) do_one(c, serial_rows);
         return out;
     }
 
@@ -880,7 +1053,7 @@ std::vector<ParsedColumn> parse_all_columns(
     std::vector<std::future<void>> futs;
     futs.reserve(ncols);
     for (size_t c = 0; c < ncols; ++c)
-        futs.push_back(pool.submit_task([&, c]() { do_one(c); }));
+        futs.push_back(pool.submit_task([&, c]() { do_one(c, serial_rows); }));
     for (auto& f : futs) f.get();
     return out;
 }

@@ -96,19 +96,29 @@ static void ej_raw(std::string &o, Col &c, size_t i) {
 }
 static void ej_quoted(std::string &o, Col &c, size_t i) {
   const char *p; uint32_t n;
-  if (sv_cell(c.sv, i, p, n)) { o.push_back('"'); o.append(p, n); o.push_back('"'); }
+  if (sv_cell(c.sv, i, p, n)) append_quoted_raw(o, p, n);
   else o.append("null");
 }
 static void ej_string(std::string &o, Col &c, size_t i) {
   const char *p; uint32_t n;
   if (sv_cell(c.sv, i, p, n)) json_string(o, p, n); else o.append("null");
 }
+// FLOAT32 renders through fmt_float on the un-promoted value, never through
+// fmt_double on a widened double -- see fmt_float's comment in
+// interop/value_format.hpp for why the two are not interchangeable.
+// FLOAT32 renders through fmt_float on the un-promoted value, never through
+// fmt_double on a widened double -- see fmt_float's comment in
+// interop/value_format.hpp for why the two are not interchangeable.
 static void ej_float(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
-  double v = c.dv->type == DRAKEN_FLOAT64 ? ((const double *)c.dv->data)[p]
-                                          : ((const float *)c.dv->data)[p];
-  if (double_is_nan_or_inf(v)) o.append("null"); else fmt_double(o, v);
+  if (c.dv->type == DRAKEN_FLOAT64) {
+    double v = ((const double *)c.dv->data)[p];
+    if (double_is_nan_or_inf(v)) o.append("null"); else fmt_double(o, v);
+  } else {
+    float v = ((const float *)c.dv->data)[p];
+    if (double_is_nan_or_inf((double)v)) o.append("null"); else fmt_float(o, v);
+  }
 }
 static void ej_decimal(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
@@ -120,16 +130,12 @@ static void ej_decimal(std::string &o, Col &c, size_t i) {
 static void ej_time(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
   uint32_t p = c.dv->selection[i];
-  o.push_back('"');
-  if (c.dv->type == DRAKEN_TIME64) fmt_time(o, ((const int64_t *)c.dv->data)[p], c.desc.column.unit);
-  else fmt_time(o, ((const int32_t *)c.dv->data)[p], c.desc.column.unit);
-  o.push_back('"');
+  if (c.dv->type == DRAKEN_TIME64) fmt_time_quoted(o, ((const int64_t *)c.dv->data)[p], c.desc.column.unit);
+  else fmt_time_quoted(o, ((const int32_t *)c.dv->data)[p], c.desc.column.unit);
 }
 static void ej_timestamp(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
-  o.push_back('"');
-  fmt_timestamp(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.desc.column.unit);
-  o.push_back('"');
+  fmt_timestamp_quoted(o, ((const int64_t *)c.dv->data)[c.dv->selection[i]], c.desc.column.unit);
 }
 // Direct numeric/temporal emitters — used for DENSE columns (data_length >=
 // length), where the batch cast kernel would format every value twice, allocate
@@ -155,7 +161,7 @@ static void ej_bool(std::string &o, Col &c, size_t i) {
 }
 static void ej_date(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
-  o.push_back('"'); fmt_date(o, ((const int32_t *)c.dv->data)[c.dv->selection[i]]); o.push_back('"');
+  fmt_date_quoted(o, ((const int32_t *)c.dv->data)[c.dv->selection[i]]);
 }
 static void ej_array(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
@@ -189,9 +195,7 @@ static void ej_fp16(std::string &o, Col &c, size_t i) {
 // scalars (date/timestamp/time) — an address is not a JSON number.
 static void ej_ipv4(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
-  o.push_back('"');
-  fmt_ipv4(o, ((const uint32_t *)c.dv->data)[c.dv->selection[i]]);
-  o.push_back('"');
+  fmt_ipv4_quoted(o, ((const uint32_t *)c.dv->data)[c.dv->selection[i]]);
 }
 static void ej_null(std::string &o, Col &c, size_t i) { (void)c; (void)i; o.append("null"); }
 
@@ -205,9 +209,13 @@ static void ec_string(std::string &o, Col &c, size_t i) {
 static void ec_float(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
   uint32_t p = c.dv->selection[i];
-  double v = c.dv->type == DRAKEN_FLOAT64 ? ((const double *)c.dv->data)[p]
-                                          : ((const float *)c.dv->data)[p];
-  if (!double_is_nan_or_inf(v)) fmt_double(o, v); // NaN/Infinity -> empty CSV field
+  if (c.dv->type == DRAKEN_FLOAT64) {
+    double v = ((const double *)c.dv->data)[p];
+    if (!double_is_nan_or_inf(v)) fmt_double(o, v); // NaN/Infinity -> empty CSV field
+  } else {
+    float v = ((const float *)c.dv->data)[p];
+    if (!double_is_nan_or_inf((double)v)) fmt_float(o, v);
+  }
 }
 static void ec_decimal(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
@@ -405,19 +413,52 @@ static inline void free_cols(std::vector<Col> &cols) {
 
 // ---- top-level writers ----
 
-// Render logical rows [r0, r1) of the resolved columns into `out`.
+// Estimated rendered width (bytes) of one cell of `c`, for the output reserve.
+// String-family columns are sized from their arena (exact long-payload bytes;
+// inline payloads are <= 12 bytes each, folded into the constant). Everything
+// else uses a fixed per-type width. Only a heuristic — an under-estimate costs
+// a re-grow, an over-estimate costs slack — but arena-derived string widths
+// remove the systematic under-reserve wide text columns used to cause.
+static inline size_t est_cell_bytes(const Col &c) {
+  const DrakenVector *dv = c.dv;
+  switch (dv->type) {
+  case DRAKEN_INT8: case DRAKEN_UINT8: return 4;
+  case DRAKEN_INT16: case DRAKEN_UINT16: return 6;
+  case DRAKEN_INT32: case DRAKEN_UINT32: return 11;
+  case DRAKEN_INT64: case DRAKEN_UINT64: return 14;
+  case DRAKEN_FLOAT32: case DRAKEN_FLOAT64: return 18;
+  case DRAKEN_BOOL: return 5;
+  case DRAKEN_DATE32: return 12;
+  case DRAKEN_TIMESTAMP64: return 34;
+  case DRAKEN_TIME32: case DRAKEN_TIME64: return 17;
+  case DRAKEN_DECIMAL: case DRAKEN_DECIMAL128: return 22;
+  case DRAKEN_VECTOR_FP16: return 1 + (size_t)c.desc.column.dim * 12;
+  case DRAKEN_VARCHAR: case DRAKEN_NVARCHAR: case DRAKEN_VARBINARY: case DRAKEN_VARIANT: {
+    const DrakenStringArena *sa = (const DrakenStringArena *)dv->data;
+    size_t nvals = sa && sa->length ? sa->length : 1;
+    return (sa ? sa->arena_used / nvals : 0) + 14; // + inline payload + quotes
+  }
+  default: return 16; // ARRAY and anything else: no cheap width signal
+  }
+}
+
+// Render logical rows [r0, r1) of the resolved columns into `out`. `prefixes`
+// are the baked per-column field prefixes ('{' or ',' + escaped name + ':'),
+// so each field costs one append for its framing, not a push_back + append.
 static inline void jsonl_render_rows(std::vector<Col> &cols, const std::string *prefixes,
                                      size_t ncols, size_t r0, size_t r1,
                                      size_t est_row_bytes, std::string &out) {
   out.reserve((r1 - r0) * est_row_bytes);
+  if (ncols == 0) {
+    for (size_t i = r0; i < r1; i++) out.append("{}\n", 3);
+    return;
+  }
   for (size_t i = r0; i < r1; i++) {
-    out.push_back('{');
     for (size_t c = 0; c < ncols; c++) {
-      if (c) out.push_back(',');
       out.append(prefixes[c]);
       cols[c].emit(out, cols[c], i);
     }
-    out.append("}\n");
+    out.append("}\n", 2);
   }
 }
 
@@ -448,12 +489,17 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const Drak
                                             const ColumnDesc *descs,
                                             const std::string *prefixes, size_t ncols, size_t nrows) {
   std::vector<Col> cols(ncols);
-  size_t prefsum = 0;
+  // Bake the field framing into the prefixes once: first column opens the row
+  // ('{'), the rest lead with ','. The row loop then has no per-field branch.
+  std::vector<std::string> baked(ncols);
+  size_t est = 2; // "}\n"
   for (size_t c = 0; c < ncols; c++) {
     resolve_col(cols[c], dvs[c], childs[c], descs[c], nullptr, 0, false, false);
-    prefsum += prefixes[c].size();
+    baked[c].reserve(prefixes[c].size() + 1);
+    baked[c].push_back(c == 0 ? '{' : ',');
+    baked[c].append(prefixes[c]);
+    est += baked[c].size() + est_cell_bytes(cols[c]);
   }
-  size_t est = prefsum + ncols + 2 + ncols * 8; // reserve heuristic (per row)
 
   // One partition per ~MIN_ROWS rows, capped at the pool width.
   const size_t MIN_ROWS = 16384;
@@ -463,7 +509,7 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const Drak
 
   std::vector<std::string> chunks(nt);
   if (nt <= 1) {
-    jsonl_render_rows(cols, prefixes, ncols, 0, nrows, est, chunks[0]);
+    jsonl_render_rows(cols, baked.data(), ncols, 0, nrows, est, chunks[0]);
   } else {
     BS::thread_pool<> &pool = jsonl_render_pool();
     std::vector<std::future<void>> futs;
@@ -477,7 +523,7 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const Drak
         // Shallow copy: shares the read-only cast arenas but owns an independent
         // `scratch`. Never freed here — free_cols runs once on `cols` below.
         std::vector<Col> local = cols;
-        jsonl_render_rows(local, prefixes, ncols, r0, r1, est, chunks[t]);
+        jsonl_render_rows(local, baked.data(), ncols, r0, r1, est, chunks[t]);
       }));
     }
     for (auto &f : futs) f.get();
@@ -513,22 +559,28 @@ inline std::string csv_write(const DrakenVector **dvs, const DrakenVector **chil
         }
   }
   std::vector<Col> cols(ncols);
-  size_t namesum = 0;
+  // Bake the field separator into a per-column prefix (empty for column 0,
+  // one delim byte otherwise) — same trick as jsonl_write's '{'/',' prefixes:
+  // the row loop then has no per-field branch, just an append + the emitter.
+  std::vector<char> seps(ncols, delim);
+  if (ncols) seps[0] = 0; // sentinel: column 0 has no separator
+  size_t namesum = 0, est = ncols + 4; // + one '\n' worth of slack
   for (size_t c = 0; c < ncols; c++) {
     resolve_col(cols[c], dvs[c], childs[c], descs[c], &names[c], delim, true, for_excel);
     namesum += names[c].size();
+    est += est_cell_bytes(cols[c]);
   }
   std::string out;
-  out.reserve(nrows * (ncols * 10) + namesum + ncols + 4);
+  out.reserve(nrows * est + namesum + ncols + 4);
   if (header) {
-    for (size_t c = 0; c < ncols; c++) { if (c) out.push_back(delim); csv_field(out, names[c].data(), names[c].size(), delim); }
+    for (size_t c = 0; c < ncols; c++) { if (seps[c]) out.push_back(seps[c]); csv_field(out, names[c].data(), names[c].size(), delim); }
     out.push_back('\n');
   }
   // for_excel's cell-width check throws from inside an emitter; the cast blocks
   // held by `cols` are ours to release on the way out.
   try {
     for (size_t i = 0; i < nrows; i++) {
-      for (size_t c = 0; c < ncols; c++) { if (c) out.push_back(delim); cols[c].emit(out, cols[c], i); }
+      for (size_t c = 0; c < ncols; c++) { if (seps[c]) out.push_back(seps[c]); cols[c].emit(out, cols[c], i); }
       out.push_back('\n');
     }
   } catch (...) {

@@ -147,6 +147,25 @@ def get_subplan_schemas(sub_plan: Graph) -> List[str]:
         if current_node.node_type == LogicalPlanStepType.Subquery:
             return aliases
 
+        # A nested set-op (this branch is itself `a UNION b`, e.g. a 3+-leg chained
+        # UNION ALL) only keeps its LEFT side's schema entries alive in
+        # context.schemas once bound -- visit_union/visit_intersect/visit_except
+        # (opteryx/planner/binder/set_ops.py) explicitly pop the right side's
+        # entries once folded into the left. Descending into both children here
+        # would collect the right side's leaf aliases too, and the outer set-op
+        # would later try to resolve those against context.schemas after they're
+        # gone (KeyError). current_node.left_relation_names was already computed
+        # by this exact function for the inner set-op (set inside plan_query
+        # right after inner_query_planner returns it), so reuse it instead of
+        # re-deriving from raw graph children -- correct by induction at any
+        # nesting depth.
+        if current_node.node_type in (
+            LogicalPlanStepType.Union,
+            LogicalPlanStepType.Intersect,
+            LogicalPlanStepType.Except,
+        ):
+            return aliases + list(current_node.left_relation_names or [])
+
         # Recursively collect aliases from children
         for child in node.get("children", []):
             aliases.extend(collect_aliases(child))

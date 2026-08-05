@@ -29,6 +29,7 @@ from opteryx.expression.intervals import (
     MICROSECONDS_PER_MINUTE,
     MICROSECONDS_PER_SECOND,
 )
+from opteryx.expression.operator_catalog import get_operator_for_sql_symbol
 from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
@@ -554,9 +555,14 @@ def binary_op(branch, alias: Optional[List[str]] = None, key=None):
     operator = branch["op"]
     right = build(branch["right"])
 
-    # Dialect-specific operator mapping
+    # Dialect-specific operator mapping. A custom operator arrives as its SQL
+    # spelling (`<<=`), because that is what sqlparser writes when an AST is
+    # serialised back to SQL to store a view; the canonical name is recovered
+    # here. An unknown symbol is left as-is so the error below names the text
+    # that was actually parsed.
     if isinstance(operator, dict):
-        operator = operator["Custom"]
+        symbol = operator["Custom"]
+        operator = get_operator_for_sql_symbol(symbol) or symbol
 
     if operator in ("PGRegexMatch", "SimilarTo"):
         operator = "RLike"
@@ -1202,42 +1208,14 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
                 alias=alias,
             )
         if _node_cat == LogicalCategory.TIMESTAMP and isinstance(literal_node.value, int):
-            us = literal_node.value
-            sec, usec = divmod(us, 1_000_000)
-            if usec < 0:
-                sec -= 1
-                usec += 1_000_000
-            days64, tod = divmod(sec, 86400)
-            if tod < 0:
-                days64 -= 1
-                tod += 86400
-            z = days64 + 719468
-            era = (z if z >= 0 else z - 146096) // 146097
-            doe = z - era * 146097
-            yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
-            yr = yoe + era * 400
-            doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
-            mp = (5 * doy + 2) // 153
-            d = doy - (153 * mp + 2) // 5 + 1
-            m = mp + 3 if mp < 10 else mp - 9
-            y = yr + (1 if m <= 2 else 0)
-            hh, rem = divmod(tod, 3600)
-            mm, ss = divmod(rem, 60)
-            parsed_value = f"{y:04d}-{m:02d}-{d:02d}T{hh:02d}:{mm:02d}:{ss:02d}.{usec:06d}"
+            from opteryx.expression.formatter import _format_timestamp_micros
+
+            parsed_value = _format_timestamp_micros(literal_node.value)
             return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
         if _node_cat == LogicalCategory.DATE and isinstance(literal_node.value, int):
-            days = literal_node.value
-            z = days + 719468
-            era = (z if z >= 0 else z - 146096) // 146097
-            doe = z - era * 146097
-            yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
-            yr = yoe + era * 400
-            doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
-            mp = (5 * doy + 2) // 153
-            d = doy - (153 * mp + 2) // 5 + 1
-            m = mp + 3 if mp < 10 else mp - 9
-            y = yr + (1 if m <= 2 else 0)
-            parsed_value = f"{y:04d}-{m:02d}-{d:02d}"
+            from opteryx.expression.formatter import _format_date_days
+
+            parsed_value = _format_date_days(literal_node.value)
             return Node(NodeType.LITERAL, type=sql_type, value=parsed_value, alias=alias)
         if _node_cat == LogicalCategory.TIME and isinstance(literal_node.value, datetime.time):
             # Matches draken_cast_time_to_string's fixed "HH:MM:SS.ffffff" format

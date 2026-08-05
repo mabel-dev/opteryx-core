@@ -503,16 +503,34 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
             draken_malloc((k > 0u ? k : 1u) * sizeof(uint32_t)));
         if (!out) return draken_error_sentinel("Allocation failed");
 
-        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
-        for (uint32_t i = 0u; i < n; ++i)
-            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        // A dense vector with no validity mask references every physical slot
+        // through selection[i] == i, so the liveness pass would mark all k slots
+        // live and can be skipped along with its zeroed allocation. This is a
+        // provable shortcut, NOT a shape-dependent answer: both paths treat
+        // exactly the same set of slots as live, so a missing layout hint (flags
+        // == 0 means "don't know") costs a pass and never a wrong result.
+        const bool all_live = (v->validity == nullptr)
+                           && ((v->flags & DRAKEN_SEL_IDENTITY) != 0u)
+                           && (k == n);
+        std::vector<uint8_t> live;
+        if (!all_live) {
+            live.assign(k > 0u ? k : 1u, 0u);
+            for (uint32_t i = 0u; i < n; ++i)
+                if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+        }
+        const uint8_t* live_map = all_live ? nullptr : live.data();
 
+        // `bad` records rows to NULL afterwards, which only TRY_CAST ever does —
+        // a plain CAST returns on the first unparseable value, so it can never
+        // record one. Allocating it unconditionally zeroed k bytes that the
+        // common path never reads.
         const bool is_safe = kernel_cast_is_safe(ctx);
-        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        std::vector<uint8_t> bad;
+        if (is_safe) bad.assign(k > 0u ? k : 1u, 0u);
         bool any_bad = false;
 
         for (uint32_t j = 0u; j < k; ++j) {
-            if (!live[j]) { out[j] = 0u; continue; }
+            if (live_map != nullptr && !live_map[j]) { out[j] = 0u; continue; }
             const DrakenStringSlot* slot = &sa->slots[j];
             const uint8_t* s   = str_data(slot, sa ? sa->arena : nullptr);
             const uint32_t len = str_length(slot);
@@ -563,6 +581,10 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
 // so a dead dictionary slot cannot poison rows that do not reference it; it
 // costs at most MAX_TEXT_LENGTH bytes of work. Two passes over the K values:
 // size the arena, then fill ("255.255.255.255" is 15 bytes, past STR_INLINE_MAX).
+// The sizing pass calls ipv4::text_length rather than rendering into a scratch
+// buffer and measuring — the width of an address is four threshold tests, so
+// there is no reason to format every value twice just to learn how big the
+// arena must be.
 VecResult draken_cast_ipv4_to_string(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
         if (!v) return draken_error_sentinel("Input vector is null");
@@ -573,12 +595,13 @@ VecResult draken_cast_ipv4_to_string(void* ctx, const DrakenVector* v) {
         const uint32_t k = v->data_length;
         const uint32_t* src = static_cast<const uint32_t*>(v->data);
 
-        char tmp[draken::ipv4::MAX_TEXT_LENGTH];
         size_t total_extern = 0u;
         for (uint32_t j = 0u; j < k; ++j) {
-            const uint32_t len = draken::ipv4::format(src[j], tmp);
+            const uint32_t len = draken::ipv4::text_length(src[j]);
             if (len > STR_INLINE_MAX) total_extern += static_cast<size_t>(len);
         }
+
+        char tmp[draken::ipv4::MAX_TEXT_LENGTH];
 
         DrakenStringSlot* slots;
         uint8_t* arena;

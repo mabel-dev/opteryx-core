@@ -36,9 +36,6 @@ from draken.vectors.bool_vector import BoolVector as _BoolVector
 from draken.morsels.morsel import Morsel as _Morsel
 import draken.draken_native as _draken_native
 from opteryx.compiled.nanobind.vectors import vector_uint64_eq_scalar as _vector_uint64_eq_scalar
-from opteryx.compiled.nanobind.vectors import vector_map_access_string as _vector_map_access_string
-from opteryx.compiled.nanobind.vectors import vector_json_extract as _vector_json_extract
-from opteryx.compiled.nanobind.vectors import vector_json_extract_text as _vector_json_extract_text
 from draken.draken_native import vector_array_map_access as _vector_array_map_access
 
 # ---------------------------------------------------------------------------
@@ -583,9 +580,9 @@ from opteryx.compiled.expression.compiled_expression cimport (
     UOP_UNKNOWN, UOP_IS_NULL, UOP_IS_NOT_NULL, UOP_IS_EMPTY,
     UOP_IS_NOT_EMPTY, UOP_BITWISE_NOT,
     UOP_IS_TRUE, UOP_IS_NOT_FALSE, UOP_IS_FALSE, UOP_IS_NOT_TRUE,
-    # Extraction op codes
-    BC_EXTR_UNKNOWN, BC_EXTR_MAP_STRING, BC_EXTR_MAP_ARRAY,
-    BC_EXTR_JSON_PTR, BC_EXTR_JSON_KEY,
+    # Extraction op codes — only arr[i] is discriminated here; every other
+    # sub-op runs its bind-time-resolved kernel without the VM naming it.
+    BC_EXTR_MAP_ARRAY,
 )
 from libc.stdint cimport uint8_t, int8_t, int16_t, int32_t, int64_t, uintptr_t, uint32_t
 
@@ -3076,6 +3073,8 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef DrakenType result_dtype
     cdef VecResult cast_vr
     cdef VecResult binop_vr
+    cdef VecResult extr_vr
+    cdef object extr_err_msg
     cdef const DrakenVector* cfargs[16]   # C-native BC_FUNCTION operand scratch
     cdef Py_ssize_t _fj
     cdef object cast_err_msg
@@ -3599,47 +3598,62 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                 continue
 
             # ----------------------------------------------------------
-            # BC_EXTRACTION — Phase 3: direct native kernel calls.
-            # Sub-op code in slot.op_code (BC_EXTR_MAP_STRING, etc.)
-            # Key stored in slot.literal_obj (bytes or Vector) or slot.bool_value (scalar int).
+            # BC_EXTRACTION — the bind-time-resolved C-ABI kernel, called
+            # directly, exactly as the engine VM calls it (c_execute_dv_inner).
+            # `->`, `->>` and str[i] consume ONE operand — the path/index rides
+            # in extraction_ctx — so there is nothing to marshal: no nanobind
+            # wrapper, no Python Vector per morsel. Mirrors the BC_CAST arm below.
+            #
+            # arr[i] is the one sub-op that still needs a Python object here.
+            # Its element vector hangs off the column owner, not off
+            # DrakenVector, and this VM has no dv_cache to resolve it from
+            # (the reason BC_CAST's ARRAY->VARCHAR arm refuses outright); only
+            # the anchor's nanobind Vector can reach the child.
             # ----------------------------------------------------------
             if opcode == BC_EXTRACTION:
                 sp -= 1
                 dv_left_ptr = dv_stack[sp]
-                py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
 
-                # Unwrap Cython shim to nanobind Vector for native kernel calls.
-                if isinstance(py_left, Vector):
-                    py_left_nb = (<Vector>py_left)._nb
-                else:
-                    py_left_nb = py_left
-
-                # Dispatch to the resolved native kernel based on sub-op code.
-                if slot.op_code == BC_EXTR_MAP_STRING:
-                    legacy_result = _vector_map_access_string(py_left_nb, <object>slot.literal_obj)
-                elif slot.op_code == BC_EXTR_MAP_ARRAY:
+                if slot.op_code == BC_EXTR_MAP_ARRAY:
+                    py_left = _slot_to_pyobj(dv_left_ptr, anchor[sp], arena)
+                    # Unwrap Cython shim to nanobind Vector for the native call.
+                    if isinstance(py_left, Vector):
+                        py_left_nb = (<Vector>py_left)._nb
+                    else:
+                        py_left_nb = py_left
                     legacy_result = _vector_array_map_access(py_left_nb, <int64_t>slot.bool_value)
-                elif slot.op_code == BC_EXTR_JSON_PTR:
-                    # `->` → VARIANT (JSON value)
-                    legacy_result = _vector_json_extract(py_left_nb, <object>slot.literal_obj)
-                elif slot.op_code == BC_EXTR_JSON_KEY:
-                    # `->>` → NVARCHAR (text; JSON strings unquoted)
-                    legacy_result = _vector_json_extract_text(py_left_nb, <object>slot.literal_obj)
-                else:
-                    raise NotImplementedError(f"BC_EXTRACTION: unknown sub-op {slot.op_code}")
-
-                # Result wrap — kernel returns nanobind Vector, wrap as needed.
-                if slot.flags & BC_RESULT_NEEDS_NB_WRAP:
                     if not isinstance(legacy_result, Vector):
-                        if slot.flags & BC_RESULT_WRAP_AS_BOOL:
-                            legacy_result = BoolVector(legacy_result)
-                        else:
-                            legacy_result = Vector(legacy_result)
-                anchor[sp] = legacy_result
-                if isinstance(legacy_result, Vector):
+                        legacy_result = Vector(legacy_result)
+                    anchor[sp] = legacy_result
                     dv_stack[sp] = <DrakenVector*>(<Vector>legacy_result)._dv
-                else:
-                    dv_stack[sp] = NULL
+                    sp += 1
+                    continue
+
+                # Every other sub-op is resolved to a kernel at bind time or the
+                # lowering raises (compiled_expression.pyx), so a missing kernel
+                # here is a compiler bug — fail loud, never marshal a fallback.
+                if (slot.flags & BC_INSTR_C_NATIVE) == 0:
+                    raise ValueError(
+                        f"execute_bytecode: BC_EXTRACTION sub-op {slot.op_code} carries "
+                        "no resolved kernel"
+                    )
+                if dv_left_ptr == NULL:
+                    raise ValueError(
+                        "execute_bytecode: BC_EXTRACTION operand is not a vector"
+                    )
+                rc = _dv_extraction_kernel_c(
+                    slot.kernel_fn, <void*>slot.ctx_ptr, dv_left_ptr, NULL,
+                    dv_store, dv_stack, sp, arena, &extr_vr)
+                if rc == 4:
+                    extr_err_msg = (
+                        extr_vr.error_msg.decode("utf-8", "replace")
+                        if extr_vr.error_msg != NULL else "C extraction kernel error"
+                    )
+                    raise ValueError(extr_err_msg)
+                # rc 0: the result (string canonical block or element-typed) is
+                # adopted into the frame arena; _slot_to_pyobj builds a Vector
+                # lazily only if something downstream consumes the object.
+                anchor[sp] = None
                 sp += 1
                 continue
 

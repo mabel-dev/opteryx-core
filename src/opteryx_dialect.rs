@@ -143,6 +143,14 @@ impl Dialect for OpteryxDialect {
         // The right operand is parsed with parse_subexpr(precedence), NOT
         // parse_expr(): parse_expr consumes the whole remaining expression, so
         // `ip <<= '10/8' AND x = 1` would bind as `ip <<= ('10/8' AND x = 1)`.
+        //
+        // BinaryOperator::Custom carries the SQL SPELLING, never the operator's
+        // internal name. sqlparser's Display for Custom writes the string back
+        // verbatim, and that Display is how a view is serialised for storage
+        // (ViewManagementNode -> restore_ast). Naming the variant "IPContainedBy"
+        // saved `ip <<= '10/8'` as `ip IPContainedBy '10/8'` - a view that could
+        // never be re-parsed. The symbol round-trips. `binary_op` in the logical
+        // planner maps the symbol back to the canonical operator name.
         if matches!(parser.peek_token().token, Token::ShiftLeft)
             && matches!(parser.peek_nth_token(1).token, Token::Eq)
         {
@@ -151,7 +159,7 @@ impl Dialect for OpteryxDialect {
             return Some(match parser.parse_subexpr(precedence) {
                 Ok(right) => Ok(Expr::BinaryOp {
                     left: Box::new(expr.clone()),
-                    op: BinaryOperator::Custom("IPContainedBy".to_string()),
+                    op: BinaryOperator::Custom("<<=".to_string()),
                     right: Box::new(right),
                 }),
                 Err(e) => Err(e),
@@ -165,7 +173,7 @@ impl Dialect for OpteryxDialect {
             return Some(match parser.parse_subexpr(precedence) {
                 Ok(right) => Ok(Expr::BinaryOp {
                     left: Box::new(expr.clone()),
-                    op: BinaryOperator::Custom("IPContains".to_string()),
+                    op: BinaryOperator::Custom(">>=".to_string()),
                     right: Box::new(right),
                 }),
                 Err(e) => Err(e),
@@ -201,7 +209,8 @@ impl Dialect for OpteryxDialect {
                 return Some(match parser.parse_subexpr(precedence) {
                     Ok(right) => Ok(Expr::BinaryOp {
                         left: Box::new(expr.clone()),
-                        op: BinaryOperator::Custom("ArrayContainsAll".to_string()), // your ALL operator
+                        // As with `<<=` above: the SQL spelling, so Display round-trips.
+                        op: BinaryOperator::Custom("@>>".to_string()),
                         right: Box::new(right),
                     }),
                     Err(e) => Err(e),

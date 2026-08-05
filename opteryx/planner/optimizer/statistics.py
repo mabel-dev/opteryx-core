@@ -168,10 +168,27 @@ class RelationStatistics:
     row_count: int
     columns: dict[bytes, ColumnStatistics]
 
+    # Pre-filter row count of the largest base relation underneath this node --
+    # a *domain* size, not a cardinality. Join-key NDV is frequently absent
+    # (Parquet rarely carries distinct-count statistics), and the tdom fallback
+    # that stands in for it must divide by the size of the key's domain, not by
+    # the post-filter row count: |A| x |B| / min(|A|, |B|) is identically
+    # max(|A|, |B|), so a filtered dimension table would predict zero reduction
+    # no matter how selective its filter. None means "same as row_count" so
+    # every existing construction site keeps its previous meaning.
+    base_row_count: Optional[int] = None
+
+    @property
+    def domain_row_count(self) -> int:
+        """Base (pre-filter) row count, falling back to the live row count."""
+        return self.row_count if self.base_row_count is None else self.base_row_count
+
     def copy(self) -> "RelationStatistics":
         """Create a shallow copy with new column dict."""
         return RelationStatistics(
-            row_count=self.row_count, columns={k: v for k, v in self.columns.items()}
+            row_count=self.row_count,
+            columns={k: v for k, v in self.columns.items()},
+            base_row_count=self.base_row_count,
         )
 
     def get_column(self, identity: bytes) -> Optional[ColumnStatistics]:

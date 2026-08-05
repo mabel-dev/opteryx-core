@@ -331,6 +331,29 @@ def _scan_stats(
                     histogram = manifest.get_distogram(col_name)
                 except Exception:
                     histogram = None
+                # Manifest min/max -> value_range. Without this the field was
+                # left empty here and only ever written by
+                # _narrow_filter_columns, so a column with no predicate on it
+                # -- which is every join key -- had no range at all, and the
+                # parquet footer's real per-row-group bounds were discarded.
+                try:
+                    bounds = manifest.get_value_range(col_name)
+                except Exception:
+                    bounds = None
+                # NUMERIC ONLY, deliberately. The manifest returns bounds
+                # decoded for integer columns but as RAW SERIALIZED BYTES for
+                # strings and decimals (ps_supplycost comes back as
+                # b'\x00...d'). value_range holds logical values that
+                # _narrow_filter_columns intersects against predicate literals
+                # with a bare max()/min() -- unguarded on purpose, so that a
+                # type error there means a genuine upstream defect. Feeding it
+                # undecoded bytes IS that defect: bytes vs str raises. Ints and
+                # floats are the only bounds that arrive already decoded, and
+                # they are exactly the ones the NDV-span bound can use.
+                if bounds is not None and all(
+                    type(b) in (int, float) for b in bounds
+                ):
+                    value_range = ColumnRange(lower_bound=bounds[0], upper_bound=bounds[1])
                 if has_null_counts:
                     try:
                         null_fraction = manifest.estimate_null_fraction(col_name)
@@ -387,7 +410,12 @@ def _scan_stats(
                 total_bytes=total_bytes,
             )
 
-    base = RelationStatistics(row_count=int(row_count), columns=columns)
+    # `row_count` here is the relation's pre-filter size -- the domain the two
+    # selectivity passes below shrink. Carry it as base_row_count so join-key
+    # tdom estimates divide by the domain rather than by the filtered count.
+    base = RelationStatistics(
+        row_count=int(row_count), columns=columns, base_row_count=int(row_count)
+    )
 
     # Apply leaf-local filter selectivity from upward Filter ancestors.
     if plan is not None and nid is not None:
@@ -423,7 +451,11 @@ def _scan_stats(
                     narrowed_columns, _ratio(new_rows, base.row_count)
                 )
                 if new_rows != base.row_count or narrowed_columns is not base.columns:
-                    base = RelationStatistics(row_count=new_rows, columns=narrowed_columns)
+                    base = RelationStatistics(
+                        row_count=new_rows,
+                        columns=narrowed_columns,
+                        base_row_count=base.domain_row_count,
+                    )
 
     # Predicates already pushed onto this scan (post-PredicatePushdown) have no
     # Filter node for the leaf-local walk to find, so apply the same selectivity
@@ -456,7 +488,11 @@ def _scan_stats(
             new_rows = max(1, int(base.row_count * selectivity))
         narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
         if new_rows != base.row_count or narrowed_columns is not base.columns:
-            base = RelationStatistics(row_count=new_rows, columns=narrowed_columns)
+            base = RelationStatistics(
+                row_count=new_rows,
+                columns=narrowed_columns,
+                base_row_count=base.domain_row_count,
+            )
 
     return base
 
@@ -546,7 +582,10 @@ def _filter_stats(
     if selectivity != 1.0:
         new_rows = estimate_after_filter(base.row_count, selectivity)
     narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
-    return RelationStatistics(row_count=new_rows, columns=narrowed_columns)
+    # Filtering shrinks the cardinality, never the key domain it was drawn from.
+    return RelationStatistics(
+        row_count=new_rows, columns=narrowed_columns, base_row_count=base.domain_row_count
+    )
 
 
 def _join_note(nid, join_type, left_rows, right_rows, out_rows, key_count) -> dict:
@@ -558,6 +597,188 @@ def _join_note(nid, join_type, left_rows, right_rows, out_rows, key_count) -> di
         "row_count": out_rows,
         "key_count": key_count,
     }
+
+
+def _value_range_span(col_stats) -> Optional[int]:
+    """Distinct-value upper bound implied by an integer column's value range.
+
+    ``max - min + 1`` counts every value the range could hold, so it is an
+    UPPER bound on NDV -- never a substitute for a real ``distinct_count``,
+    only a cap on an estimate derived from something weaker. For the dense
+    surrogate keys that carry most joins it is close to exact (TPC-H
+    ``ps_suppkey`` spans 1..10,000 against a true NDV of 10,000); for a sparse
+    key it can overshoot badly, which is why callers cap with it rather than
+    adopt it.
+
+    Integer bounds only: a float or string range has no meaningful value
+    count. ``type(x) is int`` rather than ``isinstance`` because
+    ``isinstance(True, int)`` is True and a bool range spans nothing useful.
+    """
+    value_range = getattr(col_stats, "value_range", None)
+    if value_range is None:
+        return None
+    lower, upper = value_range.lower_bound, value_range.upper_bound
+    if type(lower) is not int or type(upper) is not int or upper < lower:
+        return None
+    return upper - lower + 1
+
+
+def _equi_key_classes(
+    left_keys: List[bytes],
+    right_keys: List[bytes],
+    left: RelationStatistics,
+    right: RelationStatistics,
+) -> List[Tuple[KeyStats, KeyStats]]:
+    """Collapse a join's equi-key pairs to one KeyStats pair per equivalence class.
+
+    A query that restates a key transitively -- JOB writes
+    ``t.id = mc.movie_id AND t.id = ci.movie_id AND ci.movie_id = mc.movie_id``
+    -- hands a single join several key pairs that all express the SAME key
+    identity. That is not a composite key. ``estimate_join_cardinality``
+    multiplies every pair's selectivity under its independence assumption, so
+    passing the restated pairs squares a selectivity that should apply once and
+    collapses the estimate towards nothing (JOB 10a: a 632K x 2.6M join
+    estimated at 4 rows).
+
+    Pairs are grouped by shared endpoint: ``a.x = c.z`` and ``b.y = c.z`` both
+    touch ``c.z``, so they form one class and contribute one factor. A genuinely
+    composite key (``a.x = b.x AND a.y = b.y``) shares no endpoint, stays two
+    classes, and still has both selectivities multiplied in.
+
+    Per class, tdom is the largest known NDV across every member endpoint
+    (Ebergen 2022 3.2) and is applied to BOTH sides -- so a class where only one
+    side knows its NDV uses that NDV rather than ``_key_selectivity``'s flat 0.1
+    equality fallback. When no member knows an NDV (common with Parquet files
+    that omit distinct-count statistics), tdom falls back to the smaller side's
+    ``domain_row_count`` -- its PRE-filter size: under FK-PK structure the
+    smaller relation upper-bounds the distinct key count, and dividing by the
+    post-filter count instead yields exactly ``max(rows)``, erasing every
+    dimension filter. Null fractions take the worst case per side, matching
+    ``JoinOrderingStrategy._key_null_fraction``.
+
+    This mirrors ``plan_adapter._build_equiv_tdoms``, which already groups the
+    identical way for the edges DPccp enumerates. The two paths must agree, or
+    the tree-picker and the build-side chooser cost the same join differently.
+    """
+    parent: Dict[Tuple[str, bytes], Tuple[str, bytes]] = {}
+
+    def find(key):
+        parent.setdefault(key, key)
+        root = key
+        while parent[root] != root:
+            root = parent[root]
+        while parent[key] != root:
+            parent[key], key = root, parent[key]
+        return root
+
+    def union(a, b):
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    pairs = list(zip(left_keys, right_keys))
+    for left_key, right_key in pairs:
+        union(("L", left_key), ("R", right_key))
+
+    # Insertion-ordered so the emitted key list is deterministic.
+    classes: Dict[Tuple[str, bytes], List[Tuple[bytes, bytes]]] = {}
+    for left_key, right_key in pairs:
+        classes.setdefault(find(("L", left_key)), []).append((left_key, right_key))
+
+    equi_keys: List[Tuple[KeyStats, KeyStats]] = []
+    for members in classes.values():
+        known_ndvs: List[int] = []
+        spans: List[int] = []
+        left_nulls: List[float] = []
+        right_nulls: List[float] = []
+        for left_key, right_key in members:
+            left_col = left.get_column(left_key)
+            right_col = right.get_column(right_key)
+            for col in (left_col, right_col):
+                if col is None:
+                    continue
+                if col.distinct_count is not None:
+                    known_ndvs.append(col.distinct_count)
+                span = _value_range_span(col)
+                if span is not None:
+                    spans.append(span)
+            if left_col is not None and left_col.null_fraction is not None:
+                left_nulls.append(left_col.null_fraction)
+            if right_col is not None and right_col.null_fraction is not None:
+                right_nulls.append(right_col.null_fraction)
+
+        tdom = (
+            max(known_ndvs)
+            if known_ndvs
+            else min(left.domain_row_count, right.domain_row_count)
+        )
+        # An equi-join only matches values present on BOTH sides, so the key
+        # domain cannot exceed the narrowest member's value range. Applied as a
+        # cap, never as the estimate itself: a range span is an upper bound on
+        # NDV (see _value_range_span), so adopting it outright would overstate
+        # the domain for a sparse key and shrink the join estimate to nothing.
+        # Capping only ever tightens tdom, which raises the estimate.
+        if spans:
+            tdom = min(tdom, min(spans))
+        tdom = max(1, tdom)
+        equi_keys.append((
+            KeyStats(ndv=tdom, null_fraction=max(left_nulls) if left_nulls else None),
+            KeyStats(ndv=tdom, null_fraction=max(right_nulls) if right_nulls else None),
+        ))
+
+    return equi_keys
+
+
+def _apply_occupancy_bound(
+    equi_keys: List[Tuple[KeyStats, KeyStats]],
+    left: RelationStatistics,
+    right: RelationStatistics,
+) -> List[Tuple[KeyStats, KeyStats]]:
+    """Bound a COMPOSITE key's domain by the rows available to hold it.
+
+    ``estimate_join_cardinality`` multiplies one selectivity per class under an
+    independence assumption, so N classes divide by the PRODUCT of their
+    domains. For a composite key that product counts *possible* key tuples, and
+    it can exceed the number that could physically exist: TPC-H's
+    ``(ps_partkey, ps_suppkey)`` gives 200,000 x 10,000 = 2e9 against 800,000
+    rows to hold them, so the join estimated 2,400 rows instead of 6,001,215 --
+    and being 2,500x under put a 6-million-row input on the BUILD side of three
+    consecutive joins.
+
+    A relation cannot contain more distinct key tuples than it has rows, so the
+    composite domain is capped at the smaller side's row count. This is the
+    row-group occupancy bound evaluated at relation granularity: the per-row-
+    group form is ``sum(min(rows_rg, cells_rg))``, which collapses to
+    ``sum(rows_rg) = |R|`` whenever a row group holds fewer rows than its key
+    space has cells -- true for every row group of every relation measured here
+    (partsupp: 65,536 rows against 16,384 x 10,000 cells). The per-row-group
+    form is strictly tighter only for a composite key with heavy duplication
+    inside a narrow box; nothing in TPC-H or JOB has that shape.
+
+    Collapsing to a single pair is exactly equivalent when the product is
+    already under the bound (one divisor of P == N divisors multiplying to P),
+    and null fractions keep their worst-case-per-side composition because
+    ``_effective_rows`` takes the max across the key list either way.
+
+    Callers must note the PRE-bound class count in telemetry: after a collapse
+    the returned list no longer reveals that the join had a composite key.
+    """
+    if len(equi_keys) < 2:
+        return equi_keys
+
+    composite = 1
+    for left_stat, _ in equi_keys:
+        composite *= left_stat.ndv
+    bound = max(1, min(left.domain_row_count, right.domain_row_count))
+    if composite <= bound:
+        return equi_keys
+
+    left_null = [k[0].null_fraction for k in equi_keys if k[0].null_fraction is not None]
+    right_null = [k[1].null_fraction for k in equi_keys if k[1].null_fraction is not None]
+    return [(
+        KeyStats(ndv=bound, null_fraction=max(left_null) if left_null else None),
+        KeyStats(ndv=bound, null_fraction=max(right_null) if right_null else None),
+    )]
 
 
 def _join_stats(
@@ -620,30 +841,15 @@ def _join_stats(
     # pair's selectivity multiplied in -- estimate_join_cardinality already
     # does this correctly given a multi-entry equi_keys list (see its
     # independence-assumption docstring), and _intersect_join_keys below
-    # already loops over every pair. Using only keys[0] silently dropped every
-    # key past the first, understating a composite key's true selectivity and
-    # overestimating the join (the same "signal exists, never reaches the
-    # estimator" shape as the pushed-predicate and DISTINCT-NDV gaps above).
-    equi_keys = []
-    for left_key, right_key in zip(left_keys, right_keys):
-        left_col = left.get_column(left_key)
-        right_col = right.get_column(right_key)
-        left_ndv = left_col.distinct_count if left_col else None
-        right_ndv = right_col.distinct_count if right_col else None
-        # When NDV is absent on both sides (common with Parquet files that omit
-        # distinct-count row-group statistics), fall back to tdom = min(row_counts).
-        # Assuming FK-PK structure, the smaller relation upper-bounds the distinct
-        # key count, giving a far better estimate than a flat 0.1 selectivity.
-        # Ebergen (2022) §3.2.  Only fires when BOTH sides are unknown — if one
-        # side has a real NDV, _key_selectivity already uses it.
-        if left_ndv is None and right_ndv is None:
-            tdom = max(1, min(left.row_count, right.row_count))
-            left_ndv = tdom
-            right_ndv = tdom
-        equi_keys.append((
-            KeyStats(ndv=left_ndv, null_fraction=left_col.null_fraction if left_col else None),
-            KeyStats(ndv=right_ndv, null_fraction=right_col.null_fraction if right_col else None),
-        ))
+    # already loops over every pair. Restated transitive keys are NOT a
+    # composite key and must not be multiplied; _equi_key_classes separates
+    # the two cases.
+    equi_keys = _equi_key_classes(left_keys, right_keys, left, right)
+    # Class count BEFORE the occupancy bound: a bounded composite collapses to
+    # one pair, and telemetry reporting "1 key" for a two-column join would
+    # hide exactly the shape a reader needs to see to understand the estimate.
+    key_class_count = len(equi_keys)
+    equi_keys = _apply_occupancy_bound(equi_keys, left, right)
 
     out_rows = estimate_join_cardinality(
         left_rows=left.row_count,
@@ -654,14 +860,22 @@ def _join_stats(
     )
     if join_notes is not None:
         join_notes.append(
-            _join_note(nid, join_type, left.row_count, right.row_count, out_rows, len(equi_keys))
+            _join_note(nid, join_type, left.row_count, right.row_count, out_rows, key_class_count)
         )
     merged = _drop_histograms(_merge_columns(left, right))
     # Equi-join: matching join keys see their range intersected and NDV reduced
     # to min(left, right). Non-key columns just get NDV capped at output rows.
     merged = _intersect_join_keys(merged, left, right, left_keys, right_keys)
     merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
-    return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
+    # A later join keys off a column belonging to one of the base relations
+    # under this subtree; we can't tell which, so keep the largest domain --
+    # the conservative choice, since it under-claims rather than over-claims
+    # the reduction at the next join.
+    return RelationStatistics(
+        row_count=out_rows,
+        columns=_cap_ndvs(merged, out_rows),
+        base_row_count=max(left.domain_row_count, right.domain_row_count),
+    )
 
 
 def _intersect_join_keys(

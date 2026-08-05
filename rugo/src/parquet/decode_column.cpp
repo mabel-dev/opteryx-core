@@ -587,8 +587,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     int32_t dict_size = 0;
 
     // Keep decompressed buffers alive across dictionary and data page decoding.
-    std::vector<uint8_t> dict_decompressed_data;
-    std::vector<uint8_t> page_decompressed_data;
+    rugo::compression::ScratchBuffer dict_decompressed_data;
+    rugo::compression::ScratchBuffer page_decompressed_data;
 
     if (target_col->dictionary_page_offset >= 0 &&
         (uint64_t)target_col->dictionary_page_offset < file_size) {
@@ -1094,7 +1094,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // handled. Confirmed via dev/decomp_buffer_ab (matched A/B
               // against the real DecompressInto + the real page-decode pool):
               // consistent win at every page size tested, no regression.
-              static thread_local std::vector<uint8_t> decomp_buf;
+              static thread_local rugo::compression::ScratchBuffer decomp_buf;
               const uint8_t* dp;
               size_t         ds;
 
@@ -1877,8 +1877,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           // (dict_codes_array) path is intentionally untouched: abandoning a packed
           // code array would require a def-level-aware gather back to dense.
           if (byte_array_dict_mode && !result.rle_str_lens.empty()) {
-            result.string_values.reserve(result.string_values.size() +
-                                         result.rle_total_length);
+            result.string_offsets.reserve(result.string_offsets.size() +
+                                          result.rle_total_length);
+            result.string_lens.reserve(result.string_lens.size() +
+                                       result.rle_total_length);
             const size_t n_runs = result.rle_run_lengths.size();
             for (size_t r = 0; r < n_runs; ++r) {
               const uint32_t off = result.rle_str_offsets[r];
@@ -1887,7 +1889,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               const char* sp = reinterpret_cast<const char*>(
                   result.rle_str_arena.data() + off);
               for (int32_t j = 0; j < cnt; ++j)
-                result.string_values.emplace_back(sp, static_cast<size_t>(len));
+                result.append_string(sp, static_cast<size_t>(len));
             }
             result.rle_str_arena.clear();
             result.rle_str_offsets.clear();
@@ -2172,21 +2174,24 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           // PLAIN page -> if dict_size / rows_so_far < 0.8 (≥20% saving), intern the
           //              plain values into the unified dictionary and keep dict mode.
           //              Otherwise materialise the already-decoded dict rows to
-          //              string_values and switch to dense for all remaining pages.
+          //              the dense string arena and switch to dense for all
+          //              remaining pages.
           // A PLAIN/DELTA page after dict pages is the writer's high-cardinality
           // verdict — honour it rather than re-deriving it at read time:
           // materialise any dict rows decoded so far to dense strings, drop the
           // dictionary, and decode this and every later page dense. We never
           // intern a PLAIN page into a dictionary on read.
           if (byte_array_dict_mode) {
-            result.string_values.reserve(result.string_values.size() +
-                                         result.dict_indices.size());
+            result.string_offsets.reserve(result.string_offsets.size() +
+                                          result.dict_indices.size());
+            result.string_lens.reserve(result.string_lens.size() +
+                                       result.dict_indices.size());
             for (int32_t code : result.dict_indices) {
               if (code >= 0 && code < (int32_t)result.string_dict_lens.size()) {
                 const uint32_t off = result.string_dict_offsets[code];
                 const int32_t  len = result.string_dict_lens[code];
-                result.string_values.emplace_back(
-                    reinterpret_cast<const char*>(result.string_dict_arena.data()) + off,
+                result.append_string(
+                    result.string_dict_arena.data() + off,
                     static_cast<size_t>(len));
               }
             }
@@ -2201,15 +2206,18 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
                                                     present_count, page_strs);
             if (decoded != present_count) return;
-            result.string_values.insert(result.string_values.end(),
-                                         page_strs.begin(), page_strs.end());
+            for (const auto& s : page_strs)
+              result.append_string(s.data(), s.size());
           } else {
+            // NO per-page reserve() here. reserve(size + page_span) sets capacity
+            // to that EXACT size, so the next page reserves again and reallocates
+            // — one full arena copy per page, i.e. quadratic in the chunk. Let the
+            // insert below grow the buffers geometrically (amortized O(1)) instead.
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);
               data_ptr += 4;
               if (data_ptr + length > data_end) break;
-              result.string_values.emplace_back(
-                  reinterpret_cast<const char *>(data_ptr), length);
+              result.append_string(data_ptr, length);
               data_ptr += length;
             }
           }
@@ -2499,15 +2507,25 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             result.boolean_values = std::move(o);
           }
 
-          // Filter string_values (plain byte_array — high-cardinality columns that
-          // fell out of dictionary encoding into dense strings). Without this they
+          // Filter the dense string arena (plain byte_array — high-cardinality
+          // columns that fell out of dictionary encoding). Without this they
           // slip through unfiltered, leaving the column at total_decoded length
-          // while the engine sees num_rows = K.
-          if (!result.string_values.empty()) {
-            std::vector<std::string> o; o.reserve(K);
-            for (size_t i = 0; i < std::min((size_t)result.string_values.size(), mask_len); ++i)
-              if (decoded_row_mask[i]) o.push_back(std::move(result.string_values[i]));
-            result.string_values = std::move(o);
+          // while the engine sees num_rows = K. Survivors' bytes are recompacted
+          // into a fresh arena.
+          if (!result.string_lens.empty()) {
+            std::vector<uint8_t>  oa;
+            std::vector<uint32_t> oo; oo.reserve(K);
+            std::vector<int32_t>  ol; ol.reserve(K);
+            for (size_t i = 0; i < std::min((size_t)result.string_lens.size(), mask_len); ++i)
+              if (decoded_row_mask[i]) {
+                oo.push_back(static_cast<uint32_t>(oa.size()));
+                ol.push_back(result.string_lens[i]);
+                const uint8_t* b = result.string_arena.data() + result.string_offsets[i];
+                oa.insert(oa.end(), b, b + result.string_lens[i]);
+              }
+            result.string_arena   = std::move(oa);
+            result.string_offsets = std::move(oo);
+            result.string_lens    = std::move(ol);
           }
         } else {
           // Nullable: use def_levels to map rows → value positions.
@@ -2519,7 +2537,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           const bool have_f64   = !result.float64_values.empty();
           const bool have_dict  = !result.dict_indices.empty();
           const bool have_bool  = !result.boolean_values.empty();
-          const bool have_str   = !result.string_values.empty();
+          const bool have_str   = !result.string_lens.empty();
 
           std::vector<int32_t> o_i32;
           std::vector<int64_t> o_i64;
@@ -2527,7 +2545,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           std::vector<double>  o_f64;
           std::vector<int32_t> o_dict;
           std::vector<uint8_t> o_bool;
-          std::vector<std::string> o_str;
+          std::vector<uint8_t>  o_str_arena;
+          std::vector<uint32_t> o_str_offsets;
+          std::vector<int32_t>  o_str_lens;
 
           int32_t val_idx = 0;
           for (int32_t row_i = 0; row_i < total_decoded; ++row_i) {
@@ -2548,8 +2568,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   o_dict.push_back(result.dict_indices[val_idx]);
                 if (have_bool && val_idx < (int32_t)result.boolean_values.size())
                   o_bool.push_back(result.boolean_values[val_idx]);
-                if (have_str  && val_idx < (int32_t)result.string_values.size())
-                  o_str.push_back(std::move(result.string_values[val_idx]));
+                if (have_str  && val_idx < (int32_t)result.string_lens.size()) {
+                  o_str_offsets.push_back(static_cast<uint32_t>(o_str_arena.size()));
+                  o_str_lens.push_back(result.string_lens[val_idx]);
+                  const uint8_t* b =
+                      result.string_arena.data() + result.string_offsets[val_idx];
+                  o_str_arena.insert(o_str_arena.end(),
+                                     b, b + result.string_lens[val_idx]);
+                }
               }
               ++val_idx;
             }
@@ -2560,7 +2586,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           if (have_f64)  result.float64_values = std::move(o_f64);
           if (have_dict) result.dict_indices   = std::move(o_dict);
           if (have_bool) result.boolean_values = std::move(o_bool);
-          if (have_str)  result.string_values  = std::move(o_str);
+          if (have_str) {
+            result.string_arena   = std::move(o_str_arena);
+            result.string_offsets = std::move(o_str_offsets);
+            result.string_lens    = std::move(o_str_lens);
+          }
         }
 
         // Filter def_levels to selected rows (valid_bits is built from this below).
@@ -2579,9 +2609,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       const int32_t max_def_lvl = target_col->max_definition_level;
 
       std::vector<int32_t> new_rep, new_def;
-      std::vector<std::string> new_strings;
+      std::vector<uint8_t>  new_str_arena;
+      std::vector<uint32_t> new_str_offsets;
+      std::vector<int32_t>  new_str_lens;
       std::vector<int32_t> new_dict_indices;
-      const bool use_strings = !result.string_values.empty();
+      const bool use_strings = !result.string_lens.empty();
       const bool use_dicts   = !result.dict_indices.empty();
 
       int32_t logical_row = -1;
@@ -2603,8 +2635,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           if (i < all_def_levels.size())
             new_def.push_back(all_def_levels[i]);
           if (is_value) {
-            if (use_strings && value_idx < (int32_t)result.string_values.size())
-              new_strings.push_back(std::move(result.string_values[value_idx]));
+            if (use_strings && value_idx < (int32_t)result.string_lens.size()) {
+              new_str_offsets.push_back(static_cast<uint32_t>(new_str_arena.size()));
+              new_str_lens.push_back(result.string_lens[value_idx]);
+              const uint8_t* b =
+                  result.string_arena.data() + result.string_offsets[value_idx];
+              new_str_arena.insert(new_str_arena.end(),
+                                   b, b + result.string_lens[value_idx]);
+            }
             if (use_dicts && value_idx < (int32_t)result.dict_indices.size())
               new_dict_indices.push_back(result.dict_indices[value_idx]);
           }
@@ -2614,7 +2652,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
       all_rep_levels = std::move(new_rep);
       all_def_levels = std::move(new_def);
-      if (use_strings) result.string_values = std::move(new_strings);
+      if (use_strings) {
+        result.string_arena   = std::move(new_str_arena);
+        result.string_offsets = std::move(new_str_offsets);
+        result.string_lens    = std::move(new_str_lens);
+      }
       if (use_dicts)   result.dict_indices   = std::move(new_dict_indices);
       total_collected = out_rows;
     }
@@ -2646,7 +2688,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
     }
 
-    // If every byte_array page used dictionary encoding, string_values is still empty
+    // If every byte_array page used dictionary encoding, the dense string arena is still empty
     // and dict_indices holds all per-row lookup indices.  The compact dictionary is
     // already in result.string_dict_arena / string_dict_offsets / string_dict_lens;
     // no action needed here.

@@ -728,14 +728,21 @@ static void assert_extr_rejects_int64(VecResult (*fn)(void*, const DrakenVector*
 }
 void test_draken_map_access_string() { assert_extr_rejects_int64(draken_map_access_string, 1); }
 void test_draken_json_extract() { assert_extr_rejects_int64(draken_json_extract, 4); }
-void test_draken_pointer_extract() { assert_extr_rejects_int64(draken_pointer_extract, 3); }
-// draken_array_map_access is a deliberate stub: it must ALWAYS fail loud, whatever
-// it is handed, because the binder never flags BC_EXTR_MAP_ARRAY as C-native.
+// draken_array_map_access is real, but it cannot be driven from here: it needs the
+// ARRAY's child vector, which the VM resolves per morsel from the column owner
+// (BC_C_NATIVE_CHILD). What IS checkable at the ABI is that it refuses rather than
+// guesses when its preconditions are unmet — null ctx, wrong operand type, or a
+// missing child are all loud failures, never a silent empty result.
 void test_draken_array_map_access() {
     int64_t d[] = {1};
     DrakenVector* v = create_int64_vector(d, 1);
     VecResult r = draken_array_map_access(nullptr, v, nullptr);
-    assert(r.data == nullptr && "ARRAY subscript kernel must never succeed");
+    assert(r.data == nullptr && "ARRAY subscript must reject a null ctx");
+    extraction_ctx* ctx = kernel_alloc_extraction_ctx(2 /* BC_EXTR_MAP_ARRAY */, nullptr, 0, 0);
+    assert(ctx != nullptr && "extraction ctx allocation must succeed");
+    r = draken_array_map_access(ctx, v, nullptr);
+    assert(r.data == nullptr && "ARRAY subscript must reject a non-ARRAY operand");
+    free(ctx);
     free_vector(v);
 }
 
@@ -860,10 +867,10 @@ void test_registry_honesty() {
         assert(kernel_registry_lookup(name, &fn, &ctx) && fn != nullptr
                && "P9.0: real kernel must stay registered");
     }
-    // NOTE: draken_map_access_string / _json_extract / _pointer_extract are real
-    // kernels dispatched by the nogil VM. draken_array_map_access stays a stub (the
-    // ARRAY child is unreachable from a DrakenVector*) and the binder never flags
-    // BC_EXTR_MAP_ARRAY as C-native, so it is never dispatched.
+    // NOTE: all three extraction kernels — draken_map_access_string, _json_extract
+    // and _array_map_access — are real and dispatched by the nogil VM.
+    // draken_pointer_extract was removed 2026-08-05 as unreachable (see the
+    // extraction block in kernel_registry.cpp).
 }
 
 // P9.1a — unified binop dispatch (draken_binop), integer arithmetic core.
@@ -1261,7 +1268,7 @@ int main() {
         {"draken_string_concat", test_draken_string_concat}, {"draken_temporal_interval_op", test_draken_temporal_interval_op},
         {"draken_date_minus_date", test_draken_date_minus_date}, {"draken_interval_interval_op", test_draken_interval_interval_op},
         {"draken_map_access_string", test_draken_map_access_string}, {"draken_array_map_access", test_draken_array_map_access},
-        {"draken_json_extract", test_draken_json_extract}, {"draken_pointer_extract", test_draken_pointer_extract},
+        {"draken_json_extract", test_draken_json_extract},
         {"error_handling", test_error_handling}, {"context_passing", test_context_passing},
         {"registry_honesty", test_registry_honesty},
         {"draken_binop_int_arith", test_draken_binop_int_arith},

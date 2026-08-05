@@ -252,7 +252,7 @@ void DecompressInto(
     size_t compressed_size,
     size_t uncompressed_size,
     CompressionCodec codec,
-    std::vector<uint8_t>& out_buf)
+    ScratchBuffer& out_buf)
 {
     switch (codec) {
         case CompressionCodec::UNCOMPRESSED:

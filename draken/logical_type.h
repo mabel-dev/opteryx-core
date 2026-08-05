@@ -111,22 +111,44 @@ struct LogicalType {
 };
 
 // ---------------------------------------------------------------------------
-// Process-global interned registry.
+// Interned registry.
 //
 // Returns a BORROWED pointer to the canonical LogicalType instance for lt.
 // Two calls with equal lt values return the same pointer.
 //
 // Storage: std::deque<LogicalType> — push_back never invalidates existing
 // element addresses (unlike std::vector), so borrowed pointers stay stable.
-//
-// Thread-safety: guarded by a process-global mutex. Reachable off-GIL via
-// vecresult_to_owner (e.g. take/mask/slice on a TIMESTAMP64 column inside a
-// gil_scoped_release window), so the GIL can no longer be relied on to
-// serialise the iterate+push_back. The deque keeps borrowed pointers stable;
-// the mutex only protects the lookup/insert, and the returned pointer remains
+// The registry never moves or frees entries, so a borrowed pointer remains
 // valid (and lock-free to dereference) for the process lifetime.
+//
+// LINKAGE — load-bearing, do not add `static`.
+//
+// This function is `inline`, NOT `static inline`. `static` at namespace scope
+// gives INTERNAL linkage, which would give every translation unit including
+// this header its own copy of the function AND its own function-local
+// `registry` — so two vectors interned from different .cpp files would carry
+// different pointers for the same descriptor, and the identity guarantee below
+// would silently be false. It was `static inline` until 2026-08-04; nothing
+// compared these pointers at the time, so the defect was latent rather than
+// live. Plain `inline` has external linkage and the standard then guarantees
+// the function-local statics are ONE entity across every TU in the module.
+//
+// SCOPE OF THE IDENTITY GUARANTEE: pointer equality ⟹ descriptor equality
+// holds within a linked module. It does NOT extend across extension `.so`
+// boundaries in general — that depends on symbol visibility and load flags
+// (RTLD_GLOBAL + -fvisibility=default merges them on Linux; macOS's two-level
+// namespace need not). This mirrors the rule vector_alloc.h already states for
+// draken_identity_sel/draken_zero_sel: each extension may hold its own copy,
+// so cross-module code MUST compare descriptors BY VALUE (operator== is
+// provided) and MUST NOT compare pointers. Within one module, pointer
+// comparison is exact and cheap.
+//
+// Thread-safety: guarded by a mutex. Reachable off-GIL via vecresult_to_owner
+// (e.g. take/mask/slice on a TIMESTAMP64 column inside a gil_scoped_release
+// window), so the GIL cannot be relied on to serialise the iterate+push_back.
+// The mutex protects only the lookup/insert.
 // ---------------------------------------------------------------------------
-static inline const LogicalType* logical_type_intern(const LogicalType& lt) {
+inline const LogicalType* logical_type_intern(const LogicalType& lt) {
     static std::deque<LogicalType> registry;
     static std::mutex registry_mutex;
     std::lock_guard<std::mutex> lk(registry_mutex);

@@ -325,6 +325,22 @@ cdef inline tuple _split_columns(MorselRef* result):
     return ref_ids, direct
 
 
+cdef inline int64_t _absent_as_sentinel(object value) except? -1:
+    """Translate fetch_column_chunk_info's absent-field spelling into the C++ one.
+
+    The two halves of this module's public API disagree on how to say "this
+    metadata field is not present": fetch_column_chunk_info emits None, while
+    rugo's ColumnStats (rugo/src/parquet/metadata.hpp) spells absent as a -1
+    sentinel. Without this translation a present-but-None value flows into
+    `.get(key, -1)` unchanged — the default never fires — and assigning it to an
+    int64_t field raises `TypeError: an integer is required`, so the two halves
+    could not compose for any column lacking a dictionary page.
+    """
+    if value is None:
+        return -1
+    return <int64_t>value
+
+
 cdef class CppIOPipeline:
     # C attributes declared in pool_reader.pxd; only method bodies here.
 
@@ -398,13 +414,26 @@ cdef class CppIOPipeline:
         cdef vector[ColumnStats] col_stats_vec
         cdef string path_str
 
+        # Full Parquet-spec name<->code tables (rugo/src/parquet/metadata.cpp's
+        # CompressionCodecToString/EncodingToString, which is what populated these
+        # names in the first place via fetch_column_chunk_info). Complete on
+        # purpose: `.get(name, 0)`/`if name in map` used to silently coerce an
+        # unmapped-but-valid name (e.g. LZ4_RAW, missing below until now) to
+        # UNCOMPRESSED/dropped — handing compressed bytes to the plain decoder,
+        # or silently rejecting a column whose only listed encoding (e.g. a
+        # DELTA_BINARY_PACKED-only int column) the decoder actually supports.
+        # Being IN this table is "spec-recognised", not "rugo can decode it" —
+        # decodability is a narrower, separate gate the C++ worker already
+        # enforces and reports (decode_column.cpp's codec/encoding guards), so
+        # this layer only needs to catch names it doesn't even recognise.
         codec_map = {
             'UNCOMPRESSED': 0, 'SNAPPY': 1, 'GZIP': 2, 'LZO': 3,
-            'BROTLI': 4, 'LZ4': 5, 'ZSTD': 6,
+            'BROTLI': 4, 'LZ4': 5, 'ZSTD': 6, 'LZ4_RAW': 7,
         }
         encoding_map = {
-            'PLAIN': 0, 'RLE': 3, 'PLAIN_DICTIONARY': 2,
-            'RLE_DICTIONARY': 8, 'BYTE_STREAM_SPLIT': 9,
+            'PLAIN': 0, 'GROUP_VAR_INT': 1, 'PLAIN_DICTIONARY': 2, 'RLE': 3,
+            'BIT_PACKED': 4, 'DELTA_BINARY_PACKED': 5, 'DELTA_LENGTH_BYTE_ARRAY': 6,
+            'DELTA_BYTE_ARRAY': 7, 'RLE_DICTIONARY': 8, 'BYTE_STREAM_SPLIT': 9,
         }
 
         path_str = path.encode('utf-8')
@@ -414,19 +443,44 @@ cdef class CppIOPipeline:
 
         cdef ColumnStats stats
         for s_dict in column_stats_dicts:
+            col_name = s_dict['name']
             codec_name = s_dict.get('compression_codec', 'UNCOMPRESSED')
-            encoding_codes = [encoding_map[e] for e in s_dict.get('encodings', [])
-                              if e in encoding_map]
+            if codec_name is None:
+                # fetch_column_chunk_info reports an unknown codec as None.
+                raise ValueError(
+                    f"Column '{col_name}': compression codec is absent; cannot decode"
+                )
+            if codec_name not in codec_map:
+                raise ValueError(
+                    f"Column '{col_name}': unrecognised compression codec {codec_name!r}"
+                )
 
-            stats.name = s_dict['name'].encode('utf-8')
+            encoding_names = s_dict.get('encodings', [])
+            unrecognised = [e for e in encoding_names if e not in encoding_map]
+            if unrecognised:
+                raise ValueError(
+                    f"Column '{col_name}': unrecognised encoding(s) {unrecognised!r}"
+                )
+            encoding_codes = [encoding_map[e] for e in encoding_names]
+
+            # Definition/repetition levels drive nullability and list structure in
+            # the decoder (it branches on > 0 vs == 0), so there is no sound value
+            # to substitute when they are missing — refuse rather than guess.
+            for level_field in ('max_definition_level', 'max_repetition_level'):
+                if s_dict.get(level_field, 0) is None:
+                    raise ValueError(
+                        f"Column '{col_name}': {level_field} is absent; cannot decode"
+                    )
+
+            stats.name = col_name.encode('utf-8')
             stats.physical_type = s_dict['physical_type'].encode('utf-8')
             stats.logical_type = s_dict.get('logical_type', '').encode('utf-8')
-            stats.num_values = s_dict.get('num_values', -1)
-            stats.total_uncompressed_size = s_dict.get('total_uncompressed_size', -1)
-            stats.total_compressed_size = s_dict.get('total_compressed_size', -1)
-            stats.data_page_offset = s_dict.get('data_page_offset', -1)
-            stats.dictionary_page_offset = s_dict.get('dictionary_page_offset', -1)
-            stats.codec = codec_map.get(codec_name, 0)
+            stats.num_values = _absent_as_sentinel(s_dict.get('num_values'))
+            stats.total_uncompressed_size = _absent_as_sentinel(s_dict.get('total_uncompressed_size'))
+            stats.total_compressed_size = _absent_as_sentinel(s_dict.get('total_compressed_size'))
+            stats.data_page_offset = _absent_as_sentinel(s_dict.get('data_page_offset'))
+            stats.dictionary_page_offset = _absent_as_sentinel(s_dict.get('dictionary_page_offset'))
+            stats.codec = codec_map[codec_name]
             stats.max_definition_level = s_dict.get('max_definition_level', 0)
             stats.max_repetition_level = s_dict.get('max_repetition_level', 0)
             stats.type_length = s_dict.get('type_length') or 0
@@ -694,17 +748,21 @@ cpdef dict fetch_column_chunk_info(
     cdef const uint8_t* buf_ptr
     cdef size_t buf_size
     cdef FileStats fs
+    cdef const FileStats* fsp        # borrowed (cache) on hit, &fs on cold miss
     cdef size_t rg_count, col_count, col_i
     cdef str col_name
 
-    if not _PARSED_FOOTER_CACHE.try_get(path, &fs):
+    # Borrowed for the duration of this read only — never stashed past the return.
+    fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
+    if fsp == NULL:
         envelope, _ = _read_footer_payload(path, -1, footer_bytes_cache)
         buf_ptr = <const uint8_t*>envelope
         buf_size = <size_t>len(envelope)
         fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
         _PARSED_FOOTER_CACHE.put_fs(path, fs)
+        fsp = &fs
 
-    rg_count = fs.row_groups.size()
+    rg_count = fsp.row_groups.size()
     if rg_idx < 0 or <size_t>rg_idx >= rg_count:
         raise IndexError(
             f"Row group {rg_idx} out of range [0, {rg_count})"
@@ -712,9 +770,9 @@ cpdef dict fetch_column_chunk_info(
 
     requested = set(column_names)
     cdef dict result = {}
-    col_count = fs.row_groups[rg_idx].columns.size()
+    col_count = fsp.row_groups[rg_idx].columns.size()
     for col_i in range(col_count):
-        col = fs.row_groups[rg_idx].columns[col_i]
+        col = fsp.row_groups[rg_idx].columns[col_i]
         col_name = col.name.decode("utf-8")
         # Use display name (top-level) for lookup — matches schema_columns naming.
         dot = col_name.find(".")
@@ -1322,10 +1380,7 @@ cdef tuple _acquire_remote_footers(
     Returns (remote_files_seen, process_hits, tier_hits, tier_misses) for telemetry.
     `remote_files_seen == 0` means the scan was all-local and the other counters carry
     no information — the caller should report nothing rather than report zeros."""
-    cdef FileStats probe_fs
-    cdef FileStats parsed_fs
-    cdef const uint8_t* footer_buf_ptr
-    cdef size_t footer_buf_size
+    cdef const FileStats* probe_fsp
     cdef Py_ssize_t bi
     cdef str path, fetch_url
     cdef bytes envelope
@@ -1352,13 +1407,15 @@ cdef tuple _acquire_remote_footers(
         if not _is_remote_url(fetch_url):
             continue
         remote_files_seen += 1
-        # Parsed-struct cache hit → nothing to parse. A local probe var is used (not
-        # &footer_map[key]) so a MISS does not default-construct an empty FileStats in
-        # the map, which a caller's pruning loop would read as "zero row groups" and
-        # silently skip the file's rows.
-        if _PARSED_FOOTER_CACHE.try_get(path, &probe_fs):
+        # Parsed-struct cache hit → nothing to parse. The borrowed pointer (not
+        # &footer_map[key]) keeps a MISS from default-constructing an empty FileStats
+        # in the map, which a caller's pruning loop would read as "zero row groups"
+        # and silently skip the file's rows. Borrow-then-assign copies the struct
+        # once, into its final owner; the map must own it (it outlives this call).
+        probe_fsp = _PARSED_FOOTER_CACHE.try_get_ptr(path)
+        if probe_fsp != NULL:
             if footer_map != NULL:
-                footer_map[0][path.encode('utf-8')] = probe_fs
+                footer_map[0][path.encode('utf-8')] = probe_fsp[0]
             process_hits += 1
             continue
         if footer_bytes_cache is not None:
