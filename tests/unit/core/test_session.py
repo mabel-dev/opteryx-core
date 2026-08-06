@@ -1,175 +1,202 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+"""
+The Session - execution surface and lifecycle.
+
+This file tested `opteryx.Session`, `session.execute()`, `fetchone/fetchmany/
+fetchall`, `execute_to_arrow*` and `cursor.shape` long after all of them were
+removed, so every test in it errored and several had bodies of `pass  # migrated
+from query` above dead references. It now tests the session there is:
+`opteryx.session()` and `execute_to_morsels()`.
+
+What a session reports about its result has its own files - see
+test_session_rowcount.py and test_session_schema.py.
+"""
+
 import os
 import sys
 
-import pyarrow
 import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
-from tests.helpers import execute_and_get_arrow, execute_and_get_rowcount, execute_and_get_shape, execute_and_fetch_all
-from opteryx.exceptions import InvalidCursorStateError, MissingSqlStatement, UnsupportedSyntaxError
-from opteryx.constants import ResultType
+from opteryx.constants import QueryStatus, ResultType
+from opteryx.exceptions import (
+    DatasetNotFoundError,
+    InvalidCursorStateError,
+    MissingSqlStatement,
+    ProgrammingError,
+    UnsupportedSyntaxError,
+)
 
 
-def setup_function():
-    # Setup for each test, create a new session
-    session = opteryx.Session()
-    return session
+def test_session_executes_and_streams_its_result():
+    session = opteryx.session()
+    morsels = list(session.execute_to_morsels("SELECT * FROM $planets"))
+
+    assert sum(morsel.num_rows for morsel in morsels) == 9
+    assert len(session.column_names) == 20
+    assert session.result_type == ResultType.TABULAR
+    assert session.query_status == QueryStatus.SQL_SUCCESS
+    session.close()
 
 
-def test_execute():
-    session = opteryx.Session()
-    session.execute("SELECT * FROM $planets")
-    # session can now be re-used for additional queries
-    session.execute("SELECT name FROM $planets LIMIT 1")
-    result = session.fetchone()
-    assert result[0] == "Mercury"
+def test_morsels_are_capped_at_max_size():
+    """The output boundary is row-bounded, whatever shape the engine produced."""
+    session = opteryx.session()
+    morsels = list(session.execute_to_morsels("SELECT * FROM $planets", max_size=3))
+
+    assert [morsel.num_rows for morsel in morsels] == [3, 3, 3]
+    session.close()
 
 
-def test_rowcount():
-    pass  # migrated from query
-    assert execute_and_get_rowcount("SELECT * FROM $planets") == 9
+def test_a_session_can_run_more_than_one_statement():
+    session = opteryx.session()
+
+    first = sum(m.num_rows for m in session.execute_to_morsels("SELECT * FROM $planets"))
+    second = sum(
+        m.num_rows for m in session.execute_to_morsels("SELECT name FROM $planets LIMIT 2")
+    )
+
+    assert (first, second) == (9, 2)
+    session.close()
 
 
-def test_shape():
-    pass  # migrated from query
-    assert cursor.shape == (9, 20), cursor.shape
+def test_named_parameters_are_bound():
+    session = opteryx.session()
+    morsels = list(
+        session.execute_to_morsels("SELECT * FROM $planets WHERE id = :want", params={"want": 3})
+    )
+
+    assert sum(morsel.num_rows for morsel in morsels) == 1
+    session.close()
 
 
-def test_fetchone():
-    pass  # migrated from query
-    one = cursor.fetchone()
-    assert one[1] == "Mercury"
+def test_a_batch_returns_only_the_last_result():
+    session = opteryx.session()
+    morsels = list(
+        session.execute_to_morsels("SELECT * FROM $planets; SELECT name FROM $planets LIMIT 2")
+    )
+
+    assert sum(morsel.num_rows for morsel in morsels) == 2
+    assert session.column_names == ["name"]
+    session.close()
 
 
-def test_fetchmany():
-    pass  # migrated from query
-    dual = cursor.fetchmany(2)
-    assert len(dual) == 2
-
-
-def test_fetchall():
-    pass  # migrated from query
-    all_rows = cursor.fetchall()
-    assert len(all_rows) == 9, len(all_rows)
-
-
-def test_execute_error():
-    session = opteryx.Session()
-    with pytest.raises(Exception):
-        session.execute("SELECT * FROM non_existent_table")
-
-
-def test_cursor_init():
-    cursor = setup_function()
-    assert not cursor  # __bool__ should be False before execution
-
-
-def test_execute_to_arrow():
-    cursor = setup_function()
-    results = cursor.execute_to_arrow("SELECT * FROM $planets")
-    assert results.shape == (9, 20)
-    assert isinstance(results, pyarrow.Table)
-
-
-def test_query_to_arrow():
-    results = execute_and_get_arrow("SELECT * FROM $planets")
-    assert results.shape == (9, 20)
-    assert isinstance(results, pyarrow.Table)
-
-
-def test_execute_to_arrow_batches():
-    cursor = setup_function()
-    batches = list(cursor.execute_to_arrow_batches("SELECT * FROM $planets", batch_size=3))
-    assert all(isinstance(b, pyarrow.RecordBatch) for b in batches)
-    assert sum(b.num_rows for b in batches) == 9
-
-
-def test_execute_to_arrow_batches_limit():
-    cursor = setup_function()
-    batches = list(cursor.execute_to_arrow_batches("SELECT * FROM $planets", batch_size=2, limit=3))
-    assert sum(b.num_rows for b in batches) == 3
-
-
-def test_query_to_arrow_batches():
-    batches = list(opteryx.query_to_arrow_batches("SELECT * FROM $planets", batch_size=4))
-    assert all(isinstance(b, pyarrow.RecordBatch) for b in batches)
-
-
-def test_execute_to_arrow_batches_consolidate():
-    cursor = setup_function()
-    # create two morsels 50 and 100 rows
-    t1 = pyarrow.Table.from_pydict({"a": [1] * 50})
-    t2 = pyarrow.Table.from_pydict({"a": [2] * 100})
-
-    def fake_execute_statements(operation, params, visibility_filters):
-        return (iter([t1, t2]), ResultType.TABULAR)
-
-    cursor._execute_statements = fake_execute_statements
-
-    batches = list(cursor.execute_to_arrow_batches("SELECT fakes", batch_size=150))
-    assert len(batches) == 1
-    assert batches[0].num_rows == 150
-
-    cursor = setup_function()
-    cursor._execute_statements = fake_execute_statements
-    batches = list(cursor.execute_to_arrow_batches("SELECT fakes", batch_size=100))
-    assert [b.num_rows for b in batches] == [100, 50]
-
-
-def test_execute_to_arrow_batches_sets_description():
-    cursor = setup_function()
-    batches = cursor.execute_to_arrow_batches("SELECT * FROM $planets", batch_size=3)
-    next(batches)
-    assert cursor.description is not None
-
-
-def test_execute_missing_sql_statement():
-    cursor = setup_function()
-    with pytest.raises(MissingSqlStatement):
-        cursor.execute("")
-
-
-def test_execute_unsupported_syntax_error():
-    cursor = setup_function()
+def test_a_batch_cannot_take_a_parameter_list():
+    """Which statement a positional parameter belongs to is not knowable."""
+    session = opteryx.session()
     with pytest.raises(UnsupportedSyntaxError):
-        cursor.execute("SELECT * FROM table; SELECT * FROM table2", params=[1])
+        list(
+            session.execute_to_morsels(
+                "SELECT * FROM $planets; SELECT * FROM $planets", params=[1]
+            )
+        )
+    session.close()
 
 
-def test_non_tabular_result():
-    cursor = setup_function()
-    cursor.execute("SET @name = 'tim'")
-    cursor.fetchall()
+def test_an_empty_statement_is_an_error():
+    session = opteryx.session()
+    with pytest.raises(MissingSqlStatement):
+        list(session.execute_to_morsels(""))
+    session.close()
 
 
-def test_limit():
-    cursor = setup_function()
-    dataset = cursor.execute_to_arrow("SELECT * FROM $planets", limit=3)
-    assert dataset.num_rows == 3
+def test_an_unknown_dataset_is_an_error():
+    session = opteryx.session()
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("SELECT * FROM $no_such_dataset"))
+    session.close()
 
 
-def test_cursor_close_blocks_further_commands():
-    cursor = setup_function()
-    cursor.close()
+def test_a_session_is_falsy_until_it_has_executed():
+    session = opteryx.session()
+    assert not session
+
+    list(session.execute_to_morsels("SELECT * FROM $planets"))
+    assert session
+
+    session.close()
+    assert not session
+
+
+def test_a_closed_session_refuses_further_statements():
+    """And refuses at the call, not at the first morsel - nothing is planned."""
+    session = opteryx.session()
+    session.close()
+
     with pytest.raises(InvalidCursorStateError):
-        cursor.execute("SELECT * FROM $planets")
+        session.execute_to_morsels("SELECT * FROM $planets")
 
 
-def test_execute_to_arrow_can_repeat():
-    cursor = setup_function()
-    result_first = cursor.execute_to_arrow("SELECT * FROM $planets")
-    assert result_first.shape == (9, 20)
-    result_second = cursor.execute_to_arrow("SELECT name FROM $planets LIMIT 2")
-    assert result_second.num_rows == 2
+def test_closing_twice_is_harmless():
+    session = opteryx.session()
+    list(session.execute_to_morsels("SELECT * FROM $planets"))
+    session.close()
+    session.close()
 
 
-def test_cursor_truthiness_after_close():
-    cursor = setup_function()
-    cursor.execute("SELECT * FROM $planets")
-    assert cursor
-    cursor.close()
-    assert not cursor
+def test_a_session_validates_the_identity_it_is_given():
+    """Caller identity decides what a query may read, so it is checked up front."""
+    with pytest.raises(ProgrammingError):
+        opteryx.session(user=7)
+    with pytest.raises(ProgrammingError):
+        opteryx.session(memberships=[1])
+    with pytest.raises(ProgrammingError):
+        opteryx.session(entitlements=[object()])
+    with pytest.raises(ProgrammingError):
+        opteryx.session(access_policies=["not a policy"])
+    with pytest.raises(ProgrammingError):
+        opteryx.session(billing_account=object())
+
+
+def test_the_removed_io_trace_file_argument_is_rejected():
+    from opteryx.query_session import Session
+
+    with pytest.raises(TypeError):
+        Session(io_trace_file="/tmp/trace.jsonl")
+
+
+def test_a_session_has_a_query_id_and_will_take_one():
+    assert len(opteryx.session().query_id) == 32
+    assert opteryx.session(query_id="a-known-id").query_id == "a-known-id"
+
+
+def test_a_non_tabular_statement_reports_an_outcome_not_a_relation():
+    session = opteryx.session()
+    morsels = list(session.execute_to_morsels("SET @answer = 42"))
+
+    assert morsels == []
+    assert session.result_type == ResultType.NON_TABULAR
+    assert session.query_status == QueryStatus.SQL_SUCCESS
+    assert session.rowcount == 1
+    assert session.column_names == []
+    session.close()
+
+
+def test_a_variable_set_by_one_statement_is_seen_by_the_next():
+    """What a session is for - state which outlives the statement that set it."""
+    session = opteryx.session()
+    list(session.execute_to_morsels("SET @wanted = 3"))
+
+    morsels = list(session.execute_to_morsels("SELECT * FROM $planets WHERE id = @wanted"))
+
+    assert sum(morsel.num_rows for morsel in morsels) == 1
+    session.close()
+
+
+def test_tracing_is_not_armed_unless_it_is_asked_for():
+    session = opteryx.session()
+    list(session.execute_to_morsels("SELECT * FROM $planets"))
+
+    assert not session.trace_armed
+    with pytest.raises(RuntimeError):
+        session.trace()
+    session.close()
 
 
 if __name__ == "__main__":  # pragma: no cover

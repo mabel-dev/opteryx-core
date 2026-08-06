@@ -52,7 +52,7 @@ Usage Patterns:
    opteryx.register_workspace("my_prefix", create_gcs_connector, bucket="my-bucket")
 
 3. Query Usage - the prefix is the first segment of the relation name:
-   opteryx.query("SELECT * FROM my_prefix.my_dataset")
+   opteryx.session().execute_to_morsels("SELECT * FROM my_prefix.my_dataset")
 
    A bucket URL is NOT a valid relation name: `FROM gs://bucket/file.parquet` is
    a syntax error. Register a prefix as above, or name the file directly with

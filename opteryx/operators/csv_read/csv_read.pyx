@@ -146,6 +146,38 @@ cdef class CsvReadNode(ReaderNode):
             finally:
                 file_obj.close()
 
+            # An EMPTY projection means "this query reads no columns" (COUNT(*), or a
+            # projection of only constants -- `SELECT 3.14 FROM t`), NOT "a file with
+            # zero columns". rugo answers a `columns=[]` request with the file's FULL
+            # column set, so the drift check below would compare those real columns
+            # against an empty expectation and reject every file, including a single
+            # non-glob one -- the bug this branch fixes.
+            #
+            # Emit the same shape the parquet scan's equivalent path emits: a genuine
+            # ZERO-COLUMN morsel whose row count rides on `zero_col_rows`, which is
+            # what `select([])` produces (draken's cxx_morsel_ops.h) and exactly the
+            # contract UngroupedAggSink's CountStar reads -- see parquet_read.pyx's
+            # `_next_cxx` ("No output columns ... Emit a genuine ZERO-COLUMN morsel").
+            # Building `Morsel.from_vectors([], [])` here instead would report
+            # num_rows == 0 and silently turn COUNT(*) into 0, which is worse than the
+            # loud failure this replaces.
+            #
+            # Skipping the cross-file drift check is sound rather than merely
+            # convenient: with nothing projected, no column of this file is read into
+            # the result, so no disagreement between files can change the answer. The
+            # check still fires for every query that projects at least one column --
+            # a glob over genuinely divergent files is unaffected.
+            if not expected_physical_names:
+                result_morsel = morsel.select([])
+
+                # `result_morsel.nbytes` is 0 (no columns); report the decoded
+                # morsel's size, which is the work this read actually did.
+                self.readings["rows_read"] += result_morsel.num_rows
+                self.readings["bytes_processed"] += morsel.nbytes
+
+                yield result_morsel
+                continue
+
             file_names = {
                 n.decode("utf-8") if isinstance(n, bytes) else n
                 for n in morsel.column_names

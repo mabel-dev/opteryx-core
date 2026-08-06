@@ -2737,8 +2737,25 @@ class _Compiler:
         missing = [identity for identity in expected if identity not in layout]
         if missing:
             _unsupported(f"a virtual dataset missing plan columns {missing}")
-        if not layout:
+        if not layout and expected:
+            # An empty layout while the plan still expects columns is a real defect —
+            # the source produced nothing the plan can read from. (Unreachable via
+            # `layout`'s own definition above, which falls back to `expected`; kept as
+            # a guard so a future change to that fallback cannot pass silently.)
             _unsupported("a zero-column virtual dataset")
+        # An empty layout with NOTHING expected is the legal zero-projection shape —
+        # bare `COUNT(*)` over READ_CSV/READ_JSONL, whose scan nodes emit genuine
+        # zero-column morsels carrying their row count in `zero_col_rows` (see
+        # csv_read.pyx / jsonl_read.pyx). BufferSource hands those morsels through
+        # verbatim and CxxMorsel::num_rows() reads `zero_col_rows` when there are no
+        # columns, so the downstream UngroupedAggSink CountStar sees the right count —
+        # the same contract `_compile_scan`'s parquet path already relies on when it
+        # returns an empty layout for a zero-projection scan.
+        #
+        # The other materialized sources ($planets, VALUES, GENERATE_SERIES) never
+        # reach here with an empty layout: they ignore the projection and materialize
+        # every column, so a zero-projection query over them arrives with a NON-empty
+        # layout and is reduced to zero columns by the downstream Select instead.
         p = self.nplan.new_pipeline()
         self.nplan.set_buffer_source(p, buf)
         self._remember_types(node.columns)

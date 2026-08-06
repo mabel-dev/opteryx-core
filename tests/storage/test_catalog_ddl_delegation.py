@@ -286,11 +286,34 @@ def test_alter_workspace_requires_owner(catalog_workspace):
     assert catalog_workspace.calls == []
 
 
-def test_alter_workspace_owner_within_workspace_is_not_enough(catalog_workspace):
-    """Owning everything *inside* a workspace does not make you owner *of* it -
-    workspace-level settings need a grant naming the workspace itself."""
+def test_alter_workspace_whole_workspace_owner_grant_is_enough(catalog_workspace):
+    """"ws.*" is how ownership of a whole workspace is issued - it covers the
+    workspace itself, not merely things inside it."""
     session = opteryx.session(
         user="alice", access_policies=[{"pattern": "cat.*", "role": "owner"}]
+    )
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+
+    assert catalog_workspace.calls == [
+        ("set_workspace_properties", {"delete_protection": False}, "alice")
+    ]
+
+
+def test_alter_workspace_named_owner_grant_is_enough(catalog_workspace):
+    """A grant matching the bare workspace name also unlocks it."""
+    session = opteryx.session(user="alice", access_policies=[{"pattern": "cat", "role": "owner"}])
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+
+    assert catalog_workspace.calls == [
+        ("set_workspace_properties", {"delete_protection": False}, "alice")
+    ]
+
+
+def test_alter_workspace_partial_grant_is_not_enough(catalog_workspace):
+    """A grant scoped to one collection covers part of the workspace, so it
+    cannot change settings governing all of it."""
+    session = opteryx.session(
+        user="alice", access_policies=[{"pattern": "cat.coll.*", "role": "owner"}]
     )
 
     with pytest.raises(PermissionError, match="permission to alter workspace cat"):
@@ -299,14 +322,16 @@ def test_alter_workspace_owner_within_workspace_is_not_enough(catalog_workspace)
     assert catalog_workspace.calls == []
 
 
-def test_alter_workspace_named_owner_grant_is_enough(catalog_workspace):
-    """A grant naming the workspace itself is what unlocks it."""
-    session = opteryx.session(user="alice", access_policies=[{"pattern": "cat", "role": "owner"}])
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+def test_alter_workspace_owner_of_another_workspace_is_not_enough(catalog_workspace):
+    """Ownership does not leak sideways between workspaces."""
+    session = opteryx.session(
+        user="alice", access_policies=[{"pattern": "other.*", "role": "owner"}]
+    )
 
-    assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"delete_protection": False}, "alice")
-    ]
+    with pytest.raises(PermissionError, match="permission to alter workspace cat"):
+        list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+
+    assert catalog_workspace.calls == []
 
 
 def test_create_collection_delegates_to_catalog_with_user(catalog_workspace):

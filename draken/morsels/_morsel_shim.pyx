@@ -274,7 +274,11 @@ cdef class Morsel:
         cdef Py_ssize_t n = self._num_columns()
         cdef Py_ssize_t i
         handles = [self._get_column(i)._nb for i in range(n)]
-        return cxx_morsel_from_vectors(handles, list(self._col_names))
+        # `_zero_col_num_rows` is the ONLY carrier of the row count when there are no
+        # columns (`select([])`/`rename([])` on a PyObject-backed Morsel set it); it
+        # must cross the boundary or the morsel arrives in C++ as zero rows.
+        return cxx_morsel_from_vectors(handles, list(self._col_names),
+                                       self._zero_col_num_rows)
 
     cpdef object _cxx_column(self, identity, name=None):
         """Read one column for a CONVERTED operator: from the CxxMorsel substrate

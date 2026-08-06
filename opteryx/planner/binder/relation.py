@@ -237,8 +237,8 @@ def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[No
             f"connector for {node.workspace_name} does not support ALTER WORKSPACE"
         )
 
-    # Owner of the workspace itself - owning relations within it is not enough,
-    # since these properties govern the whole workspace (see
+    # Owner of the whole workspace - a grant covering only part of it is not
+    # enough, since these properties govern the workspace entire (see
     # can_perform_workspace_action for why this is not can_perform_action).
     if not can_perform_workspace_action(
         context.execution_context, node.workspace_name, action="ALTER"

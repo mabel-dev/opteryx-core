@@ -9176,13 +9176,22 @@ NB_MODULE(draken_native, m) {
             return out;
         });
 
-    m.def("cxx_morsel_from_vectors", [](nb::list vectors, nb::list names) -> CxxMorsel {
+    m.def("cxx_morsel_from_vectors", [](nb::list vectors, nb::list names,
+                                        uint32_t zero_col_rows) -> CxxMorsel {
         CxxMorsel cm = cxx_from_vectors_list(vectors);
         cm.names.reserve(nb::len(names));
         for (size_t i = 0; i < nb::len(names); ++i)
             cm.names.push_back(nb_bytes_to_std(names[i]));
+        // A zero-column morsel carries its row count in `zero_col_rows` (there is no
+        // column to read a length from -- see CxxMorsel::num_rows). Without this the
+        // row count of a zero-column PyObject-backed Morsel was silently dropped at
+        // the boundary and it arrived in C++ as 0 rows: COUNT(*) over a source that
+        // projects no columns returned 0 instead of the true count.
+        if (cm.columns.empty()) cm.zero_col_rows = zero_col_rows;
         return cm;
-    }, "S1: build a CxxMorsel (handle) from Vector handles + bytes names.");
+    }, nb::arg("vectors"), nb::arg("names"), nb::arg("zero_col_rows") = 0,
+       "S1: build a CxxMorsel (handle) from Vector handles + bytes names. "
+       "`zero_col_rows` supplies the row count when there are no columns.");
 
     m.def("vector_concat",
         [](nb::list vectors) -> VectorOwner {

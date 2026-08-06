@@ -150,6 +150,57 @@ cdef class JsonlReadNode(ReaderNode):
                     if len(chunk) == 0:
                         continue
 
+                    # An EMPTY projection means "this query reads no columns"
+                    # (COUNT(*), or a projection of only constants), NOT "a file with
+                    # zero columns". rugo answers a `columns=[]` request with the
+                    # chunk's FULL column set, so BOTH the per-file probe below and
+                    # the per-chunk check further down would compare those real
+                    # columns against an empty expectation and reject every file,
+                    # including a single non-glob one -- the bug this branch fixes.
+                    #
+                    # Emit the same shape the parquet scan's equivalent path emits: a
+                    # genuine ZERO-COLUMN morsel whose row count rides on
+                    # `zero_col_rows`, which is what `select([])` produces (draken's
+                    # cxx_morsel_ops.h) and exactly the contract UngroupedAggSink's
+                    # CountStar reads -- see parquet_read.pyx's `_next_cxx` ("No output
+                    # columns ... Emit a genuine ZERO-COLUMN morsel"). Building
+                    # `Morsel.from_vectors([], [])` here instead would report
+                    # num_rows == 0 and silently turn COUNT(*) into 0, which is worse
+                    # than the loud failure this replaces.
+                    #
+                    # Skipping the drift checks is sound rather than merely convenient:
+                    # with nothing projected, no column of this file is read into the
+                    # result, so no disagreement between files (or between chunks) can
+                    # change the answer. Both checks still fire for every query that
+                    # projects at least one column -- a glob over genuinely divergent
+                    # files is unaffected.
+                    #
+                    # The probe's None-ambiguity does not arise here: with no requested
+                    # columns there is no "none of them exist in this chunk" case left
+                    # to distinguish, so None can only mean `predicates` filtered every
+                    # row out -- a legitimate zero-row chunk, skipped like any other.
+                    if not expected_physical_names:
+                        count_morsel = decode_chunk(
+                            chunk,
+                            expected_physical_names,
+                            predicates,
+                            fail_on_error=self.jsonl_fail_on_error,
+                            infer_schema=self.jsonl_infer_schema,
+                            infer_sample_size=self.jsonl_infer_sample_size,
+                        )
+                        if count_morsel is None:
+                            continue
+
+                        result_morsel = count_morsel.select([])
+
+                        # `result_morsel.nbytes` is 0 (no columns); report the decoded
+                        # chunk's size, which is the work this read actually did.
+                        self.readings["rows_read"] += result_morsel.num_rows
+                        self.readings["bytes_processed"] += count_morsel.nbytes
+
+                        yield result_morsel
+                        continue
+
                     if not file_schema_validated:
                         # Stage 4: decode_chunk(..., predicates) returns None both when
                         # every row is filtered out AND when none of the requested

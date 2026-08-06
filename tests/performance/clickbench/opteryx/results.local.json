@@ -61,10 +61,10 @@ current (15,078ms)
 (20.10 seconds) <- best on clickbench parquet files (13-JUL)
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch - (1433.9ms) (05-AUG) [2.90x]
-make medicare1 - (456.1ms) (31-JUL) [~4x]
-make job - (45,916.4ms) (03-AUG) [6.8x]
+make tpch - (1413.1ms) (05-AUG) [2.86x]
+make medicare1 - (456.1ms) (31-JUL) [2.63x]
+make job - (38,106.8ms) (05-AUG) [5.65x]
 make h2o - (1998.9ms) (2 fails) (05-AUG) [0.73x]
-make jsonbench (6159.5ms) (05-AUG) [2.37x]
+make jsonbench (6026.6ms) (05-AUG) [2.32x]
 make dash (189.3ms) (05-AUG) [2.09x]
 make signals (0.8s) [only two tests] (05-AUG)

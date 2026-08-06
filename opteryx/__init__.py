@@ -9,7 +9,13 @@ Opteryx is a SQL query engine optimized for speed and efficiency.
 
 To get started:
     import opteryx
-    results = opteryx.session().execute("SELECT * FROM my_table")
+
+    session = opteryx.session()
+    for morsel in session.execute_to_morsels("SELECT * FROM my_table"):
+        print(morsel)
+
+Results are delivered as Draken morsels - batches of columns - as the engine
+produces them, rather than as one materialized table.
 
 Opteryx handles parsing, planning, and execution of SQL queries with a focus on low-latency
 analytics over local or remote data sources.
@@ -99,7 +105,8 @@ def session(
 
     Example:
         session = opteryx.session(user="alice", memberships=["finance"])
-        session.execute("SELECT 1")
+        for morsel in session.execute_to_morsels("SELECT 1"):
+            print(morsel)
     """
     from opteryx.query_session import Session
 
@@ -135,18 +142,25 @@ def analyze_query(sql: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing:
         - query_type: Type of query (e.g., "Query", "Insert", "Update")
-        - tables: List of table names referenced in the query
+        - tables: Table names referenced in the query - INCOMPLETE for subqueries,
+          derived tables, CTEs and mutations, so not safe to authorize a statement
+          from on its own (see `opteryx.utils.query_parser.parse_query_info`)
         - parameters: Names of `:name` placeholders referenced in the query
           (sorted, deduplicated, no leading `:`)
-        - is_select: True if this is a SELECT query
+        - is_read: True if this only reads (SELECT, SHOW COLUMNS, SHOW TABLES, USE)
         - is_mutation: True if this modifies data (INSERT, UPDATE, DELETE)
+        - is_ddl: True if this changes a definition (CREATE, ALTER, DROP)
+        - permission_required: the role the statement needs - "reader", "writer",
+          "owner", or "denied" for a statement none of them permits
 
     Example:
-        >>> info = opteryx.parse_query_info("SELECT * FROM users WHERE id = 1")
+        >>> info = opteryx.analyze_query("SELECT * FROM users WHERE id = 1")
         >>> print(info["query_type"])
         'Query'
         >>> print(info["tables"])
         ['users']
+        >>> print(info["permission_required"])
+        'reader'
     """
     from opteryx.utils.query_parser import parse_query_info as _parse_query_info
 
@@ -169,8 +183,9 @@ except Exception as err:
 
 __all__ = [
     "analyze_query",
+    # `session()` is the way in - the Session class itself is deliberately not
+    # exported here, so importing opteryx does not pull in the planner.
     "session",
-    "Session",
     "register_workspace",
     "set_default_connector",
     "__author__",

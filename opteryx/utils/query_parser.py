@@ -280,15 +280,24 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing:
         - query_type: str - Type of query (e.g., "Query", "Insert", "Update")
-        - tables: List[str] - List of table names referenced in the query
+        - tables: List[str] - Table names referenced in the query. INCOMPLETE, and
+          not safe to authorize a statement from on its own: tables inside
+          subqueries and derived tables are missed, a CTE is reported under its
+          own alias instead of the tables it reads, and INSERT/UPDATE/DELETE
+          report no tables at all. The failing cases in
+          tests/unit/core/test_parse_query_info.py are the specification; the
+          code is what is wrong.
         - parameters: List[str] - Names of `:name` placeholders referenced in
           the query (sorted, deduplicated, no leading `:`) - lets a caller
           resolve exactly the parameters a query needs before execution,
           without waiting for the bind-time `Parameter not defined` error.
           Positional `?` placeholders aren't named and so aren't included.
-        - is_select: bool - True if this is a SELECT query
+        - is_read: bool - True if this only reads (SELECT, SHOW COLUMNS,
+          SHOW TABLES, USE, SHOW CREATE)
         - is_mutation: bool - True if this modifies data (INSERT, UPDATE, DELETE)
         - is_ddl: bool - True if this is a DDL operation (CREATE, ALTER, DROP)
+        - permission_required: str - the role the statement needs: "reader",
+          "writer", "owner", or "denied" for a statement none of them permits
 
     Raises:
         ValueError: If the SQL cannot be parsed
@@ -299,7 +308,7 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         'Query'
         >>> info["tables"]
         ['users']
-        >>> info["is_select"]
+        >>> info["is_read"]
         True
         >>> parse_query_info("SELECT * FROM t WHERE dept = :department")["parameters"]
         ['department']

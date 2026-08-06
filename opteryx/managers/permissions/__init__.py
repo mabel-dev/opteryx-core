@@ -37,11 +37,14 @@ def can_perform_workspace_action(
     """Check whether the session may perform a workspace-level action.
 
     This is deliberately not `can_perform_action`: that function reads a name
-    with no dots as a local table and short-circuits to READ-only, and a policy
-    pattern granting ownership *inside* a workspace (e.g. "ws.*") does not
-    fnmatch the bare workspace name anyway. Ownership of the workspace itself is
-    required and is not implied by owning anything within it - a policy must
-    match the workspace name directly (e.g. "ws", or "*").
+    with no dots as a local table and short-circuits to READ-only, so a bare
+    workspace name can never clear it.
+
+    A policy grants a workspace-level action when it covers the workspace in
+    full. "ws.*" is how ownership of the whole workspace is issued, so it
+    qualifies; so does a pattern matching the bare name ("ws", "*"). A policy
+    scoped to part of a workspace does not - "ws.coll.*" reduces to "ws.coll",
+    which is not the workspace, so it grants nothing at this level.
 
     Args:
         execution_context (ExecutionContext): The execution context containing access policies.
@@ -58,7 +61,12 @@ def can_perform_workspace_action(
         for policy in policies:
             pattern = policy.get("pattern", "")
             role = policy.get("role", "reader")
-            if role in action_map and fnmatch(workspace, pattern):
+            if role not in action_map:
+                continue
+            # A trailing ".*" spans everything under the name it qualifies; drop
+            # it to ask what that name is. Anything else must match as written.
+            covered = pattern[:-2] if pattern.endswith(".*") else pattern
+            if fnmatch(workspace, covered):
                 return True
         return False
 

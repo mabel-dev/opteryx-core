@@ -3,23 +3,21 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""Session object that *is* the cursor.
+"""The Session - the object a query is executed on.
 
-This implementation replaces the legacy `Cursor` by inheriting from it and
-making the session object the primary execution surface. The class keeps
-the `ExecutionContext` previously owned by `Connection` and preserves the
-cursor execution behavior by reusing the existing `Cursor` implementation.
+Session replaced the DBAPI Connection and Cursor pair, which no longer exist:
+it owns the `ExecutionContext` the Connection used to hold (planners read it as
+`connection.context`), and it is what a statement is executed on. Build one with
+`opteryx.session()` rather than by importing this module.
 
-Design goals:
-- Session *replaces* Cursor (no internal delegation/wrapping)
-- Minimize code duplication by subclassing `Cursor`
-- Provide a minimalist `cursor()` compatibility that returns `self`
-- Keep `close()`, `__enter__/__exit__`, and execution methods unchanged
-  (they are inherited from `Cursor`)
+`execute_to_morsels()` is the execution surface. It streams Draken morsels as the
+engine produces them - there is no materialized result object, and no fetch*()
+methods, so a caller which needs the whole result assembles it (see
+`tests/helpers.py`, or `opteryx/__main__.py` for the command line's version).
 
-Note: This approach keeps the tested `Cursor` execution semantics and
-lets us collapse Connection+Cursor into a single object with minimal
-code churn.
+What the session reports about a result - `rowcount`, `column_names`,
+`description`, `query_status` - describes the last statement executed on it, and
+`rowcount` is only knowable once that statement's stream has been read to the end.
 """
 
 import logging
@@ -54,10 +52,11 @@ _CAMEL_SPLIT_RE = re.compile(r"[A-Z][a-z]*|[0-9]+")
 
 
 class Session(DataFrame):
-    """Session acts as the canonical execution object and replaces Cursor.
+    """Session is the canonical execution object, and replaces Connection+Cursor.
 
-    It subclasses `Cursor` to reuse the DataFrame and execution logic and
-    sets up the `ExecutionContext` that planners expect on `connection.context`.
+    It subclasses `DataFrame` for the result metadata (schema, description,
+    column names) and sets up the `ExecutionContext` that planners expect on
+    `connection.context`.
     """
 
     def __init__(
@@ -295,8 +294,22 @@ class Session(DataFrame):
 
     @property
     def rowcount(self) -> int:
+        """
+        The number of rows the last statement produced.
+
+        A tabular result only has a row count once it has been read to the end -
+        the engine streams, so until the last morsel has been handed over the
+        number does not exist to report. Asking early is an error rather than a
+        count of what has been delivered so far, which reads like a total and
+        isn't one.
+        """
         if self._result_type == ResultType.TABULAR:
-            return super().rowcount
+            if not self._executed:
+                raise InvalidCursorStateError(
+                    "Row count is not known until the result has been read - "
+                    "consume execute_to_morsels() before asking for it."
+                )
+            return self._rowcount
         if self._result_type == ResultType.NON_TABULAR:
             return self._rowcount
         raise InvalidCursorStateError("Session not in valid state to return a row count.")
@@ -492,7 +505,36 @@ class Session(DataFrame):
 
         This is a *Draken-native* API: it avoids converting morsels to Arrow (or
         any other intermediate format) except when absolutely required.
+
+        Planning and execution are lazy - nothing runs until the returned generator
+        is iterated. What this call does DO immediately is check the session is open
+        and clear what the last statement left behind, so a session holding a
+        generator it has not started cannot answer questions about a result which
+        does not exist yet with the previous statement's numbers.
         """
+        self._ensure_open()
+        # A statement supersedes the one before it the moment it is submitted, not
+        # when its first morsel arrives: `rowcount`, the schema behind
+        # `column_names`/`description`, and `query_status` all describe the LAST
+        # statement, and until this one produces its own they must describe nothing.
+        # The schema in particular is only rebuilt when there isn't one, so without
+        # clearing it a reused session reports its FIRST query's columns forever.
+        self._executed = False
+        self._rowcount = None
+        self._schema = RelationSchema(name="table", columns=[])
+        self._description = None
+        self._query_status = QueryStatus._UNDEFINED
+        self._result_type = ResultType._UNDEFINED
+        return self._stream_morsels(operation, params, max_size, visibility_filters)
+
+    def _stream_morsels(
+        self,
+        operation: str,
+        params: Optional[Iterable],
+        max_size: int,
+        visibility_filters: Optional[Dict[str, Any]],
+    ):
+        """The generator behind `execute_to_morsels` - see it for the contract."""
         from draken.morsels.morsel import Morsel
 
         from opteryx.types.logical_type import column_type_from_vector
@@ -513,7 +555,6 @@ class Session(DataFrame):
                 columns.append(SchemaColumn(name=col_name, column_type=ct, identity=mint_column_identity("table", col_name)))
             return RelationSchema(name="table", columns=columns)
 
-        self._ensure_open()
         start = time.time_ns()
         results = self._execute_statements(operation, params, visibility_filters)
         if results is None:
@@ -618,9 +659,12 @@ class Session(DataFrame):
             yield from _flush_buffer(pending)
         elif not saw_nonzero_rows and last_empty_morsel is not None:
             yield from _yield_morsel(last_empty_morsel)
-        elif not saw_nonzero_rows and last_empty_morsel is not None:
-            yield from _yield_morsel(last_empty_morsel)
 
+        # The result has been delivered in full, so the rows counted for the
+        # `sql_select_limit` backstop above are also the query's row count. It is
+        # only knowable here: the engine streams, so nothing before the last
+        # morsel knows how many rows there were.
+        self._rowcount = delivered_rows
         self._executed = True
         elapsed = time.time_ns() - start
         self._telemetry.time_executing += elapsed - self._telemetry.time_planning

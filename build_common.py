@@ -243,7 +243,15 @@ class build_ext(build_ext_orig):
         _build_temp_local.value = per_ext_build_temp
         try:
             if is_linux() and getattr(ext, "language", "") == "c++":
-                ext.extra_link_args = list(getattr(ext, "extra_link_args", [])) + LD_EXTRA
+                # Append only what is not already present. Most extensions set
+                # extra_link_args=LD_EXTRA at definition time, so a blind append
+                # passed every flag twice. That was merely redundant for
+                # -static-libstdc++/--exclude-libs, but ld rejects a REPEATED
+                # --version-script outright ("anonymous version tag cannot be
+                # combined with other version tags"), which would break the
+                # C++-runtime hiding below. Dedupe, preserving order.
+                _existing = list(getattr(ext, "extra_link_args", []))
+                ext.extra_link_args = _existing + [a for a in LD_EXTRA if a not in _existing]
             super().build_extension(ext)
         finally:
             _build_temp_local.value = prev
@@ -325,10 +333,30 @@ if OPTERYX_ENABLE_PGO and not is_win():
 # RTLD_GLOBAL — come from .o files, not archives, so they are unaffected and stay
 # exported. macOS is immune (two-level namespaces bind each image to its own
 # runtime) and its linker does not accept the flag.
+#
+# `--exclude-libs,ALL` is NOT sufficient on its own: std:: members instantiated
+# into our OWN translation units via `#include <string>` etc. are COMDAT
+# definitions in our .o files — outside --exclude-libs' reach — and
+# `-fvisibility=default` exports them (254 old-ABI std::string symbols across
+# 20 .so in the 0.9.55 manylinux wheel; 57 __cxx11 ones in a gcc-12 dev build).
+# On Linux's flat namespace, grpc's cygrpc (loaded by any google.cloud.* import
+# AFTER opteryx) then binds part of its std::string calls into our private
+# libstdc++ copy and part into the system one → free(): invalid pointer →
+# SIGABRT. hide_cxx_runtime.map localizes the std-library manglings (both
+# string ABIs) in every extension; it lists only `local:` patterns, so
+# PyInit_* and the bridge symbols above keep their default exported binding.
+_HIDE_CXX_RUNTIME_MAP = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "hide_cxx_runtime.map"
+)
 LD_EXTRA = (
     ["-static-libstdc++"]
     if is_mac()
-    else ["-static-libstdc++", "-static-libgcc", "-Wl,--exclude-libs,ALL"]
+    else [
+        "-static-libstdc++",
+        "-static-libgcc",
+        "-Wl,--exclude-libs,ALL",
+        f"-Wl,--version-script={_HIDE_CXX_RUNTIME_MAP}",
+    ]
 )
 
 # Enable LTO for non-Windows when requested (must be after LD_EXTRA initialization)

@@ -1,0 +1,47 @@
+/*
+ * Linker version script (Linux/ELF only): localize C++ standard-library
+ * symbols in every extension we link.
+ *
+ * Why this exists: each extension links libstdc++ STATICALLY and
+ * `--exclude-libs,ALL` hides everything pulled from those archives. But
+ * std:: members instantiated into our OWN translation units via
+ * `#include <string>` etc. are COMDAT definitions in our .o files —
+ * outside --exclude-libs' reach — and `-fvisibility=default` exports
+ * them. On Linux's flat symbol namespace a later-loaded library (grpc's
+ * cygrpc, via any google.cloud.* import) then binds part of its
+ * std::string calls into our private libstdc++ copy and part into the
+ * system one: one string reserved by one implementation and freed by
+ * another → free(): invalid pointer → SIGABRT. Observed as the
+ * `import opteryx; import grpc` abort on the 0.9.55 wheel (2026-08-05).
+ * macOS is immune (two-level namespace) and ld64 does not take this flag.
+ *
+ * Only a `local:` list, no `global:` — unmatched symbols keep their
+ * default (exported) binding, so PyInit_*, the RTLD_GLOBAL bridge
+ * symbols (draken_vector_unwrap / draken_vector_own_raw), and all other
+ * project symbols are untouched. Patterns cover BOTH string ABIs: the
+ * pre-C++11 mangling abbreviations (Ss/Sb/Si/So/Sd) that manylinux
+ * toolchains emit, and the __cxx11 forms (under _ZNSt*) that modern
+ * gcc emits. Never audit this by one ABI's mangling alone.
+ */
+{
+  local:
+    /* pre-C++11 ABI: Ss = std::string, Sb = basic_string, Si/So/Sd = iostreams */
+    _ZNSs*; _ZNKSs*;
+    _ZNSbI*; _ZNKSbI*;
+    _ZNSi*; _ZNKSi*;
+    _ZNSo*; _ZNKSo*;
+    _ZNSd*; _ZNKSd*;
+    _ZTVSs; _ZTISs; _ZTSSs;
+    /* std:: namespace members — includes every __cxx11 instantiation */
+    _ZNSt*; _ZNKSt*; _ZNVSt*;
+    _ZSt*;
+    _ZTVSt*; _ZTISt*; _ZTSSt*;
+    _ZTVNSt*; _ZTINSt*; _ZTSNSt*;
+    /* function-local statics and their guards inside std code */
+    _ZGVNSt*; _ZZNSt*; _ZGVZSt*; _ZZSt*;
+    /* operator new/delete — each extension owns its static copy */
+    _Znwm*; _Znam*; _ZdlPv*; _ZdaPv*;
+    /* C++ runtime / unwinder (belt-and-braces; archives are already
+       hidden by --exclude-libs,ALL — this catches any COMDAT copies) */
+    __cxa_*; __gxx_*; _Unwind_*; __gcc_*; __emutls*;
+};

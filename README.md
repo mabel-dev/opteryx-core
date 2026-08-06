@@ -35,14 +35,20 @@ from opteryx.connectors import DiskConnector
 opteryx.register_workspace("data", DiskConnector)
 
 session = opteryx.session()
-result = session.execute_to_arrow(
-    "SELECT id, name FROM data.planets WHERE id < 5"
-)
 
-print(result)
+for morsel in session.execute_to_morsels("SELECT id, name FROM data.planets WHERE id < 5"):
+    print(morsel)
 ```
 
+Results arrive as Draken morsels — batches of columns — streamed as the engine produces them, so a large result never has to fit in memory at once. A morsel prints as a table, and carries `num_rows`, `column_names` and `column(name).to_pylist()` for getting at the values. Once the stream has been read to the end, `session.rowcount` is the number of rows it delivered.
+
 In this model, dataset names are resolved relative to the current working directory. For example, `data.planets` resolves to `./data/planets`, and Opteryx Core reads the Parquet files it finds there.
+
+There is also a command line, for querying without writing Python:
+
+```bash
+python -m opteryx "SELECT id, name FROM data.planets WHERE id < 5"
+```
 
 ## What It Is For
 

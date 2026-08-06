@@ -1,8 +1,37 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# See the License at http://www.apache.org/licenses/LICENSE-2.0
+# Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
+
+"""
+Reading datasets out of Google Cloud Storage.
+
+This ran on `opteryx.connect()` / `cursor()`, which no longer exist; it now uses
+`opteryx.session()` / `execute_to_morsels()`, and the per-scan telemetry that the
+old `cur.telemetry["rows_read"]` / `["columns_read"]` / `["blobs_read"]` moved
+into.
+
+KNOWN FAILING, and not because of the API: as of this rewrite every case fails
+with
+
+    DatasetReadError: Cannot read information for dataset 'opteryx.space_missions':
+    head_many: HTTP 404:
+    https://storage.googleapis.com/opteryx/space_missions%2F_opteryx_manifest.parquet
+
+The bucket no longer holds the manifest these queries read. The expected row,
+column and telemetry numbers below are therefore UNVERIFIED - they are the
+numbers this test has always carried, kept as they were rather than rewritten to
+match a run that cannot happen. Whoever restores the dataset should re-confirm
+them, starting with `columns_read`: it counts projected AND filtered columns, so
+the 1 expected for a query which filters on a column it does not select looks low.
+"""
+
 import os
 import sys
 from collections import namedtuple
 
 import pytest
+
 os.environ.pop("OPTERYX_DEBUG", None)
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
@@ -44,37 +73,55 @@ test_cases = [
         query="SELECT COUNT(*) FROM opteryx.many",
         expected_rowcount=1,
         expected_columncount=1,
-        stats={"blobs_read": 1018, "rows_read": 9162}
+        stats={"blobs_read": 1018, "rows_read": 9162},
     ),
 ]
+
+
+def scan_statistics(session) -> dict:
+    """Totals across the scan operators - what the query actually read.
+
+    `rows_read` was the name for the rows a scan handed up; that measurement is
+    `records_out` on the scan's telemetry today.
+    """
+    scans = [
+        operation
+        for operation in session.telemetry["operations"].values()
+        if "dataset" in operation  # only scans read a dataset
+    ]
+    return {
+        "rows_read": sum(scan["records_out"] for scan in scans),
+        "columns_read": sum(scan["columns_read"] for scan in scans),
+        "blobs_read": sum(scan["blobs_read"] for scan in scans),
+    }
+
 
 @pytest.mark.parametrize("test_case", test_cases)
 def test_gcs_storage(test_case):
     opteryx.register_workspace("opteryx", GcpCloudStorageConnector)
     opteryx.register_workspace("mabel_data", GcpCloudStorageConnector)
 
-    conn = opteryx.connect()
-    cur = conn.cursor()
-    cur.execute(test_case.query)
-    # DEBUG: show stats observed during test run
-    print("DEBUG cur.telemetry:", cur.telemetry)
+    session = opteryx.session()
+    for _ in session.execute_to_morsels(test_case.query):
+        pass
 
     # Assertions for rowcount and columncount
     assert (
-        cur.rowcount == test_case.expected_rowcount
-    ), f"Expected rowcount {test_case.expected_rowcount}, got {cur.rowcount}"
+        session.rowcount == test_case.expected_rowcount
+    ), f"Expected rowcount {test_case.expected_rowcount}, got {session.rowcount}"
     assert (
-        cur.columncount == test_case.expected_columncount
-    ), f"Expected columncount {test_case.expected_columncount}, got {cur.columncount}"
+        len(session.column_names) == test_case.expected_columncount
+    ), f"Expected columncount {test_case.expected_columncount}, got {len(session.column_names)}"
 
     # Assertions for telemetry
+    observed = scan_statistics(session)
     for key, expected_value in test_case.stats.items():
-        actual_value = cur.telemetry.get(key, None)
+        actual_value = observed.get(key)
         assert (
             actual_value == expected_value
         ), f"Stats check failed for {key}: expected {expected_value}, got {actual_value}"
 
-    conn.close()
+    session.close()
 
 
 def main():
@@ -95,8 +142,6 @@ def main():
     passed = 0
     failed = 0
 
-    nl = "\n"
-
     failures = []
 
     print(f"RUNNING BATTERY OF {len(test_cases)} Google Cloud Storage TESTS")
@@ -104,7 +149,7 @@ def main():
         (statement, rows, cols, stats) = test_case
 
         printable = statement
-        if hasattr(printable, "decode"):
+        if isinstance(printable, bytes):
             printable = printable.decode()
         print(
             f"\033[38;2;255;184;108m{(index + 1):04}\033[0m"
