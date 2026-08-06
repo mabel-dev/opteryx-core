@@ -453,7 +453,7 @@ SELECT VARCHAR FROM (SELECT 'varchar' AS VARCHAR) AS SQ
 query shape 1 1
 SELECT BOOLEAN FROM (SELECT False AS BOOLEAN) AS SQ
 
-query shape 9 3
+query shape 9 4
 EXPLAIN SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
 query shape 2 1

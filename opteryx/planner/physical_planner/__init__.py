@@ -136,7 +136,7 @@ def _create_aggregate_and_group_node(logical_node, query_properties, registry):
     return registry.create(
         "Aggregate and Group",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "group_map_variant")},
+        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "group_map_variant", "groupby_ndv_estimate")},
     )
 
 

@@ -139,6 +139,8 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     double gb_tel_probe_s "opteryx::engine::groupby_tel::probe_s" ()
     double gb_tel_apply_s "opteryx::engine::groupby_tel::apply_s" ()
     long long gb_tel_calls "opteryx::engine::groupby_tel::calls_count" ()
+    long long gb_tel_parvi_sinks "opteryx::engine::groupby_tel::parvi_sinks_count" ()
+    long long gb_tel_parvi_promotes "opteryx::engine::groupby_tel::parvi_promotes_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
 # The bridge is the ONLY correct way to reach the shared execution tracer
@@ -250,7 +252,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf)
         void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
                               cppvector[string] key_names,
-                              cppvector[AggSpec2] specs, size_t buf)
+                              cppvector[AggSpec2] specs, size_t buf,
+                              int64_t ndv_estimate)
         void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf)
         void set_buffer_append_sink(size_t p, size_t buf)
         size_t new_join2_ref()
@@ -535,6 +538,8 @@ def get_groupby_telemetry():
         "probe_s": gb_tel_probe_s(),
         "apply_s": gb_tel_apply_s(),
         "calls":   gb_tel_calls(),
+        "parvi_sinks":    gb_tel_parvi_sinks(),
+        "parvi_promotes": gb_tel_parvi_promotes(),
     }
 
 
@@ -2363,14 +2368,19 @@ cdef class NativePlan:
         operand col_idx | -1), ...] in output-column order."""
         self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf)
 
-    def set_groupby_sink(self, size_t p, list key_idx, list key_names, list specs, size_t buf):
+    def set_groupby_sink(self, size_t p, list key_idx, list key_names, list specs, size_t buf,
+                         int64_t ndv_estimate):
+        """``ndv_estimate`` is the planner's distinct-group-count estimate for the
+        GROUP BY keys (-1 = unknown). At or below the native gate the sink fronts
+        each hash partition with a 16-slot parvi map (native_group_sinks.hpp,
+        kGBParviGateNDV)."""
         cdef cppvector[size_t] keys
         cdef cppvector[string] knames
         for i in key_idx:
             keys.push_back(<size_t>i)
         for n in key_names:
             knames.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
-        self._e.set_groupby_sink(p, keys, knames, _agg_spec_from_list(specs), buf)
+        self._e.set_groupby_sink(p, keys, knames, _agg_spec_from_list(specs), buf, ndv_estimate)
 
     def set_distinct_sink(self, size_t p, list on_idx, size_t buf):
         """``on_idx`` = dedup key column indices; empty list = every column."""

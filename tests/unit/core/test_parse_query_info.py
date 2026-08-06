@@ -202,7 +202,20 @@ def test_parse_mixed_system_and_user_tables():
 def test_parse_invalid_sql():
     """Test that invalid SQL raises an error"""
     with pytest.raises(ValueError, match="Failed to parse SQL query"):
-        opteryx.analyze_query("SELECT * FROM WHERE")
+        opteryx.analyze_query("SELECT * FROM users WHERE")
+
+
+def test_parse_agrees_with_the_planner_about_what_is_valid():
+    """`SELECT * FROM WHERE` was expected to be a parse error here. It is not one
+    for the engine either - the dialect reads `WHERE` as the relation's name and
+    the query fails later, on the dataset not existing. This reports what the
+    engine will do with the statement, so it has to accept what the engine
+    accepts: rejecting a statement the planner would run is the worse answer for
+    a caller using this to decide whether to queue it."""
+    info = opteryx.analyze_query("SELECT * FROM WHERE")
+
+    assert info["query_type"] == "Query"
+    assert info["tables"] == ["WHERE"]
 
 
 def test_parse_empty_sql():
@@ -322,6 +335,90 @@ def test_parse_named_parameter_in_subquery():
     """)
 
     assert info["parameters"] == ["min_amount"]
+
+
+def test_parse_scalar_subquery_in_the_select_list():
+    """A subquery is a subquery wherever it appears, not only in the FROM"""
+    info = opteryx.analyze_query("SELECT (SELECT MAX(amount) FROM orders) AS m, name FROM users")
+
+    assert sorted(info["tables"]) == ["orders", "users"]
+
+
+def test_parse_exists_subquery():
+    info = opteryx.analyze_query(
+        "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM audit WHERE audit.uid = users.id)"
+    )
+
+    assert sorted(info["tables"]) == ["audit", "users"]
+
+
+def test_parse_subquery_in_having():
+    info = opteryx.analyze_query(
+        "SELECT COUNT(*) FROM users GROUP BY dept HAVING COUNT(*) > (SELECT AVG(n) FROM stats)"
+    )
+
+    assert sorted(info["tables"]) == ["stats", "users"]
+
+
+def test_parse_cte_reports_what_it_reads_not_its_own_name():
+    """`h` is a result, not a relation - nothing can hold a permission on it"""
+    info = opteryx.analyze_query(
+        "WITH h AS (SELECT user_id FROM orders) SELECT u.* FROM users u JOIN h ON u.id = h.user_id"
+    )
+
+    assert sorted(info["tables"]) == ["orders", "users"]
+    assert "h" not in info["tables"]
+
+
+def test_parse_update_reports_its_target():
+    info = opteryx.analyze_query("UPDATE users SET email = 'new@example.com' WHERE id = 1")
+
+    assert info["tables"] == ["users"]
+
+
+def test_parse_delete_reports_its_target():
+    info = opteryx.analyze_query("DELETE FROM users WHERE id = 1")
+
+    assert info["tables"] == ["users"]
+
+
+def test_parse_drop_reports_its_target():
+    """A DDL target is named by the statement, not by a relation node"""
+    info = opteryx.analyze_query("DROP TABLE users")
+
+    assert info["tables"] == ["users"]
+    assert info["is_ddl"] is True
+
+
+def test_parse_create_table_reports_its_target():
+    info = opteryx.analyze_query("CREATE TABLE new_users (id INTEGER)")
+
+    assert info["tables"] == ["new_users"]
+
+
+def test_parse_alter_table_reports_its_target():
+    info = opteryx.analyze_query("ALTER TABLE users ADD COLUMN nickname VARCHAR")
+
+    assert info["tables"] == ["users"]
+
+
+def test_parse_show_columns_reports_the_table_it_describes():
+    info = opteryx.analyze_query("SHOW COLUMNS FROM users")
+
+    assert info["tables"] == ["users"]
+    assert info["is_read"] is True
+
+
+def test_parse_explain_reports_the_tables_of_the_statement_it_explains():
+    info = opteryx.analyze_query("EXPLAIN SELECT * FROM users")
+
+    assert info["tables"] == ["users"]
+
+
+def test_parse_table_functions_are_not_relations():
+    """They read their arguments, not a dataset"""
+    assert opteryx.analyze_query("SELECT * FROM UNNEST((1, 2)) AS x")["tables"] == []
+    assert opteryx.analyze_query("SELECT * FROM GENERATE_SERIES(1, 10) AS g")["tables"] == []
 
 
 def test_permission_required_for_each_kind_of_statement():

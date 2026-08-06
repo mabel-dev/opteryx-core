@@ -540,6 +540,39 @@ def determine_type(node):
         except Exception:
             return result_ct  # placeholder DECIMAL(38, 18)
     if result_cat == OT.INTEGER and left_ct is not None and right_ct is not None:
+        # Binary bitwise ops are WIDTH-PRESERVING, not width-widening. draken's
+        # int_bitwise requires both operands to share one physical type and returns
+        # that same type, so `int8_col ^ 1` is INT8 -> INT8 -> INT8. The arithmetic
+        # lattice in _int_result_type is wrong here: it sees INT8 against the
+        # literal's natural INT64 and widens to INT64, so the binder DECLARED INT64
+        # while the kernel EMITTED INT8. Nothing reconciled the two, and the
+        # divergence surfaced one level up: the enclosing comparison read the
+        # declared INT64, concluded its own literal already matched and needed no
+        # coercion, and draken_compare_dv (identical-type only) then met an INT8
+        # vector against an INT64 literal at runtime and failed with a bare
+        # `err_op=11` and no message. `id ^ 1 = 1` was unrunnable for every narrow
+        # int width while `CAST(id AS INTEGER) ^ 1 = 1` worked.
+        #
+        # The width the kernel actually produces is the NON-LITERAL operand's: the
+        # plan compiler materialises an integer literal in the column's physical type
+        # (_coerce_literal_physical) precisely so the identical-type kernel can fire.
+        # That coercion is value-exact only — a literal too wide for the column is
+        # left alone, the operand types then differ, and _c_native_binop refuses the
+        # expression at plan time, so the declared type never gets used. Two
+        # non-literal operands of differing widths are refused the same way.
+        #
+        # BitwiseNot is NOT here: it genuinely widens (`~int8_col` is INT64) and its
+        # INT64 declaration is already true.
+        if operator in ("BitwiseOr", "BitwiseAnd", "BitwiseXor"):
+            left_is_literal = node.left is not None and node.left.node_type == NodeType.LITERAL
+            right_is_literal = node.right is not None and node.right.node_type == NodeType.LITERAL
+            if right_is_literal and not left_is_literal:
+                return left_ct
+            if left_is_literal and not right_is_literal:
+                return right_ct
+            if left_ct.physical == right_ct.physical:
+                return left_ct
+            return result_ct  # mismatched widths — refused downstream, declaration moot
         try:
             return compute_result_logical_type(left_ct, right_ct, operator, OT.INTEGER)
         except NotImplementedError:

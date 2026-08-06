@@ -28,6 +28,7 @@ from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.types.logical_type import integer_bounds
 from opteryx.utils import random_string
 
 from .optimization_strategy import (
@@ -122,12 +123,36 @@ def _get_equi_join_pairs(on_node):
     return []
 
 
+def _representable(bound, target_type) -> bool:
+    """True if *bound* can be carried by a literal of *target_type*.
+
+    The bound comes from the OTHER leg of the join, so its width is the other
+    column's, not the target's: `p.id = s.id` puts satellites.id's 1..177 onto
+    $planets.id, which is an INT8. Typing 177 as INT8 is not a widening
+    question — the literal is materialised by
+    `vector_int8_from_constant` and dies with a bare OverflowError.
+
+    Dropping an unrepresentable bound is always sound: these are derived
+    necessary-condition filters layered on top of the join, so a missing one
+    only forgoes pruning. Both out-of-range directions are droppable — a bound
+    beyond the target's width is a tautology (every INT8 is <= 177), and one
+    below it makes the predicate unsatisfiable, which the join itself still
+    enforces.
+    """
+    bounds = integer_bounds(target_type)
+    if bounds is None:  # not an integer width — this check does not apply
+        return True
+    if not isinstance(bound, (int, float)) or isinstance(bound, bool):
+        return True
+    return bounds[0] <= bound <= bounds[1]
+
+
 def _range_conditions(target_col, value_range):
     """Build GtEq/LtEq COMPARISON_OPERATOR condition Nodes pushing *value_range*
     (native, post-filter bounds) onto *target_col*, correctly typed."""
     target_type = getattr(getattr(target_col, "schema_column", None), "column_type", None)
     conditions = []
-    if value_range.upper_bound is not None:
+    if value_range.upper_bound is not None and _representable(value_range.upper_bound, target_type):
         conditions.append(
             Node(
                 NodeType.COMPARISON_OPERATOR,
@@ -136,7 +161,7 @@ def _range_conditions(target_col, value_range):
                 right=build_literal_node(value_range.upper_bound, suggested_type=target_type),
             )
         )
-    if value_range.lower_bound is not None:
+    if value_range.lower_bound is not None and _representable(value_range.lower_bound, target_type):
         conditions.append(
             Node(
                 NodeType.COMPARISON_OPERATOR,

@@ -142,9 +142,9 @@ def analyze_query(sql: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing:
         - query_type: Type of query (e.g., "Query", "Insert", "Update")
-        - tables: Table names referenced in the query - INCOMPLETE for subqueries,
-          derived tables, CTEs and mutations, so not safe to authorize a statement
-          from on its own (see `opteryx.utils.query_parser.parse_query_info`)
+        - tables: Every relation the statement references, sorted - including
+          through subqueries, derived tables and CTE bodies, and the target of a
+          mutation or DDL statement
         - parameters: Names of `:name` placeholders referenced in the query
           (sorted, deduplicated, no leading `:`)
         - is_read: True if this only reads (SELECT, SHOW COLUMNS, SHOW TABLES, USE)

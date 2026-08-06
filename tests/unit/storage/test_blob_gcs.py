@@ -18,6 +18,11 @@ with
     head_many: HTTP 404:
     https://storage.googleapis.com/opteryx/space_missions%2F_opteryx_manifest.parquet
 
+(In a full-suite run this used to fail earlier still, with `AttributeError:
+module 'google' has no attribute 'auth'`, because tests/unit/keyvalue/
+test_kvstores_cloud.py deleted the real `google` package out of `sys.modules`.
+That is fixed there; the 404 below is what remains.)
+
 The bucket no longer holds the manifest these queries read. The expected row,
 column and telemetry numbers below are therefore UNVERIFIED - they are the
 numbers this test has always carried, kept as they were rather than rewritten to

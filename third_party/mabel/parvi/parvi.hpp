@@ -62,6 +62,14 @@ struct ParviResult {
     bool        found = false;
 };
 
+// Outcome of ParviMap::find_or_insert_id — mirrors the three-way contract of
+// CarcharIndex::find_or_insert_id plus the fixed-capacity overflow case.
+enum class ParviInsert : std::uint8_t {
+    kFound    = 0,  // key existed; payload_out holds its payload
+    kInserted = 1,  // new_id inserted; payload_out == new_id
+    kFull     = 2,  // key absent and table full — caller promotes to Carchar
+};
+
 // ------------------------------------------------------------------
 // Performance improvement #1: faster scalar mask extraction
 //
@@ -204,6 +212,34 @@ public:
         return {slot, true};
     }
 
+    // Single-probe find-or-insert with a caller-assigned id (the engine's
+    // num_groups++ / hashes.size() convention). One tag scan decides hit,
+    // insert, and overflow — no second lookup on the hit path.
+    ParviInsert find_or_insert_id(std::uint64_t key, std::int64_t new_id,
+                                  std::int64_t& payload_out) noexcept {
+        const std::uint8_t tag = key_tag(key);
+        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
+        while (tag_matches != 0U) {
+            const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
+            if (hashes_[idx] == key) {
+                payload_out = payload_refs_[idx];
+                return ParviInsert::kFound;
+            }
+            tag_matches &= (tag_matches - 1U);
+        }
+        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
+        if (empty_matches == 0U) {
+            return ParviInsert::kFull;
+        }
+        const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
+        control_[slot]      = tag;
+        hashes_[slot]       = key;
+        payload_refs_[slot] = new_id;
+        ++size_;
+        payload_out = new_id;
+        return ParviInsert::kInserted;
+    }
+
     // find_or_insert: returns (payload, inserted_bool).
     // On overflow (table full and key absent) the out-param `overflow` is
     // set to true and the returned payload is the factory's fresh value
@@ -265,72 +301,6 @@ public:
     }
 
 private:
-    // Helper that returns both tag-match mask and empty-slot mask
-    // from a single load of the control array.
-    // Marked always_inline to avoid function-call overhead.
-    std::pair<std::uint32_t, std::uint32_t> get_masks(std::uint8_t tag) const noexcept
-#if defined(__GNUC__) || defined(__clang__)
-        __attribute__((always_inline))
-#endif
-    {
-#if defined(__AVX2__)
-        const __m128i ctrl = _mm_load_si128(reinterpret_cast<const __m128i*>(control_.data()));
-        const __m128i tag_v = _mm_set1_epi8(static_cast<char>(tag));
-        const __m128i empty_v = _mm_set1_epi8(static_cast<char>(kEmpty));
-        const uint32_t tag_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, tag_v)));
-        const uint32_t empty_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, empty_v)));
-        return {tag_mask, empty_mask};
-#elif defined(__riscv) && defined(__riscv_vector)
-        return {group_match_mask(control_.data(), tag), group_match_mask(control_.data(), kEmpty)};
-#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-        const uint8x16_t ctrl = vld1q_u8(control_.data());
-        const uint8x16_t tag_eq = vceqq_u8(ctrl, vdupq_n_u8(tag));
-        const uint8x16_t empty_eq = vceqq_u8(ctrl, vdupq_n_u8(kEmpty));
-        // Use the same fast mask conversion as group_match_mask.
-        auto neon_mask = [](uint8x16_t eq) -> uint32_t {
-            static constexpr uint8_t kPowersArr[16] = {1,2,4,8,16,32,64,128,
-                                                       1,2,4,8,16,32,64,128};
-            const uint8x16_t powers = vld1q_u8(kPowersArr);
-            const uint8x16_t masked = vandq_u8(eq, powers);
-            const uint8_t lo = vaddv_u8(vget_low_u8(masked));
-            const uint8_t hi = vaddv_u8(vget_high_u8(masked));
-            return static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 8U);
-        };
-        return {neon_mask(tag_eq), neon_mask(empty_eq)};
-#else
-        // Scalar fallback: load 64-bit halves and compute both masks at once.
-        using ::opteryx::carchar::detail::kByteHighBits64;
-        using ::opteryx::carchar::detail::load_u64;
-        using ::opteryx::carchar::detail::match_mask64;
-        const uint64_t lo = load_u64(control_.data());
-        const uint64_t hi = load_u64(control_.data() + 8U);
-        // Compute tag-match masks.
-        uint64_t tag_lo, tag_hi;
-        if (tag == kEmpty) {
-            tag_lo = lo & kByteHighBits64;
-            tag_hi = hi & kByteHighBits64;
-        } else {
-            tag_lo = match_mask64(lo, tag);
-            tag_hi = match_mask64(hi, tag);
-        }
-        // Compute empty masks (kEmpty is 0x80).
-        const uint64_t empty_lo = lo & kByteHighBits64;
-        const uint64_t empty_hi = hi & kByteHighBits64;
-        // Convert each to 8-bit mask using multiplication.
-        constexpr uint64_t kHighBitMask = 0x8080808080808080ULL;
-        constexpr uint64_t kGather = 0x8040201008040201ULL;
-        auto to_mask = [](uint64_t bits) -> uint8_t {
-            return static_cast<uint8_t>(((bits & kHighBitMask) * kGather) >> 56);
-        };
-        uint8_t tag_mask_lo = to_mask(tag_lo);
-        uint8_t tag_mask_hi = to_mask(tag_hi);
-        uint8_t empty_mask_lo = to_mask(empty_lo);
-        uint8_t empty_mask_hi = to_mask(empty_hi);
-        uint32_t tag_mask = static_cast<uint32_t>(tag_mask_lo) | (static_cast<uint32_t>(tag_mask_hi) << 8U);
-        uint32_t empty_mask = static_cast<uint32_t>(empty_mask_lo) | (static_cast<uint32_t>(empty_mask_hi) << 8U);
-        return {tag_mask, empty_mask};
-#endif
-    }
 
     // Performance improvement #4: align control array to 64-byte cache line
     // to avoid false sharing when multiple ParviMaps are used concurrently
@@ -445,65 +415,6 @@ public:
     }
 
 private:
-    // Same helper as ParviMap: compute tag-match and empty-slot masks in one pass.
-    std::pair<std::uint32_t, std::uint32_t> get_masks(std::uint8_t tag) const noexcept
-#if defined(__GNUC__) || defined(__clang__)
-        __attribute__((always_inline))
-#endif
-    {
-#if defined(__AVX2__)
-        const __m128i ctrl = _mm_load_si128(reinterpret_cast<const __m128i*>(control_.data()));
-        const __m128i tag_v = _mm_set1_epi8(static_cast<char>(tag));
-        const __m128i empty_v = _mm_set1_epi8(static_cast<char>(kEmpty));
-        const uint32_t tag_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, tag_v)));
-        const uint32_t empty_mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, empty_v)));
-        return {tag_mask, empty_mask};
-#elif defined(__riscv) && defined(__riscv_vector)
-        return {group_match_mask(control_.data(), tag), group_match_mask(control_.data(), kEmpty)};
-#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-        const uint8x16_t ctrl = vld1q_u8(control_.data());
-        const uint8x16_t tag_eq = vceqq_u8(ctrl, vdupq_n_u8(tag));
-        const uint8x16_t empty_eq = vceqq_u8(ctrl, vdupq_n_u8(kEmpty));
-        auto neon_mask = [](uint8x16_t eq) -> uint32_t {
-            static constexpr uint8_t kPowersArr[16] = {1,2,4,8,16,32,64,128,
-                                                       1,2,4,8,16,32,64,128};
-            const uint8x16_t powers = vld1q_u8(kPowersArr);
-            const uint8x16_t masked = vandq_u8(eq, powers);
-            const uint8_t lo = vaddv_u8(vget_low_u8(masked));
-            const uint8_t hi = vaddv_u8(vget_high_u8(masked));
-            return static_cast<uint32_t>(lo) | (static_cast<uint32_t>(hi) << 8U);
-        };
-        return {neon_mask(tag_eq), neon_mask(empty_eq)};
-#else
-        using ::opteryx::carchar::detail::kByteHighBits64;
-        using ::opteryx::carchar::detail::load_u64;
-        using ::opteryx::carchar::detail::match_mask64;
-        const uint64_t lo = load_u64(control_.data());
-        const uint64_t hi = load_u64(control_.data() + 8U);
-        uint64_t tag_lo, tag_hi;
-        if (tag == kEmpty) {
-            tag_lo = lo & kByteHighBits64;
-            tag_hi = hi & kByteHighBits64;
-        } else {
-            tag_lo = match_mask64(lo, tag);
-            tag_hi = match_mask64(hi, tag);
-        }
-        const uint64_t empty_lo = lo & kByteHighBits64;
-        const uint64_t empty_hi = hi & kByteHighBits64;
-        constexpr uint64_t kHighBitMask = 0x8080808080808080ULL;
-        constexpr uint64_t kGather = 0x8040201008040201ULL;
-        auto to_mask = [](uint64_t bits) -> uint8_t {
-            return static_cast<uint8_t>(((bits & kHighBitMask) * kGather) >> 56);
-        };
-        uint8_t tag_mask_lo = to_mask(tag_lo);
-        uint8_t tag_mask_hi = to_mask(tag_hi);
-        uint8_t empty_mask_lo = to_mask(empty_lo);
-        uint8_t empty_mask_hi = to_mask(empty_hi);
-        uint32_t tag_mask = static_cast<uint32_t>(tag_mask_lo) | (static_cast<uint32_t>(tag_mask_hi) << 8U);
-        uint32_t empty_mask = static_cast<uint32_t>(empty_mask_lo) | (static_cast<uint32_t>(empty_mask_hi) << 8U);
-        return {tag_mask, empty_mask};
-#endif
-    }
 
     alignas(64) std::array<std::uint8_t, kCapacity>  control_{};
     std::array<std::uint64_t, kCapacity>             hashes_{};

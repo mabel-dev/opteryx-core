@@ -150,7 +150,7 @@ SELECT * FROM $planets ANTI JOIN testdata.satellites USING(id) WHERE name IS NOT
 query shape 0
 SELECT * FROM $planets AS P ANTI JOIN testdata.satellites AS S ON P.id = S.id WHERE P.name != 'Earth'
 
-query shape 9 5
+query shape 9 7
 EXPLAIN ANALYZE FORMAT TEXT SELECT * FROM $planets AS a INNER JOIN (SELECT id FROM $planets) AS b USING (id)
 
 statement error UnsupportedSyntaxError
@@ -168,10 +168,10 @@ SELECT DISTINCT ON (planetId) planetId, name FROM testdata.satellites
 query shape 1 1
 SELECT 8 DIV 4
 
-query error sql failed TypeError: 'opteryx\.compiled\.structures\.carchar_set\.CarcharSetWrapper' object is not iterable
+query shape 1 20
 SELECT * FROM $planets WHERE id IN (1)
 
-query error sql failed TypeError: 'opteryx\.compiled\.structures\.carchar_set\.CarcharSetWrapper' object is not iterable
+query shape 8 20
 SELECT * FROM $planets WHERE id NOT IN (1)
 
 statement error ArrayWithMixedTypesError
@@ -198,7 +198,7 @@ SELECT * FROM $planets WHERE id > 0
 query shape 9 20
 SELECT * FROM $planets WHERE id <= 9
 
-statement error TypeError: _eval_value: cannot construct Draken vector
+query shape 2 20
 SELECT * FROM $planets WHERE (id = 2 OR id = 4) AND NOT (id = 3 OR id = 5)
 
 query shape 2 20
@@ -213,7 +213,7 @@ SELECT * FROM $planets WHERE (id = 3 AND NOT (id = 3))
 query shape 9 20
 SELECT * FROM $planets WHERE (id = 6 OR id != 6)
 
-statement error TypeError: _eval_value: cannot construct Draken vector
+query shape 0
 SELECT * FROM $planets WHERE id IS NOT NULL AND id < NULL
 
 query shape 0
@@ -228,7 +228,7 @@ SELECT * FROM $planets ORDER BY lengthOfDay NULLS LAST
 query shape 0
 SELECT name[0] FROM $planets WHERE id IS NULL
 
-query error sql failed TypeError: Argument 'key' has incorrect type \(expected str, got bytes\)
+query shape 0
 SELECT * FROM testdata.astronauts WHERE birth_place->>'city' = 'New York'
 
 query shape 0

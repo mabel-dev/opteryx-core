@@ -108,6 +108,30 @@ jobs:
             "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
             /io/dev/build-rugo-wheels.sh
 
+      - name: Verify wheel imports (release gate — MUST NOT be continue-on-error)
+        # Same gate as opteryx_core's release.yaml. rugo is exposed to the same
+        # break: rugo_native resolves 6 draken_* symbols via RTLD_GLOBAL, and
+        # both wheels are linked with the same LD_EXTRA from build_common.py. A
+        # symbol-hiding change that breaks that bridge produces a wheel that
+        # imports nothing — which is how opteryx_core 0.9.56 took production
+        # down while every dev-build signal was green. Only importing the real
+        # manylinux wheel catches it.
+        run: |
+          set -euo pipefail
+          chmod +x dev/verify-wheel-imports.sh
+          docker run --rm \
+            -e OPTERYX_ALLOW_KNOWN_GRPC_ABORT="${OPTERYX_ALLOW_KNOWN_GRPC_ABORT:-0}" \
+            -v "$(pwd)":/io \
+            --workdir /io \
+            "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
+            /io/dev/verify-wheel-imports.sh /io/dist rugo
+        env:
+          # TODO(remove once the C++ symbol-hiding fix lands): `import rugo;
+          # import grpc` aborts today, exactly as opteryx_core does. Accepting
+          # that KNOWN failure keeps it from blocking releases; the bridge-symbol
+          # check still gates hard. Setting this to 0 is the goal.
+          OPTERYX_ALLOW_KNOWN_GRPC_ABORT: "1"
+
       - name: Archive wheels
         uses: actions/upload-artifact@v4
         with:

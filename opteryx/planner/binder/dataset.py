@@ -75,9 +75,93 @@ _CSV_SUPPORTED_TYPES = {
 # exact path.
 _GLOB_METACHARACTERS = frozenset("*?[")
 
+# The options each file-reading dataset function accepts, in the order they are
+# offered as examples in error messages (so the first entry should be the one a
+# user most often reaches for). These are the ONLY names accepted -- the reader
+# parameters they translate to (rugo's `fail_on_error`, `has_header`, `delimiter`)
+# are deliberately not aliases, so writing one is an unrecognized option and the
+# "did you mean" hint below points at the SQL spelling.
+_READ_JSONL_OPTIONS = ("ignore_errors", "infer_schema", "infer_sample_size")
+_READ_CSV_OPTIONS = ("ignore_errors", "separator", "has_header_row", "infer_sample_size")
+
 
 def _is_glob_pattern(path: str) -> bool:
     return any(ch in path for ch in _GLOB_METACHARACTERS)
+
+
+def _option_name_of(node) -> str:
+    """The option name an `option = value` positional argument was written with, or "".
+
+    `READ_JSONL('f.jsonl', ignore_errors = true)` does NOT parse as a named
+    argument -- sqlparser only produces `FunctionArg::Named` for the `=>` form, so
+    the `=` form arrives as an ordinary *positional* expression: a COMPARISON_OPERATOR
+    'Eq' node over an unqualified identifier and a value. Recognising that shape is
+    the only way to tell the user their operator (not their option) was the mistake.
+    A qualified left side (`t.ignore_errors`) is not an option spelling, so it
+    returns "" and falls through to the generic positional-argument error.
+    """
+    if node.node_type != NodeType.COMPARISON_OPERATOR or node.value != "Eq":
+        return ""
+    left = node.left
+    if left is None or left.node_type != NodeType.IDENTIFIER or left.source is not None:
+        return ""
+    return left.source_column
+
+
+def _validate_reader_options(function: str, args: list, named_args: dict, options: tuple) -> None:
+    """Reject anything after the path that is not a recognized `option => value`.
+
+    Every file-reading dataset function (READ_JSONL/READ_CSV/READ_PARQUET) takes
+    exactly one positional argument -- the path -- and its options by name. Before
+    this check, only `named_args` was validated, so a mis-typed *operator*
+    (`ignore_errors = true`) landed in `args` instead and was silently discarded:
+    the query bound clean and read with the default. Options that quietly do
+    nothing are worse than options that don't exist, so every surplus argument is
+    an error here, and the message names which of the two mistakes was made --
+    wrong operator, unrecognized name, or both -- with a `suggest_alternative`
+    hint whenever the name is a near miss.
+    """
+    from opteryx.utils import suggest_alternative
+
+    def _unrecognized(name: str, operator_also_wrong: bool) -> str:
+        # A reader with no options at all can never have a "did you mean" or an
+        # operator hint -- there is no spelling of this that would have worked.
+        if not options:
+            return f"{function} does not take options; received '{name}'."
+        message = f"{function} received an unrecognized option '{name}'."
+        suggestion = suggest_alternative(name, options)
+        if suggestion:
+            message += f" Did you mean '{suggestion}'?"
+        else:
+            message += f" Valid options are: {', '.join(sorted(options))}."
+        if operator_also_wrong:
+            message += (
+                f" Options are also passed with '=>', not '=' "
+                f"(e.g. {suggestion or options[0]} => ...)."
+            )
+        return message
+
+    for extra in args[1:]:
+        if extra.node_type == NodeType.NESTED:
+            extra = extra.centre
+        name = _option_name_of(extra)
+        if name and name in options:
+            raise InvalidFunctionParameterError(
+                f"{function} option '{name}' must be passed with '=>', not '=' -- "
+                f"write {function}(..., {name} => ...)."
+            )
+        if name:
+            raise InvalidFunctionParameterError(_unrecognized(name, operator_also_wrong=True))
+        raise InvalidFunctionParameterError(
+            f"{function} takes a single positional argument (the path); options must be "
+            f"named with '=>' (e.g. {function}(..., {options[0]} => ...))."
+            if options
+            else f"{function} takes a single positional argument (the path) and no options."
+        )
+
+    for name in named_args:
+        if name not in options:
+            raise InvalidFunctionParameterError(_unrecognized(name, operator_also_wrong=False))
 
 
 def _resolve_glob_files(path: str, filesystem) -> list:
@@ -257,17 +341,22 @@ def visit_function_dataset(
                 arg = arg.centre
             return arg
 
-        if "explicit_schema" in named_args:
+        # `explicit_schema` is checked against every spelling the user could have
+        # written -- `=>` (named_args) and `=` (a positional Eq expression) -- so the
+        # documented gap reports itself either way rather than the second form
+        # reporting a wrong operator for an option that would fail regardless.
+        written_options = set(named_args)
+        for extra in node.args[1:]:
+            written_options.add(
+                _option_name_of(extra.centre if extra.node_type == NodeType.NESTED else extra)
+            )
+        if "explicit_schema" in written_options:
             raise NotSupportedError(
                 "READ_JSONL('explicit_schema=...') is not supported: rugo has no "
                 "working per-chunk explicit_schema override today, so this option "
                 "cannot be honored yet."
             )
-        for key in named_args:
-            if key not in ("ignore_errors", "infer_schema", "infer_sample_size"):
-                raise InvalidFunctionParameterError(
-                    f"READ_JSONL received an unrecognized option '{key}'."
-                )
+        _validate_reader_options("READ_JSONL", node.args, named_args, _READ_JSONL_OPTIONS)
 
         if "ignore_errors" in named_args:
             arg = _literal_value("ignore_errors")
@@ -524,11 +613,9 @@ def visit_function_dataset(
         # Unlike READ_JSONL, Parquet's schema is unambiguous (read straight off the
         # file's own footer, not inferred from sample rows), so there is nothing
         # analogous to Stage 3's ignore_errors/infer_schema/infer_sample_size to
-        # configure -- any named option is a mistake, not a typo to silently ignore.
-        if node.named_args:
-            raise InvalidFunctionParameterError(
-                f"READ_PARQUET does not take options; received {sorted(node.named_args)}."
-            )
+        # configure -- any option is a mistake, not a typo to silently ignore. The
+        # empty option tuple makes every name unrecognized, in either spelling.
+        _validate_reader_options("READ_PARQUET", node.args, node.named_args or {}, ())
 
         protocol = path.split("://")[0] if "://" in path else ""
         is_glob = _is_glob_pattern(path)
@@ -688,11 +775,7 @@ def visit_function_dataset(
                 arg = arg.centre
             return arg
 
-        for key in named_args:
-            if key not in ("separator", "has_header_row", "ignore_errors", "infer_sample_size"):
-                raise InvalidFunctionParameterError(
-                    f"READ_CSV received an unrecognized option '{key}'."
-                )
+        _validate_reader_options("READ_CSV", node.args, named_args, _READ_CSV_OPTIONS)
 
         if "separator" in named_args:
             arg = _literal_value("separator")

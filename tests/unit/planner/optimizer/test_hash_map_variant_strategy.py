@@ -200,3 +200,57 @@ def test_empty_group_by_is_parvi_eligible():
     context = strategy.visit(agg_node, context)
 
     assert agg_node.group_map_variant == "parvi"
+
+
+def test_groupby_ndv_estimate_stashed_in_native_gate_band():
+    """The raw group-count estimate is stored on the node for the native sink's
+    parvi gate (kGBParviGateNDV=64) even when it exceeds the Cython PARVI_CAPACITY."""
+    telemetry = QueryTelemetry()
+    strategy = HashMapVariantStrategy(telemetry)
+
+    scan = _make_scan_node_with_manifest("test_table", 1000)
+    scan.manifest.estimate_cardinality = lambda col: 6  # 6 * 6 = 36: > 16, <= 64
+
+    plan = LogicalPlan()
+    plan.add_node("scan_1", scan)
+
+    agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+    agg_node.groups = [_make_identifier_node("col1"), _make_identifier_node("col2")]
+    agg_node.nid = "agg_1"
+    plan.add_node("agg_1", agg_node)
+    plan.add_edge("scan_1", "agg_1")
+
+    context = OptimizerContext(plan)
+    context.node_id = "agg_1"
+    context.pre_optimized_tree = plan
+    strategy.visit(agg_node, context)
+
+    # 36 groups: too big for the Cython 16-slot map, in-band for the native gate.
+    assert agg_node.group_map_variant == "carchar"
+    assert agg_node.groupby_ndv_estimate == 36
+
+
+def test_groupby_ndv_estimate_none_without_stats():
+    """No manifest → no estimate → the native gate stays off (fail-safe)."""
+    telemetry = QueryTelemetry()
+    strategy = HashMapVariantStrategy(telemetry)
+
+    scan = _make_scan_node_with_manifest("test_table", 1000)
+    scan.manifest = None
+
+    plan = LogicalPlan()
+    plan.add_node("scan_1", scan)
+
+    agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+    agg_node.groups = [_make_identifier_node("col1")]
+    agg_node.nid = "agg_1"
+    plan.add_node("agg_1", agg_node)
+    plan.add_edge("scan_1", "agg_1")
+
+    context = OptimizerContext(plan)
+    context.node_id = "agg_1"
+    context.pre_optimized_tree = plan
+    strategy.visit(agg_node, context)
+
+    assert agg_node.group_map_variant == "carchar"
+    assert agg_node.groupby_ndv_estimate is None

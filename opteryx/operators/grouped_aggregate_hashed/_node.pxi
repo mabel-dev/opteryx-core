@@ -45,6 +45,9 @@ cdef class GroupedAggregateHashedNode(BasePlanNode):
     cdef public list _required_columns
     cdef public object _having_condition
     cdef public bint _use_parvi
+    # Planner distinct-group-count estimate (int or None) — consumed by the
+    # native plan compiler to gate GroupBySink's per-partition parvi maps.
+    cdef public object groupby_ndv_estimate
     # STATE (per-worker): _engine may hold a GroupHashEngine or, after the parallel
     # sink wraps it, a _ScatterCollectEngine — hence `object`. _parallel_engines is
     # a tuple of disjoint per-worker engines (injected by the sink) or None.
@@ -98,6 +101,7 @@ cdef class GroupedAggregateHashedNode(BasePlanNode):
 
         variant = parameters.get("group_map_variant", "carchar")
         self._use_parvi = (variant == "parvi")
+        self.groupby_ndv_estimate = parameters.get("groupby_ndv_estimate")
 
         # Required columns for morsel.select() before ingestion
         self._required_columns = self._build_required_columns()

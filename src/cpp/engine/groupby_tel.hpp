@@ -28,12 +28,17 @@ inline std::atomic<long long> hash_ns  {0};  // Pass A: compute_row_hashes over 
 inline std::atomic<long long> probe_ns {0};  // Pass B: find_or_insert_id + partition lane growth
 inline std::atomic<long long> apply_ns {0};  // Pass C: per-aggregate-function state update
 inline std::atomic<long long> calls    {0};  // GroupBySink::sink() calls (morsels)
+// Parvi low-card gate engagement (per-event, never per-row):
+inline std::atomic<long long> parvi_sinks    {0};  // GroupBySink locals armed with parvi partitions
+inline std::atomic<long long> parvi_promotes {0};  // partition overflowed its 16 slots (estimate misfire)
 
 inline void reset() {
     hash_ns.store(0, std::memory_order_relaxed);
     probe_ns.store(0, std::memory_order_relaxed);
     apply_ns.store(0, std::memory_order_relaxed);
     calls.store(0, std::memory_order_relaxed);
+    parvi_sinks.store(0, std::memory_order_relaxed);
+    parvi_promotes.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -50,6 +55,8 @@ inline double hash_s()  { return hash_ns.load(std::memory_order_relaxed)  * 1e-9
 inline double probe_s() { return probe_ns.load(std::memory_order_relaxed) * 1e-9; }
 inline double apply_s() { return apply_ns.load(std::memory_order_relaxed) * 1e-9; }
 inline long long calls_count() { return calls.load(std::memory_order_relaxed); }
+inline long long parvi_sinks_count()    { return parvi_sinks.load(std::memory_order_relaxed); }
+inline long long parvi_promotes_count() { return parvi_promotes.load(std::memory_order_relaxed); }
 
 }  // namespace opteryx::engine::groupby_tel
 

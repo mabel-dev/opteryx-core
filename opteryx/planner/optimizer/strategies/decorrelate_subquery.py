@@ -410,6 +410,120 @@ def _expose_key(plan: LogicalPlan, key_column) -> None:
             node.columns = list(node.columns or []) + [key_column]
 
 
+def _carry_column_upward(node, column) -> None:
+    """
+    Make `column` survive one operator on the way to the ancestor join.
+
+    Grouping and projection both drop whatever they do not name, so a correlation
+    that can only be enforced further up has to be threaded through every one of
+    them in between. Widening a GROUP BY is the `Γ_{A ∪ A(D)}` rule from Neumann
+    BTW2025: the inner result is computed once per binding of the free variable
+    instead of once overall.
+
+    Widening alone is exactly the bug this fixes — it MULTIPLIES rows. It is only
+    sound because the ancestor join then binds the column; the two changes are a
+    pair and neither is correct without the other.
+    """
+    if node.node_type == LogicalPlanStepType.AggregateAndGroup:
+        node.groups = list(node.groups or []) + [column]
+        node.projection = list(node.projection or []) + [column]
+        node.columns = list(node.columns or []) + [column]
+    elif node.node_type == LogicalPlanStepType.Aggregate:
+        # Same promotion `_expose_key` performs: a plain Aggregate has no
+        # `projection`, and the physical node fails with KeyError without one.
+        node.node_type = LogicalPlanStepType.AggregateAndGroup
+        node.groups = [column]
+        node.projection = list(node.aggregates or []) + [column]
+        node.columns = list(node.columns or []) + [column]
+    elif node.node_type == LogicalPlanStepType.Project:
+        node.columns = list(node.columns or []) + [column]
+
+
+def _attach_correlation(join, inner_key, outer_key, carried, outer_on_left: bool) -> None:
+    """Bind a deferred correlation onto the ancestor join that owns its outer relation."""
+    outer_reference = _local_copy(outer_key)
+    equals = Node(node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True)
+    equals.left = outer_reference
+    equals.right = carried
+
+    if join.on is None:
+        join.on = equals
+    else:
+        conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+        conjunction.left = join.on
+        conjunction.right = equals
+        join.on = conjunction
+
+    # Appended directly rather than re-deriving with `extract_join_fields`: that
+    # helper assumes the condition only names this join's two legs, and the whole
+    # reason we are here is that the carried column's relation was not registered
+    # on either of them until now.
+    outer_identity = outer_key.schema_column.identity
+    inner_identity = inner_key.schema_column.identity
+    left_new, right_new = (
+        (outer_identity, inner_identity) if outer_on_left else (inner_identity, outer_identity)
+    )
+    join.left_columns = list(join.left_columns or []) + [left_new]
+    join.right_columns = list(join.right_columns or []) + [right_new]
+    join.columns = list(join.columns or []) + [outer_reference, carried]
+
+    carried_source = carried.source
+    if carried_source:
+        if outer_on_left:
+            names = list(join.right_relation_names or [])
+            if carried_source not in names:
+                join.right_relation_names = sorted(names + [carried_source])
+        else:
+            names = list(join.left_relation_names or [])
+            if carried_source not in names:
+                join.left_relation_names = sorted(names + [carried_source])
+        join.all_relations = set(join.all_relations or set()) | {carried_source}
+
+
+def _defer_correlation_to_ancestor(plan: LogicalPlan, from_nid: str, inner_key, outer_key) -> bool:
+    """
+    Enforce a correlation whose outer column belongs to a scope further out than
+    the subquery immediately enclosing it.
+
+    Decorrelation runs outside-in over fixed-point rounds, so by the time an inner
+    subquery is processed the join owning the grandparent relation already exists
+    as a plan node. Rather than carrying a parent pointer down a recursion (the
+    formulation in Neumann BTW2025 §3.2), we walk UP to that materialised join,
+    widening each grouping and projection on the path so the inner column survives,
+    and bind the equality there.
+
+    Returns False if no such ancestor is reachable, leaving the caller to reject
+    the query — a correlation that is carried but never bound is silently wrong.
+    """
+    carried = _local_copy(inner_key)
+    target_relation = outer_key.source
+    if not target_relation:
+        return False
+
+    current = from_nid
+    while True:
+        consumers = plan.outgoing_edges(current)
+        if not consumers:
+            return False
+        _source, consumer_nid, _relation = consumers[0]
+        consumer = plan[consumer_nid]
+        if consumer is None:
+            return False
+
+        if consumer.node_type == LogicalPlanStepType.Join:
+            outer_on_left = target_relation in (consumer.left_relation_names or [])
+            if outer_on_left or target_relation in (consumer.right_relation_names or []):
+                _attach_correlation(consumer, inner_key, outer_key, carried, outer_on_left)
+                return True
+            # A different join sits between us and the owner. Threading a column
+            # through it means registering the relation on the intervening legs
+            # too; unverified, so refuse rather than guess.
+            return False
+
+        _carry_column_upward(consumer, carried)
+        current = consumer_nid
+
+
 def _projecting_node(plan: LogicalPlan):
     """
     The node in `plan` that defines its output columns.
@@ -836,6 +950,25 @@ def _build_filter_join(
         if origin:
             inner_relations.update(origin)
 
+    # A correlation reaching past the immediate enclosing scope names a relation
+    # that is on neither leg here, so `extract_join_fields` would keep it in `on`
+    # while dropping it from the key lists — never evaluated, and the widened
+    # projection multiplies rows. The scalar path defers these to the ancestor join
+    # that owns the relation; that technique does NOT transfer here, because
+    # SEMI/ANTI emit left-side columns only, so the carried inner column cannot
+    # survive above this join to be bound higher up. Enforcing it needs the
+    # materialised domain D of Neumann BTW2025 §2.2. Refuse until that exists.
+    unresolved = [
+        outer_key for _inner_key, outer_key in key_pairs if outer_key.source not in outer_relations
+    ]
+    if unresolved:
+        names = ", ".join(f"`{column.source_column}`" for column in unresolved)
+        raise UnsupportedSyntaxError(
+            f"A correlated EXISTS/IN subquery correlates on {names}, which belongs to a "
+            "scope further out than the subquery enclosing it. Correlating across more "
+            "than one level of nesting is not supported for EXISTS or IN."
+        )
+
     on_condition = None
     for inner_key, outer_key in key_pairs:
         equals = Node(
@@ -1053,8 +1186,21 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # leg, or a reference carrying it still resolves to neither side.
     inner_relations.add(scalar_alias)
 
-    on_condition = None
+    # A correlation whose outer column belongs to THIS join's left leg can be a key
+    # here. One reaching further out — to a grandparent scope — cannot: that
+    # relation is not below this join, so the equality names a leg that does not
+    # exist and is quietly discarded from the key lists. Those are deferred to the
+    # ancestor join that does own the relation, once this join is in the plan.
+    local_pairs = []
+    deferred_pairs = []
     for inner_key, outer_key in key_pairs:
+        if outer_key.source in outer_relations:
+            local_pairs.append((inner_key, outer_key))
+        else:
+            deferred_pairs.append((inner_key, outer_key))
+
+    on_condition = None
+    for inner_key, outer_key in local_pairs:
         equals = Node(
             node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
         )
@@ -1071,7 +1217,7 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
     # No correlation means no key to join on: the subquery is one value attached
     # to every outer row, which is exactly a cross join.
-    join.type = "inner" if key_pairs else "cross join"
+    join.type = "inner" if local_pairs else "cross join"
     join.on = on_condition
     join.using = None
     # The join's referenced columns. This must be populated: projection pushdown
@@ -1080,11 +1226,17 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # of the subquery's projection and leaves the build side unable to supply it.
     # A cross join has no keys, so the subquery's VALUE column takes that role —
     # it is the only thing the outer query needs from that leg.
-    join.columns = [
-        column
-        for pair in key_pairs
-        for column in (_local_copy(pair[1]), _local_copy(pair[0]))
-    ] or [_reference_to(value_column)]
+    # A deferred pair contributes its INNER column only: the outer one is not on
+    # either leg here. It still has to be listed or projection pushdown prunes the
+    # carried column off this leg before the ancestor join can bind it.
+    join.columns = (
+        [
+            column
+            for pair in local_pairs
+            for column in (_local_copy(pair[1]), _local_copy(pair[0]))
+        ]
+        + [_local_copy(inner_key) for inner_key, _outer_key in deferred_pairs]
+    ) or [_reference_to(value_column)]
     join.left_relation_names = sorted(outer_relations)
     join.right_relation_names = sorted(inner_relations)
     join.all_relations = outer_relations | inner_relations
@@ -1094,16 +1246,35 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # before this join existed and nothing recomputes them later — so they are
     # derived here, with the same helper, or the engine rejects the join for
     # having unaligned keys.
-    if key_pairs:
+    if local_pairs:
         join.left_columns, join.right_columns = extract_join_fields(
             on_condition, join.left_relation_names, join.right_relation_names
         )
+        # Every local pair names both legs by construction, so the helper must have
+        # kept all of them. A shortfall means a pair reached this point that cannot
+        # be a key here, which is the silent-wrong-answer case — refuse instead.
+        if len(join.left_columns) != len(local_pairs):
+            raise InvalidInternalStateError(
+                "decorrelation built a join key naming a relation that is on neither leg"
+            )
     else:
         join.left_columns, join.right_columns = [], []
 
     join_nid = random_string()
     plan.insert_node_before(join_nid, join, filter_nid)
     plan.add_edge(inner_exit, join_nid)
+
+    # Correlations reaching past the enclosing scope are bound on the ancestor join
+    # that owns their relation. This has to run AFTER the join is in the plan, since
+    # the walk starts from it. A carried column that never gets bound is silently
+    # wrong — worse than the original correlated query — so refuse if it cannot be.
+    for inner_key, outer_key in deferred_pairs:
+        if not _defer_correlation_to_ancestor(plan, join_nid, inner_key, outer_key):
+            raise UnsupportedSyntaxError(
+                f"A correlated subquery correlates on `{outer_key.source_column}`, which "
+                "belongs to a scope further out than the subquery enclosing it, and no "
+                "enclosing join provides that relation. This nesting is not supported."
+            )
 
     telemetry.optimization_decorrelate_scalar_subquery = (
         getattr(telemetry, "optimization_decorrelate_scalar_subquery", 0) + 1

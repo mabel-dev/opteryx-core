@@ -614,9 +614,10 @@ public:
     }
     void set_groupby_sink(size_t p, std::vector<size_t> key_idx,
                           std::vector<std::string> key_names,
-                          std::vector<AggSpec2> specs, size_t buf) {
+                          std::vector<AggSpec2> specs, size_t buf, int64_t ndv_estimate) {
         set_sink_(p, std::make_unique<GroupBySink>(
-            std::move(key_idx), std::move(key_names), std::move(specs), buffers[buf].get()));
+            std::move(key_idx), std::move(key_names), std::move(specs), buffers[buf].get(),
+            ndv_estimate));
     }
     void set_distinct_sink(size_t p, std::vector<size_t> on_idx, size_t buf) {
         set_sink_(p,

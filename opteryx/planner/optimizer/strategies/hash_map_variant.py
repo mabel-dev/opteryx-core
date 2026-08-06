@@ -51,6 +51,12 @@ from .optimization_strategy import get_nodes_of_type_from_logical_plan
 # Must match opteryx::parvi::kCapacity in third_party/mabel/parvi/parvi.hpp.
 PARVI_CAPACITY = 16
 
+# The native GroupBySink gates its per-partition parvi front maps on the raw
+# NDV estimate (kGBParviGateNDV in src/cpp/engine/native_group_sinks.hpp = 64).
+# The NDV-product early-exit below must not truncate estimates the sink still
+# wants to see, so it cuts off above the native gate, not at PARVI_CAPACITY.
+NATIVE_GB_GATE = 64
+
 
 class HashMapVariantStrategy(OptimizationStrategy):
     """Tag AggregateAndGroup nodes with their preferred hash-map variant."""
@@ -67,8 +73,13 @@ class HashMapVariantStrategy(OptimizationStrategy):
             # GROUP BY — use group_map_variant hint
             if getattr(node, "group_map_variant", None) is not None:
                 return context
-            variant = self._pick_variant(node, context)
+            variant, estimate = self._variant_and_estimate(node, context)
             node.group_map_variant = variant
+            # Raw distinct-group-count estimate for the native sink's own gate
+            # (int or None). Kept separate from the variant tag: the Cython
+            # engine's single 16-slot map and the native sink's 64 partitioned
+            # maps have different capacity envelopes.
+            node.groupby_ndv_estimate = estimate
             context.optimized_plan[context.node_id] = node
             return context
 
@@ -100,22 +111,37 @@ class HashMapVariantStrategy(OptimizationStrategy):
     def _pick_variant(
         self, agg_node: LogicalPlanNode, context: OptimizerContext
     ) -> str:
+        variant, _ = self._variant_and_estimate(agg_node, context)
+        return variant
+
+    def _variant_and_estimate(
+        self, agg_node: LogicalPlanNode, context: OptimizerContext
+    ) -> tuple:
+        """(variant, group-count estimate). The estimate is the best available
+        distinct-group-count bound (int) or None when neither signal resolves.
+        Values above NATIVE_GB_GATE may be truncated lower bounds (the NDV
+        product early-exits) — only <= NATIVE_GB_GATE comparisons are valid."""
         plan = context.pre_optimized_tree
         scan_nodes = self._upstream_scans(plan, agg_node)
         if not scan_nodes:
-            return "carchar"
+            return "carchar", None
+
+        estimate = None
+        total_rows = self._total_record_count(scan_nodes)
+        if total_rows is not None and total_rows <= NATIVE_GB_GATE:
+            # Output groups cannot exceed input rows — a provable bound.
+            estimate = total_rows
+        ndv_product = self._ndv_product(agg_node, scan_nodes)
+        if ndv_product is not None:
+            estimate = ndv_product if estimate is None else min(estimate, ndv_product)
 
         # Signal 2 first — cheapest and provably correct.
-        total_rows = self._total_record_count(scan_nodes)
         if total_rows is not None and total_rows <= PARVI_CAPACITY:
-            return "parvi"
-
+            return "parvi", estimate
         # Signal 1 — NDV product across group columns.
-        ndv_product = self._ndv_product(agg_node, scan_nodes)
         if ndv_product is not None and ndv_product <= PARVI_CAPACITY:
-            return "parvi"
-
-        return "carchar"
+            return "parvi", estimate
+        return "carchar", estimate
 
     def _upstream_scans(self, plan: LogicalPlan, agg_node: LogicalPlanNode) -> list:
         """All Scan nodes that feed into `agg_node`."""
@@ -174,8 +200,9 @@ class HashMapVariantStrategy(OptimizationStrategy):
             if ndv is None:
                 return None
             product *= max(1, ndv)
-            if product > PARVI_CAPACITY:
-                # Early exit — we already know we'll pick carchar on this signal.
+            if product > NATIVE_GB_GATE:
+                # Early exit — already above every gate that reads this estimate
+                # (Cython parvi at PARVI_CAPACITY, native sink at NATIVE_GB_GATE).
                 return product
         return product
 

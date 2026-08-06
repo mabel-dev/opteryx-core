@@ -1,27 +1,41 @@
 /*
  * Linker version script (Linux/ELF only): localize C++ standard-library
- * symbols in every extension we link.
+ * symbols in every extension we link. Fixes TWO production-grade crashes,
+ * both caused by cross-.so interposition of the C++ runtime on Linux's flat
+ * symbol namespace (macOS two-level namespaces are immune; ld64 rejects the
+ * flag, so this is Linux-only via LD_EXTRA):
  *
- * Why this exists: each extension links libstdc++ STATICALLY and
- * `--exclude-libs,ALL` hides everything pulled from those archives. But
- * std:: members instantiated into our OWN translation units via
- * `#include <string>` etc. are COMDAT definitions in our .o files —
- * outside --exclude-libs' reach — and `-fvisibility=default` exports
- * them. On Linux's flat symbol namespace a later-loaded library (grpc's
- * cygrpc, via any google.cloud.* import) then binds part of its
- * std::string calls into our private libstdc++ copy and part into the
- * system one: one string reserved by one implementation and freed by
- * another → free(): invalid pointer → SIGABRT. Observed as the
- * `import opteryx; import grpc` abort on the 0.9.55 wheel (2026-08-05).
- * macOS is immune (two-level namespace) and ld64 does not take this flag.
+ * 1. THE EVERY-GCS-QUERY SIGSEGV (regressed in 0.9.54, diagnosed 2026-08-06).
+ *    manylinux wheels use the pre-C++11 COW string ABI. Its weak _ZNSs*
+ *    member functions export at default visibility and interpose across .so,
+ *    but each .so keeps its OWN _S_empty_rep_storage singleton local
+ *    (--exclude-libs hides archive DATA, not our own COMDAT FUNCTIONS).
+ *    Observed: pool_reader's ReadParquetMetadataFromBuffer (the GCS footer
+ *    parse) calling std::string::_M_mutate BOUND INTO draken_native.so —
+ *    draken's copy compares the rep against draken's singleton address,
+ *    mismatches, and operator-deletes pool_reader's STATIC empty-rep:
+ *    SIGSEGV in mimalloc's _ZdlPv (or free(): invalid pointer under glibc).
+ *    Local parquet is unaffected (different footer path), which is why dev
+ *    boxes and local benchmarks never reproduced it.
  *
- * Only a `local:` list, no `global:` — unmatched symbols keep their
- * default (exported) binding, so PyInit_*, the RTLD_GLOBAL bridge
- * symbols (draken_vector_unwrap / draken_vector_own_raw), and all other
- * project symbols are untouched. Patterns cover BOTH string ABIs: the
- * pre-C++11 mangling abbreviations (Ss/Sb/Si/So/Sd) that manylinux
- * toolchains emit, and the __cxx11 forms (under _ZNSt*) that modern
- * gcc emits. Never audit this by one ABI's mangling alone.
+ * 2. THE import-order SIGABRT: `import opteryx` then `import grpc` (via any
+ *    google.cloud.*) made cygrpc bind half its std::string calls into our
+ *    exported copies and half into the system libstdc++ — free(): invalid
+ *    pointer at dlopen.
+ *
+ * Only `local:` patterns, no `global:` — unmatched symbols keep their default
+ * exported binding, so PyInit_* and the RTLD_GLOBAL bridge symbols
+ * (draken_vector_unwrap / draken_vector_own_raw / draken_cast_* and the
+ * DecodeColumnFromChunk export _operators resolves from pool_reader) are
+ * untouched. Covers BOTH string ABIs (Ss/Sb/Si/So/Sd abbreviations = old ABI,
+ * _ZNSt* includes __cxx11) — never audit this by one ABI's mangling alone.
+ *
+ * NOTE: an earlier attempt at this script was blamed for a prod ImportError
+ * (undefined draken_cast_uint_to_string) and reverted. That attribution was
+ * WRONG — the ImportError came from the standalone rugo wheel overwriting
+ * opteryx_core's draken/ (see the release-gate consumer-shape check), and the
+ * bridge symbols demonstrably survive this script. Validate any change here
+ * against a real manylinux wheel via the release gate, not a dev build alone.
  */
 {
   local:
@@ -41,7 +55,6 @@
     _ZGVNSt*; _ZZNSt*; _ZGVZSt*; _ZZSt*;
     /* operator new/delete — each extension owns its static copy */
     _Znwm*; _Znam*; _ZdlPv*; _ZdaPv*;
-    /* C++ runtime / unwinder (belt-and-braces; archives are already
-       hidden by --exclude-libs,ALL — this catches any COMDAT copies) */
+    /* C++ runtime / unwinder (belt-and-braces; archives already hidden) */
     __cxa_*; __gxx_*; _Unwind_*; __gcc_*; __emutls*;
 };

@@ -6166,6 +6166,14 @@ static CxxMorsel cxx_unnest(const CxxMorsel& m, uint32_t array_idx,
     // either replace the consumed source array in place or append alongside it. The
     // compiler's _compile_unnest tracks the identical column layout either way.
     CxxMorsel out = cxx_take(m, parent_idx.data(), out_n);
+    // `names` is decorative mid-pipeline: the native engine addresses columns
+    // POSITIONALLY and several producers leave the vector empty (the join2 probe
+    // builds its output by pushing columns only; the sink stamps final_names).
+    // cxx_take copies whatever it was handed, so it can arrive short of — or
+    // empty against — the column list. Restore the one-name-per-column invariant
+    // cxx_morsel.h declares BEFORE indexing it, or `names[array_idx]` writes off
+    // the end of an empty vector.
+    if (out.names.size() != out.columns.size()) out.names.resize(out.columns.size());
     if (drop_source) {
         out.columns[array_idx] = std::move(tc);
         out.names[array_idx] = target_name;
@@ -6203,6 +6211,10 @@ static CxxMorsel cxx_unnest_literal(const CxxMorsel& m, const CxxMorsel& vals,
 
     CxxMorsel out   = cxx_take(m,    parent_idx.data(), out_n);
     CxxMorsel tiled = cxx_take(vals, child_idx.data(),  out_n);
+    // Same invariant repair as cxx_unnest: `names` is decorative mid-pipeline and
+    // producers (the join2 probe) leave it empty, so appending the target to an
+    // unsized vector would leave one name against N+1 columns.
+    if (out.names.size() != out.columns.size()) out.names.resize(out.columns.size());
     out.columns.push_back(std::move(tiled.columns[0]));
     out.names.push_back(target_name);
     return out;

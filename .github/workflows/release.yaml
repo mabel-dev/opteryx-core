@@ -119,6 +119,42 @@ jobs:
                 exit 1
               fi
             '
+      - name: Verify wheel imports (release gate — MUST NOT be continue-on-error)
+        # 0.9.56 shipped a wheel whose every query failed at import with
+        #   ImportError: undefined symbol: draken_cast_uint_to_string
+        # while a dev build, `make q` (217/217) and `nm` symbol counts were all
+        # green. Only importing the real manylinux wheel catches that class of
+        # break, so this step gates the release. See dev/verify-wheel-imports.sh.
+        run: |
+          set -euo pipefail
+
+          DESIRED_IMAGE="${{ matrix.manylinux_image }}"
+          if docker pull "${DESIRED_IMAGE}" 2>/dev/null; then
+            IMAGE="${DESIRED_IMAGE}"
+          elif docker pull ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 2>/dev/null; then
+            IMAGE=ghcr.io/pypa/manylinux/manylinux_2_31_x86_64
+          elif docker pull quay.io/pypa/manylinux2014_x86_64 2>/dev/null; then
+            IMAGE=quay.io/pypa/manylinux2014_x86_64
+          else
+            echo "ERROR: no manylinux image available to verify the wheel." >&2
+            exit 1
+          fi
+
+          chmod +x io/dev/verify-wheel-imports.sh
+          docker run --rm \
+            -e OPTERYX_ALLOW_KNOWN_GRPC_ABORT="${OPTERYX_ALLOW_KNOWN_GRPC_ABORT:-0}" \
+            -v `pwd`:/io \
+            --workdir /io \
+            "${IMAGE}" \
+            io/dev/verify-wheel-imports.sh /io/io/dist
+        env:
+          # TODO(remove once the C++ symbol-hiding fix lands): 0.9.55 and the
+          # 0.9.57 revert both abort on `import opteryx; import grpc`. Set to 1
+          # so that KNOWN, pre-existing failure does not block a release that is
+          # otherwise good — the bridge-symbol check (which caught 0.9.56 taking
+          # production down) still gates hard. Setting this to 0 is the goal.
+          OPTERYX_ALLOW_KNOWN_GRPC_ABORT: "1"
+
       - name: Archive Wheels
         uses: actions/upload-artifact@v4
         with:

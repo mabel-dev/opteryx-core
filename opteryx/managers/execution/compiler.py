@@ -1325,7 +1325,12 @@ class _Compiler:
             layout = self._project_agg_operands(p, node, layout)
             specs = self._parse_aggregates(aggs, layout)
             buf = self.nplan.new_buffer()
-            self.nplan.set_groupby_sink(p, key_idx, group_cols, specs, buf)
+            # Planner NDV estimate for the grouped keys (hash_map_variant strategy);
+            # -1 = unknown. Gates the sink's per-partition parvi front maps.
+            ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
+            self.nplan.set_groupby_sink(
+                p, key_idx, group_cols, specs, buf,
+                -1 if ndv_estimate is None else int(ndv_estimate))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             out_layout = list(group_cols) + [spec[0] for spec in specs]

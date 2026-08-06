@@ -792,12 +792,15 @@ def _binop_ts_unit(ct):
 def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
     """True iff draken_binop handles (op_code, left_phys, right_phys) today.
 
-    result_phys (the bound result physical type) guards the same-kind decimal case:
-    the dec_*/dec128_* kernels output the SAME kind as their operands, so if the
-    binder promotes the result to a different kind (e.g. DECIMAL × DECIMAL whose
-    precision exceeds 18 → DECIMAL128), the kernel's physical output disagrees with
-    the bound type and a downstream op reads the wrong width. Stay on the closure
-    for those. When result_phys is None (introspection) the guard is skipped."""
+    result_phys (the bound result physical type) guards every kernel family whose
+    output type is fixed by its operands rather than by the binder. The dec_*/dec128_*
+    kernels output the SAME kind as their operands, so if the binder promotes the
+    result to a different kind (e.g. DECIMAL × DECIMAL whose precision exceeds 18 →
+    DECIMAL128), the kernel's physical output disagrees with the bound type and a
+    downstream op reads the wrong width. int_bitwise is the same shape of promise:
+    width-preserving, so its result must equal its (already equal) operand types.
+    Stay on the closure for those. When result_phys is None (introspection) the
+    guard is skipped."""
     if left_phys is None or right_phys is None:
         return False
     cdef bint l_int = left_phys in _BINOP_NATIVE_INT
@@ -886,8 +889,18 @@ def _c_native_binop(int op_code, left_phys, right_phys, result_phys=None):
         return l_num and r_num
     # Bitwise OR/AND/XOR/SHIFT over SAME-type integers (int_bitwise requires it;
     # mismatch would return a loud error sentinel, so require equality up front).
+    #
+    # The RESULT type is checked too, not just the operands. int_bitwise is
+    # width-preserving — it stamps the shared operand type on its output — so a
+    # binder that declared any other width has mis-described this expression to
+    # everything downstream. That used to go unnoticed here and detonate one level
+    # up instead: the declared width fed the enclosing comparison's literal-coercion
+    # decision, and draken_compare_dv met a narrower vector than it was promised and
+    # died with a bare `err_op=11` carrying no message. Refuse at plan time instead,
+    # where the operator and both types are still in hand to report.
     if BOP_BITWISE_OR <= op_code <= BOP_SHIFT_RIGHT:
-        return l_int and r_int and left_phys == right_phys
+        return (l_int and r_int and left_phys == right_phys
+                and (result_phys is None or result_phys == left_phys))
     # String concat over SAME-type string columns (VARCHAR/NVARCHAR/VARBINARY).
     # Mixed/non-string operands stay on the closure (which coerces) — the kernel
     # only sees string||string of one type, result type = that type.

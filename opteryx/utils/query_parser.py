@@ -21,155 +21,136 @@ from typing import Optional
 from typing import Set
 
 
-def _extract_tables_from_relation(relation: Dict[str, Any]) -> Set[str]:
+# Table-valued functions parse as a relation named after the function. They read
+# their arguments, not a dataset, so they are not relations for this purpose.
+_TABLE_FUNCTIONS = frozenset({"UNNEST", "GENERATE_SERIES", "VALUES"})
+
+# Statements which name their target with a bare identifier path instead of a
+# relation node. Each value is the path through the statement body to that path;
+# `Drop` is handled separately because it names several targets at once.
+_STATEMENT_TARGETS = {
+    "AlterTable": ("name",),
+    "CreateTable": ("name",),
+    "CreateView": ("name",),
+    "ShowColumns": ("show_options", "show_in", "parent_name"),
+    "ShowCreate": ("obj_name",),
+}
+
+
+def _collect_relations(node: Any, tables: Set[str], cte_names: Set[str]) -> None:
     """
-    Extract table names from a relation object in the AST.
+    Walk the whole AST, collecting every relation it names and every CTE alias.
+
+    Deliberately generic. This walked the specific shape of each kind of
+    statement, and each time the parser moved a shape underneath it - INSERT's
+    target from `table_name` to `table.TableName`, DELETE's `from` gaining a
+    `WithFromKeyword` wrapper - it reported no tables at all rather than failing,
+    and a caller checking permissions saw a mutation which touched nothing.
+    Wherever a relation appears, the parser names it with the same two nodes; so
+    look for those two nodes anywhere, and stop knowing about statement shapes.
 
     Parameters:
-        relation: Dict containing relation information from the parsed AST
-
-    Returns:
-        Set of table names found in the relation
+        node: any node of the parsed AST.
+        tables: collects relation names, mutated in place.
+        cte_names: collects CTE aliases, mutated in place.
     """
-    tables = set()
+    if isinstance(node, list):
+        for item in node:
+            _collect_relations(item, tables, cte_names)
+        return
 
-    if "Table" in relation:
-        table = relation["Table"]
-        # Extract table name from the name array
-        if "name" in table and table["name"]:
-            table_name = ".".join(
-                part.get("Identifier", {}).get("value", "") for part in table["name"]
-            )
-            if table_name:
-                tables.add(table_name)
+    if not isinstance(node, dict):
+        return
 
-    if "Derived" in relation:
-        # Handle subqueries
-        derived = relation["Derived"]
-        if "subquery" in derived and derived["subquery"]:
-            # Recursively extract tables from subquery
-            subquery_tables = _extract_tables_from_ast(derived["subquery"])
-            tables.update(subquery_tables)
+    # `FROM users`, a join's relation, `UPDATE users`, `DELETE FROM users`
+    relation = node.get("Table")
+    if isinstance(relation, dict):
+        name = _extract_table_name(relation.get("name"))
+        if name and name.upper() not in _TABLE_FUNCTIONS:
+            tables.add(name)
 
-    return tables
+    # `INSERT INTO users`
+    if "TableName" in node:
+        name = _extract_table_name(node["TableName"])
+        if name:
+            tables.add(name)
+
+    # A CTE names a result, not a relation: `WITH x AS (SELECT * FROM t)` reads
+    # `t`, and the `x` below it is that result. Reporting `x` as a table names
+    # something no permission can be held on, and hides the `t` that one can.
+    with_clause = node.get("with")
+    if isinstance(with_clause, dict):
+        for cte in with_clause.get("cte_tables") or []:
+            if not isinstance(cte, dict):
+                continue
+            alias = cte.get("alias")
+            if isinstance(alias, dict) and isinstance(alias.get("name"), dict):
+                cte_name = alias["name"].get("value")
+                if cte_name:
+                    cte_names.add(cte_name)
+
+    for child in node.values():
+        _collect_relations(child, tables, cte_names)
 
 
-def _extract_tables_from_join(join: Dict[str, Any]) -> Set[str]:
+def _collect_statement_target(ast: Dict[str, Any], tables: Set[str]) -> None:
     """
-    Extract table names from a join object in the AST.
+    Add the relation a statement acts ON where the parser names it with a bare
+    identifier path rather than a relation node.
+
+    DDL and SHOW statements do this - `DROP TABLE users` carries `users` as
+    `Drop.names[0]` - so the walk above cannot see it, and the caller checking
+    permissions on a DROP is precisely the one who needs to know what it drops.
 
     Parameters:
-        join: Dict containing join information from the parsed AST
-
-    Returns:
-        Set of table names found in the join
+        ast: one parsed statement.
+        tables: collects relation names, mutated in place.
     """
-    tables = set()
+    statement_type = next(iter(ast), None)
+    body = ast.get(statement_type)
+    if not isinstance(body, dict):
+        return
 
-    if "relation" in join:
-        tables.update(_extract_tables_from_relation(join["relation"]))
+    if statement_type == "Drop":
+        # one statement, several targets: DROP TABLE a, b
+        for name_parts in body.get("names") or []:
+            name = _extract_table_name(name_parts)
+            if name:
+                tables.add(name)
+        return
 
-    # Handle nested joins
-    if "joins" in join:
-        for nested_join in join["joins"]:
-            tables.update(_extract_tables_from_join(nested_join))
+    path = _STATEMENT_TARGETS.get(statement_type)
+    if path is None:
+        return
 
-    return tables
+    node: Any = body
+    for step in path:
+        if not isinstance(node, dict):
+            return
+        node = node.get(step)
+
+    name = _extract_table_name(node)
+    if name:
+        tables.add(name)
 
 
-def _extract_tables_from_ast(ast: Dict[str, Any]) -> Set[str]:
+def _extract_tables_from_ast(ast: Dict[str, Any]) -> List[str]:
     """
-    Recursively extract all table names from a parsed AST.
+    Every relation a statement references, in sorted order.
 
     Parameters:
-        ast: Parsed AST dictionary from sqloxide.parse_sql
+        ast: one parsed statement.
 
     Returns:
-        Set of table names found in the query
+        Sorted list of relation names.
     """
-    tables = set()
+    tables: Set[str] = set()
+    cte_names: Set[str] = set()
 
-    # Handle Query statements
-    if "Query" in ast:
-        query = ast["Query"]
-        if "body" in query:
-            body = query["body"]
+    _collect_relations(ast, tables, cte_names)
+    _collect_statement_target(ast, tables)
 
-            # Handle SELECT statements
-            if "Select" in body:
-                select = body["Select"]
-
-                # Extract from FROM clause
-                if "from" in select and select["from"]:
-                    for relation in select["from"]:
-                        if "relation" in relation:
-                            tables.update(_extract_tables_from_relation(relation["relation"]))
-
-                        # Handle joins
-                        if "joins" in relation and relation["joins"]:
-                            for join in relation["joins"]:
-                                tables.update(_extract_tables_from_join(join))
-
-                # Extract from WHERE clause subqueries
-                if "selection" in select and select["selection"]:
-                    # Recursively search for subqueries in the selection
-                    tables.update(_extract_subquery_tables(select["selection"]))
-
-            # Handle SetOperation (UNION, INTERSECT, EXCEPT)
-            if "SetOperation" in body:
-                set_op = body["SetOperation"]
-                if "left" in set_op:
-                    tables.update(_extract_tables_from_ast({"Query": {"body": set_op["left"]}}))
-                if "right" in set_op:
-                    tables.update(_extract_tables_from_ast({"Query": {"body": set_op["right"]}}))
-
-        # Handle CTEs (WITH clauses)
-        if "with" in query and query["with"]:
-            cte_tables = query["with"].get("cte_tables", [])
-            for cte in cte_tables:
-                if "query" in cte:
-                    tables.update(_extract_tables_from_ast(cte["query"]))
-
-    # Handle INSERT statements
-    if "Insert" in ast:
-        insert = ast["Insert"]
-        if "table_name" in insert:
-            table_name = _extract_table_name(insert["table_name"])
-            if table_name:
-                tables.add(table_name)
-
-        # Handle INSERT ... SELECT
-        if "source" in insert and insert["source"]:
-            source = insert["source"]
-            if "Query" in source:
-                tables.update(_extract_tables_from_ast(source))
-
-    # Handle UPDATE statements
-    if "Update" in ast:
-        update = ast["Update"]
-        if "table" in update and "Table" in update["table"]:
-            table_name = _extract_table_name(update["table"]["Table"].get("name", []))
-            if table_name:
-                tables.add(table_name)
-
-    # Handle DELETE statements
-    if "Delete" in ast:
-        delete = ast["Delete"]
-        if "tables" in delete:
-            for table in delete["tables"]:
-                table_name = _extract_table_name(table.get("name", []))
-                if table_name:
-                    tables.add(table_name)
-        if "from" in delete:
-            for relation in delete["from"]:
-                if "relation" in relation:
-                    tables.update(_extract_tables_from_relation(relation["relation"]))
-
-    FUNCTIONS_NOT_TABLES = ("UNNEST", "GENERATE_SERIES", "VALUES")
-    tables = [
-        table for table in tables if table and table.upper() not in FUNCTIONS_NOT_TABLES
-    ]  # Remove empty names and functions
-    return tables
+    return sorted(tables - cte_names)
 
 
 def _extract_table_name(name_parts: List[Dict[str, Any]]) -> Optional[str]:
@@ -182,7 +163,7 @@ def _extract_table_name(name_parts: List[Dict[str, Any]]) -> Optional[str]:
     Returns:
         Dot-separated table name or None
     """
-    if not name_parts:
+    if not isinstance(name_parts, list) or not name_parts:
         return None
 
     parts = []
@@ -227,38 +208,6 @@ def _extract_placeholders(node: Any) -> Set[str]:
     return names
 
 
-def _extract_subquery_tables(expression: Any) -> Set[str]:
-    """
-    Recursively extract tables from subqueries within expressions.
-
-    Parameters:
-        expression: Expression object that may contain subqueries
-
-    Returns:
-        Set of table names found in subqueries
-    """
-    tables = set()
-
-    if not isinstance(expression, dict):
-        return tables
-
-    # Look for Subquery nodes
-    if "Subquery" in expression:
-        subquery = expression["Subquery"]
-        tables.update(_extract_tables_from_ast(subquery))
-
-    # Recursively search nested structures
-    for value in expression.values():
-        if isinstance(value, dict):
-            tables.update(_extract_subquery_tables(value))
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    tables.update(_extract_subquery_tables(item))
-
-    return tables
-
-
 def parse_query_info(sql: str) -> Dict[str, Any]:
     """
     Parse a SQL query and extract metadata without executing it.
@@ -280,13 +229,11 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     Returns:
         Dictionary containing:
         - query_type: str - Type of query (e.g., "Query", "Insert", "Update")
-        - tables: List[str] - Table names referenced in the query. INCOMPLETE, and
-          not safe to authorize a statement from on its own: tables inside
-          subqueries and derived tables are missed, a CTE is reported under its
-          own alias instead of the tables it reads, and INSERT/UPDATE/DELETE
-          report no tables at all. The failing cases in
-          tests/unit/core/test_parse_query_info.py are the specification; the
-          code is what is wrong.
+        - tables: List[str] - Every relation the statement references, sorted:
+          those read through subqueries, derived tables and CTE bodies, and the
+          target of a mutation or a DDL statement. Not included: a CTE's own
+          alias (it names a result, not a relation), a table-valued function
+          (it reads its arguments), or a `$` system dataset.
         - parameters: List[str] - Names of `:name` placeholders referenced in
           the query (sorted, deduplicated, no leading `:`) - lets a caller
           resolve exactly the parameters a query needs before execution,

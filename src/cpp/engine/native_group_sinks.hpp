@@ -63,6 +63,7 @@
 #include "morsels/cxx_hash.h"    // cxx_hash_c — draken owns the key hash (DISTINCT/GROUP BY)
 #include "carchar_set.hpp"       // opteryx::carchar::CarcharSet — hash-identity dedup set
 #include "carchar_index.hpp"     // opteryx::carchar::CarcharIndex — hash → group-id
+#include "parvi.hpp"             // opteryx::parvi::ParviMap — 16-slot low-card front map
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — shared with the legacy
                                  // Cython median accumulators (opteryx/operators/aggregate/,
@@ -1207,6 +1208,16 @@ struct KeyColMeta {
 
 constexpr size_t kGBParts = 64;
 constexpr int kGBPartShift = 58;   // top 6 bits pick the partition
+// Low-cardinality GROUP BY: when the planner's NDV estimate for the grouped
+// key product is <= this, each partition fronts its CarcharIndex with a
+// 16-slot ParviMap (single SIMD-group probe, ~25-35% cheaper per keying op on
+// AVX2, more on NEON — scratch/parvi_size_curve/bench.cpp). At estimate <= 64
+// over 64 hash partitions the expected per-partition load is ~1, so a partition
+// overflowing its 16 slots needs the estimate to be wrong by well over an order
+// of magnitude — and then it one-shot promotes to its CarcharIndex (dense group
+// ids preserved), so a misfire costs one drain of <= 16 entries per partition,
+// never a wrong answer.
+constexpr int64_t kGBParviGateNDV = 64;
 // High-NDV adaptive flush: when a worker's TOTAL local group count passes this,
 // its partitions are queued for the (parallel) merge and reset. Keeps the
 // sink-side probe working set cache-resident on 90M-group aggregations —
@@ -1873,6 +1884,8 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
 // so the parallel merge can re-insert it into the merged partition.
 struct GBPartition {
     opteryx::carchar::CarcharIndex index;
+    opteryx::parvi::ParviMap small;   // low-card front map (kGBParviGateNDV gate)
+    bool use_parvi = false;           // armed by GroupBySink when the NDV estimate is low
     std::vector<uint64_t> hashes;
     std::vector<GroupKeyColumn> keycols;
     std::vector<int64_t> grows;       // COUNT(*) rows lane (any Rows spec)
@@ -1880,6 +1893,28 @@ struct GBPartition {
     std::vector<GBCountDistinct> cd;  // one per spec (only CountDistinct fills it)
 
     size_t size() const { return hashes.size(); }
+
+    // One-shot: move the parvi entries into the CarcharIndex. Group ids are
+    // assigned from hashes.size() (dense, monotone), so the carchar continues
+    // the same id space — no remap of keycols/lanes/grows.
+    void promote_small() {
+        small.drain_into(index);
+        small.clear();
+        use_parvi = false;
+    }
+
+    // Group-id find-or-insert for the keying loop. next_id must be
+    // static_cast<int64_t>(hashes.size()). Returns true iff the group is new.
+    inline bool find_or_insert_group(uint64_t h, int64_t next_id, int64_t& gid) {
+        if (use_parvi) {
+            const auto r = small.find_or_insert_id(h, next_id, gid);
+            if (r != opteryx::parvi::ParviInsert::kFull)
+                return r == opteryx::parvi::ParviInsert::kInserted;
+            groupby_tel::parvi_promotes.fetch_add(1, std::memory_order_relaxed);
+            promote_small();  // estimate was wrong for this partition — fall through
+        }
+        return index.find_or_insert_id(h, next_id, gid);
+    }
 };
 
 
@@ -1916,17 +1951,25 @@ struct GroupBySink : Sink {
     std::vector<AggSpec2> specs;
     MorselBuffer* out;
     size_t chunk_rows;
+    bool low_card;   // planner NDV estimate <= kGBParviGateNDV → parvi front maps
 
     GroupBySink(std::vector<size_t> keys, std::vector<std::string> knames,
-                std::vector<AggSpec2> s, MorselBuffer* b, size_t chunk = 131072)
+                std::vector<AggSpec2> s, MorselBuffer* b, int64_t ndv_estimate,
+                size_t chunk = 131072)
         : key_idx(std::move(keys)), key_names(std::move(knames)), specs(std::move(s)),
-          out(b), chunk_rows(chunk) {}
+          out(b), chunk_rows(chunk),
+          low_card(ndv_estimate >= 0 && ndv_estimate <= kGBParviGateNDV) {}
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<GroupByGlobal>();
     }
     std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
-        return std::make_unique<GroupByLocal>();
+        auto l = std::make_unique<GroupByLocal>();
+        if (low_card) {
+            for (auto& P : l->parts) P.use_parvi = true;
+            groupby_tel::parvi_sinks.fetch_add(1, std::memory_order_relaxed);
+        }
+        return l;
     }
 
     // Type a partition's per-group key store from the captured key metadata. Called
@@ -2060,8 +2103,13 @@ struct GroupBySink : Sink {
         }
         for (size_t p = 0; p < kGBParts; ++p) {
             if (l.parts[p].size() > 0) {
+                // The merge probes pending partitions' CarcharIndex directly —
+                // promote any live parvi front map so every queued partition's
+                // groups are in the index (dense ids preserved).
+                if (l.parts[p].use_parvi) l.parts[p].promote_small();
                 g.pending[p].push_back(std::move(l.parts[p]));
                 l.parts[p] = GBPartition();
+                l.parts[p].use_parvi = low_card;        // fresh partition: re-arm the gate
                 type_keycols(l.parts[p], l.key_meta);   // fresh partition needs key types
             }
         }
@@ -2098,7 +2146,7 @@ struct GroupBySink : Sink {
             uint64_t h = l.mk_hash[i];
             GBPartition& P = l.parts[h >> kGBPartShift];
             int64_t gid;
-            bool is_new = P.index.find_or_insert_id(
+            bool is_new = P.find_or_insert_group(
                 h, static_cast<int64_t>(P.hashes.size()), gid);
             if (is_new) {
                 P.hashes.push_back(h);

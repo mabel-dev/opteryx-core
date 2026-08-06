@@ -307,44 +307,49 @@ if OPTERYX_ENABLE_PGO and not is_win():
         C_FLAGS.append("-fprofile-correction")
 
 
-# On Linux builds (manylinux) prefer static linking of libstdc++/libgcc to avoid
-# runtime dependency on host-provided newer libstdc++ which can require
-# GLIBCXX/GLIBC versions not available on older manylinux targets.
-# macOS/Clang does not support -static-libgcc
+# Linux: the C++ runtime is linked DYNAMICALLY — one libstdc++ per process.
 #
-# `--exclude-libs,ALL` is load-bearing, not tidiness. It marks every symbol pulled
-# in from a static ARCHIVE (libstdc++.a, libgcc.a, libgcc_eh.a) as hidden in this
-# extension's dynamic symbol table. Without it, `-fvisibility=default` (set above)
-# EXPORTS this extension's private copy of the C++ runtime — `__cxa_throw`,
-# `__gxx_personality_v0`, the `_Unwind_*` family — and draken/__init__.py loads
-# draken_native under RTLD_GLOBAL, publishing that private copy into the
-# process-global symbol table. Extensions linked against the SHARED libstdc++
-# (opteryx.connectors.parquet_io.pool_reader takes no LD_EXTRA, so it does) then
-# bind their throw path to draken's private runtime while their handler search
-# stays in the shared one. The two disagree, no handler is found, and
-# std::terminate() aborts the process — turning what should be a catchable
-# `except +` RuntimeError into a hard crash with no traceback. Observed in
-# production as a Cloud Run 503 with a faulthandler dump whose C stack shows
-# __cxa_throw resolved inside draken_native.so under a throw raised in
-# pool_reader.so.
+# ⛔ Do NOT bring back -static-libstdc++/-static-libgcc here. Static linking
+# gave all 63 extensions a PRIVATE copy of the C++ runtime, and that is a bug
+# class, not a hardening measure. Two production-grade crashes came out of it:
 #
-# Symbols from this extension's OWN objects — PyInit_*, and the bridge symbols
-# draken_vector_unwrap / draken_vector_own_raw that the Cython shims resolve via
-# RTLD_GLOBAL — come from .o files, not archives, so they are unaffected and stay
-# exported. macOS is immune (two-level namespaces bind each image to its own
-# runtime) and its linker does not accept the flag.
+#  1. The every-GCS-query SIGSEGV (regressed in 0.9.54, diagnosed 2026-08-06).
+#     manylinux wheels use the pre-C++11 COW string ABI; every .so carried its
+#     own hidden _S_empty_rep_storage singleton while the weak _ZNSs* member
+#     functions interposed across .so. pool_reader's footer parse
+#     (ReadParquetMetadataFromBuffer) ran std::string code bound into
+#     draken_native.so, the singleton address check in _M_dispose/_M_mutate
+#     mismatched, and the "immortal" empty rep was operator-deleted: SIGSEGV
+#     in free/_ZdlPv on EVERY GCS query (local parquet takes a different
+#     footer path, which is why dev boxes never saw it). No per-.so fix works:
+#     a version script localizing _ZNSs* stops the interposition but leaves N
+#     singleton copies, and any std::string created in one .so and destroyed
+#     in another (DecodedColumn.type / error_message, TestBloomFilterBytes,
+#     ...) still frees static storage — verified on the x86 repro box, where
+#     the localized build crashed local parquet as well. One shared runtime is
+#     the only complete fix.
+#  2. `import opteryx; import grpc` (any google.cloud.* import) aborted in
+#     free(): cygrpc's dlopen bound half its std::string calls into our
+#     exported private runtime and half into the system one.
 #
-# `--exclude-libs,ALL` is NOT sufficient on its own: std:: members instantiated
-# into our OWN translation units via `#include <string>` etc. are COMDAT
-# definitions in our .o files — outside --exclude-libs' reach — and
-# `-fvisibility=default` exports them (254 old-ABI std::string symbols across
-# 20 .so in the 0.9.55 manylinux wheel; 57 __cxx11 ones in a gcc-12 dev build).
-# On Linux's flat namespace, grpc's cygrpc (loaded by any google.cloud.* import
-# AFTER opteryx) then binds part of its std::string calls into our private
-# libstdc++ copy and part into the system one → free(): invalid pointer →
-# SIGABRT. hide_cxx_runtime.map localizes the std-library manglings (both
-# string ABIs) in every extension; it lists only `local:` patterns, so
-# PyInit_* and the bridge symbols above keep their default exported binding.
+# The original reason for static linking — old hosts missing newer GLIBCXX
+# versions — is handled by the release pipeline: dev/build-wheels.sh runs
+# `auditwheel repair`, which grafts the ONE devtoolset libstdc++ the build
+# actually used into the wheel (opteryx_core.libs/) and patches rpaths, so the
+# wheel is self-contained without any extension owning a private runtime.
+#
+# `--exclude-libs,ALL` stays: it hides symbols pulled from remaining static
+# ARCHIVES (libgcc_eh.a etc. — and the whole C++ runtime again if someone
+# ignores the warning above). hide_cxx_runtime.map stays as defense in depth:
+# with dynamic libstdc++ our .so IMPORT the runtime instead of defining it, so
+# the map's `local:` patterns match nothing — but if a static runtime ever
+# sneaks back in, the map stops its export. It is `local:`-only, so PyInit_*
+# and the RTLD_GLOBAL bridge symbols (draken_vector_unwrap /
+# draken_vector_own_raw / draken_cast_*) keep their default exported binding —
+# validated in the shipped 0.9.56 manylinux wheel, whose bridge imports
+# resolve. (An earlier revert of the map blamed it for a bridge ImportError;
+# that was actually the standalone rugo wheel overwriting opteryx_core's
+# draken/ — see the release gate's consumer-shape check.)
 _HIDE_CXX_RUNTIME_MAP = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "hide_cxx_runtime.map"
 )
@@ -352,8 +357,6 @@ LD_EXTRA = (
     ["-static-libstdc++"]
     if is_mac()
     else [
-        "-static-libstdc++",
-        "-static-libgcc",
         "-Wl,--exclude-libs,ALL",
         f"-Wl,--version-script={_HIDE_CXX_RUNTIME_MAP}",
     ]
