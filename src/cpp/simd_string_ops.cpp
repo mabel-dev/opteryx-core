@@ -34,8 +34,8 @@ static const uint8_t UPPER_Z = 'Z';
 static const uint8_t CASE_DIFF = 'a' - 'A';  // 32
 
 // We always provide a scalar fallback implementation. SIMD variants are compiled when
-// the compiler supports them, and we select the best implementation at runtime via
-// `simd::select_dispatch` so SIMD code is not executed on CPUs that lack support.
+// the compiler supports them, and `SIMD_STATIC_SELECT` picks the one matching the
+// build's target ISA at compile time (one ISA per wheel — see simd_dispatch.h).
 
 // Scalar fallback for to_upper
 static void simd_to_upper_scalar(char* data, size_t length) {
@@ -76,17 +76,7 @@ void simd_to_upper(char* data, size_t length) {
     using fn_t = void(*)(char*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-    fn_t fn = simd::select_dispatch<fn_t>(cache, {
-#if defined(__AVX2__)
-        { &cpu_supports_avx2, simd_to_upper_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        { &cpu_supports_neon, simd_to_upper_scalar }, // NEON variant not implemented; fall back to scalar
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        { &cpu_supports_rvv, simd_to_upper_rvv },
-#endif
-    }, simd_to_upper_scalar);
+    fn_t fn = SIMD_STATIC_SELECT(simd_to_upper_avx2, simd_to_upper_scalar, simd_to_upper_rvv, simd_to_upper_scalar);
 
     return fn(data, length);
 }
@@ -130,17 +120,7 @@ void simd_to_lower(char* data, size_t length) {
     using fn_t = void(*)(char*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-    fn_t fn = simd::select_dispatch<fn_t>(cache, {
-#if defined(__AVX2__)
-        { &cpu_supports_avx2, simd_to_lower_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        { &cpu_supports_neon, simd_to_lower_scalar }, // NEON variant not implemented; fall back to scalar
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        { &cpu_supports_rvv, simd_to_lower_rvv },
-#endif
-    }, simd_to_lower_scalar);
+    fn_t fn = SIMD_STATIC_SELECT(simd_to_lower_avx2, simd_to_lower_scalar, simd_to_lower_rvv, simd_to_lower_scalar);
 
     return fn(data, length);
 }
@@ -338,17 +318,7 @@ bool simd_equals_ci(const char* a, const char* b, size_t length) {
     using fn_t = bool(*)(const char*, const char*, size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-    fn_t fn = simd::select_dispatch<fn_t>(cache, {
-#if defined(__AVX2__)
-        { &cpu_supports_avx2, simd_equals_ci_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        { &cpu_supports_neon, simd_equals_ci_neon },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        { &cpu_supports_rvv, simd_equals_ci_rvv },
-#endif
-    }, simd_equals_ci_scalar);
+    fn_t fn = SIMD_STATIC_SELECT(simd_equals_ci_avx2, simd_equals_ci_neon, simd_equals_ci_rvv, simd_equals_ci_scalar);
 
     return fn(a, b, length);
 }

@@ -162,18 +162,10 @@ static void unpack_bitpacked_groups_avx2(const uint8_t* src, int32_t* dst,
 
 // ---- Dispatch ---------------------------------------------------------------
 using unpack_groups_fn_t = void(*)(const uint8_t*, int32_t*, int, int);
-static std::atomic<unpack_groups_fn_t> s_unpack_cache{nullptr};
 
 static unpack_groups_fn_t get_unpack_fn()
 {
-    return simd::select_dispatch<unpack_groups_fn_t>(s_unpack_cache, {
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        {&cpu_supports_neon, unpack_bitpacked_groups_neon},
-#endif
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, unpack_bitpacked_groups_avx2},
-#endif
-    }, unpack_bitpacked_groups_scalar);
+    return SIMD_STATIC_SELECT(unpack_bitpacked_groups_avx2, unpack_bitpacked_groups_neon, unpack_bitpacked_groups_scalar, unpack_bitpacked_groups_scalar);
 }
 
 // Unpack all complete groups from a bit-packed run, then handle any leftover

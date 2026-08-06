@@ -605,41 +605,13 @@ inline ProbeResult probe_find_bucket_rvv(
 inline ProbeFn select_probe_finder() noexcept {
     using fn_t = ProbeFn;
     static std::atomic<fn_t> cache{nullptr};
-    return simd::select_dispatch<fn_t>(
-        cache,
-        {
-#if defined(__AVX2__)
-            {&cpu_supports_avx2, probe_find_slot_avx2},
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-            {&cpu_supports_neon, probe_find_slot_neon},
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-            {&cpu_supports_rvv, probe_find_slot_rvv},
-#endif
-        },
-        probe_find_slot_scalar
-    );
+    return SIMD_STATIC_SELECT(probe_find_slot_avx2, probe_find_slot_neon, probe_find_slot_rvv, probe_find_slot_scalar);
 }
 
 inline ProbeFn select_bucket_probe_finder() noexcept {
     using fn_t = ProbeFn;
     static std::atomic<fn_t> cache{nullptr};
-    return simd::select_dispatch<fn_t>(
-        cache,
-        {
-#if defined(__AVX2__)
-            {&cpu_supports_avx2, probe_find_bucket_avx2},
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-            {&cpu_supports_neon, probe_find_bucket_neon},
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-            {&cpu_supports_rvv, probe_find_bucket_rvv},
-#endif
-        },
-        probe_find_bucket_scalar
-    );
+    return SIMD_STATIC_SELECT(probe_find_bucket_avx2, probe_find_bucket_neon, probe_find_bucket_rvv, probe_find_bucket_scalar);
 }
 
 }  // namespace opteryx::carchar::detail

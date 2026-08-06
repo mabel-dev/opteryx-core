@@ -9,6 +9,7 @@ Converts the AST to a logical query plan.
 The plan does not try to be efficient or clever, at this point it is only trying to be correct.
 """
 
+import copy
 import time
 from enum import Enum, auto
 from typing import List, Optional, Tuple
@@ -74,6 +75,8 @@ class LogicalPlanStepType(int, Enum):
     CreateCollection = auto()
     DropCollection = auto()
     AlterWorkspace = auto()
+
+    DropTrigger = auto()
 
 
 class LogicalPlan(Graph):
@@ -1688,6 +1691,56 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
     return plan
 
 
+def _plan_show_triggers(table_name: str) -> LogicalPlan:
+    """`SHOW TRIGGERS FOR <table>` — desugars to
+    `SELECT * FROM <workspace>.information_schema.triggers
+     WHERE event_object_table = '<collection.table>'`.
+
+    Not a virtual dataset like SHOW USER/GRANTS: those read only session
+    variables, while triggers live in the workspace's catalog, which is only
+    reachable through the workspace's connector — i.e. through an
+    information_schema scan. The table name supplies the workspace, which is
+    why the bare `SHOW TRIGGERS` form is rejected in plan_show_variables (the
+    planner has no session default workspace to scan).
+
+    The filter lands on `event_object_table`, a pushable key column of the
+    triggers reader, so the predicate-pushdown pass turns it into skipped
+    catalog round trips rather than a post-hoc row filter.
+    """
+    workspace, _, relative = table_name.partition(".")
+    if not relative:
+        raise UnsupportedSyntaxError(
+            "`SHOW TRIGGERS FOR <table>` requires a workspace-qualified table "
+            "name, e.g. `SHOW TRIGGERS FOR opteryx.test.pypi`."
+        )
+    relation = f"{workspace}.information_schema.triggers"
+
+    plan = LogicalPlan()
+
+    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step.relation = relation
+    from_step.alias = relation
+    from_step.hints = []
+    step_id = random_string()
+    plan.add_node(step_id, from_step)
+
+    filter_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+    filter_node.condition = build_expression_tree(
+        relation, [("event_object_table", "Eq", relative)]
+    )
+    previous_step_id, step_id = step_id, random_string()
+    plan.add_node(step_id, filter_node)
+    plan.add_edge(previous_step_id, step_id)
+
+    exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
+    exit_node.columns = [LogicalPlanNode(NodeType.WILDCARD)]
+    previous_step_id, step_id = step_id, random_string()
+    plan.add_node(step_id, exit_node)
+    plan.add_edge(previous_step_id, step_id)
+
+    return plan
+
+
 def plan_show_variables(statement, **kwargs):
     """SHOW VARIABLES, SHOW USER, SHOW GRANTS, SHOW MANIFEST FOR — planned from
     the parser's generic `ShowVariable` catch-all.
@@ -1739,10 +1792,24 @@ def plan_show_variables(statement, **kwargs):
         # `words` list; catalog/schema/table names are case-sensitive.
         table_name = ".".join(part["value"] for part in parts[2:])
         return _plan_show_manifest(table_name)
+    if words[0] == "TRIGGERS":
+        if len(words) < 3 or words[1] != "FOR":
+            # Bare SHOW TRIGGERS cannot be answered: triggers live in a
+            # workspace's catalog and the planner has no session default
+            # workspace, so there is nothing to enumerate. The FOR form names
+            # the workspace via the table.
+            raise UnsupportedSyntaxError(
+                "`SHOW TRIGGERS` requires a table: `SHOW TRIGGERS FOR <table>`. "
+                "To list every trigger in a workspace, query "
+                "`SELECT * FROM <workspace>.information_schema.triggers`."
+            )
+        # Original case preserved, as for SHOW MANIFEST FOR above.
+        table_name = ".".join(part["value"] for part in parts[2:])
+        return _plan_show_triggers(table_name)
     raise UnsupportedSyntaxError(
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
-        "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, and "
-        "`SHOW MANIFEST FOR <table>`."
+        "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, "
+        "`SHOW TRIGGERS FOR <table>`, and `SHOW MANIFEST FOR <table>`."
     )
 
 
@@ -1789,15 +1856,30 @@ def plan_create_view(statement, **kwargs):
     # Extract OR REPLACE flag
     create_view_node.or_replace = statement[root_node].get("or_replace", False)
 
-    # Opteryx has no materialization: the view body is stored as text and
-    # planned afresh on every reference. Accepting MATERIALIZED and creating an
-    # ordinary view would hand back something that reads as precomputed and is
-    # not - and DROP MATERIALIZED VIEW is rejected, so it could not even be
-    # dropped by the name it was created with.
+    # CREATE MATERIALIZED VIEW is not a view at all: it is CTAS plus
+    # registration. The SELECT executes now and its result is written as a
+    # backing table; the defining query is stashed on the Insert node so the
+    # insert operator can register the MV (defining SQL, source tables,
+    # refresh triggers) at the end of its catalog mutation. Registration is
+    # deliberately NOT a second plan node - the serial engine assumes
+    # InsertNode is the plan head.
     if statement[root_node].get("materialized", False):
-        raise UnsupportedSyntaxError(
-            "Opteryx does not support materialized views; "
-            "`CREATE VIEW` stores the query and plans it on each reference."
+        if statement[root_node].get("if_not_exists", False):
+            raise UnsupportedSyntaxError(
+                "CREATE MATERIALIZED VIEW does not support IF NOT EXISTS; "
+                "use CREATE OR REPLACE MATERIALIZED VIEW."
+            )
+        if statement[root_node].get("columns"):
+            raise UnsupportedSyntaxError(
+                "CREATE MATERIALIZED VIEW cannot specify column definitions; "
+                "the columns come from the SELECT."
+            )
+        return _plan_ctas(
+            relation_name=create_view_node.view_name,
+            if_not_exists=False,
+            query_ast=statement[root_node]["query"],
+            or_replace=create_view_node.or_replace,
+            is_materialized_view=True,
         )
 
     # Extract columns (if specified)
@@ -2177,6 +2259,29 @@ def plan_drop(statement, **kwargs):
         plan.add_node(random_string(), drop_relation_node)
         return plan
 
+    elif object_type == "MaterializedView":
+        # DROP MATERIALIZED VIEW - same node shape as DROP TABLE (the MV's
+        # backing store is a dataset), flagged so execution routes to the
+        # connector's MV drop (which also removes the refresh triggers from
+        # every source dataset) and so the type guards can point a plain
+        # DROP TABLE at the right statement, and vice versa.
+        drop_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropRelation)
+
+        names = drop_statement["names"]
+        relation_names = []
+        for name_parts in names:
+            relation_name = extract_variable(name_parts)
+            if isinstance(relation_name, list):
+                relation_name = ".".join(relation_name)
+            relation_names.append(relation_name)
+
+        drop_relation_node.relation_names = relation_names
+        drop_relation_node.is_materialized_view = True
+        drop_relation_node.if_exists = drop_statement.get("if_exists", False)
+
+        plan.add_node(random_string(), drop_relation_node)
+        return plan
+
     elif object_type == "Schema":
         # DROP COLLECTION path — rewritten to DROP SCHEMA by the SQL rewriter
         # (sql_rewriter.rewrite_drop_collection) since the parser has no
@@ -2201,7 +2306,9 @@ def plan_drop(statement, **kwargs):
         raise UnsupportedSyntaxError(f"DROP {object_type} is not supported")
 
 
-def _plan_ctas(relation_name, if_not_exists, query_ast, or_replace=False):
+def _plan_ctas(
+    relation_name, if_not_exists, query_ast, or_replace=False, is_materialized_view=False
+):
     """Plan CREATE TABLE ... AS SELECT.
 
     Builds: SELECT subtree (Exit-headed, kept - not stripped) → InsertNode
@@ -2212,6 +2319,11 @@ def _plan_ctas(relation_name, if_not_exists, query_ast, or_replace=False):
     time from the SELECT's exit columns.
     """
     plan = LogicalPlan()
+
+    # Snapshot the defining query BEFORE planning it - plan_query annotates
+    # the AST dicts in place, and sqloxide.ast_to_sql rejects the mutated
+    # shape when the insert operator re-renders it at registration time.
+    defining_query = copy.deepcopy(query_ast) if is_materialized_view else None
 
     source_plan = plan_query(query_ast)
     exit_node_id = source_plan.get_exit_points()[0]
@@ -2226,6 +2338,12 @@ def _plan_ctas(relation_name, if_not_exists, query_ast, or_replace=False):
     insert_step.create_target = True
     insert_step.if_not_exists = if_not_exists
     insert_step.or_replace = or_replace
+    insert_step.is_materialized_view = is_materialized_view
+    if is_materialized_view:
+        # The defining query, kept as AST so the insert operator can re-render
+        # it to SQL (sqloxide.ast_to_sql) for the catalog registration - the
+        # same trick view_management uses for CREATE VIEW.
+        insert_step.defining_query = defining_query
 
     insert_id = random_string()
     plan.add_node(insert_id, insert_step)
@@ -2503,6 +2621,23 @@ def plan_drop_statistics(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
+def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
+    """DROP TRIGGER [IF EXISTS] <name> ON <table> — synthesized by the planner's
+    pre-parse interception (OpteryxDialect has no native sqlparser grammar for
+    trigger statements). The table is required: trigger names are only unique
+    per dataset, and it is the permission target (WRITE) the binder checks."""
+    root = "DropTrigger"
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTrigger)
+    node.trigger_name = statement[root]["trigger_name"]
+    node.table_name = statement[root]["table_name"]
+    node.if_exists = statement[root].get("if_exists", False)
+
+    plan.add_node(random_string(), node)
+
+    return plan
+
+
 def build_expression_tree(relation, dnf_list):
     """
     Recursively build an expression tree from a DNF-like list structure.
@@ -2642,6 +2777,7 @@ def plan_comment(statement, **kwargs):
 QUERY_BUILDERS = {
     "Analyze": plan_analyze_query,
     "DropStatistics": plan_drop_statistics,
+    "DropTrigger": plan_drop_trigger,
     "Comment": plan_comment,
     "Explain": plan_explain,
     "Query": plan_query,

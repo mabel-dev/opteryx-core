@@ -23,9 +23,8 @@
 // Pattern: dst[i] = dict[indices[i]] for all indices
 //
 // Dispatch flow:
-//   - Compile-time: AVX2/NEON support detected
-//   - Runtime: simd::select_dispatch() picks best available implementation
-//   - Fallback: scalar loop if no SIMD available or OPTERYX_DISABLE_SIMD
+//   - Compile-time: SIMD_STATIC_SELECT picks the target ISA's variant
+//   - Fallback: scalar loop if no SIMD variant exists for the target
 
 namespace parquet_simd {
 
@@ -88,15 +87,10 @@ static inline void gather_int32_avx2(
 
 // Dispatch
 using gather_int32_fn_t = void(*)(const int32_t*, const int32_t*, size_t, std::vector<int32_t>&);
-static std::atomic<gather_int32_fn_t> s_gather_int32_cache{nullptr};
 
 static inline gather_int32_fn_t get_gather_int32_fn()
 {
-    return simd::select_dispatch<gather_int32_fn_t>(s_gather_int32_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, gather_int32_avx2},
-#endif
-    }, gather_int32_scalar);
+    return SIMD_STATIC_SELECT(gather_int32_avx2, gather_int32_scalar, gather_int32_scalar, gather_int32_scalar);
 }
 
 static inline void gather_int32(
@@ -166,15 +160,10 @@ static inline void gather_int64_avx2(
 
 // Dispatch
 using gather_int64_fn_t = void(*)(const int64_t*, const int32_t*, size_t, std::vector<int64_t>&);
-static std::atomic<gather_int64_fn_t> s_gather_int64_cache{nullptr};
 
 static inline gather_int64_fn_t get_gather_int64_fn()
 {
-    return simd::select_dispatch<gather_int64_fn_t>(s_gather_int64_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, gather_int64_avx2},
-#endif
-    }, gather_int64_scalar);
+    return SIMD_STATIC_SELECT(gather_int64_avx2, gather_int64_scalar, gather_int64_scalar, gather_int64_scalar);
 }
 
 static inline void gather_int64(
@@ -237,15 +226,10 @@ static inline void gather_float32_avx2(
 
 // Dispatch
 using gather_float32_fn_t = void(*)(const float*, const int32_t*, size_t, std::vector<float>&);
-static std::atomic<gather_float32_fn_t> s_gather_float32_cache{nullptr};
 
 static inline gather_float32_fn_t get_gather_float32_fn()
 {
-    return simd::select_dispatch<gather_float32_fn_t>(s_gather_float32_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, gather_float32_avx2},
-#endif
-    }, gather_float32_scalar);
+    return SIMD_STATIC_SELECT(gather_float32_avx2, gather_float32_scalar, gather_float32_scalar, gather_float32_scalar);
 }
 
 static inline void gather_float32(
@@ -309,15 +293,10 @@ static inline void gather_float64_avx2(
 
 // Dispatch
 using gather_float64_fn_t = void(*)(const double*, const int32_t*, size_t, std::vector<double>&);
-static std::atomic<gather_float64_fn_t> s_gather_float64_cache{nullptr};
 
 static inline gather_float64_fn_t get_gather_float64_fn()
 {
-    return simd::select_dispatch<gather_float64_fn_t>(s_gather_float64_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, gather_float64_avx2},
-#endif
-    }, gather_float64_scalar);
+    return SIMD_STATIC_SELECT(gather_float64_avx2, gather_float64_scalar, gather_float64_scalar, gather_float64_scalar);
 }
 
 static inline void gather_float64(

@@ -13,7 +13,7 @@ Two things are defended here:
      payload — 37 — which is a wrong answer wearing a cast's clothes.
 
   2. INTEGER TRUNCATES TOWARD ZERO, matching draken_cast_float64_to_int64. An
-     engine where `-3.7::DOUBLE::INTEGER` and `-3.7::DECIMAL(2,1)::INTEGER`
+     engine where `-3.7::FLOAT64::INTEGER` and `-3.7::DECIMAL(2,1)::INTEGER`
      disagreed would be indefensible, so both must give -3 (not -4).
 
 Both physical tiers are covered: DECIMAL (int64-backed, p<=18) and DECIMAL128
@@ -52,7 +52,7 @@ def test_decimal_column_to_integer_applies_the_source_scale():
 
 def test_decimal_column_to_double_applies_the_source_scale():
     gravity = _col("SELECT gravity AS x FROM $planets")
-    got = _col("SELECT CAST(gravity AS DOUBLE) AS x FROM $planets")
+    got = _col("SELECT CAST(gravity AS FLOAT64) AS x FROM $planets")
     assert got == [float(g) for g in gravity], got
 
 
@@ -68,7 +68,7 @@ def test_decimal_and_double_agree_on_truncation():
     """The whole reason for choosing truncate-toward-zero: the two numeric routes
     to INTEGER must not disagree."""
     via_decimal = _col("SELECT CAST(0 - gravity AS INTEGER) AS x FROM $planets")
-    via_double = _col("SELECT CAST(CAST(0 - gravity AS DOUBLE) AS INTEGER) AS x FROM $planets")
+    via_double = _col("SELECT CAST(CAST(0 - gravity AS FLOAT64) AS INTEGER) AS x FROM $planets")
     assert via_decimal == via_double, (via_decimal, via_double)
 
 
@@ -78,7 +78,7 @@ def test_decimal128_tier_to_integer_and_double():
         "SELECT CAST(CAST(gravity AS DECIMAL(22,2)) AS INTEGER) AS x FROM $planets"
     )[:3] == [3, 8, 9]
     assert _col(
-        "SELECT CAST(CAST(gravity AS DECIMAL(22,2)) AS DOUBLE) AS x FROM $planets"
+        "SELECT CAST(CAST(gravity AS DECIMAL(22,2)) AS FLOAT64) AS x FROM $planets"
     )[:3] == [3.7, 8.9, 9.8]
 
 
@@ -119,7 +119,7 @@ def test_negative_decimal_to_unsigned_raises():
 def test_decimal_to_numeric_works_in_a_predicate():
     """Not just projection — the same program shape has to admit in a filter."""
     assert _col("SELECT COUNT(*) AS x FROM $planets WHERE CAST(gravity AS INTEGER) > 5") == [6]
-    assert _col("SELECT COUNT(*) AS x FROM $planets WHERE CAST(gravity AS DOUBLE) > 5.0") == [6]
+    assert _col("SELECT COUNT(*) AS x FROM $planets WHERE CAST(gravity AS FLOAT64) > 5.0") == [6]
 
 
 if __name__ == "__main__":

@@ -200,7 +200,6 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "GREATEST",
                 "LEAST",
                 "GET_STRING",
-                "PASSTHRU",
             ),
         ),
     ]
@@ -221,7 +220,6 @@ _HIDDEN_FUNCTIONS = {
     "ARRAY",
     "CASE",
     "GET_STRING",
-    "PASSTHRU",
     "TRY_ARRAY",
 }
 
@@ -397,10 +395,6 @@ _RETURN_OVERRIDES = {
     "LEAST": (
         "element type of `arr`",
         "Returns a single element from `arr`, preserving the array's element type.",
-    ),
-    "PASSTHRU": (
-        "same as `value`",
-        "Returns the input unchanged, preserving the original type of `value`.",
     ),
     "SORT": (
         "same as `arr`",

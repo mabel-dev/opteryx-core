@@ -744,7 +744,7 @@ SELECT planetId, ARRAY_AGG(name) FROM testdata.satellites GROUP BY planetId
 query shape 7 1
 SELECT planetId FROM testdata.satellites GROUP BY planetId
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `BOOLEAN\(Minus\)` — use `Minus::BOOLEAN`\.
+query error sql failed UnsupportedSyntaxError: Invalid cast syntax `BOOLEAN\(Minus\)` — use `Minus::BOOL`\.
 SELECT BOOLEAN(planetId - 3) FROM testdata.satellites GROUP BY BOOLEAN(planetId - 3)
 
 query error sql failed UnsupportedSyntaxError: Invalid cast syntax `VARCHAR\(planetId\)` — use `planetId::VARCHAR`\.
@@ -753,13 +753,13 @@ SELECT VARCHAR(planetId) FROM testdata.satellites GROUP BY VARCHAR(planetId)
 query error sql failed UnsupportedSyntaxError: Invalid cast syntax `VARCHAR\(planetId\)` — use `planetId::VARCHAR`\.
 SELECT COUNT(*) FROM testdata.satellites GROUP BY TIMESTAMP('2022-01-0' || VARCHAR(planetId))
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `DOUBLE\(planetId\)` — use `planetId::DOUBLE`\.
+query error sql failed UnsupportedSyntaxError: Invalid cast syntax `DOUBLE\(planetId\)` — use `planetId::FLOAT64`\.
 SELECT DOUBLE(planetId) FROM testdata.satellites GROUP BY DOUBLE(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INT\(planetId\)` — use `planetId::INTEGER`\.
+query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INT\(planetId\)` — use `planetId::INT64`\.
 SELECT INT(planetId) FROM testdata.satellites GROUP BY INT(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INTEGER\(planetId\)` — use `planetId::INTEGER`\.
+query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INTEGER\(planetId\)` — use `planetId::INT64`\.
 SELECT INTEGER(planetId) FROM testdata.satellites GROUP BY INTEGER(planetId)
 
 query shape 177 1
@@ -787,10 +787,10 @@ query shape 177 1
 SELECT planetId::INTEGER FROM testdata.satellites
 
 query shape 177 1
-SELECT planetId::DOUBLE FROM testdata.satellites
+SELECT planetId::FLOAT64 FROM testdata.satellites
 
 query shape 1 1
-SELECT 1::double
+SELECT 1::FLOAT64
 
 query shape 177 1
 SELECT TRY_CAST(planetId AS BOOLEAN) FROM testdata.satellites
@@ -804,13 +804,13 @@ SELECT TRY_CAST(planetId AS TIMESTAMP) FROM testdata.satellites
 query shape 177 1
 SELECT TRY_CAST(planetId AS INTEGER) FROM testdata.satellites
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `DOUBLE\(planetId\)` — use `planetId::DOUBLE`\.
+query error sql failed UnsupportedSyntaxError: Invalid cast syntax `DOUBLE\(planetId\)` — use `planetId::FLOAT64`\.
 SELECT DOUBLE(planetId) AS VALUE FROM testdata.satellites GROUP BY DOUBLE(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INT\(planetId\)` — use `planetId::INTEGER`\.
+query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INT\(planetId\)` — use `planetId::INT64`\.
 SELECT INT(planetId) AS VALUE FROM testdata.satellites GROUP BY INT(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INTEGER\(planetId\)` — use `planetId::INTEGER`\.
+query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INTEGER\(planetId\)` — use `planetId::INT64`\.
 SELECT INTEGER(planetId) AS VALUE FROM testdata.satellites GROUP BY INTEGER(planetId)
 
 query shape 177 1
@@ -1630,7 +1630,7 @@ query error io failed
 WITH nonzero_pressure AS (SELECT id, surfacePressure FROM $planets) SELECT COUNT(*) FROM nonzero_pressure WHERE surfacePressure > 0
 
 query error io failed
-WITH normalized AS (SELECT id, name, round(CAST(gravity AS DOUBLE) / 9.8, 2) AS g FROM $planets WHERE gravity IS NOT NULL) SELECT name FROM normalized WHERE g > 1.1
+WITH normalized AS (SELECT id, name, round(CAST(gravity AS FLOAT64) / 9.8, 2) AS g FROM $planets WHERE gravity IS NOT NULL) SELECT name FROM normalized WHERE g > 1.1
 
 query error io failed
 WITH weird_rotation AS (SELECT id, name, rotationPeriod FROM $planets) SELECT name FROM weird_rotation WHERE rotationPeriod < 0 ORDER BY rotationPeriod

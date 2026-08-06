@@ -277,7 +277,7 @@ statement error AmbiguousIdentifierError
 SELECT p.name, s.name FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.numberOfMoons * s.albedo = p.mass / s.gm
 
 statement error AmbiguousIdentifierError
-SELECT p.name, s.name FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.diameter + s.radius = p.gravity::double - s.density
+SELECT p.name, s.name FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.diameter + s.radius = p.gravity::FLOAT64 - s.density
 
 statement error AmbiguousIdentifierError
 SELECT p.name, s.name FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId WHERE p.escapeVelocity * s.magnitude = p.rotationPeriod / s.albedo

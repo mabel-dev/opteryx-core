@@ -165,7 +165,12 @@ _NAME_OF: dict = {
     DrakenType.UINT64: "UINT64",
     DrakenType.FLOAT32: "FLOAT32",
     DrakenType.FLOAT64: "FLOAT64",
-    DrakenType.BOOL: "BOOLEAN",
+    # BOOL, not BOOLEAN — the canonical name matches the physical tag, the way
+    # INT64 and FLOAT64 do. BOOLEAN is an implied alias the dialect still accepts
+    # in CREATE and CAST, and `_SQL_NAME_ALIASES` keeps it readable so schemas
+    # stored before this (when `str(ColumnType)` was the source of the stored
+    # name) still parse. Backfill of those lives in the catalog repo.
+    DrakenType.BOOL: "BOOL",
     DrakenType.DATE32: "DATE",
     DrakenType.INTERVAL: "INTERVAL",
     DrakenType.VARCHAR: "VARCHAR",
@@ -502,7 +507,10 @@ _SQL_NAME_ALIASES: dict = {
     # column (which is what this catalog actually persists for the FLOAT category).
     "DOUBLE": FLOAT64, "FLOAT": FLOAT64, "REAL": FLOAT32,
     "STRING": VARCHAR, "TEXT": VARCHAR,
-    "BOOL": BOOLEAN,
+    # BOOLEAN, not BOOL — BOOL is the CANONICAL name now and resolves through
+    # `_NAME_TO_PHYSICAL`, so the alias that still has to be readable is the older
+    # spelling, which is what every schema stored before the rename says.
+    "BOOLEAN": BOOLEAN,
     "BYTES": VARBINARY, "BLOB": VARBINARY,
     "STRUCT": NVARCHAR, "JSONB": NVARCHAR,
 }

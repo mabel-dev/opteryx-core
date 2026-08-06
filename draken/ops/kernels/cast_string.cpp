@@ -117,24 +117,36 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
             const uint8_t* sdata = str_data(slot, sa->arena);
             const uint32_t slen  = str_length(slot);
 
-            int64_t value = 0;
             int64_t sign = 1;
             uint32_t p = 0;
             if (slen > 0 && sdata[0] == '-') { sign = -1; p = 1; }
+            // Accumulate the magnitude unsigned against the exact signed bound —
+            // a 20-digit input must fail loud (or NULL under TRY_CAST), never
+            // silently wrap (fail-loud contract, cast_numeric.cpp E33 note).
+            const uint64_t limit = (sign < 0) ? 9223372036854775808ULL
+                                              : 9223372036854775807ULL;
+            uint64_t mag = 0u;
             bool malformed = false;
+            bool overflow = false;
             for (; p < slen; ++p) {
                 const uint8_t c = sdata[p];
                 if (c < '0' || c > '9') { malformed = true; break; }
-                value = value * 10 + (c - '0');
+                const uint64_t d = (uint64_t)(c - '0');
+                if (mag > (limit - d) / 10u) { overflow = true; break; }
+                mag = mag * 10u + d;
             }
-            if (malformed || slen == 0u) {
+            if (malformed || overflow || slen == 0u || (slen == 1u && sign < 0)) {
                 if (!is_safe) {
                     draken_free(out);
+                    if (overflow)
+                        return draken_error_sentinel_fmt(
+                            "Integer literal out of range for INT64: '%.*s'",
+                            (int)(slen > 64u ? 64u : slen), (const char*)sdata);
                     return draken_error_sentinel("Invalid digit in integer literal");
                 }
                 out[j] = 0; bad[j] = 1u; any_bad = true; continue;
             }
-            out[j] = sign * value;
+            out[j] = (sign < 0) ? (int64_t)(0u - mag) : (int64_t)mag;
         }
 
         VecResult r;

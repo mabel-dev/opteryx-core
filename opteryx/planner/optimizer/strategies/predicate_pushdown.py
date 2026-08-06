@@ -344,13 +344,33 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 context.optimized_plan.add_edge(context.node_id, context.last_nid)
 
         elif node.node_type in (LogicalPlanStepType.Limit, LogicalPlanStepType.Union):
-            # don't push filters past limits
-
+            # A barrier: filters never cross a Limit (row-count semantics) or a
+            # Union (a filter placed inside one leg would not apply to the
+            # others). Placement directly above the barrier is only valid for a
+            # predicate whose every referenced column is carried by the
+            # barrier's output stream. A predicate referencing a column defined
+            # by a Project ABOVE this barrier (a computed alias the Project
+            # handler let flow, expecting complete() to restore it) must NOT be
+            # dumped here — that strands it below its defining projection and
+            # the physical compile dies with "column not carried by stream".
+            # Such predicates are restored to their recorded original position
+            # now (same plan_path walk complete() uses).
+            _emit_memo = {}
+            emitted = _emitted_identities(context.optimized_plan, context.node_id, _emit_memo)
             for predicate in context.collected_predicates:
-                self.telemetry.optimization_predicate_pushdown += 1
-                context.optimized_plan.insert_node_after(
-                    random_string(), predicate, context.node_id
-                )
+                if _predicate_column_ids(predicate) <= emitted:
+                    # DECLINED: a filter must not cross a Limit/Union, so the
+                    # predicate is put back above this node rather than pushed.
+                    self.telemetry.optimization_predicate_pushdown_declined += 1
+                    context.optimized_plan.insert_node_after(
+                        random_string(), predicate, context.node_id
+                    )
+                elif predicate.plan_path is not None:
+                    self.telemetry.optimization_predicate_pushdown_unplaced += 1
+                    for nid in predicate.plan_path:
+                        if nid in context.optimized_plan:
+                            context.optimized_plan.insert_node_before(predicate.nid, predicate, nid)
+                            break
             context.collected_predicates = []
 
         elif node.node_type == LogicalPlanStepType.Filter:
@@ -784,7 +804,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                         node.right_relation_names,
                                     )
                                 except UnsupportedSyntaxError:
-                                    self.telemetry.optimization_predicate_pushdown += 1
+                                    # DECLINED: not representable as join fields, so it
+                                    # stays a Filter above the join.
+                                    self.telemetry.optimization_predicate_pushdown_declined += 1
                                     context.optimized_plan.insert_node_after(
                                         predicate.nid, predicate, context.node_id
                                     )
@@ -794,8 +816,9 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                 node.on = _add_condition(node.on, predicate.condition)
                                 self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
                             else:
-                                # Unsupported comparison - insert predicate above the join
-                                self.telemetry.optimization_predicate_pushdown += 1
+                                # DECLINED: unsupported comparison — insert predicate
+                                # above the join rather than into it.
+                                self.telemetry.optimization_predicate_pushdown_declined += 1
                                 context.optimized_plan.insert_node_after(
                                     predicate.nid, predicate, context.node_id
                                 )
@@ -875,7 +898,11 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                 self.telemetry.optimization_predicate_pullup_implied += 1
                         context.collected_predicates.extend(derived)
 
-                self.telemetry.optimization_predicate_pushdown += 1
+                # No counter here: this is reached for EVERY join node visited,
+                # whether or not a predicate moved, so it recorded plan traversal
+                # rather than an optimization. The real join outcomes are counted
+                # where they happen — _into_join, _add_to_inner_join,
+                # _cross_join_to_inner_join, _pullup_implied, _declined.
                 context.optimized_plan.add_node(context.node_id, node)
 
             if node.on is None and node.type == ("inner"):
@@ -1010,9 +1037,21 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if not node.predicates:
                 node.predicates = []
             node.predicates.append(condition)
+            # The predicate reached the READER — the outcome this whole strategy
+            # exists to produce (CLAUDE.md §12.1: faster queries read less data) and,
+            # until this counter, the only outcome with no telemetry at all. Its
+            # absence read as "pushdown never fired" on exactly the plans where
+            # pushdown worked best: a Parquet scan absorbs the predicate and the
+            # Filter node disappears, while a connector that CANNOT push leaves a
+            # Filter behind and incremented the counter below. The signal was
+            # inverted for the case that matters most.
+            self.telemetry.optimization_predicate_pushdown_into_scan += 1
 
         for predicate in not_pushable:
-            self.telemetry.optimization_predicate_pushdown += 1
+            # DECLINED: the connector cannot push this, so it stays a Filter above
+            # the scan. Counted separately from a push — conflating the two makes the
+            # telemetry unable to answer "did pushdown help?".
+            self.telemetry.optimization_predicate_pushdown_declined += 1
             context.optimized_plan.insert_node_after(predicate.nid, predicate, context.node_id)
 
         context.collected_predicates = remaining_predicates

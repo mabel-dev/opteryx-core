@@ -44,6 +44,13 @@ class InsertNode(BasePlanNode):
         self.is_replace = parameters.get("is_replace", False)
         self.is_noop = parameters.get("is_noop", False)
 
+        # CREATE MATERIALIZED VIEW: after the CTAS write commits, the target
+        # is registered as an MV with its defining SQL (re-rendered from the
+        # stashed AST) and the source tables the binder extracted.
+        self.is_materialized_view = parameters.get("is_materialized_view", False)
+        self.defining_query = parameters.get("defining_query")
+        self.source_tables = parameters.get("source_tables")
+
         self._file_entries = []
         self._total_rows = 0
         self.result: Optional[NonTabularResult] = None
@@ -95,6 +102,20 @@ class InsertNode(BasePlanNode):
             else:
                 self.connector.insert(
                     self.relation_name, self._file_entries, author=self._author
+                )
+            if self.is_materialized_view:
+                # Registration happens after the data commit, in the same
+                # statement. If it fails the statement fails visibly: the
+                # backing table exists but is not registered as an MV -
+                # re-running CREATE OR REPLACE MATERIALIZED VIEW repairs it.
+                from opteryx.third_party import sqloxide
+
+                defining_sql = sqloxide.ast_to_sql([{"Query": self.defining_query}])[0]
+                self.connector.register_materialized_view(
+                    self.relation_name,
+                    defining_sql,
+                    self.source_tables,
+                    author=self._author,
                 )
             self.result = NonTabularResult(
                 record_count=self._total_rows,

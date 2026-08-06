@@ -53,6 +53,9 @@ cdef extern from "core/bitmap_ops.h" nogil:
         size_t nbytes, uint32_t num_rows
     ) nogil
 
+    # In-place AND: dst &= src over nbytes bytes (word-wide).
+    void c_bitmap_and_inplace(uint8_t* dst, const uint8_t* src, size_t nbytes) nogil
+
     # Extract bitmap pointers (currently a stub).
     void c_get_bitmap_ptrs(void* draken_vector) nogil
 

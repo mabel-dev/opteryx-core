@@ -71,21 +71,18 @@ def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
     return node
 
 
-def _build_passthru_node(root, value, telemetry) -> Node:
-    # We sometimes need to wrap a value in a function to make sure
-    # the expression tree is valid.
-    if root.node_type == NodeType.COMPARISON_OPERATOR:
-        return root
-
-    # We're already a function, no point wrapping in another
-    if value.node_type == NodeType.FUNCTION:
-        return value
-
-    node = Node(node_type=NodeType.FUNCTION)
-    node.value = "_PASSTHRU"
-    node.parameters = [value]
+def _build_transparent_node(root, value, telemetry) -> Node:
+    # An algebraic reduction (x * 1 -> x, TRUE AND x -> x) must keep the folded
+    # expression's output identity — downstream references root's schema_column,
+    # not the operand's. NESTED is the planner's transparent wrapper: it lowers
+    # to its centre at compile time and every predicate strategy sees through it,
+    # so the identity survives with no runtime cost (same mechanism as
+    # redundant_cast's identity-context rewrite).
+    node = Node(node_type=NodeType.NESTED)
+    node.centre = value
     node.schema_column = root.schema_column
     node.query_column = root.query_column
+    node.alias = root.alias
     # See if we can fold this further
     return fold_constants(node, telemetry)
 
@@ -146,7 +143,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.left.value == 1
             ):
                 # 1 * anything = anything (except NULL)
-                node = _build_passthru_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -156,7 +153,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.value == 1
             ):
                 # anything * 1 = anything (except NULL)
-                node = _build_passthru_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -166,7 +163,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.left.value == 0
             ):
                 # 0 + anything = anything (except NULL)
-                node = _build_passthru_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -176,7 +173,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.value == 0
             ):
                 # anything +/- 0 = anything (except NULL)
-                node = _build_passthru_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
             if (
@@ -186,7 +183,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.value == 1
             ):
                 # anything / 1 = anything (except NULL)
-                node = _build_passthru_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry)
                 telemetry.optimization_constant_fold_reduce += 1
                 return node
 
@@ -225,7 +222,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.left.value
             ):
                 # True OR anything is True (including NULL)
-                node = _build_passthru_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -234,7 +231,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.value
             ):
                 # anything OR True is True (including NULL)
-                node = _build_passthru_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -243,7 +240,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and not root.left.value
             ):
                 # False OR anything is anything (except NULL)
-                node = _build_passthru_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -252,7 +249,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and not root.right.value
             ):
                 # anything OR False is anything (except NULL)
-                node = _build_passthru_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
 
@@ -263,7 +260,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and not root.left.value
             ):
                 # False AND anything is False (including NULL)
-                node = _build_passthru_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -272,7 +269,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and not root.right.value
             ):
                 # anything AND False is False (including NULL)
-                node = _build_passthru_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -281,7 +278,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.left.value
             ):
                 # True AND anything is anything (except NULL)
-                node = _build_passthru_node(root, root.right, telemetry)
+                node = _build_transparent_node(root, root.right, telemetry)
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
             if (
@@ -290,7 +287,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
                 and root.right.value
             ):
                 # anything AND True is anything (except NULL)
-                node = _build_passthru_node(root, root.left, telemetry)
+                node = _build_transparent_node(root, root.left, telemetry)
                 node.type = BOOLEAN
                 telemetry.optimization_constant_fold_boolean_reduce += 1
                 return node
@@ -361,8 +358,8 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         # at plan time rather than falling back. Assuming a Vector here crashed
         # `SELECT CHR(200)` with AttributeError: 'list' has no attribute 'to_pylist'.
         # A boolean connective carries NO schema_column — AND/OR are structure, not
-        # a projected column — and `_build_passthru_node` copies that None onto the
-        # _PASSTHRU wrapper it folds through here. Dereferencing it unconditionally
+        # a projected column — and `_build_transparent_node` copies that None onto
+        # the NESTED wrapper it folds through here. Dereferencing it unconditionally
         # crashed any always-false conjunct nested under an OR
         # (`WHERE id < 3 OR (id == -312.458 AND name < 'x')`) with
         # AttributeError: 'NoneType' object has no attribute 'column_type'.

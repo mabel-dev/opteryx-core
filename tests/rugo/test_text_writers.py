@@ -91,7 +91,7 @@ def test_jsonl_float_plain_decimal_not_scientific():
 
 def test_jsonl_nan_and_infinity_become_null():
     m = _morsel(
-        "SELECT CAST(v AS DOUBLE) AS v FROM "
+        "SELECT CAST(v AS FLOAT64) AS v FROM "
         "(VALUES ('NaN'), ('Infinity'), ('-Infinity'), ('1.5')) AS t(v)"
     )
     rows = [json.loads(l) for l in write_jsonl(m).decode().splitlines()]
@@ -100,7 +100,7 @@ def test_jsonl_nan_and_infinity_become_null():
 
 def test_csv_nan_and_infinity_become_empty():
     m = _morsel(
-        "SELECT CAST(v AS DOUBLE) AS v FROM "
+        "SELECT CAST(v AS FLOAT64) AS v FROM "
         "(VALUES ('NaN'), ('Infinity'), ('1.5')) AS t(v)"
     )
     out = write_csv(m).decode()

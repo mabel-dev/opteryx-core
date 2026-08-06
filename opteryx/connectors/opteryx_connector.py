@@ -867,6 +867,126 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         schema = catalog.load_dataset(relative_id).schema()
         return [c.name for c in schema.columns]
 
+    def is_materialized_view(self, relation_name: str) -> bool:
+        """Whether the dataset carries the catalog's materialized-view marker."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        # A catalog without the MV API (older library, or a test double) has
+        # no materialized views - checked before importing the MV exception
+        # types, which the older library does not define either.
+        if getattr(catalog, "get_materialized_view", None) is None:
+            return False
+
+        from opteryx_catalog.exceptions import DatasetNotFound
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        try:
+            catalog.get_materialized_view(relative_id)
+        except (DatasetNotFound, MaterializedViewError):
+            return False
+        return True
+
+    def register_materialized_view(
+        self,
+        relation_name: str,
+        sql: str,
+        source_tables,
+        author: Optional[str] = None,
+    ) -> None:
+        """Register the (already-created) backing table as a materialized view.
+
+        The catalog stores the defining SQL as a versioned statement, records
+        the source list, and lands one refresh trigger on each source dataset.
+        `update_if_exists=True` because this is the CoRTAS path's registration
+        too - re-running the statement writes a new statement version and
+        reconciles triggers against the new source list.
+        """
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        relative_sources = []
+        for source in source_tables:
+            source_workspace, source_relative = self._parse_identifier(source)
+            if source_workspace != workspace:
+                raise ValueError(
+                    f"materialized view {relation_name} cannot read across workspaces "
+                    f"(source {source} is in workspace {source_workspace}); refresh "
+                    "triggers only exist within the MV's own workspace"
+                )
+            relative_sources.append(source_relative)
+
+        try:
+            catalog.create_materialized_view(
+                relative_id,
+                sql,
+                relative_sources,
+                author=author,
+                update_if_exists=True,
+            )
+        except MaterializedViewError as exc:
+            raise ValueError(f"CREATE MATERIALIZED VIEW {relation_name}: {exc}") from exc
+
+    def drop_materialized_view(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop a materialized view: its refresh triggers, then its backing dataset."""
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        if not catalog.dataset_exists(relative_id):
+            if if_exists:
+                return
+            raise DatasetNotFoundError(dataset=relation_name, connector=self.__class__.__name__)
+
+        try:
+            catalog.drop_materialized_view(relative_id, author=author)
+        except MaterializedViewError as exc:
+            raise ValueError(
+                f"{relation_name} is not a materialized view; use DROP TABLE or DROP VIEW"
+            ) from exc
+
+    def drop_trigger(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        author: Optional[str] = None,
+        missing_ok: bool = False,
+    ) -> None:
+        """Remove a trigger from the dataset that carries it, delegating to the
+        catalog. A missing trigger is translated into a clear ValueError unless
+        missing_ok (IF EXISTS) - the catalog's own drop_trigger honours
+        missing_ok, so that branch never raises."""
+        try:
+            from opteryx_catalog.exceptions import TriggerNotFound
+        except ImportError:
+            # An installed opteryx_catalog wheel that predates triggers (same
+            # skew tolerance as information_schema._normalize_sort_order).
+            # The real TriggerNotFound subclasses KeyError, so this stays
+            # correct when the newer wheel arrives.
+            TriggerNotFound = KeyError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.drop_trigger(relative_id, trigger_name, author=author, missing_ok=missing_ok)
+        except TriggerNotFound as exc:
+            raise ValueError(
+                f"trigger {trigger_name} does not exist on {relation_name} "
+                "(use DROP TRIGGER IF EXISTS to make this quiet)"
+            ) from exc
+
+    def list_triggers(self, relation_name: str) -> list:
+        """The triggers attached to a dataset, as the catalog's plain dicts."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        return catalog.list_triggers(relative_id)
+
     # View operations (Eidetic capability)
     def get_view(self, view_name: str):
         """Retrieve the definition of the specified view."""

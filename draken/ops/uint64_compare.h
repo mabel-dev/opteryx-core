@@ -40,24 +40,37 @@ static inline uint8_t* u64c_alloc_bool_buf(uint32_t n) {
     return p;
 }
 
+// Copy a validity bitmap for n rows. Masks the partial last byte so padding
+// bits in the source are not propagated (same contract as cmp_copy_validity,
+// int64_compare.h).
 static inline uint8_t* u64c_copy_validity(const uint8_t* src, uint32_t n) {
     uint8_t* dst = u64c_alloc_bool_buf(n);
     const uint32_t nb = (n + 7u) >> 3;
-    if (nb > 0) memcpy(dst, src, nb);
+    if (nb > 0) {
+        memcpy(dst, src, nb);
+        if ((n & 7u) != 0)
+            dst[nb - 1] &= static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+    }
     return dst;
 }
 
+// AND of two validity bitmaps; nullptr when both inputs are nullptr. Mirrors
+// cmp_and_validity's contract: an all-valid AND result is freed and returned
+// as nullptr so downstream kernels take the no-nulls path.
 static inline uint8_t* u64c_and_validity(const uint8_t* a, const uint8_t* b, uint32_t n) {
     if (a == nullptr && b == nullptr) return nullptr;
+    if (a == nullptr) return u64c_copy_validity(b, n);
+    if (b == nullptr) return u64c_copy_validity(a, n);
     uint8_t* out = u64c_alloc_bool_buf(n);
     const uint32_t nb = (n + 7u) >> 3;
-    if (a != nullptr && b != nullptr) {
-        for (uint32_t k = 0; k < nb; ++k) out[k] = a[k] & b[k];
-    } else if (a != nullptr) {
-        memcpy(out, a, nb);
-    } else {
-        memcpy(out, b, nb);
+    const uint8_t tail_mask = (n & 7u) ? static_cast<uint8_t>((1u << (n & 7u)) - 1u) : 0xFFu;
+    bool all_valid = true;
+    for (uint32_t k = 0; k < nb; ++k) {
+        const uint8_t expected = (k == nb - 1u) ? tail_mask : 0xFFu;
+        out[k] = static_cast<uint8_t>((a[k] & b[k]) & expected);
+        all_valid = all_valid && (out[k] == expected);
     }
+    if (all_valid) { draken_free(out); return nullptr; }
     return out;
 }
 

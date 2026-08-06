@@ -119,15 +119,10 @@ static inline void build_validity_bitmap_avx2(
 
 // Dispatch
 using build_validity_bitmap_fn_t = void(*)(const int32_t*, size_t, int32_t, std::vector<uint8_t>&);
-static std::atomic<build_validity_bitmap_fn_t> s_build_bitmap_cache{nullptr};
 
 static inline build_validity_bitmap_fn_t get_build_validity_bitmap_fn()
 {
-    return simd::select_dispatch<build_validity_bitmap_fn_t>(s_build_bitmap_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, build_validity_bitmap_avx2},
-#endif
-    }, build_validity_bitmap_scalar);
+    return SIMD_STATIC_SELECT(build_validity_bitmap_avx2, build_validity_bitmap_scalar, build_validity_bitmap_scalar, build_validity_bitmap_scalar);
 }
 
 static inline void build_validity_bitmap(

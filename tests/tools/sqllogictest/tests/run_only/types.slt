@@ -198,7 +198,7 @@ statement error UnsupportedSyntaxError
 SELECT 'apple' = CAST(BLOB('apple') AS VARCHAR)
 
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('apple') AS BLOB) = b'apple'
+SELECT CAST(BLOB('apple') AS VARBINARY) = b'apple'
 
 
 # Case Sensitivity
@@ -549,11 +549,11 @@ statement error UnsupportedSyntaxError
 SELECT CAST(BLOB('42') AS INTEGER) = 42
 
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('42.0') AS DOUBLE) = 42.0
+SELECT CAST(BLOB('42.0') AS FLOAT64) = 42.0
 
 # SELECT CAST(BLOB('21.5') AS DECIMAL) = 21.5;
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('0.0') AS DOUBLE) = 0.0
+SELECT CAST(BLOB('0.0') AS FLOAT64) = 0.0
 
 statement error UnsupportedSyntaxError
 SELECT CAST(BLOB('apple') AS VARCHAR) = 'apple'
@@ -638,7 +638,7 @@ statement error UnsupportedSyntaxError
 SELECT CAST(BLOB('42') AS INTEGER) = 42
 
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('42.0') AS DOUBLE) = 42.0
+SELECT CAST(BLOB('42.0') AS FLOAT64) = 42.0
 
 # SELECT CAST(BLOB('21.5') AS DECIMAL) = 21.5;
 statement error UnsupportedSyntaxError
@@ -652,7 +652,7 @@ statement error UnsupportedSyntaxError
 SELECT CAST(BLOB('42') AS INTEGER) = CAST('42' AS INTEGER)
 
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('42.0') AS DOUBLE) = CAST(42.0 AS DOUBLE)
+SELECT CAST(BLOB('42.0') AS FLOAT64) = CAST(42.0 AS FLOAT64)
 
 statement error UnsupportedSyntaxError
 SELECT CAST(BLOB('apple') AS VARCHAR) = 'apple'
@@ -661,19 +661,19 @@ SELECT CAST(BLOB('apple') AS VARCHAR) = 'apple'
 
 # Explicit Type Casting from Non-BLOB Types to BLOBs
 statement error UnsupportedSyntaxError
-SELECT CAST('apple' AS BLOB) = BLOB('apple')
+SELECT CAST('apple' AS VARBINARY) = BLOB('apple')
 
 statement error UnsupportedSyntaxError
-SELECT CAST(b'apple' AS BLOB) = BLOB('apple')
+SELECT CAST(b'apple' AS VARBINARY) = BLOB('apple')
 
 statement error UnsupportedSyntaxError
-SELECT CAST(42 AS BLOB) = BLOB('42')
+SELECT CAST(42 AS VARBINARY) = BLOB('42')
 
 statement error UnsupportedSyntaxError
-SELECT CAST(42.0 AS BLOB) = BLOB('42.0')
+SELECT CAST(42.0 AS VARBINARY) = BLOB('42.0')
 
 statement error UnsupportedSyntaxError
-SELECT CAST(TRUE AS BLOB) = BLOB('true')
+SELECT CAST(TRUE AS VARBINARY) = BLOB('true')
 
 
 # Type Comparison Using CAST with Edge Cases
@@ -692,7 +692,7 @@ statement error UnsupportedSyntaxError
 SELECT CAST(BLOB('42') AS INTEGER) > 41
 
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('21.5') AS DOUBLE) < 22.0
+SELECT CAST(BLOB('21.5') AS FLOAT64) < 22.0
 
 statement error UnsupportedSyntaxError
 SELECT CAST(BLOB('apple') AS VARCHAR) LIKE 'app%'
@@ -702,10 +702,10 @@ SELECT CAST(BLOB('apple') AS VARCHAR) LIKE 'app%'
 # Mixed Type Equivalency Tests with Explicit Casts
 # SELECT CAST(BLOB('42') AS INTEGER) = CAST('42.0' AS DECIMAL);
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('42.0') AS DOUBLE) = CAST('42' AS INTEGER)
+SELECT CAST(BLOB('42.0') AS FLOAT64) = CAST('42' AS INTEGER)
 
 statement error UnsupportedSyntaxError
-SELECT CAST(BLOB('42.0') AS DOUBLE) != CAST('42' AS INTEGER)
+SELECT CAST(BLOB('42.0') AS FLOAT64) != CAST('42' AS INTEGER)
 
 
 # Type Conversion Error Checks

@@ -155,7 +155,7 @@ def test_zero_times_column_fold_preserves_null():
     for op in ("0 * v", "v * 0"):
         sql = (
             f"SELECT {op} AS k FROM "
-            "(SELECT CAST(NULLIF(id, 3) AS DOUBLE) AS v FROM $planets) AS t"
+            "(SELECT CAST(NULLIF(id, 3) AS FLOAT64) AS v FROM $planets) AS t"
         )
         out = _col(sql)
         assert out.count(None) == 1, (sql, out)

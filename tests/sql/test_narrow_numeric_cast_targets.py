@@ -73,7 +73,7 @@ def test_every_source_family_reaches_the_narrow_int_targets(target, physical):
     sources = {
         "signed": "SELECT CAST(id AS {t}) AS x FROM $planets",
         "unsigned": "SELECT CAST(CAST(id AS UINT32) AS {t}) AS x FROM $planets",
-        "float": "SELECT CAST(CAST(id AS DOUBLE) AS {t}) AS x FROM $planets",
+        "float": "SELECT CAST(CAST(id AS FLOAT64) AS {t}) AS x FROM $planets",
         "bool": "SELECT CAST(a AS {t}) AS x FROM (SELECT true AS a) AS s",
         "string": "SELECT CAST(a AS {t}) AS x FROM (SELECT '7' AS a) AS s",
         "decimal": "SELECT CAST(gravity AS {t}) AS x FROM $planets",
@@ -88,7 +88,7 @@ def test_every_source_family_reaches_float32():
     sources = (
         "SELECT CAST(id AS FLOAT32) AS x FROM $planets",
         "SELECT CAST(CAST(id AS UINT32) AS FLOAT32) AS x FROM $planets",
-        "SELECT CAST(CAST(id AS DOUBLE) AS FLOAT32) AS x FROM $planets",
+        "SELECT CAST(CAST(id AS FLOAT64) AS FLOAT32) AS x FROM $planets",
         "SELECT CAST(a AS FLOAT32) AS x FROM (SELECT true AS a) AS s",
         "SELECT CAST(a AS FLOAT32) AS x FROM (SELECT '2.5' AS a) AS s",
         "SELECT CAST(gravity AS FLOAT32) AS x FROM $planets",
@@ -137,7 +137,7 @@ def test_float32_widens_back_to_double_through_a_kernel():
     refused — the refusal was the only thing between that entry and a 4-byte
     buffer being read at an 8-byte stride."""
     got_type, values = _typed(
-        "SELECT CAST(CAST(id AS FLOAT32) AS DOUBLE) AS x FROM $planets"
+        "SELECT CAST(CAST(id AS FLOAT32) AS FLOAT64) AS x FROM $planets"
     )
     assert got_type == DrakenType.FLOAT64, got_type
     assert values[:3] == [1.0, 2.0, 3.0], values[:3]

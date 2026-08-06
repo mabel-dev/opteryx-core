@@ -180,21 +180,7 @@ using search_sub_fn_t = int (*)(const char*, size_t, const char*, size_t);
 
 int simd_search_substring(const char* data, size_t length, const char* pattern, size_t pattern_len) {
     static std::atomic<search_sub_fn_t> cache{nullptr};
-    search_sub_fn_t fn = simd::select_dispatch<search_sub_fn_t>(
-        cache,
-        {
-#if defined(__AVX2__)
-            { &cpu_supports_avx2, simd_search_substring_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-            { &cpu_supports_neon, simd_search_substring_neon },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-            { &cpu_supports_rvv, simd_search_substring_rvv },
-#endif
-        },
-        simd_search_substring_scalar
-    );
+    search_sub_fn_t fn = SIMD_STATIC_SELECT(simd_search_substring_avx2, simd_search_substring_neon, simd_search_substring_rvv, simd_search_substring_scalar);
     return fn(data, length, pattern, pattern_len);
 }
 
@@ -495,18 +481,7 @@ static int avx_search_avx2(const char* data, size_t length, char target) {
 int avx_search(const char* data, size_t length, char target) {
     using fn_t = int (*)(const char*, size_t, char);
     static std::atomic<fn_t> cache{nullptr};
-    fn_t fn = simd::select_dispatch<fn_t>(
-        cache,
-        {
-#if defined(__AVX2__)
-            { &cpu_supports_avx2, avx_search_avx2 },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-            { &cpu_supports_rvv, avx_search_rvv },
-#endif
-        },
-        avx_search_scalar
-    );
+    fn_t fn = SIMD_STATIC_SELECT(avx_search_avx2, avx_search_scalar, avx_search_rvv, avx_search_scalar);
     return fn(data, length, target);
 }
 
@@ -563,21 +538,7 @@ static std::vector<size_t> avx_find_all_avx2(const char* data, size_t length, ch
 std::vector<size_t> simd_find_all(const char* data, size_t length, char target) {
     using fn_t = std::vector<size_t> (*)(const char*, size_t, char);
     static std::atomic<fn_t> cache{nullptr};
-    fn_t fn = simd::select_dispatch<fn_t>(
-        cache,
-        {
-#if defined(__AVX2__)
-            { &cpu_supports_avx2, avx_find_all_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-            { &cpu_supports_neon, neon_find_all },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-            { &cpu_supports_rvv, simd_find_all_rvv },
-#endif
-        },
-        avx_find_all_scalar
-    );
+    fn_t fn = SIMD_STATIC_SELECT(avx_find_all_avx2, neon_find_all, simd_find_all_rvv, avx_find_all_scalar);
     return fn(data, length, target);
 }
 
@@ -627,18 +588,7 @@ static size_t avx_count_avx2(const char* data, size_t length, char target) {
 size_t avx_count(const char* data, size_t length, char target) {
     using fn_t = size_t (*)(const char*, size_t, char);
     static std::atomic<fn_t> cache{nullptr};
-    fn_t fn = simd::select_dispatch<fn_t>(
-        cache,
-        {
-#if defined(__AVX2__)
-            { &cpu_supports_avx2, avx_count_avx2 },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-            { &cpu_supports_rvv, avx_count_rvv },
-#endif
-        },
-        avx_count_scalar
-    );
+    fn_t fn = SIMD_STATIC_SELECT(avx_count_avx2, avx_count_scalar, avx_count_rvv, avx_count_scalar);
     return fn(data, length, target);
 }
 
@@ -786,17 +736,6 @@ static int avx_find_delimiter_avx2(const char* data, size_t length) {
 int avx_find_delimiter(const char* data, size_t length) {
     using fn_t = int (*)(const char*, size_t);
     static std::atomic<fn_t> cache{nullptr};
-    fn_t fn = simd::select_dispatch<fn_t>(
-        cache,
-        {
-#if defined(__AVX2__)
-            { &cpu_supports_avx2, avx_find_delimiter_avx2 },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-            { &cpu_supports_rvv, avx_find_delimiter_rvv },
-#endif
-        },
-        avx_find_delimiter_scalar
-    );
+    fn_t fn = SIMD_STATIC_SELECT(avx_find_delimiter_avx2, avx_find_delimiter_scalar, avx_find_delimiter_rvv, avx_find_delimiter_scalar);
     return fn(data, length);
 }

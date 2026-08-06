@@ -751,18 +751,23 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
             _p = str(_param)
             args.append(build_literal_node(int(_p) if _p.lstrip("-").isdigit() else _p))
 
+    # Both parameter reads below key off the AST NODE, not off a substring of the
+    # type's NAME. Asking `"array" in data_type.lower()` said yes to SUBARRAY and
+    # MY_ARRAY — custom type names that have no `Array` node — and the very next
+    # line indexed `["Array"]` unconditionally, so a name that merely CONTAINED
+    # the word crashed with a raw `KeyError: 'Array'` instead of an SqlError.
+    _raw_type = branch["data_type"]
+
     # Handle DECIMAL precision and scale
-    if "decimal" in data_type.lower() and "PrecisionAndScale" in branch["data_type"].get(
-        "Decimal", {}
-    ):
-        precision = branch["data_type"]["Decimal"]["PrecisionAndScale"][0]
-        scale = branch["data_type"]["Decimal"]["PrecisionAndScale"][1]
+    if isinstance(_raw_type, dict) and "PrecisionAndScale" in _raw_type.get("Decimal", {}):
+        precision = _raw_type["Decimal"]["PrecisionAndScale"][0]
+        scale = _raw_type["Decimal"]["PrecisionAndScale"][1]
         args.append(build_literal_node(precision))
         args.append(build_literal_node(scale))
 
     # Handle ARRAY element types
-    if "array" in data_type.lower():
-        element_key = branch["data_type"]["Array"].get("AngleBracket", {"Varchar": None})
+    if isinstance(_raw_type, dict) and "Array" in _raw_type:
+        element_key = _raw_type["Array"].get("AngleBracket", {"Varchar": None})
         if isinstance(element_key, dict):
             element_key = next(iter(element_key))
         if isinstance(element_key, str):
@@ -770,6 +775,53 @@ def _extract_data_type(raw_data_type, branch, args, build_literal_node):
             args.append(element_key)
 
     return data_type
+
+
+# The candidate set the typo detector matches an unrecognized name against.
+#
+# CANONICAL names ONLY — these are the names `str(ColumnType)` renders and the
+# catalog stores. A suggestion is an instruction to the user, so it must name the
+# type they will see echoed back. That rules out the three implied aliases the
+# dialect still ACCEPTS in CREATE and CAST (INTEGER, FLOAT, and the DOUBLE
+# spelling of FLOAT64) — accepted is not the same as recommended, and showing
+# INTEGER would teach a name the rest of the engine never uses. STRUCT and BLOB
+# are absent for the same reason: they resolve to NVARCHAR and VARBINARY.
+_CAST_TARGET_NAMES = (
+    "TIMESTAMP",
+    "TIME",
+    "DATE",
+    "VARCHAR",
+    "NVARCHAR",
+    "DECIMAL",
+    "BOOL",
+    "ARRAY",
+    "VECTOR",
+    "INTERVAL",
+    "VARBINARY",
+    "INT8",
+    "INT16",
+    "INT32",
+    "INT64",
+    "FLOAT32",
+    "FLOAT64",
+    "UINT8",
+    "UINT16",
+    "UINT32",
+    "UINT64",
+    "IPV4",
+)
+
+# The THREE implied aliases the dialect ACCEPTS in CREATE and CAST, mapped to the
+# canonical name they mean. They are typo-MATCHED (so `UINTEGER` is still
+# recognized as a slip for the INTEGER spelling) but never RENDERED — the
+# suggestion always names the canonical type, so we never teach a spelling the
+# rest of the engine does not use. Anything not canonical and not one of these
+# three is rejected outright, which is why DOUBLE, BLOB and STRUCT are absent.
+_IMPLIED_ALIAS_CANONICAL = {
+    "INTEGER": "INT64",
+    "FLOAT": "FLOAT64",
+    "BOOLEAN": "BOOL",
+}
 
 
 def _normalize_cast_type(data_type: str) -> str:
@@ -788,10 +840,11 @@ def _normalize_cast_type(data_type: str) -> str:
     ):
         return upper_type
 
-    # NVARCHAR must be matched before the "varchar" substring rule below
-    # (since "varchar" is a substring of "nvarchar"), or it would collapse to
-    # VARCHAR and the UTF-8/Unicode string type would be unreachable from SQL.
-    if "nvarchar" in lower_type:
+    # NVARCHAR is its own name, matched exactly. It was `"nvarchar" in lower_type`,
+    # which also claimed MYNVARCHAR and every other name ending in it — the same
+    # silent-wrong-type the exact table below exists to prevent. It no longer needs
+    # to precede VARCHAR either, now that VARCHAR is matched exactly too.
+    if lower_type == "nvarchar":
         return "NVARCHAR"
 
     # Unsigned integer widths (E33) — exact match, ahead of the substring rules below
@@ -810,7 +863,14 @@ def _normalize_cast_type(data_type: str) -> str:
     # width (draken's DrakenType, `str(ColumnType)`, and the catalog's stored
     # names all agree), and INT8 meaning 8 bytes next to INT64 meaning 8 bytes
     # would be indefensible. Postgres's `int8` is spelled BIGINT/INTEGER here.
-    if upper_type in ("INT8", "INT16", "INT32", "FLOAT32"):
+    #
+    # INT64 is the CANONICAL name — it is what `str(ColumnType)` renders and what
+    # the catalog stores, so a user must be able to type back the name the engine
+    # showed them. It was the only widthed numeric spelling the dialect rejected
+    # (INT8/16/32, UINT8..64, FLOAT32/64 all worked), which left `CAST(x AS INT64)`
+    # failing with "did you mean 'UINT64'?" — a signed request pointed at the
+    # UNSIGNED type. INTEGER remains accepted as an implied alias for it.
+    if upper_type in ("INT8", "INT16", "INT32", "INT64", "FLOAT32"):
         return upper_type
 
     # FLOAT and FLOAT64 are DOUBLE — one spelling reaches the tables downstream.
@@ -831,30 +891,46 @@ def _normalize_cast_type(data_type: str) -> str:
     if upper_type == "IPV4":
         return "IPV4"
 
-    # Map of substring patterns to normalized types
+    # Map of type spellings to normalized types, matched EXACTLY.
+    #
+    # ⚠ This was a SUBSTRING match, and a substring match on a type name silently
+    # answers a question the user did not ask. `UINTEGER` contains "integer", so
+    # `CAST(x AS UINTEGER)` returned a SIGNED INT64 — an unsigned cast quietly
+    # became signed, with no error. The same trap caught any custom type name
+    # ending in a mapped word. Nothing that reaches here needs a substring match:
+    # `_extract_data_type` flattens the AST to a bare identifier token before we
+    # see it (`TIMESTAMP(6)` -> "Timestamp", `ARRAY<VARCHAR>` -> "Array"), so the
+    # parameterised forms the substring rule looked like it was for never arrive
+    # carrying their parameters. The multi-word spellings sqlparser concatenates
+    # are listed explicitly instead — there is no rule to infer them from.
     type_mappings = {
         "timestamp": "TIMESTAMP",
         "time": "TIME",
         "date": "DATE",
         "varchar": "VARCHAR",
         "decimal": "DECIMAL",
+        # Only THREE implied aliases are accepted: INTEGER (INT64), FLOAT
+        # (FLOAT64, handled above) and BOOLEAN (BOOL). Every other spelling must be
+        # the canonical name or be rejected — so DOUBLE, DOUBLE PRECISION, BLOB and
+        # STRUCT are gone from the dialect and now raise pointing at FLOAT64,
+        # VARBINARY and NVARCHAR. The VALUES here are the engine's INTERNAL cast
+        # target names, which are a separate vocabulary from the surface spellings
+        # (casts.pyx translates VARBINARY to its own "BLOB" at the boundary) — so
+        # removing a surface spelling never disturbs the dispatch below it.
         "integer": "INTEGER",
-        "double": "DOUBLE",
+        "bool": "BOOLEAN",
         "boolean": "BOOLEAN",
-        "struct": "STRUCT",
-        "blob": "BLOB",
         "array": "ARRAY",
         "vector": "VECTOR",
         "interval": "INTERVAL",
     }
 
-    # Check type mappings
-    for pattern, normalized in type_mappings.items():
-        if pattern in lower_type:
-            return normalized
+    normalized = type_mappings.get(lower_type)
+    if normalized is not None:
+        return normalized
 
     # Check binary types separately
-    if any(token in lower_type for token in ("varbinary", "binary", "raw")):
+    if lower_type in ("varbinary", "binary", "raw"):
         return "VARBINARY"
 
     # Handle unsupported type aliases with helpful error messages
@@ -871,8 +947,17 @@ def _normalize_cast_type(data_type: str) -> str:
         ("REAL",): "FLOAT32",
         ("TINYINT", "BYTE"): "INT8",
         ("SMALLINT",): "INT16",
-        ("INT", "BIGINT"): "INTEGER",
-        ("BOOL", "BIT"): "BOOLEAN",
+        # INT64, never INTEGER. A suggestion must name the CANONICAL type — the
+        # name `str(ColumnType)` renders and the catalog stores — so that what we
+        # tell a user to type is the same name the engine will show them back.
+        ("INT", "BIGINT"): "INT64",
+        ("BIT",): "BOOL",
+        # Accepted until the canonical-only ruling: these resolve to FLOAT64,
+        # VARBINARY and NVARCHAR, and a spelling that is not the canonical name of
+        # what you get is a second vocabulary waiting to drift from the first.
+        ("DOUBLE", "DOUBLEPRECISION"): "FLOAT64",
+        ("BLOB",): "VARBINARY",
+        ("STRUCT",): "NVARCHAR",
     }
 
     for aliases, suggestion in type_suggestions.items():
@@ -881,7 +966,25 @@ def _normalize_cast_type(data_type: str) -> str:
                 f"Unsupported type for CAST - '{upper_type}' — did you mean '{suggestion}'?"
             )
 
-    raise SqlError(f"Unsupported type for CAST - '{data_type}'.")
+    # Anything still unrecognized gets the same treatment a mistyped column or
+    # function name gets: a typo detector, not intent inference. It answers "did
+    # you fat-finger a name we have?", so `UINTEGER` -> INTEGER (one inserted
+    # character) but `UBIGINT`/`USMALLINT`/`UTINYINT` get no suggestion — they are
+    # a different type system's vocabulary, not a slip, and guessing which of our
+    # widths they meant is inference this does not do.
+    suggestion = suggest_alternative(
+        upper_type, _CAST_TARGET_NAMES + tuple(_IMPLIED_ALIAS_CANONICAL)
+    )
+    if suggestion is not None:
+        suggestion = _IMPLIED_ALIAS_CANONICAL.get(suggestion, suggestion)
+        raise SqlError(
+            f"Unsupported type for CAST - '{upper_type}' — did you mean '{suggestion}'?"
+        )
+
+    # Report the name UPPERCASED, not sqlparser's internal spelling: the token we
+    # are handed is its variant name ("UBigInt", "Datetime"), which is not what
+    # the user typed and reads like the engine mangled their SQL.
+    raise SqlError(f"Unsupported type for CAST - '{upper_type}'.")
 
 
 # The internal temporal forms the SQL rewriter produces for TIMESTAMP[unit], as
@@ -1444,18 +1547,22 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         from opteryx.exceptions import FunctionNotFoundError
 
         # Rewrite type-names used as cast functions: VARCHAR(x) → CAST(x AS VARCHAR)
+        # The VALUE is what we tell the user to type, so it must be the CANONICAL
+        # name — this advice is executed verbatim. It used to say `::DOUBLE`,
+        # `::BLOB` and `::INTEGER`; the first two are no longer accepted at all,
+        # which would have made the error message itself a dead end.
         _TYPE_CAST_NAMES = {
             "VARCHAR": "VARCHAR",
-            "INT": "INTEGER",
-            "INT64": "INTEGER",
-            "INTEGER": "INTEGER",
-            "DOUBLE": "DOUBLE",
+            "INT": "INT64",
+            "INT64": "INT64",
+            "INTEGER": "INT64",
+            "DOUBLE": "FLOAT64",
             "TIMESTAMP": "TIMESTAMP",
             "DATE": "DATE",
-            "BOOLEAN": "BOOLEAN",
-            "BLOB": "BLOB",
+            "BOOLEAN": "BOOL",
+            "BLOB": "VARBINARY",
             "VARBINARY": "VARBINARY",
-            "FLOAT": "DOUBLE",
+            "FLOAT": "FLOAT64",
             "TIME": "TIME",
         }
         _COMMON_ERRORS = {

@@ -37,6 +37,7 @@ from opteryx.planner.binder.relation import (
     visit_create_relation,
     visit_drop_collection,
     visit_drop_relation,
+    visit_drop_trigger,
     visit_rename_relation,
     visit_truncate_relation,
     visit_insert,
@@ -224,6 +225,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_collection(self, node, context)
+
+    def visit_drop_trigger(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_drop_trigger(self, node, context)
 
     def visit_truncate_relation(
         self, node: Node, context: BindingContext

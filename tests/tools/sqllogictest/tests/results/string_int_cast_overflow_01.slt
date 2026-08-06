@@ -1,0 +1,33 @@
+# STRING -> INT64 overflow: a 20-digit literal must never silently wrap
+# (fail-loud contract). Column forms force the draken kernel (literal forms
+# fold at plan time). TRY_CAST nulls out-of-range rows; boundary values
+# (INT64_MAX, INT64_MIN) parse exactly.
+
+query I rowsort
+SELECT TRY_CAST(v AS INTEGER) AS r FROM (SELECT '99999999999999999999' AS v UNION ALL SELECT '42') AS t
+----
+42
+NULL
+
+query I rowsort
+SELECT TRY_CAST(v AS INTEGER) AS r FROM (SELECT '9223372036854775808' AS v UNION ALL SELECT '-9223372036854775809') AS t
+----
+NULL
+NULL
+
+query I rowsort
+SELECT CAST(v AS INTEGER) AS r FROM (SELECT '9223372036854775807' AS v UNION ALL SELECT '-9223372036854775808') AS t
+----
+-9223372036854775808
+9223372036854775807
+
+query I rowsort
+SELECT SUM(CAST(v AS INTEGER)) AS r FROM (SELECT '9223372036854775807' AS v UNION ALL SELECT '-9223372036854775808') AS t
+----
+-1
+
+query I rowsort
+SELECT TRY_CAST(v AS INTEGER) AS r FROM (SELECT '-' AS v UNION ALL SELECT '7') AS t
+----
+7
+NULL

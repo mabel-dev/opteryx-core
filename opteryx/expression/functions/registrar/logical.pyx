@@ -21,7 +21,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
       - IFNULL / IFNOTNULL
       - NULLIF
       - IIF (vectorized conditional)
-      - _PASSTHRU (utility, for tests/compat)
     """
 
     # Small adapter object bundling kernels implemented elsewhere
@@ -172,29 +171,6 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         id="default",
                         callable_ref=None,   # c-native: draken_iif
                         cost_us_per_million=3689.18,
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="_PASSTHRU",
-            aliases=(),
-            category="logical",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Return input unchanged.",
-            documentation="Returns the input value unchanged. Used for testing and compatibility.",
-            overloads=(
-                FunctionOverload(
-                    id="_PASSTHRU_1",
-                    parameters=(ParameterSpec(name="value", type_family="any"),),
-                    return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=lambda x: x,
-                        cost_us_per_million=-0.017,
                     ),
                 ),
             ),

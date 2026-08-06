@@ -221,6 +221,35 @@ def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     return node, context
 
 
+def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the DROP TRIGGER node to determine which connector should handle
+    removing the trigger.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.table_name} does not support DROP TRIGGER"
+        )
+
+    # WRITE on the table the trigger hangs off — symmetric with creation:
+    # landing a refresh trigger on a source table is gated at WRITE by
+    # visit_insert's MV branch, so removing one is an update to that same
+    # table, not to the trigger's target view.
+    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to drop a trigger on table {node.table_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the ALTER WORKSPACE ... SET node to determine which connector should
@@ -336,6 +365,60 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     create_target = getattr(node, "create_target", False)
     if_not_exists = getattr(node, "if_not_exists", False)
     or_replace = getattr(node, "or_replace", False)
+    is_materialized_view = getattr(node, "is_materialized_view", False)
+
+    if is_materialized_view:
+        # The MV target: owner tier (the DROP action), whether or not the
+        # target exists yet - stricter than plain CTAS's CREATE tier for fresh
+        # targets. The refresh CoRTAS re-runs under the same check, so a
+        # non-owner may not create something only others could keep fresh.
+        if not can_perform_action(context.execution_context, node.relation_name, action="DROP"):
+            raise PermissionError(
+                f"User does not have permission to create materialized view "
+                f"{node.relation_name} (owner required)"
+            )
+
+        # Source-table extraction: the bound SELECT subtree already knows every
+        # relation it scans - collect them from the Scan nodes rather than
+        # re-parsing the SQL. Every scanned relation must be catalog-resident:
+        # a virtual dataset ($planets), information_schema, or a non-catalog
+        # source could never fire the MV's refresh.
+        from opteryx.planner.logical_planner import LogicalPlanStepType
+
+        source_tables = []
+        for _, plan_node in self.graph.nodes(True):
+            if plan_node.node_type != LogicalPlanStepType.Scan:
+                continue
+            relation = plan_node.relation
+            gateway = connector_factory(relation, telemetry=context.telemetry)
+            if (
+                relation.startswith("$")
+                or "information_schema" in relation.split(".")
+                or not isinstance(gateway, Writable)
+            ):
+                raise UnsupportedSyntaxError(
+                    f"Materialized view source '{relation}' is not a catalog table; "
+                    "an MV can only read catalog tables - commits to them are what "
+                    "fire its refresh."
+                )
+            if relation not in source_tables:
+                source_tables.append(relation)
+
+        if not source_tables:
+            raise UnsupportedSyntaxError(
+                "A materialized view needs at least one catalog table as a source - "
+                "nothing could ever fire its refresh."
+            )
+
+        # Creating a refresh trigger is an update to each source table.
+        for source in source_tables:
+            if not can_perform_action(context.execution_context, source, action="WRITE"):
+                raise PermissionError(
+                    f"User does not have permission to create a refresh trigger on "
+                    f"materialized view source {source} (write required)"
+                )
+
+        node.source_tables = source_tables
 
     if create_target:
         node.is_replace = False

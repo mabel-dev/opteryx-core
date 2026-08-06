@@ -404,6 +404,10 @@ def _create_insert_node(logical_node, query_properties, registry):
     return registry.create("Insert", query_properties, **logical_node.properties)
 
 
+def _create_drop_trigger_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="drop_trigger", **logical_node.properties)
+
+
 _DISPATCH = {
     LogicalPlanStepType.Aggregate:        _create_aggregate_node,
     LogicalPlanStepType.AggregateAndGroup: _create_aggregate_and_group_node,
@@ -439,6 +443,7 @@ _DISPATCH = {
     LogicalPlanStepType.RenameRelation:   _create_rename_relation_node,
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.Insert:           _create_insert_node,
+    LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
 }
 
 

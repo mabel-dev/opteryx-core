@@ -27,8 +27,8 @@
 // Use case: After row-mask filtering during parquet decoding.
 //
 // Dispatch flow:
-//   - Compile-time: per-arch variants compiled when the target supports them.
-//   - Runtime: simd::select_dispatch() picks the best available implementation.
+//   - Compile-time: per-arch variants compiled when the target supports them,
+//     selected via SIMD_STATIC_SELECT (one ISA per build; no runtime probe).
 //   - Fallback: scalar per-element filter.
 //
 // Per-arch strategy:
@@ -37,7 +37,9 @@
 //   - ARM NEON: no compress instruction, so a per-128-bit-block byte shuffle
 //     (`vqtbl1q_u8`) driven by a precomputed permutation table indexed by the
 //     block's lane mask, advancing the write cursor by the block popcount.
-//   - x86 AVX2: kept as-is (note: the existing AVX2 body is effectively scalar).
+//   - x86 AVX2: per-256-bit-block left-pack (`_mm256_permutevar8x32_epi32`)
+//     driven by a lane-mask-indexed permutation table, advancing the write
+//     cursor by the block popcount — the 8-wide twin of the NEON design.
 
 namespace parquet_simd {
 
@@ -99,53 +101,115 @@ static inline void compact_int32_scalar(
 }
 
 #ifdef __AVX2__
-// AVX2: Vectorized stream compaction using shuffle tables
-// Process 8 int32 values at a time (32 bytes), check mask, compact to output
-// Uses popcount to track output position for scatter-like write
+// AVX2 left-pack: same permutation-table design as the NEON bodies below, at
+// 256-bit width. For each block, the mask bytes become an N-bit lane mask
+// (compare-to-zero + movemask, so any nonzero byte selects), the LUT supplies
+// the _mm256_permutevar8x32_epi32 index vector that packs the selected 32-bit
+// lanes to the front in order, and the write cursor advances by popcount.
+// Single pass: worst-case resize up front, trim to the written count at the
+// end — no separate counting pass.
+
+// 256-entry LUT: 8-bit lane mask → packed 32-bit lane indices.
+inline const std::array<std::array<uint32_t, 8>, 256>& avx2_perm8()
+{
+    static const std::array<std::array<uint32_t, 8>, 256> t = [] {
+        std::array<std::array<uint32_t, 8>, 256> tbl{};
+        for (int m = 0; m < 256; ++m) {
+            int o = 0;
+            for (int lane = 0; lane < 8; ++lane)
+                if (m & (1 << lane)) tbl[m][o++] = (uint32_t)lane;
+            for (; o < 8; ++o) tbl[m][o] = 0;  // lanes past popcount are never kept
+        }
+        return tbl;
+    }();
+    return t;
+}
+
+// 16-entry LUT: 4-bit lane mask → packed 64-bit lanes as 32-bit index pairs.
+inline const std::array<std::array<uint32_t, 8>, 16>& avx2_perm4x64()
+{
+    static const std::array<std::array<uint32_t, 8>, 16> t = [] {
+        std::array<std::array<uint32_t, 8>, 16> tbl{};
+        for (int m = 0; m < 16; ++m) {
+            int o = 0;
+            for (int lane = 0; lane < 4; ++lane)
+                if (m & (1 << lane)) {
+                    tbl[m][o++] = (uint32_t)(2 * lane);
+                    tbl[m][o++] = (uint32_t)(2 * lane + 1);
+                }
+            for (; o < 8; ++o) tbl[m][o] = 0;
+        }
+        return tbl;
+    }();
+    return t;
+}
+
+// 32-bit-lane core (int32 / float32 — identical byte layout).
+template <typename T>
+static inline void compact32_avx2_impl(
+    const T* src, const uint8_t* mask, size_t count, std::vector<T>& output)
+{
+    static_assert(sizeof(T) == 4, "32-bit lanes only");
+    size_t old_size = output.size();
+    // +8 slack: each block stores a full 32-byte vector even when fewer lanes
+    // are selected (same slack-and-trim pattern as the NEON bodies).
+    output.resize(old_size + count + 8);
+    T* out = output.data() + old_size;
+    size_t w = 0;
+    const auto& tbl = avx2_perm8();
+    const __m128i zero = _mm_setzero_si128();
+    size_t blocks = count / 8;
+    for (size_t b = 0; b < blocks; ++b) {
+        size_t base = b * 8;
+        __m128i mb = _mm_loadl_epi64((const __m128i*)(mask + base));
+        unsigned m = (unsigned)(~_mm_movemask_epi8(_mm_cmpeq_epi8(mb, zero))) & 0xFFu;
+        __m256i v = _mm256_loadu_si256((const __m256i*)(src + base));
+        __m256i perm = _mm256_loadu_si256((const __m256i*)tbl[m].data());
+        _mm256_storeu_si256((__m256i*)(out + w), _mm256_permutevar8x32_epi32(v, perm));
+        w += (size_t)__builtin_popcount(m);
+    }
+    for (size_t i = blocks * 8; i < count; ++i)
+        if (mask[i]) out[w++] = src[i];
+    output.resize(old_size + w);  // trim slack back to logical size
+}
+
+// 64-bit-lane core (int64 / float64).
+template <typename T>
+static inline void compact64_avx2_impl(
+    const T* src, const uint8_t* mask, size_t count, std::vector<T>& output)
+{
+    static_assert(sizeof(T) == 8, "64-bit lanes only");
+    size_t old_size = output.size();
+    // +4 slack: full 32-byte store per block (up to 4 extra elements).
+    output.resize(old_size + count + 4);
+    T* out = output.data() + old_size;
+    size_t w = 0;
+    const auto& tbl = avx2_perm4x64();
+    const __m128i zero = _mm_setzero_si128();
+    size_t blocks = count / 4;
+    for (size_t b = 0; b < blocks; ++b) {
+        size_t base = b * 4;
+        uint32_t mb4;
+        __builtin_memcpy(&mb4, mask + base, 4);
+        __m128i mb = _mm_cvtsi32_si128((int)mb4);
+        unsigned m = (unsigned)(~_mm_movemask_epi8(_mm_cmpeq_epi8(mb, zero))) & 0xFu;
+        __m256i v = _mm256_loadu_si256((const __m256i*)(src + base));
+        __m256i perm = _mm256_loadu_si256((const __m256i*)tbl[m].data());
+        _mm256_storeu_si256((__m256i*)(out + w), _mm256_permutevar8x32_epi32(v, perm));
+        w += (size_t)__builtin_popcount(m);
+    }
+    for (size_t i = blocks * 4; i < count; ++i)
+        if (mask[i]) out[w++] = src[i];
+    output.resize(old_size + w);
+}
+
 static inline void compact_int32_avx2(
     const int32_t* src,
     const uint8_t* mask,
     size_t count,
     std::vector<int32_t>& output)
 {
-    // Pre-allocate worst case (all selected)
-    size_t old_size = output.size();
-
-    // First pass: count selected items
-    int32_t selected_count = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (mask[i]) selected_count++;
-    }
-
-    output.resize(old_size + selected_count);
-    int32_t* out_ptr = output.data() + old_size;
-    int32_t out_idx = 0;
-
-    // Second pass: compact with SIMD prefetching
-    // Process 8 values at a time for better cache locality
-    size_t chunk_size = 8;
-    size_t full_chunks = count / chunk_size;
-
-    for (size_t chunk = 0; chunk < full_chunks; ++chunk) {
-        size_t base = chunk * chunk_size;
-        // Load 8 mask bytes and 8 int32 values
-        __m256i values = _mm256_loadu_si256((__m256i*)(src + base));
-
-        // Check mask and scatter selected values
-        for (size_t i = 0; i < chunk_size; ++i) {
-            if (mask[base + i]) {
-                out_ptr[out_idx++] = src[base + i];
-            }
-        }
-    }
-
-    // Handle remainder
-    size_t tail_start = full_chunks * chunk_size;
-    for (size_t i = tail_start; i < count; ++i) {
-        if (mask[i]) {
-            out_ptr[out_idx++] = src[i];
-        }
-    }
+    compact32_avx2_impl(src, mask, count, output);
 }
 #endif
 
@@ -208,21 +272,10 @@ static inline void compact_int32_rvv(
 
 // Dispatch
 using compact_int32_fn_t = void(*)(const int32_t*, const uint8_t*, size_t, std::vector<int32_t>&);
-static std::atomic<compact_int32_fn_t> s_compact_int32_cache{nullptr};
 
 static inline compact_int32_fn_t get_compact_int32_fn()
 {
-    return simd::select_dispatch<compact_int32_fn_t>(s_compact_int32_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, compact_int32_avx2},
-#endif
-#if defined(__ARM_NEON) || defined(__aarch64__)
-        {&cpu_supports_neon, compact_int32_neon},
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        {&cpu_supports_rvv, compact_int32_rvv},
-#endif
-    }, compact_int32_scalar);
+    return SIMD_STATIC_SELECT(compact_int32_avx2, compact_int32_neon, compact_int32_rvv, compact_int32_scalar);
 }
 
 static inline void compact_int32(
@@ -253,49 +306,14 @@ static inline void compact_int64_scalar(
 }
 
 #ifdef __AVX2__
-// AVX2: Vectorized int64 stream compaction
-// Process 4 int64 values at a time (32 bytes), check mask, compact to output
+// AVX2: left-pack via avx2_perm4x64 (see compact64_avx2_impl above).
 static inline void compact_int64_avx2(
     const int64_t* src,
     const uint8_t* mask,
     size_t count,
     std::vector<int64_t>& output)
 {
-    size_t old_size = output.size();
-
-    // Count selected items
-    int64_t selected_count = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (mask[i]) selected_count++;
-    }
-
-    output.resize(old_size + selected_count);
-    int64_t* out_ptr = output.data() + old_size;
-    int64_t out_idx = 0;
-
-    // Process 4 values at a time
-    size_t chunk_size = 4;
-    size_t full_chunks = count / chunk_size;
-
-    for (size_t chunk = 0; chunk < full_chunks; ++chunk) {
-        size_t base = chunk * chunk_size;
-        __m256i values = _mm256_loadu_si256((__m256i*)(src + base));
-
-        // Scatter selected values
-        for (size_t i = 0; i < chunk_size; ++i) {
-            if (mask[base + i]) {
-                out_ptr[out_idx++] = src[base + i];
-            }
-        }
-    }
-
-    // Handle remainder
-    size_t tail_start = full_chunks * chunk_size;
-    for (size_t i = tail_start; i < count; ++i) {
-        if (mask[i]) {
-            out_ptr[out_idx++] = src[i];
-        }
-    }
+    compact64_avx2_impl(src, mask, count, output);
 }
 #endif
 
@@ -353,21 +371,10 @@ static inline void compact_int64_rvv(
 
 // Dispatch
 using compact_int64_fn_t = void(*)(const int64_t*, const uint8_t*, size_t, std::vector<int64_t>&);
-static std::atomic<compact_int64_fn_t> s_compact_int64_cache{nullptr};
 
 static inline compact_int64_fn_t get_compact_int64_fn()
 {
-    return simd::select_dispatch<compact_int64_fn_t>(s_compact_int64_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, compact_int64_avx2},
-#endif
-#if defined(__ARM_NEON) || defined(__aarch64__)
-        {&cpu_supports_neon, compact_int64_neon},
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        {&cpu_supports_rvv, compact_int64_rvv},
-#endif
-    }, compact_int64_scalar);
+    return SIMD_STATIC_SELECT(compact_int64_avx2, compact_int64_neon, compact_int64_rvv, compact_int64_scalar);
 }
 
 static inline void compact_int64(
@@ -397,49 +404,14 @@ static inline void compact_float32_scalar(
 }
 
 #ifdef __AVX2__
-// AVX2: Vectorized float32 stream compaction
-// Process 8 float32 values at a time (32 bytes), check mask, compact to output
+// AVX2: 32-bit lanes — identical byte layout to int32, same left-pack core.
 static inline void compact_float32_avx2(
     const float* src,
     const uint8_t* mask,
     size_t count,
     std::vector<float>& output)
 {
-    size_t old_size = output.size();
-
-    // Count selected items
-    int32_t selected_count = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (mask[i]) selected_count++;
-    }
-
-    output.resize(old_size + selected_count);
-    float* out_ptr = output.data() + old_size;
-    int32_t out_idx = 0;
-
-    // Process 8 values at a time
-    size_t chunk_size = 8;
-    size_t full_chunks = count / chunk_size;
-
-    for (size_t chunk = 0; chunk < full_chunks; ++chunk) {
-        size_t base = chunk * chunk_size;
-        __m256 values = _mm256_loadu_ps(src + base);
-
-        // Scatter selected values
-        for (size_t i = 0; i < chunk_size; ++i) {
-            if (mask[base + i]) {
-                out_ptr[out_idx++] = src[base + i];
-            }
-        }
-    }
-
-    // Handle remainder
-    size_t tail_start = full_chunks * chunk_size;
-    for (size_t i = tail_start; i < count; ++i) {
-        if (mask[i]) {
-            out_ptr[out_idx++] = src[i];
-        }
-    }
+    compact32_avx2_impl(src, mask, count, output);
 }
 #endif
 
@@ -478,21 +450,10 @@ static inline void compact_float32_rvv(
 #endif
 
 using compact_float32_fn_t = void(*)(const float*, const uint8_t*, size_t, std::vector<float>&);
-static std::atomic<compact_float32_fn_t> s_compact_float32_cache{nullptr};
 
 static inline compact_float32_fn_t get_compact_float32_fn()
 {
-    return simd::select_dispatch<compact_float32_fn_t>(s_compact_float32_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, compact_float32_avx2},
-#endif
-#if defined(__ARM_NEON) || defined(__aarch64__)
-        {&cpu_supports_neon, compact_float32_neon},
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        {&cpu_supports_rvv, compact_float32_rvv},
-#endif
-    }, compact_float32_scalar);
+    return SIMD_STATIC_SELECT(compact_float32_avx2, compact_float32_neon, compact_float32_rvv, compact_float32_scalar);
 }
 
 static inline void compact_float32(
@@ -522,49 +483,14 @@ static inline void compact_float64_scalar(
 }
 
 #ifdef __AVX2__
-// AVX2: Vectorized float64 stream compaction
-// Process 4 float64 values at a time (32 bytes), check mask, compact to output
+// AVX2: 64-bit lanes — identical byte layout to int64, same left-pack core.
 static inline void compact_float64_avx2(
     const double* src,
     const uint8_t* mask,
     size_t count,
     std::vector<double>& output)
 {
-    size_t old_size = output.size();
-
-    // Count selected items
-    int64_t selected_count = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (mask[i]) selected_count++;
-    }
-
-    output.resize(old_size + selected_count);
-    double* out_ptr = output.data() + old_size;
-    int64_t out_idx = 0;
-
-    // Process 4 values at a time
-    size_t chunk_size = 4;
-    size_t full_chunks = count / chunk_size;
-
-    for (size_t chunk = 0; chunk < full_chunks; ++chunk) {
-        size_t base = chunk * chunk_size;
-        __m256d values = _mm256_loadu_pd(src + base);
-
-        // Scatter selected values
-        for (size_t i = 0; i < chunk_size; ++i) {
-            if (mask[base + i]) {
-                out_ptr[out_idx++] = src[base + i];
-            }
-        }
-    }
-
-    // Handle remainder
-    size_t tail_start = full_chunks * chunk_size;
-    for (size_t i = tail_start; i < count; ++i) {
-        if (mask[i]) {
-            out_ptr[out_idx++] = src[i];
-        }
-    }
+    compact64_avx2_impl(src, mask, count, output);
 }
 #endif
 
@@ -603,21 +529,10 @@ static inline void compact_float64_rvv(
 #endif
 
 using compact_float64_fn_t = void(*)(const double*, const uint8_t*, size_t, std::vector<double>&);
-static std::atomic<compact_float64_fn_t> s_compact_float64_cache{nullptr};
 
 static inline compact_float64_fn_t get_compact_float64_fn()
 {
-    return simd::select_dispatch<compact_float64_fn_t>(s_compact_float64_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, compact_float64_avx2},
-#endif
-#if defined(__ARM_NEON) || defined(__aarch64__)
-        {&cpu_supports_neon, compact_float64_neon},
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        {&cpu_supports_rvv, compact_float64_rvv},
-#endif
-    }, compact_float64_scalar);
+    return SIMD_STATIC_SELECT(compact_float64_avx2, compact_float64_neon, compact_float64_rvv, compact_float64_scalar);
 }
 
 static inline void compact_float64(

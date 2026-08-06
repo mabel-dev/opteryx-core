@@ -1974,14 +1974,9 @@ cdef Py_ssize_t _linearize(
 
     # ------------------------------------------------------------------
     # NT_FUNCTION — compile each parameter, store callable and arity.
-    # _PASSTHRU is transparent: just compile the single parameter.
     # ------------------------------------------------------------------
     if nt == _NT_FUNCTION:
         func_val = <object>node.value
-        if func_val == "_PASSTHRU":
-            if node.parameters.size() == 0:
-                raise ValueError("compiled_expression: _PASSTHRU FUNCTION has no parameters")
-            return _linearize(node.parameters[0], bc, depth)
 
         # IF_THEN_ELSE — synthetic node from the plan compiler's CASE rewrite
         # (no function_ref, no Python fallback; the C kernel is mandatory).

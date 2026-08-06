@@ -769,9 +769,9 @@ def test_ipv4_to_blob_is_the_same_bytes(address):
     """VARBINARY is the VARCHAR bytes with a different tag. Routing a BLOB target
     at the `_to_string` kernel would hand back a VARCHAR-tagged result."""
     expected = [address.encode("utf-8")]
-    assert rows(f"SELECT CAST(CAST('{address}' AS IPV4) AS BLOB)") == expected
+    assert rows(f"SELECT CAST(CAST('{address}' AS IPV4) AS VARBINARY)") == expected
     assert (
-        rows(f"SELECT CAST(CAST(a AS IPV4) AS BLOB) FROM (SELECT '{address}' AS a) AS t")
+        rows(f"SELECT CAST(CAST(a AS IPV4) AS VARBINARY) FROM (SELECT '{address}' AS a) AS t")
         == expected
     )
 

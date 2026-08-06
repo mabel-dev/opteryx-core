@@ -687,14 +687,9 @@ def test_drop_restrict_rejected(tmp_path):
         list(owner.execute_to_morsels("DROP TABLE ws.t RESTRICT"))
 
 
-def test_materialized_view_rejected(tmp_path):
-    """Opteryx has no materialization; this used to create an ordinary view."""
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    list(owner.execute_to_morsels("CREATE TABLE ws.t (id BIGINT)"))
-
-    with pytest.raises(UnsupportedSyntaxError, match="materialized views"):
-        list(owner.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.t"))
+# CREATE/DROP MATERIALIZED VIEW behaviour is covered by
+# tests/storage/test_materialized_views.py - it is CTAS plus registration,
+# no longer a rejection.
 
 
 def test_show_create_table_rejected_at_plan_time(tmp_path):

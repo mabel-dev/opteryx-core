@@ -44,6 +44,8 @@ class RelationManagementNode(BasePlanNode):
         self.relation_names = parameters.get("relation_names")
         self.connectors = parameters.get("connectors")
         self.if_exists: bool = parameters.get("if_exists", False)
+        # DROP MATERIALIZED VIEW arrives as a flagged drop_relation
+        self.is_materialized_view: bool = parameters.get("is_materialized_view", False)
 
         # CREATE COLLECTION
         self.collection_name: Optional[str] = parameters.get("collection_name")
@@ -56,6 +58,10 @@ class RelationManagementNode(BasePlanNode):
 
         # ALTER ... RENAME TO
         self.new_relation_name: Optional[str] = parameters.get("new_relation_name")
+
+        # DROP TRIGGER
+        self.trigger_name: Optional[str] = parameters.get("trigger_name")
+        self.table_name: Optional[str] = parameters.get("table_name")
 
         # ALTER WORKSPACE ... SET
         self.workspace_name: Optional[str] = parameters.get("workspace_name")
@@ -83,6 +89,8 @@ class RelationManagementNode(BasePlanNode):
             return f"rename {self.relation_name} to {self.new_relation_name}"
         if self.action == "alter_workspace":
             return f"alter workspace {self.workspace_name} set {self.property_name} = {self.property_value}"
+        if self.action == "drop_trigger":
+            return f"drop trigger {self.trigger_name} on {self.table_name}"
         return f"{self.action} {self.relation_name}"
 
     @property
@@ -113,9 +121,28 @@ class RelationManagementNode(BasePlanNode):
                     if self.if_exists:
                         continue
                     raise DatasetNotFoundError(connector=connector, dataset=relation_name)
-                connector.drop_relation(
-                    relation_name, if_exists=self.if_exists, author=self._author
-                )
+                # Type guard in both directions: a materialized view's backing
+                # store is a dataset, so DROP TABLE would "work" on it - but
+                # would strand its refresh triggers on every source table.
+                target_is_mv = connector.is_materialized_view(relation_name)
+                if self.is_materialized_view:
+                    if not target_is_mv:
+                        raise ValueError(
+                            f"{relation_name} is not a materialized view; "
+                            "use DROP TABLE or DROP VIEW"
+                        )
+                    connector.drop_materialized_view(
+                        relation_name, if_exists=self.if_exists, author=self._author
+                    )
+                else:
+                    if target_is_mv:
+                        raise ValueError(
+                            f"{relation_name} is a materialized view; "
+                            "use DROP MATERIALIZED VIEW"
+                        )
+                    connector.drop_relation(
+                        relation_name, if_exists=self.if_exists, author=self._author
+                    )
                 dropped += 1
             return NonTabularResult(record_count=dropped, status=QueryStatus.SQL_SUCCESS)
 
@@ -173,6 +200,19 @@ class RelationManagementNode(BasePlanNode):
                 raise ValueError(f"relation already exists: {self.new_relation_name}")
             self.connector.rename_relation(
                 self.relation_name, self.new_relation_name, author=self._author
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_trigger":
+            # The table must exist regardless of IF EXISTS - that modifier
+            # speaks about the trigger, not the table it hangs off.
+            if not self.connector.relation_exists(self.table_name):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+            self.connector.drop_trigger(
+                self.table_name,
+                self.trigger_name,
+                author=self._author,
+                missing_ok=self.if_exists,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 

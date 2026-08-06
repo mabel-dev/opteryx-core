@@ -8,7 +8,7 @@ import sys
 from typing import List, Tuple
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
-sys.path.insert(1, os.path.join(sys.path[0], "../../../../pyiceberg-firestore-gcs"))
+sys.path.insert(1, os.path.join(sys.path[0], "../../../../opteryx-catalog"))
 sys.path.insert(1, os.path.join(sys.path[0], "../../../../opteryx-catalog"))
 
 from opteryx.third_party import yyjson as orjson

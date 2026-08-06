@@ -10,7 +10,7 @@ information_schema
 Minimum information_schema surface. Backed by the real Opteryx catalog
 (opteryx_catalog) via list_collections()/list_datasets()/list_views() -
 NOT a static/generated snapshot. Currently implements `tables`, `columns`,
-`views`, and `schemata`.
+`views`, `schemata`, and `triggers`.
 
 information_schema is a reserved nested schema inside a catalog workspace,
 addressed as `<workspace>.information_schema.<table>` - e.g.
@@ -253,11 +253,17 @@ def _extract_key_predicate(condition, allowed_columns: frozenset):
     if col_name not in allowed_columns:
         return None
 
+    # VARCHAR literals reach the pushdown layer as bytes; the catalog keys they
+    # are compared against are str, so normalize here or nothing ever matches.
     value = literal.value
+    if isinstance(value, bytes):
+        value = value.decode()
     if op in ("InList", "NotInList"):
-        if not isinstance(value, (list, tuple, set)) or not all(isinstance(v, str) for v in value):
+        if not isinstance(value, (list, tuple, set)) or not all(
+            isinstance(v, (str, bytes)) for v in value
+        ):
             return None
-        value = list(value)
+        value = [v.decode() if isinstance(v, bytes) else v for v in value]
     elif not isinstance(value, str):
         return None
 
@@ -687,6 +693,135 @@ class InformationSchemaViewsTable(BaseTable, _KeyColumnPredicatePushable):
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
 
+class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
+    """Reads `information_schema.triggers` from the catalog's per-dataset
+    trigger listings - list_collections() -> list_datasets() -> list_triggers(),
+    one round trip per dataset.
+
+    A trigger hangs off the dataset whose commits fire it (the SOURCE table),
+    not off its target view, so the per-row READ check is on that source table
+    - matching DROP TRIGGER's WRITE gate, which is also on the source. An MV
+    whose refresh trigger has been dropped simply has no row here: that
+    absence is the documented way to see a "paused" MV.
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
+    # BaseTable also declares this (False); it comes first in the MRO, so it
+    # would otherwise shadow _KeyColumnPredicatePushable's True.
+    supports_predicate_pushdown = True
+
+    _COLUMNS = (
+        "trigger_catalog",
+        "trigger_collection",
+        "trigger_name",
+        "event_object_table",
+        "action_kind",
+        "target_view",
+        "created_by",
+        "created_at",
+        "last_fired_at",
+        "last_fired_status",
+    )
+
+    # trigger_catalog/trigger_collection/event_object_table are known before
+    # the per-dataset list_triggers() round trip, so pushing them skips those
+    # calls entirely; trigger_name only prunes rows after the listing.
+    _pushable_columns = frozenset(
+        {"trigger_catalog", "trigger_collection", "event_object_table", "trigger_name"}
+    )
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        PredicatePushable.__init__(self, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationSchema:
+        column_types = {
+            "trigger_catalog": _lt.VARCHAR,
+            "trigger_collection": _lt.VARCHAR,
+            "trigger_name": _lt.VARCHAR,
+            "event_object_table": _lt.VARCHAR,
+            "action_kind": _lt.VARCHAR,
+            "target_view": _lt.VARCHAR,
+            "created_by": _lt.VARCHAR,
+            "created_at": _lt.TIMESTAMP(),
+            "last_fired_at": _lt.TIMESTAMP(),
+            "last_fired_status": _lt.VARCHAR,
+        }
+        self.schema = RelationSchema(
+            name="information_schema.triggers",
+            columns=[
+                SchemaColumn(
+                    name=column_name,
+                    column_type=column_types[column_name],
+                    identity=mint_column_identity("information_schema.triggers", column_name),
+                )
+                for column_name in self._COLUMNS
+            ],
+        )
+        return self.schema
+
+    def read_dataset(self, predicates=None, **kwargs) -> Iterable[Morsel]:
+        compiled = _compile_key_predicates(predicates, self._pushable_columns)
+
+        trigger_catalog = []
+        trigger_collection = []
+        trigger_name = []
+        event_object_table = []
+        action_kind = []
+        target_view = []
+        created_by = []
+        created_at = []
+        last_fired_at = []
+        last_fired_status = []
+
+        # See InformationSchemaTablesTable.read_dataset - trigger_catalog is
+        # constant per reader, so an excluding predicate skips enumeration
+        # entirely rather than filtering row by row.
+        if _key_predicates_allow(compiled, {"trigger_catalog": self.workspace}):
+            for collection in self.catalog.list_collections():
+                if not _key_predicates_allow(compiled, {"trigger_collection": collection}):
+                    continue
+                for name in self.catalog.list_datasets(collection):
+                    source_table = f"{collection}.{name}"
+                    if not _key_predicates_allow(compiled, {"event_object_table": source_table}):
+                        continue
+                    if not _readable(self.execution_context, self.workspace, collection, name):
+                        continue
+                    for trigger in self.catalog.list_triggers(source_table):
+                        name_value = trigger.get("name")
+                        if not _key_predicates_allow(compiled, {"trigger_name": name_value}):
+                            continue
+                        trigger_catalog.append(self.workspace)
+                        trigger_collection.append(collection)
+                        trigger_name.append(name_value)
+                        event_object_table.append(source_table)
+                        action_kind.append(trigger.get("kind"))
+                        target_view.append(trigger.get("target-view"))
+                        created_by.append(trigger.get("created-by"))
+                        created_at.append(_ms_to_datetime(trigger.get("created-at-ms")))
+                        last_fired_at.append(_ms_to_datetime(trigger.get("last-fired-at-ms")))
+                        last_fired_status.append(trigger.get("last-fired-status"))
+
+        vectors = [
+            vector_from_sequence(trigger_catalog, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(trigger_collection, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(trigger_name, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(event_object_table, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(action_kind, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(target_view, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(created_by, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(created_at, dtype=DrakenType.TIMESTAMP64),
+            vector_from_sequence(last_fired_at, dtype=DrakenType.TIMESTAMP64),
+            vector_from_sequence(last_fired_status, dtype=DrakenType.VARCHAR),
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
 class InformationSchemaSchemataTable(BaseTable, _KeyColumnPredicatePushable):
     """Reads `information_schema.schemata` from the catalog's collection listing.
 
@@ -758,4 +893,5 @@ _TABLE_CLASSES = {
     "columns": InformationSchemaColumnsTable,
     "views": InformationSchemaViewsTable,
     "schemata": InformationSchemaSchemataTable,
+    "triggers": InformationSchemaTriggersTable,
 }

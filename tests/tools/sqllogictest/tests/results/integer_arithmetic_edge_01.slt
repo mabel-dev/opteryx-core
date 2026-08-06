@@ -1,0 +1,40 @@
+# INT64 integer division/modulo edge cases — INT64_MIN DIV -1 must wrap
+# (i64_neg semantics), never trap: unguarded it raises SIGFPE (#DE) on x86 and
+# kills the process. x % -1 is 0 for every dividend. `/` is true division
+# (float64) and never reaches i64_div — DIV is the integer form.
+
+query I rowsort
+SELECT -9223372036854775808 DIV -1 AS r
+----
+-9223372036854775808
+
+query I rowsort
+SELECT -9223372036854775808 % -1 AS r
+----
+0
+
+query I rowsort
+SELECT 7 % -1 AS r
+----
+0
+
+query I rowsort
+SELECT -9223372036854775807 DIV -1 AS r
+----
+9223372036854775807
+
+query I rowsort
+SELECT -9223372036854775808 DIV 1 AS r
+----
+-9223372036854775808
+
+# Column-form: force the values through the vector kernels, not literal folding.
+query I rowsort
+SELECT MIN(v DIV d) AS r FROM (SELECT -9223372036854775808 AS v, -1 AS d UNION ALL SELECT 10, 2) AS t
+----
+-9223372036854775808
+
+query I rowsort
+SELECT MAX(v % d) AS r FROM (SELECT -9223372036854775808 AS v, -1 AS d UNION ALL SELECT 10, 3) AS t
+----
+1

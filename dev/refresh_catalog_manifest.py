@@ -36,7 +36,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), ".."))
 # (same fallback tests/integration/test_catalog_gcs_scan.py uses). In a VM
 # where opteryx_catalog is pip-installed this is a no-op.
 _CATALOG_REPO = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "pyiceberg-firestore-gcs")
+    os.path.join(os.path.dirname(__file__), "..", "..", "opteryx-catalog")
 )
 if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
     sys.path.insert(1, _CATALOG_REPO)

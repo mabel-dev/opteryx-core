@@ -296,6 +296,155 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             return (TableType.View, None)
         return (None, None)
 
+    # Materialized view operations. The registration record (defining SQL,
+    # source tables) is a sidecar file next to dataset.json - the backing
+    # table is an ordinary relation in every other respect. This store has no
+    # trigger machinery, so registration records the sources verbatim and
+    # nothing ever fires; it exists so the MV statement surface is fully
+    # exercisable without a remote catalog.
+    def _mv_path(self, relation_name: str) -> str:
+        return os.path.join(self._relation_dir(relation_name), "materialized_view.json")
+
+    def is_materialized_view(self, relation_name: str) -> bool:
+        return os.path.isfile(self._mv_path(relation_name))
+
+    def _read_mv_record(self, relation_name: str) -> Optional[dict]:
+        mv_path = self._mv_path(relation_name)
+        if not os.path.isfile(mv_path):
+            return None
+        with open(mv_path) as f:
+            return json.load(f)
+
+    # Trigger records mirror the catalog's: one refresh trigger per (source,
+    # MV) pair, held in a `triggers.json` sidecar next to the SOURCE table's
+    # dataset.json - the trigger hangs off the table whose commits would fire
+    # it, not off the MV. Nothing in this store ever fires them; they exist so
+    # DROP TRIGGER / SHOW TRIGGERS surfaces are fully exercisable without a
+    # remote catalog.
+    def _triggers_path(self, relation_name: str) -> str:
+        return os.path.join(self._relation_dir(relation_name), "triggers.json")
+
+    @staticmethod
+    def _mv_trigger_name(relation_name: str) -> str:
+        """The auto-generated name of an MV's refresh trigger on a source -
+        same convention as the catalog's, derived from the MV's name relative
+        to its workspace (`refresh__<collection>__<dataset>`)."""
+        relative = relation_name.split(".")[1:] or [relation_name]
+        return "refresh__" + "__".join(relative)
+
+    def list_triggers(self, relation_name: str) -> List[dict]:
+        triggers_path = self._triggers_path(relation_name)
+        if not os.path.isfile(triggers_path):
+            return []
+        with open(triggers_path) as f:
+            return json.load(f)
+
+    def _write_triggers(self, relation_name: str, triggers: List[dict]) -> None:
+        triggers_path = self._triggers_path(relation_name)
+        if not triggers:
+            if os.path.isfile(triggers_path):
+                os.remove(triggers_path)
+            return
+        tmp_path = triggers_path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(triggers, f)
+        os.replace(tmp_path, triggers_path)
+
+    def drop_trigger(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        author: Optional[str] = None,
+        missing_ok: bool = False,
+    ) -> None:
+        self._validate_relation_name(relation_name)
+        triggers = self.list_triggers(relation_name)
+        remaining = [t for t in triggers if t.get("name") != trigger_name]
+        if len(remaining) == len(triggers):
+            if missing_ok:
+                return
+            raise ValueError(
+                f"trigger {trigger_name} does not exist on {relation_name} "
+                "(use DROP TRIGGER IF EXISTS to make this quiet)"
+            )
+        self._write_triggers(relation_name, remaining)
+
+    def _land_refresh_trigger(
+        self, source: str, mv_relation_name: str, author: Optional[str]
+    ) -> None:
+        """Upsert this MV's refresh trigger on one source table, with the same
+        field names (kebab-case) the catalog stores."""
+        name = self._mv_trigger_name(mv_relation_name)
+        triggers = [t for t in self.list_triggers(source) if t.get("name") != name]
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        triggers.append(
+            {
+                "name": name,
+                "kind": "materialized_view_refresh",
+                "target-view": mv_relation_name,
+                "statement-id": None,
+                "created-by": author,
+                "created-at-ms": now_ms,
+                "last-fired-at-ms": None,
+                "last-fired-status": None,
+            }
+        )
+        self._write_triggers(source, triggers)
+
+    def register_materialized_view(
+        self,
+        relation_name: str,
+        sql: str,
+        source_tables: List[str],
+        author: Optional[str] = None,
+    ) -> None:
+        self._validate_relation_name(relation_name)
+        if not self.relation_exists(relation_name):
+            raise ValueError(
+                f"materialized view backing table does not exist: {relation_name}"
+            )
+        # Re-registration (CREATE OR REPLACE) reconciles triggers against the
+        # new source list - a source no longer read must not keep firing.
+        previous = self._read_mv_record(relation_name) or {}
+        record = {
+            "sql": sql,
+            "source_tables": list(source_tables),
+            "author": author,
+            "registered_at": _now_utc_iso(),
+        }
+        mv_path = self._mv_path(relation_name)
+        tmp_path = mv_path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(record, f)
+        os.replace(tmp_path, mv_path)
+
+        trigger_name = self._mv_trigger_name(relation_name)
+        for source in source_tables:
+            self._land_refresh_trigger(source, relation_name, author)
+        for stale in set(previous.get("source_tables") or []) - set(source_tables):
+            self.drop_trigger(stale, trigger_name, author=author, missing_ok=True)
+
+    def drop_materialized_view(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        self._validate_relation_name(relation_name)
+        if not self.relation_exists(relation_name):
+            if if_exists:
+                return
+            raise ValueError(f"relation does not exist: {relation_name}")
+        if not self.is_materialized_view(relation_name):
+            raise ValueError(
+                f"{relation_name} is not a materialized view; "
+                "use DROP TABLE or DROP VIEW"
+            )
+        # A dropped MV takes its refresh triggers with it - they live on the
+        # source tables, so remove them before the MV's own directory goes.
+        record = self._read_mv_record(relation_name) or {}
+        trigger_name = self._mv_trigger_name(relation_name)
+        for source in record.get("source_tables") or []:
+            self.drop_trigger(source, trigger_name, author=author, missing_ok=True)
+        shutil.rmtree(self._relation_dir(relation_name))
+
     def table_engine(self, name: str, telemetry=None, **kwargs):
         """Create a transient table reader for the named relation."""
         return LocalStoreTable(

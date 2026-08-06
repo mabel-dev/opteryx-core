@@ -79,7 +79,7 @@
     },
     "disable_gc_during_query": {
         "name": "disable_gc_during_query",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "SERVER",
         "visibility": "RESTRICTED",
         "settable": false,
@@ -91,7 +91,7 @@
     },
     "disable_http2": {
         "name": "disable_http2",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "USER",
         "visibility": "RESTRICTED",
         "settable": true,
@@ -103,7 +103,7 @@
     },
     "disable_http_multiplexing": {
         "name": "disable_http_multiplexing",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "USER",
         "visibility": "RESTRICTED",
         "settable": true,
@@ -115,7 +115,7 @@
     },
     "disable_optimizer": {
         "name": "disable_optimizer",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "SERVER",
         "visibility": "RESTRICTED",
         "settable": false,
@@ -198,7 +198,7 @@
     },
     "http_pipewait": {
         "name": "http_pipewait",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "USER",
         "visibility": "RESTRICTED",
         "settable": true,
@@ -222,7 +222,7 @@
     },
     "instrument_engine": {
         "name": "instrument_engine",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "SERVER",
         "visibility": "RESTRICTED",
         "settable": false,
@@ -409,7 +409,7 @@
     },
     "opteryx_debug": {
         "name": "opteryx_debug",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "SERVER",
         "visibility": "RESTRICTED",
         "settable": false,
@@ -571,7 +571,7 @@
     },
     "trace": {
         "name": "trace",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "USER",
         "visibility": "UNRESTRICTED",
         "settable": true,
@@ -605,7 +605,7 @@
     },
     "validate_optimizer_plans": {
         "name": "validate_optimizer_plans",
-        "type": "BOOLEAN",
+        "type": "BOOL",
         "owner": "SERVER",
         "visibility": "RESTRICTED",
         "settable": false,

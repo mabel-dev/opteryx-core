@@ -204,17 +204,7 @@ void simd_mix_hash(uint64_t* dest, const uint64_t* values, std::size_t count) {
 #if defined(__AVX2__)
     // noop - AVX2 candidate included below
 #endif
-    fn_t fn = simd::select_dispatch<fn_t>(cache, {
-#if defined(__AVX2__)
-        { &cpu_supports_avx2, simd_mix_hash_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        { &cpu_supports_neon, simd_mix_hash_neon },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        { &cpu_supports_rvv, simd_mix_hash_rvv },
-#endif
-    }, simd_mix_hash_scalar);
+    fn_t fn = SIMD_STATIC_SELECT(simd_mix_hash_avx2, simd_mix_hash_neon, simd_mix_hash_rvv, simd_mix_hash_scalar);
 
     return fn(dest, values, count);
 }
@@ -279,17 +269,7 @@ void simd_hash_i64(const uint64_t* src, uint64_t* dst, std::size_t count) {
     if (!src || !dst || !count) return;
     using fn_t = void(*)(const uint64_t*, uint64_t*, std::size_t);
     static std::atomic<fn_t> cache{nullptr};
-    fn_t fn = simd::select_dispatch<fn_t>(cache, {
-#if defined(__AVX2__)
-        { &cpu_supports_avx2, simd_hash_i64_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        { &cpu_supports_neon, simd_hash_i64_neon },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        { &cpu_supports_rvv, simd_hash_i64_rvv },
-#endif
-    }, simd_hash_i64_scalar);
+    fn_t fn = SIMD_STATIC_SELECT(simd_hash_i64_avx2, simd_hash_i64_neon, simd_hash_i64_rvv, simd_hash_i64_scalar);
     fn(src, dst, count);
 }
 
@@ -529,30 +509,27 @@ void simd_mix_hash_from_dict_rvv_tpl(
 }
 #endif  // __riscv && __riscv_vector
 
-// Dispatcher per (CodeT, Nullable) pair. Each template instantiation owns its
-// own atomic cache, so the CPU probe runs once per kernel variant.
+// Dispatcher per (CodeT, Nullable) pair — compile-time selection (the macro
+// can't carry template-comma arguments, so this site uses the #if chain
+// directly; same semantics as SIMD_STATIC_SELECT).
 template <typename CodeT, bool Nullable>
 void simd_mix_hash_from_dict_dispatch(
         uint64_t* dest, const uint64_t* dict_lookup,
         const CodeT* codes, const uint8_t* null_bitmap,
         std::size_t start_row, std::size_t count) {
-    using fn_t = void (*)(uint64_t*, const uint64_t*, const CodeT*,
-                          const uint8_t*, std::size_t, std::size_t);
-    static std::atomic<fn_t> cache{nullptr};
-
-    fn_t fn = simd::select_dispatch<fn_t>(cache, {
 #if defined(__AVX2__)
-        { &cpu_supports_avx2, simd_mix_hash_from_dict_avx2_tpl<CodeT, Nullable> },
+    simd_mix_hash_from_dict_avx2_tpl<CodeT, Nullable>(
+        dest, dict_lookup, codes, null_bitmap, start_row, count);
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+    simd_mix_hash_from_dict_neon_tpl<CodeT, Nullable>(
+        dest, dict_lookup, codes, null_bitmap, start_row, count);
+#elif defined(__riscv) && defined(__riscv_vector)
+    simd_mix_hash_from_dict_rvv_tpl<CodeT, Nullable>(
+        dest, dict_lookup, codes, null_bitmap, start_row, count);
+#else
+    simd_mix_hash_from_dict_scalar_tpl<CodeT, Nullable>(
+        dest, dict_lookup, codes, null_bitmap, start_row, count);
 #endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        { &cpu_supports_neon, simd_mix_hash_from_dict_neon_tpl<CodeT, Nullable> },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        { &cpu_supports_rvv, simd_mix_hash_from_dict_rvv_tpl<CodeT, Nullable> },
-#endif
-    }, simd_mix_hash_from_dict_scalar_tpl<CodeT, Nullable>);
-
-    fn(dest, dict_lookup, codes, null_bitmap, start_row, count);
 }
 
 }  // namespace
@@ -689,17 +666,7 @@ void simd_scale_date32(const int32_t* src, int64_t* dest, std::size_t count) {
     using fn_t = void(*)(const int32_t*, int64_t*, std::size_t);
     static std::atomic<fn_t> cache{nullptr};
 
-    fn_t fn = simd::select_dispatch<fn_t>(cache, {
-#if defined(__AVX2__)
-        { &cpu_supports_avx2, simd_scale_date32_avx2 },
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        { &cpu_supports_neon, simd_scale_date32_neon },
-#endif
-#if defined(__riscv) && defined(__riscv_vector)
-        { &cpu_supports_rvv, simd_scale_date32_rvv },
-#endif
-    }, simd_scale_date32_scalar);
+    fn_t fn = SIMD_STATIC_SELECT(simd_scale_date32_avx2, simd_scale_date32_neon, simd_scale_date32_rvv, simd_scale_date32_scalar);
 
     return fn(src, dest, count);
 }

@@ -1140,18 +1140,6 @@
         "error": null
       }
     ],
-    "_PASSTHRU": [
-      {
-        "function_name": "_PASSTHRU",
-        "overload_id": "_PASSTHRU_1",
-        "kernel": "lambda2",
-        "current_cost": -0.017,
-        "cost_us_per_million": -0.028,
-        "ns_per_row": -0.0,
-        "success": true,
-        "error": null
-      }
-    ],
     "_STARTS_WITH": [
       {
         "function_name": "_STARTS_WITH",

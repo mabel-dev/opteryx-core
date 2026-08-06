@@ -28,7 +28,11 @@ STATEMENTS = [
         ("SELECT * FROM $planets WHERE id = 4 + 4", "optimization_constant_fold_expression"),
         ("SELECT * FROM $planets WHERE id * 0 = 1", "optimization_constant_fold_reduce"),
         ("SELECT id ^ 1 = 1 FROM $planets LIMIT 10", "optimization_limit_pushdown"),
-        ("SELECT name FROM testdata.astronauts WHERE name = 'Neil A. Armstrong'", "optimization_predicate_pushdown"),
+        # `_into_scan`, not the bare `_pushdown` counter: this predicate reaches the
+        # Parquet reader and the Filter node disappears entirely. The bare counter
+        # never sees that — it counts predicates placed as Filter nodes elsewhere in
+        # the plan, so for a fully-pushed scan predicate it stays at zero.
+        ("SELECT name FROM testdata.astronauts WHERE name = 'Neil A. Armstrong'", "optimization_predicate_pushdown_into_scan"),
         ("SELECT name FROM $planets WHERE name LIKE '%'", "optimization_constant_fold_reduce"), # rewritten to `name is not null`
         ("SELECT name FROM $planets WHERE name ILIKE '%'", "optimization_constant_fold_reduce"), # rewritten to `name is not null`
         ("SELECT name FROM $planets WHERE name ILIKE '%th%'", "optimization_predicate_rewriter_replace_like_with_in_string"),

@@ -22,6 +22,9 @@ extern "C" {
 /* Count set bits in a bitmap. */
 size_t simd_popcount(const uint8_t* data, size_t nbytes);
 
+/* In-place AND: dst &= src over nbytes bytes (word-wide). */
+void c_bitmap_and_inplace(uint8_t* dst, const uint8_t* src, size_t nbytes);
+
 /* Create a BoolVector from raw bitmap buffers.
  *
  * Parameters:

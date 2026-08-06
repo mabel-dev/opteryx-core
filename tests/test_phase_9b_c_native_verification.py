@@ -48,12 +48,12 @@ def test_cast_double_to_integer():
 
 
 def test_cast_varchar_to_double():
-    """CAST(varchar_col AS DOUBLE) should execute successfully."""
+    """CAST(varchar_col AS FLOAT64) should execute successfully."""
     session = opteryx.session()
-    sql = "SELECT CAST('3.14' AS DOUBLE) FROM $planets LIMIT 1"
+    sql = "SELECT CAST('3.14' AS FLOAT64) FROM $planets LIMIT 1"
     results = list(session.execute_to_morsels(sql))
     assert len(results) > 0, "Cast query should return results"
-    print("✓ CAST(VARCHAR AS DOUBLE) → executes (should use draken_cast_string_to_float64)")
+    print("✓ CAST(VARCHAR AS FLOAT64) → executes (should use draken_cast_string_to_float64)")
 
 
 def test_cast_string_to_integer():

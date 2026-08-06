@@ -36,7 +36,7 @@ statement ok
 SELECT CAST('22' AS INTEGER)
 
 statement ok
-SELECT CAST('22.0' AS DOUBLE)
+SELECT CAST('22.0' AS FLOAT64)
 
 statement ok
 SELECT CAST('22.0' AS DECIMAL)
@@ -55,7 +55,7 @@ statement ok
 SELECT TRY_CAST('22' AS INTEGER)
 
 statement ok
-SELECT TRY_CAST('22.0' AS DOUBLE)
+SELECT TRY_CAST('22.0' AS FLOAT64)
 
 statement ok
 SELECT TRY_CAST('22.0' AS DECIMAL)
@@ -86,14 +86,14 @@ statement ok
 SELECT CAST(FALSE AS VARCHAR)
 
 statement ok
-SELECT CAST('48656c6c6f' AS BLOB); -- "Hello" in hexadecimal
+SELECT CAST('48656c6c6f' AS VARBINARY); -- "Hello" in hexadecimal
 
 
 statement ok
-SELECT CAST('48656c6c6f' AS BLOB)
+SELECT CAST('48656c6c6f' AS VARBINARY)
 
 statement error TypeError
-SELECT CAST(NULL AS BLOB)
+SELECT CAST(NULL AS VARBINARY)
 
 
 statement ok
@@ -115,16 +115,16 @@ statement ok
 SELECT TRY_CAST(FALSE AS VARCHAR)
 
 statement ok
-SELECT TRY_CAST('48656c6c6f' AS BLOB)
+SELECT TRY_CAST('48656c6c6f' AS VARBINARY)
 
 statement error TypeError
-SELECT TRY_CAST(NULL AS BLOB)
+SELECT TRY_CAST(NULL AS VARBINARY)
 
 statement error ValueError
 SELECT TRY_CAST('Not a number' AS INTEGER)
 
 statement error ValueError
-SELECT TRY_CAST('Not a number' AS DOUBLE)
+SELECT TRY_CAST('Not a number' AS FLOAT64)
 
 statement error ValueError
 SELECT TRY_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
@@ -158,16 +158,16 @@ statement ok
 SELECT SAFE_CAST(FALSE AS VARCHAR)
 
 statement ok
-SELECT SAFE_CAST('48656c6c6f' AS BLOB)
+SELECT SAFE_CAST('48656c6c6f' AS VARBINARY)
 
 statement error TypeError
-SELECT SAFE_CAST(NULL AS BLOB)
+SELECT SAFE_CAST(NULL AS VARBINARY)
 
 statement error ValueError
 SELECT SAFE_CAST('Not a number' AS INTEGER)
 
 statement error ValueError
-SELECT SAFE_CAST('Not a number' AS DOUBLE)
+SELECT SAFE_CAST('Not a number' AS FLOAT64)
 
 statement error ValueError
 SELECT SAFE_CAST('2022-01-01' AS INTEGER);  -- Invalid cast
@@ -186,13 +186,13 @@ statement error TypeError
 SELECT CAST(NULL AS INTEGER)
 
 statement error TypeError
-SELECT CAST(NULL AS DOUBLE)
+SELECT CAST(NULL AS FLOAT64)
 
 statement error TypeError
 SELECT TRY_CAST(NULL AS INTEGER)
 
 statement error TypeError
-SELECT TRY_CAST(NULL AS DOUBLE)
+SELECT TRY_CAST(NULL AS FLOAT64)
 
 statement error TypeError
 SELECT CAST(NULL AS BOOLEAN)

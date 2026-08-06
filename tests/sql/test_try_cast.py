@@ -143,7 +143,7 @@ def test_try_cast_over_a_conversion_that_cannot_fail_is_just_a_cast():
     """A widening has no failure mode, so the disposition is irrelevant to it —
     TRY_CAST must not make it null anything."""
     assert _col("SELECT TRY_CAST(id AS INTEGER) AS x FROM $planets")[:3] == [1, 2, 3]
-    assert _col("SELECT TRY_CAST(id AS DOUBLE) AS x FROM $planets")[:3] == [1.0, 2.0, 3.0]
+    assert _col("SELECT TRY_CAST(id AS FLOAT64) AS x FROM $planets")[:3] == [1.0, 2.0, 3.0]
     assert _col("SELECT TRY_CAST(CAST(id AS UINT8) AS UINT64) AS x FROM $planets")[:3] == [1, 2, 3]
 
 

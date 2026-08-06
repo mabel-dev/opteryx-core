@@ -16,8 +16,8 @@ same shape: a private copy of a rule that had drifted from the canonical one.
    matching the UINT32 the kernel produces.
 
 3. `_parse_blob` fell through to bytes(value), whose int overload builds a zero
-   buffer of that LENGTH: CAST(42 AS BLOB) folded to 42 zero bytes, and
-   CAST(3232235777 AS BLOB) allocated ~3GB at plan time.
+   buffer of that LENGTH: CAST(42 AS VARBINARY) folded to 42 zero bytes, and
+   CAST(3232235777 AS VARBINARY) allocated ~3GB at plan time.
 
 Run as a script (CLAUDE.md §10) or under pytest.
 """
@@ -287,15 +287,15 @@ def test_literal_cast_to_binary_encodes_the_rendering(literal, expected, target)
 
 def test_literal_binary_cast_matches_the_column_path():
     # The column path was always right — b'1', b'2', b'3' — so this is the oracle.
-    assert _values("SELECT CAST(id AS BLOB) AS v FROM $planets LIMIT 3") == [b"1", b"2", b"3"]
-    assert _values("SELECT CAST(1 AS BLOB) AS v") == [b"1"]
-    assert _values("SELECT CAST(gravity AS BLOB) AS v FROM $planets LIMIT 2") == [b"3.7", b"8.9"]
-    assert _values("SELECT CAST(3.7 AS BLOB) AS v") == [b"3.7"]
+    assert _values("SELECT CAST(id AS VARBINARY) AS v FROM $planets LIMIT 3") == [b"1", b"2", b"3"]
+    assert _values("SELECT CAST(1 AS VARBINARY) AS v") == [b"1"]
+    assert _values("SELECT CAST(gravity AS VARBINARY) AS v FROM $planets LIMIT 2") == [b"3.7", b"8.9"]
+    assert _values("SELECT CAST(3.7 AS VARBINARY) AS v") == [b"3.7"]
 
 
 def test_large_integer_to_blob_does_not_allocate_by_value():
     # The real hazard: this used to build a ~3GB zero buffer at plan time.
-    result = _values("SELECT CAST(3232235777 AS BLOB) AS v")
+    result = _values("SELECT CAST(3232235777 AS VARBINARY) AS v")
     assert len(result[0]) == 10, len(result[0])
 
 

@@ -369,6 +369,91 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry):
     return predicate
 
 
+def rewrite_cnf_any_eq_to_contains(condition, telemetry):
+    """CNF (n-ary OR) counterpart of `rewrite_ored_any_eq_to_contains`.
+
+    'a' = ANY(z) OR 'b' = ANY(z) OR 'c' = ANY(z)  →  z @> ('a', 'b', 'c')
+
+    Needed because DisjunctionSimplificationStrategy normalises a chain of THREE OR
+    MORE OR-branches into a single n-ary CNF node, while two branches stay a binary
+    OR. The OR-shaped rewrite above is reached only from the `node_type == OR` arm of
+    `_rewrite_predicate`, so without this the fusion fired at two terms and silently
+    stopped at three — losing the optimization exactly where more terms make it pay
+    most (each surviving branch is another full ANY scan per row). Its Eq and LIKE
+    siblings already had CNF counterparts (`rewrite_cnf_eq_to_inlist`,
+    `rewrite_cnf_like_to_any`); this was the missing third.
+    """
+    if condition.node_type != NodeType.CNF:
+        return condition
+
+    groups: Dict[str, dict] = {}
+    others = []
+
+    for branch in condition.parameters:
+        if (
+            branch.node_type == NodeType.COMPARISON_OPERATOR
+            and branch.value == "AnyOpEq"
+            and branch.left.node_type == NodeType.LITERAL
+            and branch.right.node_type == NodeType.IDENTIFIER
+            and branch.right.schema_column is not None
+        ):
+            col_id = branch.right.schema_column.identity
+            if col_id not in groups:
+                groups[col_id] = {"values": [], "nodes": [], "column_node": branch.right}
+            groups[col_id]["values"].append(branch.left.value)
+            groups[col_id]["nodes"].append(branch)
+        else:
+            others.append(branch)
+
+    new_params = list(others)
+    rewrote = False
+
+    for data in groups.values():
+        if len(data["values"]) <= 1:
+            new_params.extend(data["nodes"])
+            continue
+
+        telemetry.optimization_predicate_rewriter_anyeq_to_contains += 1
+        rewrote = True
+
+        node = data["nodes"][0]
+        # Sorted, not `list(set(...))`: set iteration order is not stable across runs,
+        # and an unstable literal order makes the rendered plan differ between two
+        # compilations of the same query. Values are already typed by the binder
+        # (VARCHAR literals are bytes) — sort by string repr for a deterministic order
+        # across mixed literal types while keeping the actual typed values.
+        values = sorted(set(data["values"]), key=str)
+        node.left.value = values
+        _old_elem_ct = node.left.type
+        _arr_ct = _lt.ARRAY(_old_elem_ct if isinstance(_old_elem_ct, ColumnType) else _lt.VARIANT)
+        node.left.type = _arr_ct
+        node.left.schema_column = ConstantColumn(
+            name=node.left.name,
+            column_type=_arr_ct,
+            value=node.left.value,
+        )
+        node.value = "AtArrow"
+        node.node_type = NodeType.COMPARISON_OPERATOR
+        node.right = data["column_node"]
+        # AtArrow reads container-on-the-left: `alma_mater @> ['MIT', ...]`.
+        node.left, node.right = node.right, node.left
+        new_params.append(node)
+        # The other branches are DROPPED rather than turned into LITERAL False (what
+        # the OR-shaped twin must do, since it cannot restructure a binary tree in
+        # place) — a CNF node owns a parameter list, so the absorbed branches simply
+        # do not come along.
+
+    if not rewrote:
+        return condition
+
+    if len(new_params) == 1:
+        return new_params[0]
+
+    result = Node(node_type=NodeType.CNF)
+    result.parameters = new_params
+    return result
+
+
 def rewrite_ored_eq_to_inlist(predicate, telemetry):
     """
     Rewrite multiple OR'ed Equals conditions on the same column to a single regex pattern.
@@ -1092,6 +1177,84 @@ def _is_safe(node) -> bool:
     return False
 
 
+# Physical casts that can NEVER map a non-NULL input to NULL: identity, and
+# value-preserving numeric widenings. Deliberately narrow — this is the exact family
+# a CASE branch type-blend inserts, and nothing else earns the benefit of the doubt.
+# Excluded on purpose: every narrowing (can overflow), string<->numeric (can fail to
+# parse), DECIMAL/temporal/VARIANT, and every TRY_ cast (whose entire contract is to
+# yield NULL on failure).
+_NULL_PRESERVING_WIDENING: Dict[str, frozenset] = {
+    "INT8":    frozenset({"INT8", "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "INT16":   frozenset({"INT16", "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "INT32":   frozenset({"INT32", "INT64", "FLOAT64"}),  # not FLOAT32: 2^31 > 2^24
+    "INT64":   frozenset({"INT64"}),
+    "UINT8":   frozenset({"UINT8", "UINT16", "UINT32", "UINT64",
+                          "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "UINT16":  frozenset({"UINT16", "UINT32", "UINT64",
+                          "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "UINT32":  frozenset({"UINT32", "UINT64", "INT64", "FLOAT64"}),
+    "UINT64":  frozenset({"UINT64"}),
+    "FLOAT32": frozenset({"FLOAT32", "FLOAT64"}),
+    "FLOAT64": frozenset({"FLOAT64"}),
+}
+
+
+def _physical_name(expression) -> str:
+    """Physical DrakenType name bound to an expression, or '' when untyped."""
+    schema_column = getattr(expression, "schema_column", None)
+    column_type = getattr(schema_column, "column_type", None)
+    physical = getattr(column_type, "physical", None)
+    return getattr(physical, "name", "") or ""
+
+
+def _is_null_preserving_cast(cast_node) -> bool:
+    """True iff this CAST cannot turn a non-NULL value into NULL."""
+    target_name = (getattr(cast_node, "value", "") or "").upper()
+    if target_name.startswith("TRY_"):
+        return False  # TRY_ exists precisely to yield NULL on failure
+    if getattr(cast_node, "format", None) is not None:
+        return False  # a FORMAT-driven parse can fail on a non-NULL input
+    source = getattr(cast_node, "left", None)
+    if source is None:
+        return False
+    source_physical = _physical_name(source)
+    target_physical = _physical_name(cast_node)
+    if not source_physical or not target_physical:
+        return False
+    return target_physical in _NULL_PRESERVING_WIDENING.get(source_physical, frozenset())
+
+
+def _identity_through_transparent(expression):
+    """`schema_column.identity` of an expression, seeing through wrappers that change
+    neither which value it denotes nor which rows are NULL.
+
+    The IFNULL rewrite below matches `CASE WHEN x IS NULL THEN y ELSE x END` by
+    comparing the identity of both mentions of `x`. Branch type-blending routinely
+    wraps the ELSE mention in a CAST the user never wrote — `surface_pressure`
+    (FLOAT32) against a FLOAT64 literal binds as `surface_pressure::FLOAT64` — and the
+    wrapper carries its OWN identity, so the two stopped matching and the rewrite
+    silently declined for every blended CASE. Looking through the wrapper restores it.
+
+    The look-through is NOT unconditional. The rewrite re-points the null test at the
+    wrapped expression (`IFNULL(CAST(x), y)` tests `CAST(x) IS NULL`, not `x IS NULL`),
+    so an unwrapped cast that can produce NULL from a non-NULL input would change the
+    answer: `CASE WHEN x IS NULL THEN y ELSE CAST(x AS INTEGER) END` over an
+    unparseable string yields NULL, while `IFNULL(CAST(x AS INTEGER), y)` yields y.
+    Only casts that provably cannot do that are crossed. NESTED is the sanctioned
+    transparent wrapper (a parenthesis) and is always safe.
+    """
+    while expression is not None:
+        node_type = expression.node_type
+        if node_type == NodeType.NESTED:
+            expression = expression.centre
+            continue
+        if node_type == NodeType.CAST and _is_null_preserving_cast(expression):
+            expression = expression.left
+            continue
+        break
+    return getattr(getattr(expression, "schema_column", None), "identity", None)
+
+
 def _rewrite_case_node(node, telemetry: QueryTelemetry):
     """Rewrite a NodeType.CASE node to IFNULL or IIF when safe."""
     if len(node.conditions) != 1 or node.else_result is None:
@@ -1106,8 +1269,11 @@ def _rewrite_case_node(node, telemetry: QueryTelemetry):
         and cond.value == "IsNull"
         and _is_safe(then_)
     ):
-        cond_identity = getattr(getattr(cond.centre, "schema_column", None), "identity", None)
-        else_identity = getattr(getattr(else_, "schema_column", None), "identity", None)
+        # `else_` itself (wrapper and all) stays the IFNULL argument — only the
+        # identity MATCH looks through it. Unwrapping the argument would drop the
+        # blend cast and hand back the narrower branch type.
+        cond_identity = _identity_through_transparent(cond.centre)
+        else_identity = _identity_through_transparent(else_)
         if cond_identity is not None and cond_identity == else_identity:
             telemetry.optimization_predicate_rewriter_case_to_ifnull += 1
             new_node = Node(
@@ -1159,6 +1325,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     if predicate.node_type == NodeType.CNF:
         predicate = rewrite_cnf_eq_to_inlist(predicate, telemetry)
         predicate = rewrite_cnf_like_to_any(predicate, telemetry)
+        predicate = rewrite_cnf_any_eq_to_contains(predicate, telemetry)
 
     # if predicate.node_type in {NodeType.AND, NodeType.OR, NodeType.XOR}:
     if predicate.left:

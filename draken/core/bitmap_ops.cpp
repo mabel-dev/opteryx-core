@@ -6,6 +6,74 @@
 #include <cstring>
 #include <cstdint>
 
+namespace {
+
+// Word-wide binary bitmap op with the null-shape dispatch hoisted out of the
+// loop. Data bits are combined 8 bytes at a time (memcpy'd words — alignment
+// safe, and the loops auto-vectorize under -O3 with the target's SIMD); the
+// value-blind null merge (OR of the operand null masks — see the Kleene note
+// below for why the VM does NOT use these) runs the same way, accumulating
+// has_null as a running OR tested once instead of a branch per byte.
+template <typename OpFn>
+inline int bitmap_binop(
+    uint8_t* out, uint8_t* out_null,
+    const uint8_t* left, const uint8_t* left_null,
+    const uint8_t* right, const uint8_t* right_null,
+    size_t nbytes, uint32_t num_rows, OpFn op)
+{
+    const size_t nw = nbytes >> 3;
+
+    for (size_t i = 0; i < nw; i++) {
+        uint64_t l, r, w;
+        std::memcpy(&l, left + i * 8, 8);
+        std::memcpy(&r, right + i * 8, 8);
+        w = op(l, r);
+        std::memcpy(out + i * 8, &w, 8);
+    }
+    for (size_t i = nw * 8; i < nbytes; i++)
+        out[i] = static_cast<uint8_t>(op((uint64_t)left[i], (uint64_t)right[i]));
+
+    uint64_t null_acc = 0;
+    if (left_null == nullptr && right_null == nullptr) {
+        std::memset(out_null, 0, nbytes);
+    } else if (left_null != nullptr && right_null != nullptr) {
+        for (size_t i = 0; i < nw; i++) {
+            uint64_t l, r, w;
+            std::memcpy(&l, left_null + i * 8, 8);
+            std::memcpy(&r, right_null + i * 8, 8);
+            w = l | r;
+            null_acc |= w;
+            std::memcpy(out_null + i * 8, &w, 8);
+        }
+        for (size_t i = nw * 8; i < nbytes; i++) {
+            out_null[i] = static_cast<uint8_t>(left_null[i] | right_null[i]);
+            null_acc |= out_null[i];
+        }
+    } else {
+        const uint8_t* only = (left_null != nullptr) ? left_null : right_null;
+        for (size_t i = 0; i < nw; i++) {
+            uint64_t w;
+            std::memcpy(&w, only + i * 8, 8);
+            null_acc |= w;
+            std::memcpy(out_null + i * 8, &w, 8);
+        }
+        for (size_t i = nw * 8; i < nbytes; i++) {
+            out_null[i] = only[i];
+            null_acc |= only[i];
+        }
+    }
+
+    if ((num_rows & 7) != 0 && nbytes > 0) {
+        uint8_t mask = (1 << (num_rows & 7)) - 1;
+        out[nbytes - 1] &= mask;
+        out_null[nbytes - 1] &= mask;
+    }
+
+    return null_acc != 0;
+}
+
+}  // namespace
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -67,11 +135,33 @@ PyObject* bool_vector_from_bits(uint8_t* bitmap, uint8_t* null_bitmap, uint32_t 
  * AVX2 _mm256_sad_epu8, etc.), but the simple byte-loop is correct and sufficient.
  */
 size_t simd_popcount(const uint8_t* data, size_t nbytes) {
+    // Word-wide: __builtin_popcountll lowers to POPCNT / CNT+ADDV — 8 bytes
+    // per iteration instead of one.
+    const size_t nw = nbytes >> 3;
     size_t count = 0;
-    for (size_t i = 0; i < nbytes; i++) {
-        count += __builtin_popcount(data[i]);
+    for (size_t i = 0; i < nw; i++) {
+        uint64_t w;
+        std::memcpy(&w, data + i * 8, 8);
+        count += (size_t)__builtin_popcountll(w);
+    }
+    for (size_t i = nw * 8; i < nbytes; i++) {
+        count += (size_t)__builtin_popcount(data[i]);
     }
     return count;
+}
+
+/* In-place AND: dst &= src, word-wide. Shared by the filter-span validity
+ * merge (evaluation.pyx) — one implementation, not a per-call-site byte loop. */
+void c_bitmap_and_inplace(uint8_t* dst, const uint8_t* src, size_t nbytes) {
+    const size_t nw = nbytes >> 3;
+    for (size_t i = 0; i < nw; i++) {
+        uint64_t d, s;
+        std::memcpy(&d, dst + i * 8, 8);
+        std::memcpy(&s, src + i * 8, 8);
+        d &= s;
+        std::memcpy(dst + i * 8, &d, 8);
+    }
+    for (size_t i = nw * 8; i < nbytes; i++) dst[i] &= src[i];
 }
 
 /* AND two bitmaps: out = left & right, with NULL merging. */
@@ -81,35 +171,8 @@ int c_and_bitmap(
     const uint8_t* right, const uint8_t* right_null,
     size_t nbytes, uint32_t num_rows
 ) {
-    int has_null = 0;
-
-    for (size_t i = 0; i < nbytes; i++) {
-        // AND the data bits
-        out[i] = left[i] & right[i];
-
-        // NULL bitmap: OR the nulls (row is NULL if either is NULL)
-        uint8_t null_byte = 0;
-        if (left_null) {
-            null_byte |= left_null[i];
-        }
-        if (right_null) {
-            null_byte |= right_null[i];
-        }
-        out_null[i] = null_byte;
-
-        if (null_byte) {
-            has_null = 1;
-        }
-    }
-
-    // Handle partial byte at the end (may have padding bits)
-    if ((num_rows & 7) != 0) {
-        uint8_t mask = (1 << (num_rows & 7)) - 1;
-        out[nbytes - 1] &= mask;
-        out_null[nbytes - 1] &= mask;
-    }
-
-    return has_null;
+    return bitmap_binop(out, out_null, left, left_null, right, right_null,
+                        nbytes, num_rows, [](uint64_t l, uint64_t r) { return l & r; });
 }
 
 /* OR two bitmaps: out = left | right, with NULL merging. */
@@ -119,35 +182,8 @@ int c_or_bitmap(
     const uint8_t* right, const uint8_t* right_null,
     size_t nbytes, uint32_t num_rows
 ) {
-    int has_null = 0;
-
-    for (size_t i = 0; i < nbytes; i++) {
-        // OR the data bits
-        out[i] = left[i] | right[i];
-
-        // NULL bitmap: OR the nulls
-        uint8_t null_byte = 0;
-        if (left_null) {
-            null_byte |= left_null[i];
-        }
-        if (right_null) {
-            null_byte |= right_null[i];
-        }
-        out_null[i] = null_byte;
-
-        if (null_byte) {
-            has_null = 1;
-        }
-    }
-
-    // Handle partial byte at the end
-    if ((num_rows & 7) != 0) {
-        uint8_t mask = (1 << (num_rows & 7)) - 1;
-        out[nbytes - 1] &= mask;
-        out_null[nbytes - 1] &= mask;
-    }
-
-    return has_null;
+    return bitmap_binop(out, out_null, left, left_null, right, right_null,
+                        nbytes, num_rows, [](uint64_t l, uint64_t r) { return l | r; });
 }
 
 /* XOR two bitmaps: out = left ^ right, with NULL merging. */
@@ -157,35 +193,8 @@ int c_xor_bitmap(
     const uint8_t* right, const uint8_t* right_null,
     size_t nbytes, uint32_t num_rows
 ) {
-    int has_null = 0;
-
-    for (size_t i = 0; i < nbytes; i++) {
-        // XOR the data bits
-        out[i] = left[i] ^ right[i];
-
-        // NULL bitmap: OR the nulls
-        uint8_t null_byte = 0;
-        if (left_null) {
-            null_byte |= left_null[i];
-        }
-        if (right_null) {
-            null_byte |= right_null[i];
-        }
-        out_null[i] = null_byte;
-
-        if (null_byte) {
-            has_null = 1;
-        }
-    }
-
-    // Handle partial byte at the end
-    if ((num_rows & 7) != 0) {
-        uint8_t mask = (1 << (num_rows & 7)) - 1;
-        out[nbytes - 1] &= mask;
-        out_null[nbytes - 1] &= mask;
-    }
-
-    return has_null;
+    return bitmap_binop(out, out_null, left, left_null, right, right_null,
+                        nbytes, num_rows, [](uint64_t l, uint64_t r) { return l ^ r; });
 }
 
 /* NOT a bitmap: out = ~src (within num_rows bits), with NULL propagation. */
@@ -194,32 +203,39 @@ int c_not_bitmap(
     const uint8_t* src, const uint8_t* src_null,
     size_t nbytes, uint32_t num_rows
 ) {
-    int has_null = 0;
+    const size_t nw = nbytes >> 3;
+    for (size_t i = 0; i < nw; i++) {
+        uint64_t w;
+        std::memcpy(&w, src + i * 8, 8);
+        w = ~w;
+        std::memcpy(out + i * 8, &w, 8);
+    }
+    for (size_t i = nw * 8; i < nbytes; i++)
+        out[i] = static_cast<uint8_t>(~src[i]);
 
-    for (size_t i = 0; i < nbytes; i++) {
-        // NOT the data bits
-        out[i] = ~src[i];
-
-        // NULL bitmap: propagate (NOT doesn't change NULL status)
-        uint8_t null_byte = 0;
-        if (src_null) {
-            null_byte = src_null[i];
+    uint64_t null_acc = 0;
+    if (src_null == nullptr) {
+        std::memset(out_null, 0, nbytes);
+    } else {
+        for (size_t i = 0; i < nw; i++) {
+            uint64_t w;
+            std::memcpy(&w, src_null + i * 8, 8);
+            null_acc |= w;
+            std::memcpy(out_null + i * 8, &w, 8);
         }
-        out_null[i] = null_byte;
-
-        if (null_byte) {
-            has_null = 1;
+        for (size_t i = nw * 8; i < nbytes; i++) {
+            out_null[i] = src_null[i];
+            null_acc |= src_null[i];
         }
     }
 
-    // Handle partial byte at the end
-    if ((num_rows & 7) != 0) {
+    if ((num_rows & 7) != 0 && nbytes > 0) {
         uint8_t mask = (1 << (num_rows & 7)) - 1;
         out[nbytes - 1] &= mask;
         out_null[nbytes - 1] &= mask;
     }
 
-    return has_null;
+    return null_acc != 0;
 }
 
 /* Stub: extract bitmap pointers from a DrakenVector.

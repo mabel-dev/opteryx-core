@@ -25,8 +25,8 @@ from opteryx.expression.evaluator._impl import _OP_CODE, _verify_node_type_const
 def compile_eval_nodes(nodes):
     """Compile expression nodes to (identity, CompiledBytecode) at bind time.
 
-    Applies should_evaluate filtering, _PASSTHRU exclusion, and
-    prioritize_evaluation ordering.  The result is a list of
+    Applies should_evaluate filtering and prioritize_evaluation
+    ordering.  The result is a list of
     (identity_str, CompiledBytecode) pairs ready for execute_and_append().
     """
     from opteryx.expression import should_evaluate, prioritize_evaluation
@@ -35,7 +35,7 @@ def compile_eval_nodes(nodes):
         build_bytecode as _build_bc,
     )
 
-    filtered = [n for n in nodes if n.value != "_PASSTHRU" and should_evaluate(n)]
+    filtered = [n for n in nodes if should_evaluate(n)]
     ordered = list(prioritize_evaluation(filtered))
     return [(n.schema_column.identity, _build_bc(_lower(n))) for n in ordered]
 

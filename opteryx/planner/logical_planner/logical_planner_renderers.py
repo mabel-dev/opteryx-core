@@ -342,6 +342,12 @@ def render_analyze(node: LogicalPlanNode) -> str:
     return f"ANALYZE TABLE ({node.table_name})"
 
 
+@register_render(LogicalPlanStepType.DropTrigger)
+def render_drop_trigger(node: LogicalPlanNode) -> str:
+    if_exists = "IF EXISTS " if node.if_exists else ""
+    return f"DROP TRIGGER {if_exists}({node.trigger_name}) ON ({node.table_name})"
+
+
 @register_render(LogicalPlanStepType.Window)
 def render_window(node: LogicalPlanNode) -> str:
     aggs = ", ".join(format_expression(a) for a in (node.aggregates or []))

@@ -31,7 +31,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # The catalog is a sibling repo, not a package dependency (same as the worker script does).
 _CATALOG_REPO = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "pyiceberg-firestore-gcs")
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
 )
 if os.path.isdir(_CATALOG_REPO) and _CATALOG_REPO not in sys.path:
     sys.path.insert(1, _CATALOG_REPO)

@@ -1106,10 +1106,10 @@
                     "DATE",
                     "EXTRACT"
                 ],
-                "return_type": "TIME",
+                "return_type": "TIME[US]",
                 "returns": {
-                    "type": "TIME",
-                    "documentation": "Returns the computed result as `TIME`."
+                    "type": "TIME[US]",
+                    "documentation": "Returns the computed result as `TIME[US]`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -1156,10 +1156,10 @@
                     "DATE",
                     "EXTRACT"
                 ],
-                "return_type": "TIMESTAMP",
+                "return_type": "TIMESTAMP[US]",
                 "returns": {
-                    "type": "TIMESTAMP",
-                    "documentation": "Returns the computed result as `TIMESTAMP`."
+                    "type": "TIMESTAMP[US]",
+                    "documentation": "Returns the computed result as `TIMESTAMP[US]`."
                 },
                 "arity": {
                     "minimum": 0,
@@ -1681,10 +1681,10 @@
                     "TODAY",
                     "DATE"
                 ],
-                "return_type": "TIMESTAMP",
+                "return_type": "TIMESTAMP[US]",
                 "returns": {
-                    "type": "TIMESTAMP",
-                    "documentation": "Returns the computed result as `TIMESTAMP`."
+                    "type": "TIMESTAMP[US]",
+                    "documentation": "Returns the computed result as `TIMESTAMP[US]`."
                 },
                 "arity": {
                     "minimum": 1,
@@ -5008,10 +5008,10 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME"
                 ],
-                "return_type": "TIMESTAMP",
+                "return_type": "TIMESTAMP[US]",
                 "returns": {
-                    "type": "TIMESTAMP",
-                    "documentation": "Returns the computed result as `TIMESTAMP`."
+                    "type": "TIMESTAMP[US]",
+                    "documentation": "Returns the computed result as `TIMESTAMP[US]`."
                 },
                 "arity": {
                     "minimum": 3,
@@ -5311,10 +5311,10 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME"
                 ],
-                "return_type": "TIMESTAMP",
+                "return_type": "TIMESTAMP[US]",
                 "returns": {
-                    "type": "TIMESTAMP",
-                    "documentation": "Returns the computed result as `TIMESTAMP`."
+                    "type": "TIMESTAMP[US]",
+                    "documentation": "Returns the computed result as `TIMESTAMP[US]`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -5360,10 +5360,10 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME"
                 ],
-                "return_type": "TIMESTAMP",
+                "return_type": "TIMESTAMP[US]",
                 "returns": {
-                    "type": "TIMESTAMP",
-                    "documentation": "Returns the computed result as `TIMESTAMP`."
+                    "type": "TIMESTAMP[US]",
+                    "documentation": "Returns the computed result as `TIMESTAMP[US]`."
                 },
                 "arity": {
                     "minimum": 2,
@@ -5586,10 +5586,10 @@
                 "category": "Misc",
                 "documentation": "Current UTC timestamp.",
                 "related_functions": [],
-                "return_type": "TIMESTAMP",
+                "return_type": "TIMESTAMP[US]",
                 "returns": {
-                    "type": "TIMESTAMP",
-                    "documentation": "Returns the computed result as `TIMESTAMP`."
+                    "type": "TIMESTAMP[US]",
+                    "documentation": "Returns the computed result as `TIMESTAMP[US]`."
                 },
                 "arity": {
                     "minimum": 0,

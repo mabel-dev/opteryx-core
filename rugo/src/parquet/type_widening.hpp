@@ -17,8 +17,7 @@
 // Typical use: after decoding int32 dictionary values, widen to int64 for Draken.
 //
 // Dispatch flow:
-//   - Compile-time: AVX2 support detected
-//   - Runtime: simd::select_dispatch() picks best implementation
+//   - Compile-time: SIMD_STATIC_SELECT picks the target ISA's variant
 //   - Fallback: scalar loop
 
 namespace parquet_simd {
@@ -69,15 +68,10 @@ static inline void widen_int32_to_int64_avx2(
 
 // Dispatch
 using widen_int32_to_int64_fn_t = void(*)(const int32_t*, int64_t*, size_t);
-static std::atomic<widen_int32_to_int64_fn_t> s_widen_int32_cache{nullptr};
 
 static inline widen_int32_to_int64_fn_t get_widen_int32_fn()
 {
-    return simd::select_dispatch<widen_int32_to_int64_fn_t>(s_widen_int32_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, widen_int32_to_int64_avx2},
-#endif
-    }, widen_int32_to_int64_scalar);
+    return SIMD_STATIC_SELECT(widen_int32_to_int64_avx2, widen_int32_to_int64_scalar, widen_int32_to_int64_scalar, widen_int32_to_int64_scalar);
 }
 
 static inline void widen_int32_to_int64(
@@ -134,15 +128,10 @@ static inline void widen_float32_to_float64_avx2(
 
 // Dispatch
 using widen_float32_to_float64_fn_t = void(*)(const float*, double*, size_t);
-static std::atomic<widen_float32_to_float64_fn_t> s_widen_float32_cache{nullptr};
 
 static inline widen_float32_to_float64_fn_t get_widen_float32_fn()
 {
-    return simd::select_dispatch<widen_float32_to_float64_fn_t>(s_widen_float32_cache, {
-#if defined(__AVX2__)
-        {&cpu_supports_avx2, widen_float32_to_float64_avx2},
-#endif
-    }, widen_float32_to_float64_scalar);
+    return SIMD_STATIC_SELECT(widen_float32_to_float64_avx2, widen_float32_to_float64_scalar, widen_float32_to_float64_scalar, widen_float32_to_float64_scalar);
 }
 
 static inline void widen_float32_to_float64(

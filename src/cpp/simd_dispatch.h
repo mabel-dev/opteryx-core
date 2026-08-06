@@ -22,6 +22,24 @@
 //   }, scalar_impl);
 //   return fn(args...);
 
+// Compile-time ISA selection. The build targets exactly one ISA per wheel
+// (-march=haswell on x86, NEON on aarch64, RVV on riscv64), so the runtime
+// probe below always resolved to the first compiled candidate anyway — while
+// costing an atomic acquire-load and an un-inlinable indirect call per entry.
+// SIMD_STATIC_SELECT picks the candidate at compile time; pass the scalar
+// implementation for any slot the site has no specialised variant for.
+// (This removes the OPTERYX_DISABLE_SIMD runtime escape hatch — it had no
+// first-party consumers; use a scalar build if a no-SIMD repro is needed.)
+#if defined(__AVX2__)
+  #define SIMD_STATIC_SELECT(avx2, neon, rvv, scalar) (avx2)
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+  #define SIMD_STATIC_SELECT(avx2, neon, rvv, scalar) (neon)
+#elif defined(__riscv) && defined(__riscv_vector)
+  #define SIMD_STATIC_SELECT(avx2, neon, rvv, scalar) (rvv)
+#else
+  #define SIMD_STATIC_SELECT(avx2, neon, rvv, scalar) (scalar)
+#endif
+
 namespace simd {
 
 // If the environment variable OPTERYX_DISABLE_SIMD is set, the dispatcher will

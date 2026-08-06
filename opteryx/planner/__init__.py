@@ -219,6 +219,55 @@ def _intercept_drop_statistics(clean_sql: str):
     return [{"DropStatistics": {"table_name": match.group("table"), "columns": columns}}]
 
 
+# DROP TRIGGER [IF EXISTS] <name> ON <table>
+# The table is REQUIRED: trigger names are only unique per dataset, and naming
+# the table makes the permission target (WRITE on that table) explicit.
+_DROP_TRIGGER_RE = _re.compile(
+    r"^\s*DROP\s+TRIGGER\s+(?P<if_exists>IF\s+EXISTS\s+)?"
+    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    _re.IGNORECASE | _re.DOTALL,
+)
+_DROP_TRIGGER_LEAD = _re.compile(r"^\s*DROP\s+TRIGGER\b", _re.IGNORECASE)
+_CREATE_TRIGGER_LEAD = _re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b", _re.IGNORECASE)
+
+
+def _intercept_trigger_statements(clean_sql: str):
+    """Recognize `DROP TRIGGER [IF EXISTS] <name> ON <table>` before the SQL
+    parser (OpteryxDialect is not in sqlparser's allowlist for trigger
+    statements, so they would otherwise fail to parse with an unhelpful error).
+
+    Returns a synthesized single-statement AST list, or None if the statement
+    is not a trigger statement. `CREATE TRIGGER` is rejected here by name -
+    triggers exist only as the automatic artifact of CREATE MATERIALIZED VIEW.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if _CREATE_TRIGGER_LEAD.match(clean_sql):
+        raise UnsupportedSyntaxError(
+            "CREATE TRIGGER is not supported; triggers are created automatically "
+            "by CREATE MATERIALIZED VIEW."
+        )
+    if not _DROP_TRIGGER_LEAD.match(clean_sql):
+        return None
+    match = _DROP_TRIGGER_RE.match(clean_sql)
+    if match is None:
+        # CASCADE/RESTRICT (or any other trailing modifier) lands here: the
+        # grammar above accepts nothing after the table name.
+        raise UnsupportedSyntaxError(
+            "Expected: DROP TRIGGER [IF EXISTS] <name> ON <table> "
+            "(no CASCADE/RESTRICT; the table name is required)"
+        )
+    return [
+        {
+            "DropTrigger": {
+                "trigger_name": match.group("name"),
+                "table_name": match.group("table"),
+                "if_exists": match.group("if_exists") is not None,
+            }
+        }
+    ]
+
+
 def query_planner(
     operation: str,
     parameters: Union[Iterable, Dict, None],
@@ -257,6 +306,8 @@ def query_planner(
     # STATISTICS` mis-parses STATISTICS as a column name), so it is recognized
     # here in the pre-parse layer and synthesized into an AST directly.
     parsed_statements = _intercept_drop_statistics(clean_sql)
+    if parsed_statements is None:
+        parsed_statements = _intercept_trigger_statements(clean_sql)
     if parsed_statements is None:
         try:
             parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")

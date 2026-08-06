@@ -69,6 +69,22 @@ ls -1 "${DIST_DIR}"/*.whl 2>/dev/null || {
   exit 1
 }
 
+# Resolve DIST_DIR before leaving the current directory, then run every
+# interpreter check from a NEUTRAL cwd.
+#
+# ⛔ Never run these checks from the repo root. sys.path[0] is the cwd, so the
+# SOURCE `rugo/` and `draken/` directories shadow the installed wheel and the
+# gate tests the tree instead of the artifact. In the rugo workflow the repo is
+# mounted at the container workdir (/io) and this produced a bogus failure:
+#   ImportError: cannot import name 'draken_native' from partially initialized
+#   module 'draken' ... (/io/draken/__init__.py)
+# — source draken/ has no built draken_native.so. The opteryx workflow only
+# escaped it because its checkout sits one level down (/io/io).
+DIST_DIR="$(cd "${DIST_DIR}" && pwd)"
+GATE_CWD="$(mktemp -d)"
+trap 'rm -rf "${GATE_CWD}"' EXIT
+cd "${GATE_CWD}"
+
 FOUND=0
 
 for PY in /opt/python/*/bin/python*; do

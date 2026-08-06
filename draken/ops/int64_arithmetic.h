@@ -255,14 +255,17 @@ static inline VecResult i64_div(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_div: length mismatch");
     VecResult out;
-    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return y == 0 ? (int64_t)0 : x / y; }, out)) return out;
+    // bv == -1 is answered by negation, not idiv: INT64_MIN / -1 raises SIGFPE
+    // (#DE) on x86 — the wrap contract above (matches i64_neg) requires the
+    // divide never be issued for that divisor.
+    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return y == 0 ? (int64_t)0 : y == -1 ? -x : x / y; }, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
     for (uint32_t i = 0; i < n; ++i) {
         const int64_t bv = bd[b.selection[i]];
-        dst[i] = (bv == 0) ? 0 : ad[a.selection[i]] / bv;
+        dst[i] = (bv == 0) ? 0 : (bv == -1) ? -ad[a.selection[i]] : ad[a.selection[i]] / bv;
     }
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
@@ -273,6 +276,9 @@ static inline VecResult i64_div_scalar(const DrakenVector& a, int64_t scalar) {
     int64_t* dst = alloc_i64(k);
     if (scalar == 0) {
         for (uint32_t j = 0; j < k; ++j) dst[j] = 0;
+    } else if (scalar == -1) {
+        // Negate, never idiv: INT64_MIN / -1 raises SIGFPE; wraps like i64_neg.
+        for (uint32_t j = 0; j < k; ++j) dst[j] = -ad[j];
     } else {
         for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] / scalar;
     }
@@ -286,14 +292,16 @@ static inline VecResult i64_mod(const DrakenVector& a, const DrakenVector& b) {
     if (a.length != b.length)
         throw std::invalid_argument("i64_mod: length mismatch");
     VecResult out;
-    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return y == 0 ? (int64_t)0 : x % y; }, out)) return out;
+    // bv == -1 → 0 for every dividend, answered without idiv: INT64_MIN % -1
+    // raises SIGFPE (#DE) on x86 even though the mathematical result is 0.
+    if (i64_const_fold(a, b, [](int64_t x, int64_t y){ return (y == 0 || y == -1) ? (int64_t)0 : x % y; }, out)) return out;
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
     for (uint32_t i = 0; i < n; ++i) {
         const int64_t bv = bd[b.selection[i]];
-        dst[i] = (bv == 0) ? 0 : ad[a.selection[i]] % bv;
+        dst[i] = (bv == 0 || bv == -1) ? 0 : ad[a.selection[i]] % bv;
     }
     return make_dense_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
@@ -302,7 +310,8 @@ static inline VecResult i64_mod_scalar(const DrakenVector& a, int64_t scalar) {
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const uint32_t k = a.data_length;
     int64_t* dst = alloc_i64(k);
-    if (scalar == 0) {
+    if (scalar == 0 || scalar == -1) {
+        // x % -1 == 0 for all x; never issue idiv (INT64_MIN % -1 SIGFPEs).
         for (uint32_t j = 0; j < k; ++j) dst[j] = 0;
     } else {
         for (uint32_t j = 0; j < k; ++j) dst[j] = ad[j] % scalar;

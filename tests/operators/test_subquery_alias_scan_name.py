@@ -53,7 +53,7 @@ CASES = [
     ),
     # DOUBLE cast variant (was: C kernel error)
     (
-        "SELECT k FROM (SELECT CAST(id AS DOUBLE) AS c, id AS k FROM $planets) t WHERE c > -1",
+        "SELECT k FROM (SELECT CAST(id AS FLOAT64) AS c, id AS k FROM $planets) t WHERE c > -1",
         [1, 2, 3, 4, 5, 6, 7, 8, 9],
     ),
     # plain filter on the un-cast aliased column, multi-column subquery (was: 0 rows)

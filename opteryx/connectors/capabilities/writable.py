@@ -149,6 +149,100 @@ class Writable:
         """
         raise NotImplementedError
 
+    def is_materialized_view(self, relation_name: str) -> bool:
+        """Whether the named relation is the backing table of a materialized view.
+
+        False by default: most write targets have no materialized-view concept,
+        and DROP TABLE's type guard must be able to ask this of any Writable
+        connector without an error.
+
+        Args:
+            relation_name: Fully-qualified relation name
+
+        Returns:
+            True if the relation is a materialized view, False otherwise
+        """
+        return False
+
+    def register_materialized_view(
+        self,
+        relation_name: str,
+        sql: str,
+        source_tables: "List[str]",
+        author: Optional[str] = None,
+    ) -> None:
+        """Register an already-created relation as a materialized view.
+
+        Called at the end of the CTAS write path (the backing table and its
+        data already exist) with the defining SELECT as text and the catalog
+        tables it reads - a refresh trigger lands on each source.
+
+        Args:
+            relation_name: Fully-qualified name of the (existing) backing table
+            sql: the defining SELECT, as executable text
+            source_tables: fully-qualified names of every catalog table the SELECT reads
+            author: session user the registration is attributed to
+
+        Raises:
+            ValueError: If the backing table doesn't exist or a source is invalid
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support CREATE MATERIALIZED VIEW"
+        )
+
+    def drop_materialized_view(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop a materialized view: its refresh triggers, then its backing table.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            if_exists: If True, do not raise error if the relation doesn't exist
+            author: session user the drop is attributed to
+
+        Raises:
+            ValueError: If the relation doesn't exist (and if_exists is False),
+                or is not a materialized view
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support DROP MATERIALIZED VIEW"
+        )
+
+    def drop_trigger(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        author: Optional[str] = None,
+        missing_ok: bool = False,
+    ) -> None:
+        """Remove a trigger from the relation that carries it.
+
+        Dropping a materialized view's refresh trigger orphans the view: it
+        stays queryable but stops refreshing. That is the supported way to
+        pause an MV; `information_schema.triggers` is where the absence shows.
+
+        Args:
+            relation_name: Fully-qualified name of the relation carrying the trigger
+            trigger_name: Name of the trigger to remove
+            author: session user the drop is attributed to
+            missing_ok: If True, a missing trigger is not an error
+
+        Raises:
+            ValueError: If the trigger doesn't exist (and missing_ok is False)
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support DROP TRIGGER"
+        )
+
+    def list_triggers(self, relation_name: str) -> "List[dict]":
+        """The triggers attached to a relation, as plain dicts (catalog field
+        names: name, kind, target-view, statement-id, created-by,
+        created-at-ms, last-fired-at-ms, last-fired-status).
+
+        Empty by default: most write targets have no trigger concept.
+        """
+        return []
+
     def collection_exists(self, collection_name: str) -> bool:
         """Check if a collection exists.
 

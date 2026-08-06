@@ -70,8 +70,8 @@ def test_unsigned_same_width_is_a_copy():
 
 
 def test_unsigned_to_double():
-    assert _col(f"SELECT CAST(u AS DOUBLE) AS x FROM {_lit(5, 'UINT64')}") == [5.0]
-    assert _col("SELECT CAST(CAST(id AS UINT32) AS DOUBLE) AS x FROM $planets")[:3] == [
+    assert _col(f"SELECT CAST(u AS FLOAT64) AS x FROM {_lit(5, 'UINT64')}") == [5.0]
+    assert _col("SELECT CAST(CAST(id AS UINT32) AS FLOAT64) AS x FROM $planets")[:3] == [
         1.0,
         2.0,
         3.0,
@@ -82,10 +82,106 @@ def test_unsigned_to_double_covers_the_range_int64_cannot():
     """The point of the kernel: UINT64_MAX has no INT64 route (that raises), so
     before this it could not reach float at all. Above 2^53 a double loses low
     bits — that is floating point, not an error."""
-    got = _col(f"SELECT CAST(u AS DOUBLE) AS x FROM {_lit(UINT64_MAX, 'UINT64')}")
+    got = _col(f"SELECT CAST(u AS FLOAT64) AS x FROM {_lit(UINT64_MAX, 'UINT64')}")
     assert got == [float(UINT64_MAX)], got
     with pytest.raises(Exception):
         _col(f"SELECT CAST(u AS INTEGER) AS x FROM {_lit(UINT64_MAX, 'UINT64')}")
+
+
+def test_foreign_unsigned_spellings_are_rejected_never_silently_signed():
+    """`UINTEGER` must not come back as a SIGNED INT64.
+
+    The cast target used to be matched by SUBSTRING, and "uinteger" contains
+    "integer" — so `CAST(x AS UINTEGER)` silently answered with INT64, turning an
+    unsigned request into a signed one with no error. Every spelling here belongs
+    to another engine's vocabulary, not ours (we spell these UINT8..UINT64), so
+    the only acceptable outcome is a loud refusal.
+    """
+    for spelling in ("UINTEGER", "UBIGINT", "USMALLINT", "UTINYINT"):
+        with pytest.raises(Exception) as err:
+            _col(f"SELECT CAST('42' AS {spelling}) AS x")
+        assert "Unsupported type for CAST" in str(err.value), (spelling, err.value)
+        assert spelling in str(err.value), (spelling, err.value)
+
+
+def test_uinteger_is_reported_as_a_typo_and_named_canonically():
+    """The suggestion engine is a TYPO detector, not intent inference.
+
+    `UINTEGER` is one inserted character away from the INTEGER spelling, so it
+    gets a suggestion. The other three are not near-misses of any name we have —
+    they are a different type system's words — and guessing which of our widths
+    they meant is inference this deliberately does not do.
+
+    The suggestion names INT64, never INTEGER. INTEGER is an implied alias the
+    dialect accepts; INT64 is the canonical name `str(ColumnType)` renders and the
+    catalog stores, so it is the only one worth teaching.
+    """
+    with pytest.raises(Exception) as err:
+        _col("SELECT CAST('42' AS UINTEGER) AS x")
+    assert "did you mean 'INT64'" in str(err.value), err.value
+    assert "INTEGER'" not in str(err.value).replace("'UINTEGER'", ""), err.value
+
+    for spelling in ("UBIGINT", "USMALLINT", "UTINYINT"):
+        with pytest.raises(Exception) as err:
+            _col(f"SELECT CAST('42' AS {spelling}) AS x")
+        assert "did you mean" not in str(err.value), (spelling, err.value)
+
+
+def test_a_name_that_merely_contains_a_type_name_is_not_that_type():
+    """MANDATE is not DATE. Cast targets are matched EXACTLY, case-insensitively.
+
+    The matcher used substrings, so any name CONTAINING a type name became that
+    type with no error — UPDATEDAT and SANDATE were DATE, SUBSTRUCTURE was STRUCT,
+    SUPERVECTOR was VECTOR, MY_INTEGER was INTEGER. SUBARRAY was worse: it matched
+    "array" and then indexed the absent Array node, raising a raw KeyError.
+    """
+    for spelling in (
+        "MANDATE", "UPDATEDAT", "SANDATE", "SUBSTRUCTURE", "SUPERVECTOR",
+        "MY_INTEGER", "SUBARRAY", "MY_ARRAY", "MYNVARCHAR", "TABOOLI",
+    ):
+        with pytest.raises(Exception) as err:
+            _col(f"SELECT CAST('42' AS {spelling}) AS x")
+        # An SqlError naming the type — never a KeyError from indexing an AST node
+        # that a substring match wrongly promised was there.
+        assert "Unsupported type for CAST" in str(err.value), (spelling, repr(err.value))
+        assert spelling in str(err.value), (spelling, repr(err.value))
+
+
+def test_real_type_names_are_matched_whatever_the_case():
+    """Exact must not mean case-sensitive."""
+    assert _col("SELECT CAST('42' AS vArChAr) AS x") == ["42"]
+    assert _col("SELECT CAST('42' AS UiNt64) AS x") == [42]
+    assert _col("SELECT CAST('42' AS nvarchar) AS x") == ["42"]
+    assert _col("SELECT CAST('4.5' AS FLOAT64) AS x") == [4.5]
+
+
+def test_our_own_unsigned_spellings_still_work():
+    """The guard above must not have made the real names unreachable."""
+    for spelling, expected in (("UINT8", 42), ("UINT16", 42), ("UINT32", 42), ("UINT64", 42)):
+        assert _col(f"SELECT CAST('42' AS {spelling}) AS x") == [expected], spelling
+
+
+def test_int64_the_canonical_name_is_castable():
+    """A user must be able to type back the name the engine showed them.
+
+    INT64 is what `str(ColumnType)` renders and what the catalog stores, but it
+    was the ONE widthed numeric spelling the dialect rejected — and the typo
+    detector answered it with "did you mean 'UINT64'?", pointing a SIGNED request
+    at the UNSIGNED type. INTEGER stays accepted as an implied alias.
+    """
+    assert _col("SELECT CAST('42' AS INT64) AS x") == [42]
+    assert _col("SELECT CAST('42' AS INTEGER) AS x") == [42]
+    assert _col("SELECT CAST(id AS INT64) * 2 AS x FROM $planets LIMIT 3") == [2, 4, 6]
+
+
+def test_suggestions_never_name_a_non_canonical_type():
+    """We recommend INT64, never INTEGER — accepted is not the same as taught."""
+    for spelling, expected in (("INT", "INT64"), ("BIGINT", "INT64"),
+                               ("TINYINT", "INT8"), ("SMALLINT", "INT16"),
+                               ("REAL", "FLOAT32"), ("DOUBEL", "FLOAT64")):
+        with pytest.raises(Exception) as err:
+            _col(f"SELECT CAST('1' AS {spelling}) AS x")
+        assert f"did you mean '{expected}'" in str(err.value), (spelling, err.value)
 
 
 def test_unsigned_casts_preserve_nulls():

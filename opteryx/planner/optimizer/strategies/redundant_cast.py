@@ -54,7 +54,7 @@ logical descriptor (DECIMAL precision/scale, TIMESTAMP unit) and ARRAY element. 
 true no-op folds — `DECIMAL(10,2) -> DECIMAL(12,2)`, `VARCHAR -> NVARCHAR`, etc. are kept.
 
 This mirrors the plan-time rewrites in Constant Folding (e.g. `x * 1 -> x`), which also
-replace an expression with a `_PASSTHRU` of its operand.
+replace an expression with a transparent `NESTED` wrapper around its operand.
 """
 
 from opteryx.expression import NodeType

@@ -52,6 +52,7 @@ from draken.core.buffers cimport DrakenVector, DRAKEN_SEL_IDENTITY
 from draken.vectors.bool_vector cimport (
     BoolVector,
     c_and_bitmap,
+    c_bitmap_and_inplace,
     c_not_bitmap,
     c_or_bitmap,
     c_xor_bitmap,
@@ -477,7 +478,7 @@ cpdef execute_and_append(list compiled_evals, morsel):
     """Execute pre-compiled (identity, CompiledBytecode) pairs and append results.
 
     Successor to the tree-walker evaluate_and_append_draken.  Filtering
-    (_PASSTHRU, should_evaluate) and ordering (prioritize_evaluation) must
+    (should_evaluate) and ordering (prioritize_evaluation) must
     have been applied at bind time by compile_eval_nodes().
 
     The identity-already-present check is still performed at runtime because
@@ -2266,8 +2267,7 @@ cdef int _dv_filter_and_mask_span_cxx(
             return 99
         memcpy(out_mask, dense, <size_t>nbytes)
         if mask_dv.validity != NULL:
-            for bi in range(nbytes):
-                out_mask[bi] &= mask_dv.validity[bi]
+            c_bitmap_and_inplace(out_mask, mask_dv.validity, <size_t>nbytes)
         out_filtered[0] = cxx_mask_c(m, mask_dv)
     draken_frame_arena_destroy(arena)
     return rc
@@ -2346,8 +2346,7 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
             return 99
         memcpy(out_mask, dense, <size_t>nbytes)
         if mask_dv.validity != NULL:
-            for bi in range(nbytes):
-                out_mask[bi] &= mask_dv.validity[bi]
+            c_bitmap_and_inplace(out_mask, mask_dv.validity, <size_t>nbytes)
     draken_frame_arena_destroy(arena)
     return rc
 
