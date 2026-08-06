@@ -61,7 +61,7 @@ current (15,078ms)
 (20.10 seconds) <- best on clickbench parquet files (13-JUL)
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch - (1413.1ms) (05-AUG) [2.86x]
+make tpch - (1385.9ms) (06-AUG) [2.80x]
 make medicare1 - (456.1ms) (31-JUL) [2.63x]
 make job - (38,106.8ms) (05-AUG) [5.65x]
 make h2o - (1998.9ms) (2 fails) (05-AUG) [0.73x]

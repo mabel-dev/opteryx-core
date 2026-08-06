@@ -619,9 +619,11 @@ public:
             std::move(key_idx), std::move(key_names), std::move(specs), buffers[buf].get(),
             ndv_estimate));
     }
-    void set_distinct_sink(size_t p, std::vector<size_t> on_idx, size_t buf) {
+    void set_distinct_sink(size_t p, std::vector<size_t> on_idx, size_t buf,
+                           int64_t ndv_estimate) {
         set_sink_(p,
-            std::make_unique<DistinctSink>(std::move(on_idx), buffers[buf].get()));
+            std::make_unique<DistinctSink>(std::move(on_idx), buffers[buf].get(),
+                                           ndv_estimate));
     }
     void set_buffer_append_sink(size_t p, size_t buf) {
         set_sink_(p, std::make_unique<BufferAppendSink>(buffers[buf].get()));

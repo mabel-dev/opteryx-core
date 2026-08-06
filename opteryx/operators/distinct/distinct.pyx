@@ -37,6 +37,9 @@ cdef class DistinctNode(BasePlanNode):
     # tree away before the compiler ever sees it.
     cdef public object _distinct_on_exprs
     cdef public str _set_variant
+    # Planner distinct-count estimate (int or None) — consumed by the native
+    # plan compiler to gate DistinctSink's parvi front set.
+    cdef public object distinct_ndv_estimate
     cdef public object _hash_set
     cdef public bint at_least_one_yielded
     # Row-routing producer seam (M4 parallel DISTINCT). None = normal serial
@@ -52,6 +55,7 @@ cdef class DistinctNode(BasePlanNode):
                 col.schema_column.identity for col in self._distinct_on
             ]
         self._set_variant = parameters.get("set_variant", "carchar")
+        self.distinct_ndv_estimate = parameters.get("distinct_ndv_estimate")
         self._hash_set = None
         self.at_least_one_yielded = False
         self._scatter_engine = None
@@ -64,6 +68,7 @@ cdef class DistinctNode(BasePlanNode):
         w._distinct_on = self._distinct_on
         w._distinct_on_exprs = self._distinct_on_exprs
         w._set_variant = self._set_variant
+        w.distinct_ndv_estimate = self.distinct_ndv_estimate
         w._hash_set = None
         w.at_least_one_yielded = False
         w._scatter_engine = None

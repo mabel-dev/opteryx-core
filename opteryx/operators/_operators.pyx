@@ -141,6 +141,8 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_calls "opteryx::engine::groupby_tel::calls_count" ()
     long long gb_tel_parvi_sinks "opteryx::engine::groupby_tel::parvi_sinks_count" ()
     long long gb_tel_parvi_promotes "opteryx::engine::groupby_tel::parvi_promotes_count" ()
+    long long gb_tel_distinct_parvi_sinks "opteryx::engine::groupby_tel::distinct_parvi_sinks_count" ()
+    long long gb_tel_distinct_parvi_promotes "opteryx::engine::groupby_tel::distinct_parvi_promotes_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
 # The bridge is the ONLY correct way to reach the shared execution tracer
@@ -254,7 +256,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                               cppvector[string] key_names,
                               cppvector[AggSpec2] specs, size_t buf,
                               int64_t ndv_estimate)
-        void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf)
+        void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf,
+                               int64_t ndv_estimate)
         void set_buffer_append_sink(size_t p, size_t buf)
         size_t new_join2_ref()
         void set_join2_build_sink(size_t p, cppvector[size_t] key_idx,
@@ -540,6 +543,8 @@ def get_groupby_telemetry():
         "calls":   gb_tel_calls(),
         "parvi_sinks":    gb_tel_parvi_sinks(),
         "parvi_promotes": gb_tel_parvi_promotes(),
+        "distinct_parvi_sinks":    gb_tel_distinct_parvi_sinks(),
+        "distinct_parvi_promotes": gb_tel_distinct_parvi_promotes(),
     }
 
 
@@ -2382,12 +2387,15 @@ cdef class NativePlan:
             knames.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
         self._e.set_groupby_sink(p, keys, knames, _agg_spec_from_list(specs), buf, ndv_estimate)
 
-    def set_distinct_sink(self, size_t p, list on_idx, size_t buf):
-        """``on_idx`` = dedup key column indices; empty list = every column."""
+    def set_distinct_sink(self, size_t p, list on_idx, size_t buf, int64_t ndv_estimate):
+        """``on_idx`` = dedup key column indices; empty list = every column.
+        ``ndv_estimate`` is the planner's distinct-count estimate (-1 = unknown);
+        at or below kDistinctParviGateNDV the sink fronts its per-worker dedup
+        set with a 16-slot parvi set (native_group_sinks.hpp)."""
         cdef cppvector[size_t] on
         for i in on_idx:
             on.push_back(<size_t>i)
-        self._e.set_distinct_sink(p, on, buf)
+        self._e.set_distinct_sink(p, on, buf, ndv_estimate)
 
     def set_buffer_append_sink(self, size_t p, size_t buf):
         """Stream this pipeline into a (possibly shared) buffer — UNION ALL legs."""

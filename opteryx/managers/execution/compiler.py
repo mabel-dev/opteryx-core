@@ -1318,7 +1318,11 @@ class _Compiler:
                 if getattr(node, "_having_condition", None) is not None:
                     _unsupported("a HAVING on a no-aggregate GROUP BY")
                 buf = self.nplan.new_buffer()
-                self.nplan.set_distinct_sink(p, key_idx, buf)
+                # No-aggregate GROUP BY routes to the DistinctSink — the group
+                # count estimate is the distinct-count estimate here.
+                ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
+                self.nplan.set_distinct_sink(
+                    p, key_idx, buf, -1 if ndv_estimate is None else int(ndv_estimate))
                 p2 = self.nplan.new_pipeline()
                 self.nplan.set_buffer_source(p2, buf)
                 return p2, list(layout)
@@ -1385,7 +1389,11 @@ class _Compiler:
                         "DISTINCT", self._layout_name(identity),
                         self._layout_type(None, identity))
             buf = self.nplan.new_buffer()
-            self.nplan.set_distinct_sink(p, on_idx, buf)
+            # Planner NDV estimate for the dedup keys (hash_map_variant strategy);
+            # -1 = unknown. Gates the sink's parvi front set.
+            ndv_estimate = getattr(node, "distinct_ndv_estimate", None)
+            self.nplan.set_distinct_sink(
+                p, on_idx, buf, -1 if ndv_estimate is None else int(ndv_estimate))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             return p2, layout

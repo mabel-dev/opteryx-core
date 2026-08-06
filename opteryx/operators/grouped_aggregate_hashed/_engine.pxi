@@ -53,23 +53,22 @@ cdef extern from "carchar_index.hpp" namespace "opteryx::carchar":
 
 
 cdef extern from "parvi.hpp" namespace "opteryx::parvi":
-    cdef struct ParviResult:
-        size_t slot
-        bint   found
+    cdef enum class ParviInsert(uint8_t):
+        kFound
+        kInserted
+        kFull
 
     cdef cppclass ParviMap:
         ParviMap() except +
         size_t size() noexcept nogil
-        bint   full() noexcept nogil
-        bint   lookup_fast(uint64_t key, int64_t& payload_ref_out) noexcept nogil
-        # Pure noexcept C++ (fixed-capacity SIMD map; insert_new never allocates,
-        # drain_into copies into a pre-reserved carchar) → safe to call from the
-        # nogil ingest span. drain_into's internal carchar inserts cannot resize
-        # because the engine reserves the carchar to hold kCapacity before drain.
-        ParviResult insert_new(uint64_t key, int64_t payload_ref) noexcept nogil
+        # Pure noexcept C++ (fixed-capacity SIMD map; find_or_insert_id never
+        # allocates, drain_into copies into a pre-reserved carchar) → safe to
+        # call from the nogil ingest span. drain_into's internal carchar inserts
+        # cannot resize because the engine reserves the carchar to hold
+        # kCapacity before drain.
+        ParviInsert find_or_insert_id(uint64_t key, int64_t new_id,
+                                      int64_t& payload_out) noexcept nogil
         void   drain_into(CarcharIndex& target) noexcept nogil
-
-    const size_t kCapacity
 
 
 cdef double _CARCHAR_LOAD_FACTOR = 0.70
@@ -78,7 +77,6 @@ cdef double _CARCHAR_LOAD_FACTOR = 0.70
 # without taxing tiny or huge aggregations. (Swept empirically; the real fix for
 # high-cardinality is NDV-based reserve(), which a constant cannot provide.)
 cdef size_t _INITIAL_INDEX_CAPACITY = 4096
-cdef size_t _PARVI_CAPACITY = 16  # must match opteryx::parvi::kCapacity
 
 
 cdef inline long long _now_ns() noexcept nogil:
@@ -436,7 +434,7 @@ cdef class GroupHashEngine:
         cdef uint64_t cache_keys[8]
         cdef int64_t cache_vals[8]
         cdef uint8_t cache_used[8]
-        cdef ParviResult pr
+        cdef ParviInsert pres
 
         self._new_row_scratch.clear()
 
@@ -452,12 +450,11 @@ cdef class GroupHashEngine:
                     si_buf[i] = <uint32_t>state_idx
                     i += 1
                     continue
-                pr = self._parvi.insert_new(h, num_groups)
-                if pr.found:
-                    state_idx = num_groups
+                pres = self._parvi.find_or_insert_id(h, num_groups, state_idx)
+                if pres == ParviInsert.kInserted:
                     self._new_row_scratch.push_back(i)
                     num_groups += 1
-                elif pr.slot == _PARVI_CAPACITY:
+                elif pres == ParviInsert.kFull:
                     # Overflow → promote: drain the 16 live entries into the
                     # pre-reserved carchar (nogil, no resize), flip to carchar,
                     # and insert the overflow key as the next new group.
@@ -466,12 +463,10 @@ cdef class GroupHashEngine:
                     self._parvi.drain_into(self._index[0])
                     self._use_parvi = False
                     self._promoted_from_parvi = True
-                    state_idx = num_groups
                     _hot_is_new = self._index.find_or_insert_id(h, num_groups, state_idx)
                     self._new_row_scratch.push_back(i)
                     num_groups += 1
-                else:
-                    state_idx = <int64_t>pr.slot
+                # kFound: state_idx already holds the existing group id
                 cache_keys[cache_slot] = h
                 cache_vals[cache_slot] = state_idx
                 cache_used[cache_slot] = 1
@@ -599,7 +594,7 @@ cdef class GroupHashEngine:
         cdef Py_ssize_t k, c
         cdef int64_t* code_state
         cdef bint _is_new
-        cdef ParviResult pr
+        cdef ParviInsert pres
         cdef bint _hot_is_new
 
         self._new_row_scratch.clear()
@@ -679,22 +674,20 @@ cdef class GroupHashEngine:
                         i += 1
                         continue
 
-                    # Single-probe path: insert_new returns existing slot on hit,
-                    # new slot on insert, and kCapacity on overflow.
-                    pr = self._parvi.insert_new(h, num_groups)
-                    if pr.found:
-                        state_idx = num_groups
+                    # Single probe: hit, insert, and overflow decided in one
+                    # tag scan; the payload IS the group id (no slot proxy).
+                    pres = self._parvi.find_or_insert_id(h, num_groups, state_idx)
+                    if pres == ParviInsert.kInserted:
                         self._new_row_scratch.push_back(i)
                         num_groups += 1
-                    elif pr.slot == _PARVI_CAPACITY:
+                    elif pres == ParviInsert.kFull:
                         state_idx = num_groups
                         # Parvi overflow: drain into carchar and continue seamlessly.
                         self._promote_parvi_to_carchar()
                         self._index.insert_new(h, state_idx)
                         self._new_row_scratch.push_back(i)
                         num_groups += 1
-                    else:
-                        state_idx = <int64_t>pr.slot
+                    # kFound: state_idx already holds the existing group id
 
                     cache_keys[cache_slot] = h
                     cache_vals[cache_slot] = state_idx

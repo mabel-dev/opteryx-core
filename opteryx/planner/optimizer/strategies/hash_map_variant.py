@@ -87,8 +87,11 @@ class HashMapVariantStrategy(OptimizationStrategy):
             # DISTINCT — use set_variant hint
             if getattr(node, "set_variant", None) is not None:
                 return context
-            variant = self._pick_variant(node, context)
+            variant, estimate = self._variant_and_estimate(node, context)
             node.set_variant = variant
+            # Raw distinct-count estimate for the native DistinctSink's parvi
+            # gate (kDistinctParviGateNDV) — int or None.
+            node.distinct_ndv_estimate = estimate
             context.optimized_plan[context.node_id] = node
             return context
 

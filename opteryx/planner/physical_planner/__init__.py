@@ -145,7 +145,7 @@ def _create_distinct_node(logical_node, query_properties, registry):
     return registry.create(
         "Distinct",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("on", "set_variant")},
+        **{k: v for k, v in node_config.items() if k in ("on", "set_variant", "distinct_ndv_estimate")},
     )
 
 

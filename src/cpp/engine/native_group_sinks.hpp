@@ -1218,6 +1218,12 @@ constexpr int kGBPartShift = 58;   // top 6 bits pick the partition
 // ids preserved), so a misfire costs one drain of <= 16 entries per partition,
 // never a wrong answer.
 constexpr int64_t kGBParviGateNDV = 64;
+// DISTINCT low-cardinality gate: DistinctSink deduplicates through ONE
+// per-worker CarcharSet (no hash partitioning), so its parvi front set has the
+// bare 16-slot capacity — the gate matches it. On overflow the set drains into
+// the CarcharSet and the morsel's remaining rows rescan on the carchar path;
+// dup-vs-new answers are unaffected (drained keys are simply no longer new).
+constexpr int64_t kDistinctParviGateNDV = 16;
 // High-NDV adaptive flush: when a worker's TOTAL local group count passes this,
 // its partitions are queued for the (parallel) merge and reset. Keeps the
 // sink-side probe working set cache-resident on 90M-group aggregations —
@@ -2774,6 +2780,8 @@ struct GroupBySink : Sink {
 
 struct DistinctLocal : LocalSinkState {
     opteryx::carchar::CarcharSet seen;    // per-worker dedup on the 64-bit key hash
+    opteryx::parvi::ParviSet small;       // low-card front set (kDistinctParviGateNDV)
+    bool use_parvi = false;               // armed by DistinctSink when the estimate is low
     std::vector<MorselPtr> morsels;       // source morsels a kept row references
     std::vector<uint64_t> kept_hashes;    // parallel to (ref_m,ref_r); carried to combine
     std::vector<uint32_t> ref_m, ref_r;   // (morsel, row) of each locally-new row
@@ -2791,15 +2799,23 @@ struct DistinctSink : Sink {
     std::vector<size_t> on_idx;   // dedup key columns; empty = all columns
     MorselBuffer* out;
     size_t chunk_rows;
+    bool low_card;   // planner NDV estimate <= kDistinctParviGateNDV → parvi front set
 
-    DistinctSink(std::vector<size_t> on, MorselBuffer* b, size_t chunk = 131072)
-        : on_idx(std::move(on)), out(b), chunk_rows(chunk) {}
+    DistinctSink(std::vector<size_t> on, MorselBuffer* b, int64_t ndv_estimate,
+                 size_t chunk = 131072)
+        : on_idx(std::move(on)), out(b), chunk_rows(chunk),
+          low_card(ndv_estimate >= 0 && ndv_estimate <= kDistinctParviGateNDV) {}
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<DistinctGlobal>();
     }
     std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
-        return std::make_unique<DistinctLocal>();
+        auto l = std::make_unique<DistinctLocal>();
+        if (low_card) {
+            l->use_parvi = true;
+            groupby_tel::distinct_parvi_sinks.fetch_add(1, std::memory_order_relaxed);
+        }
+        return l;
     }
 
     SinkResult sink(const MorselPtr& in, GlobalSinkState&, LocalSinkState& ls,
@@ -2840,7 +2856,25 @@ struct DistinctSink : Sink {
 
         // Local dedup: the indices of rows whose hash is new to THIS worker.
         l.newidx.resize(rows);
-        size_t nnew = l.seen.mark_new_indices_32(l.rowh.data(), l.newidx.data(), rows);
+        size_t nnew;
+        if (l.use_parvi) {
+            const auto [count, overflow] =
+                l.small.mark_new_indices(l.rowh.data(), l.newidx.data(), rows);
+            nnew = count;
+            if (overflow) {
+                // Estimate was wrong — drain into the CarcharSet and rescan the
+                // full range on it. Rows the parvi pass already marked new are in
+                // the drained set (no longer new), so the rescan appends only the
+                // unprocessed tail's new rows — index order stays ascending.
+                groupby_tel::distinct_parvi_promotes.fetch_add(1, std::memory_order_relaxed);
+                l.small.drain_into(l.seen);
+                l.use_parvi = false;
+                nnew += l.seen.mark_new_indices_32(l.rowh.data(),
+                                                   l.newidx.data() + nnew, rows);
+            }
+        } else {
+            nnew = l.seen.mark_new_indices_32(l.rowh.data(), l.newidx.data(), rows);
+        }
         if (nnew == 0) return SinkResult::CONTINUE;
 
         uint32_t mi = static_cast<uint32_t>(l.morsels.size());
