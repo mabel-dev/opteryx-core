@@ -109,11 +109,12 @@ static void test_all_distinct_int_declines_ordering() {
     check_rows(v, rows);                       // rows unchanged, as always
     CHECK_EQ(v.data_length, uint32_t{4});
 
-    // Written as-is: original value order, identity selection, no permutation.
+    // Written as-is: original value order, identity selection. (IDENTITY
+    // implies PERMUTATION in draken's flag containment — buffers.h — so only
+    // IDENTITY is asserted; a stored permutation would clear it.)
     const int64_t* data = static_cast<const int64_t*>(v.data);
     for (uint32_t i = 0; i < v.data_length; ++i) CHECK_EQ(data[i], rows[i]);
     CHECK_EQ(v.data_length, v.length);
-    CHECK((v.flags & DRAKEN_SEL_PERMUTATION) == 0);
     CHECK((v.flags & DRAKEN_SEL_IDENTITY) != 0);
 
     FileMetadata meta;
