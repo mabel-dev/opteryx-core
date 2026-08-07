@@ -1,0 +1,7 @@
+# Standalone `libskene` wheel — the skene columnar file format (draken + skene),
+# built from the parent opteryx-core source tree. Metadata is carried in
+# skene/setup.py (which re-roots to the repo top); this file only declares the
+# build backend. Build from the repo root: `python skene/setup.py bdist_wheel`.
+[build-system]
+requires = ["setuptools>=68", "Cython>=3.0", "wheel"]
+build-backend = "setuptools.build_meta"
