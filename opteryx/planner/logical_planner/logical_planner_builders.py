@@ -960,11 +960,14 @@ def _normalize_cast_type(data_type: str) -> str:
         ("STRUCT",): "NVARCHAR",
     }
 
-    for aliases, suggestion in type_suggestions.items():
-        if upper_type in aliases:
-            raise SqlError(
-                f"Unsupported type for CAST - '{upper_type}' — did you mean '{suggestion}'?"
-            )
+    rejected_alias_suggestion = {
+        alias: suggestion for aliases, suggestion in type_suggestions.items() for alias in aliases
+    }
+    suggestion = rejected_alias_suggestion.get(upper_type)
+    if suggestion is not None:
+        raise SqlError(
+            f"Unsupported type for CAST - '{upper_type}' — did you mean '{suggestion}'?"
+        )
 
     # Anything still unrecognized gets the same treatment a mistyped column or
     # function name gets: a typo detector, not intent inference. It answers "did
@@ -972,11 +975,23 @@ def _normalize_cast_type(data_type: str) -> str:
     # character) but `UBIGINT`/`USMALLINT`/`UTINYINT` get no suggestion — they are
     # a different type system's vocabulary, not a slip, and guessing which of our
     # widths they meant is inference this does not do.
+    # The spellings the canonical-only ruling REMOVED stay in the typo candidate
+    # pool: they were accepted names until that ruling, so a typo of one
+    # ('DOUBEL') is still a slip of a name a user plausibly knows, and it gets
+    # the same canonical suggestion the exact spelling gets (FLOAT64) — mapped
+    # through, never surfaced as the thing to type. The always-rejected aliases
+    # (BIGINT, TINYINT, ...) are deliberately NOT in the pool: putting them there
+    # made UBIGINT a near-miss of BIGINT, handing a suggestion to exactly the
+    # foreign vocabulary the paragraph above refuses to guess about.
+    formerly_accepted = ("DOUBLE", "DOUBLEPRECISION", "BLOB", "STRUCT")
     suggestion = suggest_alternative(
-        upper_type, _CAST_TARGET_NAMES + tuple(_IMPLIED_ALIAS_CANONICAL)
+        upper_type,
+        _CAST_TARGET_NAMES + tuple(_IMPLIED_ALIAS_CANONICAL) + formerly_accepted,
     )
     if suggestion is not None:
-        suggestion = _IMPLIED_ALIAS_CANONICAL.get(suggestion, suggestion)
+        suggestion = _IMPLIED_ALIAS_CANONICAL.get(
+            suggestion, rejected_alias_suggestion.get(suggestion, suggestion)
+        )
         raise SqlError(
             f"Unsupported type for CAST - '{upper_type}' — did you mean '{suggestion}'?"
         )
@@ -1277,7 +1292,12 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         sql_type = parse_column_type(base_type)  # ColumnType
 
     # Temporal → VARCHAR: format as ISO string rather than calling str() on the raw int.
-    if base_type in ("VARCHAR", "BLOB"):
+    # VARBINARY, not BLOB: the surface spelling BLOB was removed with the
+    # canonical-only ruling, so the normalized name that arrives here is
+    # VARBINARY. Gating on the dead spelling skipped this whole rendering block —
+    # CAST(ip AS VARBINARY) on a literal folded to b'3232235777' where the column
+    # kernel yields b'192.168.1.1'.
+    if base_type in ("VARCHAR", "VARBINARY"):
         # IPV4 → string family renders dotted-decimal, matching the column path's
         # draken_cast_ipv4_to_string. The DESCRIPTOR is the discriminant, never the
         # category: IPv4's category is deliberately INTEGER (so ordering, grouping

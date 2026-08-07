@@ -87,7 +87,7 @@ def test_decimal_to_numeric_preserves_nulls():
         "SELECT CAST(d AS {t}) AS x FROM "
         "(SELECT CASE WHEN id > 4 THEN gravity ELSE NULL END AS d FROM $planets) AS s"
     )
-    for target in ("INTEGER", "DOUBLE"):
+    for target in ("INTEGER", "FLOAT64"):
         got = _col(sql.format(t=target))
         assert got[:4] == [None, None, None, None], (target, got[:4])
         assert got[4] is not None, (target, got[4])

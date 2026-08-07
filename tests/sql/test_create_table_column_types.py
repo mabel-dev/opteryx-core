@@ -70,7 +70,7 @@ def test_the_reported_syslog_schema_plans():
         "message": "NVARCHAR",
         "fields": "NVARCHAR",
         "raw": "VARBINARY",
-        "parse_ok": "BOOLEAN",
+        "parse_ok": "BOOL",
     }, resolved
 
 
@@ -94,7 +94,7 @@ def test_the_reported_syslog_schema_plans():
         ("FLOAT32", "FLOAT32"),
         # …and the ones it already accepted, which must not have moved
         ("VARCHAR", "VARCHAR"),
-        ("BOOLEAN", "BOOLEAN"),
+        ("BOOLEAN", "BOOL"),
         ("INTEGER", "INT64"),
         ("DOUBLE", "FLOAT64"),
         ("DATE", "DATE"),
@@ -137,7 +137,7 @@ def test_timestamp_days_is_refused_as_a_declared_type():
         ("INT", "INT64"),
         ("TEXT", "VARCHAR"),
         ("STRING", "VARCHAR"),
-        ("BOOL", "BOOLEAN"),
+        ("BOOL", "BOOL"),
     ],
 )
 def test_alias_spellings_a_stored_schema_may_use_still_declare(decl, expected):

@@ -13,7 +13,7 @@ cdef class BloomFilter:
     cdef uint32_t  bit64_array_size
     cdef uint32_t  bit_array_size_bits
     cdef uint64_t  bit_mask
-    cdef uint32_t  bit_shift
+    cdef uint64_t  word_mask
 
     cdef inline void  _add(self, const uint64_t item) nogil
     cdef inline bint  _possibly_contains_fast(self, const uint64_t item) nogil

@@ -11,19 +11,24 @@
 """
 Bloom filter — not general-purpose; tuned for Opteryx join/group-by pre-filtering.
 
-Five size tiers (all powers of 2, all using 2 hashes):
-    8k bits  — up to 1k items   (~4.9% FPR)
-    512k bits — up to 62k items  (~4.2% FPR)
-    8M bits  — up to 1M items   (~4.5% FPR)
-    128M bits — up to 16M items  (~4.7% FPR)
-    2B bits  — up to 256M items  (~0.3% FPR at 56M items)
+Single-word BLOCKED layout (k=2, both bits in one 64-bit word): the low bits
+of the hash pick a word, the high bits of a golden-ratio multiply pick two bit
+positions within it. One cache line touched per insert/probe instead of two —
+~2x probe throughput for ~0.4pt FPR vs an unblocked k=2 filter. The position
+bits must come from the multiply's HIGH bits: low product bits depend only on
+low input bits, which are already spent on the word index.
 
-Second-hash position: HIGH bits of a golden-ratio multiply (Fibonacci
-hashing), cheaper than a second full hash. High bits are load-bearing —
-the low bits of h*C depend only on the low bits of h, so a masked product
-is a bijection of the first position and the FPR triples.
+Five size tiers (all powers of 2):
+    8k bits  — up to 1k items   (~5% FPR at capacity)
+    512k bits — up to 62k items  (~4.9% FPR)
+    8M bits  — up to 1M items   (~4.9% FPR)
+    128M bits — up to 16M items  (~4.9% FPR)
+    2B bits  — up to 256M items
 
-Hot insert and probe paths live in bloom_filter_ops.hpp (NEON / SSE2 / scalar).
+Hot insert and probe paths live in bloom_filter_ops.hpp (NEON / SSE2 /
+RISC-V / scalar); the scalar _add/_possibly_contains_fast below must stay
+bit-for-bit in lockstep with them — a divergence is a false negative, i.e.
+wrong join results.
 """
 
 from libc.stdlib cimport calloc, free
@@ -78,16 +83,7 @@ cdef class BloomFilter:
 
         self.bit_array_size_bits = self.bit64_array_size * 64
         self.bit_mask            = self.bit_array_size_bits - 1
-        # Second position = high bits of the golden-ratio multiply (Fibonacci
-        # hashing): shift = 64 - log2(bits). Masking the product instead makes
-        # the second position a bijection of the first (low product bits depend
-        # only on low input bits) — a single-hash filter, ~12% FPR.
-        cdef uint64_t mask = self.bit_mask
-        cdef uint32_t log2_bits = 0
-        while mask:
-            log2_bits += 1
-            mask >>= 1
-        self.bit_shift = 64 - log2_bits
+        self.word_mask           = self.bit64_array_size - 1
 
         self.bit_array = <uint64_t*>calloc(self.bit64_array_size, sizeof(uint64_t))
         if not self.bit_array:
@@ -98,22 +94,17 @@ cdef class BloomFilter:
             free(self.bit_array)
 
     cdef inline void _add(self, const uint64_t item) nogil:
-        cdef uint64_t h1 = item & self.bit_mask
-        cdef uint64_t h2 = (item * GOLDEN_RATIO) >> self.bit_shift
-        self.bit_array[h1 >> 6] |= (<uint64_t>1) << (h1 & 0x3F)
-        self.bit_array[h2 >> 6] |= (<uint64_t>1) << (h2 & 0x3F)
+        cdef uint64_t mix = item * GOLDEN_RATIO
+        cdef uint64_t pair = ((<uint64_t>1) << (mix >> 58)) | ((<uint64_t>1) << ((mix >> 52) & 0x3F))
+        self.bit_array[item & self.word_mask] |= pair
 
     cpdef void add(self, const uint64_t item):
         self._add(item)
 
     cdef inline bint _possibly_contains_fast(self, const uint64_t item) nogil:
-        cdef uint64_t h1 = item & self.bit_mask
-        cdef uint64_t h2 = (item * GOLDEN_RATIO) >> self.bit_shift
-        cdef uint64_t chunk1 = self.bit_array[h1 >> 6]
-        cdef uint64_t chunk2 = self.bit_array[h2 >> 6]
-        cdef uint64_t mask1  = (<uint64_t>1) << (h1 & 0x3F)
-        cdef uint64_t mask2  = (<uint64_t>1) << (h2 & 0x3F)
-        return (chunk1 & mask1) != 0 and (chunk2 & mask2) != 0
+        cdef uint64_t mix = item * GOLDEN_RATIO
+        cdef uint64_t pair = ((<uint64_t>1) << (mix >> 58)) | ((<uint64_t>1) << ((mix >> 52) & 0x3F))
+        return (self.bit_array[item & self.word_mask] & pair) == pair
 
     cpdef bint possibly_contains(self, const uint64_t item):
         return self._possibly_contains_fast(item)

@@ -45,7 +45,7 @@ def _col(sql, colname="x"):
 # use: "parse this text, null what does not parse".
 UNPARSEABLE_TARGETS = [
     "INTEGER",
-    "DOUBLE",
+    "FLOAT64",
     "BOOLEAN",
     "DATE",
     "TIMESTAMP",

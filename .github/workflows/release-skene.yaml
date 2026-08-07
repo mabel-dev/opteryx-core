@@ -1,0 +1,213 @@
+name: Release libskene to PyPI
+
+# Releasing libskene is a SEPARATE decision from releasing opteryx_core or
+# rugo. This runs only for tags prefixed `skene-` (e.g. `skene-0.1.0`).
+# release.yaml is scoped to `opteryx-*` and release-rugo.yaml to `rugo-*`, so
+# the three pipelines are mutually exclusive.
+#
+# PyPI distribution name is `libskene` (`skene` is taken by an unrelated
+# project); the import package is `skene`. The wheel bundles draken and
+# nothing else — no rugo, no opteryx, no Rust, no OpenSSL.
+#
+# Matrix mirrors rugo's:
+#   Python  : 3.11, 3.12, 3.13, 3.14 (GIL)
+#   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64
+on:
+  push:
+    tags:
+      - 'skene-*'
+
+jobs:
+  # ── Release floor: both suites MUST pass before any wheel is built or
+  # published. The C++ suite is the format's own correctness battery
+  # (round-trip, encodings, compression, value ordering, probe, reject paths);
+  # the bindings suite gates the Python boundary. A red suite blocks the PyPI
+  # publish entirely (build-linux/build-macos `needs: floor`).
+  floor:
+    name: skene floor (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [cxx, bindings]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+
+      - name: Run floor suite — ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.suite }}" in
+            cxx)
+              # skene's own C++ test battery, built against the in-tree draken.
+              make -C skene test
+              ;;
+            bindings)
+              python -m pip install --upgrade pip uv
+              python -m uv pip install --upgrade cython setuptools pytest
+              # draken + skene only — no opteryx SQL engine, no rugo, no Rust.
+              python skene/setup.py build_ext --inplace
+              python -m pytest tests/unit/skene -q
+              ;;
+          esac
+
+  build-linux:
+    needs: floor
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          # x86_64: native runner
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.11"
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.12"
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.13"
+          - arch: x86_64
+            runner: ubuntu-latest
+            pybuild: "3.14"
+          # aarch64: native ARM runner — no QEMU needed
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.11"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.12"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.13"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            pybuild: "3.14"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Make build script executable
+        run: chmod +x dev/build-skene-wheels.sh
+
+      - name: Build libskene wheels (manylinux ${{ matrix.arch }}, py ${{ matrix.pybuild }})
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e PLAT="manylinux2014_${{ matrix.arch }}" \
+            -e PYTHON_VERSION=${{ matrix.pybuild }} \
+            -e OPTERYX_ENABLE_LTO=1 \
+            -v "$(pwd)":/io \
+            --workdir /io \
+            "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
+            /io/dev/build-skene-wheels.sh
+
+      - name: Verify wheel imports (release gate — MUST NOT be continue-on-error)
+        # Same gate as the opteryx_core and rugo releases: the ONLY thing that
+        # catches a broken artifact is importing the actual manylinux wheel.
+        # The skene mode also runs a write→read morsel round-trip inside the
+        # installed wheel — a wheel that imports but cannot serialize must not
+        # ship. No OPTERYX_ALLOW_KNOWN_GRPC_ABORT here: skene starts at the
+        # goal state; if the grpc interposition check fails, the release stops.
+        run: |
+          set -euo pipefail
+          chmod +x dev/verify-wheel-imports.sh
+          docker run --rm \
+            -v "$(pwd)":/io \
+            --workdir /io \
+            "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
+            /io/dev/verify-wheel-imports.sh /io/dist skene
+
+      - name: Archive wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: skene-linux-${{ matrix.arch }}-${{ matrix.pybuild }}
+          path: dist/*manylinux*.whl
+
+  build-macos:
+    needs: floor
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        # macos-14 = Apple Silicon (arm64) only, matching rugo: no Intel wheels.
+        os: [macos-14]
+        pybuild: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Set up Python ${{ matrix.pybuild }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.pybuild }}
+          allow-prereleases: true
+
+      - name: Make build script executable
+        run: chmod +x dev/build-skene-wheels-macos.sh
+
+      - name: Build libskene wheel (${{ matrix.os }}, py ${{ matrix.pybuild }})
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          OPTERYX_ENABLE_LTO: "1"
+        run: ./dev/build-skene-wheels-macos.sh
+
+      - name: Verify wheel round-trip (release gate)
+        # macOS analog of the linux import gate: install the delocated wheel
+        # into a clean interpreter state (neutral cwd so the source tree cannot
+        # shadow it) and run the same write→read morsel round-trip.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls dist/delocated/*.whl | head -1)
+          python -m pip install --force-reinstall --no-deps "$WHEEL"
+          cd "$(mktemp -d)"
+          python - <<'EOF'
+          import skene
+          from draken.draken_native import DrakenType
+          from draken.interop.vector_sequence import vector_from_sequence
+          from draken.morsels.morsel import Morsel
+          m = Morsel.from_vectors(["a"], [vector_from_sequence([1, 2, None], DrakenType.INT64)])
+          buf = skene.write_morsel(m, read_acceleration=True, zstd_level=1)
+          r = skene.read_morsel(buf)
+          r.materialize()
+          assert r.column("a").to_pylist() == [1, 2, None], "skene wheel round-trip failed"
+          print("wheel round-trip ok")
+          EOF
+
+      - name: Archive wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: skene-macos-${{ matrix.os }}-${{ matrix.pybuild }}
+          path: dist/delocated/*.whl
+
+  upload:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all libskene wheels
+        uses: actions/download-artifact@v4.1.7
+        with:
+          path: dist-staging
+
+      - name: Stage wheels into dist/
+        run: |
+          mkdir -p dist
+          find dist-staging -name '*.whl' -exec mv -v {} dist/ \;
+          echo "=== wheels to publish ===" && ls -lh dist/
+
+      - name: Publish libskene 📦 to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Distinct token, scoped to the `libskene` PyPI project only.
+          password: ${{ secrets.LIBSKENE_PYPI_API_TOKEN }}

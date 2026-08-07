@@ -279,7 +279,7 @@ def test_case_aligns_mixed_unsigned_branches():
         ("'abc'", b"abc"),
     ],
 )
-@pytest.mark.parametrize("target", ["BLOB", "VARBINARY"])
+@pytest.mark.parametrize("target", ["VARBINARY"])
 def test_literal_cast_to_binary_encodes_the_rendering(literal, expected, target):
     # bytes(42) is 42 zero bytes, not b'42'; bytes(1.5) raised outright.
     assert _values(f"SELECT CAST({literal} AS {target}) AS v") == [expected]

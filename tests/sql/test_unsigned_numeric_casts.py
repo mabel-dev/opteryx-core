@@ -190,7 +190,7 @@ def test_unsigned_casts_preserve_nulls():
         "(SELECT CASE WHEN id > 4 THEN CAST(id AS UINT32) ELSE NULL END AS u "
         "FROM $planets) AS s"
     )
-    for target in ("UINT64", "UINT8", "DOUBLE"):
+    for target in ("UINT64", "UINT8", "FLOAT64"):
         got = _col(sql.format(t=target))
         assert got[:4] == [None, None, None, None], (target, got[:4])
         assert got[4] is not None, (target, got[4])

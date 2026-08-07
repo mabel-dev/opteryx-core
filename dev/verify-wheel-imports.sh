@@ -57,8 +57,26 @@ from opteryx.connectors import OpteryxConnector'
 from rugo import parquet
 import draken'
     ;;
+  skene)
+    PKG="skene"
+    # The libskene wheel bundles draken; skene_native crosses into
+    # draken.morsels.morsel at import (cxx_to_morsel capsule import), so a
+    # bare import already exercises the boundary. The round-trip below gates
+    # the actual artifact end to end: a wheel that imports but cannot
+    # serialize/deserialize a morsel must not ship.
+    DEEP_IMPORT='import skene
+import draken
+from draken.draken_native import DrakenType
+from draken.interop.vector_sequence import vector_from_sequence
+from draken.morsels.morsel import Morsel
+m = Morsel.from_vectors(["a"], [vector_from_sequence([1, 2, None], DrakenType.INT64)])
+buf = skene.write_morsel(m, read_acceleration=True, zstd_level=1)
+r = skene.read_morsel(buf)
+r.materialize()
+assert r.column("a").to_pylist() == [1, 2, None], "skene wheel round-trip failed"'
+    ;;
   *)
-    echo "ERROR: unknown mode '${MODE}' (expected 'opteryx' or 'rugo')" >&2
+    echo "ERROR: unknown mode '${MODE}' (expected 'opteryx', 'rugo' or 'skene')" >&2
     exit 1
     ;;
 esac
@@ -93,18 +111,29 @@ FOUND=0
 for PY in /opt/python/*/bin/python3; do
   [ -x "${PY}" ] || continue
 
-  # The tag MUST carry the ABI flags. manylinux images ship a free-threaded
-  # interpreter (/opt/python/cp314-cp314t) whose version_info is identical to
-  # the GIL build's, so a tag built from version_info alone matched the GIL
-  # wheel and pip rejected it: "not a supported wheel on this platform" — a
-  # release-blocking failure caused entirely by this script.
-  read -r PYTAG ABITAG <<EOF
+  # The tag must come from the IMPLEMENTATION and the ABI FLAGS, never from
+  # version_info alone. Two release-blocking failures came from getting this
+  # wrong, both caused entirely by this script:
+  #   * /opt/python/cp314-cp314t (free-threaded) has version_info identical to
+  #     the GIL build, so it claimed the GIL wheel;
+  #   * /opt/python/pp311-pypy311_pp73 (PyPy) reports version_info (3, 11) with
+  #     empty abiflags, so it claimed the CPython cp311 wheel.
+  # Both ended in: "not a supported wheel on this platform".
+  #
+  # We publish CPython wheels only, so a non-CPython interpreter is skipped
+  # outright — visibly, never silently.
+  read -r IMPL PYTAG ABITAG <<EOF
 $("${PY}" -c 'import sys
+impl = sys.implementation.name
 t = "t" if "t" in getattr(sys, "abiflags", "") else ""
 v = f"cp{sys.version_info[0]}{sys.version_info[1]}"
-print(v, v + t)' 2>/dev/null)
+print(impl, v, v + t)' 2>/dev/null)
 EOF
   [ -n "${PYTAG:-}" ] || continue
+  if [ "${IMPL}" != "cpython" ]; then
+    echo "--- ${IMPL} ${PYTAG}: not CPython — we publish CPython wheels only, skipping"
+    continue
+  fi
 
   # Match the wheel's full python-tag/abi-tag pair, so a cp314t interpreter can
   # never claim a cp314 wheel (or vice versa).

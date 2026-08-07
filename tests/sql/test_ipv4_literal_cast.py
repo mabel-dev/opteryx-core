@@ -227,14 +227,14 @@ def test_case_over_integer_ipv4_literals_folds():
 
 
 @pytest.mark.parametrize(
-    "target,expected", [("VARCHAR", "192.168.1.1"), ("BLOB", b"192.168.1.1")]
+    "target,expected", [("VARCHAR", "192.168.1.1"), ("VARBINARY", b"192.168.1.1")]
 )
 def test_ipv4_literal_to_string_family_folds_to_dotted_decimal(target, expected):
     assert _values(f"SELECT CAST(CAST('192.168.1.1' AS IPV4) AS {target})") == [expected]
 
 
 @pytest.mark.parametrize(
-    "target,expected", [("VARCHAR", "192.168.1.1"), ("BLOB", b"192.168.1.1")]
+    "target,expected", [("VARCHAR", "192.168.1.1"), ("VARBINARY", b"192.168.1.1")]
 )
 def test_ipv4_literal_to_string_family_under_try_cast(target, expected):
     # TRY_ changes what a BAD VALUE does, and a fold that cannot fail has none —
@@ -242,7 +242,7 @@ def test_ipv4_literal_to_string_family_under_try_cast(target, expected):
     assert _values(f"SELECT TRY_CAST(CAST('192.168.1.1' AS IPV4) AS {target})") == [expected]
 
 
-@pytest.mark.parametrize("target", ["VARCHAR", "BLOB"])
+@pytest.mark.parametrize("target", ["VARCHAR", "VARBINARY"])
 def test_ipv4_literal_and_column_string_folds_agree(target):
     # Parity is the reason the fold calls draken.ipv4_format rather than
     # formatting in Python: the planner and the kernel share one renderer.
