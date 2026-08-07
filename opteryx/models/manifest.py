@@ -1231,6 +1231,22 @@ class Manifest:
         if field_id is None:
             return None
 
+        if self.bounds_are_ordinal:
+            # The bounds dicts hold ordinalize() ORDINALS, not decoded values
+            # (ANALYZE manifests, skene footers). Callers of this method want
+            # decoded values — handing an ordinal to the selectivity estimator
+            # compares it against real predicate literals in the wrong space
+            # (a VARCHAR's prefix-packed int against a bytes literal). Serve
+            # them only for categories whose ordinal space IS the value space
+            # (identity mapping); everything else gets "no estimate", which
+            # costs estimation quality, never correctness.
+            column_type = self._column_type(column)
+            if column_type is None or column_type.category not in (
+                LogicalCategory.INTEGER,
+                LogicalCategory.DATE,
+            ):
+                return None
+
         min_val = None
         max_val = None
         for file in self.files:

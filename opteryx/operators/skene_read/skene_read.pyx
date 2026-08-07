@@ -25,10 +25,14 @@ unprojected column's bytes are never interpreted (whole-file bytes are still
 fetched in this phase — the footer-extent ranged-read path is the native scan
 source's job, not this operator's).
 
-Predicates are NOT pushed in this phase — FileSystemTable.can_push declines
-for skene datasets, so filters stay above the scan (a missed optimization,
-never a dropped predicate). The footer's statistics/zone-map/bloom pruning
-arrives with the native scan source.
+Predicates are NOT pushed into this reader — FileSystemTable.can_push
+declines for skene, because on the compile-time materialized path a
+reader-side row filter SERIALIZES work the parallel engine Filter does
+concurrently (measured: +460ms across TPC-H SF1). Filters stay in the plan;
+FILE-level pruning still happens at plan time — the manifest pruning strategy
+prunes from parent Filter nodes (footer min/max ordinals in the manifest
+bounds) without consuming them. Reader-side predicates and zone-map/bloom
+pruning return with the native scan source.
 
 Schema is not inferred and not sampled: every file's footer carries the exact
 DrakenType + LogicalType per column, and every decoded file is validated
@@ -42,7 +46,6 @@ from libcpp.string cimport string
 from draken.morsels.cxx_morsel cimport CxxMorsel
 
 from opteryx.exceptions import DatasetReadError
-from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
 
 # BasePlanNode/ReaderNode/Morsel/morsel_to_cxx in scope via _operators.pyx include.
@@ -53,20 +56,16 @@ cdef class SkeneReadNode(ReaderNode):
 
     # Manifest-ordered list of .skene files this scan reads.
     cdef public list skene_files
-    # Pushed-down projection: physical (in-file) column names, parallel to
-    # self.columns. Empty means COUNT(*)-style zero-column reads.
-    cdef public list skene_physical_columns
-    # Pushed predicates, lowered by compiler._compile_scan through the shared
-    # rewrite chain. Pushed predicates are REMOVED from the plan, so applying
-    # this per morsel is a correctness obligation, not an optimization.
-    cdef public object compiled_predicate
+    # The schema columns this scan DECODES: projection ∪ pushed-predicate
+    # columns (physical name = schema_column.name; see _skene_scan_config).
+    # Empty means COUNT(*)-style zero-column reads with no predicates.
+    cdef public list skene_read_schema_columns
     cdef object _filesystem
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.skene_files = list(parameters.get("skene_files") or [])
-        self.skene_physical_columns = list(parameters.get("skene_physical_columns") or [])
-        self.compiled_predicate = None  # set at plan time by compiler._compile_scan
+        self.skene_read_schema_columns = list(parameters.get("skene_read_schema_columns") or [])
         self._filesystem = None
 
     @property
@@ -138,15 +137,17 @@ cdef class SkeneReadNode(ReaderNode):
         """One Morsel per .skene file, in manifest order."""
         import skene as _skene
 
-        from opteryx.expression.evaluator import execute_bytecode
-        from opteryx.expression.evaluator.evaluation import (
-            filter_morsel_c_native as _filter_morsel_c_native,
-        )
-
         filesystem = self._ensure_filesystem()
 
-        expected_columns = self.columns or []
-        physical_names = self.skene_physical_columns
+        read_schema_columns = self.skene_read_schema_columns
+        physical_names = [sc.name for sc in read_schema_columns]
+        identity_by_physical = {sc.name: sc for sc in read_schema_columns}
+        projection_identities = [c.schema_column.identity for c in (self.columns or [])]
+        # Predicate-only columns must not leave the scan: after filtering,
+        # select back down to exactly the plan's projection. For COUNT(*)
+        # WHERE this yields the genuine zero-column morsel whose (filtered)
+        # row count rides on zero_col_rows — the CountStar contract.
+        needs_select = len(read_schema_columns) != len(projection_identities)
 
         for path in self.skene_files:
             file_obj = filesystem.open_input_file(path)
@@ -154,17 +155,6 @@ cdef class SkeneReadNode(ReaderNode):
                 data = file_obj.memoryview
 
                 if not physical_names:
-                    if self.compiled_predicate is not None:
-                        # A pushed predicate references at least one column, and
-                        # projection pushdown always keeps predicate columns in
-                        # the scan's column set — an empty projection alongside
-                        # a predicate is an invariant break, and counting
-                        # unfiltered rows here would be a silent wrong answer.
-                        raise InvalidInternalStateError(
-                            f"skene scan '{path}': pushed predicate with an "
-                            "empty projection — predicate columns missing from "
-                            "the scan's column set."
-                        )
                     # An EMPTY projection is "this query reads no columns"
                     # (COUNT(*)), not "a file with zero columns": emit a genuine
                     # ZERO-COLUMN morsel whose row count rides on zero_col_rows
@@ -196,10 +186,6 @@ cdef class SkeneReadNode(ReaderNode):
                 # CxxMorsel (we exclusively own this fresh instance), instead
                 # of materializing PyObject wrappers and rebuilding via
                 # from_vectors: that round-trip was pure boundary waste.
-                identity_by_physical = {
-                    physical_name: expected.schema_column
-                    for physical_name, expected in zip(physical_names, expected_columns)
-                }
                 result_morsel = self._rename_to_identities(
                     <Morsel>file_morsel, identity_by_physical, path
                 )
@@ -208,20 +194,8 @@ cdef class SkeneReadNode(ReaderNode):
                 self.readings["rows_read"] += result_morsel.num_rows
                 self.readings["bytes_processed"] += len(data)
 
-                if self.compiled_predicate is not None:
-                    # Same application as the parquet scan: c-native filter
-                    # first (no PyObject columns), VM + filter_mask fallback
-                    # for anything the native path declines.
-                    filtered = _filter_morsel_c_native(self.compiled_predicate, result_morsel)
-                    if filtered is None:
-                        filtered = result_morsel.filter_mask(
-                            execute_bytecode(self.compiled_predicate, result_morsel)
-                        )
-                    result_morsel = <Morsel>filtered
-                    if result_morsel.num_rows == 0:
-                        # Every row of this file was filtered out — a legitimate
-                        # empty result; the file contributes nothing.
-                        continue
+                if needs_select:
+                    result_morsel = result_morsel.select(projection_identities)
 
                 yield result_morsel
             finally:

@@ -68,12 +68,26 @@ class ManifestPruningStrategy(OptimizationStrategy):
             context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
 
         if node.node_type == LogicalPlanStepType.Scan:
-            # Try to prune files using manifest
-            if node.manifest is not None and node.predicates:
+            # Predicates come from two places:
+            #   - node.predicates: pushed INTO the scan by predicate pushdown
+            #     (the connector accepted them; the reader applies them);
+            #   - parent Filter nodes directly above the scan: predicates the
+            #     connector DECLINED (e.g. skene scans, which decline so the
+            #     parallel engine Filter keeps the row-level work). Pruning
+            #     from a Filter does not consume it — the Filter still runs,
+            #     so a pruned file is one whose rows were provably all
+            #     filter-dropped anyway. Files skipped, answers unchanged.
+            prunable = list(node.predicates or [])
+            prunable.extend(
+                self._parent_filter_predicates(
+                    context.pre_optimized_tree, context.node_id, node
+                )
+            )
+            if node.manifest is not None and prunable:
                 # Apply manifest-based pruning
                 original_count = node.manifest.get_file_count()
 
-                node.manifest.prune_files(node.predicates)
+                node.manifest.prune_files(prunable)
 
                 pruned_count = node.manifest.get_file_count()
                 self.telemetry.files_pruned += original_count - pruned_count
@@ -81,6 +95,53 @@ class ManifestPruningStrategy(OptimizationStrategy):
             context.optimized_plan[context.node_id] = node
 
         return context
+
+    def _parent_filter_predicates(self, plan, node_id, scan_node) -> list:
+        """Conditions of the unbroken Filter chain directly ABOVE the scan,
+        restricted to predicates over THIS scan's own columns.
+
+        The walk stops at the first non-Filter node: predicate pushdown has
+        already moved every filter as close to its scan as it legally can, so
+        anything further up is separated by an operator (join, aggregate,
+        limit, window) this walk must not see through — a Limit between filter
+        and scan, for example, makes pruning change WHICH rows reach the
+        filter, a wrong answer rather than a missed optimization.
+
+        The identity gate is what makes a name-keyed prune safe here: a
+        predicate is used only when every column it references is one of this
+        scan's OWN schema columns (by identity, never by name — two relations
+        can share a column name, and a self-join's `n1.name = 'X'` filter must
+        never prune n2's files).
+        """
+        from opteryx.expression import get_all_nodes_of_type
+
+        scan_identities = {
+            column.identity for column in getattr(scan_node.schema, "columns", None) or []
+        }
+        if not scan_identities:
+            return []
+
+        collected = []
+        current_id = node_id
+        while True:
+            # Data flows child -> parent in this graph: a node's parent is the
+            # TARGET of its outgoing edge (ingoing_edges lists its children).
+            parents = [target for _, target, _ in plan.outgoing_edges(current_id)]
+            if len(parents) != 1:
+                break
+            parent = plan[parents[0]]
+            if parent.node_type != LogicalPlanStepType.Filter:
+                break
+            condition = getattr(parent, "condition", None)
+            if condition is not None:
+                referenced = get_all_nodes_of_type(condition, (NodeType.IDENTIFIER,))
+                if referenced and all(
+                    identifier.schema_column.identity in scan_identities
+                    for identifier in referenced
+                ):
+                    collected.append(condition)
+            current_id = parents[0]
+        return collected
 
     def _is_prunable_predicate(self, condition: Node) -> bool:
         """

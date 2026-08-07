@@ -33,6 +33,7 @@ The Physical Planner does NOT optimize, bind, or rewrite the plan.
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import PhysicalPlan
 from opteryx.models.dataset_format import PARQUET
 from opteryx.models.dataset_format import SCAN_READERS
@@ -142,16 +143,33 @@ def _jsonl_scan_config(node_config):
 
 def _skene_scan_config(node_config):
     """Adapt a manifest-backed Scan's config to SkeneReadNode's parameters:
-    the manifest's file list plus the physical (in-file) projection names,
-    parallel to `columns` (scan schema columns are file-named). Predicates are
-    never in this config — FileSystemTable.can_push declines them for skene,
-    so they remain Filter nodes above the scan."""
+    the manifest's file list plus the schema columns the reader must decode
+    (scan schema columns are file-named, so physical name = schema_column.name).
+    Pushed predicates ride through node_config["predicates"] and are lowered by
+    the compiler into scan.compiled_predicate; the reader applies them exactly
+    and then selects back down to the projection."""
     manifest = node_config["manifest"]
     columns = node_config.get("columns") or []
+    predicates = node_config.get("predicates") or []
+
+    # The read set is projection ∪ predicate columns: a pushed predicate's
+    # column is not necessarily projected (COUNT(*) WHERE x > 5 projects
+    # nothing), but the reader must decode it to filter. The reader selects
+    # back down to the projection after filtering, so predicate-only columns
+    # never leave the scan.
+    read_schema_columns = [c.schema_column for c in columns]
+    read_identities = {sc.identity for sc in read_schema_columns}
+    for condition in predicates:
+        for referenced in get_all_nodes_of_type(condition, (NodeType.IDENTIFIER,)):
+            schema_column = referenced.schema_column
+            if schema_column.identity not in read_identities:
+                read_identities.add(schema_column.identity)
+                read_schema_columns.append(schema_column)
+
     return {
         **node_config,
         "skene_files": [f.file_path for f in manifest.files],
-        "skene_physical_columns": [c.schema_column.name for c in columns],
+        "skene_read_schema_columns": read_schema_columns,
     }
 
 

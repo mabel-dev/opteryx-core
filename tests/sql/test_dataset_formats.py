@@ -81,6 +81,37 @@ def test_dataset_scan(session, dataset_fixture, request):
     assert sum(len(v) for v in result.values()) == 3, result
 
 
+def test_skene_pruning_notEq_shared_prefix_strings(session, tmp_path):
+    """String ordinals pack the first 8 bytes and collide on shared prefixes:
+    a file holding 'abcdefgh1' AND 'abcdefgh2' has min == max ORDINAL with
+    non-uniform values. NotEq pruning on ordinal bounds must not treat that
+    as uniformity — the file must be read, and the other value returned."""
+    import skene
+    from draken.draken_native import DrakenType
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    strings = vector_from_sequence(["abcdefgh1", "abcdefgh2"], DrakenType.VARCHAR)
+    values = vector_from_sequence([1, 2], DrakenType.INT64)
+    morsel = Morsel.from_vectors(["s", "v"], [strings, values])
+    (tmp_path / "f.skene").write_bytes(skene.write_morsel(morsel, read_acceleration=True))
+
+    result = _run(session, f"SELECT s FROM '{tmp_path}' WHERE s != 'abcdefgh1'")
+    assert result["s"] == ["abcdefgh2"], result
+
+
+def test_skene_file_pruning_from_parent_filter(session, skene_dataset):
+    """Skene declines predicate pushdown (the Filter stays in the plan), but
+    manifest pruning still drops provably-excluded files from the parent
+    Filter's predicates — a contradiction must return zero rows, and a
+    selective filter the right ones, with the Filter doing row-level work."""
+    result = _run(session, f"SELECT COUNT(*) FROM '{skene_dataset}' WHERE value < 0")
+    assert list(result.values()) == [[0]], result
+
+    result = _run(session, f"SELECT name FROM '{skene_dataset}' WHERE value = 30")
+    assert result["name"] == ["gamma"], result
+
+
 def test_mixed_format_dataset_raises(session, tmp_path):
     from opteryx.models.dataset_format import MixedFormatDatasetError
 

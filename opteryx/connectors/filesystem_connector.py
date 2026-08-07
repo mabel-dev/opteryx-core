@@ -129,17 +129,24 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     def can_push(self, operator, types: set = None) -> bool:
         """Format-aware predicate gate.
 
-        Parquet and skene take PredicatePushable's generic gate against this
-        class's PUSHABLE_OPS/TYPES — both readers apply accepted predicates
-        exactly, with the same engine filter kernel (skene:
-        SkeneReadNode.read_morsels; parquet: the pass1/pass2 gate), and both
-        feed manifest file pruning. JSONL delegates to JsonlPredicatePushable —
-        the same (deliberately narrower) gate READ_JSONL uses, so a dataset
-        scan and READ_JSONL over the same files push identically. Anything
-        else declines: a declined predicate stays behind as a Filter node — a
-        missed optimization, never a dropped predicate.
+        Parquet takes PredicatePushable's generic gate against this class's
+        PUSHABLE_OPS/TYPES. JSONL delegates to JsonlPredicatePushable — the
+        same (deliberately narrower) gate READ_JSONL uses, so a dataset scan
+        and READ_JSONL over the same files push identically.
+
+        SKENE deliberately DECLINES: its scan runs on the compile-time
+        materialized path, where a reader-side row filter serializes work the
+        parallel engine Filter does concurrently — measured on TPC-H SF1,
+        accepting pushdown cost +460ms across the suite. Filters therefore
+        stay in the plan, and file-level pruning still happens: the manifest
+        pruning strategy prunes from parent Filter nodes without consuming
+        them. Reader-side predicates return with the native skene scan source,
+        which can filter during the scan without serializing it.
+
+        Anything else declines: a declined predicate stays behind as a Filter
+        node — a missed optimization, never a dropped predicate.
         """
-        if self.dataset_file_format in (PARQUET, SKENE):
+        if self.dataset_file_format == PARQUET:
             return PredicatePushable.can_push(self, operator, types)
         if self.dataset_file_format == JSONL:
             from opteryx.connectors.jsonl_io import JsonlPredicatePushable
