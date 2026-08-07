@@ -64,6 +64,130 @@ def _get_logical_node_type(node):
         return None
 
 
+def _node_predicates(node):
+    """The filter terms a node applies, one entry per ANDed term.
+
+    The two node kinds that filter store it differently: a read node carries
+    pushed-down predicates in `predicates`, already split into terms by the
+    planner, while a FILTER carries a single expression tree in `filter` that
+    may itself be a conjunction. Splitting the latter with the planner's own
+    splitter — rather than a second implementation here — means both arrive
+    downstream in the same shape, and a nested `(a AND b)` is unwrapped the
+    way the planner unwraps it.
+    """
+    predicates = getattr(node, "predicates", None)
+    if predicates:
+        return list(predicates)
+
+    expression = getattr(node, "filter", None)
+    if expression is None:
+        return []
+    try:
+        from opteryx.expression import NodeType
+        from opteryx.planner.optimizer.strategies.split_conjunctive_predicates import (
+            _inner_split,
+        )
+
+        # NodeType.DNF is, despite the name, this engine's n-ary AND — its
+        # `parameters` ARE the conjuncts (see expression/__init__.pyx), and
+        # it's the shape a multi-term WHERE actually reaches the physical
+        # FILTER in. An OR keeps its own node type and is deliberately left
+        # whole: it is one term, and splitting it would misrepresent a
+        # disjunction as a conjunction.
+        if expression.node_type == NodeType.DNF:
+            return list(getattr(expression, "parameters", None) or [expression])
+        return _inner_split(expression)
+    except Exception:  # pragma: no cover - never let telemetry break the query
+        # Unsplit is still correct, just one long term instead of several.
+        return [expression]
+
+
+def _format_expressions(expressions):
+    """Render a node's expression list, one entry per expression.
+
+    Used for every list a node exposes — a read node's pushed-down predicate
+    terms, an aggregate's functions and its grouping keys. Emitted as a list
+    rather than a pre-joined string because the entries ARE the structure,
+    and a consumer can't recover them from a joined string: " AND " also
+    appears inside string literals and BETWEEN, and a comma appears inside
+    any two-argument function call. A reader wanting one line can always
+    join them; a reader wanting one entry per row can only do that if they
+    arrive separately.
+    """
+    from opteryx.expression import format_expression
+
+    parts = []
+    for expression in expressions:
+        # As for node.config: one unformattable entry shouldn't cost the
+        # whole list, so skip it and keep the rest.
+        try:
+            rendered = str(format_expression(expression)).strip()
+        except Exception:  # pragma: no cover - defensive, as for node.config
+            continue
+        if rendered:
+            parts.append(rendered)
+    return parts
+
+
+def _describe_columns(node):
+    """Per-column name/type/pass-through detail for a Project node.
+
+    ``config`` already carries these names, but only as one comma-joined
+    string — a consumer can't recover a column's type from it, and a name
+    that itself contains a comma (a two-argument function call, say) can't
+    even be split back out reliably. This emits the same list structurally,
+    with the resolved type the binder attached to each column.
+
+    Two kinds of column are described, because a Project emits both:
+
+    * the projection — the query's output row;
+    * ``passthrough_columns`` — computed and emitted for a consumer above
+      (ORDER BY, HAVING), then dropped at the Exit node. They are part of
+      what this operator produces, so counting only the projection
+      understates its work; they are flagged rather than silently merged so
+      a reader can tell which columns survive into the result.
+
+    ``hoisted_columns`` are deliberately excluded: those are computed for
+    this node's own internal use and never emitted at all.
+
+    Pass-through columns are read from ``node.parameters`` because
+    ProjectionNode.columns deliberately holds only the output projection
+    (see projection.pyx).
+    """
+    from opteryx.expression import format_expression
+
+    parameters = getattr(node, "parameters", None) or {}
+    projection = list(getattr(node, "columns", None) or [])
+    passthrough = list(parameters.get("passthrough_columns") or [])
+    if not projection and not passthrough:
+        return []
+
+    details = []
+    for column, is_passthrough in [(c, False) for c in projection] + [
+        (c, True) for c in passthrough
+    ]:
+        # One unformattable column shouldn't cost the whole list — skip it and
+        # keep the rest, the same way `config` is guarded below.
+        try:
+            name = str(format_expression(column))
+        except Exception:  # pragma: no cover - defensive, as for node.config
+            continue
+        detail = {"name": name, "passthrough": is_passthrough}
+        # `column_type` is the attribute on both SchemaColumn (a plain
+        # identifier) and ExpressionColumn (a computed column), and its str()
+        # is the display form a reader expects — "VARCHAR", or a fully
+        # parameterised "DECIMAL(22, 1)". `type` is checked as a fallback for
+        # any column class that names it that way instead.
+        schema_column = getattr(column, "schema_column", None)
+        column_type = getattr(schema_column, "column_type", None)
+        if column_type is None:
+            column_type = getattr(schema_column, "type", None)
+        if column_type is not None:
+            detail["type"] = str(column_type)
+        details.append(detail)
+    return details
+
+
 # Exact, architect-specified display label per operator CLASS — distinct from
 # _get_logical_node_type's coarse category bucket, which can't tell a Parquet
 # scan from a function scan, or a hashed group-by from a plain aggregate.
@@ -83,7 +207,6 @@ _OPERATOR_LABELS = {
     "LimitNode": "LIMIT",
     "DrakenInnerJoinNode": "HASH JOIN",
     "NestedLoopJoinNode": "NESTED JOIN",
-    "NonEquiJoinNode": "NON EQUI JOIN",
     "AsofJoinNode": "ASOF JOIN",
     "CrossJoinNode": "CROSS JOIN",
     "UnnestJoinNode": "UNNEST JOIN",
@@ -228,10 +351,56 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
             # Add node-specific attributes
             if getattr(node, "columns", None):
                 node_stat["columns"] = len(node.columns)
+            # Only Project nodes: every operator has a column list, but this is
+            # the one whose whole job is choosing and shaping them, and emitting
+            # per-column detail for a wide scan would bloat the telemetry for no
+            # reader. `columns` above stays the output-projection count it has
+            # always been; the pass-through columns are additional entries here.
+            if _get_logical_node_type(node) == "ProjectRel":
+                column_details = _describe_columns(node)
+                if column_details:
+                    node_stat["column_details"] = column_details
             if getattr(node, "limit", None) is not None:
                 node_stat["limit"] = node.limit
             if getattr(node, "predicates", None):
                 node_stat["has_filters"] = True
+            # `has_filters` says only that a predicate exists; this says what
+            # it is, one entry per ANDed term. Emitted for every node that
+            # filters — a FILTER, and a read node with predicates pushed into
+            # it. A FILTER's `config` is its predicate too, but as one joined
+            # string that can't be split back apart; a read node's `config` is
+            # the dataset, so there the expression has nowhere else to appear.
+            predicates = _node_predicates(node)
+            if predicates:
+                filters = _format_expressions(predicates)
+                if filters:
+                    node_stat["filters"] = filters
+            # A LIMIT's `config` reads "N OFFSET M" — one string a consumer
+            # has to parse to get either number back. `limit` is emitted
+            # above; this is its other half. Emitted even when zero, so the
+            # absence of an offset is stated rather than inferred from a
+            # missing key.
+            if getattr(node, "offset", None) is not None:
+                node_stat["offset"] = node.offset
+            # An aggregate's two lists, kept apart: the functions it computes
+            # and the keys it groups by are different things, and its
+            # `config` ("AGGREGATE (...) GROUP BY (...)") runs them together
+            # into one string. Absent on an ungrouped aggregate, which has
+            # functions but no keys.
+            aggregates = _format_expressions(getattr(node, "aggregates", None) or [])
+            if aggregates:
+                node_stat["aggregates"] = aggregates
+            groups = _format_expressions(getattr(node, "groups", None) or [])
+            if groups:
+                node_stat["groups"] = groups
+            if node.is_scan:
+                # The denominator for `columns_read`: how many columns the
+                # relation has, so a reader can see the projection pushdown as
+                # a ratio ("2 of 13") rather than a bare count that could mean
+                # anything without knowing the table's width.
+                schema_columns = getattr(getattr(node, "schema", None), "columns", None)
+                if schema_columns:
+                    node_stat["columns_total"] = len(schema_columns)
             if getattr(node, "left_filter", None) is not None:
                 node_stat["bloom_filter"] = True
             if getattr(node, "at_date", None):
