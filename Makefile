@@ -336,6 +336,12 @@ tpch: ## Run TPC-H benchmark vs DuckDB (defaults to SF=1)
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py
 
+tpch-skene: ## Run TPC-H benchmark on the skene mirror of the dataset (generates testdata/tpch_1_skene from testdata/tpch_1 on first run)
+	$(call print_blue,"Running TPC-H benchmark on skene...")
+	@test -d testdata/tpch_1_skene || $(PYTHON) dev/parquet_to_skene.py testdata/tpch_1 testdata/tpch_1_skene
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --variant skene
+
 b: check-python
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) scratch/brace.py

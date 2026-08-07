@@ -129,14 +129,17 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     def can_push(self, operator, types: set = None) -> bool:
         """Format-aware predicate gate.
 
-        Parquet takes PredicatePushable's generic gate against this class's
-        PUSHABLE_OPS/TYPES. JSONL delegates to JsonlPredicatePushable — the
-        same (deliberately narrower) gate READ_JSONL uses, so a dataset scan
-        and READ_JSONL over the same files push identically. Anything else
-        declines: a declined predicate stays behind as a Filter node — a
+        Parquet and skene take PredicatePushable's generic gate against this
+        class's PUSHABLE_OPS/TYPES — both readers apply accepted predicates
+        exactly, with the same engine filter kernel (skene:
+        SkeneReadNode.read_morsels; parquet: the pass1/pass2 gate), and both
+        feed manifest file pruning. JSONL delegates to JsonlPredicatePushable —
+        the same (deliberately narrower) gate READ_JSONL uses, so a dataset
+        scan and READ_JSONL over the same files push identically. Anything
+        else declines: a declined predicate stays behind as a Filter node — a
         missed optimization, never a dropped predicate.
         """
-        if self.dataset_file_format == PARQUET:
+        if self.dataset_file_format in (PARQUET, SKENE):
             return PredicatePushable.can_push(self, operator, types)
         if self.dataset_file_format == JSONL:
             from opteryx.connectors.jsonl_io import JsonlPredicatePushable
@@ -458,11 +461,64 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # keyed by the original path. fetch_column_stats_many owns that split, and
         # fetches the whole set concurrently with the GIL released instead of one
         # serial, GIL-held round trip (plus a signing round trip) per file.
-        # Footer statistics are parquet's; other formats take the stats-absent
-        # path below (record_count=None — UNKNOWN, never 0). Skene's footer
-        # stats feed in with its reader, not here.
+        # Footer statistics per format. Formats without a footer (JSONL) take
+        # the stats-absent path below (record_count=None — UNKNOWN, never 0).
         stats_by_name: Dict[str, tuple] = {}
-        if dataset_fmt == PARQUET:
+        if dataset_fmt == SKENE:
+            # Skene's footer carries an exact row_count and per-column min/max
+            # ORDINALS (draken ordinalize dialect — format.h ColumnStatistics:
+            # "the same dialect the catalog manifest speaks").
+            #
+            # row_count: without it the join ordering optimizer is blind —
+            # measured on TPC-H Q9, the unordered plan put a 6M-row table on a
+            # join BUILD side and ran ~10x slower than the ordered plan.
+            #
+            # bounds: feed the SAME manifest slots ANALYZE's ordinal bounds use
+            # (FileEntry.lower/upper_bounds + bounds_are_ordinal=True), so the
+            # optimizer's manifest pruning drops provably-excluded files with
+            # no skene-specific pruning code. Bounds are keyed by the column's
+            # SCHEMA position — resolved by NAME from each file's own footer,
+            # never by footer position, so a file whose column order diverges
+            # from the schema cannot land bounds on the wrong column. Only
+            # columns with BOTH kStatMin and kStatMax are emitted (an all-null
+            # column carries neither; emitting a half-bound would prune wrong).
+            #
+            # read_metadata parses only the footer; the mmap'd open touches
+            # footer pages, not the data region.
+            from skene import SkeneError
+            from skene import read_metadata as _skene_read_metadata
+
+            _KSTAT_MIN_MAX = 0x3  # kStatMin | kStatMax (skene format.h StatFlag)
+            position_by_name = {col.name: idx for idx, col in enumerate(schema.columns)}
+            skene_bounds: Dict[str, tuple] = {}
+            for blob_name in ordered_names:
+                file_obj = self.filesystem.open_input_file(blob_name)
+                try:
+                    footer = _skene_read_metadata(file_obj.memoryview)
+                except SkeneError as err:
+                    raise DataError(f"Cannot read skene file '{blob_name}': {err}") from err
+                finally:
+                    file_obj.close()
+                stats_by_name[blob_name] = (footer["row_count"], None)
+                lower: Dict[int, int] = {}
+                upper: Dict[int, int] = {}
+                for column in footer["columns"]:
+                    statistics = column["statistics"]
+                    if statistics is None:
+                        continue
+                    if (statistics["flags"] & _KSTAT_MIN_MAX) != _KSTAT_MIN_MAX:
+                        continue
+                    position = position_by_name.get(column["name"])
+                    if position is None:
+                        continue
+                    lower[position] = statistics["min_ordinal"]
+                    upper[position] = statistics["max_ordinal"]
+                if lower:
+                    skene_bounds[blob_name] = (lower, upper)
+            if skene_bounds:
+                manifest_bounds = skene_bounds
+                bounds_are_ordinal = True
+        elif dataset_fmt == PARQUET:
             try:
                 from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
 

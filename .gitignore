@@ -266,3 +266,4 @@ rugo/src/jsonl/_jsonl_writer.cpp
 rugo/src/parquet/parquet_writer.cpp
 rugo/src/rugo_native.cpp
 !opteryx/compiled/thread_pool_bridge.cpp
+*.skene

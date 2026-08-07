@@ -2250,6 +2250,15 @@ class _Compiler:
         # whole-file Morsel per file rather than one per newline-chunk -- rugo's
         # CSV reader has no chunked entry point (see CsvReadNode's docstring).
         if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode", "SkeneReadNode"):
+            if kind == "SkeneReadNode" and getattr(scan, "predicates", None):
+                # Pushed predicates are REMOVED from the plan, so the reader
+                # must apply them exactly. Lower them HERE, through the same
+                # rewrite chain as the streaming scan's compiled_predicate —
+                # reader-side lowering would bypass it and repeat the decimal
+                # off-scale silent row drop that chain exists to prevent.
+                scan.compiled_predicate = self._lower_bytecode(
+                    self._compose_predicate_nodes(scan.predicates)
+                )
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")

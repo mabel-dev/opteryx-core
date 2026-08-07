@@ -55,14 +55,19 @@ _DUCKDB_DIR = os.path.join(os.path.dirname(__file__), "duckdb")
 _RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 
 
-def _scale_to_dataset(scale: str) -> str:
+def _dataset_suffix(scale: str, variant: str) -> str:
+    """`tpch_<scale>` or `tpch_<scale>_<variant>` (e.g. variant `skene`)."""
+    return f"tpch_{scale}_{variant}" if variant else f"tpch_{scale}"
+
+
+def _scale_to_dataset(scale: str, variant: str = "") -> str:
     """Map CLI scale token (`1`, `001`, …) to the testdata workspace path."""
-    return f"testdata.tpch_{scale}"
+    return f"testdata.{_dataset_suffix(scale, variant)}"
 
 
-def _load_queries(scale: str) -> list[tuple[str, str]]:
+def _load_queries(scale: str, variant: str = "") -> list[tuple[str, str]]:
     """[(name, sql), ...] sorted by name; placeholder table prefixes rewritten."""
-    dataset = _scale_to_dataset(scale)
+    dataset = _scale_to_dataset(scale, variant)
     queries: list[tuple[str, str]] = []
     for path in sorted(glob.glob(os.path.join(_QUERY_DIR, "query*.sql"))):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -104,16 +109,27 @@ def main() -> int:
         default=3,
         help="Warm iterations per query (default: 3)",
     )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="",
+        help="Dataset format variant: runs against testdata/tpch_<scale>_<variant> "
+        "(e.g. `skene` for the skene mirror; default: the parquet dataset)",
+    )
     args = parser.parse_args()
 
-    dataset = _scale_to_dataset(args.scale)
-    dataset_path = os.path.join(_REPO_ROOT, "testdata", f"tpch_{args.scale}")
+    suffix = _dataset_suffix(args.scale, args.variant)
+    dataset = _scale_to_dataset(args.scale, args.variant)
+    dataset_path = os.path.join(_REPO_ROOT, "testdata", suffix)
     if not os.path.isdir(dataset_path):
         print(f"ERROR: dataset not found at {dataset_path}")
-        print(f"       expected: testdata/tpch_{args.scale}")
+        print(f"       expected: testdata/{suffix}")
+        if args.variant:
+            print(f"       generate it: python dev/parquet_to_skene.py "
+                  f"testdata/tpch_{args.scale} testdata/{suffix}")
         return 1
 
-    queries = _load_queries(args.scale)
+    queries = _load_queries(args.scale, args.variant)
     if not queries:
         print(f"ERROR: no .sql files found in {_QUERY_DIR}")
         return 1
@@ -129,7 +145,7 @@ def main() -> int:
     try:
         warm_session = opteryx.session()
         for _ in warm_session.execute_to_morsels(
-            f"SELECT COUNT(*) FROM testdata.tpch_{args.scale};"
+            f"SELECT COUNT(*) FROM testdata.{suffix};"
         ):
             pass
         cold_time_ms = (time.monotonic_ns() - start) / 1e6
@@ -145,6 +161,7 @@ def main() -> int:
         opteryx_version=opteryx.__version__,
         metadata=[
             ("Scale factor", f"{args.scale}  ({dataset})"),
+            ("Format", args.variant or "parquet"),
             ("Queries", str(len(queries))),
             ("Iterations", f"{args.iterations} warm runs per query"),
         ],
@@ -158,6 +175,7 @@ def main() -> int:
         _RESULTS_DIR,
         fieldnames=[
             "scale",
+            "variant",
             "query",
             "run",
             "status",
@@ -190,6 +208,7 @@ def main() -> int:
                     csv_writer.writerow(
                         {
                             "scale": args.scale,
+                            "variant": args.variant or "parquet",
                             "query": name,
                             "run": run_ix,
                             "status": "ok",
@@ -208,6 +227,7 @@ def main() -> int:
                     csv_writer.writerow(
                         {
                             "scale": args.scale,
+                            "variant": args.variant or "parquet",
                             "query": name,
                             "run": run_ix,
                             "status": "error",

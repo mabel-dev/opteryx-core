@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.models.file_entry import FileEntry
 from opteryx.third_party.maki_nage.distogram import Distogram, merge
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import RelationSchema
 
 # INT64_MIN, the codebase-wide "this producer computed no real bound for this
@@ -454,6 +455,23 @@ class Manifest:
 
                     if _is_real_bound(min_value, max_value):
                         compare_value = literal_value
+                        if self.bounds_are_ordinal and predicate.value == "NotEq":
+                            # String ordinals pack the first 8 content bytes and
+                            # are MONOTONIC BUT NOT INJECTIVE (skene format.h,
+                            # same dialect as ANALYZE bounds): two different
+                            # values can share one ordinal. The NotEq handler
+                            # prunes on `min == max == v`, which reads ordinal
+                            # equality as value uniformity — false for strings
+                            # ('abcdefgh1' vs 'abcdefgh2' collide), so a file
+                            # holding the OTHER value would be wrongly dropped.
+                            # Range handlers stay safe (monotonicity is enough);
+                            # only NotEq needs injectivity, so only NotEq skips.
+                            column_type = self._column_type(column_name)
+                            if column_type is None or column_type.category in (
+                                LogicalCategory.VARCHAR,
+                                LogicalCategory.VARBINARY,
+                            ):
+                                continue
                         if self.bounds_are_ordinal:
                             # Bounds are Vector.ordinalize() ordinal keys, not real
                             # values (see __init__'s bounds_are_ordinal docstring) -

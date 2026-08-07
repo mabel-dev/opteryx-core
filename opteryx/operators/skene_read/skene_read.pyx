@@ -36,10 +36,16 @@ against the bind-time schema by name and physical type — a divergent file in
 a dataset fails loud, naming the file.
 """
 
+from libcpp.memory cimport shared_ptr
+from libcpp.string cimport string
+
+from draken.morsels.cxx_morsel cimport CxxMorsel
+
 from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryProperties
 
-# BasePlanNode/ReaderNode/Morsel in scope via _operators.pyx include.
+# BasePlanNode/ReaderNode/Morsel/morsel_to_cxx in scope via _operators.pyx include.
 
 
 cdef class SkeneReadNode(ReaderNode):
@@ -50,12 +56,17 @@ cdef class SkeneReadNode(ReaderNode):
     # Pushed-down projection: physical (in-file) column names, parallel to
     # self.columns. Empty means COUNT(*)-style zero-column reads.
     cdef public list skene_physical_columns
+    # Pushed predicates, lowered by compiler._compile_scan through the shared
+    # rewrite chain. Pushed predicates are REMOVED from the plan, so applying
+    # this per morsel is a correctness obligation, not an optimization.
+    cdef public object compiled_predicate
     cdef object _filesystem
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.skene_files = list(parameters.get("skene_files") or [])
         self.skene_physical_columns = list(parameters.get("skene_physical_columns") or [])
+        self.compiled_predicate = None  # set at plan time by compiler._compile_scan
         self._filesystem = None
 
     @property
@@ -83,9 +94,54 @@ cdef class SkeneReadNode(ReaderNode):
                 self._filesystem = create_filesystem(protocol)
         return self._filesystem
 
+    cdef Morsel _rename_to_identities(self, Morsel file_morsel, dict identity_by_physical, str path):
+        """Validate column types against the bind-time schema and rename the
+        columns to their planner identities on the CxxMorsel, returning a
+        FRESH Cxx-backed wrapper over the renamed morsel.
+
+        Name-keyed, not positional — like rugo, the reader's output order is
+        not part of the contract this operator relies on. The re-wrap is a
+        struct copy only (buffers stay shared): the Morsel wrapper caches its
+        name list at wrap time, so an in-place rename under the original
+        wrapper would leave its column_names stale.
+        """
+        cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(file_morsel)
+        cdef CxxMorsel* mp = sp.get()
+        cdef size_t i
+        for i in range(mp.names.size()):
+            decoded_name = mp.names[i].decode("utf-8")
+            expected_column = identity_by_physical.get(decoded_name)
+            if expected_column is None:
+                raise DatasetReadError(
+                    f"skene scan '{path}': decoded unexpected column "
+                    f"'{decoded_name}' — not in the projected set "
+                    f"{sorted(identity_by_physical)}."
+                )
+            # .value: DrakenType is a nanobind enum — it compares equal only to
+            # itself, never to a bare int, so the C-side tag must be compared
+            # against the enum's integer value.
+            if <int>mp.columns[i].view.type != <int>expected_column.column_type.physical.value:
+                raise DatasetReadError(
+                    f"skene scan '{path}': column '{decoded_name}' is "
+                    f"type {<int>mp.columns[i].view.type} in this file but "
+                    f"{expected_column.column_type.physical!r} at bind time "
+                    "(schema read from the dataset's first file). This "
+                    "dataset's files do not share one schema."
+                )
+            identity = expected_column.identity
+            if isinstance(identity, str):
+                identity = identity.encode("utf-8")
+            mp.names[i] = <string>identity
+        return cxx_to_morsel(sp)
+
     def read_morsels(self):
         """One Morsel per .skene file, in manifest order."""
         import skene as _skene
+
+        from opteryx.expression.evaluator import execute_bytecode
+        from opteryx.expression.evaluator.evaluation import (
+            filter_morsel_c_native as _filter_morsel_c_native,
+        )
 
         filesystem = self._ensure_filesystem()
 
@@ -98,6 +154,17 @@ cdef class SkeneReadNode(ReaderNode):
                 data = file_obj.memoryview
 
                 if not physical_names:
+                    if self.compiled_predicate is not None:
+                        # A pushed predicate references at least one column, and
+                        # projection pushdown always keeps predicate columns in
+                        # the scan's column set — an empty projection alongside
+                        # a predicate is an invariant break, and counting
+                        # unfiltered rows here would be a silent wrong answer.
+                        raise InvalidInternalStateError(
+                            f"skene scan '{path}': pushed predicate with an "
+                            "empty projection — predicate columns missing from "
+                            "the scan's column set."
+                        )
                     # An EMPTY projection is "this query reads no columns"
                     # (COUNT(*)), not "a file with zero columns": emit a genuine
                     # ZERO-COLUMN morsel whose row count rides on zero_col_rows
@@ -122,29 +189,39 @@ cdef class SkeneReadNode(ReaderNode):
                     # A missing column names a file that diverges from the
                     # bind-time schema (resolved from the first file).
                     raise DatasetReadError(f"skene scan '{path}': {err}") from err
-                file_morsel.materialize()
 
-                names = []
-                vectors = []
-                for physical_name, expected in zip(physical_names, expected_columns):
-                    vector = file_morsel.column(physical_name.encode("utf-8"))
-                    expected_column = expected.schema_column
-                    if vector.type != expected_column.column_type.physical:
-                        raise DatasetReadError(
-                            f"skene scan '{path}': column '{physical_name}' is "
-                            f"{vector.type!r} in this file but "
-                            f"{expected_column.column_type.physical!r} at bind time "
-                            "(schema read from the dataset's first file). This "
-                            "dataset's files do not share one schema."
-                        )
-                    names.append(expected_column.identity)
-                    vectors.append(vector)
+                # The morsel is Cxx-backed and the engine runs on the Cxx
+                # substrate — keep it there. Validate types and rename the
+                # columns to their planner identities directly on the
+                # CxxMorsel (we exclusively own this fresh instance), instead
+                # of materializing PyObject wrappers and rebuilding via
+                # from_vectors: that round-trip was pure boundary waste.
+                identity_by_physical = {
+                    physical_name: expected.schema_column
+                    for physical_name, expected in zip(physical_names, expected_columns)
+                }
+                result_morsel = self._rename_to_identities(
+                    <Morsel>file_morsel, identity_by_physical, path
+                )
 
-                result_morsel = Morsel.from_vectors(names, vectors)
-
-                self.readings["columns_read"] += len(names)
+                self.readings["columns_read"] += len(physical_names)
                 self.readings["rows_read"] += result_morsel.num_rows
-                self.readings["bytes_processed"] += result_morsel.nbytes
+                self.readings["bytes_processed"] += len(data)
+
+                if self.compiled_predicate is not None:
+                    # Same application as the parquet scan: c-native filter
+                    # first (no PyObject columns), VM + filter_mask fallback
+                    # for anything the native path declines.
+                    filtered = _filter_morsel_c_native(self.compiled_predicate, result_morsel)
+                    if filtered is None:
+                        filtered = result_morsel.filter_mask(
+                            execute_bytecode(self.compiled_predicate, result_morsel)
+                        )
+                    result_morsel = <Morsel>filtered
+                    if result_morsel.num_rows == 0:
+                        # Every row of this file was filtered out — a legitimate
+                        # empty result; the file contributes nothing.
+                        continue
 
                 yield result_morsel
             finally:
