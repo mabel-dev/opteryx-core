@@ -254,3 +254,62 @@ def test_groupby_ndv_estimate_none_without_stats():
 
     assert agg_node.group_map_variant == "carchar"
     assert agg_node.groupby_ndv_estimate is None
+
+
+def test_plain_distinct_without_resolvable_columns_is_carchar():
+    """A plain `SELECT DISTINCT` carries NO column list on its logical node (the
+    keys are the projected columns; only identity bytes are available at this
+    stage), so its cardinality is UNKNOWN — it must fail safe to carchar.
+
+    Regression: the empty-column shortcut used to return 1 for ANY node, so
+    every plain DISTINCT claimed an NDV of 1 and armed the native DistinctSink's
+    parvi front set — including high-cardinality DISTINCTs, which then paid a
+    promote on every worker for nothing."""
+    telemetry = QueryTelemetry()
+    strategy = HashMapVariantStrategy(telemetry)
+
+    scan = _make_scan_node_with_manifest("test_table", 4_000_000)
+
+    plan = LogicalPlan()
+    plan.add_node("scan_1", scan)
+
+    distinct_node = LogicalPlanNode(node_type=LogicalPlanStepType.Distinct)
+    distinct_node.columns = []       # plain SELECT DISTINCT — no explicit `on`
+    distinct_node.nid = "distinct_1"
+    plan.add_node("distinct_1", distinct_node)
+    plan.add_edge("scan_1", "distinct_1")
+
+    context = OptimizerContext(plan)
+    context.node_id = "distinct_1"
+    context.pre_optimized_tree = plan
+    strategy.visit(distinct_node, context)
+
+    assert distinct_node.set_variant == "carchar"
+    assert distinct_node.distinct_ndv_estimate is None
+
+
+def test_scalar_aggregate_still_estimates_one_group():
+    """The counterpart to the test above: GROUP BY () genuinely produces exactly
+    one row, so an empty `groups` list on an AggregateAndGroup node IS provably
+    an estimate of 1 — that shortcut must survive."""
+    telemetry = QueryTelemetry()
+    strategy = HashMapVariantStrategy(telemetry)
+
+    scan = _make_scan_node_with_manifest("test_table", 4_000_000)
+
+    plan = LogicalPlan()
+    plan.add_node("scan_1", scan)
+
+    agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+    agg_node.groups = []
+    agg_node.nid = "agg_1"
+    plan.add_node("agg_1", agg_node)
+    plan.add_edge("scan_1", "agg_1")
+
+    context = OptimizerContext(plan)
+    context.node_id = "agg_1"
+    context.pre_optimized_tree = plan
+    strategy.visit(agg_node, context)
+
+    assert agg_node.group_map_variant == "parvi"
+    assert agg_node.groupby_ndv_estimate == 1

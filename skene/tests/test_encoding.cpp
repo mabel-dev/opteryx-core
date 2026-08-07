@@ -317,6 +317,44 @@ static void test_random_round_trips() {
     ++skene_test::g_checks;
 }
 
+// The selection-code decoder (bitpack_decode_codes -> unpack32) is a separate,
+// hand-written bit reader from the generic unpack(): it writes uint32 directly
+// and reads a whole 8-byte window per value instead of refilling byte by byte.
+// Two readers of one on-disk encoding is exactly where a format drifts, and a
+// wrong code is not a crash but a WRONG ROW — so sweep every legal width against
+// counts chosen to land on and around the byte and window boundaries, and check
+// the exact values back rather than just the status.
+static void test_code_decode_every_width_and_tail() {
+    // Counts around 8-byte window edges, byte edges, and the tail cutover.
+    const std::vector<uint32_t> counts = {1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33,
+                                          63, 64, 65, 127, 128, 129, 1000, 4096};
+    std::mt19937 rng(20260807);
+    for (uint8_t width = 1; width <= 32; ++width) {
+        // The encoder derives width from data_length as bits_required(data_length-1),
+        // so data_length must be 2^width to ask for exactly this width (and 2^32 is
+        // not representable, so the top width uses the largest uint32 instead).
+        const uint32_t data_length = (width >= 32) ? 0xFFFFFFFFu
+                                                   : (uint32_t{1} << width);
+        const uint64_t max_value = data_length - 1u;
+        for (uint32_t count : counts) {
+            std::vector<uint32_t> codes(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                // Include both extremes so the top bit of every width is exercised.
+                if (i == 0) codes[i] = 0;
+                else if (i == 1) codes[i] = static_cast<uint32_t>(max_value);
+                else codes[i] = static_cast<uint32_t>(rng() & max_value);
+            }
+            std::vector<uint8_t> packed;
+            if (!bitpack_encode_codes(codes.data(), count, data_length, &packed))
+                continue;  // encoder declined (not smaller) — nothing to decode
+            std::vector<uint32_t> back(count, 0xDEADBEEF);
+            CHECK(bitpack_decode_codes(packed.data(), packed.size(), count,
+                                       back.data()).is_ok());
+            for (uint32_t i = 0; i < count; ++i) CHECK_EQ(back[i], codes[i]);
+        }
+    }
+}
+
 int main() {
     test_bits_required();
     test_bitpack_widths();
@@ -330,5 +368,6 @@ int main() {
     test_delta_rejects_corrupt_bodies();
     test_delta_type_eligibility();
     test_random_round_trips();
+    test_code_decode_every_width_and_tail();
     return skene_test::summary("test_encoding");
 }

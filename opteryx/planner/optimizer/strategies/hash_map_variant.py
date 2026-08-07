@@ -200,8 +200,26 @@ class HashMapVariantStrategy(OptimizationStrategy):
         # Handle both GROUP BY (groups) and DISTINCT (on) columns.
         columns = getattr(node, "groups", None) or getattr(node, "on", None)
         if not columns:
-            # GROUP BY () or DISTINCT with no specific columns — trivially parvi-eligible.
-            return 1
+            # An EMPTY column list means two completely different things, and
+            # conflating them made every plain DISTINCT claim an NDV of 1:
+            #
+            #   AggregateAndGroup with no groups  →  GROUP BY (), a scalar
+            #       aggregate that provably yields exactly ONE row. Estimate 1.
+            #
+            #   Distinct with no `on`             →  plain `SELECT DISTINCT`,
+            #       whose key columns are the PROJECTED ones. The logical node
+            #       carries `columns == []` and only identity bytes in
+            #       `pre_update_columns` at this stage, so the cardinality is
+            #       UNKNOWN, not 1. Returning 1 armed the native DistinctSink's
+            #       parvi front set for every DISTINCT — including
+            #       high-cardinality ones, which then paid a promote on every
+            #       worker for nothing.
+            #
+            # Unknown must fail safe to carchar: this module's contract is
+            # "parvi is only chosen with positive evidence".
+            if node.node_type == LogicalPlanStepType.AggregateAndGroup:
+                return 1
+            return None
 
         # Try to resolve each column to a manifest cardinality estimate.
         # Any expression column (e.g. GROUP BY UPPER(x)) defeats this signal and

@@ -34,6 +34,7 @@
 #include "native_join2.hpp"         // Join2BuildSink/Probe — multi-key, semi/anti/outer
 #include "native_parquet_scan_source.hpp"  // NativeParquetScanSource (zero-Python pull)
 #include "native_latmat_scan_source.hpp"   // LatmatScanSource (R3 two-pass late-mat)
+#include "native_skene_scan_source.hpp"    // NativeSkeneScanSource (zero-Python skene)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
@@ -398,6 +399,21 @@ public:
     // `logical_coerce[i]` carries the retag kind + unit / precision-scale so
     // DATE/TIMESTAMP/TIME/DECIMAL columns land byte-identically to the trampoline.
     // Both default null → the original numeric+string behaviour.
+    // Skene scan: workers claim files from one atomic counter and decode them
+    // independently (skene::read_morsel is a pure function over a buffer), so
+    // there is no pipeline, no in-flight window and no footer map to carry —
+    // just the file list, the projected in-file names, the identities to emit
+    // them under, and the bound physical type per projected column. Every
+    // pointer is borrowed from the NativePlan, which holds the owners alive.
+    void set_native_skene_scan_source(size_t p,
+                                      const std::vector<std::string>* files,
+                                      const std::vector<std::string>* column_names,
+                                      const std::vector<std::string>* out_identities,
+                                      const std::vector<int>* column_types) {
+        set_source_(p, std::make_unique<NativeSkeneScanSource>(
+                           files, column_names, out_identities, column_types));
+    }
+
     void set_native_scan_source(size_t p, rugo::ParquetIOPipeline* pipeline,
                                 const std::unordered_map<std::string, FileStats>* footer_map,
                                 const std::vector<std::pair<std::string, int>>* work_items,

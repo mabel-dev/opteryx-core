@@ -1729,6 +1729,26 @@ class _Compiler:
                     pt.name if pt is not None else "NONE")
         return kinds, string_types, decimal_columns, logical_coerce, None
 
+    def _skene_scan_plan(self, scan):
+        """Plan-time setup for the zero-Python skene Source.
+
+        Returns a SkeneScanPlan, or None when this scan is not a shape the
+        native Source serves — today only the zero-projection (COUNT(*)) case,
+        which needs the materialized path's genuine zero-column morsel.
+        Declining is a fallback to a slower CORRECT path, never a wrong answer.
+        """
+        from opteryx.operators._operators import SkeneScanPlan
+
+        read_columns = getattr(scan, "skene_read_schema_columns", None) or []
+        if not read_columns:
+            return None
+        return SkeneScanPlan(
+            list(scan.skene_files),
+            [sc.name for sc in read_columns],
+            [sc.identity for sc in read_columns],
+            [sc.column_type.physical.value for sc in read_columns],
+        )
+
     def _native_scan_plan(self, scan):
         """Plan-time setup for the zero-Python scan Source (NativeParquetScanSource)
         when this scan is PROVABLY within its increment-1 scope, else None and the
@@ -2249,7 +2269,42 @@ class _Compiler:
         # CsvReadNode (READ_CSV): same story, except read_morsels() yields one
         # whole-file Morsel per file rather than one per newline-chunk -- rugo's
         # CSV reader has no chunked entry point (see CsvReadNode's docstring).
-        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode", "SkeneReadNode"):
+        if kind == "SkeneReadNode":
+            # Zero-Python skene Source: workers claim files from an atomic
+            # counter and decode them independently (skene::read_morsel is a
+            # pure function over a buffer). Replaces the compile-time
+            # materialized path, which decoded every file serially on the
+            # driver thread and held the whole read set resident.
+            splan = self._skene_scan_plan(scan)
+            if splan is not None:
+                self.scan_sources[scan.identity] = "NativeSkeneScanSource"
+                manifest = getattr(scan, "manifest", None)
+                file_count = manifest.get_file_count() if manifest is not None else 0
+                self.scan_facts[scan.identity] = {
+                    "files_read": file_count,
+                    # One .skene file IS one row group (skene/FORMAT.md), so the
+                    # two counts are the same number by construction — not a
+                    # placeholder. Files pruned at plan time are already absent
+                    # from the manifest, hence 0 pruned HERE: the manifest
+                    # pruning strategy reports what it dropped, and counting it
+                    # twice would double-report.
+                    "row_groups_read": file_count,
+                    "row_groups_pruned": 0,
+                    # No reader-side predicate on this path (skene declines
+                    # pushdown), so rows-in == rows-out of the scan; the Filter
+                    # above it carries the selectivity.
+                    "parquet_rows_before_filter": 0,
+                    "columns_read": len(scan.skene_read_schema_columns or []),
+                }
+                p = self.nplan.new_pipeline()
+                self.nplan.set_native_skene_scan_source(p, splan)
+                self._remember_types(scan.columns)
+                return p, [sc.identity for sc in scan.skene_read_schema_columns]
+            # Zero-projection (COUNT(*)) and anything else the native Source
+            # declines fall through to the materialized path below, which
+            # handles the zero-column morsel shape.
+            return self._compile_materialized_source(scan)
+        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")

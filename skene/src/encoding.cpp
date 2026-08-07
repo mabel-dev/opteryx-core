@@ -72,6 +72,69 @@ Status unpack(const uint8_t* in, uint64_t available, uint32_t count, uint8_t wid
     return Status::ok();
 }
 
+// Inverse of pack() specialised for SELECTION CODES, which the format bounds at
+// 32 bits (bitpack_decode_codes rejects a wider declared width before calling
+// this). That bound is what makes the direct form possible, and it matters:
+// selection decode is per-ROW work on the widest side of a dict column, so it
+// dominated the read of every repeat-heavy column (measured on TPC-H lineitem,
+// a 2-distinct BOOL-ish column cost 8ms against 2.4ms for a 32MB dense one).
+//
+// Three things the generic unpack() does that this does not:
+//   - no uint64 scratch vector, allocated and zeroed once per column per file,
+//     then narrowed to uint32 in a second pass — this writes uint32 directly;
+//   - no byte-at-a-time refill loop with a 128-bit accumulator — each value is
+//     ONE unaligned 8-byte load, one shift, one mask, no inner loop and no
+//     carried dependency between iterations, so it pipelines;
+//   - no per-value bounds branch in the body: the safe prefix is computed once.
+//
+// The 8-byte load is correct because width <= 32 and the bit offset within a
+// byte is <= 7, so a value never spans more than 39 bits — always inside the
+// 64-bit window. It reads little-endian, which is unconditional here: the
+// format IS little-endian and reader.cpp rejects any other file before a
+// section is ever interpreted, so there is no big-endian path to be wrong on.
+Status unpack32(const uint8_t* in, uint64_t available, uint32_t count, uint8_t width,
+                uint32_t* out) {
+    if (width == 0) {
+        std::memset(out, 0, static_cast<size_t>(count) * sizeof(uint32_t));
+        return Status::ok();
+    }
+    const uint64_t nbytes = packed_bytes(count, width);
+    if (nbytes > available)
+        return fail(Code::kMalformed,
+                    "bit-packed body is shorter than its declared count and width");
+
+    const uint64_t mask = width_mask(width);
+
+    // Largest i whose 8-byte window stays inside the body: (i*width)/8 + 8 <= nbytes.
+    uint32_t fast_count = 0;
+    if (nbytes >= 8) {
+        const uint64_t max_byte = nbytes - 8u;
+        const uint64_t max_i = (max_byte * 8u) / width;   // (i*width)>>3 <= max_byte
+        fast_count = max_i >= count ? count : static_cast<uint32_t>(max_i);
+    }
+
+    uint32_t i = 0;
+    for (; i < fast_count; ++i) {
+        const uint64_t bit = static_cast<uint64_t>(i) * width;
+        uint64_t chunk;
+        std::memcpy(&chunk, in + (bit >> 3), sizeof(chunk));
+        out[i] = static_cast<uint32_t>((chunk >> (bit & 7u)) & mask);
+    }
+    // Tail: the last few values, read bit by bit so no load can pass the end.
+    for (; i < count; ++i) {
+        const uint64_t bit = static_cast<uint64_t>(i) * width;
+        uint64_t value = 0;
+        for (uint8_t b = 0; b < width; ++b) {
+            const uint64_t at = bit + b;
+            const uint64_t byte_index = at >> 3;
+            if (byte_index >= nbytes) break;
+            value |= static_cast<uint64_t>((in[byte_index] >> (at & 7u)) & 1u) << b;
+        }
+        out[i] = static_cast<uint32_t>(value & mask);
+    }
+    return Status::ok();
+}
+
 // Reads one value of `item_bytes` as an unsigned integer. Signed types are read
 // through their unsigned twin: see the wrapping-difference note in format.h.
 inline uint64_t load(const void* data, size_t index, size_t item_bytes) {
@@ -141,12 +204,9 @@ Status bitpack_decode_codes(const uint8_t* stored, uint64_t stored_bytes,
         return fail(Code::kMalformed,
                     "bit-packed selection declares a width above 32 bits");
 
-    std::vector<uint64_t> widened(count > 0 ? count : 1u);
-    SKENE_RETURN_IF_ERROR(unpack(stored + sizeof(BitpackHeader),
-                                 stored_bytes - sizeof(BitpackHeader),
-                                 count, header.bit_width, widened.data()));
-    for (uint32_t i = 0; i < count; ++i) out[i] = static_cast<uint32_t>(widened[i]);
-    return Status::ok();
+    return unpack32(stored + sizeof(BitpackHeader),
+                    stored_bytes - sizeof(BitpackHeader),
+                    count, header.bit_width, out);
 }
 
 // ─── kDeltaBitpack ──────────────────────────────────────────────────────────

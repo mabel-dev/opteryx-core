@@ -33,6 +33,8 @@
 // ---------------------------------------------------------------------------
 
 // ---- scalar helper (one group of 8) ----------------------------------------
+// SAFE variant: never reads beyond this group's own byte span. Required for the
+// LAST group of a run — see unpack_group_8_scalar_fast.
 static inline void unpack_group_8_scalar(const uint8_t* __restrict__ src,
                                          int32_t* __restrict__ dst,
                                          int bit_width)
@@ -62,12 +64,42 @@ static inline void unpack_group_8_scalar(const uint8_t* __restrict__ src,
     }
 }
 
+// FAST variant for bit_width 9-32: one unaligned 64-bit load per value instead
+// of assembling it byte-by-byte in an inner loop. A value spans at most
+// bit_off(≤7) + bit_width(≤32) = 39 bits, so a single 8-byte load starting at
+// byte_pos always covers it.
+//
+// This deliberately reads up to 8 bytes from byte_pos, which for the last
+// values of a group runs past the group's own span into the FOLLOWING group.
+// That is safe for every group except the last one of a run, where it would
+// read past the end of the caller's buffer — callers must route the final
+// group through the safe unpack_group_8_scalar above.
+static inline void unpack_group_8_scalar_fast(const uint8_t* __restrict__ src,
+                                              int32_t* __restrict__ dst,
+                                              int bit_width)
+{
+    const uint64_t mask = (bit_width == 32) ? 0xFFFFFFFFULL : ((1ULL << bit_width) - 1ULL);
+    for (int i = 0; i < 8; i++) {
+        const int bit_pos  = i * bit_width;
+        uint64_t val;
+        std::memcpy(&val, src + (bit_pos >> 3), sizeof(val));
+        dst[i] = (int32_t)((val >> (bit_pos & 7)) & mask);
+    }
+}
+
 // ---- scalar bulk (num_groups groups) ----------------------------------------
 static void unpack_bitpacked_groups_scalar(const uint8_t* src, int32_t* dst,
                                            int num_groups, int bit_width)
 {
     const int bpg = (bit_width <= 8) ? bit_width : (8 * bit_width + 7) / 8;
-    for (int g = 0; g < num_groups; g++)
+    int g = 0;
+    if (bit_width > 8) {
+        // All but the final group can use the overreading fast path; the final
+        // group must not read past the buffer.
+        for (; g + 1 < num_groups; g++)
+            unpack_group_8_scalar_fast(src + g * bpg, dst + g * 8, bit_width);
+    }
+    for (; g < num_groups; g++)
         unpack_group_8_scalar(src + g * bpg, dst + g * 8, bit_width);
 }
 
@@ -117,11 +149,42 @@ static inline void unpack_group_8_neon(const uint8_t* __restrict__ src,
     }
 }
 
+// bit_width 9-16, one group of 8. Each value spans at most 7+16 = 23 bits, so a
+// 32-bit lane per value is enough: gather eight overlapping 32-bit words at the
+// values' byte offsets, then shift/mask in one vector op. Overreads past the
+// group like unpack_group_8_scalar_fast — final group must use the safe path.
+static inline void unpack_group_8_neon_wide(const uint8_t* __restrict__ src,
+                                            int32_t* __restrict__ dst,
+                                            int bit_width)
+{
+    uint32_t w[8];
+    int32_t  sh[8];
+    for (int i = 0; i < 8; i++) {
+        const int bit_pos = i * bit_width;
+        std::memcpy(&w[i], src + (bit_pos >> 3), sizeof(uint32_t));
+        sh[i] = -(bit_pos & 7);  // negative shift = right shift for vshlq_u32
+    }
+    const uint32x4_t mask = vdupq_n_u32((bit_width == 32)
+        ? 0xFFFFFFFFu : ((1u << bit_width) - 1u));
+    vst1q_s32(dst, vreinterpretq_s32_u32(vandq_u32(
+        vshlq_u32(vld1q_u32(w), vld1q_s32(sh)), mask)));
+    vst1q_s32(dst + 4, vreinterpretq_s32_u32(vandq_u32(
+        vshlq_u32(vld1q_u32(w + 4), vld1q_s32(sh + 4)), mask)));
+}
+
 static void unpack_bitpacked_groups_neon(const uint8_t* src, int32_t* dst,
                                          int num_groups, int bit_width)
 {
     const int bpg = (bit_width <= 8) ? bit_width : (8 * bit_width + 7) / 8;
-    for (int g = 0; g < num_groups; g++)
+    int g = 0;
+    if (bit_width >= 9 && bit_width <= 16) {
+        for (; g + 1 < num_groups; g++)
+            unpack_group_8_neon_wide(src + g * bpg, dst + g * 8, bit_width);
+    } else if (bit_width > 16) {
+        for (; g + 1 < num_groups; g++)
+            unpack_group_8_scalar_fast(src + g * bpg, dst + g * 8, bit_width);
+    }
+    for (; g < num_groups; g++)
         unpack_group_8_neon(src + g * bpg, dst + g * 8, bit_width);
 }
 #endif  // __ARM_NEON
@@ -153,9 +216,33 @@ static void unpack_bitpacked_groups_avx2(const uint8_t* src, int32_t* dst,
         }
         return;
     }
-    // Fallback for other widths.
     const int bpg = (bit_width <= 8) ? bit_width : (8 * bit_width + 7) / 8;
-    for (int g = 0; g < num_groups; g++)
+    int g = 0;
+    if (bit_width >= 9 && bit_width <= 16) {
+        // Each value spans at most 7+16 = 23 bits, so one 32-bit lane per value
+        // suffices: gather eight overlapping 32-bit words at the values' byte
+        // offsets, then variable-shift and mask in one pass. Overreads past the
+        // group, so the final group takes the safe scalar path below.
+        const __m256i mk = _mm256_set1_epi32((int)((1u << bit_width) - 1u));
+        for (; g + 1 < num_groups; g++) {
+            const uint8_t* s = src + g * bpg;
+            int32_t w[8], sh[8];
+            for (int i = 0; i < 8; i++) {
+                const int bit_pos = i * bit_width;
+                memcpy(&w[i], s + (bit_pos >> 3), sizeof(int32_t));
+                sh[i] = bit_pos & 7;
+            }
+            const __m256i W = _mm256_loadu_si256((const __m256i*)w);
+            const __m256i S = _mm256_loadu_si256((const __m256i*)sh);
+            _mm256_storeu_si256((__m256i*)(dst + g * 8),
+                                _mm256_and_si256(_mm256_srlv_epi32(W, S), mk));
+        }
+    } else if (bit_width > 16) {
+        for (; g + 1 < num_groups; g++)
+            unpack_group_8_scalar_fast(src + g * bpg, dst + g * 8, bit_width);
+    }
+    // Remaining widths (1,2,3,5,6,7) and every final group: safe scalar.
+    for (; g < num_groups; g++)
         unpack_group_8_scalar(src + g * bpg, dst + g * 8, bit_width);
 }
 #endif  // __AVX2__

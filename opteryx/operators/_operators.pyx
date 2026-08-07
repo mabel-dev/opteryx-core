@@ -197,6 +197,11 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         size_t new_pipeline()
         size_t new_buffer()
         void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bint serialize_pull)
+        void set_native_skene_scan_source(size_t p,
+                                          const cppvector[string]* files,
+                                          const cppvector[string]* column_names,
+                                          const cppvector[string]* out_identities,
+                                          const cppvector[int]* column_types)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -2136,6 +2141,38 @@ cdef Py_ssize_t _first_non_c_native(CompiledBytecode bc):
     return -1
 
 
+cdef class SkeneScanPlan:
+    """Owns the C++ vectors NativeSkeneScanSource borrows for a skene scan.
+
+    A plain holder, not a planner: the physical planner already resolved the
+    file list (from the pruned manifest), the projected in-file column names,
+    the identities to emit them under, and each column's bound physical type.
+    This just pins them in C++ storage that outlives the driver — the Source
+    holds raw pointers into these vectors and NativePlan holds this object.
+    """
+
+    cdef cppvector[string] files
+    cdef cppvector[string] column_names
+    cdef cppvector[string] out_identities
+    cdef cppvector[int] column_types
+
+    def __init__(self, list files, list column_names, list out_identities,
+                 list column_types):
+        if not (len(column_names) == len(out_identities) == len(column_types)):
+            raise ValueError(
+                "SkeneScanPlan: column_names/out_identities/column_types must be "
+                "parallel — the Source indexes all three by the same position."
+            )
+        for path in files:
+            self.files.push_back(<string>(path.encode("utf-8") if isinstance(path, str) else path))
+        for name in column_names:
+            self.column_names.push_back(<string>(name.encode("utf-8") if isinstance(name, str) else name))
+        for identity in out_identities:
+            self.out_identities.push_back(<string>(identity.encode("utf-8") if isinstance(identity, str) else identity))
+        for physical_type in column_types:
+            self.column_types.push_back(<int>physical_type)
+
+
 cdef class NativePlan:
     """The compiled-native execution plan: owns the C++ ``Engine`` pipeline graph plus
     the Python references (scan plan nodes, compiled expression programs) whose
@@ -2146,12 +2183,14 @@ cdef class NativePlan:
     cdef public list scans   # BasePlanNode scan objects StreamingScanSource borrows
     cdef public list held    # CompiledBytecode programs (own instrs + literal vectors)
     cdef public list scan_plans  # NativeScanPlan objects NativeParquetScanSource borrows
+    cdef public list skene_scan_plans  # SkeneScanPlan objects NativeSkeneScanSource borrows
 
     def __cinit__(self):
         self._e = new Engine()
         self.scans = []
         self.held = []
         self.scan_plans = []
+        self.skene_scan_plans = []
 
     def __dealloc__(self):
         if self._e != NULL:
@@ -2223,6 +2262,16 @@ cdef class NativePlan:
         self.scans.append(scan)
         self._e.set_scan_source(p, <void*><PyObject*>scan, _scan_pull_trampoline,
                                 serialize_pull)
+
+    def set_native_skene_scan_source(self, size_t p, SkeneScanPlan splan):
+        """Source = the fully-native skene scan (NativeSkeneScanSource): workers
+        claim files from an atomic counter and decode them independently — no
+        GIL trampoline, no compile-time materialization, memory O(morsels in
+        flight) rather than O(table). The Source borrows every vector from
+        ``splan``; this plan holds it alive for the driver's lifetime."""
+        self.skene_scan_plans.append(splan)
+        self._e.set_native_skene_scan_source(p, &splan.files, &splan.column_names,
+                                             &splan.out_identities, &splan.column_types)
 
     def set_native_scan_source(self, size_t p, NativeScanPlan splan, object row_limit=None):
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers

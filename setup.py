@@ -655,6 +655,24 @@ extensions = [
             # compiled copies per se).
             "src/cpp/ipc_deserialize.cpp",
             "src/cpp/memory_pool.cpp",
+            # NativeSkeneScanSource (src/cpp/engine/native_skene_scan_source.hpp)
+            # decodes .skene files on worker threads, so this extension compiles
+            # skene's reader in. Its own copy, like draken/core/vector_alloc.cpp
+            # elsewhere: skene's reader is stateless pure functions over a
+            # caller-supplied buffer — no static registry, no cross-TU singleton —
+            # so a second compiled copy cannot produce the kernel_registry-style
+            # split-state hazard. skene_native (the libskene wheel's extension)
+            # keeps its own copy; neither extension links the other.
+            "skene/src/checksum.cpp",
+            "skene/src/probe.cpp",
+            "skene/src/reader.cpp",
+            "skene/src/reader_v1.cpp",
+            "skene/src/encoding.cpp",
+            "skene/src/statistics.cpp",
+            "skene/src/value_order.cpp",
+            "skene/src/bloom.cpp",
+            "skene/src/file_io.cpp",
+            "skene/src/writer.cpp",
             # NativeParquetScanSource submits work to a ParquetIOPipeline that
             # pool_reader.so constructed. io_pipeline.hpp is header-only, so this
             # extension gets its OWN inline copy of submit_row_group/decode_row_group
@@ -665,6 +683,12 @@ extensions = [
         include_dirs=include_dirs
         + [
             "opteryx/operators/aggregate",
+            "skene/include",   # skene/reader.h etc (NativeSkeneScanSource)
+            "skene/src",       # skene's internal headers (reader_v1.h, encoding.h, ...)
+            "third_party/zstd",          # skene's per-section codec
+            "third_party/zstd/common",
+            "third_party/zstd/decompress",
+            "third_party/zstd/compress",
         ]
         + _curl_include_dirs,
         # RUGO_ENABLE_HTTP must match opteryx.connectors.parquet_io.pool_reader.

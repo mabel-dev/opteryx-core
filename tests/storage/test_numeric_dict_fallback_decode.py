@@ -148,24 +148,45 @@ def test_nullable_spill_past_code_width_boundary():
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def test_fully_dict_numeric_chunk_stays_dict_shaped():
-    """A chunk whose every data page is dictionary-encoded must still produce
-    a Dict-shaped vector — the dense-on-spill transition must only fire on
-    spilled chunks."""
-    folder = "numdictfb_puredict_tmp"
-    vals = [i % 40 for i in range(20000)]  # low NDV: no spill
+@pytest.mark.parametrize(
+    "dtype, cast",
+    [(pa.int32(), int), (pa.int64(), int), (pa.float64(), float)],
+    ids=["int32", "int64", "float64"],
+)
+def test_dict_shape_only_dropped_on_spill(dtype, cast):
+    """The scan must produce a Dict-shaped vector for a chunk whose every data
+    page is dictionary-encoded, and a Dense one only when the writer spilled to
+    PLAIN. This is the invariant the dense-on-spill transition rests on: the
+    dict-aware operator fast paths (dict compare, k-probe group-by) must keep
+    firing for genuinely dictionary-encoded data.
+
+    Asserted at the scan boundary (iter_row_groups_ipc) because that is where
+    the shape decision is made; later pipeline stages may densify for their own
+    reasons, which this test is not about.
+    """
+    from opteryx.connectors.parquet_io.pool_reader import iter_row_groups_ipc
+
+    base = f"numdictfb_shape_{dtype}_tmp"
+    pure = [cast(i % 40) for i in range(20000)]
+    spilled = [cast(v) for v in _mixed_values()]
     try:
-        _write(folder, {"v": pa.array(vals, pa.int64())}, use_dictionary=True)
-        session = opteryx.session()
-        morsels = list(session.execute_to_morsels(f"SELECT v FROM {folder}"))
-        v = morsels[0].column(b"v")
-        assert v._nb.is_dict, "fully-dict chunk lost its Dict shape"
-        got = []
-        for m in morsels:
-            got.extend(m.column(b"v").to_pylist())
-        assert got == vals
+        for name, vals, kw in (
+            ("pure", pure, dict(use_dictionary=True)),
+            ("spill", spilled, _SPILL_KW),
+        ):
+            # distinct directories: the reader caches footers per path
+            folder = os.path.join(base, name)
+            _write(folder, {"v": pa.array(vals, dtype)}, **kw)
+            for _rg, cols in iter_row_groups_ipc(None, [f"{folder}/p.parquet"], ["v"]):
+                v = cols[next(iter(cols))]
+                assert v.to_pylist() == vals, name
+                if name == "pure":
+                    assert v._nb.is_dict, "fully-dict chunk lost its Dict shape"
+                else:
+                    assert not v._nb.is_dict, "spilled chunk should decode dense"
+                break
     finally:
-        shutil.rmtree(folder, ignore_errors=True)
+        shutil.rmtree(base, ignore_errors=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

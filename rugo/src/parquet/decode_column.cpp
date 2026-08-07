@@ -992,6 +992,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     }
 
     int32_t page_row_offset = 0;
+    // Page-local scratch, hoisted to chunk scope so each page reuses the
+    // previous page's capacity instead of allocating afresh. Every consumer
+    // clear()s before writing (see the references inside the page loop).
+    std::vector<int32_t> _page_rep_levels;
+    std::vector<int32_t> _page_def_levels;
+    std::vector<int32_t> _page_dict_indices;
     std::vector<uint8_t> decoded_row_mask;
     if (row_mask != nullptr) {
       decoded_row_mask.reserve(total_needed > 0 ? (size_t)total_needed : 65536u);
@@ -1291,8 +1297,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       //       compressed (iff is_compressed).
       const uint8_t *data_ptr;
       size_t         data_size;
-      std::vector<int32_t> page_rep_levels;
-      std::vector<int32_t> def_levels;
+      // Chunk-scoped (declared above the page loop): every DecodeRLEBitPacked*
+      // entry point clear()s its output before writing, so these carry no state
+      // across pages — but they do carry their CAPACITY, which turns a
+      // reserve+realloc per page into one allocation per column chunk.
+      std::vector<int32_t>& page_rep_levels = _page_rep_levels;
+      std::vector<int32_t>& def_levels      = _page_def_levels;
 
       // Level bit-widths (0 when the corresponding max level is 0 → not decoded).
       int rep_bit_width = 0;
@@ -1578,7 +1588,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 
         } else {
           // ── Dense path: nullable columns or non-RLE-mode dict types ─────
-          std::vector<int32_t> indices;
+          std::vector<int32_t>& indices = _page_dict_indices;  // chunk-scoped; cleared by the decoder
           { RUGO_TEL_START(_rle_t0);
             int32_t decoded = DecodeRLEBitPackedIndicesNoPrefix(
                 data_ptr, data_size, present_count, bit_width, indices);
@@ -2604,9 +2614,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // rep_levels and def_levels are needed for list column reconstruction (Step 10).
     // valid_bits is built from def_levels for direct null-bitmap use by flat columns.
     result.rep_levels = std::move(all_rep_levels);
-    result.def_levels = all_def_levels;  // keep a copy; move would invalidate the loop below
 
     // Build validity bitmap from accumulated definition levels (Tier 2D: SIMD-accelerated).
+    // Built BEFORE the move below — that ordering is what lets def_levels move
+    // instead of being copied (a nullable column's levels are one int32 per row,
+    // so the copy was a full extra pass + allocation per column chunk).
     { RUGO_TEL_START(_vb_t0);
     if (!all_def_levels.empty()) {
       int32_t total_rows = (int32_t)all_def_levels.size();
@@ -2615,6 +2627,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       parquet_simd::build_validity_bitmap(all_def_levels.data(), total_rows, max_def, result.valid_bits);
     }
     RUGO_TEL_ACCUM(rugo_tel::validity_bmp_ns, _vb_t0); }
+
+    result.def_levels = std::move(all_def_levels);
 
     // Success: all expected values collected (or at least some, if total unknown).
     if (total_needed > 0) {

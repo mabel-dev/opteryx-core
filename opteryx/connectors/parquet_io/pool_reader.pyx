@@ -2249,9 +2249,11 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     # emits as "int8"/"int16"/"uint8"/"uint16"/"uint32"/"uint64" (signed int8/16
     # and every unsigned width). The physical stream is still parquet int32/int64,
     # so the physical check below is unchanged; only the logical annotation widens.
-    # Signed narrow widens to DK_INT64 on decode; unsigned preserves its exact
-    # width as DK_UINT{8,16,32,64} — both byte-identical to the trampoline
-    # (pool_reader _wrap_direct) and the native Source (draken_type_for).
+    # Every width preserves itself on decode — signed as DK_INT{8,16,32,64},
+    # unsigned as DK_UINT{8,16,32,64} (see direct_kind_for in io_pipeline.hpp:
+    # a bare physical int32 narrows to DK_INT32 rather than widening) — all
+    # byte-identical to the trampoline (pool_reader _wrap_direct) and the
+    # native Source (draken_type_for).
     cdef string s_int8 = b"int8"
     cdef string s_int16 = b"int16"
     cdef string s_uint8 = b"uint8"

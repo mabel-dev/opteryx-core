@@ -33,6 +33,11 @@
 #include <sys/stat.h>
 #include <map>
 #include <unordered_map>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#elif defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #include "BS_thread_pool.hpp"
 // Remote (HTTP/HTTPS/GCS) reads are gated on RUGO_ENABLE_HTTP — defined by the
@@ -596,6 +601,58 @@ static inline bool build_direct_string_plain(const DecodedColumn& d,
     return true;
 }
 
+// Expand a packed dict-code array (1/2/4 bytes per code, LE) into the uint32
+// `codes` selection every dict-shaped ColumnOut carries. Shared by all four
+// dict builders below, which each open-coded the same per-row scalar switch.
+// cw == 4 is a straight bulk copy; 1/2 widen 8/16 → 32 bits, vectorised where
+// the target ISA offers it (NEON vmovl / AVX2 cvtepu). Scalar fallback is the
+// same loop the builders used before.
+static inline void expand_packed_codes(const uint8_t* ca, uint32_t n, uint8_t cw,
+                                       uint32_t* codes) {
+    if (cw == 4) {
+        if (n) std::memcpy(codes, ca, static_cast<size_t>(n) * sizeof(uint32_t));
+        return;
+    }
+    uint32_t i = 0;
+    if (cw == 1) {
+#if defined(__ARM_NEON)
+        for (; i + 8 <= n; i += 8) {
+            const uint8x8_t b = vld1_u8(ca + i);
+            const uint16x8_t w = vmovl_u8(b);
+            vst1q_u32(codes + i,     vmovl_u16(vget_low_u16(w)));
+            vst1q_u32(codes + i + 4, vmovl_u16(vget_high_u16(w)));
+        }
+#elif defined(__AVX2__)
+        for (; i + 8 <= n; i += 8) {
+            const __m128i b = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(ca + i));
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(codes + i),
+                                _mm256_cvtepu8_epi32(b));
+        }
+#endif
+        for (; i < n; ++i) codes[i] = ca[i];
+        return;
+    }
+    // cw == 2
+#if defined(__ARM_NEON)
+    for (; i + 8 <= n; i += 8) {
+        const uint16x8_t w = vld1q_u16(reinterpret_cast<const uint16_t*>(ca + i * 2));
+        vst1q_u32(codes + i,     vmovl_u16(vget_low_u16(w)));
+        vst1q_u32(codes + i + 4, vmovl_u16(vget_high_u16(w)));
+    }
+#elif defined(__AVX2__)
+    for (; i + 8 <= n; i += 8) {
+        const __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ca + i * 2));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(codes + i),
+                            _mm256_cvtepu16_epi32(w));
+    }
+#endif
+    for (; i < n; ++i) {
+        uint16_t v;
+        std::memcpy(&v, ca + i * 2, 2);
+        codes[i] = v;
+    }
+}
+
 // Build the DICT-VARCHAR direct buffers for a dict-encoded byte_array column,
 // mirroring _build_string_dict (consumer) + serialize_string_dict (source): a
 // compact value array of `dict_size` unique slots over a verbatim copy of
@@ -641,14 +698,7 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     if (!codes) { freefn(keyhash); freefn(arena); freefn(slots); return false; }
     const uint8_t cw = d.code_width;
     if (!d.dict_codes_array.empty()) {
-        const uint8_t* ca = d.dict_codes_array.data();
-        for (uint32_t row = 0; row < n; ++row) {
-            uint32_t c;
-            if (cw == 1) { c = ca[row]; }
-            else if (cw == 2) { uint16_t v; std::memcpy(&v, ca + row * 2, 2); c = v; }
-            else { std::memcpy(&c, ca + row * 4, 4); }
-            codes[row] = c;
-        }
+        expand_packed_codes(d.dict_codes_array.data(), n, cw, codes);
     } else {
         int32_t di = 0;
         for (uint32_t row = 0; row < n; ++row) {
@@ -706,14 +756,7 @@ static inline bool build_direct_int64_dict(const DecodedColumn& d,
     if (!codes) { freefn(dict); return false; }
     const uint8_t cw = d.code_width;
     if (!d.dict_codes_array.empty()) {
-        const uint8_t* ca = d.dict_codes_array.data();
-        for (uint32_t row = 0; row < n; ++row) {
-            uint32_t c;
-            if (cw == 1) { c = ca[row]; }
-            else if (cw == 2) { uint16_t v; std::memcpy(&v, ca + row * 2, 2); c = v; }
-            else { std::memcpy(&c, ca + row * 4, 4); }
-            codes[row] = c;
-        }
+        expand_packed_codes(d.dict_codes_array.data(), n, cw, codes);
     } else {
         int32_t di = 0;
         for (uint32_t row = 0; row < n; ++row) {
@@ -775,14 +818,7 @@ static inline bool build_direct_narrow_dict(const DecodedColumn& d, int elem_byt
     if (!codes) { freefn(dict); return false; }
     const uint8_t cw = d.code_width;
     if (!d.dict_codes_array.empty()) {
-        const uint8_t* ca = d.dict_codes_array.data();
-        for (uint32_t row = 0; row < n; ++row) {
-            uint32_t c;
-            if (cw == 1) { c = ca[row]; }
-            else if (cw == 2) { uint16_t v; std::memcpy(&v, ca + row * 2, 2); c = v; }
-            else { std::memcpy(&c, ca + row * 4, 4); }
-            codes[row] = c;
-        }
+        expand_packed_codes(d.dict_codes_array.data(), n, cw, codes);
     } else {
         int32_t di = 0;
         for (uint32_t row = 0; row < n; ++row) {
@@ -835,14 +871,7 @@ static inline bool build_direct_float_dict(const DecodedColumn& d, bool is_f32,
     if (!codes) { freefn(dict); return false; }
     const uint8_t cw = d.code_width;
     if (!d.dict_codes_array.empty()) {
-        const uint8_t* ca = d.dict_codes_array.data();
-        for (uint32_t row = 0; row < n; ++row) {
-            uint32_t c;
-            if (cw == 1) { c = ca[row]; }
-            else if (cw == 2) { uint16_t v; std::memcpy(&v, ca + row * 2, 2); c = v; }
-            else { std::memcpy(&c, ca + row * 4, 4); }
-            codes[row] = c;
-        }
+        expand_packed_codes(d.dict_codes_array.data(), n, cw, codes);
     } else {
         int32_t di = 0;
         for (uint32_t row = 0; row < n; ++row) {
@@ -897,14 +926,23 @@ static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
         const int elem_bytes = (dk == DK_UINT8) ? 1 : (dk == DK_UINT16) ? 2 : (dk == DK_UINT32) ? 4 : 8;
         const bool src_is_32 = (d.type == "int32");
         const size_t count = src_is_32 ? d.int32_values.size() : d.int64_values.size();
-        narrowed.resize(count * static_cast<size_t>(elem_bytes));
-        for (size_t i = 0; i < count; ++i) {
-            const uint64_t v = src_is_32
-                ? static_cast<uint64_t>(static_cast<uint32_t>(d.int32_values[i]))
-                : static_cast<uint64_t>(d.int64_values[i]);
-            std::memcpy(narrowed.data() + i * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+        if (elem_bytes == (src_is_32 ? 4 : 8)) {
+            // Declared width already equals the source width: on a LE host the
+            // staging loop above was a byte-for-byte identity copy, so stage
+            // nothing and let the single bulk copy below do the work.
+            csrc = src_is_32
+                ? reinterpret_cast<const uint8_t*>(d.int32_values.data())
+                : reinterpret_cast<const uint8_t*>(d.int64_values.data());
+        } else {
+            narrowed.resize(count * static_cast<size_t>(elem_bytes));
+            for (size_t i = 0; i < count; ++i) {
+                const uint64_t v = src_is_32
+                    ? static_cast<uint64_t>(static_cast<uint32_t>(d.int32_values[i]))
+                    : static_cast<uint64_t>(d.int64_values[i]);
+                std::memcpy(narrowed.data() + i * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+            }
+            csrc = narrowed.data();
         }
-        csrc = narrowed.data();
         elem = static_cast<uint32_t>(elem_bytes); compact_count = count;
     } else if (dk == DK_INT8 || dk == DK_INT16 || dk == DK_INT32) {
         // Signed mirror of the unsigned branch above: preserve the exact
@@ -915,12 +953,19 @@ static inline bool build_direct_fixed(const DecodedColumn& d, DirectKind dk,
         // width. Little-endian host assumed, as elsewhere in this decoder.
         const int elem_bytes = (dk == DK_INT8) ? 1 : (dk == DK_INT16) ? 2 : 4;
         const size_t count = d.int32_values.size();
-        narrowed.resize(count * static_cast<size_t>(elem_bytes));
-        for (size_t i = 0; i < count; ++i) {
-            const int32_t v = d.int32_values[i];
-            std::memcpy(narrowed.data() + i * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+        if (elem_bytes == 4) {
+            // DK_INT32 from physical int32 — the staging loop was an identity
+            // copy (one memcpy call per element, then a second full pass). Point
+            // straight at the source; the bulk copy below is the only pass.
+            csrc = reinterpret_cast<const uint8_t*>(d.int32_values.data());
+        } else {
+            narrowed.resize(count * static_cast<size_t>(elem_bytes));
+            for (size_t i = 0; i < count; ++i) {
+                const int32_t v = d.int32_values[i];
+                std::memcpy(narrowed.data() + i * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+            }
+            csrc = narrowed.data();
         }
-        csrc = narrowed.data();
         elem = static_cast<uint32_t>(elem_bytes); compact_count = count;
     } else if (dk == DK_INT64 && d.type == "int32") {
         widened.resize(d.int32_values.size());

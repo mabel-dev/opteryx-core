@@ -14,6 +14,14 @@
 """
 Skene Read Node
 
+NOTE — the execution path for a projecting skene scan is now
+src/cpp/engine/native_skene_scan_source.hpp (zero-Python, parallel: workers
+claim files from an atomic counter and decode independently). This operator
+remains the plan-node carrier (it holds skene_files / skene_read_schema_columns
+for the compiler) and still SERVES the zero-projection COUNT(*) shape, which
+needs the materialized path's genuine zero-column morsel. read_morsels() below
+is therefore the declining-shape path, not the main one.
+
 Scan operator for `.skene` datasets. One `.skene` file IS one row group:
 libskene's read_morsel reconstructs the whole file as a single draken Morsel
 (zero copy across the boundary — the vectors in the emitted Morsel are the
