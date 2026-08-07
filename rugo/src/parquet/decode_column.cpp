@@ -71,6 +71,21 @@ inline void WritePackedCode(uint8_t* codes_array, size_t row_index,
   }
 }
 
+// Inverse of WritePackedCode. Returns -1 on an invalid code_width so the
+// caller's bounds check (code < 0) fails loud instead of reading garbage.
+inline int32_t ReadPackedCode(const uint8_t* codes_array, size_t row_index,
+                              uint8_t code_width) {
+  switch (code_width) {
+    case 1:
+      return (int32_t)codes_array[row_index];
+    case 2:
+      return (int32_t)*(const uint16_t*)(codes_array + row_index * 2);
+    case 4:
+      return (int32_t)*(const uint32_t*)(codes_array + row_index * 4);
+  }
+  return -1;
+}
+
 // ─── Open-addressed string intern table ──────────────────────────────────────
 // Replaces std::unordered_map<std::string, int32_t> for the per-column-chunk
 // unified dictionary on byte_array columns.  Designed for the parquet decode
@@ -196,112 +211,107 @@ inline void SeedDictionaryMapFromArena(
   }
 }
 
-// Flat open-addressing hash map for integer-keyed dictionary interning.
-//
-// Replaces std::unordered_map<T,int32_t> on the primitive (int32/int64) dictionary
-// intern hot path. std::unordered_map is node-based: every insert allocates and the
-// probe chain chases pointers, which dominates decode time on high-cardinality
-// columns (a near-unique int64 column does one insert per row). This is a contiguous
-// power-of-2 table with linear probing — no per-insert allocation, cache-friendly.
-// Slot is empty iff code < 0; codes are dense and non-negative so -1 is a safe
-// vacancy sentinel. Interning semantics are identical (codes assigned in first-seen
-// order), so the decoded output is byte-for-byte unchanged.
+// ─── Mixed dict+PLAIN chunk: dict→dense prefix materialisation ───────────────
+// A PLAIN/DELTA data page inside a dict-mode numeric chunk is the writer's
+// high-cardinality verdict: its dictionary hit the size cap and spilled.
+// Honour it rather than fighting it at read time — materialise the rows
+// decoded so far (dict codes) into the type's dense values vector, drop the
+// dictionary, and decode this and every later page dense. We never intern a
+// PLAIN page into a dictionary on read (same rule as the byte_array
+// transition in the page loop). The old per-value hash-intern path was the
+// dominant scan cost on high-NDV columns (one probe/insert per PLAIN value)
+// and could silently truncate codes once interning grew the dictionary past
+// the packed code_width frozen at dict-page decode.
+
+inline void GatherDictValues(const std::vector<int32_t>& dict,
+                             const int32_t* codes, size_t n,
+                             std::vector<int32_t>& out) {
+  parquet_simd::gather_int32(dict.data(), codes, n, out);
+}
+inline void GatherDictValues(const std::vector<int64_t>& dict,
+                             const int32_t* codes, size_t n,
+                             std::vector<int64_t>& out) {
+  parquet_simd::gather_int64(dict.data(), codes, n, out);
+}
+inline void GatherDictValues(const std::vector<float>& dict,
+                             const int32_t* codes, size_t n,
+                             std::vector<float>& out) {
+  parquet_simd::gather_float32(dict.data(), codes, n, out);
+}
+inline void GatherDictValues(const std::vector<double>& dict,
+                             const int32_t* codes, size_t n,
+                             std::vector<double>& out) {
+  parquet_simd::gather_float64(dict.data(), codes, n, out);
+}
+inline void GatherDictValues(const std::vector<__int128>& dict,
+                             const int32_t* codes, size_t n,
+                             std::vector<__int128>& out) {
+  const size_t old_sz = out.size();
+  out.resize(old_sz + n);
+  __int128* dst = out.data() + old_sz;
+  for (size_t i = 0; i < n; ++i) dst[i] = dict[codes[i]];
+}
+
+// Materialise the dict-coded prefix of a mixed dict+PLAIN numeric chunk into
+// the type's dense values vector, then drop the dictionary state. Covers the
+// three code-container variants:
+//   - dict_codes_array non-empty: nullable, unmasked — positional packed
+//     codes with zero doubling as the null placeholder.
+//   - dict_indices non-empty: non-nullable (positional) or nullable+masked
+//     (compact present-only) — both orders coincide with the value stream.
+//   - both empty: the first data page is PLAIN — nothing to materialise.
+// Output is the compact present-only dense form, exactly what the PLAIN
+// dense decode appends; validity is rebuilt from def levels in the epilogue.
+// Returns false (fail loud) on any out-of-range code.
 template <typename T>
-struct PrimitiveDictHashMap {
-  struct Slot { T key; int32_t code; };
-  std::vector<Slot> slots;
-  size_t mask = 0;
-  size_t used = 0;
-
-  inline bool empty() const { return used == 0; }
-
-  static inline uint64_t hash_key(T key) {
-    // fmix64 (MurmurHash3 finalizer) — strong avalanche for integer keys.
-    uint64_t x = static_cast<uint64_t>(key);
-    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    return x;
-  }
-
-  inline void insert_raw(T key, int32_t code) {
-    size_t b = static_cast<size_t>(hash_key(key)) & mask;
-    while (slots[b].code >= 0) b = (b + 1) & mask;
-    slots[b].key = key;
-    slots[b].code = code;
-    ++used;
-  }
-
-  void grow_to(size_t cap) {
-    std::vector<Slot> old = std::move(slots);
-    slots.assign(cap, Slot{T{}, -1});
-    mask = cap - 1;
-    used = 0;
-    for (const Slot& s : old)
-      if (s.code >= 0) insert_raw(s.key, s.code);
-  }
-
-  void reserve(size_t n) {
-    size_t cap = 16;
-    while (cap < (n * 2 + 1)) cap <<= 1;
-    if (cap > slots.size()) grow_to(cap);
-  }
-
-  // find existing code, or -1 if absent.
-  inline int32_t find(T key) const {
-    if (slots.empty()) return -1;
-    size_t b = static_cast<size_t>(hash_key(key)) & mask;
-    while (slots[b].code >= 0) {
-      if (slots[b].key == key) return slots[b].code;
-      b = (b + 1) & mask;
+inline bool MaterializeDictPrefixToDense(
+    std::vector<T>& dict_values,
+    std::vector<T>& dense_values,
+    std::vector<int32_t>& dict_indices,
+    std::vector<uint8_t>& dict_codes_array,
+    uint8_t code_width,
+    const std::vector<int32_t>& all_def_levels,
+    int32_t rows_so_far,
+    int32_t max_def,
+    int32_t total_needed) {
+  const int32_t dict_sz = static_cast<int32_t>(dict_values.size());
+  // The pre-loop reserve targeted the dict containers for this column; the
+  // dense DELTA paths rely on "resize never reallocates", so restore that
+  // invariant for the dense vector taking over.
+  if (total_needed > 0)
+    dense_values.reserve(static_cast<size_t>(total_needed));
+  if (!dict_codes_array.empty()) {
+    // Walk the def levels for the rows decoded so far. The CURRENT page's
+    // def levels are already appended to all_def_levels, but its codes are
+    // not in dict_codes_array — the bound is rows_so_far, never
+    // all_def_levels.size(). Null rows are skipped, so their zero
+    // placeholder is never misread as a code.
+    if (static_cast<size_t>(rows_so_far) > all_def_levels.size()) return false;
+    const uint8_t* codes = dict_codes_array.data();
+    for (int32_t i = 0; i < rows_so_far; ++i) {
+      if (all_def_levels[i] != max_def) continue;
+      const int32_t code =
+          ReadPackedCode(codes, static_cast<size_t>(i), code_width);
+      if (code < 0 || code >= dict_sz) return false;
+      dense_values.push_back(dict_values[code]);
     }
-    return -1;
+    dict_codes_array.clear();
+  } else if (!dict_indices.empty()) {
+    // Validate all codes up front (min/max scan), then SIMD gather — the
+    // AVX2 gather has no per-lane bounds checks.
+    int32_t lo = dict_indices[0], hi = dict_indices[0];
+    for (size_t i = 1; i < dict_indices.size(); ++i) {
+      const int32_t v = dict_indices[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (lo < 0 || hi >= dict_sz) return false;
+    GatherDictValues(dict_values, dict_indices.data(), dict_indices.size(),
+                     dense_values);
+    dict_indices.clear();
   }
-
-  // insert a key known to be absent, growing past a 0.75 load factor.
-  inline void put(T key, int32_t code) {
-    if (slots.empty() || (used + 1) * 4 >= slots.size() * 3)
-      grow_to(slots.empty() ? 16 : slots.size() << 1);
-    insert_raw(key, code);
-  }
-};
-
-template <typename T>
-inline int32_t InternPrimitiveToDictionary(
-    T value,
-    PrimitiveDictHashMap<T>& dict_map,
-    std::vector<T>& dict_values) {
-  int32_t code = dict_map.find(value);
-  if (code >= 0) {
-    return code;
-  }
-
-  code = static_cast<int32_t>(dict_values.size());
-  dict_values.push_back(value);
-  dict_map.put(value, code);
-  return code;
-}
-
-template <typename T>
-inline void SeedPrimitiveDictionaryMap(
-    PrimitiveDictHashMap<T>& dict_map,
-    const std::vector<T>& dict_values) {
-  dict_map.reserve(dict_values.size());
-  for (size_t i = 0; i < dict_values.size(); ++i) {
-    dict_map.put(dict_values[i], static_cast<int32_t>(i));
-  }
-}
-
-inline uint32_t Float32Bits(float value) {
-  uint32_t bits;
-  std::memcpy(&bits, &value, sizeof(uint32_t));
-  return bits;
-}
-
-inline uint64_t Float64Bits(double value) {
-  uint64_t bits;
-  std::memcpy(&bits, &value, sizeof(uint64_t));
-  return bits;
+  dict_values.clear();
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -907,14 +917,6 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     }
 
     StringInternTable unified_dict_map;
-    PrimitiveDictHashMap<int32_t> int32_dict_map;
-    PrimitiveDictHashMap<int64_t> int64_dict_map;
-    // Keyed by IEEE-754 bit pattern (Float32Bits/Float64Bits), not by float
-    // value, so NaN payloads and -0.0/0.0 intern to distinct dictionary
-    // entries exactly as they did through std::unordered_map.
-    PrimitiveDictHashMap<uint32_t> float32_dict_map;
-    PrimitiveDictHashMap<uint64_t> float64_dict_map;
-    PrimitiveDictHashMap<__int128> int128_dict_map;
 
     // ── RLE skip-dense path gate ────────────────────────────────────────────
     // For non-nullable dict columns (max_definition_level == 0) we bypass the
@@ -1828,32 +1830,6 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           return;
         }
 
-        // Place a page's worth of dict codes (one per present value, in order)
-        // into the active code representation.  When dict_codes_array is in use
-        // (nullable numeric dict columns), codes must be written at their DENSE
-        // row position (def-level aware) exactly like the dict-page scatter —
-        // NOT appended to dict_indices.  Appending to dict_indices here while the
-        // serializer prefers the (then-incomplete) dict_codes_array silently
-        // dropped PLAIN-fallback rows in mixed dict+PLAIN chunks.
-        const int32_t _pd_max_def = target_col->max_definition_level;
-        const int32_t _pd_row_off  = total_collected;
-        auto place_plain_dict_codes = [&](const std::vector<int32_t>& codes) {
-          if (!result.dict_codes_array.empty()) {
-            int32_t pc = 0;
-            for (int32_t i = 0; i < page_values && i < (int32_t)def_levels.size(); ++i) {
-              if (def_levels[i] == _pd_max_def) {
-                if (pc >= (int32_t)codes.size()) break;
-                WritePackedCode(result.dict_codes_array.data(),
-                                (size_t)(_pd_row_off + i), codes[pc++],
-                                result.code_width);
-              }
-            }
-          } else {
-            result.dict_indices.insert(result.dict_indices.end(),
-                                       codes.begin(), codes.end());
-          }
-        };
-
         // ── Mixed-encoding transition ──────────────────────────────────────
         // When a column starts with dict-encoded pages and then switches to
         // PLAIN/DELTA pages mid-chunk, the rle_path has already accumulated
@@ -1955,29 +1931,63 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         }
         // ──────────────────────────────────────────────────────────────────
 
-        if (result.type == "int32") {
+        // ── Mixed-encoding transition (numeric dict codes) ─────────────────
+        // Same verdict-honouring rule as the rle_path block above and the
+        // byte_array transition below: a PLAIN/DELTA page in a dict-mode
+        // chunk means the dictionary spilled — materialise the dict-coded
+        // prefix to dense, drop the dictionary, and decode this and every
+        // later page dense. See MaterializeDictPrefixToDense for the
+        // container variants. Mutually exclusive with the rle_path block:
+        // when that fired, the mode flags are already false.
+        if (int32_dict_mode || int64_dict_mode || int128_dict_mode ||
+            float32_dict_mode || float64_dict_mode) {
+          const int32_t _md = target_col->max_definition_level;
+          bool _ok;
           if (int32_dict_mode) {
-            if (int32_dict_map.empty()) {
-              SeedPrimitiveDictionaryMap(int32_dict_map, result.dict_int32_values);
-            }
-            std::vector<int32_t> _pd_codes;
-            _pd_codes.reserve(present_count);
-            if (page_encoding == 5) {
-              std::vector<int32_t> page_ints;
-              int32_t decoded =
-                  DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
-              if (decoded != present_count) return;
-              for (int32_t value : page_ints)
-                _pd_codes.push_back(InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values));
-            } else {
-              for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
-                int32_t value = ReadLE32(data_ptr);
-                data_ptr += 4;
-                _pd_codes.push_back(InternPrimitiveToDictionary(value, int32_dict_map, result.dict_int32_values));
-              }
-            }
-            place_plain_dict_codes(_pd_codes);
-          } else if (result.ext_int32) {
+            _ok = MaterializeDictPrefixToDense(
+                result.dict_int32_values, result.int32_values,
+                result.dict_indices, result.dict_codes_array,
+                result.code_width, all_def_levels, total_collected, _md,
+                total_needed);
+            int32_dict_mode = false;
+          } else if (int64_dict_mode) {
+            _ok = MaterializeDictPrefixToDense(
+                result.dict_int64_values, result.int64_values,
+                result.dict_indices, result.dict_codes_array,
+                result.code_width, all_def_levels, total_collected, _md,
+                total_needed);
+            int64_dict_mode = false;
+          } else if (int128_dict_mode) {
+            _ok = MaterializeDictPrefixToDense(
+                result.dict_int128_values, result.int128_values,
+                result.dict_indices, result.dict_codes_array,
+                result.code_width, all_def_levels, total_collected, _md,
+                total_needed);
+            int128_dict_mode = false;
+          } else if (float32_dict_mode) {
+            _ok = MaterializeDictPrefixToDense(
+                result.dict_float32_values, result.float32_values,
+                result.dict_indices, result.dict_codes_array,
+                result.code_width, all_def_levels, total_collected, _md,
+                total_needed);
+            float32_dict_mode = false;
+          } else {
+            _ok = MaterializeDictPrefixToDense(
+                result.dict_float64_values, result.float64_values,
+                result.dict_indices, result.dict_codes_array,
+                result.code_width, all_def_levels, total_collected, _md,
+                total_needed);
+            float64_dict_mode = false;
+          }
+          // The (possibly sorted) dictionary no longer exists — the flag
+          // must not survive to describe the dense output.
+          result.dict_ordered = false;
+          if (!_ok) return;
+        }
+        // ──────────────────────────────────────────────────────────────────
+
+        if (result.type == "int32") {
+          if (result.ext_int32) {
             if (page_encoding == 5) {
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.ext_int32 + result.ext_written);
@@ -2027,36 +2037,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             }
           }
         } else if (result.type == "int64") {
-          if (int64_dict_mode) {
-            if (int64_dict_map.empty()) {
-              SeedPrimitiveDictionaryMap(int64_dict_map, result.dict_int64_values);
-            }
-            std::vector<int32_t> _pd_codes;
-            _pd_codes.reserve(present_count);
-            if (page_encoding == 5) {
-              std::vector<int64_t> page_ints;
-              int32_t decoded =
-                  DecodeDeltaBinaryPacked(data_ptr, data_size, present_count, page_ints);
-              if (decoded != present_count) return;
-              for (int64_t value : page_ints)
-                _pd_codes.push_back(InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values));
-            } else if (flba_byte_width > 0) {
-              for (int32_t i = 0;
-                   i < present_count && data_ptr + flba_byte_width <= data_end;
-                   i++) {
-                int64_t value = ReadBESignExt(data_ptr, flba_byte_width);
-                data_ptr += flba_byte_width;
-                _pd_codes.push_back(InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values));
-              }
-            } else {
-              for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
-                int64_t value = ReadLE64(data_ptr);
-                data_ptr += 8;
-                _pd_codes.push_back(InternPrimitiveToDictionary(value, int64_dict_map, result.dict_int64_values));
-              }
-            }
-            place_plain_dict_codes(_pd_codes);
-          } else if (result.ext_int64) {
+          if (result.ext_int64) {
             if (page_encoding == 5) {
               int32_t decoded = DecodeDeltaBinaryPacked(
                   data_ptr, data_size, present_count, result.ext_int64 + result.ext_written);
@@ -2128,32 +2109,12 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             }
           }
         } else if (result.type == "int128") {
-          // PLAIN FLBA width 9..16 → int128 (DECIMAL128).
-          //
-          // Mixed dict+PLAIN chunk (int128_dict_mode): the chunk opened with a
-          // dictionary page, so codes live in dict_codes_array/dict_indices and
-          // dict_int128_values is the value table. A PLAIN-fallback page's values
-          // are NOT in the dict — intern them (mirroring the int64 intern path) and
-          // place the resulting codes via place_plain_dict_codes so the shape stays
-          // dict end-to-end. There is no ext_int128 buffer and no DELTA encoding for
-          // FLBA decimals, so only the FLBA big-endian read applies.
-          if (int128_dict_mode && flba_byte_width > 0) {
-            if (int128_dict_map.empty()) {
-              SeedPrimitiveDictionaryMap(int128_dict_map, result.dict_int128_values);
-            }
-            std::vector<int32_t> _pd_codes;
-            _pd_codes.reserve(present_count);
-            for (int32_t i = 0;
-                 i < present_count && data_ptr + flba_byte_width <= data_end;
-                 i++) {
-              __int128 value = ReadBESignExt128(data_ptr, flba_byte_width);
-              data_ptr += flba_byte_width;
-              _pd_codes.push_back(InternPrimitiveToDictionary(
-                  value, int128_dict_map, result.dict_int128_values));
-            }
-            place_plain_dict_codes(_pd_codes);
-          } else if (flba_byte_width > 0) {
-            // Pure-PLAIN chunk (no dictionary page): dense append, present rows only.
+          // PLAIN FLBA width 9..16 → int128 (DECIMAL128). A mixed dict+PLAIN
+          // chunk already dropped to dense via the numeric transition above.
+          // There is no ext_int128 buffer and no DELTA encoding for FLBA
+          // decimals, so only the FLBA big-endian read applies.
+          if (flba_byte_width > 0) {
+            // Dense append, present rows only.
             // The shared null-expansion step scatters them by def-level.
             int32_t safe_count = std::min(
                 present_count,
@@ -2168,14 +2129,6 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             data_ptr += safe_count * flba_byte_width;
           }
         } else if (result.type == "byte_array") {
-          // PLAIN fallback page: decide at the first one whether to intern or go dense.
-          //
-          // dict page -> build/extend dict vector (dict_indices + string_dict_arena).
-          // PLAIN page -> if dict_size / rows_so_far < 0.8 (≥20% saving), intern the
-          //              plain values into the unified dictionary and keep dict mode.
-          //              Otherwise materialise the already-decoded dict rows to
-          //              the dense string arena and switch to dense for all
-          //              remaining pages.
           // A PLAIN/DELTA page after dict pages is the writer's high-cardinality
           // verdict — honour it rather than re-deriving it at read time:
           // materialise any dict rows decoded so far to dense strings, drop the
@@ -2200,6 +2153,9 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             result.string_dict_offsets.clear();
             result.string_dict_lens.clear();
             byte_array_dict_mode = false;
+            // The (possibly sorted) dictionary no longer exists — the flag
+            // must not survive to describe the dense output.
+            result.dict_ordered = false;
           }
           if (page_encoding == 7) {
             std::vector<std::string> page_strs;
@@ -2241,32 +2197,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             data_ptr += (present_count + 7) / 8;
           }
         } else if (result.type == "float32") {
-          if (float32_dict_mode) {
-            if (float32_dict_map.empty()) {
-              // Seed from dict_float32_values (float) keyed by bit pattern (uint32_t) —
-              // can't reuse the generic SeedPrimitiveDictionaryMap since the dict-values
-              // vector element type (float) differs from the map's key type (uint32_t).
-              float32_dict_map.reserve(result.dict_float32_values.size());
-              for (size_t i = 0; i < result.dict_float32_values.size(); ++i) {
-                float32_dict_map.put(Float32Bits(result.dict_float32_values[i]), static_cast<int32_t>(i));
-              }
-            }
-            std::vector<int32_t> _pd_codes;
-            _pd_codes.reserve(present_count);
-            for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
-              float value = ReadFloat32(data_ptr);
-              data_ptr += 4;
-              uint32_t key = Float32Bits(value);
-              int32_t code = float32_dict_map.find(key);
-              if (code < 0) {
-                code = static_cast<int32_t>(result.dict_float32_values.size());
-                float32_dict_map.put(key, code);
-                result.dict_float32_values.push_back(value);
-              }
-              _pd_codes.push_back(code);
-            }
-            place_plain_dict_codes(_pd_codes);
-          } else if (result.ext_float32) {
+          if (result.ext_float32) {
             int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 4));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
             std::memcpy(result.ext_float32 + result.ext_written, data_ptr, safe_count * sizeof(float));
@@ -2293,31 +2224,7 @@ void DecodeColumnFromChunk(DecodedColumn &result,
 #endif
           }
         } else if (result.type == "float64") {
-          if (float64_dict_mode) {
-            if (float64_dict_map.empty()) {
-              // See the float32 branch above: manual seed loop because dict_float64_values
-              // (double) and the map's key type (uint64_t bit pattern) differ.
-              float64_dict_map.reserve(result.dict_float64_values.size());
-              for (size_t i = 0; i < result.dict_float64_values.size(); ++i) {
-                float64_dict_map.put(Float64Bits(result.dict_float64_values[i]), static_cast<int32_t>(i));
-              }
-            }
-            std::vector<int32_t> _pd_codes;
-            _pd_codes.reserve(present_count);
-            for (int32_t i = 0; i < present_count && data_ptr + 8 <= data_end; i++) {
-              double value = ReadFloat64(data_ptr);
-              data_ptr += 8;
-              uint64_t key = Float64Bits(value);
-              int32_t code = float64_dict_map.find(key);
-              if (code < 0) {
-                code = static_cast<int32_t>(result.dict_float64_values.size());
-                float64_dict_map.put(key, code);
-                result.dict_float64_values.push_back(value);
-              }
-              _pd_codes.push_back(code);
-            }
-            place_plain_dict_codes(_pd_codes);
-          } else if (result.ext_float64) {
+          if (result.ext_float64) {
             int32_t safe_count = std::min(present_count, (int32_t)((data_end - data_ptr) / 8));
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
             std::memcpy(result.ext_float64 + result.ext_written, data_ptr, safe_count * sizeof(double));

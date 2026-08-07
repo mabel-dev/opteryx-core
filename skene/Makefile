@@ -76,6 +76,11 @@ ZSTD_SRCS  := $(wildcard $(ZSTD_DIR)/common/*.cpp) \
               $(wildcard $(ZSTD_DIR)/compress/*.cpp) \
               $(wildcard $(ZSTD_DIR)/decompress/*.cpp)
 ZSTD_OBJS  := $(patsubst $(ZSTD_DIR)/%.cpp,$(BUILD)/zstd/%.o,$(ZSTD_SRCS))
+# zstd's huf_decompress.cpp references BMI2 asm-loop symbols on x86-64
+# (defined in huf_decompress_amd64.S); build_common.py does the same.
+ifneq (,$(filter x86_64 amd64,$(shell uname -m)))
+ZSTD_OBJS  += $(BUILD)/zstd/decompress/huf_decompress_amd64.o
+endif
 
 BENCH_INCLUDES := $(INCLUDES) \
                   -I$(DRAKEN_ROOT)/rugo/src \
@@ -256,6 +261,10 @@ prune: check-draken $(BUILD)/libskene.a
 $(BUILD)/zstd/%.o: $(ZSTD_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXSTD) $(OPT) -I$(ZSTD_DIR) -I$(ZSTD_DIR)/common -w -c $< -o $@
+
+$(BUILD)/zstd/%.o: $(ZSTD_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CXX) $(OPT) -I$(ZSTD_DIR) -I$(ZSTD_DIR)/common -c $< -o $@
 
 # The library must never see a rugo header. This is the rule, checked rather
 # than trusted, because a stray include would be invisible until the standalone

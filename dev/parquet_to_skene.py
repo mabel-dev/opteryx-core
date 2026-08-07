@@ -5,8 +5,14 @@ Convert a parquet dataset tree to its skene mirror.
 Walks a source tree of `<table>/<file>.parquet` datasets (the testdata TPC-H
 layout) and writes `<table>/<file>-rgNNNN.skene` alongside-structure into the
 destination — one `.skene` file per parquet ROW GROUP, because one skene file
-IS one row group (skene/FORMAT.md). Written with the storage posture
-(read_acceleration + zstd-1), the same settings an optimised dataset uses.
+IS one row group (skene/FORMAT.md).
+
+Written read-first: read_acceleration on, zstd OFF. Read performance is king
+for LTS writes (architect ruling 2026-08-07), and per-section zstd-1 is the
+dominant read tax on local storage — measured on TPC-H lineitem, one DECIMAL
+column decodes in 2.0ms raw vs 38.8ms compressed (19x), all 16 columns 127ms
+vs 441ms — for ~2.7x the disk. Network-bound remote storage inverts that
+trade; when a remote posture exists it can recompress.
 
 Usage:
     python dev/parquet_to_skene.py testdata/tpch_1 testdata/tpch_1_skene
@@ -33,7 +39,7 @@ def convert_file(parquet_path: str, out_dir: str) -> tuple[int, int, int]:
     files = rows = nbytes = 0
     with read_parquet(parquet_path) as reader:
         for rg_index, morsel in enumerate(reader):
-            payload = skene.write_morsel(morsel, read_acceleration=True, zstd_level=1)
+            payload = skene.write_morsel(morsel, read_acceleration=True, zstd_level=0)
             out_path = os.path.join(out_dir, f"{stem}-rg{rg_index:04d}.skene")
             with open(out_path, "wb") as out:
                 out.write(payload)
