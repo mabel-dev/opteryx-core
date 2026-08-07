@@ -21,7 +21,7 @@ Design notes
 ------------
 - CarcharSet is heap-allocated via `new`/`delete` so Cython never tries to
   default-construct or copy the C++ object.
-- Hot-path methods (insert, contains, reserve, find_new_indices_out*) are all
+- Hot-path methods (insert, contains, reserve) are all
   declared `noexcept nogil` so callers can hold these loops inside `with nogil`
   blocks.  If CarcharSet::insert_or_ignore triggers a resize that throws
   std::bad_alloc, std::terminate() is called — the same behaviour as the
@@ -64,24 +64,6 @@ cdef extern from *:
         ) noexcept {
             s->reserve(n);
         }
-
-        static inline size_t mark_new_idx32(
-            opteryx::carchar::CarcharSet* s,
-            const uint64_t* keys,
-            int32_t* out_indices,
-            size_t length
-        ) noexcept {
-            return s->mark_new_indices_32(keys, out_indices, length);
-        }
-
-        static inline size_t mark_new_idx64(
-            opteryx::carchar::CarcharSet* s,
-            const uint64_t* keys,
-            int64_t* out_indices,
-            size_t length
-        ) noexcept {
-            return s->mark_new_indices_64(keys, out_indices, length);
-         }
 
         static inline size_t insert_many(
             opteryx::carchar::CarcharSet* s,
@@ -127,20 +109,6 @@ cdef extern from *:
 
     void _csw_reserve "opteryx_csw::pre_reserve"(
         CarcharSet* s, size_t n
-    ) noexcept nogil
-
-    size_t _csw_mark_new_idx32 "opteryx_csw::mark_new_idx32"(
-        CarcharSet* s,
-        const uint64_t* keys,
-        int32_t* out_indices,
-        size_t length,
-    ) noexcept nogil
-
-    size_t _csw_mark_new_idx64 "opteryx_csw::mark_new_idx64"(
-        CarcharSet* s,
-        const uint64_t* keys,
-        int64_t* out_indices,
-        size_t length,
     ) noexcept nogil
 
     size_t _csw_insert_many "opteryx_csw::insert_many"(
@@ -236,39 +204,6 @@ cdef class CarcharSetWrapper:
     cdef inline void reserve(self, size_t capacity) noexcept nogil:
         """Pre-allocate for at least `capacity` entries."""
         _csw_reserve(self._ptr, capacity)
-
-    cdef Py_ssize_t find_new_indices_out(
-        self,
-        uint64_t* hashes,
-        Py_ssize_t length,
-        int64_t* out_indices,
-     ) noexcept nogil:
-        """
-        Insert hashes[0..length); write index i into out_indices for each
-        newly-inserted entry.  Returns the count of newly-inserted entries.
-
-        Equivalent to FlatHashSet.find_new_indices_out — used by
-        table_ops/distinct for large (>= 2^31 row) datasets.
-         """
-        return <Py_ssize_t>_csw_mark_new_idx64(
-            self._ptr, hashes, out_indices, <size_t>length
-         )
-
-    cdef Py_ssize_t find_new_indices_out_32(
-        self,
-        uint64_t* hashes,
-        Py_ssize_t length,
-        int32_t* out_indices,
-     ) noexcept nogil:
-        """
-        Same as find_new_indices_out but writes int32 row indices.
-
-        Used when num_rows < 2^31 (the common case).  Equivalent to
-        FlatHashSet.find_new_indices_out_32.
-         """
-        return <Py_ssize_t>_csw_mark_new_idx32(
-            self._ptr, hashes, out_indices, <size_t>length
-          )
 
     cdef Py_ssize_t probe_found_32_nogil(
         self,

@@ -50,15 +50,10 @@ from opteryx.utils import random_string
 # column, so no JSONL-specific enforcement belongs here -- only `->`/`->>` (and
 # CAST of the *extracted* NVARCHAR text) are how a VARIANT column is meant to be
 # used, same as a VARIANT produced by any other path.
-_JSONL_SUPPORTED_TYPES = {
-    DrakenType.INT64,
-    DrakenType.FLOAT64,
-    DrakenType.BOOL,
-    DrakenType.VARCHAR,
-    DrakenType.NULL,
-    DrakenType.ARRAY,
-    DrakenType.VARIANT,
-}
+# The reader's capability declaration lives with the reader glue
+# (opteryx/connectors/jsonl_io) — shared with the filesystem connector's
+# JSONL-dataset schema inference so the two gates cannot drift.
+from opteryx.connectors.jsonl_io import JSONL_SUPPORTED_TYPES as _JSONL_SUPPORTED_TYPES
 
 # CSV columns rugo's decoder can currently produce (rugo's sniff_csv_column_types
 # only widens INT64 -> FLOAT64 -> VARCHAR -- no BOOL, unlike JSONL, since CSV has

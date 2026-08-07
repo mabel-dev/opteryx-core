@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -272,15 +273,34 @@ struct CountState {
 
 // ---------------------------------------------------------------------------
 // MedianState — buffers non-null doubles, computes exact median via
-// std::nth_element on finalize. `max_size` is a hard cap; once reached,
-// `overflowed` is set and further appends are dropped — the engine
-// must check overflowed() and raise.
+// std::nth_element on finalize.
+//
+// Memory guard: a GLOBAL byte budget across every MedianState buffer, not a
+// per-group value cap. Exact MEDIAN inherently buffers every non-null input
+// value, so the real OOM risk is the TOTAL across all groups — a per-group
+// cap bounded nothing (group count is unbounded) while refusing ordinary
+// group sizes. The budget is charged on capacity growth (amortized — one
+// atomic op per doubling, never per append) and released on free. Past the
+// budget, `overflowed` latches and appends are refused — the engine must
+// check and raise (fail loud; a query author who wants approximate opts in
+// by name via APPROX_PERCENTILE, the budget never silently decides).
+//
+// The counter is a per-shared-object static (inline function local): the one
+// extension that actually executes MEDIAN (the native engine) accounts
+// against a single instance; the legacy Cython spec-carrier modules never
+// append.
 // ---------------------------------------------------------------------------
+constexpr int64_t kMedianBudgetBytes = 512LL * 1024 * 1024;   // 512MB
+
+inline std::atomic<int64_t>& median_budget_used() noexcept {
+    static std::atomic<int64_t> used{0};
+    return used;
+}
+
 struct MedianState {
     double* buf = nullptr;
     size_t  size = 0;
     size_t  cap = 0;
-    size_t  max_size = 1000;
     bool    overflowed = false;
 
     MedianState() noexcept = default;
@@ -288,38 +308,52 @@ struct MedianState {
     MedianState& operator=(const MedianState&) = delete;
 
     MedianState(MedianState&& o) noexcept
-        : buf(o.buf), size(o.size), cap(o.cap),
-          max_size(o.max_size), overflowed(o.overflowed) {
+        : buf(o.buf), size(o.size), cap(o.cap), overflowed(o.overflowed) {
         o.buf = nullptr; o.size = 0; o.cap = 0;
     }
 
     MedianState& operator=(MedianState&& o) noexcept {
         if (this != &o) {
-            if (buf) std::free(buf);
+            _release();
             buf = o.buf; size = o.size; cap = o.cap;
-            max_size = o.max_size; overflowed = o.overflowed;
+            overflowed = o.overflowed;
             o.buf = nullptr; o.size = 0; o.cap = 0;
         }
         return *this;
     }
 
-    ~MedianState() noexcept {
-        if (buf) { std::free(buf); buf = nullptr; }
+    ~MedianState() noexcept { _release(); }
+
+    inline void _release() noexcept {
+        if (buf) {
+            std::free(buf);
+            median_budget_used().fetch_sub(
+                static_cast<int64_t>(cap) * static_cast<int64_t>(sizeof(double)));
+            buf = nullptr; size = 0; cap = 0;
+        }
     }
 
     inline bool _grow(size_t need) noexcept {
         size_t new_cap = cap == 0 ? 64 : cap * 2;
         while (new_cap < need) new_cap *= 2;
-        if (new_cap > max_size) new_cap = max_size;
+        int64_t delta = static_cast<int64_t>(new_cap - cap)
+                        * static_cast<int64_t>(sizeof(double));
+        if (median_budget_used().fetch_add(delta) + delta > kMedianBudgetBytes) {
+            median_budget_used().fetch_sub(delta);
+            overflowed = true;
+            return false;
+        }
         double* nb = (double*)std::realloc(buf, new_cap * sizeof(double));
-        if (!nb) return false;
+        if (!nb) {
+            median_budget_used().fetch_sub(delta);
+            return false;
+        }
         buf = nb;
         cap = new_cap;
         return true;
     }
 
     inline bool append(double v) noexcept {
-        if (size >= max_size) { overflowed = true; return false; }
         if (size >= cap && !_grow(size + 1)) return false;
         buf[size++] = v;
         return true;

@@ -66,12 +66,6 @@ cdef extern from "perfect_hash_set.hpp" namespace "opteryx::perfect_hash" nogil:
 cdef class PerfectHashSet:
     cdef CppPerfectHashSet* _ptr
 
-        # Getters for _rebuild_carchar_from_phash fallback path.
-    cpdef Py_ssize_t min_val(self)
-    cpdef Py_ssize_t range(self)
-    cpdef Py_ssize_t n_words(self)
-    cpdef uint64_t word_at(self, Py_ssize_t i)
-
       # Single-value operations
     cdef bint insert_i64(self, int64_t val) noexcept nogil
     cdef bint contains_i64(self, int64_t val) noexcept nogil

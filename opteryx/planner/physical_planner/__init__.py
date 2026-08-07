@@ -34,6 +34,9 @@ from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
 from opteryx.models import PhysicalPlan
+from opteryx.models.dataset_format import PARQUET
+from opteryx.models.dataset_format import SCAN_READERS
+from opteryx.models.dataset_format import manifest_format
 from opteryx.operators.catalog import get_registry
 from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -106,20 +109,70 @@ def _translate_csv_predicates(predicates, physical_by_identity):
     return translated
 
 
-def _manifest_is_all_parquet(manifest) -> bool:
-    """Return True if every file in *manifest* has a .parquet extension.
+def _jsonl_scan_config(node_config):
+    """Adapt a manifest-backed Scan's config to JsonlReadNode's parameters.
 
-    An empty manifest (no files) is treated as parquet-compatible — it
-    represents an empty relation and the parquet reader yields nothing.
+    JsonlReadNode serves both READ_JSONL (files resolved by the binder) and
+    dataset Scans (files from the manifest) through the same fields: the file
+    list, the physical (in-file) projection names parallel to `columns`, and
+    pushed predicates as rugo tuples. Scan schema columns are file-named, so
+    the physical name is simply schema_column.name. An empty projection is the
+    genuine COUNT(*) shape (zero-column morsels), same as the parquet scan.
     """
-    if manifest is None:
-        return False
-    files = getattr(manifest, "files", None)
-    if files is None:
-        return False
-    if len(files) == 0:
-        return True
-    return all(getattr(f, "file_path", "").endswith(".parquet") for f in files)
+    manifest = node_config["manifest"]
+    columns = node_config.get("columns") or []
+    predicates = node_config.get("predicates") or []
+
+    physical_by_identity = {c.schema_column.identity: c.schema_column.name for c in columns}
+    # A pushed predicate's column is not necessarily projected; its own
+    # schema_column carries the same identity→name mapping.
+    for condition in predicates:
+        for side in (condition.left, condition.right):
+            schema_column = getattr(side, "schema_column", None)
+            if schema_column is not None:
+                physical_by_identity.setdefault(schema_column.identity, schema_column.name)
+
+    return {
+        **node_config,
+        "jsonl_files": [f.file_path for f in manifest.files],
+        "jsonl_physical_columns": [c.schema_column.name for c in columns],
+        "jsonl_predicates": _translate_jsonl_predicates(predicates, physical_by_identity),
+    }
+
+
+def _skene_scan_config(node_config):
+    """Adapt a manifest-backed Scan's config to SkeneReadNode's parameters:
+    the manifest's file list plus the physical (in-file) projection names,
+    parallel to `columns` (scan schema columns are file-named). Predicates are
+    never in this config — FileSystemTable.can_push declines them for skene,
+    so they remain Filter nodes above the scan."""
+    manifest = node_config["manifest"]
+    columns = node_config.get("columns") or []
+    return {
+        **node_config,
+        "skene_files": [f.file_path for f in manifest.files],
+        "skene_physical_columns": [c.schema_column.name for c in columns],
+    }
+
+
+def _scan_reader_for_manifest(manifest, dataset: str) -> str:
+    """Operator-registry name for a manifest-backed Scan, dispatched on the
+    dataset's format (FileEntry.file_format — datasets are single-format).
+
+    An empty manifest is an empty relation: any reader yields nothing, so the
+    parquet reader serves it. A mixed manifest raises in manifest_format; a
+    format with no registered Scan reader raises here, by name.
+    """
+    file_format = manifest_format(manifest, dataset=dataset)
+    if file_format is None:
+        return SCAN_READERS[PARQUET]
+    reader_name = SCAN_READERS.get(file_format)
+    if reader_name is None:
+        raise UnsupportedSyntaxError(
+            f"Dataset {dataset or '(unnamed)'} is {file_format}, which has no "
+            f"scan reader. Supported formats: {', '.join(sorted(SCAN_READERS))}."
+        )
+    return reader_name
 
 
 def _create_aggregate_node(logical_node, query_properties, registry):
@@ -300,18 +353,26 @@ def _create_scan_node(logical_node, query_properties, registry):
     if connector == "__null__":
         # Scan marked for empty result (contradictory predicates)
         return registry.create("Null Reader", query_properties, **node_config)
-    elif connector and _manifest_is_all_parquet(node_config.get("manifest")):
-        # Column-chunk range-read path: footer-first planning, per-row-group morsels.
-        # Works for any connector (local, GCS, S3, Opteryx catalog) — filesystem
-        # is resolved from file-path protocol inside ParquetReadNode if not provided
-        # directly by the connector.
-        return registry.create("Parquet Reader", query_properties, **node_config)
+    elif connector and node_config.get("manifest") is not None:
+        # Manifest-backed Scan: dispatch on the dataset's single format.
+        # For parquet this is the column-chunk range-read path: footer-first
+        # planning, per-row-group morsels; works for any connector (local, GCS,
+        # S3, Opteryx catalog) — filesystem is resolved from file-path protocol
+        # inside the reader if not provided directly by the connector.
+        reader_name = _scan_reader_for_manifest(
+            node_config.get("manifest"), str(node_config.get("relation", ""))
+        )
+        if reader_name == "JSONL Reader":
+            node_config = _jsonl_scan_config(node_config)
+        elif reader_name == "Skene Reader":
+            node_config = _skene_scan_config(node_config)
+        return registry.create(reader_name, query_properties, **node_config)
     elif connector and getattr(connector, "interal_only", False):
         # Internal virtual datasets (for example $no_table) do not use file manifests.
         return registry.create("Reader", query_properties, **node_config)
     else:
         raise UnsupportedSyntaxError(
-            "Only Parquet scans are supported. Non-parquet external scan paths have been removed."
+            "Scans require a file manifest. Non-manifest external scan paths have been removed."
         )
 
 

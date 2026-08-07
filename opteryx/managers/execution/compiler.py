@@ -968,7 +968,7 @@ class _Compiler:
     _AGG_WHOLE_ROW = -2    # CountDistinct: dedup over every column (COUNT(DISTINCT *))
 
     _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG", "STDDEV", "MEDIAN",
-                "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE"}
+                "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "CORR"}
     # MEDIAN is numeric-only (native_group_sinks.hpp's median_operand_supported) —
     # narrower than _AGG_OPERAND_TYPES (which also allows DECIMAL/BOOL/temporal for
     # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median collectors exactly.
@@ -1060,16 +1060,23 @@ class _Compiler:
                 # only params[0] is a projectable operand.
                 if len(params) != 2:
                     continue
-                operand = params[0]
+                operands = [params[0]]
+            elif agg.value == "CORR":
+                # 2 params, BOTH operand columns (the only two-column aggregate)
+                # — both are projectable.
+                if len(params) != 2:
+                    continue
+                operands = list(params)
             elif len(params) == 1:
-                operand = params[0]
+                operands = [params[0]]
             else:
                 continue
-            if operand.node_type in (NodeType.WILDCARD, NodeType.IDENTIFIER):
-                continue
-            sc = getattr(operand, "schema_column", None)
-            if sc is not None and sc.identity is not None and sc.identity not in layout:
-                computed.append(operand)
+            for operand in operands:
+                if operand.node_type in (NodeType.WILDCARD, NodeType.IDENTIFIER):
+                    continue
+                sc = getattr(operand, "schema_column", None)
+                if sc is not None and sc.identity is not None and sc.identity not in layout:
+                    computed.append(operand)
         if computed:
             layout = self._add_computed(p, computed, layout)
         return layout
@@ -1092,10 +1099,10 @@ class _Compiler:
             params = getattr(agg, "parameters", None) or []
             percentile = None
             if func == "APPROX_PERCENTILE":
-                # APPROX_PERCENTILE(expr, percentile) — the only aggregate with a
-                # second, query-time-constant argument (not a second operand
-                # column, see CORR's still-deferred design question). Matches the
-                # legacy Cython _extract_percentile_option validation exactly.
+                # APPROX_PERCENTILE(expr, percentile) — a second, query-time-
+                # constant argument (not a second operand column — CORR is the
+                # only aggregate with one of those). Matches the legacy Cython
+                # _extract_percentile_option validation exactly.
                 if len(params) != 2:
                     _unsupported("APPROX_PERCENTILE requires two arguments: the "
                                  "column and the percentile")
@@ -1107,6 +1114,11 @@ class _Compiler:
                 if not (0.0 <= percentile <= 1.0):
                     _unsupported("APPROX_PERCENTILE percentile must be between 0.0 "
                                  "and 1.0")
+            elif func == "CORR":
+                # CORR(x, y) — the only aggregate with a second operand COLUMN
+                # (AggSpec2.col_idx2 in the native sink).
+                if len(params) != 2:
+                    _unsupported("CORR requires two arguments: the x and y columns")
             elif len(params) != 1:
                 _unsupported(f"{func} with {len(params)} parameters")
             operand = params[0]
@@ -1143,6 +1155,26 @@ class _Compiler:
                 if pt not in self._ARRAY_AGG_OPERAND_TYPES:
                     _unsupported(f"ARRAY_AGG over a {pt} column")
                 specs.append((sc.identity, "ArrayAgg", idx, self._array_agg_options(agg)))
+                continue
+            if func == "CORR":
+                # Both operands numeric-only — same restriction (and reasoning)
+                # as MEDIAN: no DECIMAL descale, never a mis-scaled answer.
+                # Mirrors the sink's corr_capture_meta gate.
+                if pt not in self._MEDIAN_OPERAND_TYPES:
+                    _unsupported(f"CORR over a {pt} column — only numeric inputs "
+                                 "are accepted (CAST DECIMAL to DOUBLE first)")
+                operand2 = params[1]
+                psc2 = getattr(operand2, "schema_column", None)
+                if psc2 is None:
+                    _unsupported("CORR over an unbound operand")
+                if psc2.identity not in layout:
+                    _unsupported("CORR over a column the stream does not carry")
+                idx2 = layout.index(psc2.identity)
+                pt2 = _physical_type(psc2)
+                if pt2 not in self._MEDIAN_OPERAND_TYPES:
+                    _unsupported(f"CORR over a {pt2} column — only numeric inputs "
+                                 "are accepted (CAST DECIMAL to DOUBLE first)")
+                specs.append((sc.identity, "Corr", idx, {"col_idx2": idx2}))
                 continue
             if func == "COUNT":
                 # COUNT(DISTINCT col) dedups on serialized VALUE bytes in the
@@ -2217,7 +2249,7 @@ class _Compiler:
         # CsvReadNode (READ_CSV): same story, except read_morsels() yields one
         # whole-file Morsel per file rather than one per newline-chunk -- rugo's
         # CSV reader has no chunked entry point (see CsvReadNode's docstring).
-        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode"):
+        if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode", "SkeneReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
             _unsupported(f"the {kind} source")
@@ -2320,12 +2352,15 @@ class _Compiler:
 
     def _compile_join(self, nid, node, in_edges):
         """Hash joins via the generalized native join (serialized multi-column keys
-        of any supported type; INNER / LEFT OUTER / SEMI / null-aware ANTI modes).
-        The PROBE side is always the streamed side; for LEFT OUTER the plan's
-        preserved (left) leg maps to the probe so unmatched rows emit with NULL
-        build payload. CROSS = a zero-key inner join (every build row shares one
-        empty key → cartesian). nested_loop = an equi-join with a residual `on`
-        predicate applied as a post-join filter. full-outer joins fail loud."""
+        of any supported type; INNER / LEFT OUTER / FULL OUTER / SEMI / null-aware
+        ANTI modes). The PROBE side is always the streamed side; for LEFT OUTER the
+        plan's preserved (left) leg maps to the probe so unmatched rows emit with
+        NULL build payload. FULL OUTER = LEFT OUTER probing (with build-side match
+        tracking) plus a tail pipeline whose UnmatchedBuildSource emits the build
+        rows no probe matched, NULL-padded — both legs append into one shared
+        buffer, the engine's UNION plumbing. CROSS = a zero-key inner join (every
+        build row shares one empty key → cartesian). nested_loop = an equi-join
+        with a residual `on` predicate applied as a post-join filter."""
         join_type = getattr(node, "join_type", None)
         if join_type == "asof":
             return self._compile_asof_join(node, in_edges)
@@ -2335,7 +2370,7 @@ class _Compiler:
         # inner key held a single NULL. See native_join2.hpp's JoinMode comment.
         modes = {"inner": 0, "left outer": 1, "left semi": 2,
                  "left anti null-aware": 3, "left anti": 4,
-                 "cross": 0, "nested_loop": 0}
+                 "cross": 0, "nested_loop": 0, "full outer": 5}
         if join_type not in modes:
             _unsupported(f"a {join_type} join")
         mode = modes[join_type]
@@ -2416,7 +2451,8 @@ class _Compiler:
         else:
             build_types, build_logical = self._payload_types(build_id, blayout)
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
-                                        build_types, build_logical)
+                                        build_types, build_logical,
+                                        mode == 5)   # FULL OUTER: track matches
 
         pp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
@@ -2453,6 +2489,23 @@ class _Compiler:
             # joined stream, and append a filter to the probe pipeline.
             bc = self._lower_expression(residual, "a nested-loop join condition")
             self.nplan.add_expr_filter(pp, bc, out_layout)
+        if mode == 5:
+            # FULL OUTER tail: the probe leg and the unmatched-build leg stream
+            # into ONE shared buffer (the UNION plumbing). The tail pipeline is
+            # created AFTER the probe pipeline — pipelines run in creation
+            # order, so by the time UnmatchedBuildSource pulls, every probe
+            # worker has finished and the matched[] flags are complete.
+            probe_types, probe_logical = self._payload_types(probe_id, playout)
+            buf = self.nplan.new_buffer()
+            self.nplan.set_buffer_append_sink(pp, buf)
+            tail = self.nplan.new_pipeline()
+            self.nplan.set_current_identity(node.identity)
+            self.nplan.set_current_display_name(type(node).__name__)
+            self.nplan.set_unmatched_build_source(tail, ref, probe_types, probe_logical)
+            self.nplan.set_buffer_append_sink(tail, buf)
+            p2 = self.nplan.new_pipeline()
+            self.nplan.set_buffer_source(p2, buf)
+            return p2, out_layout
         return pp, out_layout
 
     # ---- implicit numeric join-key coercion ---------------------------------------

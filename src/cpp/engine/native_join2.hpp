@@ -47,7 +47,7 @@
 namespace opteryx::engine {
 
 enum class JoinMode : uint8_t {
-    Inner = 0, LeftOuter = 1, Semi = 2, AntiNullAware = 3, Anti = 4
+    Inner = 0, LeftOuter = 1, Semi = 2, AntiNullAware = 3, Anti = 4, FullOuter = 5
 };
 
 // The build side RETAINS its payload columns rather than copying their values into a
@@ -64,6 +64,11 @@ struct Join2BuildLocal : LocalSinkState {
     std::vector<uint32_t> row_r;       // build row id -> row within that morsel
     std::vector<uint64_t> row_hashes;  // parallel to build rows: the 64-bit key hash
     std::vector<uint64_t> asof_keys;   // ASOF only: per build row, sort_num_key
+    // FULL OUTER only (track_matches): NULL-keyed build rows. Every other mode
+    // drops them (a NULL key can never equi-match), but FULL OUTER must still
+    // emit them in the unmatched-build tail — so their addresses are retained
+    // here, OUTSIDE the keyed row space the CSR is built over.
+    std::vector<uint32_t> null_row_m, null_row_r;
     uint32_t next_row = 0;
     bool saw_null_key = false;
 };
@@ -151,6 +156,22 @@ struct Join2BuildGlobal : GlobalSinkState {
     JoinCsr csr;
     std::vector<std::vector<uint64_t>> hash_chunks;   // per-worker hashes, queued O(1)
     bool csr_active = false;
+
+    // FULL OUTER (track_matches) state, allocated/appended in finalize():
+    //   matched[r]     — build row r received >= 1 probe match. mutable + atomic
+    //                    because probes are const and concurrent; relaxed byte
+    //                    stores (idempotent 0->1) are all that is needed.
+    //   tail_null_rows — count of NULL-keyed build rows appended to row_m/row_r
+    //                    AFTER the CSR was built: rows [total_rows,
+    //                    total_rows + tail_null_rows) are addressable for the
+    //                    tail gather but invisible to the CSR, so they can never
+    //                    match — the tail emits them unconditionally.
+    mutable std::unique_ptr<std::atomic<uint8_t>[]> matched;
+    uint32_t tail_null_rows = 0;
+    // combine()-time staging for the NULL-keyed rows (rebased to global morsel
+    // indices); moved onto the end of row_m/row_r by finalize() once the keyed
+    // row space is sealed.
+    std::vector<uint32_t> null_row_m, null_row_r;
 
     // The two build-table operations the probe modes use. Routing them through the
     // global keeps the ASOF carve-out in ONE place rather than at each call site.
@@ -267,13 +288,15 @@ struct Join2BuildSink : Sink {
     int asof_idx = -1;   // >= 0: ASOF build — capture the asof column's normalized
                          // order key per row (rows with a NULL asof value are
                          // skipped: they can never satisfy the MATCH_CONDITION)
+    bool track_matches = false;   // FULL OUTER: allocate the matched[] flags and
+                                  // retain NULL-keyed rows for the unmatched tail
 
     Join2BuildSink(std::vector<size_t> keys, std::vector<size_t> payload_idx,
                    std::vector<DrakenType> types, std::vector<const LogicalType*> logical,
-                   int asof = -1)
+                   int asof = -1, bool track = false)
         : key_idx(std::move(keys)), payload_col_idx(std::move(payload_idx)),
           payload_types(std::move(types)), payload_logical(std::move(logical)),
-          asof_idx(asof) {}
+          asof_idx(asof), track_matches(track) {}
 
     // Zero-row payload columns at the PLAN-known types. This is the fallback schema
     // for a build side that streams zero rows (a filtered-to-empty subquery): with no
@@ -321,6 +344,7 @@ struct Join2BuildSink : Sink {
         view->zero_col_rows = rows;
         const uint32_t mi = static_cast<uint32_t>(l.morsels.size());
         const uint32_t rows_before = l.next_row;
+        const size_t nulls_before = l.null_row_m.size();
         l.morsels.push_back(std::move(view));
 
         // Draken owns the key hash for the whole morsel; per-row nullness is read from
@@ -336,6 +360,13 @@ struct Join2BuildSink : Sink {
             }
             if (any_null) {
                 l.saw_null_key = true;
+                // FULL OUTER: a NULL-keyed build row can never match but must
+                // still be emitted (NULL-padded) by the unmatched tail — retain
+                // its address outside the keyed row space.
+                if (track_matches) {
+                    l.null_row_m.push_back(mi);
+                    l.null_row_r.push_back(i);
+                }
                 continue;
             }
             if (asof_idx >= 0
@@ -350,9 +381,11 @@ struct Join2BuildSink : Sink {
             l.row_hashes.push_back(rowh[i]);   // parallel to the build row just added
             ++l.next_row;
         }
-        // Every row was NULL-keyed (or NULL-asof): nothing addresses this morsel, so
-        // don't pin its buffers for the lifetime of the build table.
-        if (l.next_row == rows_before) l.morsels.pop_back();
+        // Nothing addresses this morsel (no keyed row and — under FULL OUTER —
+        // no retained NULL-keyed row either): don't pin its buffers for the
+        // lifetime of the build table.
+        if (l.next_row == rows_before && l.null_row_m.size() == nulls_before)
+            l.morsels.pop_back();
         return SinkResult::CONTINUE;
     }
 
@@ -378,6 +411,12 @@ struct Join2BuildSink : Sink {
             g.row_r.push_back(l.row_r[r]);
         }
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
+        // FULL OUTER: stage this worker's NULL-keyed rows, rebased to global
+        // morsel indices. finalize() appends them after the keyed row space.
+        for (size_t r = 0; r < l.null_row_m.size(); ++r) {
+            g.null_row_m.push_back(morsel_off + l.null_row_m[r]);
+            g.null_row_r.push_back(l.null_row_r[r]);
+        }
         // Queue this worker's key hashes — an O(1) move, NOT O(rows) inserts under the
         // lock — and build the CSR once, in parallel, in finalize(). row_hashes[r] is
         // the key hash of local build row r → global row row_off+r, and chunks are
@@ -403,6 +442,21 @@ struct Join2BuildSink : Sink {
         // No-op for ASOF, whose combine() populated `index` instead of queuing chunks.
         auto& g = static_cast<Join2BuildGlobal&>(gs);
         if (g.csr_active) build_join_csr(g);
+        if (track_matches) {
+            // The keyed row space [0, total_rows) is sealed (the CSR above was
+            // built over it); NULL-keyed rows go on the END of row_m/row_r so
+            // the tail source can gather every build row through one address
+            // space, while staying invisible to the CSR (never matchable).
+            g.tail_null_rows = static_cast<uint32_t>(g.null_row_m.size());
+            g.row_m.insert(g.row_m.end(), g.null_row_m.begin(), g.null_row_m.end());
+            g.row_r.insert(g.row_r.end(), g.null_row_r.begin(), g.null_row_r.end());
+            g.null_row_m.clear();
+            g.null_row_r.clear();
+            const size_t flags = g.total_rows == 0 ? 1 : g.total_rows;
+            g.matched = std::make_unique<std::atomic<uint8_t>[]>(flags);
+            for (size_t i = 0; i < flags; ++i)
+                g.matched[i].store(0, std::memory_order_relaxed);
+        }
     }
 };
 
@@ -424,13 +478,16 @@ struct Join2ProbeOperator : Operator {
     std::vector<size_t> probe_payload_idx;
     const Join2Ref* ref;
     bool left_outer;
+    // FULL OUTER: mark matched build rows so the UnmatchedBuildSource tail can
+    // emit the rest. Relaxed idempotent byte stores — probes stay const/parallel.
+    bool track_matches = false;
     static constexpr size_t kBatch = 8192;
     static constexpr uint32_t kNoBuildRow = UINT32_MAX;
 
     Join2ProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
-                       const Join2Ref* r, bool outer)
+                       const Join2Ref* r, bool outer, bool track = false)
         : probe_key_idx(std::move(keys)), probe_payload_idx(std::move(payload)),
-          ref(r), left_outer(outer) {}
+          ref(r), left_outer(outer), track_matches(track) {}
 
     std::unique_ptr<OperatorState> make_state() override {
         return std::make_unique<Join2ProbeState>();
@@ -555,6 +612,12 @@ struct Join2ProbeOperator : Operator {
                 // build row whose key hash matches. Equality is 64-bit hash identity.
                 g.probe_append(st.rowh[row], static_cast<int64_t>(row),
                                build_rows, probe_rows);
+                if (track_matches) {
+                    std::atomic<uint8_t>* m = g.matched.get();
+                    for (size_t bi = before; bi < build_rows.size(); ++bi)
+                        m[static_cast<size_t>(build_rows[bi])].store(
+                            1, std::memory_order_relaxed);
+                }
                 if (build_rows.size() == before && left_outer) {
                     build_rows.push_back(static_cast<int64_t>(kNoBuildRow));
                     probe_rows.push_back(static_cast<int64_t>(row));
@@ -867,6 +930,98 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
     }
 };
 
+// ---- FULL OUTER tail: emit unmatched build rows, NULL-padded probe half ------------
+// Runs as the SOURCE of its own pipeline, created AFTER the probe pipeline (pipelines
+// execute in creation order), so by the time it pulls, every probe worker has finished
+// and g.matched is complete. Output column order is identical to
+// Join2ProbeOperator::build_output — build payload first, then probe payload — and both
+// legs append into one shared buffer (the engine's UNION plumbing).
+struct UnmatchedBuildSourceGlobal : GlobalSourceState {
+    std::atomic<uint32_t> next{0};
+};
+
+struct UnmatchedBuildSource : Source {
+    const Join2Ref* ref;
+    // Zero-row, plan-typed PROBE payload columns — what the all-NULL probe half is
+    // gathered against (the exact mirror of Join2BuildGlobal::schema_morsel).
+    MorselPtr probe_schema;
+    static constexpr uint32_t kChunk = 65536;
+
+    UnmatchedBuildSource(const Join2Ref* r, MorselPtr schema)
+        : ref(r), probe_schema(std::move(schema)) {}
+
+    std::unique_ptr<GlobalSourceState> make_global() override {
+        return std::make_unique<UnmatchedBuildSourceGlobal>();
+    }
+    std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
+        return std::make_unique<LocalSourceState>();
+    }
+
+    SourceResult get_morsel(GlobalSourceState& gs_, LocalSourceState&,
+                            MorselPtr& out, ErrCtx& err) override {
+        auto& gsrc = static_cast<UnmatchedBuildSourceGlobal&>(gs_);
+        const Join2BuildGlobal& g = *ref->g;
+        const uint32_t keyed = g.total_rows;
+        const uint32_t domain = keyed + g.tail_null_rows;
+        for (;;) {
+            const uint32_t start = gsrc.next.fetch_add(kChunk);
+            if (start >= domain) return SourceResult::FINISHED;
+            const uint32_t end = std::min(domain, start + kChunk);
+
+            // Rows [0, keyed) are CSR-visible: emit iff no probe matched them.
+            // Rows [keyed, domain) are the NULL-keyed build rows finalize()
+            // appended — never matchable, always emitted.
+            std::vector<uint32_t> order;
+            order.reserve(end - start);
+            const std::atomic<uint8_t>* matched = g.matched.get();
+            for (uint32_t r = start; r < end; ++r) {
+                if (r >= keyed || matched[r].load(std::memory_order_relaxed) == 0)
+                    order.push_back(r);
+            }
+            if (order.empty()) continue;   // fully-matched chunk — claim the next
+            const uint32_t n = static_cast<uint32_t>(order.size());
+
+            auto morsel = std::make_shared<CxxMorsel>();
+            morsel->zero_col_rows = n;
+
+            // Build payload: real rows, the engine's one row gather.
+            if (!g.morsels.empty()) {
+                MorselPtr bhalf = gather_rows(g.morsels, order, 0, n, g.row_m, g.row_r,
+                                              g.morsels.front()->names, err);
+                if (err.code != 0 || bhalf == nullptr) return SourceResult::FINISHED;
+                for (CxxColumn& c : bhalf->columns)
+                    morsel->columns.push_back(std::move(c));
+            }
+
+            // Probe payload: every row is the null-row sentinel against the
+            // plan-typed zero-row schema — the same emit LEFT OUTER uses for its
+            // build half, mirrored.
+            if (probe_schema && !probe_schema->columns.empty()) {
+                for (const CxxColumn& c : probe_schema->columns) {
+                    if (c.view.type == DRAKEN_ARRAY) {
+                        err.code = 1;
+                        err.msg = "FULL OUTER: ARRAY probe payload has no child "
+                                  "vector to emit NULLs against — fail loud, "
+                                  "never silent corruption";
+                        return SourceResult::FINISHED;
+                    }
+                }
+                std::vector<uint32_t> norder(n, kGatherNullRow);
+                std::vector<MorselPtr> pm{probe_schema};
+                std::vector<uint32_t> prow_m(1, 0), prow_r(1, 0);
+                MorselPtr phalf = gather_rows(pm, norder, 0, n, prow_m, prow_r,
+                                              probe_schema->names, err);
+                if (err.code != 0 || phalf == nullptr) return SourceResult::FINISHED;
+                for (CxxColumn& c : phalf->columns)
+                    morsel->columns.push_back(std::move(c));
+            }
+
+            out = std::move(morsel);
+            return SourceResult::HAVE_MORE;
+        }
+    }
+};
+
 // Deferred construction (build table exists only after the build pipeline runs).
 struct DeferredJoin2Probe : Operator {
     std::vector<size_t> key_idx, payload_idx;
@@ -900,8 +1055,13 @@ struct DeferredJoin2Probe : Operator {
                     key_idx, payload_idx, ref, mode != JoinMode::Semi,
                     mode == JoinMode::AntiNullAware, residual, residual_fn);
             } else {
+                // FULL OUTER probes exactly like LEFT OUTER (preserved probe side,
+                // NULL build half on miss) and additionally marks matched build
+                // rows for the UnmatchedBuildSource tail pipeline.
                 inner = std::make_unique<Join2ProbeOperator>(
-                    key_idx, payload_idx, ref, mode == JoinMode::LeftOuter);
+                    key_idx, payload_idx, ref,
+                    mode == JoinMode::LeftOuter || mode == JoinMode::FullOuter,
+                    mode == JoinMode::FullOuter);
             }
         });
         return inner->make_state();

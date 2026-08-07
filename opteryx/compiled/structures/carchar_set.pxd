@@ -31,18 +31,6 @@ cdef class CarcharSetWrapper:
     cdef inline bint insert(self, uint64_t value) noexcept nogil
     cdef inline bint contains(self, uint64_t value) noexcept nogil
     cdef inline void reserve(self, size_t capacity) noexcept nogil
-    cdef Py_ssize_t find_new_indices_out(
-        self,
-        uint64_t* hashes,
-        Py_ssize_t length,
-        int64_t* out_indices,
-    ) noexcept nogil
-    cdef Py_ssize_t find_new_indices_out_32(
-        self,
-        uint64_t* hashes,
-        Py_ssize_t length,
-        int32_t* out_indices,
-    ) noexcept nogil
 
     # Batch read-only probes — semi-join (found) and anti-join (not-found).
     # const on the C++ side; safe to call NoGIL; never modify the set.

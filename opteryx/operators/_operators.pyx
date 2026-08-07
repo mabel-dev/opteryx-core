@@ -120,9 +120,11 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         AnyValue "opteryx::engine::AggFn::AnyValue"
         ApproxCountDistinct "opteryx::engine::AggFn::ApproxCountDistinct"
         ApproxPercentile "opteryx::engine::AggFn::ApproxPercentile"
+        Corr "opteryx::engine::AggFn::Corr"
     cdef cppclass AggSpec2:
         AggFn fn
         int col_idx
+        int col_idx2
         string name
         bint aa_distinct
         bint aa_ordered
@@ -265,7 +267,13 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                   cppvector[DrakenType] payload_types,
                                   cppvector[int] lt_kind, cppvector[int] lt_unit,
                                   cppvector[int] lt_precision, cppvector[int] lt_scale,
-                                  cppvector[int] lt_dimension)
+                                  cppvector[int] lt_dimension, bint track_matches)
+        void set_unmatched_build_source(size_t p, size_t ref,
+                                        cppvector[DrakenType] probe_types,
+                                        cppvector[int] lt_kind, cppvector[int] lt_unit,
+                                        cppvector[int] lt_precision,
+                                        cppvector[int] lt_scale,
+                                        cppvector[int] lt_dimension)
         void add_join2_probe_residual(size_t p, size_t ref, cppvector[size_t] key_idx,
                                       cppvector[size_t] payload_idx, int mode,
                                       void* instrs, int count, cppvector[int] col_idx,
@@ -358,46 +366,6 @@ cdef extern from "engine/native_decimal.hpp" namespace "opteryx::engine" nogil:
                                           shared_ptr[DecimalExpr] then_expr,
                                           shared_ptr[DecimalExpr] else_expr)
 
-
-# -----------------------------------------------------------------------------
-# Shared helper: rebuild a CarcharSetWrapper from a PerfectHashSet.
-#
-# Used by the PerfectHashSet fast paths in filter_join (semi/anti probe) and
-# distinct when a mid-stream morsel turns out to have an encoding the
-# PerfectHashSet path can't handle (nullable / non-dense / type drift): the
-# narrow-int values already marked as seen are re-inserted as int64 row-hashes
-# so the standard carchar path recognises them.
-# -----------------------------------------------------------------------------
-
-cdef CarcharSetWrapper _rebuild_carchar_from_phash(PerfectHashSet phs):
-    """Reconstruct a hash-based CarcharSetWrapper from an existing PerfectHashSet.
-
-    Iterates the bit-array and inserts the int64 row-hash of each stored value
-    directly — mix_hash(0, v) is identically the int64 hash kernel's output for
-    value v (the same equivalence the probe path produces), so no per-value
-    constant vector or Python hash() round-trip is needed.
-    """
-    cdef CarcharSetWrapper result = CarcharSetWrapper(<size_t>phs.range() * 2 + 8)
-    cdef Py_ssize_t w, bit
-    cdef uint64_t word, mask, h
-    cdef int64_t slot, val
-    cdef int64_t min_val = phs.min_val()
-    for w in range(phs.n_words()):
-        word = phs.word_at(w)
-        if word == 0:
-            continue
-        for bit in range(64):
-            mask = <uint64_t>1 << bit
-            if word & mask:
-                slot = <int64_t>w * 64 + <int64_t>bit
-                val = min_val + slot
-                # Must equal simd_hash_i64(val) exactly so probe-side hashes
-                # match: mix_hash supplies `val * C + 1`; the int64 kernel then
-                # applies the final avalanche `h ^ (h >> 32)`. Omitting it (as a
-                # prior version did) leaves the rebuilt set unmatchable.
-                h = mix_hash(0, <uint64_t>val)
-                result.insert(h ^ (h >> 32))
-    return result
 
 # -----------------------------------------------------------------------------
 # Foundation: shared types and the BasePlanNode hierarchy.
@@ -2405,7 +2373,8 @@ cdef class NativePlan:
         return self._e.new_join2_ref()
 
     def set_join2_build_sink(self, size_t p, list key_idx, list payload_idx, size_t ref,
-                             list payload_types, list payload_logical=None):
+                             list payload_types, list payload_logical=None,
+                             bint track_matches=False):
         """``payload_types``/``payload_logical`` are the build-side payload columns'
         PLAN-KNOWN physical (DrakenType ints) + logical ((kind, unit, precision, scale,
         dimension) tuples or None) types — same shape as ``set_final_schema`` — so the
@@ -2430,7 +2399,30 @@ cdef class NativePlan:
             else:
                 lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
                 lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
-        self._e.set_join2_build_sink(p, keys, pay, ref, ts, lk, lu, lp, lsc, ld)
+        self._e.set_join2_build_sink(p, keys, pay, ref, ts, lk, lu, lp, lsc, ld,
+                                     track_matches)
+
+    def set_unmatched_build_source(self, size_t p, size_t ref, list probe_types,
+                                   list probe_logical=None):
+        """FULL OUTER tail pipeline source: emits build rows no probe matched,
+        NULL-padded on the probe half. ``probe_types``/``probe_logical`` are the
+        PROBE payload columns' plan-known types — the mirror of
+        ``set_join2_build_sink``'s payload types, and for the same reason: the
+        all-NULL probe half needs a typed schema even when the probe side
+        streamed zero rows."""
+        cdef cppvector[DrakenType] ts
+        cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef int i
+        for t in probe_types:
+            ts.push_back(<DrakenType><int>t)
+        for i in range(len(probe_types)):
+            entry = probe_logical[i] if probe_logical is not None and i < len(probe_logical) else None
+            if entry is None:
+                lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
+            else:
+                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
+                lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
+        self._e.set_unmatched_build_source(p, ref, ts, lk, lu, lp, lsc, ld)
 
     def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                         int mode):
@@ -2709,8 +2701,10 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
     in output order. ``col_idx`` is a real column index (>= 0), or one of the
     named sentinels compiler.py mirrors from native_group_sinks.hpp:
     ``_AGG_NO_OPERAND`` (-1, CountStar) / ``_AGG_WHOLE_ROW`` (-2, whole-row
-    CountDistinct — COUNT(DISTINCT *)). ``options`` is ARRAY_AGG-only; every
-    other function ignores it.
+    CountDistinct — COUNT(DISTINCT *)). ``options`` carries the per-function
+    extras: ARRAY_AGG's modifiers, APPROX_PERCENTILE's ``percentile``, and
+    CORR's second operand column index (``col_idx2``); every other function
+    ignores it.
     """
     cdef cppvector[AggSpec2] out
     cdef AggSpec2 s
@@ -2746,6 +2740,8 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.fn = AggFn.ApproxCountDistinct
         elif fn == "ApproxPercentile":
             s.fn = AggFn.ApproxPercentile
+        elif fn == "Corr":
+            s.fn = AggFn.Corr
         else:
             raise ValueError(f"native engine: unknown aggregate function {fn!r}")
         s.col_idx = <int>col_idx
@@ -2753,6 +2749,7 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
         # `s` is reused across iterations — every field is assigned unconditionally
         # so a previous ARRAY_AGG's modifiers can never bleed into a later spec.
         if opts is None:
+            s.col_idx2 = -1
             s.aa_distinct = False
             s.aa_ordered = False
             s.aa_descending = False
@@ -2760,6 +2757,7 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.aa_max_per_group = 1000
             s.percentile = 0.5
         else:
+            s.col_idx2 = <int>opts.get("col_idx2", -1)
             s.aa_distinct = <bint>bool(opts.get("distinct", False))
             s.aa_ordered = <bint>bool(opts.get("ordered", False))
             s.aa_descending = <bint>bool(opts.get("descending", False))
@@ -3087,6 +3085,7 @@ include "filter/filter.pyx"
 include "function_dataset/function_dataset.pyx"
 include "heap_sort/heap_sort.pyx"
 include "jsonl_read/jsonl_read.pyx"
+include "skene_read/skene_read.pyx"
 include "limit/limit.pyx"
 include "window/row_number.pyx"
 include "nested_loop_join/nested_loop_join.pyx"

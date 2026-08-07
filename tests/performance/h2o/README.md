@@ -123,17 +123,15 @@ schema lines up.
 
 ## Known gaps
 
-These are queries that rely on functions Opteryx may not yet implement.
-They will surface as `error` rows, not crashes — that's expected.
+None currently — all 15 queries run. Historical gaps, since closed:
+g6 needed MEDIAN over ~1000-row groups (fixed by replacing the per-group
+value cap with a global 512MB budget), g8 needed the
+`ROW_NUMBER() OVER (...)` window, and g9 needed the `CORR(x, y)`
+aggregate (upstream's `pow` is spelled `POWER` in the query).
 
-| query | likely gap                                                     |
-|-------|----------------------------------------------------------------|
-| g6    | `median(v3)` and `stddev(v3)` aggregates                       |
-| g8    | `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` window     |
-| g9    | `corr(v1, v2)` aggregate, and possibly `pow()`                 |
-
-Per repo policy (`CLAUDE.md` §8) these are reported, not papered over —
-the runner captures the error and moves on.
+If a query does rely on something unimplemented it will surface as an
+`error` row, not a crash. Per repo policy (`CLAUDE.md` §8) such gaps are
+reported, not papered over — the runner captures the error and moves on.
 
 ## Cold vs. warm runs
 

@@ -22,6 +22,8 @@ with the schema resolved at bind time, and failing loudly if they don't.
 
 from typing import Iterator, Optional, Sequence
 
+from draken.draken_native import DrakenType
+
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.expression import NodeType
 from opteryx.types.logical_type import LogicalCategory
@@ -43,7 +45,23 @@ __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "JsonlPredicatePushable",
     "JSONL_OP_XLAT",
+    "JSONL_SUPPORTED_TYPES",
 ]
+
+# DrakenTypes the JSONL reader can currently produce/serve (Stage 1 limits).
+# This is the READER's capability declaration — the binder's READ_JSONL branch
+# and the filesystem connector's JSONL-dataset schema inference both gate on it.
+# See the fuller rationale where the binder consumes it
+# (opteryx/planner/binder/dataset.py, above the READ_JSONL branch).
+JSONL_SUPPORTED_TYPES = {
+    DrakenType.INT64,
+    DrakenType.FLOAT64,
+    DrakenType.BOOL,
+    DrakenType.VARCHAR,
+    DrakenType.NULL,
+    DrakenType.ARRAY,
+    DrakenType.VARIANT,
+}
 
 # Comparison ops rugo's (column, op, value) predicate tuples can express
 # (rugo/src/jsonl/_jsonl_reader.pxi: op in ['==', '!=', '<', '<=', '>', '>=']).

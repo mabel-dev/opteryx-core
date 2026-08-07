@@ -39,19 +39,6 @@ cdef class PerfectHashSet:
             del self._ptr
             self._ptr = NULL
 
-       # Getters for _rebuild_carchar_from_phash fallback path.
-    cpdef Py_ssize_t min_val(self):
-        return self._ptr.min_val()
-
-    cpdef Py_ssize_t range(self):
-        return self._ptr.range()
-
-    cpdef Py_ssize_t n_words(self):
-        return self._ptr.n_words()
-
-    cpdef uint64_t word_at(self, Py_ssize_t i):
-        return self._ptr.word_at(i)
-
     def __repr__(self):
         return f"PerfectHashSet()"
 

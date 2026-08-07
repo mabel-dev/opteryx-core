@@ -18,7 +18,10 @@ Five size tiers (all powers of 2, all using 2 hashes):
     128M bits — up to 16M items  (~4.7% FPR)
     2B bits  — up to 256M items  (~0.3% FPR at 56M items)
 
-Second-hash position: golden-ratio multiply, cheaper than a second full hash.
+Second-hash position: HIGH bits of a golden-ratio multiply (Fibonacci
+hashing), cheaper than a second full hash. High bits are load-bearing —
+the low bits of h*C depend only on the low bits of h, so a masked product
+is a bijection of the first position and the FPR triples.
 
 Hot insert and probe paths live in bloom_filter_ops.hpp (NEON / SSE2 / scalar).
 """
@@ -75,6 +78,16 @@ cdef class BloomFilter:
 
         self.bit_array_size_bits = self.bit64_array_size * 64
         self.bit_mask            = self.bit_array_size_bits - 1
+        # Second position = high bits of the golden-ratio multiply (Fibonacci
+        # hashing): shift = 64 - log2(bits). Masking the product instead makes
+        # the second position a bijection of the first (low product bits depend
+        # only on low input bits) — a single-hash filter, ~12% FPR.
+        cdef uint64_t mask = self.bit_mask
+        cdef uint32_t log2_bits = 0
+        while mask:
+            log2_bits += 1
+            mask >>= 1
+        self.bit_shift = 64 - log2_bits
 
         self.bit_array = <uint64_t*>calloc(self.bit64_array_size, sizeof(uint64_t))
         if not self.bit_array:
@@ -86,7 +99,7 @@ cdef class BloomFilter:
 
     cdef inline void _add(self, const uint64_t item) nogil:
         cdef uint64_t h1 = item & self.bit_mask
-        cdef uint64_t h2 = (item * GOLDEN_RATIO) & self.bit_mask
+        cdef uint64_t h2 = (item * GOLDEN_RATIO) >> self.bit_shift
         self.bit_array[h1 >> 6] |= (<uint64_t>1) << (h1 & 0x3F)
         self.bit_array[h2 >> 6] |= (<uint64_t>1) << (h2 & 0x3F)
 
@@ -95,7 +108,7 @@ cdef class BloomFilter:
 
     cdef inline bint _possibly_contains_fast(self, const uint64_t item) nogil:
         cdef uint64_t h1 = item & self.bit_mask
-        cdef uint64_t h2 = (item * GOLDEN_RATIO) & self.bit_mask
+        cdef uint64_t h2 = (item * GOLDEN_RATIO) >> self.bit_shift
         cdef uint64_t chunk1 = self.bit_array[h1 >> 6]
         cdef uint64_t chunk2 = self.bit_array[h2 >> 6]
         cdef uint64_t mask1  = (<uint64_t>1) << (h1 & 0x3F)

@@ -87,14 +87,35 @@ cd "${GATE_CWD}"
 
 FOUND=0
 
-for PY in /opt/python/*/bin/python*; do
+# ONE interpreter per /opt/python entry. Globbing `bin/python*` matches python,
+# python3 AND python3.14 in the same directory, which verified every wheel three
+# times over.
+for PY in /opt/python/*/bin/python3; do
   [ -x "${PY}" ] || continue
-  VER="$("${PY}" -c 'import sys; print(f"cp{sys.version_info[0]}{sys.version_info[1]}")' 2>/dev/null)" || continue
-  WHEEL="$(ls "${DIST_DIR}"/*"${VER}"*manylinux*.whl 2>/dev/null | head -1 || true)"
-  [ -n "${WHEEL}" ] || continue
+
+  # The tag MUST carry the ABI flags. manylinux images ship a free-threaded
+  # interpreter (/opt/python/cp314-cp314t) whose version_info is identical to
+  # the GIL build's, so a tag built from version_info alone matched the GIL
+  # wheel and pip rejected it: "not a supported wheel on this platform" — a
+  # release-blocking failure caused entirely by this script.
+  read -r PYTAG ABITAG <<EOF
+$("${PY}" -c 'import sys
+t = "t" if "t" in getattr(sys, "abiflags", "") else ""
+v = f"cp{sys.version_info[0]}{sys.version_info[1]}"
+print(v, v + t)' 2>/dev/null)
+EOF
+  [ -n "${PYTAG:-}" ] || continue
+
+  # Match the wheel's full python-tag/abi-tag pair, so a cp314t interpreter can
+  # never claim a cp314 wheel (or vice versa).
+  WHEEL="$(ls "${DIST_DIR}"/*-"${PYTAG}"-"${ABITAG}"-*manylinux*.whl 2>/dev/null | head -1 || true)"
+  if [ -z "${WHEEL}" ]; then
+    echo "--- ${ABITAG}: no matching wheel in ${DIST_DIR} — not a target of this build, skipping"
+    continue
+  fi
 
   echo
-  echo "--- ${VER}: ${WHEEL##*/} ---"
+  echo "--- ${ABITAG}: ${WHEEL##*/} ---"
   FOUND=1
 
   "${PY}" -m pip install --quiet --force-reinstall --no-deps "${WHEEL}"
@@ -134,7 +155,7 @@ import grpc" 2>/dev/null; then
       fi
     fi
   else
-    echo "  ERROR: could not install grpcio for ${VER}; interposition check could not run." >&2
+    echo "  ERROR: could not install grpcio for ${ABITAG}; interposition check could not run." >&2
     echo "  Refusing to report a pass for a check that did not execute." >&2
     exit 1
   fi

@@ -100,6 +100,14 @@ cdef class JsonlReadNode(ReaderNode):
 
     cdef object _ensure_filesystem(self):
         if self._filesystem is None:
+            # Dataset Scans attach a connector table that already holds the
+            # RIGHT filesystem (platform credentials for gs:// catalog data).
+            # The protocol-sniffing below is READ_JSONL's path, where a
+            # user-supplied gs:// URL must NEVER use platform credentials.
+            connector_filesystem = getattr(self.connector, "filesystem", None)
+            if connector_filesystem is not None:
+                self._filesystem = connector_filesystem
+                return self._filesystem
             path = self.dataset
             protocol = path.split("://")[0] if "://" in path else ""
             if protocol in ("gs", "gcs"):

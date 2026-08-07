@@ -1,4 +1,4 @@
-// src/cpp/cpu_features.cpp
+// draken/simd/cpu_features.cpp
 //
 // Compatibility stub — all cpu_features logic has been moved to the header
 // (cpu_features.h) as static inline functions so that translation units

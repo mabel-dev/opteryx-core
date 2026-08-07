@@ -135,6 +135,12 @@ cpdef tuple create_collectors(list aggregation_specs, list group_columns):
             # construction-time placeholder only, never actually accumulated
             # into or finalized for a STDDEV query.
             c = _DeferredAvgCollector()
+        elif fn == "corr":
+            # Same reasoning as STDDEV above — no correlation collector in this
+            # legacy engine, execution never reaches it (native engine:
+            # native_group_sinks.hpp's GBKind::Corr). Construction-time
+            # placeholder only.
+            c = _DeferredAvgCollector()
         else:
             raise ValueError(f"unsupported aggregation function: {fn!r}")
 

@@ -74,7 +74,9 @@ _AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
 # STDDEV: population stddev, always DOUBLE regardless of input numeric type —
 # the native sink rejects DECIMAL input outright (native_group_sinks.hpp), so
 # there's no AVG-style decimal-passthrough case to handle.
-_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE", "MEDIAN", "STDDEV"})
+# CORR: Pearson correlation over two numeric operand columns — always DOUBLE
+# (NULL when undefined), same DECIMAL rejection posture as STDDEV/MEDIAN.
+_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE", "CORR", "MEDIAN", "STDDEV"})
 
 # ---------------------------------------------------------------------------
 # CASE THEN/ELSE branch-type validation.

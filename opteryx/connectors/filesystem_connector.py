@@ -18,11 +18,15 @@ from opteryx.exceptions import (
     EmptyDatasetError,
     UnsupportedSyntaxError,
 )
+from opteryx.models.dataset_format import JSONL
+from opteryx.models.dataset_format import PARQUET
+from opteryx.models.dataset_format import SKENE
+from opteryx.models.dataset_format import dataset_format
+from opteryx.models.dataset_format import format_for_path
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import RelationSchema
 
 OS_SEP = os.sep
-PARQUET_SUFFIX = ".parquet"
 
 # Process-global manifest cache: dataset -> (signature, file_entries, min_k,
 # histogram, bounds_are_ordinal, char_class).
@@ -48,10 +52,16 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     __mode__ = "Blob"
     __synchronousity__ = "synchronous"
 
-    # Capability declarations
+    # Capability declarations. limit-pushdown and can_push are re-gated per
+    # instance once the dataset's format is discovered (get_dataset_metadata):
+    # only formats whose reader honors a pushed limit/predicate may accept one.
     supports_predicate_pushdown = True
     supports_limit_pushdown = True
     supports_async = True
+
+    # Until discovery runs, assume parquet (the discovery default for an empty
+    # dataset). get_dataset_metadata overwrites this per instance.
+    dataset_file_format = PARQUET
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,
@@ -115,6 +125,24 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             self.dataset = self.dataset.replace(".", OS_SEP)
 
         self._stats_lock = Lock()
+
+    def can_push(self, operator, types: set = None) -> bool:
+        """Format-aware predicate gate.
+
+        Parquet takes PredicatePushable's generic gate against this class's
+        PUSHABLE_OPS/TYPES. JSONL delegates to JsonlPredicatePushable — the
+        same (deliberately narrower) gate READ_JSONL uses, so a dataset scan
+        and READ_JSONL over the same files push identically. Anything else
+        declines: a declined predicate stays behind as a Filter node — a
+        missed optimization, never a dropped predicate.
+        """
+        if self.dataset_file_format == PARQUET:
+            return PredicatePushable.can_push(self, operator, types)
+        if self.dataset_file_format == JSONL:
+            from opteryx.connectors.jsonl_io import JsonlPredicatePushable
+
+            return JsonlPredicatePushable.can_push(JsonlPredicatePushable(), operator, types)
+        return False
 
     def get_list_of_blob_names(self, prefix: str, predicates=None):
         """
@@ -200,6 +228,61 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 f"Unable to read Parquet metadata from {blob_name}: {type(e).__name__}: {e}"
             ) from e
 
+    def _read_skene_schema(self, blob_name: str) -> RelationSchema:
+        """Schema for a skene dataset, read exactly from the first file's footer."""
+        from opteryx.connectors.skene_io import skene_metadata_to_schema
+        from skene import SkeneError
+        from skene import read_metadata as _skene_read_metadata
+
+        file_obj = self.filesystem.open_input_file(blob_name)
+        try:
+            metadata = _skene_read_metadata(file_obj.memoryview)
+        except SkeneError as err:
+            raise DataError(f"Cannot read skene file '{blob_name}': {err}") from err
+        finally:
+            file_obj.close()
+        return skene_metadata_to_schema(metadata, self.dataset)
+
+    def _infer_jsonl_schema(self, blob_name: str) -> RelationSchema:
+        """Schema for a JSONL dataset, inferred by decoding its first file.
+
+        JSONL has no cheap metadata path (rugo.jsonl.read_metadata fully
+        decodes too), so this pays one file's decode at bind time — the same
+        cost READ_JSONL's binder branch pays for the same reason.
+        """
+        from opteryx.connectors.jsonl_io import JSONL_SUPPORTED_TYPES
+        from opteryx.types.logical_type import column_type_from_vector
+        from opteryx.types.schema import SchemaColumn
+        from opteryx.types.schema import mint_column_identity
+        from rugo.jsonl import read_jsonl as _rugo_read_jsonl
+
+        file_obj = self.filesystem.open_input_file(blob_name)
+        try:
+            with _rugo_read_jsonl(file_obj.memoryview) as reader:
+                sample_morsel = next(iter(reader))
+        except RuntimeError as err:
+            raise DataError(f"Cannot read JSONL file '{blob_name}': {err}") from err
+        finally:
+            file_obj.close()
+
+        schema_columns = []
+        for raw_name in sample_morsel.column_names:
+            name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else raw_name
+            vector = sample_morsel.column(name.encode("utf-8"))
+            if vector.type not in JSONL_SUPPORTED_TYPES:
+                raise DataError(
+                    f"JSONL dataset {self.dataset}: column '{name}' has inferred type "
+                    f"{vector.type!r}, which the JSONL reader does not support."
+                )
+            schema_columns.append(
+                SchemaColumn(
+                    name=name,
+                    column_type=column_type_from_vector(vector),
+                    identity=mint_column_identity(self.dataset, name),
+                )
+            )
+        return RelationSchema(name=self.dataset, columns=schema_columns)
+
     def read_dataset(
         self,
         columns: list = None,
@@ -219,7 +302,27 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             Morsel or schemas
         """
         blob_names = self.get_list_of_blob_names(prefix=self.dataset, predicates=predicates or [])
-        blob_names = [name for name in blob_names if name.lower().endswith(PARQUET_SUFFIX)]
+        # Single-format discovery: raises on a mixed listing, never drops files.
+        dataset_fmt = dataset_format(blob_names, self.dataset) or PARQUET
+        blob_names = [name for name in blob_names if format_for_path(name) == dataset_fmt]
+
+        if just_schema and dataset_fmt == SKENE and blob_names:
+            # Skene's footer IS the schema — exact DrakenType + LogicalType per
+            # column, no inference and no translation loss. Read from the first
+            # file; every file is validated against it at read time
+            # (SkeneReadNode's per-file name/type checks).
+            yield self._read_skene_schema(blob_names[0])
+            return
+
+        if just_schema and dataset_fmt == JSONL and blob_names:
+            # JSONL carries no footer: the schema is inferred from the FIRST
+            # file (architect decision 2026-08-07 — catalog-declared schema when
+            # one exists, first-file inference as the fallback; filesystem
+            # datasets have no declared schema, so this is the fallback path).
+            # Every other file is validated against it at read time by
+            # JsonlReadNode's per-file/per-chunk fail-loud checks.
+            yield self._infer_jsonl_schema(blob_names[0])
+            return
 
         if just_schema:
             for blob_name in blob_names:
@@ -284,15 +387,26 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         from opteryx.models.manifest import Manifest
         from opteryx.models.manifest_io import DATASET_MANIFEST_NAME
 
-        # Parquet data files. get_list_of_blob_names already excludes the dataset
+        # Data files. get_list_of_blob_names already excludes the dataset
         # manifest, so this is data only; the manifest is addressed by its known
         # path instead of being fished back out of the listing.
+        # Format is discovered from the listing (datasets are single-format —
+        # dataset_format raises on a mixed listing rather than dropping files);
+        # an empty listing is an empty relation and defaults to PARQUET.
         blob_names = self.get_list_of_blob_names(self.dataset)
-        parquet_names = [b for b in blob_names if b.lower().endswith(PARQUET_SUFFIX)]
+        dataset_fmt = dataset_format(blob_names, self.dataset) or PARQUET
+        data_names = [b for b in blob_names if format_for_path(b) == dataset_fmt]
+        # Bind-time capability gating (the optimizer runs after this): pushdown
+        # a reader cannot honor must be DECLINED here, because a pushed limit or
+        # predicate is REMOVED from the plan — accepting one the reader ignores
+        # silently returns wrong answers. JsonlReadNode honors predicates
+        # (rugo tuples, gated by can_push below) but not limits.
+        self.dataset_file_format = dataset_fmt
+        self.supports_limit_pushdown = dataset_fmt == PARQUET
         manifest_path = os.path.join(self.dataset, DATASET_MANIFEST_NAME)
         # Stat the manifest alongside the data: ANALYZE rewrites only the manifest,
         # so a data-only signature would serve stale sketches from cache forever.
-        infos = self.filesystem.get_file_info(parquet_names + [manifest_path])
+        infos = self.filesystem.get_file_info(data_names + [manifest_path])
         infos = [i for i in infos if (getattr(i, "size", None) is not None)]
         sizes = {i.path: (getattr(i, "size", 0) or 0) for i in infos}
 
@@ -327,7 +441,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # Order matters: the sketch vectors' rows are positional to the manifest's
         # rows, so file_entries must be built in that same order to stay aligned.
         ordered_names, min_k_vector, histogram_vector, char_class_vector, manifest_bounds = (
-            self._read_dataset_manifest(manifest_path, parquet_names)
+            self._read_dataset_manifest(manifest_path, data_names)
         )
         # manifest_bounds' lower/upper bounds (when present) are ANALYZE's
         # Vector.ordinalize() ordinal keys, not real values — this Manifest's
@@ -344,28 +458,32 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # keyed by the original path. fetch_column_stats_many owns that split, and
         # fetches the whole set concurrently with the GIL released instead of one
         # serial, GIL-held round trip (plus a signing round trip) per file.
+        # Footer statistics are parquet's; other formats take the stats-absent
+        # path below (record_count=None — UNKNOWN, never 0). Skene's footer
+        # stats feed in with its reader, not here.
         stats_by_name: Dict[str, tuple] = {}
-        try:
-            from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
+        if dataset_fmt == PARQUET:
+            try:
+                from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
 
-            schema_column_names = [col.name for col in schema.columns]
-            # strict: the returned list is parallel to ordered_names by contract,
-            # and a silent zip truncation here would hand a file another file's
-            # statistics from that point on.
-            for blob_name, (record_count, column_stats) in zip(
-                ordered_names,
-                fetch_column_stats_many(self.filesystem, ordered_names, sizes),
-                strict=True,
-            ):
-                column_stats.bind_schema(schema_column_names)
-                stats_by_name[blob_name] = (record_count, column_stats)
-        except (OSError, ValueError, RuntimeError):
-            # No statistics for this dataset. The C++ footer batch is
-            # all-or-nothing, so one unreadable file costs the whole set, and
-            # every entry below falls back to record_count=None — UNKNOWN, never
-            # a fabricated 0, which would let the optimizer answer COUNT(*) as 0
-            # and delete LIMIT nodes. Files are still listed and still read.
-            stats_by_name = {}
+                schema_column_names = [col.name for col in schema.columns]
+                # strict: the returned list is parallel to ordered_names by contract,
+                # and a silent zip truncation here would hand a file another file's
+                # statistics from that point on.
+                for blob_name, (record_count, column_stats) in zip(
+                    ordered_names,
+                    fetch_column_stats_many(self.filesystem, ordered_names, sizes),
+                    strict=True,
+                ):
+                    column_stats.bind_schema(schema_column_names)
+                    stats_by_name[blob_name] = (record_count, column_stats)
+            except (OSError, ValueError, RuntimeError):
+                # No statistics for this dataset. The C++ footer batch is
+                # all-or-nothing, so one unreadable file costs the whole set, and
+                # every entry below falls back to record_count=None — UNKNOWN, never
+                # a fabricated 0, which would let the optimizer answer COUNT(*) as 0
+                # and delete LIMIT nodes. Files are still listed and still read.
+                stats_by_name = {}
 
         # Build FileEntry objects from file metadata. Every name in ordered_names
         # yields exactly one entry, in order, whether or not it has statistics —
@@ -379,7 +497,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             file_entries.append(
                 FileEntry(
                     file_path=blob_name,
-                    file_format="PARQUET",
+                    file_format=dataset_fmt,
                     record_count=record_count,
                     file_size_in_bytes=sizes.get(blob_name, 0),
                     column_stats=column_stats,

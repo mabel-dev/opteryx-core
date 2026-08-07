@@ -87,6 +87,118 @@ def _build_transparent_node(root, value, telemetry) -> Node:
     return fold_constants(node, telemetry)
 
 
+# Operators whose operands may be swapped without changing meaning. Ordering
+# comparisons are NOT here: `a < b` and `b < a` are different predicates (they are
+# convertible, not equal), and treating them as interchangeable would merge two
+# distinct conditions and silently drop one.
+_COMMUTATIVE_OPERATORS = frozenset({"Eq", "NotEq"})
+
+
+def _literal_key(value) -> str:
+    """Order-insensitive key for a literal value.
+
+    Collection literals are sorted: `col IN [a, b]` and `col IN [b, a]` are the same
+    predicate, and the rewrites that build these lists do not all agree on an order.
+    Making duplicate detection depend on them agreeing would tie correctness here to
+    an invariant maintained somewhere else entirely.
+    """
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return "[" + ",".join(sorted(repr(v) for v in value)) + "]"
+    return repr(value)
+
+
+def _canonical_predicate_key(node):
+    """A string equal for two conditions iff they are the same predicate, or None
+    when this node cannot be canonicalised.
+
+    None means "never treat as a duplicate". Every unrecognised shape returns None,
+    so the failure mode is a missed dedup (harmless) rather than merging two
+    predicates that merely look alike (a wrong answer).
+    """
+    if node is None:
+        return "~none"
+    node_type = node.node_type
+
+    if node_type == NodeType.NESTED:  # parenthesis wrapper — transparent
+        return _canonical_predicate_key(node.centre)
+
+    if node_type == NodeType.LITERAL:
+        type_name = getattr(getattr(node.type, "physical", None), "name", "?")
+        return f"~lit[{type_name}]{_literal_key(node.value)}"
+
+    if node_type == NodeType.IDENTIFIER:
+        schema_column = getattr(node, "schema_column", None)
+        identity = getattr(schema_column, "identity", None)
+        # Identity, not name: two different columns can share a name across relations.
+        return None if identity is None else f"~col[{identity}]"
+
+    if node_type in (NodeType.AND, NodeType.OR, NodeType.XOR):
+        keys = [_canonical_predicate_key(node.left), _canonical_predicate_key(node.right)]
+        if any(k is None for k in keys):
+            return None
+        return f"{node_type.name}({','.join(sorted(keys))})"
+
+    if node_type in (NodeType.DNF, NodeType.CNF):
+        keys = [_canonical_predicate_key(p) for p in (node.parameters or [])]
+        if any(k is None for k in keys):
+            return None
+        return f"{node_type.name}({','.join(sorted(keys))})"
+
+    if node_type == NodeType.NOT:
+        key = _canonical_predicate_key(node.centre)
+        return None if key is None else f"NOT({key})"
+
+    if node_type == NodeType.UNARY_OPERATOR:
+        key = _canonical_predicate_key(node.centre)
+        return None if key is None else f"{node.value}({key})"
+
+    if node_type == NodeType.CAST:
+        key = _canonical_predicate_key(node.left)
+        return None if key is None else f"CAST[{node.value}]({key})"
+
+    if node_type in (NodeType.COMPARISON_OPERATOR, NodeType.BINARY_OPERATOR):
+        left_key = _canonical_predicate_key(node.left)
+        right_key = _canonical_predicate_key(node.right)
+        if left_key is None or right_key is None:
+            return None
+        if node.value in _COMMUTATIVE_OPERATORS:
+            left_key, right_key = sorted((left_key, right_key))
+        return f"{node.value}({left_key},{right_key})"
+
+    # FUNCTION is deliberately absent: a volatile function (RANDOM(), NOW()) is not
+    # idempotent — `RANDOM() > 0.5 AND RANDOM() > 0.5` is not `RANDOM() > 0.5` — and
+    # this canonicaliser has no volatility information to tell those from pure ones.
+    # Refusing them costs a missed dedup, never a wrong answer.
+    return None
+
+
+def _dedupe_branches(parameters: list, telemetry) -> list:
+    """Drop repeated branches from a DNF/CNF node, preserving order.
+
+    Both shapes are flat idempotent lists — DNF is an AND-list (see filter.pyx),
+    CNF an OR-list — and `X AND X` is `X`, `X OR X` is `X`.
+
+    This runs AFTER the branches themselves have been folded, which is the whole
+    point: the duplicate is not visible before then. DisjunctiveDomainPushdown ANDs
+    a weaker predicate derived from an OR onto that OR, then PredicateRewrite
+    collapses the OR into exactly the derived predicate — but leaves `X OR False`
+    litter behind, so the two only become textually equal once folding has reduced
+    it. Neither strategy is wrong alone and neither can see the collision. Left in,
+    every row was filtered twice by an identical condition.
+    """
+    seen: set = set()
+    unique = []
+    for parameter in parameters:
+        key = _canonical_predicate_key(parameter)
+        if key is not None:
+            if key in seen:
+                telemetry.optimization_duplicate_predicate_removed += 1
+                continue
+            seen.add(key)
+        unique.append(parameter)
+    return unique
+
+
 def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
     if root.node_type == NodeType.LITERAL:
         # if we're already a literal (constant), we can't fold
@@ -102,7 +214,13 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         return root
 
     if root.node_type in (NodeType.DNF, NodeType.CNF):
-        root.parameters = [fold_constants(p, telemetry) for p in root.parameters]
+        root.parameters = _dedupe_branches(
+            [fold_constants(p, telemetry) for p in root.parameters], telemetry
+        )
+        if len(root.parameters) == 1:
+            # Don't leave a one-branch DNF/CNF behind — a bare condition is the shape
+            # every single-predicate Filter already has.
+            return root.parameters[0]
         return root
 
     if root.node_type in {

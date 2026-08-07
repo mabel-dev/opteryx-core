@@ -11,7 +11,7 @@ from libc.stddef cimport size_t
 
 from draken.core.buffers cimport DrakenVector, DrakenType
 
-# Hash mixing constants from src/cpp/simd_hash.h.
+# Hash mixing constants from draken/simd/simd_hash.h.
 cdef extern from "simd_hash.h" nogil:
     const uint64_t NULL_HASH
     const uint64_t MIX_HASH_CONSTANT

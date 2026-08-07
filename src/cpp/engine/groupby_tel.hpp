@@ -30,7 +30,7 @@ inline std::atomic<long long> apply_ns {0};  // Pass C: per-aggregate-function s
 inline std::atomic<long long> calls    {0};  // GroupBySink::sink() calls (morsels)
 // Parvi low-card gate engagement (per-event, never per-row):
 inline std::atomic<long long> parvi_sinks    {0};  // GroupBySink locals armed with parvi partitions
-inline std::atomic<long long> parvi_promotes {0};  // partition overflowed its 16 slots (estimate misfire)
+inline std::atomic<long long> parvi_promotes {0};  // partition's parvi front map overflowed (estimate misfire)
 inline std::atomic<long long> distinct_parvi_sinks    {0};  // DistinctSink locals armed with a parvi front set
 inline std::atomic<long long> distinct_parvi_promotes {0};  // front set overflowed (estimate misfire)
 

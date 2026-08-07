@@ -66,13 +66,46 @@ Scope note: this owns EVERY subquery form that appears in a predicate — scalar
 EXISTS, IN. The plan rewriter is now purely syntactic (set operations, window
 rewrites) and no longer touches subqueries.
 
+SKIP-LEVEL correlations — a subquery nested two levels deep referencing its
+GRANDPARENT scope — cannot be keys of the join built here, because the
+grandparent's relation is on neither leg. They are bound on the ancestor join
+that owns the relation instead (Neumann BTW2025's `Γ_{A ∪ A(D)}` rule, driven
+as a walk UP the materialised plan rather than the paper's parent-pointer
+recursion, because decorrelation runs outside-in and the ancestor already
+exists as a node):
+  - scalar: `_defer_correlation_to_ancestor` — grouping/projections on the path
+    are widened by the carried column, the equality lands on the ancestor.
+  - EXISTS/IN: this join is converted SEMI→INNER so the carried column can flow
+    (SEMI emits left-side columns only); sound because existence absorbs the
+    multiplicity (`EXISTS(o: P ∧ EXISTS(l: Q)) ≡ EXISTS((o,l): P ∧ Q)`), so it
+    is only done when `_defer_existence_to_ancestor` verifies the ancestor is a
+    SEMI/ANTI join with nothing multiplicity-sensitive between.
+
 Known gaps (raise, never silently wrong):
   - UNCORRELATED `EXISTS`. Unlike the scalar case it cannot become a cross join —
     the answer is "any row at all", a zero-key semi/anti join, and the engine's
     join compiler admits zero-key only for CROSS and nested_loop.
   - An EXPRESSION on the left of `IN` (`x + 0 IN (...)`): join conditions are
     restricted to column comparisons.
-Both predate this strategy.
+  - Skip-level correlation inside NOT EXISTS / NOT IN (the inner negation blocks
+    the SEMI→INNER conversion), combined with a correlated non-equality, or with
+    an aggregate between it and the enclosing existence test.
+  - A scalar subquery in the SELECT LIST. The logical planner refuses it before
+    it reaches here (UnsupportedSyntaxError at the first walk of the projection),
+    because this strategy only inspects Filter conditions and an unhandled
+    SUBQUERY node in a projection used to crash the binder. Follow-on scope,
+    for the architect: the rewrite is NOT the one `_decorrelate` builds. A
+    WHERE-clause scalar subquery joins INNER — a missing match makes the
+    comparison unknown, so dropping the row is correct. A SELECT-list scalar
+    subquery is a VALUE per outer row: an outer row with no match must survive
+    carrying NULL, which is a LEFT OUTER join to the same grouped relation.
+    The ORDER BY ... LIMIT 1 form additionally needs the
+    `_rewrite_order_limit_to_row_number` rewrite (ROW_NUMBER() OVER
+    (PARTITION BY correlation keys ORDER BY sort spec), filter rn = 1) that is
+    being built for WHERE-clause subqueries — same rewrite, different join type
+    on top. The one-row guarantee still has to hold per partition, or the LEFT
+    join multiplies outer rows instead of raising "more than one row returned".
+The first two predate this strategy.
 """
 
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
@@ -84,6 +117,8 @@ from opteryx.planner.optimizer.strategies.optimization_strategy import (
     OptimizationStrategy,
     OptimizerContext,
 )
+from opteryx.types import logical_type as _lt
+from opteryx.types.schema import SchemaColumn, mint_column_identity
 from opteryx.utils import random_string
 
 
@@ -385,8 +420,8 @@ def _expose_key(plan: LogicalPlan, key_column) -> None:
     _, aggregate = _aggregate_node(plan)
     if aggregate is None:
         raise UnsupportedSyntaxError(
-            "Correlated scalar subquery could not be decorrelated: it has no aggregate. "
-            "Rewrite using EXISTS or IN."
+            "Correlated scalar subquery could not be decorrelated: it has no aggregate "
+            "and is not `ORDER BY ... LIMIT 1`. Rewrite using EXISTS or IN."
         )
 
     if aggregate.node_type == LogicalPlanStepType.Aggregate:
@@ -521,6 +556,165 @@ def _defer_correlation_to_ancestor(plan: LogicalPlan, from_nid: str, inner_key, 
             return False
 
         _carry_column_upward(consumer, carried)
+        current = consumer_nid
+
+
+def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs) -> bool:
+    """
+    Turn a correlated `ORDER BY x LIMIT 1` subquery into a per-binding top-1.
+
+    A global sort-and-limit is wrong once the subquery is decorrelated: the limit
+    must apply per value of the correlation key, not once overall (Neumann BTW2025
+    §4.4). The rewrite replaces Order with a ranking Window — ROW_NUMBER() OVER
+    (PARTITION BY <correlation keys> ORDER BY <the sort spec>) — with the
+    operator's native `top_k` set to 1, and simply deletes the Limit.
+
+    `top_k` is used instead of the paper's `Filter rn <= 1` deliberately. A rank
+    filter node is an ordinary comparison, so PredicatePushdownStrategy collects
+    it, cannot place it below the Window barrier, and "restores" it with
+    insert_node_before against the enclosing join — which moves BOTH of the
+    join's legs under the filter and leaves the join one-legged (the engine
+    refuses: "a join without labelled left/right legs"). Setting `top_k`
+    directly emits the plan WindowTopKFusionStrategy would have fused to anyway,
+    with nothing for other passes to pick up.
+
+    Only `LIMIT 1` with no OFFSET qualifies — that is what makes the subquery
+    provably one-row-per-binding, which is the scalar contract. Anything else
+    returns False and the caller falls back to the aggregate requirement.
+
+    The plan is bound but NOT yet optimized when this runs (decorrelation is the
+    first strategy), so Order and Limit are still discrete nodes — LimitPushdown
+    and the TopN fusions have not run.
+    """
+    limit_nid = None
+    order_nid = None
+    for nid, node in inner_plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Limit:
+            if limit_nid is not None:
+                return False  # two limits — not the shape this handles
+            limit_nid = nid
+        elif node.node_type == LogicalPlanStepType.Order:
+            if order_nid is not None:
+                return False
+            order_nid = nid
+
+    if limit_nid is None or order_nid is None:
+        return False
+    limit_node = inner_plan[limit_nid]
+    if limit_node.limit != 1 or limit_node.offset:
+        return False
+    # The Limit must consume the Order directly — anything between (an aggregate,
+    # a distinct) means the limit is not a plain top-1 over the sort.
+    providers = [source for source, _t, _r in inner_plan.ingoing_edges(limit_nid)]
+    if providers != [order_nid]:
+        return False
+
+    order_by = inner_plan[order_nid].order_by or []
+
+    # --- Order becomes the ranking window ------------------------------------
+    # Post-bind construction, so this does the binder's work too (visit_window):
+    # `outputs` pre-mints the row-number schema column, `window_functions` is the
+    # (kind, identity) list the physical operator executes.
+    rn_relation = f"$rownum-{random_string(6)}"
+    rn_schema_column = SchemaColumn(
+        name="$row_number",
+        column_type=_lt.INT64,
+        identity=mint_column_identity(rn_relation, "$row_number"),
+    )
+    rn_reference = LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source=rn_relation,
+        source_column=rn_schema_column.name,
+        schema_column=rn_schema_column,
+    )
+
+    window = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+    window.partition_by = [_local_copy(inner_key) for inner_key, _outer_key in key_pairs]
+    window.order_by = list(order_by)
+    window.outputs = [("ROW_NUMBER", rn_schema_column)]
+    window.output_relation = rn_relation
+    window.window_functions = [("ROW_NUMBER", rn_schema_column.identity)]
+    window.top_k = 1  # the operator keeps only rank-1 rows per partition
+    # Everything the window READS as well as what it emits: projection pushdown
+    # harvests referenced identities from `columns`, and the sort key is typically
+    # referenced by nothing else — omit it and the pass prunes it off the Project
+    # below, leaving the window ordering by a column the stream does not carry.
+    window.columns = (
+        [rn_reference]
+        + list(window.partition_by)
+        + [_local_copy(column) for column, _ascending in order_by]
+    )
+    inner_plan[order_nid] = window
+
+    # The Limit's row-count job is done by top_k, per partition. Removing it with
+    # heal makes the Window the subquery's exit.
+    inner_plan.remove_node(limit_nid, heal=True)
+
+    return True
+
+
+def _expose_key_without_aggregate(plan: LogicalPlan, key_column) -> None:
+    """
+    The projection-widening half of `_expose_key`, for the window-rewritten shape:
+    there is no aggregate to group, but the key still has to survive every Project
+    above the scan or the join cannot see it.
+    """
+    for _nid, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Project:
+            node.columns = list(node.columns or []) + [key_column]
+
+
+def _defer_existence_to_ancestor(plan: LogicalPlan, from_nid: str, inner_key, outer_key) -> bool:
+    """
+    Bind a skip-level correlation from inside an EXISTS/IN subquery on the
+    ancestor SEMI/ANTI join that owns its outer relation.
+
+    The caller has already converted the subquery's own semi join to a plain
+    inner join so the carried column can flow — SEMI emits left-side columns
+    only. That conversion changes multiplicity, and it is only sound because
+    existence absorbs it: `EXISTS(o: P ∧ EXISTS(l: Q))` ≡ `EXISTS((o,l): P ∧ Q)`,
+    and likewise for NOT EXISTS around it. So this walk is STRICTER than the
+    scalar `_defer_correlation_to_ancestor`: only Filter and Project may sit on
+    the path — an Aggregate between would have its COUNT/SUM inflated by the
+    conversion, and widening it (the scalar rule) cannot repair rows that were
+    already duplicated below it — and the ancestor must itself be a SEMI or
+    ANTI join, since only those collapse the multiplicity again. `left anti
+    null-aware` is excluded: the engine's null-aware anti join is single-column.
+
+    Returns False if the shape does not qualify; the caller must then refuse
+    the query — the conversion has already happened, so continuing would be
+    silently wrong.
+    """
+    carried = _local_copy(inner_key)
+    target_relation = outer_key.source
+    if not target_relation:
+        return False
+
+    current = from_nid
+    while True:
+        consumers = plan.outgoing_edges(current)
+        if not consumers:
+            return False
+        _source, consumer_nid, _relation = consumers[0]
+        consumer = plan[consumer_nid]
+        if consumer is None:
+            return False
+
+        if consumer.node_type == LogicalPlanStepType.Join:
+            if consumer.type not in ("left semi", "left anti"):
+                return False
+            if target_relation not in (consumer.left_relation_names or []):
+                return False
+            _attach_correlation(consumer, inner_key, outer_key, carried, outer_on_left=True)
+            return True
+
+        if consumer.node_type == LogicalPlanStepType.Filter:
+            pass
+        elif consumer.node_type == LogicalPlanStepType.Project:
+            consumer.columns = list(consumer.columns or []) + [carried]
+        else:
+            # Aggregate, Distinct, Limit, ... — multiplicity-sensitive. Refuse.
+            return False
         current = consumer_nid
 
 
@@ -951,26 +1145,55 @@ def _build_filter_join(
             inner_relations.update(origin)
 
     # A correlation reaching past the immediate enclosing scope names a relation
-    # that is on neither leg here, so `extract_join_fields` would keep it in `on`
-    # while dropping it from the key lists — never evaluated, and the widened
-    # projection multiplies rows. The scalar path defers these to the ancestor join
-    # that owns the relation; that technique does NOT transfer here, because
-    # SEMI/ANTI emit left-side columns only, so the carried inner column cannot
-    # survive above this join to be bound higher up. Enforcing it needs the
-    # materialised domain D of Neumann BTW2025 §2.2. Refuse until that exists.
-    unresolved = [
-        outer_key for _inner_key, outer_key in key_pairs if outer_key.source not in outer_relations
-    ]
-    if unresolved:
-        names = ", ".join(f"`{column.source_column}`" for column in unresolved)
-        raise UnsupportedSyntaxError(
+    # that is on neither leg here, so it cannot be a key of THIS join. It is
+    # bound on the ancestor SEMI/ANTI join that owns the relation instead —
+    # sound because existence absorbs multiplicity:
+    #     EXISTS(o: P ∧ EXISTS(l: Q))  ≡  EXISTS((o,l): P ∧ Q)
+    # To let the carried inner column flow up, this join is converted from SEMI
+    # to a plain INNER join (SEMI emits left-side columns only); the witness-pair
+    # duplication that introduces is collapsed again by the ancestor's existence
+    # test. `_defer_existence_to_ancestor` verifies the absorption argument holds
+    # (only Filter/Project between, ancestor is SEMI/ANTI) and refuses otherwise.
+    local_pairs = []
+    deferred_pairs = []
+    for inner_key, outer_key in key_pairs:
+        if outer_key.source in outer_relations:
+            local_pairs.append((inner_key, outer_key))
+        else:
+            deferred_pairs.append((inner_key, outer_key))
+
+    def _skip_level_refusal(reason: str):
+        names = ", ".join(f"`{outer_key.source_column}`" for _, outer_key in deferred_pairs)
+        return UnsupportedSyntaxError(
             f"A correlated EXISTS/IN subquery correlates on {names}, which belongs to a "
-            "scope further out than the subquery enclosing it. Correlating across more "
-            "than one level of nesting is not supported for EXISTS or IN."
+            f"scope further out than the subquery enclosing it; {reason}."
         )
 
+    if deferred_pairs:
+        # Only a positive existence test (SEMI) can be converted to INNER — the
+        # flattening identity does not hold through this join's own negation.
+        if join_type != "left semi":
+            raise _skip_level_refusal("NOT EXISTS / NOT IN cannot carry such a correlation")
+        # A residual is evaluated per candidate pair INSIDE the semi probe; after
+        # the conversion there is no probe to ride on. Unbuilt, so refuse.
+        if residual is not None:
+            raise _skip_level_refusal(
+                "combining it with a correlated non-equality is not supported"
+            )
+
+    # A skip-level reference can also hide in the residual, where the outer
+    # markers are about to be cleared — it would then be evaluated against a
+    # column no leg carries. Refuse while the cause is still legible.
+    for column in _all_columns_of(residual):
+        if _is_outer(column) and column.source not in outer_relations:
+            raise UnsupportedSyntaxError(
+                f"A correlated EXISTS/IN subquery correlates on `{column.source_column}` "
+                "through a non-equality predicate, and that column belongs to a scope "
+                "further out than the subquery enclosing it. This is not supported."
+            )
+
     on_condition = None
-    for inner_key, outer_key in key_pairs:
+    for inner_key, outer_key in local_pairs:
         equals = Node(
             node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
         )
@@ -985,25 +1208,49 @@ def _build_filter_join(
             on_condition = conjunction
 
     join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
-    join.type = join_type
+    # The SEMI→INNER conversion for deferred correlations (see above). With no
+    # local key at all the converted join has nothing to hash on, and the engine
+    # admits zero-key joins only as CROSS — which is the correct semantics here:
+    # every (outer row, carried value) pair is a candidate witness.
+    if deferred_pairs:
+        join.type = "inner" if local_pairs else "cross join"
+    else:
+        join.type = join_type
     join.on = on_condition
     join.using = None
     # Every column the join reads, keys AND residual. The residual is evaluated
     # inside the existence test but lives on the node rather than in `on`, so
     # omitting its columns here hides them from projection pushdown, which then
     # prunes them off BOTH legs and the engine cannot evaluate the residual.
-    join.columns = [
-        column
-        for pair in key_pairs
-        for column in (_local_copy(pair[1]), _local_copy(pair[0]))
-    ] + [_local_copy(column) for column in _all_columns_of(residual)]
+    # A deferred pair contributes its INNER column only — the outer one is not on
+    # either leg here; it still has to be listed or projection pushdown prunes
+    # the carried column off this leg before the ancestor join can bind it.
+    join.columns = (
+        [
+            column
+            for pair in local_pairs
+            for column in (_local_copy(pair[1]), _local_copy(pair[0]))
+        ]
+        + [_local_copy(inner_key) for inner_key, _outer_key in deferred_pairs]
+        + [_local_copy(column) for column in _all_columns_of(residual)]
+    )
     join.left_relation_names = sorted(outer_relations)
     join.right_relation_names = sorted(inner_relations)
     join.all_relations = outer_relations | inner_relations
     join.schemas = {**outer_schemas, **inner_schemas}
-    join.left_columns, join.right_columns = extract_join_fields(
-        on_condition, join.left_relation_names, join.right_relation_names
-    )
+    if local_pairs:
+        join.left_columns, join.right_columns = extract_join_fields(
+            on_condition, join.left_relation_names, join.right_relation_names
+        )
+        # Every local pair names both legs by construction; a shortfall means a
+        # key that cannot be a key here slipped through — the silent-wrong-answer
+        # case this partition exists to prevent.
+        if len(join.left_columns) != len(local_pairs):
+            raise InvalidInternalStateError(
+                "decorrelation built a join key naming a relation that is on neither leg"
+            )
+    else:
+        join.left_columns, join.right_columns = [], []
     # A correlated NON-equality cannot be a join key, and it cannot be a post-join
     # filter either: SEMI/ANTI emit rows already collapsed to existence, so the
     # inner side is gone by then. It rides on the join and is evaluated per
@@ -1020,6 +1267,7 @@ def _build_filter_join(
         # that no longer resolves (redundant_operators then reads None.alias).
         plan[filter_nid] = join
         plan.add_edge(inner_exit, filter_nid)
+        join_nid = filter_nid
     else:
         filter_node.condition = remaining
         filter_node.columns = [
@@ -1030,6 +1278,17 @@ def _build_filter_join(
         join_nid = random_string()
         plan.insert_node_before(join_nid, join, filter_nid)
         plan.add_edge(inner_exit, join_nid)
+
+    # Bind deferred correlations on the ancestor existence join. Must run AFTER
+    # insertion — the walk starts from this join's position in the plan. The
+    # SEMI→INNER conversion is already committed, so an unbindable pair means the
+    # plan is unsound and the query must be refused, not answered.
+    for inner_key, outer_key in deferred_pairs:
+        if not _defer_existence_to_ancestor(plan, join_nid, inner_key, outer_key):
+            raise _skip_level_refusal(
+                "no enclosing EXISTS/IN provides that relation through a path this "
+                "rewrite can carry it (only filters and projections may sit between)"
+            )
 
     setattr(telemetry, counter, getattr(telemetry, counter, 0) + 1)
     return plan
@@ -1146,6 +1405,16 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
                 "ungrouped aggregate is supported here."
             )
 
+    # A correlated subquery with no aggregate can still be provably one-row-per-
+    # binding: `ORDER BY x LIMIT 1` — the top-1-per-group idiom. Rewritten to a
+    # ranking window partitioned by the correlation keys (BTW2025 §4.4) BEFORE the
+    # value column is read, so the plan is in its final shape.
+    window_rewritten = False
+    if key_pairs:
+        _, aggregate = _aggregate_node(inner_plan)
+        if aggregate is None:
+            window_rewritten = _rewrite_order_limit_to_row_number(inner_plan, key_pairs)
+
     # Read the subquery's value column before the key widens the projection.
     value_column = _output_column(inner_plan)
 
@@ -1161,7 +1430,12 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
         value_column.origin = [scalar_alias]
 
     for inner_key, _outer_key in key_pairs:
-        _expose_key(inner_plan, inner_key)
+        if window_rewritten:
+            # No aggregate to widen — the window's rank filter already guarantees
+            # one row per key; the key only has to survive the projections.
+            _expose_key_without_aggregate(inner_plan, inner_key)
+        else:
+            _expose_key(inner_plan, inner_key)
 
     # --- the subquery's value becomes an ordinary column ----------------------
     filter_node.condition = replace_subquery(_reference_to(value_column))

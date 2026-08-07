@@ -405,6 +405,12 @@ def _build_engine_aggregate(aggregate):
         # execute()/finalize() are never invoked for a STDDEV query.
         return [], None, None
 
+    if aggregate_type == "CORR":
+        # Same reasoning as APPROX_COUNT_DISTINCT above — no correlation
+        # accumulator in this legacy engine, execution never reaches it
+        # (native engine: native_group_sinks.hpp's GBKind::Corr).
+        return [], None, None
+
     if aggregate_type == "MEDIAN":
         if parameter_name is None:
             return [], None, _make_literal_state(aggregate)

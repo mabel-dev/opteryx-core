@@ -343,10 +343,19 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             if context.last_nid:
                 context.optimized_plan.add_edge(context.node_id, context.last_nid)
 
-        elif node.node_type in (LogicalPlanStepType.Limit, LogicalPlanStepType.Union):
-            # A barrier: filters never cross a Limit (row-count semantics) or a
+        elif node.node_type in (
+            LogicalPlanStepType.Limit,
+            LogicalPlanStepType.Union,
+            LogicalPlanStepType.Window,
+        ):
+            # A barrier: filters never cross a Limit (row-count semantics), a
             # Union (a filter placed inside one leg would not apply to the
-            # others). Placement directly above the barrier is only valid for a
+            # others), or a ranking Window — removing rows below the window
+            # changes which row ranks first in each partition, so a filter
+            # pushed through it answers a different question. (A filter on the
+            # partition keys alone would be safe, but no current producer needs
+            # that distinction — barrier conservatively.)
+            # Placement directly above the barrier is only valid for a
             # predicate whose every referenced column is carried by the
             # barrier's output stream. A predicate referencing a column defined
             # by a Project ABOVE this barrier (a computed alias the Project

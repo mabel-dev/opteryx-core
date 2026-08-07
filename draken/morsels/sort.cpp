@@ -11,7 +11,7 @@
             "draken/core/vergesort.h",
             "draken/morsels/cxx_morsel.h",
             "draken/morsels/sort.hpp",
-            "src/cpp/simd_hash.h"
+            "draken/simd/simd_hash.h"
         ],
         "extra_compile_args": [
             "-O3",
@@ -30,6 +30,7 @@
         "include_dirs": [
             ".",
             "src/cpp",
+            "draken/simd",
             "src/c",
             "draken",
             "draken/core",
@@ -60,8 +61,7 @@
         "name": "draken.morsels.sort",
         "sources": [
             "draken/morsels/sort.pyx",
-            "draken/core/vector_alloc.cpp",
-            "src/cpp/simd_bitops.cpp"
+            "draken/core/vector_alloc.cpp"
         ]
     },
     "module_name": "draken.morsels.sort"

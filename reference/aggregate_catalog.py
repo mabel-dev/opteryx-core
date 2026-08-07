@@ -11,6 +11,7 @@ from opteryx.operators.aggregate.helpers import AGGREGATORS
 
 _GLOBAL_SUPPORTED = frozenset(
     {
+        "CORR",
         "COUNT",
         "SUM",
         "MIN",
@@ -29,6 +30,7 @@ _GROUPED_SUPPORTED = _GLOBAL_SUPPORTED | frozenset({"ANY_VALUE"})
 
 _STRICT_GROUPED_SUPPORTED = frozenset(
     {
+        "CORR",
         "COUNT",
         "SUM",
         "MIN",
@@ -50,6 +52,7 @@ _FRIENDLY_NAMES = {
     "APPROX_PERCENTILE": "Approximate Percentile",
     "ARRAY_AGG": "Array Aggregate",
     "AVG": "Average",
+    "CORR": "Correlation",
     "COUNT": "Count",
     "COUNT_DISTINCT": "Count Distinct",
     "MAX": "Maximum",
@@ -65,6 +68,7 @@ _CATEGORIES = {
     "APPROX_PERCENTILE": "approximate",
     "ARRAY_AGG": "collection",
     "AVG": "numeric",
+    "CORR": "numeric",
     "COUNT": "counting",
     "COUNT_DISTINCT": "counting",
     "MAX": "extrema",
@@ -80,6 +84,7 @@ _SUMMARIES = {
     "APPROX_PERCENTILE": "Estimates a percentile using sketch-based aggregation.",
     "ARRAY_AGG": "Collects input values into an array.",
     "AVG": "Computes the arithmetic mean of the input values.",
+    "CORR": "Computes the Pearson correlation coefficient between two numeric columns.",
     "COUNT": "Counts rows or non-null input values.",
     "COUNT_DISTINCT": "Counts distinct non-null input values.",
     "MAX": "Returns the largest non-null input value.",
@@ -95,10 +100,11 @@ _DOCUMENTATION = {
     "APPROX_PERCENTILE": "Accepts an input expression and a percentile literal between 0.0 and 1.0.",
     "ARRAY_AGG": "Supports DISTINCT, ORDER BY, and LIMIT forms in the aggregate surface.",
     "AVG": "Ignores nulls and divides the running sum by the number of non-null values.",
+    "CORR": "Pearson correlation over (x, y) pairs where both values are non-null. Returns DOUBLE in [-1, 1]; NULL when undefined (no pairs, or zero variance in either input). DECIMAL inputs must be CAST to DOUBLE first.",
     "COUNT": "COUNT(*) counts rows, while COUNT(expr) counts non-null values.",
     "COUNT_DISTINCT": "Exact distinct count over the non-null input values.",
     "MAX": "Returns the greatest comparable non-null value encountered.",
-    "MEDIAN": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Per-group buffer is capped (default 1000) — exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
+    "MEDIAN": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Buffering is bounded by a global 512MB memory budget — exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
     "MIN": "Returns the smallest comparable non-null value encountered.",
     "SUM": "Nulls are ignored; non-null values are accumulated.",
     "STDDEV": "Population standard deviation (N denominator, not N-1/sample). Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
@@ -115,6 +121,7 @@ _SQL_FORMS = {
         "ARRAY_AGG(expr ORDER BY expr [ASC|DESC] LIMIT n)",
     ],
     "AVG": ["AVG(expr)"],
+    "CORR": ["CORR(x, y)"],
     "COUNT": ["COUNT(*)", "COUNT(expr)", "COUNT(DISTINCT expr)"],
     "COUNT_DISTINCT": ["COUNT_DISTINCT(expr)", "COUNT(DISTINCT expr)"],
     "MAX": ["MAX(expr)"],

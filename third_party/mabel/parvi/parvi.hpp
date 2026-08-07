@@ -1,29 +1,43 @@
 #pragma once
 
-// Parvi: a tiny fixed-capacity hash map for <= 16 entries.
+// Parvi: a tiny fixed-capacity hash map for low-cardinality keying.
 //
 // Design goals
 // ------------
 //   * Zero heap allocations — all storage is inline.
-//   * Single SIMD-group probe: the whole table is one 16-byte control group,
-//     so every lookup is one compare + one empty-check, no iterative probing.
+//   * Single SIMD-group probe: 64 slots arranged as 4 groups of 16; the
+//     probed group is selected from the key (bits 53–54, disjoint from the
+//     tag bits 57–63), so every lookup is still one 16-byte compare + one
+//     empty-check — no iterative probing, no spill to neighbouring groups.
 //   * API-compatible with opteryx::carchar::CarcharIndex for the hot path
-//     (lookup_fast / insert_new / find_or_insert / items) so callers can
-//     promote to Carchar in one step when the "<= 16 items" estimate was
-//     wrong.
+//     (lookup_fast / insert_new / find_or_insert_id / find_or_insert /
+//     items) so callers can promote to Carchar in one step when the
+//     low-cardinality estimate was wrong.
 //
-// Promotion
-// ---------
-//   * `full()` returns true once capacity is exhausted.
-//   * `drain_into(CarcharIndex&)` copies the live entries into a Carchar
-//     using insert_new, preserving keys and payload refs.
-//   * `insert_new` / `find_or_insert` return false/overflow when the table
-//     is full so callers can swap to Carchar without silent corruption.
+// Capacity & promotion
+// --------------------
+//   * kCapacity is 64 slots, but a key can only live in its selected group:
+//     overflow fires when THAT group is full, not when all 64 slots are.
+//     With hashed keys (balls-in-bins over 4 groups of 16) the measured
+//     effective capacity before first overflow is ~40–56 distinct keys
+//     (p5 = 40 — planner eligibility gates on 40, see
+//     opteryx/planner/optimizer/strategies/hash_map_variant.py).
+//   * There is deliberately NO spill probing to the next group: spilling
+//     recreates Carchar's probe loop and forfeits the flat-cost guarantee.
+//     A full group promotes instead.
+//   * `drain_into(CarcharIndex&)` / `drain_into(CarcharSet&)` copy the live
+//     entries for promotion, preserving keys and payload refs.
+//   * `insert_new` / `find_or_insert` / `find_or_insert_id` /
+//     `insert_or_ignore` signal overflow so callers can swap to Carchar
+//     without silent corruption.
+//   * `full()` remains "all 64 slots occupied"; overflow can arrive before
+//     full() is true (group-full). Promotion decisions must key off the
+//     overflow signals, never off full().
 //
-// Layout (linear, 16 slots):
-//   control_[i]    : kEmpty (0x80) or tag (top 7 bits of key)
-//   hashes_[i]     : full 64-bit key
-//   payload_refs_[i] : int64 payload
+// Layout (4 groups × 16 slots):
+//   control_[i]      : kEmpty (0x80) or tag (top 7 bits of key)
+//   hashes_[i]       : full 64-bit key
+//   payload_refs_[i] : int64 payload (ParviMap only)
 //
 // Keys must not use 0x80 as their top control byte — we reuse carchar's
 // key_tag() which masks the top bit, so this is handled for us.
@@ -55,7 +69,17 @@ namespace opteryx::parvi {
 using ::opteryx::carchar::kEmpty;
 using ::opteryx::carchar::key_tag;
 
-inline constexpr std::size_t kCapacity = 16;
+inline constexpr std::size_t kGroupSlots = 16;
+inline constexpr std::size_t kGroupCount = 4;
+inline constexpr std::size_t kCapacity = kGroupCount * kGroupSlots;  // 64
+static_assert((kGroupCount & (kGroupCount - 1U)) == 0U, "group count must be a power of two");
+
+// Group selection uses bits 53–54: disjoint from the tag bits (57–63, see
+// carchar key_tag) and comfortably above Carchar's low slot-index bits, so a
+// promoted Carchar re-derives everything independently.
+inline std::size_t group_base(std::uint64_t key) noexcept {
+    return static_cast<std::size_t>((key >> 53U) & (kGroupCount - 1U)) * kGroupSlots;
+}
 
 struct ParviResult {
     std::size_t slot = 0;
@@ -67,7 +91,7 @@ struct ParviResult {
 enum class ParviInsert : std::uint8_t {
     kFound    = 0,  // key existed; payload_out holds its payload
     kInserted = 1,  // new_id inserted; payload_out == new_id
-    kFull     = 2,  // key absent and table full — caller promotes to Carchar
+    kFull     = 2,  // key absent and its group full — caller promotes to Carchar
 };
 
 // ------------------------------------------------------------------
@@ -76,6 +100,8 @@ enum class ParviInsert : std::uint8_t {
 // The old scalar fallback looped over 8 bytes twice. Now we use a
 // 64-bit multiply to gather high bits into a single byte per 8-byte
 // chunk. This is branchless and reduces ~16 iterations to 2 multiplications.
+//
+// Operates on ONE 16-byte group (`control` points at the group base).
 // ------------------------------------------------------------------
 inline std::uint32_t group_match_mask(const std::uint8_t* control, std::uint8_t needle) noexcept {
 #if defined(__AVX2__)
@@ -86,8 +112,8 @@ inline std::uint32_t group_match_mask(const std::uint8_t* control, std::uint8_t 
     static constexpr std::uint8_t kPowersArr[16] = {1, 2, 4, 8, 16, 32, 64, 128,
                                                     1, 2, 4, 8, 16, 32, 64, 128};
     alignas(16) std::uint8_t masked_bytes[16] = {};
-    const std::size_t vl = __riscv_vsetvl_e8m4(kCapacity);
-    if (vl < kCapacity) {
+    const std::size_t vl = __riscv_vsetvl_e8m4(kGroupSlots);
+    if (vl < kGroupSlots) {
         using ::opteryx::carchar::detail::kByteHighBits64;
         using ::opteryx::carchar::detail::load_u64;
         using ::opteryx::carchar::detail::match_mask64;
@@ -167,13 +193,14 @@ public:
     bool empty() const noexcept { return size_ == 0; }
     bool full() const noexcept { return size_ == kCapacity; }
 
-    // Fast read path. Single SIMD group compare, then key verification on
-    // any tag matches. Returns true iff key is present.
+    // Fast read path. Single SIMD group compare on the key's selected group,
+    // then key verification on any tag matches. Returns true iff key is present.
     bool lookup_fast(std::uint64_t key, std::int64_t& payload_ref_out) const noexcept {
+        const std::size_t base = group_base(key);
         const std::uint8_t tag = key_tag(key);
-        std::uint32_t matches = group_match_mask(control_.data(), tag);
+        std::uint32_t matches = group_match_mask(control_.data() + base, tag);
         while (matches != 0U) {
-            const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(matches));
+            const std::size_t idx = base + static_cast<std::size_t>(__builtin_ctz(matches));
             if (hashes_[idx] == key) {
                 payload_ref_out = payload_refs_[idx];
                 return true;
@@ -184,27 +211,28 @@ public:
     }
 
     // Insert a new key with the given payload.
-    //   * If the key already exists → returns {existing_slot, false}.
-    //   * If the table is full       → returns {kCapacity, false}; caller
-    //                                    should promote to CarcharIndex.
+    //   * If the key already exists  → returns {existing_slot, false}.
+    //   * If the key's group is full → returns {kCapacity, false}; caller
+    //                                   should promote to CarcharIndex.
     //   * Otherwise                  → inserts and returns {new_slot, true}.
     ParviResult insert_new(std::uint64_t key, std::int64_t payload_ref) noexcept {
+        const std::size_t base = group_base(key);
         const std::uint8_t tag = key_tag(key);
-        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
+        std::uint32_t tag_matches = group_match_mask(control_.data() + base, tag);
         // Check for existing key.
         while (tag_matches != 0U) {
-            const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
+            const std::size_t idx = base + static_cast<std::size_t>(__builtin_ctz(tag_matches));
             if (hashes_[idx] == key) {
                 return {idx, false};
             }
             tag_matches &= (tag_matches - 1U);
         }
-        // No existing key: insert if space available.
-        if (size_ >= kCapacity) {
+        // No existing key: insert if the group has space.
+        const std::uint32_t empty_matches = group_match_mask(control_.data() + base, kEmpty);
+        if (empty_matches == 0U) {
             return {kCapacity, false};
         }
-        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
-        const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
+        const std::size_t slot = base + static_cast<std::size_t>(__builtin_ctz(empty_matches));
         control_[slot]          = tag;
         hashes_[slot]           = key;
         payload_refs_[slot]     = payload_ref;
@@ -217,21 +245,22 @@ public:
     // insert, and overflow — no second lookup on the hit path.
     ParviInsert find_or_insert_id(std::uint64_t key, std::int64_t new_id,
                                   std::int64_t& payload_out) noexcept {
+        const std::size_t base = group_base(key);
         const std::uint8_t tag = key_tag(key);
-        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
+        std::uint32_t tag_matches = group_match_mask(control_.data() + base, tag);
         while (tag_matches != 0U) {
-            const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
+            const std::size_t idx = base + static_cast<std::size_t>(__builtin_ctz(tag_matches));
             if (hashes_[idx] == key) {
                 payload_out = payload_refs_[idx];
                 return ParviInsert::kFound;
             }
             tag_matches &= (tag_matches - 1U);
         }
-        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
+        const std::uint32_t empty_matches = group_match_mask(control_.data() + base, kEmpty);
         if (empty_matches == 0U) {
             return ParviInsert::kFull;
         }
-        const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
+        const std::size_t slot = base + static_cast<std::size_t>(__builtin_ctz(empty_matches));
         control_[slot]      = tag;
         hashes_[slot]       = key;
         payload_refs_[slot] = new_id;
@@ -241,30 +270,31 @@ public:
     }
 
     // find_or_insert: returns (payload, inserted_bool).
-    // On overflow (table full and key absent) the out-param `overflow` is
-    // set to true and the returned payload is the factory's fresh value
+    // On overflow (key's group full and key absent) the out-param `overflow`
+    // is set to true and the returned payload is the factory's fresh value
     // which the caller is responsible for routing to the promoted map.
     template <typename PayloadFactory>
     std::pair<std::int64_t, bool> find_or_insert(
         std::uint64_t key, PayloadFactory&& payload_factory, bool& overflow
     ) {
         overflow = false;
+        const std::size_t base = group_base(key);
         const std::uint8_t tag = key_tag(key);
-        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
+        std::uint32_t tag_matches = group_match_mask(control_.data() + base, tag);
         while (tag_matches != 0U) {
-            const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
+            const std::size_t idx = base + static_cast<std::size_t>(__builtin_ctz(tag_matches));
             if (hashes_[idx] == key) {
                 return {payload_refs_[idx], false};
             }
             tag_matches &= (tag_matches - 1U);
         }
         const std::int64_t payload_ref = std::forward<PayloadFactory>(payload_factory)();
-        if (size_ >= kCapacity) {
+        const std::uint32_t empty_matches = group_match_mask(control_.data() + base, kEmpty);
+        if (empty_matches == 0U) {
             overflow = true;
             return {payload_ref, true};
         }
-        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
-        const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
+        const std::size_t slot = base + static_cast<std::size_t>(__builtin_ctz(empty_matches));
         control_[slot]          = tag;
         hashes_[slot]           = key;
         payload_refs_[slot]     = payload_ref;
@@ -273,8 +303,8 @@ public:
     }
 
     // Copy live entries into a CarcharIndex — use when overflow occurs or
-    // the caller decides to promote early. The Carchar is reserved to hold
-    // the existing entries plus headroom.
+    // the caller decides to promote early. reserve() sizes the target with
+    // load-factor headroom for the existing entries.
     void drain_into(::opteryx::carchar::CarcharIndex& target) const {
         target.reserve(size_);
         for (std::size_t i = 0; i < kCapacity; ++i) {
@@ -302,10 +332,10 @@ public:
 
 private:
 
-    // Performance improvement #4: align control array to 64-byte cache line
-    // to avoid false sharing when multiple ParviMaps are used concurrently
-    // (e.g., in different threads). The other arrays are kept close together
-    // for better cache locality.
+    // Performance improvement #4: align the control array to a 64-byte cache
+    // line — at 64 slots the whole control array IS one cache line, and
+    // alignment also avoids false sharing when multiple ParviMaps are used
+    // concurrently (e.g. per-partition front maps on different threads).
     alignas(64) std::array<std::uint8_t, kCapacity>  control_{};
     std::array<std::uint64_t, kCapacity>             hashes_{};
     std::array<std::int64_t, kCapacity>              payload_refs_{};
@@ -332,12 +362,14 @@ public:
     bool empty() const noexcept { return size_ == 0; }
     bool full() const noexcept { return size_ == kCapacity; }
 
-    // Fast contains: single SIMD group compare, then key verification.
+    // Fast contains: single SIMD group compare on the key's selected group,
+    // then key verification.
     bool contains(std::uint64_t key) const noexcept {
+        const std::size_t base = group_base(key);
         const std::uint8_t tag = key_tag(key);
-        std::uint32_t matches = group_match_mask(control_.data(), tag);
+        std::uint32_t matches = group_match_mask(control_.data() + base, tag);
         while (matches != 0U) {
-            const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(matches));
+            const std::size_t idx = base + static_cast<std::size_t>(__builtin_ctz(matches));
             if (hashes_[idx] == key) {
                 return true;
             }
@@ -348,26 +380,27 @@ public:
 
     // Insert a new key.
     //   * If the key already exists → returns {is_new: false, overflow: false}.
-    //   * If the table is full and key is absent
-    //                              → returns {is_new: false, overflow: true}.
+    //   * If the key's group is full and key is absent
+    //                               → returns {is_new: false, overflow: true}.
     //   * Otherwise                 → inserts and returns {is_new: true, overflow: false}.
     ParviSetResult insert_or_ignore(std::uint64_t key) noexcept {
+        const std::size_t base = group_base(key);
         const std::uint8_t tag = key_tag(key);
-        std::uint32_t tag_matches = group_match_mask(control_.data(), tag);
+        std::uint32_t tag_matches = group_match_mask(control_.data() + base, tag);
         // Check for existing key.
         while (tag_matches != 0U) {
-            const std::size_t idx = static_cast<std::size_t>(__builtin_ctz(tag_matches));
+            const std::size_t idx = base + static_cast<std::size_t>(__builtin_ctz(tag_matches));
             if (hashes_[idx] == key) {
                 return {false, false};
             }
             tag_matches &= (tag_matches - 1U);
         }
-        // No existing key: insert if space available.
-        if (size_ >= kCapacity) {
+        // No existing key: insert if the group has space.
+        const std::uint32_t empty_matches = group_match_mask(control_.data() + base, kEmpty);
+        if (empty_matches == 0U) {
             return {false, true};
         }
-        const std::uint32_t empty_matches = group_match_mask(control_.data(), kEmpty);
-        const std::size_t slot = static_cast<std::size_t>(__builtin_ctz(empty_matches));
+        const std::size_t slot = base + static_cast<std::size_t>(__builtin_ctz(empty_matches));
         control_[slot]  = tag;
         hashes_[slot]   = key;
         ++size_;
@@ -379,7 +412,14 @@ public:
     // their indices into out_indices.
     //
     // overflow=true means we encountered an unseen key that could not be inserted
-    // because capacity was already exhausted.
+    // because its group was already full. The set HAS been mutated with a
+    // PREFIX of this batch's keys, and the rows carrying them were NOT
+    // emitted (the caller's batch is unchanged). Draining into Carchar and
+    // replaying the SAME batch would therefore suppress those first
+    // occurrences — data loss. Sound recoveries: keep the partial out_indices
+    // and continue the remainder on the drained Carchar (native DistinctSink),
+    // or replay against a set that excludes this batch's inserts — a fresh
+    // set in single-shot use (draken Vector::unique).
     template <typename IndexT>
     std::pair<std::size_t, bool> mark_new_indices(
         const std::uint64_t* keys, IndexT* out_indices, std::size_t length
@@ -391,7 +431,7 @@ public:
                 out_indices[count++] = static_cast<IndexT>(i);
                 continue;
             }
-            // Early exit only on true overflow (unseen key when full).
+            // Early exit only on true overflow (unseen key, its group full).
             if (result.overflow) {
                 return {count, true};
             }

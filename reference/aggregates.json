@@ -92,6 +92,24 @@
             "strict_grouped": true
         }
     },
+    "CORR": {
+        "ast_symbol": "CORR",
+        "friendly_name": "Correlation",
+        "kernel_name": "corr",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the Pearson correlation coefficient between two numeric columns.",
+        "description": "Computes the Pearson correlation coefficient between two numeric columns.",
+        "documentation": "Pearson correlation over (x, y) pairs where both values are non-null. Returns DOUBLE in [-1, 1]; NULL when undefined (no pairs, or zero variance in either input). DECIMAL inputs must be CAST to DOUBLE first.",
+        "sql_forms": [
+            "CORR(x, y)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
     "COUNT": {
         "ast_symbol": "COUNT",
         "friendly_name": "Count",
@@ -157,7 +175,7 @@
         "status": "active",
         "summary": "Computes the exact median (middle value) of the input values.",
         "description": "Computes the exact median (middle value) of the input values.",
-        "documentation": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Per-group buffer is capped (default 1000) \u2014 exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
+        "documentation": "Buffers all non-null values per group and selects the middle. Even-count inputs interpolate; result type is FLOAT. Buffering is bounded by a global 512MB memory budget \u2014 exceeding it raises an error. Decimal inputs must be CAST to FLOAT.",
         "sql_forms": [
             "MEDIAN(expr)"
         ],

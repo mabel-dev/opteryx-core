@@ -5,10 +5,44 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 
 #include "carchar_simd.hpp"
 
 namespace opteryx::carchar {
+
+namespace detail {
+// Allocator adaptor that DEFAULT-initializes elements instead of
+// value-initializing them. For trivial types that means "allocate and leave
+// the bytes alone" — std::vector otherwise has no way to allocate without
+// filling. Every other vector behaviour (growth, copy, move, data()) is
+// unchanged, which matters because CarcharIndex must stay copyable
+// (CarcharJoinIndex holds one by value and is copied into vectors).
+// Shared by CarcharIndex and CarcharSet: in both, an empty slot's hash is
+// never read (a tag is <= 0x7F and kEmpty is 0x80, so a probe can never
+// confirm against an empty slot's hash), so pre-filling the hash array is a
+// dead memset on every allocation and every doubling.
+template <typename T>
+struct uninitialized_allocator : std::allocator<T> {
+    using std::allocator<T>::allocator;
+
+    template <typename U>
+    struct rebind {
+        using other = uninitialized_allocator<U>;
+    };
+
+    template <typename U>
+    void construct(U* ptr) noexcept(std::is_nothrow_default_constructible_v<U>) {
+        ::new (static_cast<void*>(ptr)) U;   // default-init: no fill for trivial U
+    }
+
+    template <typename U, typename... Args>
+    void construct(U* ptr, Args&&... args) {
+        std::allocator_traits<std::allocator<T>>::construct(
+            static_cast<std::allocator<T>&>(*this), ptr, std::forward<Args>(args)...);
+    }
+};
+}  // namespace detail
 
 constexpr std::uint8_t kEmpty = 0x80;
 constexpr std::size_t kMinCapacity = 16;

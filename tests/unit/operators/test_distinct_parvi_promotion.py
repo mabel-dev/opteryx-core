@@ -37,6 +37,12 @@ def _from_arrow(table):
     return Morsel.from_vectors(names, vecs)
 
 
+# Parvi is 64 slots as 4 group-selected groups of 16: overflow fires when a
+# key's GROUP is full, not at 64 keys. 16 distinct values sit comfortably
+# under the effective capacity (p5 = 40), so they never overflow; 200 distinct
+# values always exceed the 64-slot ceiling and must overflow.
+
+
 def test_parvi_promotion_preserves_seen_keys_across_morsels():
     values = [f"type_{i}" for i in range(16)]
     first = _from_arrow(pa.table({"type": values}))
@@ -44,10 +50,12 @@ def test_parvi_promotion_preserves_seen_keys_across_morsels():
 
     seen = ParviSetWrapper()
 
-    distinct(first, seen, columns=[b"type"])
+    overflow = distinct(first, seen, columns=[b"type"])
+    assert overflow is False
     assert len(first) == 16
-    assert seen.full()
+    assert seen.size() == 16
 
+    # Early promotion is always legal — drain and continue on carchar.
     promoted = CarcharSetWrapper()
     seen.drain_into_carchar(promoted)
     seen = promoted
@@ -56,7 +64,7 @@ def test_parvi_promotion_preserves_seen_keys_across_morsels():
     assert len(second) == 0
 
 
-def test_parvi_distinct_no_overflow_for_duplicates_after_full():
+def test_parvi_distinct_duplicates_never_overflow():
     values = [f"type_{i}" for i in range(16)]
     first = _from_arrow(pa.table({"type": values}))
     second = _from_arrow(pa.table({"type": values}))
@@ -65,7 +73,7 @@ def test_parvi_distinct_no_overflow_for_duplicates_after_full():
     overflow = distinct(first, seen, columns=[b"type"])
     assert overflow is False
     assert len(first) == 16
-    assert seen.full()
+    assert seen.size() == 16
 
     overflow = distinct(second, seen, columns=[b"type"])
     assert overflow is False
@@ -73,11 +81,37 @@ def test_parvi_distinct_no_overflow_for_duplicates_after_full():
 
 
 def test_parvi_distinct_overflow_leaves_chunk_unchanged_for_replay():
-    values = [f"type_{i}" for i in range(20)]
+    # 200 distinct values cannot fit in 64 slots — overflow is guaranteed and
+    # the morsel must be returned completely untouched for the replay.
+    values = [f"type_{i}" for i in range(200)]
     morsel = _from_arrow(pa.table({"type": values}))
     seen = ParviSetWrapper()
 
     overflow = distinct(morsel, seen, columns=[b"type"])
 
     assert overflow is True
-    assert len(morsel) == 20
+    assert len(morsel) == 200
+
+
+def test_parvi_overflow_replay_needs_a_set_without_this_batch():
+    # The overflow contract: the morsel is returned untouched, but the parvi
+    # set HAS been mutated with a prefix of this morsel's keys — and those
+    # rows were never emitted. Draining parvi into carchar and replaying the
+    # SAME morsel therefore suppresses the prefix values' first occurrences
+    # (data loss). The sound recoveries are (a) keep the parvi pass's partial
+    # indices and continue on the drained carchar (what the native
+    # DistinctSink does), or (b) replay against a set that excludes this
+    # batch's inserts — a fresh set in single-shot use (what draken
+    # Vector.unique does). This test pins down (b).
+    values = [f"type_{i % 100}" for i in range(300)]  # 100 distinct, with dups
+    morsel = _from_arrow(pa.table({"type": values}))
+    seen = ParviSetWrapper()
+
+    overflow = distinct(morsel, seen, columns=[b"type"])
+    assert overflow is True
+    assert len(morsel) == 300  # untouched
+
+    fresh = CarcharSetWrapper()
+    overflow = distinct(morsel, fresh, columns=[b"type"])
+    assert overflow is False
+    assert len(morsel) == 100  # one row per distinct value

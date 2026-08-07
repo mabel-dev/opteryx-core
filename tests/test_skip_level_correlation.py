@@ -103,28 +103,141 @@ def _raises_unsupported(sql) -> bool:
     return False
 
 
-def test_skip_level_exists_refuses_rather_than_answering_wrongly():
+def test_skip_level_exists():
     """
-    EXISTS cannot defer to an ancestor: SEMI/ANTI emit left-side columns only, so
-    the carried inner column cannot survive the join to be bound higher up. That
-    needs a materialised domain; until then it must refuse, not guess.
+    The inner semi join is converted to INNER so the carried column can flow;
+    the ancestor SEMI absorbs the witness-pair multiplicity. Oracle: 277 rows.
     """
-    assert _raises_unsupported(f"""
+    assert (
+        _rows(f"""
         SELECT c_custkey FROM {T}.customer
         WHERE EXISTS (SELECT 1 FROM {T}.orders
                       WHERE o_custkey = c_custkey
                         AND EXISTS (SELECT 1 FROM {T}.lineitem
                                     WHERE l_orderkey = o_orderkey
                                       AND l_linenumber = c_nationkey))
-    """)
+        """)
+        == 277
+    )
 
 
-def test_skip_level_in_refuses_rather_than_answering_wrongly():
-    assert _raises_unsupported(f"""
+def test_skip_level_in():
+    """IN builds the same SEMI join as EXISTS; same deferral. Oracle: 277 rows."""
+    assert (
+        _rows(f"""
         SELECT c_custkey FROM {T}.customer
         WHERE c_custkey IN (SELECT o_custkey FROM {T}.orders
                             WHERE o_orderkey IN (SELECT l_orderkey FROM {T}.lineitem
                                                  WHERE l_linenumber = c_nationkey))
+        """)
+        == 277
+    )
+
+
+def test_skip_level_under_not_exists_outer():
+    """
+    The OUTER negation is fine — the ancestor ANTI join also collapses to
+    existence, so it absorbs the conversion's multiplicity the same way.
+    Oracle: 1223 rows (= 1500 customers − the 277 above; self-consistent).
+    """
+    assert (
+        _rows(f"""
+        SELECT c_custkey FROM {T}.customer
+        WHERE NOT EXISTS (SELECT 1 FROM {T}.orders
+                          WHERE o_custkey = c_custkey
+                            AND EXISTS (SELECT 1 FROM {T}.lineitem
+                                        WHERE l_orderkey = o_orderkey
+                                          AND l_linenumber = c_nationkey))
+        """)
+        == 1223
+    )
+
+
+def test_skip_level_scalar_inside_exists():
+    """Scalar walk-up attaching its key onto a SEMI ancestor. Oracle: 265 rows."""
+    assert (
+        _rows(f"""
+        SELECT c_custkey FROM {T}.customer
+        WHERE EXISTS (SELECT 1 FROM {T}.orders
+                      WHERE o_custkey = c_custkey
+                        AND (SELECT SUM(l_quantity) FROM {T}.lineitem
+                             WHERE l_orderkey = o_orderkey
+                               AND l_linenumber = c_nationkey) > 20)
+        """)
+        == 265
+    )
+
+
+def test_skip_level_only_key_becomes_cross_join():
+    """
+    An inner EXISTS whose ONLY correlation is skip-level has no local key at
+    all; the converted join degrades to CROSS and the ancestor still binds the
+    carried column. Oracle: 282 rows.
+    """
+    assert (
+        _rows(f"""
+        SELECT c_custkey FROM {T}.customer
+        WHERE EXISTS (SELECT 1 FROM {T}.orders
+                      WHERE o_custkey = c_custkey
+                        AND EXISTS (SELECT 1 FROM {T}.lineitem
+                                    WHERE l_linenumber = c_nationkey))
+        """)
+        == 282
+    )
+
+
+def test_correlated_order_by_limit_one():
+    """
+    `ORDER BY x LIMIT 1` decorrelates to ROW_NUMBER() OVER (PARTITION BY key)
+    with the operator's native top_k=1 (BTW2025 §4.4). Oracle: 649 rows.
+    """
+    assert (
+        _rows(f"""
+        SELECT c_custkey FROM {T}.customer
+        WHERE (SELECT o_totalprice FROM {T}.orders
+               WHERE o_custkey = c_custkey
+               ORDER BY o_orderdate DESC LIMIT 1) > 100000
+        """)
+        == 649
+    )
+
+
+def test_correlated_order_by_limit_one_two_sort_keys():
+    """Both sort keys must survive projection pruning. Oracle: 148 rows."""
+    assert (
+        _rows(f"""
+        SELECT c_custkey FROM {T}.customer
+        WHERE (SELECT o_totalprice FROM {T}.orders
+               WHERE o_custkey = c_custkey
+               ORDER BY o_orderdate ASC, o_orderkey ASC LIMIT 1) < 50000
+        """)
+        == 148
+    )
+
+
+def test_correlated_order_by_limit_two_refuses():
+    """LIMIT 2 cannot be a scalar — not provably one row per binding."""
+    assert _raises_unsupported(f"""
+        SELECT c_custkey FROM {T}.customer
+        WHERE (SELECT o_totalprice FROM {T}.orders
+               WHERE o_custkey = c_custkey
+               ORDER BY o_orderdate DESC LIMIT 2) > 100000
+    """)
+
+
+def test_skip_level_inside_inner_not_exists_refuses():
+    """
+    The INNER negation blocks the SEMI→INNER conversion — the flattening
+    identity does not hold through the negated join itself. Must refuse, not
+    guess.
+    """
+    assert _raises_unsupported(f"""
+        SELECT c_custkey FROM {T}.customer
+        WHERE EXISTS (SELECT 1 FROM {T}.orders
+                      WHERE o_custkey = c_custkey
+                        AND NOT EXISTS (SELECT 1 FROM {T}.lineitem
+                                        WHERE l_orderkey = o_orderkey
+                                          AND l_linenumber = c_nationkey))
     """)
 
 

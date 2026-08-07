@@ -157,7 +157,7 @@ def distinct(Morsel morsel, object seen_hashes, list columns=None):
         Modified in place; duplicate rows are removed.
     seen_hashes : CarcharSetWrapper or ParviSetWrapper
         Accumulates row hashes across calls for streaming DISTINCT.
-        Supports both carchar (dynamic) and parvi (fixed 16-slot) implementations.
+        Supports both carchar (dynamic) and parvi (fixed 64-slot) implementations.
     columns : list of bytes, optional
         Column names to hash; all columns used when None.
 

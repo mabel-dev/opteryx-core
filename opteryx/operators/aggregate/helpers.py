@@ -12,6 +12,7 @@ AGGREGATORS: dict = {
     "APPROX_COUNT_DISTINCT": "approx_count_distinct",
     "APPROX_PERCENTILE": "approx_percentile",
     "ARRAY_AGG": "hash_list",
+    "CORR": "corr",
     "COUNT": "count",
     "COUNT_DISTINCT": "count_distinct",
     "MAX": "max",

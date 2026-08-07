@@ -245,6 +245,45 @@ def test_left_join_where_clause_still_filters_post_join():
     assert planets == ["Earth"], planets
 
 
+
+def test_select_star_column_order_is_left_then_right():
+    """`SELECT *` must emit the LEFT relation's columns before the RIGHT's, for
+    every join flavour. The native join emits build payload first and for LEFT/FULL
+    OUTER the build leg is the RIGHT one, so stream layout order is NOT output
+    order — the binder's schema order is what `*` expands over."""
+    import opteryx
+
+    session = opteryx.session()
+    for join in ("INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL OUTER JOIN"):
+        sql = (
+            "SELECT * FROM (VALUES (1),(2)) AS a(x) "
+            f"{join} (VALUES (2),(9)) AS b(y) ON a.x = b.y"
+        )
+        morsels = list(session.execute_to_morsels(sql))
+        names = [n.decode() if isinstance(n, bytes) else n for n in morsels[0].column_names]
+        assert names == ["x", "y"], f"{join}: expected ['x', 'y'], got {names}"
+
+    cross = list(session.execute_to_morsels(
+        "SELECT * FROM (VALUES (1),(2)) AS a(x) CROSS JOIN (VALUES (2),(9)) AS b(y)"
+    ))
+    names = [n.decode() if isinstance(n, bytes) else n for n in cross[0].column_names]
+    assert names == ["x", "y"], f"CROSS JOIN: expected ['x', 'y'], got {names}"
+
+
+def test_select_star_column_order_three_way_join():
+    """Order must hold left-to-right across a chain of joins, not just a pair."""
+    import opteryx
+
+    session = opteryx.session()
+    morsels = list(session.execute_to_morsels("""
+        SELECT * FROM (VALUES (1)) AS a(x)
+        LEFT JOIN (VALUES (1)) AS b(y) ON a.x = b.y
+        LEFT JOIN (VALUES (1)) AS c(z) ON a.x = c.z
+    """))
+    names = [n.decode() if isinstance(n, bytes) else n for n in morsels[0].column_names]
+    assert names == ["x", "y", "z"], names
+
+
 if __name__ == "__main__":
     test_left_join_with_values()
     test_right_join_with_values()
@@ -256,4 +295,6 @@ if __name__ == "__main__":
     test_left_join_on_clause_literal_conjunct_preserves_unmatched_rows()
     test_join_on_clause_bare_literal_conjunct_fails_loud()
     test_left_join_where_clause_still_filters_post_join()
+    test_select_star_column_order_is_left_then_right()
+    test_select_star_column_order_three_way_join()
     print("All tests passed.")

@@ -342,7 +342,13 @@ def rewrite_ored_any_eq_to_contains(predicate, telemetry):
             # Build new comparison node: ('a', 'b', 'c') @> z
             new_node = data["nodes"][0]
 
-            new_node.left.value = list(set(data["values"]))
+            # Sorted, not `list(set(...))`: set iteration order is not stable across
+            # runs, so the same query compiled twice rendered its literals in
+            # different orders. Matches the CNF counterpart
+            # (rewrite_cnf_any_eq_to_contains) — sort by string repr for a
+            # deterministic order across mixed literal types while keeping the
+            # actual typed values (VARCHAR literals are bytes by this point).
+            new_node.left.value = sorted(set(data["values"]), key=str)
             # Phase 2: build ARRAY ColumnType directly from old element type.
             _old_elem_ct = new_node.left.type  # ColumnType of element
             _arr_ct_1 = _lt.ARRAY(_old_elem_ct if isinstance(_old_elem_ct, ColumnType) else _lt.VARIANT)
@@ -509,7 +515,13 @@ def rewrite_ored_eq_to_inlist(predicate, telemetry):
             # Create a new regex pattern
             new_node = eq_data["nodes"][0]
             new_node.value = "InList"
-            new_node.right.value = list(set(eq_data["values"]))
+            # Sorted, not `list(set(...))`: set iteration order is not stable across
+            # runs, so the same query compiled twice rendered its IN-list literals in
+            # different orders. Matches the CNF counterpart (rewrite_cnf_eq_to_inlist)
+            # — sort by string repr for a deterministic order across mixed literal
+            # types while keeping the actual typed values. `col = NULL` branches are
+            # already excluded by collect_eqs, so there is no None to compare.
+            new_node.right.value = sorted(set(eq_data["values"]), key=str)
             # Phase 2: build ARRAY ColumnType from old element type.
             _old_elem_ct_2 = new_node.right.type
             _arr_ct_2 = _lt.ARRAY(_old_elem_ct_2) if isinstance(_old_elem_ct_2, ColumnType) else _lt.ARRAY(_lt.VARIANT)

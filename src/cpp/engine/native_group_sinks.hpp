@@ -15,9 +15,10 @@
 //     operands are rejected (CAST to DOUBLE first): reading the unscaled raw
 //     integer as a double would silently compute the wrong numbers' variance.
 //   - MEDIAN buffers every non-null value per group (MedianState, shared with
-//     the legacy Cython median accumulators — see _agg_kernels.hpp), capped
-//     at 1000/group (fails loud past the cap: use APPROX_PERCENTILE for
-//     larger inputs), and computes the exact median via std::nth_element at
+//     the legacy Cython median accumulators — see _agg_kernels.hpp), bounded
+//     by a global 512MB byte budget across all groups (fails loud past the
+//     budget: use APPROX_PERCENTILE for larger inputs), and computes the
+//     exact median via std::nth_element at
 //     finalize (even counts interpolate). Always FLOAT64, numeric-only
 //     (unlike STDDEV/SUM/AVG — no BOOL/DATE32/TIMESTAMP64/TIME32/TIME64/
 //     DECIMAL, matching the legacy contract exactly, not silently widened).
@@ -63,7 +64,7 @@
 #include "morsels/cxx_hash.h"    // cxx_hash_c — draken owns the key hash (DISTINCT/GROUP BY)
 #include "carchar_set.hpp"       // opteryx::carchar::CarcharSet — hash-identity dedup set
 #include "carchar_index.hpp"     // opteryx::carchar::CarcharIndex — hash → group-id
-#include "parvi.hpp"             // opteryx::parvi::ParviMap — 16-slot low-card front map
+#include "parvi.hpp"             // opteryx::parvi::ParviMap — 64-slot low-card front map
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — shared with the legacy
                                  // Cython median accumulators (opteryx/operators/aggregate/,
@@ -290,6 +291,12 @@ enum class AggFn : uint8_t {
                                // (td_histogram_t, third_party/tdigest-c) — MEDIAN's
                                // approximate sibling. `p` is AggSpec2::percentile,
                                // a query-time constant, not a second operand column.
+    Corr = 13,                 // CORR(x, y): Pearson correlation — the only
+                               // aggregate with a SECOND operand COLUMN
+                               // (AggSpec2::col_idx2). Rows where either operand
+                               // is NULL are skipped (SQL's pairwise contract).
+                               // Always DOUBLE; NULL when undefined (no pairs, or
+                               // zero variance in either operand).
 };
 
 // AggSpec2.col_idx sentinels — named so a bare -1/-2 is never left for a future
@@ -304,6 +311,8 @@ struct AggSpec2 {
     AggFn fn;
     int col_idx;        // operand column; kAggNoOperand for CountStar,
                          // kAggWholeRow for whole-row CountDistinct
+    int col_idx2 = kAggNoOperand;   // Corr's second operand column (y);
+                                    // kAggNoOperand for every other fn
     std::string name;   // output column identity
     // ARRAY_AGG modifiers — ignored by every other fn. DISTINCT/ORDER BY/LIMIT
     // all apply at finalize, AFTER the per-partition lists are merged: a worker
@@ -314,9 +323,10 @@ struct AggSpec2 {
     bool    aa_descending = false;
     int64_t aa_limit      = -1;     // < 0 == no LIMIT
     // Hard cap on retained elements per group. Exceeding it fails loud at
-    // finalize (MEDIAN's MedianState precedent) — an unbounded per-group list is
-    // an OOM the query can't diagnose, and silently truncating would be a wrong
-    // answer dressed as a right one.
+    // finalize — an unbounded per-group list is an OOM the query can't
+    // diagnose, and silently truncating would be a wrong answer dressed as a
+    // right one. (MEDIAN, which once shared this per-group posture, now uses
+    // a global byte budget instead — see MedianState in _agg_kernels.hpp.)
     int64_t aa_max_per_group = 1000;
     // APPROX_PERCENTILE's second argument — a query-time constant (0.0-1.0),
     // validated at plan time (compiler.py). Ignored by every other fn.
@@ -337,6 +347,10 @@ struct AggCell {
     __int128 min128 = 0, max128 = 0;   // DECIMAL128 order extremes (raw == value order)
     uint64_t min_key = 0, max_key = 0;   // normalized order keys (sort_num_key)
     int64_t  min_raw = 0, max_raw = 0;   // raw value container (widened / bit-stored)
+    // CORR-only lanes (Σy, Σy², Σxy — fsum/fsumsq carry Σx/Σx²), placed after
+    // the MIN/MAX lanes so every other aggregation's cache footprint is
+    // untouched. `valid` counts pairs where BOTH operands are non-NULL.
+    double   fsumy = 0.0, fsumyy = 0.0, fsumxy = 0.0;
 };
 
 // Captured once from the first morsel a worker sees; merged into the global.
@@ -346,6 +360,9 @@ struct AggColMeta {
     bool is_float = false;
     bool is_string = false;   // MIN/MAX over a string column (parallel string store)
     bool captured = false;
+    // Corr's second operand (col_idx2) — unset for every other fn.
+    DrakenType type2 = DRAKEN_INT64;
+    bool is_float2 = false;
 };
 
 inline bool agg2_operand_supported(DrakenType t) {
@@ -369,14 +386,17 @@ inline bool agg2_operand_supported(DrakenType t) {
 // treat those as meaningful numeric domains — the legacy MEDIAN never did,
 // and this port preserves that existing contract rather than silently
 // widening it).
-// Single source of truth for the MEDIAN cap-overflow message — four call
+// Single source of truth for the MEDIAN budget-overflow message — four call
 // sites (ungrouped accumulate/merge, grouped accumulate/merge) all fail loud
-// with the exact same text, never a silent approximate fallback (see
-// gro/g6's MEDIAN discussion — a query author who wants approximate opts in
-// by name via APPROX_PERCENTILE, the cap never silently decides for them).
+// with the exact same text, never a silent approximate fallback (a query
+// author who wants approximate opts in by name via APPROX_PERCENTILE, the
+// budget never silently decides for them). The limit is a GLOBAL byte budget
+// across all groups (kMedianBudgetBytes, _agg_kernels.hpp), not a per-group
+// value cap — exact MEDIAN buffers every non-null input value, so total
+// memory is what needs bounding.
 inline constexpr const char* kMedianCapExceededMsg =
-    "native engine: MEDIAN — too many values in one group (cap: 1000). Use "
-    "APPROX_PERCENTILE(x, 0.5) for approximate median over large sets of "
+    "native engine: MEDIAN — buffered values exceeded the 512MB memory budget. "
+    "Use APPROX_PERCENTILE(x, 0.5) for approximate median over large sets of "
     "values.";
 
 // HllppSketch::register_index/rho (hllpp.cpp) read the hash's raw top/bottom
@@ -410,6 +430,37 @@ inline bool median_operand_supported(DrakenType t) {
     }
 }
 
+// CORR operand capture, shared by the grouped and ungrouped sinks' capture_meta:
+// validates BOTH operands are numeric (median_operand_supported's set — no
+// DECIMAL descale, same "never a mis-scaled answer" reasoning as STDDEV) and
+// records the second operand's type/floatness in the spec's AggColMeta.
+inline bool corr_capture_meta(const AggSpec2& sp, const CxxMorsel& in,
+                              DrakenType t_first, AggColMeta& m, ErrCtx& err) {
+    if (!median_operand_supported(t_first)) {
+        err.code = 1;
+        err.msg = "native engine: CORR over this column type is not supported — "
+                  "only numeric inputs are accepted (CAST DECIMAL to DOUBLE first)";
+        return false;
+    }
+    if (sp.col_idx2 < 0
+            || static_cast<size_t>(sp.col_idx2) >= in.columns.size()) {
+        err.code = 1;
+        err.msg = "native engine: CORR second operand column missing from input "
+                  "morsel — fail loud, never a silent wrong answer";
+        return false;
+    }
+    DrakenType t2 = in.columns[static_cast<size_t>(sp.col_idx2)].view.type;
+    if (!median_operand_supported(t2)) {
+        err.code = 1;
+        err.msg = "native engine: CORR over this column type is not supported — "
+                  "only numeric inputs are accepted (CAST DECIMAL to DOUBLE first)";
+        return false;
+    }
+    m.type2 = t2;
+    m.is_float2 = (t2 == DRAKEN_FLOAT32 || t2 == DRAKEN_FLOAT64);
+    return true;
+}
+
 inline __int128 agg2_read_i128(const DrakenVector& v, uint32_t row) {
     __int128 out;
     std::memcpy(&out, static_cast<const uint8_t*>(v.data)
@@ -419,6 +470,38 @@ inline __int128 agg2_read_i128(const DrakenVector& v, uint32_t row) {
 
 // Raw value widened into an int64 container: integer family sign-extended; floats
 // stored as the DOUBLE's bit pattern (round-trips losslessly to FLOAT32/64 output).
+// Same semantics as agg2_read_raw below, but reading from values the caller has
+// hoisted out of the row loop. Through a `const DrakenVector&` the compiler must
+// re-load v.type / v.data / v.selection on every iteration — the accumulation
+// loops store through GBLanes pointers that it cannot prove don't alias the
+// vector — so the type switch could never be unswitched out of the loop. Passing
+// them as plain locals makes them provably invariant.
+inline int64_t agg2_read_raw_at(DrakenType vtype, const void* vdata,
+                                const uint32_t* vsel, uint32_t row, bool is_float) {
+    uint32_t phys = vsel[row];
+    if (is_float) {
+        double d = (vtype == DRAKEN_FLOAT32)
+            ? static_cast<double>(static_cast<const float*>(vdata)[phys])
+            : static_cast<const double*>(vdata)[phys];
+        int64_t bits;
+        std::memcpy(&bits, &d, sizeof(bits));
+        return bits;
+    }
+    switch (vtype) {
+        case DRAKEN_INT8:   return static_cast<const int8_t*>(vdata)[phys];
+        case DRAKEN_INT16:  return static_cast<const int16_t*>(vdata)[phys];
+        case DRAKEN_INT32:
+        case DRAKEN_DATE32:
+        case DRAKEN_TIME32: return static_cast<const int32_t*>(vdata)[phys];
+        case DRAKEN_BOOL:
+            return (static_cast<const uint8_t*>(vdata)[phys >> 3] >> (phys & 7)) & 1u;
+        case DRAKEN_UINT8:  return static_cast<int64_t>(static_cast<const uint8_t* >(vdata)[phys]);
+        case DRAKEN_UINT16: return static_cast<int64_t>(static_cast<const uint16_t*>(vdata)[phys]);
+        case DRAKEN_UINT32: return static_cast<int64_t>(static_cast<const uint32_t*>(vdata)[phys]);
+        default:            return static_cast<const int64_t*>(vdata)[phys];
+    }
+}
+
 inline int64_t agg2_read_raw(const DrakenVector& v, uint32_t row, bool is_float) {
     if (is_float) {
         uint32_t phys = v.selection[row];
@@ -510,10 +593,46 @@ inline void agg2_update_stddev(AggCell& c, const DrakenVector& v, uint32_t row,
     c.valid += 1;
 }
 
+// CORR accumulation: one (x, y) pair, both already known non-NULL. Same
+// always-double posture as STDDEV (correlation is inherently non-exact).
+inline void agg2_update_corr(AggCell& c, double x, double y) noexcept {
+    c.fsum   += x;
+    c.fsumsq += x * x;
+    c.fsumy  += y;
+    c.fsumyy += y * y;
+    c.fsumxy += x * y;
+    c.valid  += 1;
+}
+
+// Pearson r from the six CORR lanes. Returns false when undefined — no pairs,
+// or zero variance in either operand — and the caller emits NULL.
+inline bool corr_finalize(double n, double sx, double sxx, double sy, double syy,
+                          double sxy, double& out) noexcept {
+    if (n <= 0.0) return false;
+    double mx = sx / n, my = sy / n;
+    double varx = sxx / n - mx * mx;
+    double vary = syy / n - my * my;
+    // Float rounding can push a true-zero variance slightly negative (same
+    // clamp STDDEV applies before its sqrt).
+    if (varx < 0.0) varx = 0.0;
+    if (vary < 0.0) vary = 0.0;
+    double denom = std::sqrt(varx * vary);
+    if (denom == 0.0) return false;
+    double r = (sxy / n - mx * my) / denom;
+    // Rounding can nudge |r| past 1 for perfectly-correlated inputs.
+    if (r > 1.0) r = 1.0;
+    if (r < -1.0) r = -1.0;
+    out = r;
+    return true;
+}
+
 inline void agg2_merge(AggCell& into, const AggCell& from) {
     into.isum += from.isum;
     into.fsum += from.fsum;
     into.fsumsq += from.fsumsq;
+    into.fsumy += from.fsumy;
+    into.fsumyy += from.fsumyy;
+    into.fsumxy += from.fsumxy;
     if (from.valid > 0) {
         if (into.valid == 0 || from.min128 < into.min128) into.min128 = from.min128;
         if (into.valid == 0 || from.max128 > into.max128) into.max128 = from.max128;
@@ -763,6 +882,8 @@ enum class GBKind : uint8_t {
                           // (matches CountDistinct: 0 for an empty group, not NULL)
     ApproxPercentile,     // t-digest sketch per group; always DOUBLE, numeric-only
                           // (same restriction as Median — see median_operand_supported)
+    Corr,        // Pearson correlation — six double lanes (Σx, Σx², Σy, Σy², Σxy
+                 // + pair count in valid); always DOUBLE, numeric-only operands
 };
 
 // Which GBArrayAggState lane an ARRAY_AGG operand's values live in. One store per
@@ -844,6 +965,8 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
             return GBKind::ApproxCountDistinct;
         case AggFn::ApproxPercentile:
             return GBKind::ApproxPercentile;
+        case AggFn::Corr:
+            return GBKind::Corr;
     }
     return GBKind::Rows;   // unreachable
 }
@@ -890,8 +1013,11 @@ struct GBLaneView {
     const int64_t*     rows  = nullptr;
     const int64_t*     valid = nullptr;
     const int64_t*     i64   = nullptr;   // int sums / MIN-MAX raw containers
-    const double*      f64   = nullptr;   // float sums / STDDEV Σx
-    const double*      f64sq = nullptr;   // STDDEV Σx²
+    const double*      f64   = nullptr;   // float sums / STDDEV+CORR Σx
+    const double*      f64sq = nullptr;   // STDDEV+CORR Σx²
+    const double*      f64y  = nullptr;   // CORR Σy
+    const double*      f64yy = nullptr;   // CORR Σy²
+    const double*      f64xy = nullptr;   // CORR Σxy
     const __int128*    i128  = nullptr;   // DECIMAL128 sums / extremes
     const std::string* sval  = nullptr;   // string extremes
     GBArrayAggState*   aa    = nullptr;   // ARRAY_AGG element lists
@@ -1147,6 +1273,22 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             }
             return emit_fixed_column(raws.data(), okp, n, DRAKEN_FLOAT64, nullptr, err);
         }
+        case GBKind::Corr: {
+            // NULL-ness is NOT just valid==0: a group with pairs but zero
+            // variance in either operand has no defined correlation — its own
+            // okp copy, not the shared valid_ok() view.
+            std::vector<int64_t> raws(n, 0);
+            std::vector<uint8_t> okp(n, 0);
+            for (uint32_t i = 0; i < n; ++i) {
+                double r;
+                if (!corr_finalize(static_cast<double>(L.valid[i]), L.f64[i],
+                                   L.f64sq[i], L.f64y[i], L.f64yy[i], L.f64xy[i], r))
+                    continue;
+                okp[i] = 1;
+                std::memcpy(&raws[i], &r, sizeof(double));
+            }
+            return emit_fixed_column(raws.data(), okp.data(), n, DRAKEN_FLOAT64, nullptr, err);
+        }
         case GBKind::Median: {
             // Per-group state, not a fixed lane — null-ness is the state's own
             // `size == 0` (zero non-null values seen), not a parallel valid[]
@@ -1210,19 +1352,22 @@ constexpr size_t kGBParts = 64;
 constexpr int kGBPartShift = 58;   // top 6 bits pick the partition
 // Low-cardinality GROUP BY: when the planner's NDV estimate for the grouped
 // key product is <= this, each partition fronts its CarcharIndex with a
-// 16-slot ParviMap (single SIMD-group probe, ~25-35% cheaper per keying op on
-// AVX2, more on NEON — scratch/parvi_size_curve/bench.cpp). At estimate <= 64
-// over 64 hash partitions the expected per-partition load is ~1, so a partition
-// overflowing its 16 slots needs the estimate to be wrong by well over an order
-// of magnitude — and then it one-shot promotes to its CarcharIndex (dense group
-// ids preserved), so a misfire costs one drain of <= 16 entries per partition,
-// never a wrong answer.
+// 64-slot ParviMap (4 group-selected groups of 16 — still a single SIMD-group
+// probe per key; scratch/parvi_size_curve/bench.cpp). Overflow fires when a
+// key's GROUP is full, not at 64 keys. At estimate <= 64 over 64 hash
+// partitions the expected per-partition load is ~1, so a partition
+// overflowing needs the estimate to be wrong by well over an order of
+// magnitude — and then it one-shot promotes to its CarcharIndex (dense group
+// ids preserved), so a misfire costs one drain of <= 64 entries per
+// partition, never a wrong answer.
 constexpr int64_t kGBParviGateNDV = 64;
 // DISTINCT low-cardinality gate: DistinctSink deduplicates through ONE
-// per-worker CarcharSet (no hash partitioning), so its parvi front set has the
-// bare 16-slot capacity — the gate matches it. On overflow the set drains into
-// the CarcharSet and the morsel's remaining rows rescan on the carchar path;
-// dup-vs-new answers are unaffected (drained keys are simply no longer new).
+// per-worker CarcharSet (no hash partitioning), so its parvi front set is a
+// single 64-slot ParviSet. The gate sits below the measured p5=40 effective
+// capacity (group-full can fire before 64) to keep the promote rate near
+// zero. On overflow the set drains into the CarcharSet and the morsel's
+// remaining rows rescan on the carchar path; the rows the parvi pass already
+// marked new are kept, so dup-vs-new answers are unaffected.
 constexpr int64_t kDistinctParviGateNDV = 16;
 // High-NDV adaptive flush: when a worker's TOTAL local group count passes this,
 // its partitions are queued for the (parallel) merge and reset. Keeps the
@@ -1372,6 +1517,12 @@ struct UngroupedAggSink : Sink {
                           "(CAST DECIMAL to DOUBLE first)";
                 return false;
             }
+            // CORR: both operands numeric — captures the second operand's
+            // type/floatness into meta[s] (type2/is_float2).
+            if (specs[s].fn == AggFn::Corr
+                    && !corr_capture_meta(specs[s], *in, t, meta[s], err)) {
+                return false;
+            }
             // COUNT only reads validity — any column type is countable.
             // COUNT(DISTINCT) reads serialized value bytes (key_append fails
             // loud on unsupported types at run time).
@@ -1482,6 +1633,23 @@ struct UngroupedAggSink : Sink {
                         err.msg = kMedianCapExceededMsg;
                         return SinkResult::CONTINUE;
                     }
+                }
+            } else if (specs[s].fn == AggFn::Corr) {
+                bool is_fx = l.meta[s].is_float;
+                bool is_fy = l.meta[s].is_float2;
+                const DrakenVector& v2 =
+                    in->columns[static_cast<size_t>(specs[s].col_idx2)].view;
+                for (uint32_t i = 0; i < v.length; ++i) {
+                    // Pairwise: skip the row unless BOTH operands are non-NULL.
+                    if (!sort_row_valid(v, i) || !sort_row_valid(v2, i)) continue;
+                    int64_t rx = agg2_read_raw(v, i, is_fx);
+                    int64_t ry = agg2_read_raw(v2, i, is_fy);
+                    double x, y;
+                    if (is_fx) std::memcpy(&x, &rx, sizeof(x));
+                    else x = static_cast<double>(rx);
+                    if (is_fy) std::memcpy(&y, &ry, sizeof(y));
+                    else y = static_cast<double>(ry);
+                    agg2_update_corr(c, x, y);
                 }
             } else if (specs[s].fn == AggFn::ApproxCountDistinct) {
                 std::vector<size_t> vcol{static_cast<size_t>(specs[s].col_idx)};
@@ -1640,6 +1808,7 @@ struct UngroupedAggSink : Sink {
                 valid1 = dcounts[s].load();
             double f641 = c.fsum;
             double f64sq1 = c.fsumsq;
+            double f64y1 = c.fsumy, f64yy1 = c.fsumyy, f64xy1 = c.fsumxy;
             __int128 i1281 = 0;
             switch (kind) {
                 case GBKind::SumI:
@@ -1670,6 +1839,7 @@ struct UngroupedAggSink : Sink {
             GBLaneView lv;
             lv.rows = &rows1; lv.valid = &valid1; lv.i64 = &i641;
             lv.f64 = &f641; lv.f64sq = &f64sq1; lv.i128 = &i1281; lv.sval = &g.strs[s];
+            lv.f64y = &f64y1; lv.f64yy = &f64yy1; lv.f64xy = &f64xy1;
             lv.median = &g.medians[s];
             lv.hll = &g.hlls[s];
             lv.td = &g.tds[s];
@@ -1711,8 +1881,11 @@ struct UngroupedAggSink : Sink {
 struct GBLanes {
     std::vector<int64_t>  valid;   // non-NULL operand rows (every kind but Rows)
     std::vector<int64_t>  i64;     // SumI/AvgI exact sums; MinMaxNum raw containers
-    std::vector<double>   f64;     // SumF/AvgF sums; Stddev Σx
-    std::vector<double>   f64sq;   // Stddev Σx²
+    std::vector<double>   f64;     // SumF/AvgF sums; Stddev/Corr Σx
+    std::vector<double>   f64sq;   // Stddev/Corr Σx²
+    std::vector<double>   f64y;    // Corr Σy
+    std::vector<double>   f64yy;   // Corr Σy²
+    std::vector<double>   f64xy;   // Corr Σxy
     std::vector<uint64_t> mkey;    // MinMaxNum normalized order keys (sort_num_key)
     std::vector<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
     std::vector<std::string> sval; // MinMaxStr extremes
@@ -1738,6 +1911,10 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             return;
         case GBKind::Stddev:
             L.valid.resize(n); L.f64.resize(n); L.f64sq.resize(n);
+            return;
+        case GBKind::Corr:
+            L.valid.resize(n); L.f64.resize(n); L.f64sq.resize(n);
+            L.f64y.resize(n); L.f64yy.resize(n); L.f64xy.resize(n);
             return;
         // AvgI sums exact int128 (overflow-proof); SUM's OUTPUT is INT64 so its
         // int64 lane + loud overflow trap loses nothing.
@@ -2086,6 +2263,12 @@ struct GroupBySink : Sink {
                           "(CAST DECIMAL to DOUBLE first)";
                 return false;
             }
+            // CORR: both operands numeric — captures the second operand's
+            // type/floatness into meta[s] (type2/is_float2).
+            if (specs[s].fn == AggFn::Corr
+                    && !corr_capture_meta(specs[s], *in, t, l.meta[s], err)) {
+                return false;
+            }
             l.meta[s].type = t;
             l.meta[s].logical = c.own ? c.own->logical_type : nullptr;
             l.meta[s].is_float = (t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64);
@@ -2208,20 +2391,39 @@ struct GroupBySink : Sink {
             const DrakenVector& v =
                 in->columns[static_cast<size_t>(specs[s].col_idx)].view;
             bool want_max = specs[s].fn == AggFn::Max;
+
+            // ---- hoisted out of the row loops (all invariant for this spec) ----
+            // lp[p] collapses the per-row `l.parts[p].lanes[s]` chain — array
+            // index → vector index → vector data pointer, two dependent loads —
+            // into a single array load. Partitions that took no rows this morsel
+            // have no lanes; rows can only reach partitions that do.
+            GBLanes* lp[kGBParts];
+            for (size_t p = 0; p < kGBParts; ++p)
+                lp[p] = (l.parts[p].lanes.size() == nspecs) ? &l.parts[p].lanes[s]
+                                                            : nullptr;
+            const DrakenType   vtype  = v.type;
+            const void*        vdata  = v.data;
+            const uint32_t*    vsel   = v.selection;
+            const uint8_t*     vvalid = v.validity;   // nullptr ⟹ all rows valid
+            const bool         is_f   = l.meta[s].is_float;
+            // Row-valid test on hoisted locals — same predicate as sort_row_valid.
+            auto row_ok = [vvalid](uint32_t i) -> bool {
+                return vvalid == nullptr || ((vvalid[i >> 3] >> (i & 7)) & 1u);
+            };
+
             switch (kind) {
                 case GBKind::Valid:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        l.parts[l.mk_hash[i] >> kGBPartShift]
-                            .lanes[s].valid[l.mk_ent[i]] += 1;
+                        if (!row_ok(i)) continue;
+                        lp[l.mk_hash[i] >> kGBPartShift]->valid[l.mk_ent[i]] += 1;
                     }
                     break;
                 case GBKind::SumI:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
-                        int64_t r = agg2_read_raw(v, i, false);
+                        int64_t r = agg2_read_raw_at(vtype, vdata, vsel, i, false);
                         if (__builtin_add_overflow(L.i64[e], r, &L.i64[e])) {
                             err.code = 1;
                             err.msg = "SUM overflow: exact integer sum exceeds INT64 "
@@ -2233,20 +2435,20 @@ struct GroupBySink : Sink {
                     break;
                 case GBKind::AvgI:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
-                        L.i128[e] += agg2_read_raw(v, i, false);
+                        L.i128[e] += agg2_read_raw_at(vtype, vdata, vsel, i, false);
                         L.valid[e] += 1;
                     }
                     break;
                 case GBKind::SumF:
                 case GBKind::AvgF:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
-                        int64_t bits = agg2_read_raw(v, i, true);
+                        int64_t bits = agg2_read_raw_at(vtype, vdata, vsel, i, true);
                         double d;
                         std::memcpy(&d, &bits, sizeof(d));
                         L.f64[e] += d;
@@ -2255,11 +2457,10 @@ struct GroupBySink : Sink {
                     break;
                 case GBKind::Stddev:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
-                        bool is_f = l.meta[s].is_float;
-                        int64_t raw = agg2_read_raw(v, i, is_f);
+                        int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
                         double d;
                         if (is_f) std::memcpy(&d, &raw, sizeof(d));
                         else d = static_cast<double>(raw);
@@ -2268,13 +2469,43 @@ struct GroupBySink : Sink {
                         L.valid[e] += 1;
                     }
                     break;
+                case GBKind::Corr: {
+                    const DrakenVector& v2 =
+                        in->columns[static_cast<size_t>(specs[s].col_idx2)].view;
+                    const DrakenType vtype2 = v2.type;
+                    const void*      vdata2 = v2.data;
+                    const uint32_t*  vsel2  = v2.selection;
+                    const uint8_t*   vvalid2 = v2.validity;
+                    const bool       is_f2  = l.meta[s].is_float2;
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        // Pairwise: skip unless BOTH operands are non-NULL.
+                        if (!row_ok(i)) continue;
+                        if (vvalid2 != nullptr
+                                && ((vvalid2[i >> 3] >> (i & 7)) & 1u) == 0) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
+                        uint32_t e = l.mk_ent[i];
+                        int64_t rx = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
+                        int64_t ry = agg2_read_raw_at(vtype2, vdata2, vsel2, i, is_f2);
+                        double x, y;
+                        if (is_f) std::memcpy(&x, &rx, sizeof(x));
+                        else x = static_cast<double>(rx);
+                        if (is_f2) std::memcpy(&y, &ry, sizeof(y));
+                        else y = static_cast<double>(ry);
+                        L.f64[e]   += x;
+                        L.f64sq[e] += x * x;
+                        L.f64y[e]  += y;
+                        L.f64yy[e] += y * y;
+                        L.f64xy[e] += x * y;
+                        L.valid[e] += 1;
+                    }
+                    break;
+                }
                 case GBKind::Median:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
-                        bool is_f = l.meta[s].is_float;
-                        int64_t raw = agg2_read_raw(v, i, is_f);
+                        int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
                         double d;
                         if (is_f) std::memcpy(&d, &raw, sizeof(d));
                         else d = static_cast<double>(raw);
@@ -2288,8 +2519,8 @@ struct GroupBySink : Sink {
                 case GBKind::SumD128:
                 case GBKind::AvgD128:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
                         L.i128[e] += agg2_read_i128(v, i);
                         L.valid[e] += 1;
@@ -2297,8 +2528,8 @@ struct GroupBySink : Sink {
                     break;
                 case GBKind::MinMaxNum:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
                         uint64_t kk = sort_num_key(v, i);
                         if (L.valid[e] == 0
@@ -2311,8 +2542,8 @@ struct GroupBySink : Sink {
                     break;
                 case GBKind::MinMaxD128:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
                         __int128 r = agg2_read_i128(v, i);
                         if (L.valid[e] == 0
@@ -2329,19 +2560,18 @@ struct GroupBySink : Sink {
                     if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
                         return SinkResult::CONTINUE;
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         L.hll[l.mk_ent[i]].add_hash(hll_avalanche(l.cd_vhash[i]));
                     }
                     break;
                 }
                 case GBKind::ApproxPercentile:
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
-                        bool is_f = l.meta[s].is_float;
-                        int64_t raw = agg2_read_raw(v, i, is_f);
+                        int64_t raw = agg2_read_raw_at(vtype, vdata, vsel, i, is_f);
                         double d;
                         if (is_f) std::memcpy(&d, &raw, sizeof(d));
                         else d = static_cast<double>(raw);
@@ -2356,7 +2586,7 @@ struct GroupBySink : Sink {
                     if (!compute_row_hashes(in, vcol, l.cd_vhash, err))
                         return SinkResult::CONTINUE;
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
+                        if (!row_ok(i)) continue;
                         GBPartition& P = l.parts[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
                         if (P.cd[s].insert(e, l.cd_vhash[i]))
@@ -2367,8 +2597,8 @@ struct GroupBySink : Sink {
                 case GBKind::MinMaxStr: {
                     const DrakenStringArena* sa = string_arena_of(v);
                     for (uint32_t i = 0; i < rows; ++i) {
-                        if (!sort_row_valid(v, i)) continue;
-                        GBLanes& L = l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s];
+                        if (!row_ok(i)) continue;
+                        GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
                         uint32_t e = l.mk_ent[i];
                         const DrakenStringSlot* slot = &sa->slots[v.selection[i]];
                         const char* p =
@@ -2412,7 +2642,7 @@ struct GroupBySink : Sink {
                             A.push(st, nul, 0, nul ? 0 : agg2_read_i128(v, i),
                                    nullptr, 0, cap);
                         } else {
-                            A.push(st, nul, nul ? 0 : agg2_read_raw(v, i, is_f), 0,
+                            A.push(st, nul, nul ? 0 : agg2_read_raw_at(vtype, vdata, vsel, i, is_f), 0,
                                    nullptr, 0, cap);
                         }
                     }
@@ -2536,11 +2766,22 @@ struct GroupBySink : Sink {
                             D.valid[m] += S.valid[e];
                         }
                         break;
+                    case GBKind::Corr:
+                        for (uint32_t e = 0; e < sn; ++e) {
+                            uint32_t m = ge[e];
+                            D.f64[m]   += S.f64[e];
+                            D.f64sq[m] += S.f64sq[e];
+                            D.f64y[m]  += S.f64y[e];
+                            D.f64yy[m] += S.f64yy[e];
+                            D.f64xy[m] += S.f64xy[e];
+                            D.valid[m] += S.valid[e];
+                        }
+                        break;
                     case GBKind::Median: {
                         // MedianState has no merge-by-move (unlike ArrayAgg's element
                         // lists) — append each source value into the dest group's
-                        // state. Groups are cap-bounded (1000), so this is bounded
-                        // work, not a hot-path concern.
+                        // state. Total buffered values are budget-bounded (512MB
+                        // global), so this is bounded work, not a hot-path concern.
                         GBLanes& SL = src.lanes[s];
                         for (uint32_t e = 0; e < sn; ++e) {
                             opteryx::ungrouped::MedianState& src_st = SL.median[e];
@@ -2719,6 +2960,9 @@ struct GroupBySink : Sink {
                     if (!L.i64.empty())   lv.i64   = L.i64.data() + start;
                     if (!L.f64.empty())   lv.f64   = L.f64.data() + start;
                     if (!L.f64sq.empty()) lv.f64sq = L.f64sq.data() + start;
+                    if (!L.f64y.empty())  lv.f64y  = L.f64y.data() + start;
+                    if (!L.f64yy.empty()) lv.f64yy = L.f64yy.data() + start;
+                    if (!L.f64xy.empty()) lv.f64xy = L.f64xy.data() + start;
                     if (!L.i128.empty())  lv.i128  = L.i128.data() + start;
                     if (!L.sval.empty())  lv.sval  = L.sval.data() + start;
                 }

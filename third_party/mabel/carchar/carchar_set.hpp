@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cassert>
 #include <cstddef>
 #include <stdexcept>
 #include <vector>
@@ -68,10 +67,9 @@ class CarcharSet {
             return 0;
         }
         reserve(size_ + length);
-        const auto probe_finder = detail::select_probe_finder();
         std::size_t inserted = 0;
         for (std::size_t i = 0; i < length; ++i) {
-            if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
+            if (insert_or_ignore_no_reserve(keys[i])) {
                 ++inserted;
             }
         }
@@ -83,10 +81,9 @@ class CarcharSet {
         if (keys == nullptr || length == 0) {
             return 0;
         }
-        const auto probe_finder = detail::select_probe_finder();
         std::size_t hits = 0;
         for (std::size_t i = 0; i < length; ++i) {
-            if (find_slot(keys[i], probe_finder).found) {
+            if (find_slot(keys[i]).found) {
                 ++hits;
             }
         }
@@ -105,10 +102,9 @@ class CarcharSet {
             return 0;
         }
         reserve(size_ + length);
-        const auto probe_finder = detail::select_probe_finder();
         std::size_t inserted = 0;
         for (std::size_t i = 0; i < length; ++i) {
-            if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
+            if (insert_or_ignore_no_reserve(keys[i])) {
                 out_indices[inserted++] = static_cast<std::int32_t>(i);
             }
         }
@@ -126,10 +122,9 @@ class CarcharSet {
             return 0;
         }
         reserve(size_ + length);
-        const auto probe_finder = detail::select_probe_finder();
         std::size_t inserted = 0;
         for (std::size_t i = 0; i < length; ++i) {
-            if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
+            if (insert_or_ignore_no_reserve(keys[i])) {
                 out_indices[inserted++] = static_cast<std::int64_t>(i);
             }
         }
@@ -144,10 +139,9 @@ class CarcharSet {
             return 0;
         }
         reserve(size_ + length);
-        const auto probe_finder = detail::select_probe_finder();
         std::size_t inserted = 0;
         for (std::size_t i = 0; i < length; ++i) {
-            if (insert_or_ignore_no_reserve(keys[i], probe_finder)) {
+            if (insert_or_ignore_no_reserve(keys[i])) {
                 out_is_new[i] = 1U;
                 ++inserted;
             } else {
@@ -169,10 +163,9 @@ class CarcharSet {
         if (keys == nullptr || out_indices == nullptr || length == 0) {
             return 0;
         }
-        const auto probe_finder = detail::select_probe_finder();
         std::size_t found = 0;
         for (std::size_t i = 0; i < length; ++i) {
-            if (find_slot(keys[i], probe_finder).found) {
+            if (find_slot(keys[i]).found) {
                 out_indices[found++] = static_cast<std::int32_t>(i);
             }
         }
@@ -191,10 +184,9 @@ class CarcharSet {
         if (keys == nullptr || out_indices == nullptr || length == 0) {
             return 0;
         }
-        const auto probe_finder = detail::select_probe_finder();
         std::size_t not_found = 0;
         for (std::size_t i = 0; i < length; ++i) {
-            if (!find_slot(keys[i], probe_finder).found) {
+            if (!find_slot(keys[i]).found) {
                 out_indices[not_found++] = static_cast<std::int32_t>(i);
             }
         }
@@ -212,20 +204,30 @@ class CarcharSet {
 
     void initialize_storage(std::size_t capacity) {
         capacity_ = capacity;
+        // control_ IS initialized: kEmpty is the authority on slot occupancy.
+        // hashes_ is deliberately left UNINITIALIZED (uninitialized_allocator
+        // default-init) — an empty slot's hash is never read: a tag is always
+        // <= 0x7F while kEmpty is 0x80, so a probe can never confirm against an
+        // empty slot (same proof as CarcharIndex). Pre-filling was a dead
+        // memset of 8 bytes/slot on every alloc and every doubling.
         control_.assign(capacity_ + (kGroupWidth - 1U), kEmpty);
-        hashes_.assign(capacity_, 0U);
+        hashes_.clear();
+        hashes_.resize(capacity_);
         size_ = 0;
-        probe_finder_ = detail::select_probe_finder();
+        // Integer threshold computed once per (re)size — the per-insert
+        // capacity check is one integer compare (see CarcharIndex).
+        resize_threshold_ =
+            static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_);
     }
 
     void ensure_insert_capacity() {
-        if (size_ + 1 > static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_)) {
+        if (size_ >= resize_threshold_) {
             resize(capacity_ * 2U);
         }
     }
 
-    bool insert_or_ignore_no_reserve(std::uint64_t key, detail::ProbeFn probe_finder) {
-        const auto result = find_slot(key, probe_finder);
+    bool insert_or_ignore_no_reserve(std::uint64_t key) {
+        const auto result = find_slot(key);
         if (result.found) {
             return false;
         }
@@ -252,14 +254,20 @@ class CarcharSet {
         return slot;
     }
 
-    FindResult find_slot(std::uint64_t key) const noexcept {
-        return find_slot(key, probe_finder_);
-    }
-
-    FindResult find_slot(std::uint64_t key, detail::ProbeFn probe_finder) const noexcept {
+    // Direct call — the ISA variant is a compile-time choice, so the tag
+    // compare inlines into the caller's row loop instead of hiding behind a
+    // function pointer.
+    FindResult find_slot(std::uint64_t key) const {
         const std::uint8_t tag = key_tag(key);
-        const auto result = probe_finder(control_.data(), hashes_.data(), capacity_, key, tag);
-        assert(result.probes < capacity_ && "CarcharSet probe exhausted table capacity");
+        const auto result = detail::probe_find_slot_direct(
+            control_.data(), hashes_.data(), capacity_, key, tag);
+        if (result.probes >= capacity_) {
+            // Unreachable while the load-factor invariant holds (an empty slot
+            // always exists). Throw like CarcharIndex — the old release-mode
+            // assert silently returned a fabricated slot. Callers reached
+            // through noexcept boundaries terminate with this message instead.
+            throw std::runtime_error("CarcharSet probe exhausted table capacity");
+        }
         return {result.slot, result.found, result.probes};
     }
 
@@ -282,10 +290,12 @@ class CarcharSet {
 
     std::size_t capacity_ = 0;
     std::vector<std::uint8_t> control_;
-    std::vector<std::uint64_t> hashes_;
+    // Uninitialized-allocator vector: allocated but never pre-filled — an
+    // empty slot's hash is never read (see initialize_storage).
+    std::vector<std::uint64_t, detail::uninitialized_allocator<std::uint64_t>> hashes_;
     std::size_t size_ = 0;
+    std::size_t resize_threshold_ = 0;
     double load_factor_ = 0.80;
-    detail::ProbeFn probe_finder_ = nullptr;
 };
 
 }  // namespace opteryx::carchar

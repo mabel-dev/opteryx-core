@@ -27,11 +27,11 @@ cdef extern from "core/alloc.h" nogil:
 
 
 cdef extern from "../aggregate/_agg_kernels.hpp" namespace "opteryx::ungrouped":
+    cdef int64_t kMedianBudgetBytes
     cdef cppclass MedianState:
         double* buf
         size_t  size
         size_t  cap
-        size_t  max_size
         bint    overflowed
         MedianState() except +
         bint append(double v) noexcept
@@ -144,16 +144,13 @@ cdef class MedianFloat64Collector(BaseCollector):
         cdef uint8_t* validity
         cdef Py_ssize_t i
         cdef MedianState* st_ptr
-        cdef size_t cap
         cdef bint any_null = False
 
         if self._any_overflow:
-            cap = 0
-            if self._capacity > 0:
-                cap = self._states[0][0].max_size
             raise ValueError(
-                f"MEDIAN — too many values in one group (cap: {cap}; first "
-                f"triggered by group {self._first_overflow_group}). Use "
+                f"MEDIAN — buffered values exceeded the "
+                f"{kMedianBudgetBytes >> 20}MB memory budget (first triggered "
+                f"by group {self._first_overflow_group}). Use "
                 "APPROX_PERCENTILE(x, 0.5) for approximate median over large "
                 "sets of values."
             )

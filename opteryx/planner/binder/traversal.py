@@ -71,8 +71,11 @@ def traverse(
         for child in children:
             # Each peer gets the exact copy of the context so they don't affect each other
             _, child_context = traverse(self, graph, child[0], context.copy())
-            # merges the schemas from two contexts
-            exit_context.schemas = merge_schemas(child_context.schemas, exit_context.schemas)
+            # merges the schemas from two contexts. The accumulator goes FIRST so the
+            # merged dict keeps children in edge order (left leg, then right leg) —
+            # `SELECT *` expands schemas in dict order, and SQL requires the left
+            # relation's columns before the right's.
+            exit_context.schemas = merge_schemas(exit_context.schemas, child_context.schemas)
 
             # Update relations if necessary
             merged_relations = {

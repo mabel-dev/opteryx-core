@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -33,8 +32,6 @@ struct ProbeResult {
     bool found = false;
     std::size_t probes = 0;
 };
-
-using ProbeFn = ProbeResult (*)(const std::uint8_t*, const std::uint64_t*, std::size_t, std::uint64_t, std::uint8_t);
 
 constexpr std::uint64_t kByteOnes64 = 0x0101010101010101ULL;
 constexpr std::uint64_t kByteHighBits64 = 0x8080808080808080ULL;
@@ -602,16 +599,28 @@ inline ProbeResult probe_find_bucket_rvv(
 }
 #endif
 
-inline ProbeFn select_probe_finder() noexcept {
-    using fn_t = ProbeFn;
-    static std::atomic<fn_t> cache{nullptr};
-    return SIMD_STATIC_SELECT(probe_find_slot_avx2, probe_find_slot_neon, probe_find_slot_rvv, probe_find_slot_scalar);
+// Direct, INLINABLE probe. The ISA variant is fixed at compile time
+// (SIMD_STATIC_SELECT), so routing through the ProbeFn pointer bought nothing
+// and cost everything: an indirect call the optimiser cannot see through, so
+// the 16-way tag compare could never be fused into the caller's row loop and
+// the control-array base could not stay in a register across rows. These call
+// the chosen implementation by name — same code, no indirection.
+inline ProbeResult probe_find_slot_direct(const std::uint8_t* control,
+                                          const std::uint64_t* hashes,
+                                          std::size_t capacity, std::uint64_t key,
+                                          std::uint8_t tag) noexcept {
+    return SIMD_STATIC_SELECT(probe_find_slot_avx2, probe_find_slot_neon,
+                              probe_find_slot_rvv, probe_find_slot_scalar)(
+        control, hashes, capacity, key, tag);
 }
 
-inline ProbeFn select_bucket_probe_finder() noexcept {
-    using fn_t = ProbeFn;
-    static std::atomic<fn_t> cache{nullptr};
-    return SIMD_STATIC_SELECT(probe_find_bucket_avx2, probe_find_bucket_neon, probe_find_bucket_rvv, probe_find_bucket_scalar);
+inline ProbeResult probe_find_bucket_direct(const std::uint8_t* control,
+                                            const std::uint64_t* hashes,
+                                            std::size_t capacity, std::uint64_t key,
+                                            std::uint8_t tag) noexcept {
+    return SIMD_STATIC_SELECT(probe_find_bucket_avx2, probe_find_bucket_neon,
+                              probe_find_bucket_rvv, probe_find_bucket_scalar)(
+        control, hashes, capacity, key, tag);
 }
 
 }  // namespace opteryx::carchar::detail

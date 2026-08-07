@@ -556,6 +556,18 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             "Qualified wild cards (`table.*`) must be the first column when used with additional columns."
         )
 
+    # A subquery used as a SELECT-list value is not yet supported. Decorrelation
+    # (DecorrelateSubqueryStrategy) only inspects Filter conditions, so a SUBQUERY
+    # expression node in the projection would survive binding unresolved and fail
+    # deep in the planner with an internal error. Refuse it here, at the first
+    # walk of the projection, per the fail-fast contract: raise, never silently
+    # wrong. Full support needs a LEFT OUTER join decorrelation — see the
+    # "Known gaps" section of decorrelate_subquery.py.
+    if get_all_nodes_of_type(_projection, select_nodes=(NodeType.SUBQUERY,)):
+        raise UnsupportedSyntaxError(
+            "Scalar subqueries are supported in the WHERE clause but not yet in the SELECT list."
+        )
+
     # Detect window functions (AGGREGATOR nodes with an OVER clause) before aggregate extraction.
     # Replace each window function in _projection with a plain column reference to its output alias,
     # so the regular aggregate path does not see them. Window logical nodes are inserted here so

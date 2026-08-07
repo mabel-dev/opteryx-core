@@ -52,7 +52,7 @@ def _make_identifier_node(name: str):
 
 
 def test_parvi_selected_on_small_ndv_product():
-    """Parvi is selected when NDV product of group columns is <= 16."""
+    """Parvi is selected when NDV product of group columns is <= the gate (40)."""
     telemetry = QueryTelemetry()
     strategy = HashMapVariantStrategy(telemetry)
 
@@ -66,9 +66,7 @@ def test_parvi_selected_on_small_ndv_product():
 
     # Create an AggregateAndGroup node with GROUP BY col1, col2.
     # Assume each column has NDV=5 from the manifest, so product = 25.
-    # But our mock returns 5, so product = 5 * 5 = 25... hmm, that's > 16.
-    # Let's change the mock to return lower values.
-    scan.manifest.estimate_cardinality = lambda col: 3  # 3 * 3 = 9 < 16
+    scan.manifest.estimate_cardinality = lambda col: 3  # 3 * 3 = 9 <= 40
 
     agg_node = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
     agg_node.groups = [_make_identifier_node("col1"), _make_identifier_node("col2")]
@@ -89,12 +87,12 @@ def test_parvi_selected_on_small_ndv_product():
 
 
 def test_carchar_selected_on_large_ndv_product():
-    """Carchar is selected when NDV product exceeds 16."""
+    """Carchar is selected when NDV product exceeds the gate (40)."""
     telemetry = QueryTelemetry()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 1000)
-    scan.manifest.estimate_cardinality = lambda col: 10  # 10 * 10 = 100 > 16
+    scan.manifest.estimate_cardinality = lambda col: 10  # 10 * 10 = 100 > 40
 
     plan = LogicalPlan()
     scan_nid = "scan_1"
@@ -117,7 +115,7 @@ def test_carchar_selected_on_large_ndv_product():
 
 
 def test_parvi_selected_on_small_record_count():
-    """Parvi is selected when total record count is <= 16 (signal 2 priority)."""
+    """Parvi is selected when total record count is <= the gate (signal 2 priority)."""
     telemetry = QueryTelemetry()
     strategy = HashMapVariantStrategy(telemetry)
 
@@ -204,12 +202,13 @@ def test_empty_group_by_is_parvi_eligible():
 
 def test_groupby_ndv_estimate_stashed_in_native_gate_band():
     """The raw group-count estimate is stored on the node for the native sink's
-    parvi gate (kGBParviGateNDV=64) even when it exceeds the Cython PARVI_CAPACITY."""
+    parvi gate (kGBParviGateNDV=64) even when it exceeds the Cython
+    PARVI_ELIGIBILITY_GATE (40)."""
     telemetry = QueryTelemetry()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 1000)
-    scan.manifest.estimate_cardinality = lambda col: 6  # 6 * 6 = 36: > 16, <= 64
+    scan.manifest.estimate_cardinality = lambda col: 7  # 7 * 7 = 49: > 40, <= 64
 
     plan = LogicalPlan()
     plan.add_node("scan_1", scan)
@@ -225,9 +224,10 @@ def test_groupby_ndv_estimate_stashed_in_native_gate_band():
     context.pre_optimized_tree = plan
     strategy.visit(agg_node, context)
 
-    # 36 groups: too big for the Cython 16-slot map, in-band for the native gate.
+    # 49 groups: above the Cython eligibility gate (40), in-band for the
+    # native gate (64) — the estimate must still be stashed on the node.
     assert agg_node.group_map_variant == "carchar"
-    assert agg_node.groupby_ndv_estimate == 36
+    assert agg_node.groupby_ndv_estimate == 49
 
 
 def test_groupby_ndv_estimate_none_without_stats():

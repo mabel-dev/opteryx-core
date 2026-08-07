@@ -7,38 +7,22 @@
 
 #include "carchar_common.hpp"
 
+// Hot-path probe/insert statistics (probe lengths, lookup/insert counts).
+// Diagnostic-only — no production consumer reads them — but they cost two adds
+// and two compare-branch max-updates on every insert and stats-lookup.
+// Compiled out by default; build with -DCARCHAR_HOT_STATS=1 to re-enable.
+#ifndef CARCHAR_HOT_STATS
+#define CARCHAR_HOT_STATS 0
+#endif
+
 namespace opteryx::carchar {
 
-namespace detail {
-// Allocator adaptor that DEFAULT-initializes elements instead of
-// value-initializing them. For trivial types that means "allocate and leave
-// the bytes alone" — std::vector otherwise has no way to allocate without
-// filling. Every other vector behaviour (growth, copy, move, data()) is
-// unchanged, which matters because CarcharIndex must stay copyable
-// (CarcharJoinIndex holds one by value and is copied into vectors).
-template <typename T>
-struct uninitialized_allocator : std::allocator<T> {
-    using std::allocator<T>::allocator;
-
-    template <typename U>
-    struct rebind {
-        using other = uninitialized_allocator<U>;
-    };
-
-    template <typename U>
-    void construct(U* ptr) noexcept(std::is_nothrow_default_constructible_v<U>) {
-        ::new (static_cast<void*>(ptr)) U;   // default-init: no fill for trivial U
-    }
-
-    template <typename U, typename... Args>
-    void construct(U* ptr, Args&&... args) {
-        std::allocator_traits<std::allocator<T>>::construct(
-            static_cast<std::allocator<T>&>(*this), ptr, std::forward<Args>(args)...);
-    }
-};
-}  // namespace detail
+// detail::uninitialized_allocator lives in carchar_common.hpp (shared with
+// CarcharSet, which has the same never-read-empty-slot proof).
 
 class CarcharIndex {
+    static constexpr bool kHotStats = CARCHAR_HOT_STATS != 0;
+
    public:
     explicit CarcharIndex(std::size_t initial_capacity = kMinCapacity, double load_factor = 0.80)
         : load_factor_(load_factor) {
@@ -105,8 +89,10 @@ class CarcharIndex {
 
     bool lookup(std::uint64_t key, std::int64_t& payload_ref_out) {
         const auto result = find_slot(key);
-        ++lookup_count_;
-        record_lookup_probe_length(result.probes);
+        if constexpr (kHotStats) {
+            ++lookup_count_;
+            record_lookup_probe_length(result.probes);
+        }
         if (!result.found) {
             return false;
         }
@@ -126,8 +112,10 @@ class CarcharIndex {
     std::size_t insert_new(std::uint64_t key, std::int64_t payload_ref) {
         ensure_insert_capacity();
         const auto result = find_slot(key);
-        ++insert_count_;
-        record_insert_probe_length(result.probes);
+        if constexpr (kHotStats) {
+            ++insert_count_;
+            record_insert_probe_length(result.probes);
+        }
         if (result.found) {
             throw std::runtime_error("key already exists");
         }
@@ -139,8 +127,10 @@ class CarcharIndex {
     std::pair<std::int64_t, bool> find_or_insert(std::uint64_t key, PayloadFactory&& payload_factory) {
         ensure_insert_capacity();
         const auto result = find_slot(key);
-        ++insert_count_;
-        record_insert_probe_length(result.probes);
+        if constexpr (kHotStats) {
+            ++insert_count_;
+            record_insert_probe_length(result.probes);
+        }
         if (result.found) {
             return {payload_refs_[result.slot], false};
         }
@@ -165,12 +155,14 @@ class CarcharIndex {
             return false;
         }
         // Miss: ensure capacity (may resize, invalidating the slot), then re-probe.
-        if (size_ + 1 > static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_)) {
+        if (size_ >= resize_threshold_) {
             resize(capacity_ * 2U);
             result = find_slot(key);
         }
-        ++insert_count_;
-        record_insert_probe_length(result.probes);
+        if constexpr (kHotStats) {
+            ++insert_count_;
+            record_insert_probe_length(result.probes);
+        }
         insert_at(result.slot, key, new_id);
         payload_out = new_id;
         return true;
@@ -232,11 +224,16 @@ class CarcharIndex {
         payload_refs_.clear();
         payload_refs_.resize(capacity_);
         size_ = 0;
-        probe_finder_ = detail::select_probe_finder();
+        // Integer threshold computed once per (re)size so the per-insert
+        // capacity check is a single integer compare, not an int→double
+        // convert + multiply + double compare on every inserted row.
+        // size_ + 1 > size_t(capacity * lf)  ⇔  size_ >= size_t(capacity * lf).
+        resize_threshold_ =
+            static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_);
     }
 
     void ensure_insert_capacity() {
-        if (size_ + 1 > static_cast<std::size_t>(static_cast<double>(capacity_) * load_factor_)) {
+        if (size_ >= resize_threshold_) {
             resize(capacity_ * 2U);
         }
     }
@@ -284,11 +281,20 @@ class CarcharIndex {
         return slot;
     }
 
-    FindResult find_slot(std::uint64_t key) const {
+    // noexcept: exhaustion is REPORTED (probes == capacity_), not thrown, so the
+    // hot probe path carries no unwind state. The throw moves to find_slot()
+    // below, which every existing caller already used — behaviour unchanged.
+    FindResult find_slot_nothrow(std::uint64_t key) const noexcept {
         const std::uint8_t tag = key_tag(key);
-        const auto result = probe_finder_(control_.data(), hashes_.data(), capacity_, key, tag);
-        if (result.probes < capacity_) {
-            return {result.slot, result.found, result.probes};
+        const auto result = detail::probe_find_slot_direct(
+            control_.data(), hashes_.data(), capacity_, key, tag);
+        return {result.slot, result.found, result.probes};
+    }
+
+    FindResult find_slot(std::uint64_t key) const {
+        const FindResult r = find_slot_nothrow(key);
+        if (r.probes < capacity_) {
+            return r;
         }
         throw std::runtime_error("Carchar probe exhausted table capacity");
     }
@@ -321,8 +327,8 @@ class CarcharIndex {
     std::vector<std::uint64_t, detail::uninitialized_allocator<std::uint64_t>> hashes_;
     std::vector<std::int64_t, detail::uninitialized_allocator<std::int64_t>> payload_refs_;
     std::size_t size_ = 0;
+    std::size_t resize_threshold_ = 0;
     double load_factor_ = 0.80;
-    detail::ProbeFn probe_finder_ = nullptr;
 
     std::size_t resize_count_ = 0;
     std::size_t lookup_count_ = 0;

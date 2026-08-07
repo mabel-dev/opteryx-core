@@ -300,12 +300,14 @@ public:
                               std::vector<DrakenType> payload_types,
                               std::vector<int> lt_kind, std::vector<int> lt_unit,
                               std::vector<int> lt_precision, std::vector<int> lt_scale,
-                              std::vector<int> lt_dimension) {
+                              std::vector<int> lt_dimension,
+                              bool track_matches = false) {
         auto payload_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
                                                    lt_scale, lt_dimension);
         set_sink_(p, std::make_unique<Join2BuildSink>(
             std::move(key_idx), std::move(payload_idx),
-            std::move(payload_types), std::move(payload_logical)));
+            std::move(payload_types), std::move(payload_logical),
+            /*asof=*/-1, track_matches));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_join2_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
@@ -313,6 +315,27 @@ public:
         add_op_(p, std::make_unique<DeferredJoin2Probe>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             static_cast<JoinMode>(mode)));
+    }
+    // FULL OUTER tail pipeline source (see UnmatchedBuildSource): emits the build
+    // rows no probe matched, NULL-padded on the probe half. probe_types/lt_* are
+    // the PROBE payload columns' plan-known types — the mirror of the build
+    // sink's payload_types, for the same zero-rows-streamed reason.
+    void set_unmatched_build_source(size_t p, size_t ref,
+                                    std::vector<DrakenType> probe_types,
+                                    std::vector<int> lt_kind, std::vector<int> lt_unit,
+                                    std::vector<int> lt_precision,
+                                    std::vector<int> lt_scale,
+                                    std::vector<int> lt_dimension) {
+        auto probe_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
+                                                lt_scale, lt_dimension);
+        auto schema = std::make_shared<CxxMorsel>();
+        schema->columns.reserve(probe_types.size());
+        for (size_t c = 0; c < probe_types.size(); ++c)
+            schema->columns.push_back(make_empty_col(probe_types[c], probe_logical[c]));
+        schema->names.resize(probe_types.size());
+        schema->zero_col_rows = 0;
+        set_source_(p, std::make_unique<UnmatchedBuildSource>(
+            join2_refs[ref].get(), std::move(schema)));
     }
     // SEMI/ANTI with a correlated NON-equality residual (TPC-H Q21's
     // `l2.l_suppkey <> l1.l_suppkey`). The residual is evaluated per candidate

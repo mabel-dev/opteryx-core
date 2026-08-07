@@ -19,16 +19,17 @@
 # Input vector types accepted: integer (any width), float64. Decimal is
 # rejected at the dispatch site (aggregate_node.pyx) with a CAST suggestion.
 #
-# Memory: hard-capped at MEDIAN_MAX_VALUES_PER_GROUP (default 1000); the
-# state's overflowed() flag is checked on apply() and raises immediately.
+# Memory: bounded by a global 512MB byte budget across ALL median buffers
+# (kMedianBudgetBytes, _agg_kernels.hpp); the state's overflowed flag is
+# checked on apply() and raises immediately.
 
 
 cdef extern from "_agg_kernels.hpp" namespace "opteryx::ungrouped":
+    cdef int64_t kMedianBudgetBytes
     cdef cppclass MedianState:
         double* buf
         size_t  size
         size_t  cap
-        size_t  max_size
         bint    overflowed
         MedianState() except +
         bint append(double v) noexcept
@@ -147,9 +148,10 @@ cdef class MedianFloat64Aggregate(UngroupedAggregate):
     cdef void _raise_append_failure(self) except *:
         if self._state.overflowed:
             raise ValueError(
-                f"MEDIAN — too many values in one group (cap: "
-                f"{self._state.max_size}). Use APPROX_PERCENTILE(x, 0.5) for "
-                "approximate median over large sets of values."
+                f"MEDIAN — buffered values exceeded the "
+                f"{kMedianBudgetBytes >> 20}MB memory budget. Use "
+                "APPROX_PERCENTILE(x, 0.5) for approximate median over large "
+                "sets of values."
             )
         raise MemoryError("MEDIAN buffer allocation failed")
 

@@ -11,13 +11,14 @@
 """
 opteryx/compiled/structures/parvi_set.pyx
 
-Owning handle for opteryx::parvi::ParviSet — a fixed-capacity 16-slot inline
+Owning handle for opteryx::parvi::ParviSet — a fixed-capacity 64-slot inline
 hash set optimized for small distinct/COUNT(DISTINCT) workloads.
 
 Design notes
 ------------
 - ParviSet is stack-allocated inline: no heap allocation overhead.
-- Single SIMD-group probe: entire table is one 16-byte control group.
+- Single SIMD-group probe: 4 group-selected groups of 16; each key probes
+  exactly one 16-byte control group.
 - Overflow handling: insert_or_ignore() returns {is_new: false} when full.
 - Promotion: drain_into(CarcharSet) copies live entries for seamless migration.
 
@@ -64,7 +65,11 @@ cdef class ParviSetWrapper:
         return self._ptr.size()
 
     cpdef bint full(self):
-        """Return True if the set is at capacity (16 entries)."""
+        """Return True if the set is at capacity (all 64 slots occupied).
+
+        Overflow (group-full) can occur before full() is True — promotion
+        keys off the insert/mark_new_indices overflow signal, not full().
+        """
         return self._ptr.full()
 
     cpdef bint contains(self, uint64_t key):

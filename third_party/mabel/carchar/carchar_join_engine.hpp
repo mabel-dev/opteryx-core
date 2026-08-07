@@ -512,7 +512,7 @@ class CarcharJoinEngine {
                 return false;
             }
             const auto result =
-                detail::select_bucket_probe_finder()(control.data(), hashes.data(), capacity, key, key_tag(key));
+                detail::probe_find_bucket_direct(control.data(), hashes.data(), capacity, key, key_tag(key));
             if (!result.found) {
                 return false;
             }
@@ -525,7 +525,7 @@ class CarcharJoinEngine {
                 return 0;
             }
             const auto result =
-                detail::select_bucket_probe_finder()(control.data(), hashes.data(), capacity, key, key_tag(key));
+                detail::probe_find_bucket_direct(control.data(), hashes.data(), capacity, key, key_tag(key));
             if (!result.found) {
                 return 0;
             }
@@ -543,7 +543,7 @@ class CarcharJoinEngine {
             // Grouping overhead is not worth paying for fewer than kBatchThreshold keys.
             constexpr std::size_t kBatchThreshold = 64U;
             if (length < kBatchThreshold) {
-                const auto probe_finder = detail::select_bucket_probe_finder();
+                const auto probe_finder = detail::probe_find_bucket_direct;
                 for (std::size_t i = 0; i < length; ++i) {
                     std::uint32_t count = 0;
                     if (hot_key_cache.lookup(keys[i], count)) {
@@ -575,7 +575,7 @@ class CarcharJoinEngine {
             const std::size_t sealed_bucket_count = capacity / kGroupWidth;
             if (sealed_bucket_count == 0) {
                 // Degenerate layout: fall back to scalar.
-                const auto probe_finder = detail::select_bucket_probe_finder();
+                const auto probe_finder = detail::probe_find_bucket_direct;
                 for (std::size_t i = 0; i < length; ++i) {
                     std::uint32_t count = 0;
                     if (hot_key_cache.lookup(keys[i], count)) {

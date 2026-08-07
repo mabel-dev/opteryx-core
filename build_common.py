@@ -414,8 +414,13 @@ if (not INCLUDE_DEBUG_SYMBOLS_IN_COMPILED_CODE and not is_win()
 
 # SIMD-specific flags (deterministic baseline to avoid host-specific AVX512/etc.)
 if arch == "x86_64":
-    CPP_FLAGS.extend(["-msse4.2", "-mavx2", "-march=haswell"])
-    C_FLAGS.extend(["-msse4.2", "-mavx2", "-march=haswell"])
+    # -march=haswell sets the ISA floor (AVX2/BMI1+2/POPCNT/FMA) and implies
+    # -msse4.2 -mavx2, so those are redundant. It ALSO implies -mtune=haswell,
+    # which schedules for a 2013 microarchitecture; production runs on Zen/
+    # Golden Cove. -mtune=generic keeps the same instruction set (no new ISA
+    # requirement, so no SIGILL risk) while scheduling for modern parts.
+    CPP_FLAGS.extend(["-march=haswell", "-mtune=generic"])
+    C_FLAGS.extend(["-march=haswell", "-mtune=generic"])
 elif arch == "arm" and not is_mac():
     # 32-bit ARM needs explicit NEON; AArch64 already guarantees it.
     CPP_FLAGS.append("-mfpu=neon")
@@ -439,6 +444,8 @@ C_FLAGS.extend(WARNING_FLAGS)
 include_dirs = [
     ".",  # repo root for Cython cimport (draken.core.buffers etc.)
     "src/cpp",
+    "draken/simd",  # shared SIMD layer (simd_hash/simd_env/cpu_features/simd_dispatch)
+                    # — draken-owned so draken (and skene) never reach into src/cpp
     "src/c",
     "draken",  # new draken C++-first headers (quote-include "core/buffers.h")
     "draken/core",  # draken C++ headers, quote-include form (e.g. #include "buffers.h")
@@ -469,8 +476,8 @@ include_dirs = [
 
 # Common SIMD / environment C++ sources used by multiple extensions
 COMMON_SIMD_SOURCES = [
-    "src/cpp/simd_env.cpp",
-    "src/cpp/cpu_features.cpp",
+    "draken/simd/simd_env.cpp",
+    "draken/simd/cpu_features.cpp",
     "src/cpp/simd_search.cpp",
 ]
 
@@ -487,13 +494,17 @@ def make_draken_extension(module_path, source_file, language="c++", depends=None
     if "draken/core/vector_alloc.cpp" not in sources:
         sources.append("draken/core/vector_alloc.cpp")
 
-    # simd_bitops is still compiled in, unlike the rest of the shared SIMD layer:
-    # it cannot be moved into draken_native because its `simd_popcount` collides
-    # with draken/core/bitmap_ops.cpp's (see the note in draken_native's source
-    # list). Removing it here without resolving that collision leaves these modules
-    # with no definition at all.
-    if "src/cpp/simd_bitops.cpp" not in sources:
-        sources.append("src/cpp/simd_bitops.cpp")
+    # src/cpp/simd_bitops.cpp is GONE (deleted 2026-08-06). It used to be compiled
+    # in solely to supply `simd_popcount`, which collided with
+    # draken/core/bitmap_ops.cpp's. That collision is resolved: bitmap_ops.cpp's is
+    # canonical — it lives in draken (which must not depend on opteryx's src/cpp),
+    # every caller already declares it through draken's headers, and its ≤7-byte
+    # tail uses __builtin_popcount (a POPCNT/CNT instruction) rather than
+    # simd_bitops' 256-entry lookup table. The two main loops were identical
+    # (8-byte words + __builtin_popcountll). These shims now resolve simd_popcount
+    # from draken_native.so, loaded RTLD_GLOBAL by draken/__init__.py, the same way
+    # they resolve every other draken_native symbol. simd_bitops' other exports
+    # (simd_and/or/xor/not_mask, simd_select_bytes) had zero callers.
 
     # The rest of the shared SIMD layer — simd_hash, simd_env, cpu_features,
     # simd_search — is NOT compiled in. draken_native is its single compiled home
@@ -776,9 +787,9 @@ def draken_rugo_extensions(parquet_created_by):
                 # function_codec.cpp's BASE85_ENCODE/DECODE.
                 "third_party/mabel/base85/_base85.c",
                 # Milestone C.1: hash op depends on simd_hash_i64 / simd_mix_hash.
-                "src/cpp/simd_hash.cpp",
-                "src/cpp/simd_env.cpp",
-                "src/cpp/cpu_features.cpp",
+                "draken/simd/simd_hash.cpp",
+                "draken/simd/simd_env.cpp",
+                "draken/simd/cpu_features.cpp",
                 # draken_native is the single compiled home of the shared SIMD layer
                 # for the draken unit (simd_hash / simd_env / cpu_features above).
                 # The vector/morsel/sort modules built by make_draken_extension
@@ -796,18 +807,15 @@ def draken_rugo_extensions(parquet_created_by):
                 # exported no simd_search symbol). Other units (opteryx strings /
                 # vector_ops, rugo) use it and compile it themselves.
                 #
-                # src/cpp/simd_bitops.cpp CANNOT join this list: it defines
-                # `size_t simd_popcount(const uint8_t*, size_t)` with external
-                # linkage, and so does draken/core/bitmap_ops.cpp (line 69) which is
-                # already compiled in above. Adding it is an ld "duplicate symbols"
-                # failure. The two are DIFFERENT implementations — bitmap_ops walks
-                # byte-at-a-time with __builtin_popcount, simd_bitops does 8 bytes at
-                # a time with __builtin_popcountll — so today which one a module
-                # executes depends on which .cpp its source list happens to include,
-                # and on Linux (RTLD_GLOBAL + -fvisibility=default) on which .so
-                # loaded first. Same answer, materially different speed. Resolving
-                # which implementation is canonical is a prerequisite to moving this
-                # file, and is an architecture decision, not a build one.
+                # src/cpp/simd_bitops.cpp used to duplicate `simd_popcount` here and
+                # is now deleted. draken/core/bitmap_ops.cpp's is canonical: draken
+                # must not depend on opteryx's src/cpp, every caller already declares
+                # it through draken's headers (core/bitmap_ops.h, vectors/vector.pxd,
+                # vectors/bool_vector.pxd), and it is word-wide
+                # (__builtin_popcountll) with a __builtin_popcount tail — strictly
+                # better than the 256-entry LUT tail simd_bitops used. No duplicate
+                # symbol remains, and which implementation runs no longer depends on
+                # .so load order.
                 "third_party/ulfjack/ryu/d2fixed.c",
                 "third_party/ulfjack/ryu/d2s.c",
                 "third_party/ulfjack/ryu/f2s.c",
@@ -833,7 +841,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/core/trace.hpp",
                 "draken/core/trace_bridge_c.h",
                 "draken/ops/hash.h",
-                "src/cpp/simd_hash.h",
+                "draken/simd/simd_hash.h",
                 # Phase 9a: kernel ABI headers
                 "draken/ops/kernels/c_kernel_abi.h",
                 "draken/ops/kernels/error_handling.h",
@@ -908,7 +916,7 @@ def draken_rugo_extensions(parquet_created_by):
                     # (no malloc, no other miniz object needed).
                     "third_party/miniz/miniz_tinfl.cpp",
                     "rugo/src/parquet/bloom_filter.cpp",
-                    "src/cpp/cpu_features.cpp",
+                    "draken/simd/cpu_features.cpp",
                     "src/cpp/disk_io.cpp",
                     "draken/core/vector_alloc.cpp",
                     # jsonl reader C++ sources
@@ -920,7 +928,7 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/jsonl/core/column_builder.cpp",
                     # column_builder.cpp's parse_array_column parses array elements with yyjson.
                     "third_party/yyjson/src/yyjson.c",
-                    "src/cpp/simd_env.cpp",
+                    "draken/simd/simd_env.cpp",
                     "src/cpp/simd_search.cpp",
                     # csv reader C++ sources
                     "rugo/src/csv/core/csv_scan.cpp",
@@ -933,8 +941,8 @@ def draken_rugo_extensions(parquet_created_by):
                 + [s for s in get_text_writer_cast_sources()
                    if s not in {
                        "draken/core/vector_alloc.cpp",
-                       "src/cpp/cpu_features.cpp",
-                       "src/cpp/simd_env.cpp",
+                       "draken/simd/cpu_features.cpp",
+                       "draken/simd/simd_env.cpp",
                        "src/cpp/simd_search.cpp",
                    }]
             ),
@@ -990,5 +998,84 @@ def draken_rugo_extensions(parquet_created_by):
             language="c++",
             extra_compile_args=CPP_FLAGS,
             extra_link_args=parquet_link_args + LD_EXTRA,
+        ),
+    ]
+
+
+def skene_extensions():
+    """The skene file-format extension (single-source, like draken/rugo above).
+
+    Deliberately NOT part of rugo.rugo_native: skene and rugo are parallel and
+    disjoint — neither imports the other (docs/SKENE_FILE_FORMAT_DESIGN.md).
+    skene depends on draken alone; morsels cross the Python boundary through
+    draken.morsels.morsel's cxx_to_morsel / morsel_to_cxx (capsule import, no
+    link-time draken symbols).
+
+    zstd is compiled in (same vendored copy as rugo — duplicate TUs across the
+    two .so are benign: zstd is stateless C, and each extension is
+    self-contained exactly like skene's own libskene.a).
+    """
+    return [
+        Extension(
+            "skene.skene_native",
+            sources=(
+                [
+                    "skene/src/skene_native.pyx",
+                    "skene/src/checksum.cpp",
+                    "skene/src/probe.cpp",
+                    "skene/src/writer.cpp",
+                    "skene/src/reader.cpp",
+                    "skene/src/reader_v1.cpp",
+                    "skene/src/value_order.cpp",
+                    "skene/src/statistics.cpp",
+                    "skene/src/encoding.cpp",
+                    "skene/src/bloom.cpp",
+                    "skene/src/file_io.cpp",
+                    # One vector_alloc copy per extension — deliberate, matches
+                    # make_draken_extension (globals are extension-local; owners
+                    # carry their deleters so cross-extension frees are safe).
+                    "draken/core/vector_alloc.cpp",
+                ]
+                + get_zstd_vendor_sources()
+                + get_zstd_compress_sources()
+            ),
+            include_dirs=(
+                include_dirs
+                + [
+                    "skene/include",
+                    "skene/src",
+                    "third_party/zstd",
+                    "third_party/zstd/common",
+                    "third_party/zstd/decompress",
+                    "third_party/zstd/compress",
+                ]
+            ),
+            depends=[
+                "skene/include/skene/format.h",
+                "skene/include/skene/reader.h",
+                "skene/include/skene/writer.h",
+                "skene/include/skene/probe.h",
+                "skene/include/skene/status.h",
+                "skene/include/skene/file_io.h",
+                "skene/include/skene/checksum.h",
+                "skene/src/reader_v1.h",
+                "skene/src/encoding.h",
+                "skene/src/statistics.h",
+                "skene/src/value_order.h",
+                "skene/src/bloom.h",
+                "draken/core/buffers.h",
+                "draken/core/vector_alloc.h",
+                "draken/core/vector_owner.h",
+                "draken/core/string_slot.h",
+                "draken/logical_type.h",
+                "draken/morsels/cxx_morsel.h",
+            ],
+            define_macros=[
+                ("HAVE_ZSTD", "1"),
+                ("ZSTD_STATIC_LINKING_ONLY", "1"),
+            ],
+            language="c++",
+            extra_compile_args=CPP_FLAGS,
+            extra_link_args=LD_EXTRA,
         ),
     ]

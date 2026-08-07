@@ -10,17 +10,18 @@ Type: Cost-based
 Goal: Pick the smallest viable hash map for AggregateAndGroup and Distinct nodes.
 
 GROUP BY (AggregateAndGroup):
-  When the estimated distinct group count is small enough (<= kParviCapacity),
-  we tag the node with `group_map_variant = "parvi"` so the operator uses the
-  fixed-capacity 16-slot inline map instead of heap-allocating a 256-slot
-  CarcharIndex. The operator migrates back to carchar automatically if the
-  estimate turns out wrong (see GroupHashEngine._promote_parvi_to_carchar).
+  When the estimated distinct group count is small enough
+  (<= PARVI_ELIGIBILITY_GATE), we tag the node with
+  `group_map_variant = "parvi"` so the operator uses the fixed-capacity
+  64-slot inline map instead of heap-allocating a CarcharIndex. The operator
+  migrates back to carchar automatically if the estimate turns out wrong
+  (see GroupHashEngine._promote_parvi_to_carchar).
 
 DISTINCT:
-  When the estimated distinct-on cardinality is small enough (<= kParviCapacity),
-  we tag the node with `set_variant = "parvi"` so the operator uses the
-  fixed-capacity 16-slot inline set instead of CarcharSetWrapper. The operator
-  migrates to carchar on overflow.
+  When the estimated distinct-on cardinality is small enough
+  (<= PARVI_ELIGIBILITY_GATE), we tag the node with `set_variant = "parvi"`
+  so the operator uses the fixed-capacity 64-slot inline set instead of
+  CarcharSetWrapper. The operator migrates to carchar on overflow.
 
 Fail-safe default: carchar. Parvi is only chosen with positive evidence.
 Missing or stale stats → carchar.
@@ -29,11 +30,11 @@ Two signals are used, in priority order:
 
 1. **NDV-product bound** — for each GROUP BY/DISTINCT column, resolve to a source
    column in the upstream Scan manifest and read the KMV-based distinct-count
-   estimate. If every column resolves and the product is <= 16, pick parvi.
+   estimate. If every column resolves and the product is <= the gate, pick parvi.
 
 2. **Input-rows bound** — if the total record count across all upstream
-   Scan manifests is <= 16, the output cardinality cannot exceed that regardless
-   of NDV, so pick parvi.
+   Scan manifests is <= the gate, the output cardinality cannot exceed that
+   regardless of NDV, so pick parvi.
 
 If neither signal fires, carchar.
 """
@@ -48,13 +49,24 @@ from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
-# Must match opteryx::parvi::kCapacity in third_party/mabel/parvi/parvi.hpp.
-PARVI_CAPACITY = 16
+# Parvi eligibility gate for the Cython engine's single front map.
+#
+# Parvi is 64 slots (opteryx::parvi::kCapacity) arranged as 4 group-selected
+# groups of 16; a key can only occupy its own group, so overflow fires on the
+# first FULL GROUP, not at 64 keys. Measured effective capacity before first
+# overflow is p5 = 40 (size-curve experiment, 2026-08-06; re-confirmed at
+# min=33 / avg=51 over 1000 seeds). Gating eligibility at the raw 64 would
+# put estimates in the 41–64 band on the promote-on-every-seed path, which
+# measures 9–11% SLOWER than going straight to Carchar. Gate at the p5 so the
+# promote rate stays near zero — this still ~2.5×es the eligible band over
+# the old 16-slot map.
+PARVI_ELIGIBILITY_GATE = 40
 
 # The native GroupBySink gates its per-partition parvi front maps on the raw
 # NDV estimate (kGBParviGateNDV in src/cpp/engine/native_group_sinks.hpp = 64).
 # The NDV-product early-exit below must not truncate estimates the sink still
-# wants to see, so it cuts off above the native gate, not at PARVI_CAPACITY.
+# wants to see, so it cuts off above the native gate, not at the (lower)
+# PARVI_ELIGIBILITY_GATE.
 NATIVE_GB_GATE = 64
 
 
@@ -139,10 +151,10 @@ class HashMapVariantStrategy(OptimizationStrategy):
             estimate = ndv_product if estimate is None else min(estimate, ndv_product)
 
         # Signal 2 first — cheapest and provably correct.
-        if total_rows is not None and total_rows <= PARVI_CAPACITY:
+        if total_rows is not None and total_rows <= PARVI_ELIGIBILITY_GATE:
             return "parvi", estimate
         # Signal 1 — NDV product across group columns.
-        if ndv_product is not None and ndv_product <= PARVI_CAPACITY:
+        if ndv_product is not None and ndv_product <= PARVI_ELIGIBILITY_GATE:
             return "parvi", estimate
         return "carchar", estimate
 
@@ -205,7 +217,8 @@ class HashMapVariantStrategy(OptimizationStrategy):
             product *= max(1, ndv)
             if product > NATIVE_GB_GATE:
                 # Early exit — already above every gate that reads this estimate
-                # (Cython parvi at PARVI_CAPACITY, native sink at NATIVE_GB_GATE).
+                # (Cython parvi at PARVI_ELIGIBILITY_GATE, native sink at
+                # NATIVE_GB_GATE).
                 return product
         return product
 

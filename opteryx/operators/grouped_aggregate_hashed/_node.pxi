@@ -233,7 +233,7 @@ cdef class GroupedAggregateHashedNode(BasePlanNode):
         if function in ("count", "sum", "min", "max", "avg", "median", "stddev"):
             return function
         if function in ("count_distinct", "approx_count_distinct", "approx_percentile",
-                        "array_agg", "any_value"):
+                        "array_agg", "any_value", "corr"):
             return function
         raise UnsupportedSyntaxError(
             f"Unsupported aggregate function: {value}"

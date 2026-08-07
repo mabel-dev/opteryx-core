@@ -5,6 +5,15 @@
 // Second-hash mixing constant (golden ratio, Fibonacci hashing)
 static constexpr uint64_t BLOOM_GOLDEN_RATIO = 0x9E3779B97F4A7C15ULL;
 
+// The second position takes the HIGH bits of the golden-ratio multiply
+// (Fibonacci hashing). Masking the product instead would be a correctness
+// trap: the low k bits of h*C depend only on the low k bits of h, making the
+// second position a bijection of the first — a single-hash filter in
+// disguise, ~12% FPR instead of ~5%. shift = 64 - log2(filter bits).
+static inline unsigned bloom_shift(const uint64_t bit_mask) noexcept {
+    return 64u - (unsigned)__builtin_popcountll(bit_mask);
+}
+
 // Insert n hashes into the 64-bit-chunk bit array.
 // Caller owns bit_array (calloc-zeroed). Thread-unsafe for concurrent writes.
 static inline void bloom_insert_many(
@@ -13,10 +22,11 @@ static inline void bloom_insert_many(
     const size_t n,
     const uint64_t bit_mask
 ) noexcept {
+    const unsigned shift = bloom_shift(bit_mask);
     for (size_t i = 0; i < n; ++i) {
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
-        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
         bit_array[a >> 6] |= uint64_t(1) << (a & 63u);
         bit_array[b >> 6] |= uint64_t(1) << (b & 63u);
     }
@@ -41,6 +51,7 @@ static inline void bloom_query_packed(
 ) noexcept {
     static const uint8_t BIT_WEIGHTS_ARR[8] = {1, 2, 4, 8, 16, 32, 64, 128};
     const uint8x8_t BIT_WEIGHTS = vld1_u8(BIT_WEIGHTS_ARR);
+    const unsigned shift = bloom_shift(bit_mask);
 
     size_t i = 0;
     // Process 8 hashes at a time: compute 8 booleans, pack into 1 byte with NEON.
@@ -49,7 +60,7 @@ static inline void bloom_query_packed(
         for (int j = 0; j < 8; ++j) {
             const uint64_t h = hashes[i + j];
             const uint64_t a = h & bit_mask;
-            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
             hits[j] = (uint8_t)(
                 ((bit_array[a >> 6] >> (a & 63u)) & 1u) &
                 ((bit_array[b >> 6] >> (b & 63u)) & 1u)
@@ -62,7 +73,7 @@ static inline void bloom_query_packed(
     for (; i < n; ++i) {
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
-        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
         const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
         const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
         result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));
@@ -79,6 +90,7 @@ static inline void bloom_query_packed(
     const uint64_t bit_mask,
     uint8_t* __restrict__ result
 ) noexcept {
+    const unsigned shift = bloom_shift(bit_mask);
     size_t i = 0;
     // 8 hashes → 8 bytes (0x00 or 0xFF) → movemask → 1 packed byte.
     for (; i + 8 <= n; i += 8) {
@@ -86,7 +98,7 @@ static inline void bloom_query_packed(
         for (int j = 0; j < 8; ++j) {
             const uint64_t h = hashes[i + j];
             const uint64_t a = h & bit_mask;
-            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
             hits[j] = (
                 ((bit_array[a >> 6] >> (a & 63u)) & 1u) &
                 ((bit_array[b >> 6] >> (b & 63u)) & 1u)
@@ -100,7 +112,7 @@ static inline void bloom_query_packed(
     for (; i < n; ++i) {
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
-        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
         const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
         const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
         result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));
@@ -120,6 +132,7 @@ static inline void bloom_query_packed(
     static const uint8_t BIT_WEIGHTS_ARR[8] = {1, 2, 4, 8, 16, 32, 64, 128};
     const vuint8m1_t BIT_WEIGHTS = __riscv_vle8_v_u8m1(BIT_WEIGHTS_ARR, 8);
     const vuint8m1_t V_ZERO      = __riscv_vmv_v_x_u8m1(0, 8);
+    const unsigned shift = bloom_shift(bit_mask);
 
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
@@ -127,7 +140,7 @@ static inline void bloom_query_packed(
         for (int j = 0; j < 8; ++j) {
             const uint64_t h = hashes[i + j];
             const uint64_t a = h & bit_mask;
-            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+            const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
             hits[j] = (uint8_t)(
                 ((bit_array[a >> 6] >> (a & 63u)) & 1u) &
                 ((bit_array[b >> 6] >> (b & 63u)) & 1u)
@@ -140,7 +153,7 @@ static inline void bloom_query_packed(
     for (; i < n; ++i) {
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
-        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
         const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
         const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
         result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));
@@ -156,10 +169,11 @@ static inline void bloom_query_packed(
     const uint64_t bit_mask,
     uint8_t* __restrict__ result
 ) noexcept {
+    const unsigned shift = bloom_shift(bit_mask);
     for (size_t i = 0; i < n; ++i) {
         const uint64_t h = hashes[i];
         const uint64_t a = h & bit_mask;
-        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) & bit_mask;
+        const uint64_t b = (h * BLOOM_GOLDEN_RATIO) >> shift;
         const uint64_t bit_a = (bit_array[a >> 6] >> (a & 63u)) & 1u;
         const uint64_t bit_b = (bit_array[b >> 6] >> (b & 63u)) & 1u;
         result[i >> 3] |= static_cast<uint8_t>((bit_a & bit_b) << (i & 7u));

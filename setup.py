@@ -32,6 +32,7 @@ from build_common import (
     include_dirs,
     is_mac,
     is_win,
+    skene_extensions,
 )
 
 LIBRARY = "opteryx"
@@ -264,6 +265,8 @@ extensions = [
         parquet_created_by="opteryx-rugo version %s (build %s)"
         % (__version__, __build__)
     ),
+    # skene file-format extension (skene depends on draken alone; disjoint from rugo).
+    *skene_extensions(),
     # Third-party libraries.
     #
     # The mabel codec C libraries live at the repo root (third_party/mabel/base*):
@@ -358,7 +361,7 @@ extensions = [
             "opteryx/compiled/functions/strings.pyx",
             "src/cpp/simd_search.cpp",
             "src/cpp/simd_string_ops.cpp",
-            "src/cpp/cpu_features.cpp",
+            "draken/simd/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -371,7 +374,7 @@ extensions = [
             "src/cpp/simd_strings_extension.cpp",
             "src/cpp/simd_search.cpp",
             "src/cpp/simd_string_ops.cpp",
-            "src/cpp/cpu_features.cpp",
+            "draken/simd/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -383,7 +386,7 @@ extensions = [
         "opteryx.compiled.simd_probe",
         sources=[
             "opteryx/compiled/simd_probe.pyx",
-            "src/cpp/simd_env.cpp",
+            "draken/simd/simd_env.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -411,7 +414,7 @@ extensions = [
         "opteryx.compiled.structures.carchar_set",
         sources=[
             "opteryx/compiled/structures/carchar_set.pyx",
-            "src/cpp/cpu_features.cpp",
+            "draken/simd/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -423,42 +426,10 @@ extensions = [
         ],
     ),
     Extension(
-        "opteryx.compiled.structures.carchar_index",
-        sources=[
-            "opteryx/compiled/structures/carchar_index.pyx",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        depends=[
-            "third_party/mabel/carchar/carchar_join_index.hpp",
-            "third_party/mabel/carchar/carchar_index.hpp",
-            "third_party/mabel/carchar/carchar_common.hpp",
-            "third_party/mabel/carchar/carchar_simd.hpp",
-        ],
-    ),
-    Extension(
-        "opteryx.compiled.structures.parvi_index",
-        sources=[
-            "opteryx/compiled/structures/parvi_index.pyx",
-            "src/cpp/cpu_features.cpp",
-        ],
-        include_dirs=include_dirs,
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-        depends=[
-            "third_party/mabel/parvi/parvi.hpp",
-            "third_party/mabel/carchar/carchar_index.hpp",
-            "third_party/mabel/carchar/carchar_common.hpp",
-            "third_party/mabel/carchar/carchar_simd.hpp",
-        ],
-    ),
-    Extension(
         "opteryx.compiled.structures.parvi_set",
         sources=[
             "opteryx/compiled/structures/parvi_set.pyx",
-            "src/cpp/cpu_features.cpp",
+            "draken/simd/cpu_features.cpp",
         ],
         include_dirs=include_dirs,
         language="c++",
@@ -774,11 +745,18 @@ extensions = [
         language="c++",
     ),
     # MorselQueue (moodycamel MPMC + LightweightSemaphore; carries shared_ptr[CxxMorsel])
+    #
+    # extra_compile_args MUST be CPP_FLAGS, for the same reason spelled out on the
+    # thread_pool extension above: this module carries shared_ptr<CxxMorsel> across
+    # the .so boundary, and a hand-rolled -std=c++17 against the tree's -std=c++20
+    # is exactly the feature-macro mismatch that produced the PriorityPool layout
+    # divergence. It also missed the arch flags entirely (baseline SSE2 on x86)
+    # despite sitting on the terminal output edge of every query.
     Extension(
         name="opteryx.compiled.morsel_queue",
         sources=["opteryx/compiled/morsel_queue.pyx"],
         include_dirs=include_dirs,
-        extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+        extra_compile_args=CPP_FLAGS,
         language="c++",
     ),
     # HTTP Client (libcurl-based HTTP with connection pooling and Range request support)
@@ -794,7 +772,8 @@ if not _skip_build and not _DRAKEN_BUILD:
                 "src/cpp/http_client.cpp",
             ],
             include_dirs=include_dirs + ["src/cpp"] + _curl_include_dirs,
-            extra_compile_args=["-O3", "-std=c++17"] + WARNING_FLAGS,
+            # CPP_FLAGS, not a hand-rolled -std=c++17 — see morsel_queue above.
+            extra_compile_args=CPP_FLAGS,
             extra_link_args=_curl_link_args + ([] if is_win() else ["-lm"]),
             language="c++",
         )
@@ -857,11 +836,17 @@ extensions.extend(
                     + [
                         "third_party/re2/util/strutil.cc",
                         "third_party/re2/util/rune.cc",
-                        "src/cpp/simd_env.cpp",
+                        "draken/simd/simd_env.cpp",
                         "src/cpp/simd_search.cpp",
-                        "src/cpp/simd_datepart.cpp",
+                        # src/cpp/simd_datepart.cpp is deliberately NOT here: its
+                        # 8 exported simd_datepart_* entry points have no caller
+                        # anywhere in the tree, so it was 518 lines of dead weight
+                        # compiled into the shipped .so. The SOURCE is retained on
+                        # purpose — its part/unit-specialized CAL_LOOP structure
+                        # (compile-time divisors → multiply-shift) is the donor for
+                        # the live draken_date_part rework, after which it goes.
                         "src/cpp/simd_string_ops.cpp",
-                        "src/cpp/cpu_features.cpp",
+                        "draken/simd/cpu_features.cpp",
                         "third_party/crypto/md5.cpp",
                         "third_party/crypto/sha1.cpp",
                         "third_party/crypto/sha2.cpp",
@@ -967,7 +952,7 @@ _vectors_extra_sources = [
     "third_party/yyjson/src/yyjson.c",
     # vector_string_case — SIMD string ops (+ cpu_features dep)
     "src/cpp/simd_string_ops.cpp",
-    "src/cpp/cpu_features.cpp",
+    "draken/simd/cpu_features.cpp",
 ]
 extensions.append(
     Extension(
@@ -1061,25 +1046,6 @@ extensions.append(
     )
 )
 
-extensions.append(
-    Extension(
-        "opteryx.compiled.nanobind.carchar_native",
-        sources=[
-            "src/cpp/carchar_native.cpp",
-            "third_party/nanobind/src/nb_combined.cpp",
-        ],
-        include_dirs=include_dirs
-        + [
-            "third_party/mabel/carchar",
-            "third_party/nanobind",
-            "third_party/nanobind/src",
-            "third_party/nanobind/ext/robin_map/include",
-        ],
-        extra_compile_args=CPP_FLAGS + ["-fno-strict-aliasing", "-DNB_COMPACT_ASSERTIONS"],
-        extra_link_args=LD_EXTRA,
-        language="c++",
-    )
-)
 
 extensions.append(
     Extension(
@@ -1241,7 +1207,7 @@ extensions.append(
                 "rugo/src/parquet/bloom_filter.cpp",
                 "rugo/src/parquet/decode_encodings.cpp",
                 "rugo/src/parquet/decode_page.cpp",
-                "src/cpp/cpu_features.cpp",
+                "draken/simd/cpu_features.cpp",
                 "src/cpp/http_client.cpp",
             ]
             + get_parquet_vendor_sources()
@@ -1297,11 +1263,13 @@ def discover_packages():
     """
     base = set(
         find_packages(
-            include=[LIBRARY, f"{LIBRARY}.*", "draken", "draken.*", "rugo", "rugo.*"],
-            exclude=["draken.tests", "draken.tests.*", "rugo.tests", "rugo.tests.*"],
+            include=[LIBRARY, f"{LIBRARY}.*", "draken", "draken.*", "rugo", "rugo.*",
+                     "skene", "skene.*"],
+            exclude=["draken.tests", "draken.tests.*", "rugo.tests", "rugo.tests.*",
+                     "skene.tests", "skene.tests.*"],
         )
     )
-    for root in (LIBRARY, "draken", "rugo"):
+    for root in (LIBRARY, "draken", "rugo", "skene"):
         for dirpath, _dirnames, filenames in os.walk(root):
             parts = dirpath.split(os.sep)
             if "tests" in parts:
