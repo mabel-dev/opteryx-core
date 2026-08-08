@@ -99,19 +99,36 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         LogicalCategory.DATE,
     }
 
-    def __init__(self, dataset: str, filesystem, storage_type: str, **kwargs):
+    def __init__(
+        self,
+        dataset: str,
+        filesystem,
+        storage_type: str,
+        original_relation: Optional[str] = None,
+        **kwargs,
+    ):
         """
         Initialize the table reader for a specific dataset.
 
         Args:
-            dataset: The dataset name/path
+            dataset: The dataset name/path (already lowercased by the binder's
+                case-folding — see `original_relation`)
             filesystem: Reference to the filesystem from parent connector
             storage_type: Type identifier for telemetry (LOCAL, GCS, S3, etc.)
+            original_relation: The relation exactly as typed in SQL, before the
+                binder's `.lower()`. FileSystemConnector sets
+                `requires_original_case = True`, so the binder always forwards
+                this — filesystem paths are case-sensitive on Linux/POSIX, so
+                the lowercased `dataset` would silently point at a different
+                (usually nonexistent) path.
             **kwargs: Additional parameters passed to BaseTable
         """
         BaseTable.__init__(self, dataset=dataset, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
         LimitPushable.__init__(self, **kwargs)
+
+        if original_relation is not None:
+            self.dataset = original_relation
 
         self.filesystem = filesystem
         self.__type__ = storage_type
@@ -798,6 +815,14 @@ class FileSystemConnector(BaseConnector):
     # Declare capabilities of FileSystemTable readers
     supports_predicate_pushdown = True
     supports_limit_pushdown = True
+
+    # Filesystem paths are case-sensitive on Linux/POSIX; the binder's generic
+    # case-folding (`node.relation.lower()`) would otherwise silently point
+    # FileSystemTable at the wrong (usually nonexistent) path whenever the
+    # FROM-clause path contains uppercase characters. Unlike MabelConnector's
+    # opt-in `preserve_sql_case`, this is unconditional — there's no dataset
+    # naming convention here to case-fold against.
+    requires_original_case = True
 
     def __init__(self, filesystem, storage_type="FILESYSTEM", **kwargs):
         """
