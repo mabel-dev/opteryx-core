@@ -1,0 +1,31 @@
+#
+# Replay the native parser corpus under ASan/UBSan.
+#
+# Runs on every push, not just on the nightly schedule, because it is a
+# regression test rather than a search: it is deterministic, takes about a
+# minute, and re-checks every input that has ever crashed a parser. Leaving it
+# to the nightly job would mean a reintroduced parser bug sits in the branch for
+# up to a day.
+#
+# The search for NEW inputs is the `native_fuzzing` job in fuzzer.yaml.
+#
+# No Python, no compile of the engine: these targets are built straight from the
+# C++ sources by tests/fuzzing/native/Makefile, so this job needs only clang.
+#
+name: Native Fuzz Replay
+
+on:
+  workflow_call:
+
+jobs:
+  native_fuzz_replay:
+    name: "Native Fuzz Replay"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Replay parser corpus
+        run: make fuzz-native

@@ -7,7 +7,7 @@ One `.skene` file is one row group of draken vectors. The whole Python surface
 is five functions:
 
     write_morsel(morsel, **options) -> bytes
-    read_morsel(buf, columns=None)  -> Morsel
+    read_morsel(buf, 0, columns=None)  -> Morsel
     read_metadata(buf)              -> dict     (footer only; never decodes data)
     probe_version(head)             -> int      (first 8 bytes)
     footer_extent(tail, file_bytes) -> (offset, nbytes)
@@ -15,7 +15,7 @@ is five functions:
 Run it:
 
     python skene/examples/01_write_and_read.py
-    python skene/examples/01_write_and_read.py testdata/tpch_1/nation/nation.parquet
+    python skene/examples/01_write_and_read.py testdata/tpch_10/nation/nation.1.parquet
 
 Section 6 converts a Parquet file with rugo — skene has no reader for foreign
 formats, so Parquet comes in through rugo and leaves as draken Morsels, which
@@ -40,7 +40,7 @@ from draken.interop.vector_sequence import vector_from_sequence  # noqa: E402
 from draken.morsels.morsel import Morsel  # noqa: E402
 from rugo.parquet import read_parquet  # noqa: E402
 
-DEFAULT_PARQUET = os.path.join(_REPO_ROOT, "testdata", "tpch_1", "customer", "customer.parquet")
+DEFAULT_PARQUET = os.path.join(_REPO_ROOT, "testdata", "tpch_10", "customer", "customer.1.parquet")
 
 # Footer enums — skene/include/skene/format.h is the authority.
 TYPE_NAMES = {t.value: t.name for t in DrakenType}
@@ -106,7 +106,7 @@ def section_roundtrip() -> bytes:
     )
     print(f"wrote {len(buf)} bytes for {morsel.num_rows} rows × {morsel.num_columns} columns")
 
-    back = skene.read_morsel(buf)
+    back = skene.read_morsel(buf, 0)
     back.materialize()  # Cxx-backed until asked; materialize() is in-place
 
     for name in column_names(morsel):
@@ -125,19 +125,34 @@ def section_roundtrip() -> bytes:
 
 
 def section_metadata(buf: bytes) -> None:
-    banner("2. read_metadata: the whole footer, without decoding a single value")
+    banner("2. read_metadata / read_row_group_metadata: two levels of footer")
 
-    # It parses the footer and validates the index sections next to it; the data
-    # region is never touched. Section 6 shows what that means for a remote read.
+    # read_metadata parses the FILE footer only: schema, the row group
+    # directory, and every row group's per-column statistics. No row group
+    # footer and no section directory is touched, which is what makes it the
+    # call a pruning reader makes. Section 6 shows what that means remotely.
 
     print(f"probe_version(first 8 bytes) = {skene.probe_version(buf[:8])}")
 
     meta = skene.read_metadata(buf)
     print(f"version={meta['version']}  rows={meta['row_count']}  "
+          f"row_groups={len(meta['row_groups'])}  "
           f"writer_tag={meta['writer_tag']!r}")
     print(f"file_uuid={meta['file_uuid'].hex()}  created_at_unix_us={meta['created_at_unix_us']}")
 
-    for col in meta["columns"]:
+    for index, group in enumerate(meta["row_groups"]):
+        print(f"\n  row group {index}: rows={group['row_count']} "
+              f"first_row={group['first_row']} "
+              f"data=[{group['byte_offset']}, +{group['byte_bytes']}) "
+              f"footer=[{group['footer_offset']}, +{group['footer_bytes']})")
+
+    # The per-column detail is per ROW GROUP and costs a row group footer parse,
+    # so it is a separate call — a reader that pruned a row group away never
+    # pays for it.
+    detail = skene.read_row_group_metadata(buf, 0)
+    stats_slots = meta["row_groups"][0]["column_statistics"]
+
+    for slot, col in enumerate(detail["columns"]):
         print(f"\n  {col['name']}  ({TYPE_NAMES.get(col['type'], col['type'])}, "
               f"field_id={col['field_id']})")
         print(f"    rows={col['length']}  distinct={col['data_length']}  "
@@ -145,7 +160,9 @@ def section_metadata(buf: bytes) -> None:
               f"order={VALUE_ORDERS.get(col['value_order'])}")
         print(f"    bytes=[{col['byte_offset']}, +{col['byte_bytes']})  "
               f"bloom={col['has_bloom']}")
-        stats = col["statistics"]
+        # The same statistics reached from the FILE footer, where pruning uses
+        # them — slots are depth-first over the schema.
+        stats = stats_slots[slot] if slot < len(stats_slots) else None
         if stats is not None:
             # Only the fields whose flag is set are meaningful — the rest are
             # zero and MUST NOT be read. "Absent" is never "zero".
@@ -166,7 +183,7 @@ def section_metadata(buf: bytes) -> None:
 
     # `data_length` under value ordering is the EXACT distinct count, not an
     # estimate — the writer deduplicated on the sorted values.
-    ids = next(c for c in meta["columns"] if c["name"] == "id")
+    ids = next(c for c in detail["columns"] if c["name"] == "id")
     print(f"\n  id has {ids['data_length']} distinct values across {ids['length']} rows "
           f"(exact, not a sketch)")
     print("  min/max are ORDINALS — draken's order-preserving projection of the value,")
@@ -181,7 +198,7 @@ def section_metadata(buf: bytes) -> None:
 def section_projection(buf: bytes) -> None:
     banner("3. read_morsel(columns=...): projection is pushed, and it is strict")
 
-    narrow = skene.read_morsel(buf, columns=["colour", "id"])
+    narrow = skene.read_morsel(buf, 0, columns=["colour", "id"])
     narrow.materialize()
     print(f"asked for ['colour', 'id'] → got {column_names(narrow)}")
     print(f"  colour = {narrow.column('colour').to_pylist()}")
@@ -189,7 +206,7 @@ def section_projection(buf: bytes) -> None:
     # A column that is not there is an ERROR. Returning fewer columns than the
     # caller asked for would hide their bug.
     try:
-        skene.read_morsel(buf, columns=["nope"])
+        skene.read_morsel(buf, 0, columns=["nope"])
     except skene.SkeneError as exc:
         print(f"asked for ['nope'] → SkeneError({exc.code}): {exc}")
     else:
@@ -202,63 +219,56 @@ FILE_HEAD_BYTES = 16  # kFileHeadBytes
 FILE_TAIL_BYTES = 24  # kFileTailBytes
 
 
-def data_region_end(columns: list) -> int:
-    """Last byte of the data region — where the INDEX region begins."""
-    end = 0
-    for col in columns:
-        if col["byte_bytes"]:
-            end = max(end, col["byte_offset"] + col["byte_bytes"])
-        if col["children"]:
-            end = max(end, data_region_end(col["children"]))
-    return end
-
-
 def section_remote(buf: bytes) -> None:
     banner("6. footer_extent: ranged GETs instead of pulling the whole object")
 
     file_bytes = len(buf)
 
     # Request 1: the last kFileTailBytes of the object. footer_extent validates
-    # the tail before trusting it, then says where the footer lives.
+    # the tail before trusting it, then says where the FILE footer lives.
     tail = buf[-FILE_TAIL_BYTES:]
     offset, nbytes = skene.footer_extent(tail, file_bytes)
-    print(f"object is {file_bytes:,} bytes; the tail says the footer is "
+    print(f"object is {file_bytes:,} bytes; the tail says the file footer is "
           f"[{offset:,}, +{nbytes:,}) — {nbytes / file_bytes:.3%} of it")
 
-    # Request 2 fetches from the start of the INDEX region to the end of the
-    # object: blooms, zone maps and permutations sit contiguous with the footer
-    # precisely so a pruning reader gets all of it in ONE request. (A remote
-    # client that has no manifest over-fetches backwards by a slack; here the
-    # boundary is measured from the file's own metadata.)
-    index_start = data_region_end(skene.read_metadata(buf)["columns"])
-    print(f"index region is [{index_start:,}, {offset:,}) = "
-          f"{human_bytes(offset - index_start)} of blooms and zone maps")
-
-    # Stitch what was fetched into an object-sized buffer. Nothing in the data
-    # region is ever read, so those bytes stay zero.
+    # Request 2: the FILE footer. This is the whole pruning surface — the
+    # schema, the row group directory, and every row group's per-column
+    # statistics. Note what it does NOT contain: any section directory. That is
+    # what keeps it small, and it is why a reader can decide which row groups it
+    # wants before paying for a single column directory.
+    #
+    # Stitch it into an object-sized buffer; nothing else is ever fetched, so
+    # those bytes stay zero.
     sparse = bytearray(file_bytes)
     sparse[:FILE_HEAD_BYTES] = buf[:FILE_HEAD_BYTES]
-    sparse[index_start:] = buf[index_start:]
-    fetched = FILE_HEAD_BYTES + (file_bytes - index_start)
+    sparse[offset:] = buf[offset:]
+    fetched = FILE_HEAD_BYTES + (file_bytes - offset)
 
     meta = skene.read_metadata(memoryview(bytes(sparse)))
-    blooms = sum(1 for c in meta["columns"] if c["has_bloom"])
     print(f"parsed {len(meta['columns'])} columns, {meta['row_count']:,} rows and "
-          f"{blooms} bloom filters from {fetched:,} fetched bytes "
+          f"{len(meta['row_groups'])} row group(s) from {fetched:,} fetched bytes "
           f"({fetched / file_bytes:.1%} of the object)")
 
-    # Fetch too little and it fails loudly. A footer-only request on a file that
-    # HAS index sections cannot silently return metadata with the blooms missing.
-    short = bytearray(file_bytes)
-    short[:FILE_HEAD_BYTES] = buf[:FILE_HEAD_BYTES]
-    short[offset:] = buf[offset:]
-    try:
-        skene.read_metadata(memoryview(bytes(short)))
-    except skene.SkeneError as exc:
-        print(f"footer alone, index region missing → SkeneError({exc.code}) — "
-              f"never a quiet metadata read with the blooms dropped")
-    else:
-        print("footer alone was sufficient — this file carries no index sections")
+    tracked = sum(1 for g in meta["row_groups"] for st in g["column_statistics"]
+                  if st is not None)
+    print(f"{tracked} per-row-group column bound(s) came with it — enough to rule "
+          f"row groups out\nbefore any of their directories is fetched")
+
+    # Request 3 (per SURVIVING row group only): its own footer, whose offset and
+    # length the row group directory just gave us, plus its index region, which
+    # is contiguous with it. A row group ruled out above is never fetched at all.
+    for index, group in enumerate(meta["row_groups"]):
+        print(f"  row group {index}: footer [{group['footer_offset']:,}, "
+              f"+{group['footer_bytes']:,}) = {human_bytes(group['footer_bytes'])}; "
+              f"its data is [{group['byte_offset']:,}, +{group['byte_bytes']:,})")
+
+    detail = skene.read_row_group_metadata(buf, 0)
+    blooms = sum(1 for c in detail["columns"] if c["has_bloom"])
+    print(f"row group 0's directory carries {len(detail['columns'])} column extents "
+          f"and {blooms} bloom filter(s)")
+    print("\n  That is the staged read the two footer levels exist for: a small")
+    print("  always-fetched index, then per-row-group directories paid for only by")
+    print("  the row groups that survived pruning.")
 
 
 # ─── 4. Parquet in, skene out ───────────────────────────────────────────────
@@ -297,7 +307,7 @@ def section_parquet(parquet_path: str, out_dir: str) -> tuple[bytes, Morsel]:
     for path, source_morsel in written:
         with open(path, "rb") as handle:
             payload = handle.read()
-        back = skene.read_morsel(payload)
+        back = skene.read_morsel(payload, 0)
         back.materialize()
         assert back.num_rows == source_morsel.num_rows
         assert list(back.column_names) == list(source_morsel.column_names)
@@ -314,12 +324,12 @@ def section_parquet(parquet_path: str, out_dir: str) -> tuple[bytes, Morsel]:
     name = column_names(first_morsel)[0]
 
     started = time.perf_counter()
-    whole = skene.read_morsel(payload)
+    whole = skene.read_morsel(payload, 0)
     whole.materialize()
     whole_ms = (time.perf_counter() - started) * 1000
 
     started = time.perf_counter()
-    probe = skene.read_morsel(payload, columns=[name])
+    probe = skene.read_morsel(payload, 0, columns=[name])
     probe.materialize()
     probe_ms = (time.perf_counter() - started) * 1000
 
@@ -328,22 +338,27 @@ def section_parquet(parquet_path: str, out_dir: str) -> tuple[bytes, Morsel]:
     print(f"all {first_morsel.num_columns} columns: {whole_ms:.2f}ms   "
           f"just {name!r}: {probe_ms:.2f}ms — the projection is not decoded and thrown away")
 
-    # The footer alone answers "how many rows, which columns, what types" — that
-    # is what makes a manifest cheap to build over a directory of these.
+    # The FILE footer alone answers "how many rows, how many row groups, which
+    # columns, what types, and what does each row group bound" — that is what
+    # makes a manifest cheap to build over a directory of these, and it is
+    # reached without opening a single row group footer.
     meta = skene.read_metadata(payload)
-    print(f"\nfooter of {os.path.basename(first_path)}: rows={meta['row_count']:,}")
-    for col in meta["columns"][:6]:
-        stats = col["statistics"]
+    print(f"\nfile footer of {os.path.basename(first_path)}: "
+          f"rows={meta['row_count']:,}  row_groups={len(meta['row_groups'])}")
+    detail = skene.read_row_group_metadata(payload, 0)
+    slots = meta["row_groups"][0]["column_statistics"]
+    for slot, col in enumerate(detail["columns"][:6]):
+        stats = slots[slot] if slot < len(slots) else None
         bounds = (f"[{stats['min_ordinal']}, {stats['max_ordinal']}]"
                   if stats is not None else "not tracked")
         print(f"  {col['name']:<16} {TYPE_NAMES.get(col['type'], col['type']):<12} "
               f"distinct={col['data_length']:<8} ordinal bounds {bounds}")
-    if len(meta["columns"]) > 6:
-        print(f"  … {len(meta['columns']) - 6} more")
+    if len(detail["columns"]) > 6:
+        print(f"  … {len(detail['columns']) - 6} more")
 
-    flat = [c for c in meta["columns"]
-            if c["statistics"] is not None
-            and c["statistics"]["min_ordinal"] == c["statistics"]["max_ordinal"]
+    flat = [c for slot, c in enumerate(detail["columns"])
+            if slot < len(slots) and slots[slot] is not None
+            and slots[slot]["min_ordinal"] == slots[slot]["max_ordinal"]
             and c["data_length"] > 1]
     for col in flat:
         print(f"\n  {col['name']} has {col['data_length']:,} distinct values but a single")
@@ -375,13 +390,15 @@ def section_postures(morsel: Morsel) -> None:
         write_ms = (time.perf_counter() - started) * 1000
 
         started = time.perf_counter()
-        back = skene.read_morsel(buf)
+        back = skene.read_morsel(buf, 0)
         back.materialize()
         read_ms = (time.perf_counter() - started) * 1000
         assert back.num_rows == morsel.num_rows
 
         meta = skene.read_metadata(buf)
-        tracked = any(c["statistics"] is not None for c in meta["columns"])
+        tracked = any(s is not None
+                      for g in meta["row_groups"]
+                      for s in g["column_statistics"])
         print(f"{label} {len(buf):>12,} {write_ms:>9.1f} {read_ms:>9.1f}   "
               f"{'present' if tracked else 'none — absent means NOT TRACKED'}")
 
@@ -400,7 +417,7 @@ def section_failures(buf: bytes) -> None:
 
     cases = [
         ("not a skene file", lambda: skene.probe_version(b"PAR1\x00\x00\x00\x00")),
-        ("truncated file", lambda: skene.read_morsel(buf[:64])),
+        ("truncated file", lambda: skene.read_morsel(buf[:64], 0)),
         ("empty buffer", lambda: skene.read_metadata(b"")),
         ("corrupted footer", lambda: skene.read_metadata(buf[:-40] + b"\x00" * 40)),
     ]

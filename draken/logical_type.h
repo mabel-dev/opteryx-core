@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <string>
 
 #include "core/buffers.h"   // DrakenType, draken_type_fixed_itemsize
 
@@ -277,4 +278,105 @@ static inline int64_t us_to_ts(int64_t us, TimestampUnit unit) noexcept {
         case TimestampUnit::NANOSECONDS:  return us * 1000LL;
     }
     return us;
+}
+
+// ---------------------------------------------------------------------------
+// SQL display name for a physical tag refined by an optional descriptor.
+//
+// THE SINGLE SOURCE of that mapping (architect's ruling). It lives here, next to
+// LogicalType, because the descriptor is what makes the name: a DRAKEN_UINT32
+// carrying LogicalKind::IPV4 is an IPV4, and a DRAKEN_DECIMAL without its
+// precision and scale has no complete name at all. Opteryx's ColumnType
+// delegates to this rather than keeping a second copy — two tables of type names
+// either side of a module boundary is how one surface renders a column as
+// UINT32 while another renders the same column as IPV4.
+//
+// PERSISTENCE, NOT JUST DISPLAY. Opteryx writes this string into stored schemas,
+// so the output is a format and not a cosmetic choice. A TIMESTAMP stored at ms
+// and read back as the us default reads every value 1000x off, silently — which
+// is why the unit is emitted always rather than only when it is non-default.
+// Changing any string here changes what is written to storage.
+//
+// ARRAY returns the bare "ARRAY". The element type is a caller-side concept
+// (opteryx's ColumnType carries a nested ColumnType; a DrakenVector's child is a
+// separate vector), so the caller composes "ARRAY<element>" itself.
+inline const char* timestamp_unit_sql(TimestampUnit unit) noexcept {
+    switch (unit) {
+        case TimestampUnit::SECONDS:      return "s";
+        case TimestampUnit::MILLISECONDS: return "ms";
+        case TimestampUnit::MICROSECONDS: return "us";
+        case TimestampUnit::NANOSECONDS:  return "ns";
+    }
+    return "us";
+}
+
+// Primitive-field entry point, for callers that hold the descriptor's parts
+// rather than a LogicalType (the Cython shims read them off a nanobind handle).
+// `kind` NONE means "no descriptor".
+inline std::string type_display_name_parts(DrakenType physical, LogicalKind kind,
+                                           TimestampUnit unit, uint8_t precision,
+                                           uint8_t scale, uint32_t dimension) {
+    const bool has_desc = kind != LogicalKind::NONE;
+    switch (physical) {
+        case DRAKEN_DECIMAL:
+        case DRAKEN_DECIMAL128:
+            // A DECIMAL without a descriptor is an invalid column (the
+            // descriptor is mandatory for it), so the bare name is a
+            // diagnostic, never a value that should reach storage.
+            if (!has_desc) return "DECIMAL";
+            return "DECIMAL(" + std::to_string(static_cast<int>(precision))
+                 + ", " + std::to_string(static_cast<int>(scale)) + ")";
+        case DRAKEN_VECTOR_FP16:
+            if (!has_desc) return "VECTOR";
+            return "VECTOR(" + std::to_string(dimension) + ")";
+        case DRAKEN_TIMESTAMP64:
+            if (!has_desc) return "TIMESTAMP";
+            return std::string("TIMESTAMP[") + timestamp_unit_sql(unit) + "]";
+        case DRAKEN_TIME32:
+        case DRAKEN_TIME64:
+            if (!has_desc) return "TIME";
+            return std::string("TIME[") + timestamp_unit_sql(unit) + "]";
+        case DRAKEN_ARRAY:
+            return "ARRAY";
+        default:
+            break;
+    }
+    // Checked AFTER the parameterised tags and BEFORE the physical table: IPv4
+    // shares UINT32's tag, so a refined UINT32 must not fall through and name
+    // itself "UINT32", which would lose the descriptor on round-trip.
+    if (kind == LogicalKind::IPV4) return "IPV4";
+    switch (physical) {
+        case DRAKEN_INT8:      return "INT8";
+        case DRAKEN_INT16:     return "INT16";
+        case DRAKEN_INT32:     return "INT32";
+        case DRAKEN_INT64:     return "INT64";
+        case DRAKEN_UINT8:     return "UINT8";
+        case DRAKEN_UINT16:    return "UINT16";
+        case DRAKEN_UINT32:    return "UINT32";
+        case DRAKEN_UINT64:    return "UINT64";
+        case DRAKEN_FLOAT32:   return "FLOAT32";
+        case DRAKEN_FLOAT64:   return "FLOAT64";
+        // BOOL, not BOOLEAN — the canonical name matches the physical tag, as
+        // INT64 and FLOAT64 do. BOOLEAN is a dialect alias handled above this.
+        case DRAKEN_BOOL:      return "BOOL";
+        case DRAKEN_DATE32:    return "DATE";
+        case DRAKEN_INTERVAL:  return "INTERVAL";
+        case DRAKEN_VARCHAR:   return "VARCHAR";
+        case DRAKEN_NVARCHAR:  return "NVARCHAR";
+        case DRAKEN_VARBINARY: return "VARBINARY";
+        case DRAKEN_VARIANT:   return "VARIANT";
+        case DRAKEN_NULL:      return "NULL";
+        default:               return "";   // caller decides: unnamed is an error
+    }
+}
+
+// Descriptor-pointer entry point for C++ callers. nullptr == no descriptor.
+inline std::string type_display_name(DrakenType physical, const LogicalType* logical) {
+    if (logical == nullptr) {
+        return type_display_name_parts(physical, LogicalKind::NONE,
+                                      TimestampUnit::MICROSECONDS, 0, 0, 0);
+    }
+    return type_display_name_parts(physical, logical->kind, logical->unit,
+                                   logical->precision, logical->scale,
+                                   logical->dimension);
 }

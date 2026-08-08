@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "lz4.h"
 #include "zstd.h"
 
 namespace skene {
@@ -353,6 +354,79 @@ Status zstd_decode(const uint8_t* stored, uint64_t stored_bytes,
         char message[192];
         std::snprintf(message, sizeof(message),
                       "zstd section decodes to %zu bytes but the directory "
+                      "declares %llu", produced,
+                      static_cast<unsigned long long>(plain_bytes));
+        return fail(Code::kMalformed, message);
+    }
+    return Status::ok();
+}
+
+// ─── kLz4 ───────────────────────────────────────────────────────────────────
+
+bool lz4_encode(const void* plain, size_t plain_bytes, std::vector<uint8_t>* out) {
+    if (plain_bytes == 0) return false;
+    // LZ4's block API is int-sized throughout. A section past that ceiling is
+    // stored plain — the same answer as "not smaller", and for the same reason:
+    // there is no correct compressed form to emit, so there is nothing to lose
+    // by storing the bytes as they are.
+    if (plain_bytes > static_cast<size_t>(LZ4_MAX_INPUT_SIZE)) return false;
+
+    const int source_bytes = static_cast<int>(plain_bytes);
+    const int bound = LZ4_compressBound(source_bytes);
+    if (bound <= 0) return false;
+    out->resize(static_cast<size_t>(bound));
+    const int produced =
+        LZ4_compress_default(static_cast<const char*>(plain),
+                             reinterpret_cast<char*>(out->data()),
+                             source_bytes, bound);
+    if (produced <= 0 || static_cast<size_t>(produced) >= plain_bytes) {
+        out->clear();
+        return false;   // "not smaller" is a normal answer, not a failure
+    }
+    out->resize(static_cast<size_t>(produced));
+    return true;
+}
+
+Status lz4_decode(const uint8_t* stored, uint64_t stored_bytes,
+                  uint64_t plain_bytes, uint8_t* out) {
+    // Both lengths come from the section directory, which is file content and
+    // therefore untrusted. LZ4 takes them as `int`, so a value that does not fit
+    // would be truncated into a smaller — and plausible — size: the decoder
+    // would then write within a capacity it was never given. Reject rather than
+    // narrow.
+    if (stored_bytes > static_cast<uint64_t>(INT_MAX)
+            || plain_bytes > static_cast<uint64_t>(INT_MAX)) {
+        char message[192];
+        std::snprintf(message, sizeof(message),
+                      "lz4 section declares %llu stored / %llu plain bytes, past "
+                      "the codec's 2GB block ceiling",
+                      static_cast<unsigned long long>(stored_bytes),
+                      static_cast<unsigned long long>(plain_bytes));
+        return fail(Code::kMalformed, message);
+    }
+    // An LZ4 block never decodes to nothing: the writer only emits this encoding
+    // for a body it compressed, and a zero-length one was never a candidate.
+    if (plain_bytes == 0)
+        return fail(Code::kMalformed, "lz4 section declares zero plain bytes");
+
+    const int produced =
+        LZ4_decompress_safe(reinterpret_cast<const char*>(stored),
+                            reinterpret_cast<char*>(out),
+                            static_cast<int>(stored_bytes),
+                            static_cast<int>(plain_bytes));
+    if (produced < 0) {
+        char message[192];
+        std::snprintf(message, sizeof(message),
+                      "lz4 section failed to decode (error %d)", produced);
+        return fail(Code::kMalformed, message);
+    }
+    // A block that decodes SHORT is as wrong as one that overruns: the
+    // directory decides the section's shape, and the tail of the destination
+    // buffer would otherwise keep whatever was there before.
+    if (static_cast<uint64_t>(produced) != plain_bytes) {
+        char message[192];
+        std::snprintf(message, sizeof(message),
+                      "lz4 section decodes to %d bytes but the directory "
                       "declares %llu", produced,
                       static_cast<unsigned long long>(plain_bytes));
         return fail(Code::kMalformed, message);

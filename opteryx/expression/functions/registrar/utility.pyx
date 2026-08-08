@@ -326,8 +326,27 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             "HUMANIZE",
             other_functions.humanize,
             _CT_VARCHAR,
-            (ParameterSpec(name="val", type_family="numeric"),),
-            cost=775947.17,
+            # `mode` names the scale system to render into — a CLOSED set
+            # ('words' | 'compact' | 'bytes' | 'si' | 'time' | 'clock' |
+            # 'percent' | 'odds'), consumed at bind time into the kernel's
+            # binary_op_ctx.op_code and never pushed as an operand. The
+            # authoritative spelling table is _HUMANIZE_MODES in
+            # compiled_expression.pyx, which is also what rejects an unknown
+            # mode — at PLAN time, before a row is touched.
+            (
+                ParameterSpec(name="val", type_family="numeric"),
+                ParameterSpec(
+                    name="mode",
+                    type_family="string",
+                    optional=True,
+                    constant_only=True,
+                    documentation=(
+                        "Scale system to render into: 'words' (default), 'compact', "
+                        "'bytes', 'si', 'time', 'clock', 'percent' or 'odds'."
+                    ),
+                ),
+            ),
+            cost=111871.70,
             summary="Format number in human-readable form.",
         ),
         FunctionDefinition(

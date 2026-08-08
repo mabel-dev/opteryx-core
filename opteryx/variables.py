@@ -53,9 +53,12 @@ from opteryx.compiled.platform import cgroup_memory_limit_bytes
 from opteryx.compiled.platform import cpu_count as _cpu_count
 from opteryx.compiled.platform import physical_memory_total_bytes
 from opteryx.compiled.simd_probe import cpu_architecture
+from opteryx.compiled.agg_budgets import array_agg_budget_bytes as _array_agg_budget_bytes
+from opteryx.compiled.agg_budgets import cidr_agg_emit_budget_bytes as _cidr_agg_emit_budget_bytes
+from opteryx.compiled.agg_budgets import cidr_agg_state_budget_bytes as _cidr_agg_state_budget_bytes
+from opteryx.compiled.agg_budgets import median_budget_bytes as _median_budget_bytes
 from opteryx.exceptions import PermissionsError, VariableNotFoundError
 from opteryx.types.logical_type import BOOLEAN, FLOAT64, INT64, VARCHAR, ARRAY, VARIANT
-
 
 class VariableOwner(int, Enum):
     # Manually assign numbers because USER < INTERNAL < SERVER
@@ -124,8 +127,8 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "access_policies": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.RESTRICTED),
     # Detected from the CPU at import; there is no env var and no SET for these.
     "architecture": (ARRAY(VARIANT), cpu_architecture(), VariableOwner.INTERNAL, Visibility.RESTRICTED),
-    # UNRESTRICTED: already public via `SELECT VERSION()`, so hiding it from
-    # SHOW VARIABLES would conceal nothing while making the two surfaces disagree.
+    # UNRESTRICTED: `SELECT @@version` is THE way to read the version, so hiding it
+    # from SHOW VARIABLES would conceal nothing while making the two surfaces disagree.
     "version": (VARCHAR, __version__, VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
 
     # ── USER — settable per session with `SET` ──────────────────────────────────
@@ -157,6 +160,12 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
         VariableOwner.SERVER, Visibility.RESTRICTED),
     "parquet_late_materialization_max_selectivity": (
         FLOAT64, config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY,
+        VariableOwner.SERVER, Visibility.RESTRICTED),
+    "skene_late_materialization_max_selectivity": (
+        FLOAT64, config.SKENE_LATE_MATERIALIZATION_MAX_SELECTIVITY,
+        VariableOwner.SERVER, Visibility.RESTRICTED),
+    "skene_late_materialization_min_deferred_columns": (
+        INT64, config.SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS,
         VariableOwner.SERVER, Visibility.RESTRICTED),
 
     # ── USER + RESTRICTED — deployment-shaped, but deliberately SETTABLE for tuning.
@@ -256,7 +265,6 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # RESTRICTED because it is documented **DANGEROUS** (most queries fail with it on).
     "disable_optimizer": (BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.SERVER, Visibility.RESTRICTED),
     # Deployment shape: where the caches live, which project.
-    "array_agg_max_values_per_group": (INT64, config.ARRAY_AGG_MAX_VALUES_PER_GROUP, VariableOwner.SERVER, Visibility.UNRESTRICTED),
     "max_consecutive_cache_failures": (INT64, config.MAX_CONSECUTIVE_CACHE_FAILURES, VariableOwner.SERVER, Visibility.RESTRICTED),
     "local_store_root": (VARCHAR, config.LOCAL_STORE_ROOT, VariableOwner.SERVER, Visibility.RESTRICTED),
     "manifest_cache_path": (VARCHAR, config.MANIFEST_CACHE_PATH, VariableOwner.SERVER, Visibility.RESTRICTED),
@@ -304,6 +312,37 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # above: this is the host's count, not the cgroup's CPU quota, so it is not
     # the parallelism budget. `max_execution_workers` is that.
     "cpu_count": (INT64, _cpu_count(), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # The buffering ("holistic") aggregates' memory ceilings. These are here to be
+    # COMMUNICATED, not changed: MEDIAN and ARRAY_AGG retain every input value
+    # until finalize, and each fails loud on its own global byte budget. Without a
+    # row here, an author who hits that failure has no way to learn where the line
+    # was, and no way to see it BEFORE hitting it — which is what this table exists
+    # to prevent (see the module docstring).
+    #
+    # UNRESTRICTED, unlike the host facts above: this is a limit on the CALLER'S OWN
+    # QUERY, so it is exactly the kind of thing an ordinary user needs to see.
+    # SERVER-owned, so nobody can `SET` it — the budget is a compile-time constant
+    # in the native sinks, and a session that appeared to change it would be lying.
+    #
+    # Deliberately NOT seeded from `config`, breaking this table's usual pattern:
+    # config defaults are default-or-env, and reading these from config would imply
+    # an environment override that does not exist. They come from the native
+    # constants themselves (engine/agg_budgets.hpp) so the reported figure and the
+    # enforced figure cannot drift apart.
+    #
+    # These REPLACE `array_agg_max_values_per_group`, which reported a per-group
+    # ELEMENT cap that no longer exists (it bounded nothing — the group count is
+    # unbounded — while refusing ordinary group sizes).
+    "median_memory_budget_bytes": (INT64, _median_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "array_agg_memory_budget_bytes": (INT64, _array_agg_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    # CIDR_AGG reports TWO, because it has two independent ceilings and telling an
+    # author only one of them would misdescribe which limit they hit. The state
+    # budget bounds the address sets, which dedup and so grow with DISTINCT
+    # addresses; the emit budget bounds the CIDR text, whose size does not follow
+    # from the state's at all — the worst-case output is 2^31 blocks from a state
+    # sitting at exactly the state ceiling.
+    "cidr_agg_state_budget_bytes": (INT64, _cidr_agg_state_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "cidr_agg_emit_budget_bytes": (INT64, _cidr_agg_emit_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
 }
 # fmt: on
 
@@ -395,7 +434,20 @@ class SystemVariablesContainer:
         from opteryx.types.schema import ConstantColumn
 
         # system variables aren't stored with the @@
-        variable = self._variables[key[2:]] if key.startswith("@@") else self._variables.get(key)
+        #
+        # Both branches LOOK the name up rather than subscripting it: the `@@` branch
+        # used to index directly, so an unknown system variable escaped as a bare
+        # `KeyError('version')` — untyped, and naming the stripped key rather than
+        # what the user wrote — while the `@x` branch next to it raised
+        # VariableNotFoundError. One read path, one error.
+        #
+        # No "did you mean" suggestion here, unlike the SET path. Suggestions are an
+        # existence oracle, and this container holds RESTRICTED variables whose whole
+        # point is that a non-admin cannot learn whether they exist (see the
+        # PermissionsError below). A typo'd `@@local_store_rot` must not be answered
+        # with the name of a variable the caller is not allowed to read.
+        name = key[2:] if key.startswith("@@") else key
+        variable = self._variables.get(name)
         if not variable:
             raise VariableNotFoundError(key)
         if variable[3] == Visibility.RESTRICTED and not self._caller_is_platform_admin():

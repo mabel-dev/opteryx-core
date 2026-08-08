@@ -120,7 +120,7 @@ HAND_SET: Dict[str, str] = {
     # carries `row_limit`: it claims each morsel's share under the Source's global
     # mutex, truncates the morsel that crosses the boundary, and caps the submit
     # frontier from the footer's per-row-group row counts so row groups that cannot
-    # contribute are never decoded (LIMIT 5 over tpch_1.lineitem: 96 row groups →
+    # contribute are never decoded (LIMIT 5 over tpch_10.lineitem: 15 row groups →
     # 1). The scan MUST enforce this itself — LimitPushdownStrategy removes the
     # Limit node from the plan when it pushes. See test_pushed_limit_now_native.)
     # (R3 `fused_topn` is RETIRED — no longer reachable, so it has no hand-set entry.

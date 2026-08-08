@@ -196,7 +196,6 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "CONNECTION_ID",
                 "DATABASE",
                 "USER",
-                "VERSION",
                 "GREATEST",
                 "LEAST",
                 "GET_STRING",

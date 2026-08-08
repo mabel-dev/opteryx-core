@@ -30,7 +30,7 @@ static std::vector<uint8_t> round_trip(const CxxMorsel& in, CxxMorsel* out,
         ++skene_test::g_failures;
         return bytes;
     }
-    Status read = read_morsel(bytes.data(), bytes.size(), options, out);
+    Status read = read_morsel(bytes.data(), bytes.size(), 0, options, out);
     if (!read.is_ok()) {
         std::fprintf(stderr, "  read failed: %s\n", read.message().c_str());
         ++skene_test::g_failures;
@@ -183,8 +183,8 @@ static void test_interval_value_ordering_engages() {
     std::vector<uint8_t> bytes;
     CHECK(write_morsel(in, WriteOptions::for_storage(), &bytes).is_ok());
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK_EQ(static_cast<int>(meta.columns[0].value_order),
              static_cast<int>(ValueOrder::kAscending));
     CHECK(meta.columns[0].has_statistics);
@@ -193,7 +193,7 @@ static void test_interval_value_ordering_engages() {
     CHECK(meta.columns[0].statistics.min_ordinal < meta.columns[0].statistics.max_ordinal);
 
     CxxMorsel out;
-    CHECK(read_morsel(bytes.data(), bytes.size(), &out).is_ok());
+    CHECK(read_morsel(bytes.data(), bytes.size(), 0, &out).is_ok());
     const DrakenVector& v = out.columns[0].view;
     CHECK_EQ(v.data_length, uint32_t{4});  // deduplicated to the distinct count
     const DrakenIntervalSlot* got = static_cast<const DrakenIntervalSlot*>(v.data);
@@ -449,7 +449,7 @@ static void test_ipv4_survives_typed_and_renders() {
     {
         std::vector<uint8_t> bytes;
         CHECK(write_morsel(in, WriteOptions::for_spill(), &bytes).is_ok());
-        CHECK(read_morsel(bytes.data(), bytes.size(), &again).is_ok());
+        CHECK(read_morsel(bytes.data(), bytes.size(), 0, &again).is_ok());
     }
     CHECK(again.columns[0].own->logical_type == owner->logical_type);
 
@@ -632,7 +632,7 @@ static void test_column_selection() {
     ReadOptions options;
     options.columns = {"c", "a"};  // order follows the REQUEST, not the file
     CxxMorsel out;
-    CHECK(read_morsel(bytes.data(), bytes.size(), options, &out).is_ok());
+    CHECK(read_morsel(bytes.data(), bytes.size(), 0, options, &out).is_ok());
 
     CHECK_EQ(out.num_columns(), size_t{2});
     CHECK(out.names[0] == "c");
@@ -645,7 +645,7 @@ static void test_column_selection() {
     ReadOptions missing;
     missing.columns = {"nope"};
     CxxMorsel ignored;
-    CHECK(!read_morsel(bytes.data(), bytes.size(), missing, &ignored).is_ok());
+    CHECK(!read_morsel(bytes.data(), bytes.size(), 0, missing, &ignored).is_ok());
 }
 
 static void test_metadata_and_column_extent() {
@@ -657,9 +657,9 @@ static void test_metadata_and_column_extent() {
     std::vector<uint8_t> bytes;
     CHECK(write_morsel(in, WriteOptions::for_spill(), &bytes).is_ok());
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
-    CHECK_EQ(meta.version, uint16_t{1});
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
+
     CHECK_EQ(meta.row_count, uint64_t{3});
     CHECK_EQ(meta.columns.size(), size_t{2});
     CHECK(meta.columns[1].name == "b");
@@ -715,7 +715,7 @@ static void test_file_on_disk_round_trips() {
     CHECK_EQ(std::memcmp(loaded.data(), bytes.data(), bytes.size()), 0);
 
     CxxMorsel out;
-    CHECK(read_morsel(loaded.data(), loaded.size(), &out).is_ok());
+    CHECK(read_morsel(loaded.data(), loaded.size(), 0, &out).is_ok());
     CHECK_EQ(out.num_columns(), size_t{2});
     check_values(out.columns[0].view, std::vector<int64_t>{3, 1, 2});
 

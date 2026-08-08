@@ -14,6 +14,8 @@
 #include <cstring>
 #include <limits>
 
+#include "engine/agg_budgets.hpp"   // kMedianBytes — shared with variables.py's report
+
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #  include <arm_neon.h>
 #  define UA_NEON 1
@@ -290,7 +292,7 @@ struct CountState {
 // against a single instance; the legacy Cython spec-carrier modules never
 // append.
 // ---------------------------------------------------------------------------
-constexpr int64_t kMedianBudgetBytes = 512LL * 1024 * 1024;   // 512MB
+constexpr int64_t kMedianBudgetBytes = opteryx::agg_budgets::kMedianBytes;   // 512MB
 
 inline std::atomic<int64_t>& median_budget_used() noexcept {
     static std::atomic<int64_t> used{0};

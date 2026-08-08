@@ -33,7 +33,6 @@ def get_builtin_constant_functions() -> List:
             summary="Current timestamp.",
         ),
         _make("UTC_TIMESTAMP", _CT_TIMESTAMP(), summary="Current UTC timestamp."),
-        _make("VERSION", _CT_VARCHAR, summary="Database version string."),
         _make("CONNECTION_ID", _CT_INT64, summary="Current connection identifier."),
         _make("DATABASE", _CT_VARCHAR, summary="Current database name."),
         _make("USER", _CT_VARCHAR, summary="Current user name."),
@@ -51,10 +50,6 @@ def fixed_value_function(function, context):
 
     Used by the planner to fold constant function calls at planning time.
     """
-    if function in ("VERSION",):
-        import opteryx
-
-        return VARCHAR, opteryx.__version__
     if function in ("NOW", "UTC_TIMESTAMP"):
         return TIMESTAMP(), context.execution_context.connected_at
     if function in ("CURRENT_TIME",):

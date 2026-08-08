@@ -180,7 +180,7 @@ static Result measure(Case& c, int repeats) {
 
     r.skene_read_ms = best_of(repeats, [&] {
         CxxMorsel out;
-        Status st = read_morsel(skene_bytes.data(), skene_bytes.size(), &out);
+        Status st = read_morsel(skene_bytes.data(), skene_bytes.size(), 0, &out);
         if (!st.is_ok()) { std::fprintf(stderr, "skene read: %s\n", st.message().c_str()); std::exit(1); }
     });
 

@@ -56,7 +56,11 @@ def skene_dataset():
             values = vector_from_sequence([r[1] for r in rows], DrakenType.INT64)
             morsel = Morsel.from_vectors(["name", "value"], [names, values])
             with open(os.path.join(folder, f"part-{i}.skene"), "wb") as f:
-                f.write(skene.write_morsel(morsel, read_acceleration=True, zstd_level=1))
+                f.write(
+                    skene.write_morsel(
+                        morsel, read_acceleration=True, codec="zstd", zstd_level=1
+                    )
+                )
         yield folder
 
 
@@ -79,6 +83,53 @@ def test_dataset_scan(session, dataset_fixture, request):
 
     result = _run(session, f"SELECT name FROM '{folder}' LIMIT 3")
     assert sum(len(v) for v in result.values()) == 3, result
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"codec": "none"},
+        {"codec": "lz4"},
+        {"codec": "zstd", "zstd_level": 9},
+    ],
+)
+def test_every_section_codec_scans_natively(session, tmp_path, options):
+    """The engine's scan decodes sections in `opteryx.operators._operators`,
+    which compiles its OWN copy of skene's reader — a separate build from the
+    `skene_native` extension the C++ suite and the bindings exercise. A codec
+    wired into one and not the other reads as a missing symbol or a decode
+    failure only when a file using it reaches a query, so each one is scanned
+    here for real rather than assumed to follow from the round-trip tests.
+
+    Enough distinct text to clear the writer's 10240-byte compression floor;
+    below it every codec declines and the test would pass without decoding a
+    single compressed section."""
+    import skene
+    from draken.draken_native import DrakenType
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    rows = 4000
+    names = vector_from_sequence(
+        [f"row-{i % 97}-with-enough-text-to-compress" for i in range(rows)],
+        DrakenType.VARCHAR,
+    )
+    values = vector_from_sequence([i for i in range(rows)], DrakenType.INT64)
+    morsel = Morsel.from_vectors(["name", "value"], [names, values])
+    (tmp_path / "part.skene").write_bytes(
+        skene.write_morsel(morsel, read_acceleration=True, **options)
+    )
+
+    result = _run(session, f"SELECT COUNT(*) FROM '{tmp_path}'")
+    assert list(result.values()) == [[rows]], result
+
+    result = _run(session, f"SELECT SUM(value) FROM '{tmp_path}'")
+    assert list(result.values()) == [[rows * (rows - 1) // 2]], result
+
+    # A string column reaches the arena and slot sections, which are the ones
+    # the writer's kind gate actually offers to a codec.
+    result = _run(session, f"SELECT name FROM '{tmp_path}' WHERE value = 5")
+    assert result["name"] == ["row-5-with-enough-text-to-compress"], result
 
 
 def test_skene_pruning_notEq_shared_prefix_strings(session, tmp_path):

@@ -370,10 +370,10 @@
         "overload_id": "HUMANIZE_default",
         "kernel": "humanize",
         "current_cost": 775947.17,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "TypeError: must be real number, not str"
+        "cost_us_per_million": 111871.697,
+        "ns_per_row": 111.8717,
+        "success": true,
+        "error": null
       }
     ],
     "IFNOTNULL": [
@@ -1060,18 +1060,6 @@
       {
         "function_name": "UTC_TIMESTAMP",
         "overload_id": "UTC_TIMESTAMP_default",
-        "kernel": "lambda",
-        "current_cost": 1.0,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
-      }
-    ],
-    "VERSION": [
-      {
-        "function_name": "VERSION",
-        "overload_id": "VERSION_default",
         "kernel": "lambda",
         "current_cost": 1.0,
         "cost_us_per_million": null,

@@ -355,6 +355,128 @@ static void test_code_decode_every_width_and_tail() {
     }
 }
 
+// ─── General-purpose codecs ─────────────────────────────────────────────────
+//
+// zstd and lz4 answer the same contract as every other encoding here: decoding
+// reproduces the plain bytes exactly, and "not smaller" is a normal answer
+// rather than a failure. LZ4 gets the closer look because its block format
+// carries no length of its own — the section directory's `plain_bytes` is the
+// only thing bounding the decode, and that value is file content.
+
+static std::vector<uint8_t> redundant_bytes(size_t count) {
+    std::vector<uint8_t> data(count);
+    for (size_t i = 0; i < count; ++i)
+        data[i] = static_cast<uint8_t>("skene section body "[i % 19]);
+    return data;
+}
+
+static std::vector<uint8_t> incompressible_bytes(size_t count) {
+    std::vector<uint8_t> data(count);
+    uint64_t state = 88172645463325252ull;
+    for (size_t i = 0; i < count; ++i) {
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        data[i] = static_cast<uint8_t>(state);
+    }
+    return data;
+}
+
+static void test_lz4_round_trips() {
+    // Sizes chosen around the block boundaries a compressor tends to get wrong:
+    // a single byte, an exact power of two, and one either side of it.
+    for (size_t count : {size_t{1}, size_t{2}, size_t{63}, size_t{64}, size_t{65},
+                         size_t{4095}, size_t{4096}, size_t{100000}}) {
+        const auto plain = redundant_bytes(count);
+        std::vector<uint8_t> packed;
+        if (!lz4_encode(plain.data(), plain.size(), &packed))
+            continue;  // encoder declined (not smaller) — nothing to decode
+        std::vector<uint8_t> back(count, 0xAB);
+        CHECK(lz4_decode(packed.data(), packed.size(), count, back.data()).is_ok());
+        CHECK_EQ(std::memcmp(back.data(), plain.data(), count), 0);
+    }
+}
+
+static void test_lz4_declines_when_not_smaller() {
+    // Random bytes cannot be compressed, so the encoder must say so rather than
+    // emit a body larger than the plain one.
+    const auto noise = incompressible_bytes(8192);
+    std::vector<uint8_t> packed;
+    ++skene_test::g_checks;
+    if (lz4_encode(noise.data(), noise.size(), &packed))
+        skene_test::report(__FILE__, __LINE__, "lz4 compressed random bytes",
+                           std::to_string(noise.size()) + " -> " +
+                           std::to_string(packed.size()));
+
+    // And an empty body is never a candidate at all.
+    CHECK(!lz4_encode(noise.data(), 0, &packed));
+}
+
+static void test_lz4_rejects_corrupt_bodies() {
+    const auto plain = redundant_bytes(50000);
+    std::vector<uint8_t> packed;
+    CHECK(lz4_encode(plain.data(), plain.size(), &packed));
+
+    std::vector<uint8_t> back(plain.size(), 0);
+
+    // Truncated input: the safe decoder must refuse, not decode what it can.
+    CHECK(!lz4_decode(packed.data(), packed.size() / 2, plain.size(),
+                      back.data()).is_ok());
+
+    // A declared decoded size the body does not reach. The destination's tail
+    // would otherwise keep whatever was in it.
+    //
+    // The destination here is sized to the DECLARED length, not the real one.
+    // That is not defensiveness in the test — LZ4 is entitled to write anywhere
+    // inside the capacity it is given (its final copy is a 16-byte wildcopy), so
+    // a buffer smaller than the declared size is a genuine overrun. It is the
+    // reader's job never to declare more than it allocated, which is why
+    // lz4_decode's contract is `out` holds EXACTLY plain_bytes.
+    std::vector<uint8_t> oversized(plain.size() + 1024, 0);
+    CHECK(!lz4_decode(packed.data(), packed.size(), plain.size() + 1024,
+                      oversized.data()).is_ok());
+
+    // A declared decoded size SMALLER than the body produces: an overrun, which
+    // is the case the "safe" in LZ4_decompress_safe exists for.
+    CHECK(!lz4_decode(packed.data(), packed.size(), plain.size() / 2,
+                      back.data()).is_ok());
+
+    // Zero: the writer never emits an lz4 section for an empty body, so a file
+    // declaring one is malformed rather than trivially satisfied.
+    CHECK(!lz4_decode(packed.data(), packed.size(), 0, back.data()).is_ok());
+
+    // Both lengths are file content and reach LZ4 as `int`. A value that does
+    // not fit must be REJECTED, never narrowed: truncation would hand the
+    // decoder a small, plausible capacity it was never given. Checked before
+    // anything is written, so the tiny destination below is never touched.
+    const uint64_t past_int = uint64_t{1} << 40;
+    uint8_t scratch[8] = {0};
+    CHECK(!lz4_decode(packed.data(), packed.size(), past_int, scratch).is_ok());
+    CHECK(!lz4_decode(packed.data(), past_int, plain.size(), back.data()).is_ok());
+
+    // Bytes that are not a block at all.
+    auto rubbish = incompressible_bytes(packed.size());
+    CHECK(!lz4_decode(rubbish.data(), rubbish.size(), plain.size(),
+                      back.data()).is_ok());
+}
+
+static void test_zstd_round_trips_and_declines() {
+    // The sibling codec, held to the same two rules, so neither drifts alone.
+    const auto plain = redundant_bytes(50000);
+    std::vector<uint8_t> packed;
+    CHECK(zstd_encode(plain.data(), plain.size(), 3, &packed));
+    std::vector<uint8_t> back(plain.size(), 0xAB);
+    CHECK(zstd_decode(packed.data(), packed.size(), plain.size(),
+                      back.data()).is_ok());
+    CHECK_EQ(std::memcmp(back.data(), plain.data(), plain.size()), 0);
+
+    const auto noise = incompressible_bytes(8192);
+    std::vector<uint8_t> refused;
+    ++skene_test::g_checks;
+    if (zstd_encode(noise.data(), noise.size(), 3, &refused))
+        skene_test::report(__FILE__, __LINE__, "zstd compressed random bytes",
+                           std::to_string(noise.size()) + " -> " +
+                           std::to_string(refused.size()));
+}
+
 int main() {
     test_bits_required();
     test_bitpack_widths();
@@ -369,5 +491,9 @@ int main() {
     test_delta_type_eligibility();
     test_random_round_trips();
     test_code_decode_every_width_and_tail();
+    test_lz4_round_trips();
+    test_lz4_declines_when_not_smaller();
+    test_lz4_rejects_corrupt_bodies();
+    test_zstd_round_trips_and_declines();
     return skene_test::summary("test_encoding");
 }

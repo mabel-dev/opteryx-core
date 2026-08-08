@@ -1011,9 +1011,9 @@ def skene_extensions():
     draken.morsels.morsel's cxx_to_morsel / morsel_to_cxx (capsule import, no
     link-time draken symbols).
 
-    zstd is compiled in (same vendored copy as rugo — duplicate TUs across the
-    two .so are benign: zstd is stateless C, and each extension is
-    self-contained exactly like skene's own libskene.a).
+    zstd and lz4 are both compiled in (same vendored copies as rugo — duplicate
+    TUs across the two .so are benign: both codecs are stateless C, and each
+    extension is self-contained exactly like skene's own libskene.a).
     """
     return [
         Extension(
@@ -1038,6 +1038,12 @@ def skene_extensions():
                 ]
                 + get_zstd_vendor_sources()
                 + get_zstd_compress_sources()
+                # lz4.c stays .c while the vendored zstd sources are .cpp;
+                # setuptools picks the compiler per extension by suffix, so this
+                # one TU is built as C and the rest as C++. lz4.h wraps its
+                # declarations in extern "C", so skene's C++ callers link
+                # against it unchanged (Encoding::kLz4, skene/src/encoding.cpp).
+                + get_lz4_vendor_sources()
             ),
             include_dirs=(
                 include_dirs
@@ -1048,6 +1054,7 @@ def skene_extensions():
                     "third_party/zstd/common",
                     "third_party/zstd/decompress",
                     "third_party/zstd/compress",
+                    "third_party/lz4",              # lz4.h
                 ]
             ),
             depends=[

@@ -22,11 +22,11 @@ for the compiler) and still SERVES the zero-projection COUNT(*) shape, which
 needs the materialized path's genuine zero-column morsel. read_morsels() below
 is therefore the declining-shape path, not the main one.
 
-Scan operator for `.skene` datasets. One `.skene` file IS one row group:
-libskene's read_morsel reconstructs the whole file as a single draken Morsel
+Scan operator for `.skene` datasets. A `.skene` file holds one or more ROW
+GROUPS, and libskene reconstructs one row group at a time as a draken Morsel
 (zero copy across the boundary — the vectors in the emitted Morsel are the
-buffers skene rebuilt), so this reader is one morsel per file, streamed in
-manifest order.
+buffers skene rebuilt), so this reader is one morsel per ROW GROUP, streamed in
+manifest order and then row group order.
 
 Projection is pushed natively: skene's per-column contiguous extents mean an
 unprojected column's bytes are never interpreted (whole-file bytes are still
@@ -180,7 +180,7 @@ cdef class SkeneReadNode(ReaderNode):
         return cxx_to_morsel(sp)
 
     def read_morsels(self):
-        """One Morsel per .skene file, in manifest order."""
+        """One Morsel per ROW GROUP, in manifest order then row group order."""
         import skene as _skene
 
         filesystem = self._ensure_filesystem()
@@ -200,49 +200,62 @@ cdef class SkeneReadNode(ReaderNode):
             try:
                 data = file_obj.memoryview
 
-                if not physical_names:
-                    # An EMPTY projection is "this query reads no columns"
-                    # (COUNT(*)), not "a file with zero columns": emit a genuine
-                    # ZERO-COLUMN morsel whose row count rides on zero_col_rows
-                    # (select([])) — the contract CountStar reads. Reading one
-                    # real column bounds the work; the footer's row_count alone
-                    # cannot build a morsel.
-                    metadata = _skene.read_metadata(data)
-                    footer_columns = metadata["columns"]
-                    narrow = [footer_columns[0]["name"]] if footer_columns else None
-                    count_morsel = _skene.read_morsel(data, columns=narrow)
-                    result_morsel = count_morsel.select([])
+                # The FILE footer, once per file: cheap (no row group footer, no
+                # section directory) and it is what says how many row groups
+                # there are to iterate.
+                metadata = _skene.read_metadata(data)
+                row_group_count = len(metadata["row_groups"])
 
+                for row_group in range(row_group_count):
+                    if not physical_names:
+                        # An EMPTY projection is "this query reads no columns"
+                        # (COUNT(*)), not "a row group with zero columns": emit a
+                        # genuine ZERO-COLUMN morsel whose row count rides on
+                        # zero_col_rows (select([])) — the contract CountStar
+                        # reads. Reading one real column bounds the work; the
+                        # footer's row_count alone cannot build a morsel.
+                        footer_columns = metadata["columns"]
+                        narrow = [footer_columns[0]["name"]] if footer_columns else None
+                        count_morsel = _skene.read_morsel(data, row_group, columns=narrow)
+                        result_morsel = count_morsel.select([])
+
+                        self.readings["rows_read"] += result_morsel.num_rows
+
+                        yield result_morsel
+                        continue
+
+                    try:
+                        file_morsel = _skene.read_morsel(
+                            data, row_group, columns=physical_names
+                        )
+                    except _skene.SkeneError as err:
+                        # A missing column names a file that diverges from the
+                        # bind-time schema (resolved from the first file).
+                        raise DatasetReadError(
+                            f"skene scan '{path}' row group {row_group}: {err}"
+                        ) from err
+
+                    # The morsel is Cxx-backed and the engine runs on the Cxx
+                    # substrate — keep it there. Validate types and rename the
+                    # columns to their planner identities directly on the
+                    # CxxMorsel (we exclusively own this fresh instance), instead
+                    # of materializing PyObject wrappers and rebuilding via
+                    # from_vectors: that round-trip was pure boundary waste.
+                    result_morsel = self._rename_to_identities(
+                        <Morsel>file_morsel, identity_by_physical, path
+                    )
+
+                    self.readings["columns_read"] += len(physical_names)
                     self.readings["rows_read"] += result_morsel.num_rows
-                    self.readings["bytes_processed"] += len(data)
+
+                    if needs_select:
+                        result_morsel = result_morsel.select(projection_identities)
 
                     yield result_morsel
-                    continue
 
-                try:
-                    file_morsel = _skene.read_morsel(data, columns=physical_names)
-                except _skene.SkeneError as err:
-                    # A missing column names a file that diverges from the
-                    # bind-time schema (resolved from the first file).
-                    raise DatasetReadError(f"skene scan '{path}': {err}") from err
-
-                # The morsel is Cxx-backed and the engine runs on the Cxx
-                # substrate — keep it there. Validate types and rename the
-                # columns to their planner identities directly on the
-                # CxxMorsel (we exclusively own this fresh instance), instead
-                # of materializing PyObject wrappers and rebuilding via
-                # from_vectors: that round-trip was pure boundary waste.
-                result_morsel = self._rename_to_identities(
-                    <Morsel>file_morsel, identity_by_physical, path
-                )
-
-                self.readings["columns_read"] += len(physical_names)
-                self.readings["rows_read"] += result_morsel.num_rows
+                # Counted once per FILE, not once per row group: it is the bytes
+                # the scan is responsible for, and adding len(data) per row group
+                # would multiply it by the packing factor.
                 self.readings["bytes_processed"] += len(data)
-
-                if needs_select:
-                    result_morsel = result_morsel.select(projection_identities)
-
-                yield result_morsel
             finally:
                 file_obj.close()

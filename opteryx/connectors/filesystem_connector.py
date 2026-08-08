@@ -143,6 +143,16 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         them. Reader-side predicates return with the native skene scan source,
         which can filter during the scan without serializing it.
 
+        The two-pass late-materialization skene scan
+        (`compiler.py::_skene_latmat_scan_plan` /
+        native_skene_latmat_scan_source.hpp) does NOT change this answer and
+        deliberately does not route through here. It evaluates a predicate during
+        the scan, but for a different purpose: to avoid DECODING the projected
+        columns of rows that cannot be in the answer, not to save the Filter's
+        work. It reads the predicate off the Filter node above the scan and leaves
+        that Filter in the plan. The measurement this decline rests on is about
+        filter work on projection-narrow queries and is untouched by it.
+
         Anything else declines: a declined predicate stays behind as a Filter
         node — a missed optimization, never a dropped predicate.
         """
@@ -546,6 +556,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # Footer statistics per format. Formats without a footer (JSONL) take
         # the stats-absent path below (record_count=None — UNKNOWN, never 0).
         stats_by_name: Dict[str, tuple] = {}
+        # Row groups per file. A .skene file holds up to 16 of them and the scan's
+        # unit of work is the row group, so this is not derivable from the file
+        # count. Left empty for formats whose producer does not report it, which
+        # keeps FileEntry.row_group_count None — UNKNOWN, never a fabricated 1.
+        row_groups_by_name: Dict[str, int] = {}
         if dataset_fmt == SKENE:
             # Skene's footer carries an exact row_count and per-column min/max
             # ORDINALS (draken ordinalize dialect — format.h ColumnStatistics:
@@ -567,6 +582,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             #
             # read_metadata parses only the footer; the mmap'd open touches
             # footer pages, not the data region.
+            from opteryx.connectors.skene_io import (
+                skene_statistics_positions as _skene_statistics_positions,
+            )
             from skene import SkeneError
             from skene import read_metadata as _skene_read_metadata
 
@@ -581,20 +599,53 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     raise DataError(f"Cannot read skene file '{blob_name}': {err}") from err
                 finally:
                     file_obj.close()
+                row_groups = footer["row_groups"]
                 stats_by_name[blob_name] = (footer["row_count"], None)
+                row_groups_by_name[blob_name] = len(row_groups)
+
+                # FILE-level bounds are the UNION over the file's row groups.
+                #
+                # A .skene file holds up to 16 row groups, so a file-level bound
+                # is necessarily wider than any one row group's — that coarsening
+                # is expected and correct, not a regression to fight. It costs
+                # only the files a predicate can no longer prove empty; the row
+                # groups inside a surviving file are still eliminated, from the
+                # per-row-group statistics the file footer carries (which is why
+                # they are in the file footer at all). Measured across real
+                # ClickBench predicates, the number of row groups actually READ
+                # is identical at every packing level.
+                #
+                # A column is only bounded when EVERY row group bounds it: one
+                # row group that tracked nothing (all-null, say) means the file's
+                # bound is unknown, and a union over the rest would be a bound
+                # that excludes rows the file actually holds.
                 lower: Dict[int, int] = {}
                 upper: Dict[int, int] = {}
-                for column in footer["columns"]:
-                    statistics = column["statistics"]
-                    if statistics is None:
-                        continue
-                    if (statistics["flags"] & _KSTAT_MIN_MAX) != _KSTAT_MIN_MAX:
-                        continue
-                    position = position_by_name.get(column["name"])
+                # Depth-first over `columns`, ARRAY children included — the same
+                # order skene writes the statistics in.
+                positions = _skene_statistics_positions(footer["columns"], position_by_name)
+                for slot, position in enumerate(positions):
                     if position is None:
                         continue
-                    lower[position] = statistics["min_ordinal"]
-                    upper[position] = statistics["max_ordinal"]
+                    low = None
+                    high = None
+                    for row_group in row_groups:
+                        statistics = row_group["column_statistics"][slot]
+                        if statistics is None:
+                            low = None
+                            break
+                        if (statistics["flags"] & _KSTAT_MIN_MAX) != _KSTAT_MIN_MAX:
+                            low = None
+                            break
+                        if low is None:
+                            low, high = statistics["min_ordinal"], statistics["max_ordinal"]
+                        else:
+                            low = min(low, statistics["min_ordinal"])
+                            high = max(high, statistics["max_ordinal"])
+                    if low is None:
+                        continue
+                    lower[position] = low
+                    upper[position] = high
                 if lower:
                     skene_bounds[blob_name] = (lower, upper)
             if skene_bounds:
@@ -637,6 +688,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     file_path=blob_name,
                     file_format=dataset_fmt,
                     record_count=record_count,
+                    row_group_count=row_groups_by_name.get(blob_name),
                     file_size_in_bytes=sizes.get(blob_name, 0),
                     column_stats=column_stats,
                     lower_bounds=manifest_lower,

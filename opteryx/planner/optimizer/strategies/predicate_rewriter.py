@@ -36,7 +36,7 @@ CONCAT(x, y, z)                             → x || y || z (CONCAT to operators
 CONCAT_WS(x, y, z)                          → y || x || z (CONCAT_WS to operators)
 x = 'a' OR x = 'b' OR x = 'c'               → x IN ('a', 'b', 'c') (for ORed Equals conditions)
 a = ANY(z) OR b = ANY(z) OR c = ANY(z)      → (a, b, c) @> z
-addr <<= '10.0.0.0/8'                       → addr >= base AND addr <= broadcast (so it prunes)
+addr <<= '10.0.0.0/8'                       → addr BETWEEN base AND broadcast (so it prunes)
 addr <<= '1.2.3.4/32'                       → addr = 16909060 (a /32 is one host)
 
 #### IN THE PREDICATE ORDERING STRATEGY
@@ -46,6 +46,8 @@ a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 import math
 import re
 from typing import Callable, Dict
+
+from draken.draken_native import DrakenType as _DrakenType
 
 from opteryx.exceptions import NotSupportedError
 from opteryx.expression import ExpressionColumn, NodeType, format_expression
@@ -955,11 +957,51 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+def _unwrap_ipv4_retag(addr_node):
+    """Return the operand of a pure ``UINT32 -> IPV4`` CAST, or ``addr_node`` itself.
+
+    IPv4 is ``DrakenType.UINT32`` refined by a ``LogicalKind.IPV4`` descriptor — the
+    physical buffer is the same four bytes either way, every uint32 is a valid
+    address, and the two orderings are the same ordering. So in the VALUE context of
+    a comparison the cast is a pure retag: ``CAST(col, IPV4) >= n`` and ``col >= n``
+    select identical rows, and neither can fail where the other did not.
+
+    RedundantCastElimination does not fold it, correctly — ``ColumnType`` equality is
+    physical AND descriptor, and dropping the descriptor in an IDENTITY context would
+    render addresses as bare integers. Here nothing downstream reads the cast's
+    identity: the node is being replaced by a range on the raw column.
+
+    Stripping it is what lets the bounds reach the reader. Everything downstream of
+    this rewrite — PredicateCompaction's range merge, PredicatePushdown's
+    ``_normalize_col_op_lit`` (which refuses ANY condition containing a CAST) and the
+    connector's own ``can_push`` — keys on a bare IDENTIFIER. With the cast left on,
+    a CIDR predicate reached none of them and every row was read and materialised.
+
+    Deliberately narrow: only UINT32, only IPV4. An INT64-stored address is NOT
+    covered — that cast RAISES on a value outside [0, 2**32) rather than wrapping, so
+    stripping it would turn a query that errors into one that quietly returns rows.
+    """
+    if addr_node.node_type != NodeType.CAST:
+        return addr_node
+    if addr_node.value != "IPV4":
+        return addr_node
+
+    operand = addr_node.left
+    if operand is None:
+        return addr_node
+
+    operand_type = getattr(getattr(operand, "schema_column", None), "column_type", None)
+    if operand_type is None or operand_type.physical != _DrakenType.UINT32:
+        return addr_node
+
+    return operand
+
+
 def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
     """
     Rewrite IPv4 CIDR containment against a LITERAL network into a range.
 
-        addr <<= '10.0.0.0/8'   → addr >= 167772160 AND addr <= 184549375
+        addr <<= '10.0.0.0/8'   → addr BETWEEN 167772160 AND 184549375
         '10.0.0.0/8' >>= addr   → the same (the operands are order-agnostic)
         addr <<= '1.2.3.4/32'   → addr = 16909060
 
@@ -986,6 +1028,18 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
     WHERE discards both, and this strategy only ever visits Filter conditions
     (see PredicateRewriteStrategy.visit), so the distinction is unobservable. If
     this is ever reached from a projection, that stops being true.
+
+    The result is a BETWEEN, not an `AND` of two comparisons, and that is
+    load-bearing. This rewrite runs AFTER SplitConjunctivePredicates, so nothing
+    re-splits what it emits, and PredicatePushdown only ever COLLECTS a Filter
+    whose condition root is a comparison, a BETWEEN or a unary operator — an `AND`
+    root is left exactly where it sits, which for this query meant stranded above
+    a join, filtering a materialised 500k-row join result. An `AND` only ever
+    reached a scan because PredicateCompaction happened to fold it back into a
+    BETWEEN, and compaction requires a bare IDENTIFIER on the left — so the moment
+    the address was a CAST (the normal shape, see below) the whole chain silently
+    went away. Emitting the compacted form directly makes this rewrite carry its
+    own pushability instead of borrowing another strategy's.
     """
     if predicate.node_type != NodeType.COMPARISON_OPERATOR:
         return predicate
@@ -1028,6 +1082,13 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
 
     telemetry.optimization_predicate_rewriter_cidr_to_range += 1
 
+    # Only now that the CIDR has parsed and the rewrite is certain to happen:
+    # unwrap a pure UINT32->IPV4 retag off the address, so the bounds land on the
+    # raw stored column. Done HERE and not earlier because the decline paths above
+    # must hand the kernel back byte-for-byte what it was given — an optimisation
+    # does not get to change which queries fail.
+    addr_node = _unwrap_ipv4_retag(addr_node)
+
     # A /32 is a single host: one equality prunes better than two bounds.
     if prefix == 32:
         predicate.value = "Eq"
@@ -1035,25 +1096,15 @@ def rewrite_cidr_to_range(predicate, telemetry: QueryTelemetry):
         predicate.right = build_literal_node(int(base))
         return predicate
 
-    lower_pred = Node(
-        node_type=NodeType.COMPARISON_OPERATOR,
-        value="GtEq",
-        left=addr_node,
-        right=build_literal_node(int(base)),
-        schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
-    )
-    upper_pred = Node(
-        node_type=NodeType.COMPARISON_OPERATOR,
-        value="LtEq",
-        left=addr_node,
-        right=build_literal_node(int(upper)),
-        schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN),
-    )
-
-    predicate.node_type = NodeType.AND
-    predicate.value = "And"
-    predicate.left = lower_pred
-    predicate.right = upper_pred
+    # A network is a CLOSED interval, so both bounds are inclusive. This is the
+    # same node PredicateCompaction builds for a merged range (_build_range_node),
+    # which is what makes it pushable — see the docstring.
+    predicate.node_type = NodeType.BETWEEN
+    predicate.value = (True, True)
+    predicate.left = addr_node
+    predicate.right = build_literal_node(int(base))
+    predicate.centre = build_literal_node(int(upper))
+    predicate.schema_column = ExpressionColumn(name="", column_type=_lt.BOOLEAN)
     return predicate
 
 

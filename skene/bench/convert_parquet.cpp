@@ -423,10 +423,23 @@ int main(int argc, char** argv) {
     WriteOptions options;
     options.read_acceleration = true;
     options.writer_tag = "skene-convert";
-    // Per-section zstd, set from SKENE_ZSTD so the same converter measures both
-    // postures against identical input.
-    if (const char* level = std::getenv("SKENE_ZSTD"))
-        options.zstd_level = std::atoi(level);
+    // Per-section compression, set from the environment so the same converter
+    // measures every posture against identical input. SKENE_ZSTD carries a zstd
+    // level; SKENE_LZ4 selects lz4 instead. Setting both is a contradiction and
+    // is refused rather than resolved — a bake-off that silently measured a
+    // codec other than the one asked for would be worse than no measurement.
+    const char* zstd_level = std::getenv("SKENE_ZSTD");
+    const bool  want_lz4   = std::getenv("SKENE_LZ4") != nullptr;
+    if (zstd_level != nullptr && want_lz4) {
+        std::fprintf(stderr, "SKENE_ZSTD and SKENE_LZ4 are both set — pick one\n");
+        return 1;
+    }
+    if (zstd_level != nullptr) {
+        options.codec = SectionCodec::kZstd;
+        options.zstd_level = std::atoi(zstd_level);
+    } else if (want_lz4) {
+        options.codec = SectionCodec::kLz4;
+    }
 
     uint64_t total_rows = 0, total_skene = 0, total_skene_zstd = 0;
     double write_ms = 0, read_back_ms = 0, parquet_read_ms = 0;
@@ -476,7 +489,7 @@ int main(int argc, char** argv) {
         // checking now.
         const auto read_started = Clock::now();
         CxxMorsel verify;
-        st = read_morsel(bytes.data(), bytes.size(), &verify);
+        st = read_morsel(bytes.data(), bytes.size(), 0, &verify);
         read_back_ms += std::chrono::duration<double, std::milli>(
             Clock::now() - read_started).count();
         if (!st.is_ok()) {

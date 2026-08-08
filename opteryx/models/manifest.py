@@ -265,6 +265,21 @@ class Manifest:
         """Number of files in manifest."""
         return len(self.files)
 
+    def get_row_group_count(self) -> Optional[int]:
+        """Total row groups across all files, or None when it is UNKNOWN.
+
+        Same doctrine as get_record_count: one file that does not know makes the
+        whole total unknown, because a partial sum reported as a total is a wrong
+        number rather than an approximate one. Only producers that read file
+        footers populate it.
+        """
+        total = 0
+        for f in self.files:
+            if f.row_group_count is None:
+                return None
+            total += f.row_group_count
+        return total
+
     def get_total_size(self) -> int:
         """Total size in bytes across all files."""
         return sum(f.file_size_in_bytes for f in self.files)

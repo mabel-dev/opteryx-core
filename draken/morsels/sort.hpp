@@ -525,11 +525,30 @@ inline void sort_perm(const std::vector<SortKeyColumn>& keys, std::vector<uint32
     sort_perm_cmp(SortKeyCmp{keys}, perm, take_first);
 }
 
+// One level of an ARRAY column's element subtree: the element's physical type plus
+// its logical descriptor. A chain describes the whole subtree outermost-element
+// first — {VARCHAR} is ARRAY<VARCHAR>, {ARRAY, INT64} is ARRAY<ARRAY<INT64>> — so a
+// zero-row ARRAY column can be built with the child vector every ARRAY consumer
+// requires (vector_owner.h: child_owner is non-null for DRAKEN_ARRAY).
+struct EmptyColElem {
+    DrakenType         type;
+    const LogicalType* lt;
+};
+
 // Zero-row typed column — the courtesy empty-result morsel (schema visibility when a
-// query legitimately returns no rows). String-family columns get a canonical empty
-// DrakenStringArena header (buffers.h: a string vector's `data` points at the arena
-// STRUCT, even when empty).
-inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt) {
+// query legitimately returns no rows) and the plan-typed schema a join emits its
+// NULL half against. String-family columns get a canonical empty DrakenStringArena
+// header (buffers.h: a string vector's `data` points at the arena STRUCT, even when
+// empty); ARRAY columns get a one-entry offsets buffer and, when `elem` describes
+// the element subtree, a zero-row child vector.
+//
+// `elem` empty on an ARRAY leaves the column CHILDLESS, which is what the caller
+// gets when it cannot resolve the element type. That column is not well-formed and
+// every consumer that reaches for the child fails loud on its absence — it is never
+// silently treated as an empty array.
+inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt,
+                                const std::vector<EmptyColElem>& elem = {},
+                                size_t depth = 0) {
     void* data;
     if (draken_type_is_string_storage(t)) {
         auto* sa = static_cast<DrakenStringArena*>(draken_malloc(sizeof(DrakenStringArena)));
@@ -538,6 +557,12 @@ inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt) {
         sa->owns_buffers = 0; sa->type = t;
         sa->payloads_elided = 0;
         data = sa;
+    } else if (t == DRAKEN_ARRAY) {
+        // An ARRAY's `data` is int32 offsets[length+1] (vector_owner.h), so even a
+        // zero-row one owes its consumers offsets[0] == 0.
+        auto* offsets = static_cast<int32_t*>(draken_malloc(sizeof(int32_t)));
+        offsets[0] = 0;
+        data = offsets;
     } else {
         data = draken_malloc(1);
     }
@@ -554,6 +579,13 @@ inline CxxColumn make_empty_col(DrakenType t, const LogicalType* lt) {
     // TIMESTAMP64/DECIMAL column draken treats as a hard error the moment it's
     // re-encoded (e.g. a query with 0 rows still gets written out to Parquet).
     c.own->logical_type = lt;
+    if (t == DRAKEN_ARRAY && depth < elem.size()) {
+        CxxColumn child = make_empty_col(elem[depth].type, elem[depth].lt, elem, depth + 1);
+        // `child.own` was just built here (use_count() == 1), so its VectorOwner can
+        // be moved into sole ownership under this parent — same hand-off gather_rows
+        // makes for a gathered ARRAY child.
+        c.own->child_owner = std::make_unique<VectorOwner>(std::move(*child.own));
+    }
     c.view = c.own->vec;
     return c;
 }

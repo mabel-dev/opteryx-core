@@ -398,6 +398,18 @@ extensions = [
         sources=["opteryx/compiled/functions/timestamp.pyx"],
         extra_compile_args=C_FLAGS,
     ),
+    # Buffering aggregates' memory ceilings, for `SHOW VARIABLES` to report.
+    # Header-only and dependency-free ON PURPOSE: opteryx/variables.py needs these
+    # values and sits below the engine in the import graph, so it cannot reach
+    # them through opteryx.operators._operators without a circular import.
+    Extension(
+        "opteryx.compiled.agg_budgets",
+        sources=["opteryx/compiled/agg_budgets.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
     # Platform extension - exposes OS information without psutil dependency
     Extension(
         "opteryx.compiled.platform",
@@ -666,6 +678,14 @@ extensions = [
             "skene/src/bloom.cpp",
             "skene/src/file_io.cpp",
             "skene/src/writer.cpp",
+            # skene's kLz4 section codec. Compiled in rather than left undefined
+            # for the loader to satisfy from pool_reader.so: lz4 is stateless C
+            # with no cross-TU state, so a second copy is free of the split-state
+            # hazard, and an undefined symbol here would only surface when a
+            # scan first met an LZ4 section. Note it stays .c while the vendored
+            # zstd sources in this tree are .cpp — setuptools compiles it as C,
+            # and lz4.h's extern "C" makes that transparent to skene's C++.
+            "third_party/lz4/lz4.c",
             # NativeParquetScanSource submits work to a ParquetIOPipeline that
             # pool_reader.so constructed. io_pipeline.hpp is header-only, so this
             # extension gets its OWN inline copy of submit_row_group/decode_row_group
@@ -678,10 +698,11 @@ extensions = [
             "opteryx/operators/aggregate",
             "skene/include",   # skene/reader.h etc (NativeSkeneScanSource)
             "skene/src",       # skene's internal headers (reader_v1.h, encoding.h, ...)
-            "third_party/zstd",          # skene's per-section codec
+            "third_party/zstd",          # skene's per-section codecs
             "third_party/zstd/common",
             "third_party/zstd/decompress",
             "third_party/zstd/compress",
+            "third_party/lz4",           # lz4.h
         ]
         + _curl_include_dirs,
         # RUGO_ENABLE_HTTP must match opteryx.connectors.parquet_io.pool_reader.

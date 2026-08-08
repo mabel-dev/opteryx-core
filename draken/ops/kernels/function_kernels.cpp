@@ -1104,9 +1104,11 @@ VecResult fk_affix(void* ctx, const DrakenVector* const* args, uint32_t nargs,
     const DrakenVector* p = args[1];
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel_fmt("%s: string operands required", who);
-    if (ci && v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR)
-        return draken_error_sentinel_fmt(
-            "%s: case-insensitive needs VARCHAR or NVARCHAR (not VARBINARY)", who);
+    // VARBINARY is a legal case-insensitive subject: it folds ASCII, exactly as
+    // VARCHAR does — only NVARCHAR takes the Unicode codepoint fold. Refusing it
+    // here left ILIKE the odd one out of a family where LIKE, NOT LIKE, RLIKE and
+    // NOT RLIKE all accept a VARBINARY subject, and where VARBINARY is already a
+    // legal ILIKE *pattern*. See draken_like for the same lift.
     const bool ci_utf8 = ci && v->type == DRAKEN_NVARCHAR;
     const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
     const auto* psa = static_cast<const DrakenStringArena*>(p->data);
@@ -1213,10 +1215,9 @@ VecResult draken_contains(void* ctx, const DrakenVector* const* args, uint32_t n
     const DrakenVector* p = args[1];
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_contains: string operands required");
-    if (ci && v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR)
-        return draken_error_sentinel(
-            "draken_contains: case-insensitive contains needs VARCHAR or NVARCHAR "
-            "(not VARBINARY)");
+    // VARBINARY folds ASCII like VARCHAR — see draken_like for the ruling. This is
+    // the `ILIKE '%x%'` rewrite target, so it has to lift with it or the binder
+    // would accept a predicate the optimizer then rewrites into a refusal.
     const bool ci_utf8 = ci && v->type == DRAKEN_NVARCHAR;
 
     const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
@@ -1290,9 +1291,14 @@ VecResult draken_like(void* ctx, const DrakenVector* const* args, uint32_t nargs
     const DrakenVector* p = args[1];
     if (!fk_is_string(v->type) || !fk_is_string(p->type))
         return draken_error_sentinel("draken_like: string operands required");
-    if (ci && v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR)
-        return draken_error_sentinel(
-            "draken_like: ILIKE needs VARCHAR or NVARCHAR (not VARBINARY)");
+    // ILIKE accepts a VARBINARY subject. Case folding on VARBINARY is the SAME
+    // ASCII byte fold VARCHAR gets (draken_glob::like_match's `ci` flag); only
+    // NVARCHAR needs the Unicode codepoint fold, which is what ci_utf8 selects.
+    // Refusing VARBINARY made ILIKE the only member of the LIKE family that would
+    // not take a VARBINARY subject — LIKE, NOT LIKE, RLIKE and NOT RLIKE all do,
+    // and a VARBINARY *pattern* was already legal (`name ILIKE b'%a%'`) — so the
+    // rule was "bytes are text enough for wildcards and for regex, but not for
+    // case", which is not a rule anyone could infer.
     const bool ci_utf8 = ci && v->type == DRAKEN_NVARCHAR;
 
     const auto* vsa = static_cast<const DrakenStringArena*>(v->data);
@@ -1601,7 +1607,15 @@ VecResult draken_like_program(void* ctx, const DrakenVector* const* args, uint32
 //   • otherwise (any float) → promote both to double (decimals divided by
 //     10^scale) and compare — matches SQL's numeric-promotion semantics.
 // ctx = binary_op_ctx: op_code (1=Eq 2=NotEq 3=Lt 4=Gt 5=LtEq 6=GtEq),
-// left_scale, right_scale (0 for non-decimal). NULL operand → bit 0 (row dropped).
+// left_scale, right_scale (0 for non-decimal).
+//
+// NULLS: a null on either side makes the comparison UNKNOWN, which is a cleared
+// VALIDITY bit, not a definite false. Clearing only the data bit is enough for a
+// WHERE filter (which drops the row either way) but it is a silent wrong answer
+// for anything that reads the third value — `(a > b) IS NULL` answered FALSE for
+// every row. Result validity is the AND of both operands', matching the
+// contract draken_compare_dv's own paths obey (int64_compare.h): null row →
+// validity bit 0 AND data bit 0.
 inline bool fk_is_float_t(DrakenType t) {
     return t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64;
 }
@@ -1678,23 +1692,41 @@ VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_
 
     uint32_t n = L->length;
     size_t nb = (static_cast<size_t>(n) + 7) / 8;
-    auto* out = static_cast<uint8_t*>(draken_malloc(nb > 0 ? nb : 1));
+    const size_t nb_alloc = nb > 0 ? nb : 1;
+    auto* out = static_cast<uint8_t*>(draken_malloc(nb_alloc));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
-    std::memset(out, 0, nb > 0 ? nb : 1);
+    std::memset(out, 0, nb_alloc);
+    // UNKNOWN rows need a cleared validity bit, not just a cleared data bit.
+    // Allocated all-valid only when an operand can carry a null; bits are cleared
+    // in the compare loop below, so the mask is exact for either shape of operand.
+    uint8_t* validity = nullptr;
+    if (L->validity != nullptr || R->validity != nullptr) {
+        validity = static_cast<uint8_t*>(draken_malloc(nb_alloc));
+        if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
+        std::memset(validity, 0xFF, nb_alloc);
+        if ((n & 7u) != 0)
+            validity[nb - 1] = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+    }
 
     if (!any_float) {
         const int maxs = ls > rs ? ls : rs;
         const __int128 lmul = fk_pow10_i128(maxs - ls);
         const __int128 rmul = fk_pow10_i128(maxs - rs);
         for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) continue;
+            if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
             __int128 a = fk_read_dec(L, L->selection[i]) * lmul;
             __int128 b = fk_read_dec(R, R->selection[i]) * rmul;
             if (fk_cmp_i128(op, a, b)) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
     } else {
         for (uint32_t i = 0; i < n; ++i) {
-            if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) continue;
+            if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
             double a = fk_read_num_double(L, L->selection[i], ls);
             double b = fk_read_num_double(R, R->selection[i], rs);
             if (fk_cmp_dbl(op, a, b)) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
@@ -1702,7 +1734,7 @@ VecResult draken_numeric_cmp(void* ctx, const DrakenVector* const* args, uint32_
     }
     VecResult r{};
     r.data = out;
-    r.validity = nullptr;
+    r.validity = validity;
     r.selection = draken_identity_sel(n);
     r.owns_selection = false;
     r.data_length = n;
@@ -1736,8 +1768,11 @@ inline __int128 fk_temporal_to_ns(const DrakenVector* v, uint32_t phys,
 // leave a WHERE predicate wrong with no fallback on the native engine. The
 // compiler routes here ONLY when the two temporal operands differ in physical
 // type OR unit (a matched date/date or same-unit ts/ts pair stays on the fast
-// draken_compare_dv). Both sides promote to ns in __int128, then compare. Nulls
-// (either side) yield bit 0 — SQL 3-valued: a NULL operand drops the row.
+// draken_compare_dv). Both sides promote to ns in __int128, then compare.
+//
+// NULLS: same contract as draken_numeric_cmp above — a null on either side is
+// UNKNOWN, which is a cleared VALIDITY bit, not a definite false. Result
+// validity is the AND of both operands'.
 VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     if (nargs != 2)
         return draken_error_sentinel("draken_temporal_cmp: expected 2 arguments");
@@ -1755,19 +1790,31 @@ VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32
 
     uint32_t n = L->length;
     size_t nb = (static_cast<size_t>(n) + 7) / 8;
-    auto* out = static_cast<uint8_t*>(draken_malloc(nb > 0 ? nb : 1));
+    const size_t nb_alloc = nb > 0 ? nb : 1;
+    auto* out = static_cast<uint8_t*>(draken_malloc(nb_alloc));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
-    std::memset(out, 0, nb > 0 ? nb : 1);
+    std::memset(out, 0, nb_alloc);
+    uint8_t* validity = nullptr;
+    if (L->validity != nullptr || R->validity != nullptr) {
+        validity = static_cast<uint8_t*>(draken_malloc(nb_alloc));
+        if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
+        std::memset(validity, 0xFF, nb_alloc);
+        if ((n & 7u) != 0)
+            validity[nb - 1] = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+    }
 
     for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) continue;
+        if (!fk_row_valid(L, i) || !fk_row_valid(R, i)) {
+            validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+            continue;
+        }
         __int128 a = fk_temporal_to_ns(L, L->selection[i], c->left_unit);
         __int128 b = fk_temporal_to_ns(R, R->selection[i], c->right_unit);
         if (fk_cmp_i128(op, a, b)) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     }
     VecResult r{};
     r.data = out;
-    r.validity = nullptr;
+    r.validity = validity;
     r.selection = draken_identity_sel(n);
     r.owns_selection = false;
     r.data_length = n;
@@ -1777,9 +1824,15 @@ VecResult draken_temporal_cmp(void* ctx, const DrakenVector* const* args, uint32
     return r;
 }
 
-// col <> '' / col = '' lower to UNARY IsNotEmpty/IsEmpty. SQL 3-valued: a NULL
-// operand makes the predicate NULL → the filter drops it, so NULL → result bit 0
-// for BOTH (validity all-valid; the definite-false bit drops the row).
+// col <> '' / col = '' lower to UNARY IsNotEmpty/IsEmpty.
+//
+// NULLS: a null operand makes the predicate UNKNOWN, which is a cleared VALIDITY
+// bit — NOT a definite false with the validity left all-valid. That older
+// spelling was enough for the WHERE filter this lowering was built for (the row
+// is dropped either way) and wrong for everything that reads the third value:
+// `(s <> '') IS NULL` answered FALSE for every row. Same contract as
+// draken_numeric_cmp / draken_temporal_cmp above; one operand, so the result
+// validity is a copy of the input's.
 VecResult draken_string_empty(void* ctx, const DrakenVector* const* args, uint32_t nargs,
                               bool want_empty) {
     if (nargs != 1)
@@ -1790,17 +1843,29 @@ VecResult draken_string_empty(void* ctx, const DrakenVector* const* args, uint32
     const auto* sa = static_cast<const DrakenStringArena*>(v->data);
     uint32_t n = v->length;
     size_t nb = (static_cast<size_t>(n) + 7) / 8;
-    auto* out = static_cast<uint8_t*>(draken_malloc(nb > 0 ? nb : 1));
+    const size_t nb_alloc = nb > 0 ? nb : 1;
+    auto* out = static_cast<uint8_t*>(draken_malloc(nb_alloc));
     if (out == nullptr) return draken_error_sentinel("allocation failed");
-    std::memset(out, 0, nb > 0 ? nb : 1);
+    std::memset(out, 0, nb_alloc);
+    uint8_t* validity = nullptr;
+    if (v->validity != nullptr) {
+        validity = static_cast<uint8_t*>(draken_malloc(nb_alloc));
+        if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
+        std::memset(validity, 0xFF, nb_alloc);
+        if ((n & 7u) != 0)
+            validity[nb - 1] = static_cast<uint8_t>((1u << (n & 7u)) - 1u);
+    }
     for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i)) continue;   // NULL → bit 0 (dropped)
+        if (!fk_row_valid(v, i)) {
+            validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));   // NULL → UNKNOWN
+            continue;
+        }
         bool empty = str_length(&sa->slots[v->selection[i]]) == 0;
         if (empty == want_empty) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
     }
     VecResult r{};
     r.data = out;
-    r.validity = nullptr;
+    r.validity = validity;
     r.selection = draken_identity_sel(n);
     r.owns_selection = false;
     r.data_length = n;

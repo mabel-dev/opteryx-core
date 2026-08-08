@@ -108,8 +108,8 @@ int main(int argc, char** argv) {
 
     CxxMorsel target, probes;
     FileMetadata meta;
-    if (!read_morsel(target_bytes.data(), target_bytes.size(), &target).is_ok()) return 1;
-    if (!read_morsel(probe_bytes.data(), probe_bytes.size(), &probes).is_ok()) return 1;
+    if (!read_morsel(target_bytes.data(), target_bytes.size(), 0, &target).is_ok()) return 1;
+    if (!read_morsel(probe_bytes.data(), probe_bytes.size(), 0, &probes).is_ok()) return 1;
     if (!read_metadata(target_bytes.data(), target_bytes.size(), &meta).is_ok()) return 1;
 
     Bucket strings, numerics;

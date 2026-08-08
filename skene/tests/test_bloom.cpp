@@ -45,8 +45,8 @@ static void test_never_rejects_a_present_value() {
     auto in = morsel_of({{"n", dense_column<int64_t>(values, DRAKEN_INT64)}});
     auto bytes = write_or_die(in, with_bloom({"n"}));
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(!meta.columns[0].bloom.empty());
 
     // EVERY present value must probe positive. A single false negative would
@@ -70,8 +70,8 @@ static void test_rejects_most_absent_values() {
     auto in = morsel_of({{"even", dense_column<int64_t>(values, DRAKEN_INT64)}});
     auto bytes = write_or_die(in, with_bloom({"even"}));
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     // Odd values are all absent, so every acceptance is a false positive.
     //
@@ -105,8 +105,8 @@ static void test_strings() {
     auto in = morsel_of({{"name", string_column(values)}});
     auto bytes = write_or_die(in, with_bloom({"name"}));
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(!meta.columns[0].bloom.empty());
 
     // Content hashing, so inline and arena-backed slots behave identically —
@@ -139,8 +139,8 @@ static void test_only_requested_columns_get_filters() {
     });
     auto bytes = write_or_die(in, with_bloom({"b"}));
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta.columns[0].bloom.empty());    // not requested
     CHECK(!meta.columns[1].bloom.empty());
 
@@ -161,8 +161,8 @@ static void test_types_without_hashable_bytes_are_skipped() {
     });
     auto bytes = write_or_die(in, with_bloom({"arr", "b"}));
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta.columns[0].bloom.empty());
     CHECK(meta.columns[1].bloom.empty());
 }
@@ -176,8 +176,8 @@ static void test_filter_is_built_over_distinct_values() {
     auto in = morsel_of({{"code", dense_column<int64_t>(values, DRAKEN_INT64)}});
     auto bytes = write_or_die(in, with_bloom({"code"}));
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta.columns[0].value_order == ValueOrder::kAscending);
     CHECK_EQ(meta.columns[0].data_length, uint32_t{40});
     CHECK(meta.columns[0].bloom.size() < 1024);
@@ -197,8 +197,8 @@ static void test_corrupt_filter_is_rejected_not_answered() {
     auto in = morsel_of({{"n", dense_column<int64_t>(values, DRAKEN_INT64)}});
     auto bytes = write_or_die(in, with_bloom({"n"}));
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     const int64_t value = 5;
     bool may = false;

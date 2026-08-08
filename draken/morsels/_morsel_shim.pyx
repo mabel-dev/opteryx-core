@@ -572,7 +572,10 @@ cdef class Morsel:
 
         col_names = [name.decode('utf-8') if isinstance(name, bytes) else str(name)
                      for name in self._col_names]
-        col_types = [str(self._get_column(i).type.name) for i in range(nc)]
+        # `.type_name`, NOT `.type.name`: the latter is the PHYSICAL tag, so an
+        # IPv4 column rendered as "UINT32" and a DECIMAL(10,2) as bare "DECIMAL"
+        # — naming a different type than the column actually has.
+        col_types = [self._get_column(i).type_name for i in range(nc)]
 
         if nc == 0:
             return "Morsel{%d rows, 0 columns}" % nr

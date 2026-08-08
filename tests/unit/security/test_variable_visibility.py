@@ -266,7 +266,7 @@ def test_admin_can_read_restricted_variable_by_name():
 
 def test_unrestricted_variable_is_readable_by_name():
     # The gate must not over-withhold: `version` is UNRESTRICTED precisely because
-    # it is already public via `SELECT VERSION()`.
+    # `SELECT @@version` is the sanctioned way to read it.
     assert _select_variable("version") is not None
 
 

@@ -15,7 +15,7 @@ rejected) still stand and are not re-argued.
 |---|---|
 | Home | Separate repo `../skene`. **C++, no Python.** Folds into opteryx-core later. |
 | Dependencies | **skene imports draken.** skene and rugo are **parallel and disjoint** — neither imports the other. |
-| Row groups | One file = one row group. |
+| Row groups | **SUPERSEDED 2026-08-08: one file holds MANY row groups** — 16 per file at 262144 rows each. The original ruling (one file = one row group) is kept below where it is argued, with the measurement that overturned it. See §11.5.4. |
 | Versioning | Magic + mandatory version; reader handles **current and current-1**; anything else fails loud. |
 | Statistics | **No KMV, no histograms, no char-class counts.** Those are the catalog's, and dataset-level. The file carries the stats the catalog does *not* have — MIN/MAX. |
 | DECIMAL128 | **No min/max stats.** |
@@ -68,8 +68,14 @@ any format beyond Parquet/CSV/JSONL.
 
 - Portability. Nothing outside this tree reads `.skene`, and no foreign reader is
   promised.
-- Multiple row groups. Scale is by file count — which is what the job-results
-  manifest already does with `part_NNNN`.
+- ~~Multiple row groups. Scale is by file count — which is what the job-results
+  manifest already does with `part_NNNN`.~~ **Reversed 2026-08-08.** Scaling by
+  file count alone made a ClickBench mirror 396 objects against Parquet's 99 for
+  the same data: ~0.1ms of fixed per-file cost locally is ~40ms of a full scan
+  before a byte is read, and remotely each of those is a GET rather than a
+  syscall. A file now holds 16 row groups. What made this safe rather than a
+  parallelism regression is that the SCAN's unit of work became
+  `(file, row group)` at the same time — see §11.5.4.
 - Random *row* access. Column-granular, not row-granular.
 
 ---
@@ -78,28 +84,42 @@ any format beyond Parquet/CSV/JSONL.
 
 ```
  ┌──────────────────────────────────────────────┐
- │ HEAD   magic "SKEN" │ version u16 │ rsv u16   │  8 bytes
+ │ HEAD   magic "SKEN" │ version u16 │ …         │  16 bytes
+ ├══════════════════════════════════════════════┤
+ │ ROW GROUP 0                                  │
+ │   DATA region                                │
+ │     column 0 : all its sections, contiguous  │  ← one range GET per column
+ │     column 1 : all its sections, contiguous  │
+ │   INDEX region (blooms, zone maps)           │  ← adjacent to the RG footer,
+ │   ROW GROUP FOOTER                           │     so one GET takes both
+ │     column directory + section directory     │
  ├──────────────────────────────────────────────┤
- │ DATA region                                  │
- │   column 0 : all its sections, contiguous    │  ← one range GET per column
- │   column 1 : all its sections, contiguous    │
- ├──────────────────────────────────────────────┤
- │ INDEX region  (permutations, future filters) │  ← adjacent to the footer, so
- ├──────────────────────────────────────────────┤     one GET fetches footer +
- │ FOOTER  column directory + section directory │     every index
+ │ ROW GROUP 1 …                                │  16 per file
+ ├══════════════════════════════════════════════┤
+ │ FILE FOOTER  magic "SKNI" │ schema           │  ← the whole pruning surface,
+ │   row group directory                        │     and the ONLY thing a
+ │   per-row-group statistics                   │     pruning reader fetches
  ├──────────────────────────────────────────────┤
  │ TAIL   footer_len u32 │ footer_xxh3 u64      │
  │        version u16 │ rsv u16 │ magic "SKEN"  │  24 bytes, fixed
  └──────────────────────────────────────────────┘
 ```
 
+The FILE footer deliberately holds **no section directory**. That is what keeps
+it small enough to always fetch: the expensive metadata — a column directory is
+28KB on a 105-column schema — stays behind the row group footers and is paid for
+only by the row groups that survive pruning.
+
 Magic at both ends, as Parquet does: the head magic rejects an unrelated or
 front-truncated object immediately; the tail magic plus `footer_len` finds the
 footer in one range request with no linear parse.
 
-Read protocol: GET the tail → validate → GET the footer (extend the same request
-backwards over the INDEX region when filters are wanted) → prune on footer stats
-→ one range GET per surviving column.
+Read protocol: GET the tail → validate → GET the FILE footer → prune ROW GROUPS
+on its per-row-group statistics (no row group footer has been read yet, and the
+ones ruled out never are) → per surviving row group, GET its footer at the offset
+the row group directory gave, verifying it against the checksum recorded there
+(extend that request backwards over its INDEX region when filters are wanted) →
+prune columns → one range GET per surviving column.
 
 **Validation order is fixed and total:** magic → version → declared lengths
 against the real object size → checksum → *only then* interpret one byte of
@@ -573,8 +593,8 @@ The one invariant this depends on: null rows' codes point at a real value index
 (§7.4), so they never inflate `data_length` with a phantom entry. Worth an
 assertion, not just a comment.
 
-**(b) Intra-column zone maps — the biggest remaining win.** Today "one row group"
-means a predicate either reads a whole column or none of it. Split the row space
+**(b) Intra-column zone maps — the biggest remaining win.** Within one row group
+a predicate either reads a whole column or none of it. Split the row space
 into fixed chunks (8192 rows) and store, per chunk, the **min and max code**:
 
 ```
@@ -712,12 +732,49 @@ All in the file header, all one byte, all "impossible to retrofit safely":
 - **`file_uuid` (16 bytes)** — lineage and manifest dedup; free to write, awkward
   to add once files exist.
 
-### 11.5.4 What does *not* change
+### 11.5.4 Row groups per file — REVERSED 2026-08-08
 
-**One file = one row group stands.** Scaling a stored dataset is by file count,
-and the manifest is already the multi-file layer with per-file stats — that is
-exactly how the catalog works today. Row-level deletes, snapshots and schema
-history are table-format concerns that live in the manifest, not here. Nothing
+The original ruling was **one file = one row group**: scale by file count,
+because the manifest is already the multi-file layer with per-file stats. That
+held until the file count itself became the cost.
+
+**What overturned it.** A ClickBench mirror was 396 objects against Parquet's 99
+for the same data. Per-file fixed cost measures ~0.1ms locally (open+mmap and the
+footer fetch both land there), so ~40ms of a full scan is spent before any data
+is read, plus a 4x larger manifest (5.0ms against 2.3ms to plan a stats-only
+query). On object storage the same count is 396 GETs at tens of milliseconds
+each, not 396 syscalls.
+
+**The ruling now: 16 row groups per file at 262144 rows per row group** (~4.2M
+rows/file). 262144 is where Parquet landed too — the balance between amortising
+remote IO and the cost of processing one unit.
+
+**Three things had to be true for this to pay rather than cost**, and each is a
+constraint on everything downstream:
+
+1. **The scan's claim unit is `(file, row group)`, never `file`.** Measured on
+   16M rows with the claim unit tied to row group size: flat from 64k to 256k
+   rows per claim (340/311/326ms), then 750ms at 1M and 1809ms at 4M. Packing
+   row groups without making them independently claimable reproduces the bottom
+   of that table.
+2. **Every row group is independently addressable** — its own footer at its own
+   offset with its own checksum, so a reader fetches the small file-level index,
+   prunes, and reads only the survivors' directories. Measured on the 105-column
+   schema: 89.4KB of file index against 451.8KB for all 16 row group
+   directories.
+3. **Per-row-group statistics live in the FILE footer.** Manifest bounds
+   necessarily coarsen to the union across a file's row groups — that is
+   expected and correct, not a regression to fight. What recovers the lost
+   pruning is the file footer's per-row-group per-column min/max. Measured
+   across real ClickBench predicates, the number of row groups actually READ is
+   identical at every packing level; only the fetch count changes, by 12-16x.
+
+Delivered 2026-08-08. Bracketed against Parquet (the box drifts ~9% within a
+bracket, so the ratio is the number): 0.781 before, 0.798 after — flat, with the
+file count down 16.5x.
+
+**What still does not change.** Row-level deletes, snapshots and schema history
+remain table-format concerns that live in the manifest, not here. Nothing
 proposed.
 
 ---

@@ -82,7 +82,10 @@ static void test_version_window() {
 static void test_record_layouts() {
     CHECK_EQ(sizeof(SectionEntry), size_t{36});
     CHECK_EQ(sizeof(ColumnEntryHead), size_t{80});
-    CHECK_EQ(sizeof(FooterFileHeader), size_t{48});
+    CHECK_EQ(sizeof(RowGroupFooterHeader), size_t{48});
+    CHECK_EQ(sizeof(FileFooterHeader), size_t{56});
+    CHECK_EQ(sizeof(RowGroupEntry), size_t{56});
+    CHECK_EQ(sizeof(SchemaEntryHead), size_t{20});
     CHECK_EQ(sizeof(ColumnStatistics), size_t{48});
     CHECK_EQ(sizeof(LogicalTypeDescriptor), size_t{12});
     CHECK_EQ(sizeof(ZoneMapEntry), size_t{16});
@@ -111,14 +114,43 @@ static void test_offsets_match_the_specification() {
     CHECK_EQ(offsetof(FileTail, reserved), size_t{16});
     CHECK_EQ(offsetof(FileTail, magic), size_t{20});
 
-    // FORMAT.md §5.1 — footer file header
-    CHECK_EQ(offsetof(FooterFileHeader, row_count), size_t{0});
-    CHECK_EQ(offsetof(FooterFileHeader, column_count), size_t{8});
-    CHECK_EQ(offsetof(FooterFileHeader, section_count), size_t{12});
-    CHECK_EQ(offsetof(FooterFileHeader, file_uuid), size_t{16});
-    CHECK_EQ(offsetof(FooterFileHeader, created_at_unix_us), size_t{32});
-    CHECK_EQ(offsetof(FooterFileHeader, writer_tag_bytes), size_t{40});
-    CHECK_EQ(offsetof(FooterFileHeader, file_flags), size_t{44});
+    // FORMAT.md §5.1 — file footer header
+    CHECK_EQ(offsetof(FileFooterHeader, footer_magic), size_t{0});
+    CHECK_EQ(offsetof(FileFooterHeader, footer_version), size_t{4});
+    CHECK_EQ(offsetof(FileFooterHeader, reserved), size_t{6});
+    CHECK_EQ(offsetof(FileFooterHeader, row_count), size_t{8});
+    CHECK_EQ(offsetof(FileFooterHeader, row_group_count), size_t{16});
+    CHECK_EQ(offsetof(FileFooterHeader, column_count), size_t{20});
+    CHECK_EQ(offsetof(FileFooterHeader, file_uuid), size_t{24});
+    CHECK_EQ(offsetof(FileFooterHeader, created_at_unix_us), size_t{40});
+    CHECK_EQ(offsetof(FileFooterHeader, writer_tag_bytes), size_t{48});
+    CHECK_EQ(offsetof(FileFooterHeader, file_flags), size_t{52});
+
+    // FORMAT.md §5.2 — row group directory entry
+    CHECK_EQ(offsetof(RowGroupEntry, row_count), size_t{0});
+    CHECK_EQ(offsetof(RowGroupEntry, first_row), size_t{8});
+    CHECK_EQ(offsetof(RowGroupEntry, data_offset), size_t{16});
+    CHECK_EQ(offsetof(RowGroupEntry, data_bytes), size_t{24});
+    CHECK_EQ(offsetof(RowGroupEntry, footer_offset), size_t{32});
+    CHECK_EQ(offsetof(RowGroupEntry, footer_checksum), size_t{40});
+    CHECK_EQ(offsetof(RowGroupEntry, footer_bytes), size_t{48});
+    CHECK_EQ(offsetof(RowGroupEntry, reserved), size_t{52});
+
+    // FORMAT.md §5.3 — schema directory entry
+    CHECK_EQ(offsetof(SchemaEntryHead, field_id), size_t{0});
+    CHECK_EQ(offsetof(SchemaEntryHead, name_bytes), size_t{4});
+    CHECK_EQ(offsetof(SchemaEntryHead, type), size_t{8});
+    CHECK_EQ(offsetof(SchemaEntryHead, logical_present), size_t{12});
+    CHECK_EQ(offsetof(SchemaEntryHead, child_count), size_t{16});
+
+    // FORMAT.md §5.4 — row group footer header
+    CHECK_EQ(offsetof(RowGroupFooterHeader, row_count), size_t{0});
+    CHECK_EQ(offsetof(RowGroupFooterHeader, column_count), size_t{8});
+    CHECK_EQ(offsetof(RowGroupFooterHeader, section_count), size_t{12});
+    CHECK_EQ(offsetof(RowGroupFooterHeader, file_uuid), size_t{16});
+    CHECK_EQ(offsetof(RowGroupFooterHeader, created_at_unix_us), size_t{32});
+    CHECK_EQ(offsetof(RowGroupFooterHeader, writer_tag_bytes), size_t{40});
+    CHECK_EQ(offsetof(RowGroupFooterHeader, file_flags), size_t{44});
 
     // FORMAT.md §5.2 — column directory entry
     CHECK_EQ(offsetof(ColumnEntryHead, field_id), size_t{0});

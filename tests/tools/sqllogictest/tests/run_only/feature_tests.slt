@@ -369,9 +369,6 @@ SELECT ST['prod'] FROM (SELECT '{"prod": 73}' AS ST FROM $planets) AS SB
 # Function calls which are actually resolved by the binder
 
 statement ok
-SELECT VERSION()
-
-statement ok
 SELECT CURRENT_TIMESTAMP()
 
 statement ok
@@ -484,29 +481,74 @@ statement error NotSupportedError
 SELECT missions @> [] FROM testdata.astronauts
 
 
-statement error TypeError
+# HUMANIZE's numeric forms were recorded here as `statement error TypeError`
+# against the old Python implementation; the native kernel has run them
+# successfully since the Phase 9a-fn port, so those recordings were stale.
+# A VARIANT or an untyped NULL still has no numeric type to match.
+
+statement error IncompatibleTypesError
 SELECT HUMANIZE('{"a":100}'->'a')
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT HUMANIZE(SUM('{"a":100}'->'a'))
 
-statement error TypeError
+statement ok
 SELECT HUMANIZE(1000000)
 
-statement error TypeError
+statement ok
 SELECT HUMANIZE(0)
 
-statement error TypeError
+statement error IncompatibleTypesError
 SELECT HUMANIZE(NULL)
 
-statement error TypeError
+statement ok
 SELECT HUMANIZE(10000.00)
 
-statement error TypeError
+statement ok
 SELECT HUMANIZE(SUM(gravity)) FROM $planets
 
-statement error TypeError
+statement ok
 SELECT HUMANIZE(-1)
+
+# HUMANIZE(val, mode) — the scale systems. Values are asserted in
+# tests/integration/sql_battery/test_shapes_basic.py::test_humanize_modes;
+# these cover that each mode binds and runs over literals and over a column.
+
+statement ok
+SELECT HUMANIZE(1536, 'bytes')
+
+statement ok
+SELECT HUMANIZE(0.0000012, 'si')
+
+statement ok
+SELECT HUMANIZE(90, 'time')
+
+statement ok
+SELECT HUMANIZE(5025, 'clock')
+
+statement ok
+SELECT HUMANIZE(0.4212, 'percent')
+
+statement ok
+SELECT HUMANIZE(1500000, 'compact')
+
+statement ok
+SELECT HUMANIZE(0.000001, 'odds')
+
+statement ok
+SELECT HUMANIZE(gravity, 'si') FROM $planets
+
+statement ok
+SELECT HUMANIZE(gravity / 10, 'odds') FROM $planets
+
+statement ok
+SELECT HUMANIZE(CAST(1536.75 AS DECIMAL(10,2)), 'bytes')
+
+statement error InvalidFunctionParameterError
+SELECT HUMANIZE(1000, 'kilobytes')
+
+statement error InvalidFunctionParameterError
+SELECT HUMANIZE(gravity, name) FROM $planets
 
 
 statement ok

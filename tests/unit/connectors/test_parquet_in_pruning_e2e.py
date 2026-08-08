@@ -74,7 +74,7 @@ def test_in_out_of_range_returns_zero():
     # All list values below the column's range -> every row group prunes -> 0 rows.
     assert (
         _count(
-            "SELECT COUNT(*) AS c FROM testdata.tpch_1.lineitem WHERE l_orderkey IN (-5, -4, -3)"
+            "SELECT COUNT(*) AS c FROM testdata.tpch_001.lineitem WHERE l_orderkey IN (-5, -4, -3)"
         )
         == 0
     )
@@ -84,7 +84,7 @@ def test_in_in_range_returns_matches():
     # Sanity: in-range values still return their rows (pruning must NOT drop them).
     assert (
         _count(
-            "SELECT COUNT(*) AS c FROM testdata.tpch_1.lineitem WHERE l_orderkey IN (1, 2, 3)"
+            "SELECT COUNT(*) AS c FROM testdata.tpch_001.lineitem WHERE l_orderkey IN (1, 2, 3)"
         )
         > 0
     )

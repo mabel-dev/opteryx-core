@@ -1956,7 +1956,7 @@
         "overloads": [
             {
                 "id": "HUMANIZE_default",
-                "label": "HUMANIZE(val)",
+                "label": "HUMANIZE(val, [mode])",
                 "category": "Conversion Functions",
                 "documentation": "Format number in human-readable form.",
                 "related_functions": [
@@ -1973,13 +1973,13 @@
                 },
                 "arity": {
                     "minimum": 1,
-                    "maximum": 1,
+                    "maximum": 2,
                     "variadic": false
                 },
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 775947.17
+                    "cost_us_per_million": 111871.7
                 },
                 "parameters": [
                     {
@@ -1989,6 +1989,15 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
+                        "null_handling": "strict"
+                    },
+                    {
+                        "label": "mode",
+                        "type": "varchar",
+                        "documentation": "Scale system to render into: 'words' (default), 'compact', 'bytes', 'si', 'time', 'clock', 'percent' or 'odds'. Must be a constant expression. Optional.",
+                        "optional": true,
+                        "variadic": false,
+                        "constant_only": true,
                         "null_handling": "strict"
                     }
                 ]
@@ -5590,53 +5599,6 @@
                 "returns": {
                     "type": "TIMESTAMP[US]",
                     "documentation": "Returns the computed result as `TIMESTAMP[US]`."
-                },
-                "arity": {
-                    "minimum": 0,
-                    "maximum": 0,
-                    "variadic": false
-                },
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 1.0
-                },
-                "parameters": []
-            }
-        ]
-    },
-    "VERSION": {
-        "catalog_name": "VERSION",
-        "aliases": [],
-        "summary": "Database version string.",
-        "volatility": "immutable",
-        "deterministic": true,
-        "foldable": false,
-        "pushdown_safe": false,
-        "lifecycle": {
-            "status": "active",
-            "introduced": null,
-            "deprecated_in": null,
-            "remove_after": null,
-            "replacement": null
-        },
-        "overloads": [
-            {
-                "id": "VERSION_default",
-                "label": "VERSION()",
-                "category": "Utility Functions",
-                "documentation": "Database version string.",
-                "related_functions": [
-                    "COALESCE",
-                    "IFNULL",
-                    "IFNOTNULL",
-                    "NULLIF",
-                    "IIF"
-                ],
-                "return_type": "VARCHAR",
-                "returns": {
-                    "type": "VARCHAR",
-                    "documentation": "Returns the computed result as `VARCHAR`."
                 },
                 "arity": {
                     "minimum": 0,

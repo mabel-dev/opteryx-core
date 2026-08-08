@@ -44,6 +44,7 @@ cdef class UnnestJoinNode(BasePlanNode):
     cdef public list right_relation_names
     cdef public str join_type
     cdef public object _unnest_column
+    cdef public object _unnest_function   # "UNNEST" or "CIDR_UNNEST"
     cdef public object _unnest_target
     cdef public object _filters
     cdef public bint _distinct
@@ -68,6 +69,7 @@ cdef class UnnestJoinNode(BasePlanNode):
 
         # do we have unnest details?
         self._unnest_column = parameters.get("unnest_column")
+        self._unnest_function = parameters.get("unnest_function") or "UNNEST"
         self._unnest_target = parameters.get("unnest_target").schema_column
         self._filters = parameters.get("filters")
         self._distinct = parameters.get("distinct", False)
@@ -77,9 +79,14 @@ cdef class UnnestJoinNode(BasePlanNode):
             self._unnest_column = self._unnest_column.centre
 
         # if we have a literal that's not a tuple, wrap it
-        if self._unnest_column.node_type == NodeType.LITERAL and not isinstance(
-            self._unnest_column.value, tuple
-        ):
+        #
+        # NOT for CIDR_UNNEST: its literal is a single CIDR STRING, and wrapping it
+        # would turn '10.0.0.0/24' into a one-element tuple — a collection where the
+        # operator expects one block, which then reads as an array literal and
+        # expands to nothing recognisable.
+        if (self._unnest_function != "CIDR_UNNEST"
+                and self._unnest_column.node_type == NodeType.LITERAL
+                and not isinstance(self._unnest_column.value, tuple)):
             self._unnest_column.value = tuple([self._unnest_column.value])
 
         self.pre_update_columns = parameters.get("pre_update_columns") or set()

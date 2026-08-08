@@ -55,18 +55,22 @@ Q43/42          46.59ms        46.16ms              -     46.38ms       46.16ms 
 --- ✅ done
 
 make clickbench (13.53 seconds) <- best ever on rugo parquet files [256K rg] (13-JUL)
-current (15,078ms)
-make clickbench-skene (23.79s) (07-AUG)
+current (14.52s) (08-AUG) [1.36x]
+make clickbench-skene (11.45s) (08-AUG) [1.07x]
 
 (125.62 seconds) <- 0.26.8
 (20.10 seconds) <- best on clickbench parquet files (13-JUL)
 (10.65 seconds) <- DuckDB Baseline
 
-make tpch - (1369.6ms) (07-AUG) [2.77x]
-make tpch-skene (985.1ms) (07-AUG) [1.99x]
+make tpch - (11047.1ms) (08-AUG) [SF10] [2.65x]
+make tpch-skene (8876.1ms) (08-AUG) [SF10] [2.13x]
 make medicare1 - (456.1ms) (31-JUL) [2.63x]
 make job - (32,328.3ms) (07-AUG) [4.79x]
 make h2o - (2125.4ms) (07-AUG) [0.75x]
 make jsonbench (6026.6ms) (05-AUG) [2.32x]
 make dash (189.3ms) (05-AUG) [2.09x]
 make signals (0.8s) [only two tests] (05-AUG)
+
+SF1 numbers
+make tpch - (1357.5ms) (08-AUG) [SF1] [2.75x]
+make tpch-skene (966.5ms) (07-AUG) [SF1] [1.96x]

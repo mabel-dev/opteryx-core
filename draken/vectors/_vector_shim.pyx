@@ -27,6 +27,19 @@ cdef extern from "logical_type.h":
         VECTOR
         IPV4
 
+    cdef enum class TimestampUnit(uint8_t):
+        SECONDS
+        MILLISECONDS
+        MICROSECONDS
+        NANOSECONDS
+
+    # The SINGLE source of the physical+descriptor -> SQL name mapping. Called
+    # rather than reimplemented: opteryx's ColumnType delegates to the same
+    # function, so a name cannot differ between the two surfaces.
+    string type_display_name_parts(DrakenType physical, LogicalKind kind,
+                                   TimestampUnit unit, uint8_t precision,
+                                   uint8_t scale, uint32_t dimension)
+
 cdef extern from "interop/value_format.hpp" namespace "rugo_text" nogil:
     # One descriptor per column carries every logical-type field the renderer
     # needs — including the KIND, which is the only thing that distinguishes an
@@ -44,6 +57,32 @@ cdef extern from "interop/value_format.hpp" namespace "rugo_text" nogil:
     void render_json_column(string& out, const DrakenVector* dv,
                             const DrakenVector* child, const ColumnDesc& desc,
                             size_t nrows)
+
+
+def type_display_name(physical, kind=None, unit=None, precision=0, scale=0,
+                      dimension=0):
+    """SQL type name for a physical tag plus optional descriptor parts.
+
+    The module-level entry point onto draken's single source of that mapping, for
+    callers that hold a type description rather than a vector — opteryx's
+    ColumnType delegates here so there is one table of type names, not two either
+    side of the module boundary.
+
+    `physical` is a DrakenType; `kind` a LogicalKind (or None for no descriptor);
+    `unit` the temporal unit as 's'/'ms'/'us'/'ns'. Returns '' for a physical tag
+    with no name, which the caller should treat as an error rather than print.
+    """
+    cdef LogicalKind k = LogicalKind.NONE
+    cdef TimestampUnit u = TimestampUnit.MICROSECONDS
+    if kind is not None and int(kind.value) != 0:
+        k = <LogicalKind><int>kind.value
+    if unit is not None:
+        u = <TimestampUnit><int>_unit_code(unit)
+    cdef string out = type_display_name_parts(
+        <DrakenType>physical.value, k, u,
+        <uint8_t>(precision or 0), <uint8_t>(scale or 0),
+        <uint32_t>(dimension or 0))
+    return out.decode("utf-8")
 
 
 cdef inline int _unit_code(object u):
@@ -193,6 +232,44 @@ cdef class Vector:
     @property
     def type(self):
         return self._nb.type
+
+    @property
+    def type_name(self):
+        """The SQL type name, descriptor included — 'IPV4', 'DECIMAL(10, 2)'.
+
+        NOT the same as `type.name`, which is the PHYSICAL tag: an IPv4 column is
+        physically UINT32 and a DECIMAL(10,2) is physically DECIMAL, so naming a
+        column from `.type` alone reports a different type than the column has.
+        Computed by draken's type_display_name_parts, the one place that mapping
+        lives.
+        """
+        cdef object kind = self._nb.logical_type_kind
+        cdef LogicalKind k = LogicalKind.NONE
+        cdef TimestampUnit u = TimestampUnit.MICROSECONDS
+        cdef uint8_t precision = 0
+        cdef uint8_t scale = 0
+        cdef uint32_t dimension = 0
+        cdef object v
+        if kind is not None:
+            k = <LogicalKind><int>kind.value
+            v = self._nb.logical_type_unit
+            if v is not None:
+                u = <TimestampUnit><int>_unit_code(v)
+            v = self._nb.logical_type_precision
+            if v is not None:
+                precision = <uint8_t>v
+            v = self._nb.logical_type_scale
+            if v is not None:
+                scale = <uint8_t>v
+            v = self._nb.logical_type_dimension
+            if v is not None:
+                dimension = <uint32_t>v
+        cdef string out = type_display_name_parts(
+            <DrakenType>self._nb.type.value, k, u, precision, scale, dimension)
+        if out.size() == 0:
+            raise NotImplementedError(
+                f"no display name for physical type {self._nb.type!r}")
+        return out.decode("utf-8")
 
     @property
     def data_length(self):

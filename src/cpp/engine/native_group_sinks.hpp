@@ -64,6 +64,7 @@
 #include "morsels/cxx_hash.h"    // cxx_hash_c — draken owns the key hash (DISTINCT/GROUP BY)
 #include "carchar_set.hpp"       // opteryx::carchar::CarcharSet — hash-identity dedup set
 #include "carchar_index.hpp"     // opteryx::carchar::CarcharIndex — hash → group-id
+#include "native_cidr_emit.hpp"  // CIDR_AGG: Roaring32 address sets + minimal-cover emit
 #include "parvi.hpp"             // opteryx::parvi::ParviMap — 64-slot low-card front map
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — shared with the legacy
@@ -297,6 +298,14 @@ enum class AggFn : uint8_t {
                                // is NULL are skipped (SQL's pairwise contract).
                                // Always DOUBLE; NULL when undefined (no pairs, or
                                // zero variance in either operand).
+    CidrAgg = 14,              // CIDR_AGG(ip): the minimal list of CIDR blocks
+                               // covering exactly the addresses seen, as
+                               // ARRAY<VARCHAR>. Collects into a Roaring bitmap
+                               // (native_roaring32.hpp), which dedups on insert,
+                               // so its state grows with DISTINCT addresses
+                               // rather than rows. Operand must be UINT32
+                               // carrying LogicalKind::IPV4 — see
+                               // cidr_operand_supported.
 };
 
 // AggSpec2.col_idx sentinels — named so a bare -1/-2 is never left for a future
@@ -322,12 +331,10 @@ struct AggSpec2 {
     bool    aa_ordered    = false;
     bool    aa_descending = false;
     int64_t aa_limit      = -1;     // < 0 == no LIMIT
-    // Hard cap on retained elements per group. Exceeding it fails loud at
-    // finalize — an unbounded per-group list is an OOM the query can't
-    // diagnose, and silently truncating would be a wrong answer dressed as a
-    // right one. (MEDIAN, which once shared this per-group posture, now uses
-    // a global byte budget instead — see MedianState in _agg_kernels.hpp.)
-    int64_t aa_max_per_group = 1000;
+    // No per-group element cap: retained memory is bounded by the GLOBAL byte
+    // budget (kArrayAggBudgetBytes, below), the same guard shape MEDIAN uses.
+    // A per-group count bounded nothing — the group count is unbounded — while
+    // refusing ordinary group sizes.
     // APPROX_PERCENTILE's second argument — a query-time constant (0.0-1.0),
     // validated at plan time (compiler.py). Ignored by every other fn.
     double  percentile = 0.5;
@@ -394,10 +401,14 @@ inline bool agg2_operand_supported(DrakenType t) {
 // across all groups (kMedianBudgetBytes, _agg_kernels.hpp), not a per-group
 // value cap — exact MEDIAN buffers every non-null input value, so total
 // memory is what needs bounding.
+// Names the budget, quotes no figure. A literal here is a SECOND copy of the
+// limit, which a build with a different kMedianBytes silently falsifies —
+// sending the reader to reason about a number nothing enforces. The variable is
+// the discoverable value, and it reads the native constant so it cannot drift.
 inline constexpr const char* kMedianCapExceededMsg =
-    "native engine: MEDIAN — buffered values exceeded the 512MB memory budget. "
-    "Use APPROX_PERCENTILE(x, 0.5) for approximate median over large sets of "
-    "values.";
+    "native engine: MEDIAN — buffered values exceeded the memory budget (see "
+    "@@median_memory_budget_bytes). Use APPROX_PERCENTILE(x, 0.5) for "
+    "approximate median over large sets of values.";
 
 // HllppSketch::register_index/rho (hllpp.cpp) read the hash's raw top/bottom
 // bits directly — the standard HLL algorithm, correct ONLY if the hash has
@@ -884,6 +895,11 @@ enum class GBKind : uint8_t {
                           // (same restriction as Median — see median_operand_supported)
     Corr,        // Pearson correlation — six double lanes (Σx, Σx², Σy, Σy², Σxy
                  // + pair count in valid); always DOUBLE, numeric-only operands
+    CidrAgg,     // per-group Roaring set of IPv4 addresses; emits one
+                 // ARRAY<VARCHAR> of CIDR blocks per group. Never NULL — a group
+                 // with no non-NULL addresses emits an EMPTY array, matching
+                 // "the set of addresses seen", which is a real and empty answer
+                 // rather than an unknown one.
 };
 
 // Which GBArrayAggState lane an ARRAY_AGG operand's values live in. One store per
@@ -906,25 +922,186 @@ inline bool aa_operand_supported(DrakenType t) {
     return agg2_operand_supported(t) || sort_type_is_string(t);
 }
 
+// CIDR_AGG requires a real IPv4 column: DRAKEN_UINT32 REFINED by
+// LogicalKind::IPV4, never a bare UINT32.
+//
+// The descriptor is the only thing separating an address from any other 32-bit
+// unsigned number, and the output is meaningless without it — CIDR_AGG over a
+// count or an id column would fold integers into confident, well-formed,
+// entirely fictional network ranges. That is the silent-wrong-answer shape this
+// codebase refuses, so the gate is on the descriptor rather than the width.
+//
+// Known consequence, accepted with the architect: the catalog write path
+// currently drops logical types, so a column that genuinely holds addresses but
+// lost its IPV4 tag is refused here until that is fixed. A loud refusal on real
+// data beats a plausible answer over data we cannot confirm is addresses.
+inline bool cidr_operand_supported(DrakenType t, const LogicalType* logical) noexcept {
+    return t == DRAKEN_UINT32 && logical != nullptr && logical->kind == LogicalKind::IPV4;
+}
+
+// ---------------------------------------------------------------------------
+// ARRAY_AGG memory guard — a GLOBAL byte budget across every GBArrayAggState,
+// the same shape MedianState uses (see _agg_kernels.hpp). ARRAY_AGG buffers
+// every input row (NULLs included) into some group's list, so the real OOM risk
+// is the TOTAL across all groups: the per-group element cap this replaced
+// bounded nothing, because the group count is unbounded, while still refusing
+// ordinary group sizes. Charged on capacity growth (amortized — one atomic op
+// per doubling, never per append) and released on free. Past the budget,
+// `overflowed` latches and appends are refused; emit_array_lane_column checks
+// and raises. Silently truncating a list would be a wrong answer wearing the
+// shape of a right one.
+//
+// The counter is a per-shared-object static (inline function local), matching
+// the MedianState convention: the one extension that actually executes
+// ARRAY_AGG (the native engine) accounts against a single instance, while the
+// legacy Cython spec-carrier module compiles this header but never appends.
+// ---------------------------------------------------------------------------
+constexpr int64_t kArrayAggBudgetBytes = opteryx::agg_budgets::kArrayAggBytes;   // 512MB, all groups
+
+inline std::atomic<int64_t>& array_agg_budget_used() noexcept {
+    static std::atomic<int64_t> used{0};
+    return used;
+}
+
+// Reserve `delta` bytes against the global budget. Returns false (and reserves
+// nothing) if that would breach the ceiling.
+inline bool aa_budget_take(int64_t delta) noexcept {
+    if (delta <= 0) return true;
+    if (array_agg_budget_used().fetch_add(delta) + delta > kArrayAggBudgetBytes) {
+        array_agg_budget_used().fetch_sub(delta);
+        return false;
+    }
+    return true;
+}
+
+inline void aa_budget_give(int64_t delta) noexcept {
+    if (delta > 0) array_agg_budget_used().fetch_sub(delta);
+}
+
+// Bytes a std::string holds inline before it touches the heap. libc++ and
+// libstdc++ differ, so ask the implementation rather than hard-coding either.
+// An inline variable (initialized at load time) rather than a function-local
+// static, so the charge path is a plain load and not a guarded one.
+inline const size_t kAaSsoCapacity = std::string().capacity();
+
+// Heap bytes one element string costs ON TOP of its std::string header. A short
+// string lives inside the header, which the per-element capacity charge already
+// covers — charging its length again would systematically over-report exactly
+// the workload (ARRAY_AGG over short codes) the budget should be most relaxed
+// about.
+inline int64_t aa_string_heap_bytes(uint32_t len) noexcept {
+    return static_cast<size_t>(len) > kAaSsoCapacity
+               ? static_cast<int64_t>(len) + 1   // + the NUL std::string keeps
+               : 0;
+}
+
 // One group's ARRAY_AGG elements. Exactly one value lane is populated (the one
 // aa_store_of picks); `nulls` is parallel to it and is the authoritative element
 // count. NULLs are kept as elements — every other aggregate skips them, but
 // ARRAY_AGG(col) over [1, NULL] is [1, NULL], not [1]. Null positions still push
 // a placeholder into the value lane so the two stay index-aligned.
+//
+// Non-copyable and move-only: the destructor returns this state's charge to the
+// global budget, so a copy would double-release. (GBLanes, which holds these,
+// is already move-only for the same reason via MedianState.)
 struct GBArrayAggState {
     std::vector<int64_t>     raws;
     std::vector<__int128>    i128s;
     std::vector<std::string> strs;
     std::vector<uint8_t>     nulls;   // 1 == element is NULL
-    bool overflowed = false;          // hit aa_max_per_group; raised at finalize
+    // The two halves of this state's budget charge, tracked apart because a
+    // merge TRANSFERS the heap half (the strings change owner, not owner-count)
+    // while re-charging the capacity half on the destination.
+    int64_t vec_charged  = 0;         // reserved capacity: nulls + the live lane
+    int64_t heap_charged = 0;         // element strings' out-of-header bytes
+    size_t  cap          = 0;         // reserved elements (nulls and lane agree)
+    bool    overflowed   = false;     // budget refused an append; raised at finalize
+
+    GBArrayAggState() noexcept = default;
+    GBArrayAggState(const GBArrayAggState&) = delete;
+    GBArrayAggState& operator=(const GBArrayAggState&) = delete;
+
+    GBArrayAggState(GBArrayAggState&& o) noexcept
+        : raws(std::move(o.raws)), i128s(std::move(o.i128s)),
+          strs(std::move(o.strs)), nulls(std::move(o.nulls)),
+          vec_charged(o.vec_charged), heap_charged(o.heap_charged),
+          cap(o.cap), overflowed(o.overflowed) {
+        o.vec_charged = 0; o.heap_charged = 0; o.cap = 0;
+    }
+
+    GBArrayAggState& operator=(GBArrayAggState&& o) noexcept {
+        if (this != &o) {
+            aa_budget_give(vec_charged + heap_charged);
+            raws = std::move(o.raws); i128s = std::move(o.i128s);
+            strs = std::move(o.strs); nulls = std::move(o.nulls);
+            vec_charged = o.vec_charged; heap_charged = o.heap_charged;
+            cap = o.cap; overflowed = o.overflowed;
+            o.vec_charged = 0; o.heap_charged = 0; o.cap = 0;
+        }
+        return *this;
+    }
+
+    ~GBArrayAggState() noexcept {
+        aa_budget_give(vec_charged + heap_charged);
+        vec_charged = 0; heap_charged = 0;
+    }
 
     size_t size() const noexcept { return nulls.size(); }
 
-    // Append one element. Returns false once the cap is hit (and latches
+    // Bytes one element costs in the nulls lane plus the live value lane. For
+    // the string lane this is the std::string HEADER only — its heap bytes are
+    // charged per string, where the length is known.
+    static inline int64_t _elem_bytes(AAStore st) noexcept {
+        switch (st) {
+            case AAStore::Raw:  return 1 + static_cast<int64_t>(sizeof(int64_t));
+            case AAStore::I128: return 1 + static_cast<int64_t>(sizeof(__int128));
+            case AAStore::Str:  return 1 + static_cast<int64_t>(sizeof(std::string));
+        }
+        return 1 + static_cast<int64_t>(sizeof(int64_t));
+    }
+
+    // Reserve room for `need` elements, charging the growth to the global
+    // budget. Doubling, so the charge is amortized. Reserving both lanes here
+    // (rather than letting push_back grow them) is what keeps `cap` an honest
+    // record of what has been charged. Returns false and latches `overflowed`
+    // when the budget refuses — nothing is reserved and nothing is charged.
+    inline bool _reserve(AAStore st, size_t need) noexcept {
+        if (need <= cap) return true;
+        size_t new_cap = cap == 0 ? 8 : cap * 2;
+        while (new_cap < need) new_cap *= 2;
+        const int64_t delta = static_cast<int64_t>(new_cap - cap) * _elem_bytes(st);
+        if (!aa_budget_take(delta)) { overflowed = true; return false; }
+        nulls.reserve(new_cap);
+        switch (st) {
+            case AAStore::Raw:  raws.reserve(new_cap); break;
+            case AAStore::I128: i128s.reserve(new_cap); break;
+            case AAStore::Str:  strs.reserve(new_cap); break;
+        }
+        cap = new_cap;
+        vec_charged += delta;
+        return true;
+    }
+
+    // Append one element. Returns false once the budget refuses (and latches
     // `overflowed`) so callers stop copying bytes into a doomed group.
+    //
+    // A long element string takes its heap charge here, one atomic per string
+    // rather than per doubling. That is deliberate: the charge accompanies a
+    // real malloc of the same bytes, which costs more than the fetch_add does,
+    // and the alternative (reserving heap in geometric blocks like capacity)
+    // would over-charge by up to 2x and halve the usable budget for exactly the
+    // long-string workload the guard exists for. Short strings live in the
+    // header and pay nothing extra — see aa_string_heap_bytes.
     inline bool push(AAStore st, bool is_null, int64_t raw, __int128 big,
-                     const char* sp, uint32_t slen, int64_t cap) noexcept {
-        if (static_cast<int64_t>(nulls.size()) >= cap) { overflowed = true; return false; }
+                     const char* sp, uint32_t slen) noexcept {
+        if (nulls.size() == cap && !_reserve(st, nulls.size() + 1)) return false;
+        if (st == AAStore::Str && !is_null) {
+            const int64_t heap = aa_string_heap_bytes(slen);
+            if (heap != 0) {
+                if (!aa_budget_take(heap)) { overflowed = true; return false; }
+                heap_charged += heap;
+            }
+        }
         nulls.push_back(is_null ? 1 : 0);
         switch (st) {
             case AAStore::Raw:  raws.push_back(is_null ? 0 : raw); break;
@@ -936,6 +1113,39 @@ struct GBArrayAggState {
         }
         return true;
     }
+
+    // Concatenate `src`'s elements onto this state, draining it — `src` is
+    // released right after the merge, so its element strings are MOVED, never
+    // copied. Returns false (latching `overflowed`) when the budget refuses the
+    // destination's growth; `src` is left untouched in that case.
+    //
+    // The moved strings' heap bytes are TRANSFERRED, not re-charged: the bytes
+    // changed owner, not owner-count, so the global counter must not move for
+    // them. Only the destination's capacity growth is a new charge; the source's
+    // own capacity is returned when it is destroyed.
+    inline bool append_from(AAStore st, GBArrayAggState& src) noexcept {
+        if (src.overflowed) overflowed = true;
+        const size_t take = src.size();
+        if (take == 0) return true;
+        if (!_reserve(st, nulls.size() + take)) return false;
+        nulls.insert(nulls.end(), src.nulls.begin(), src.nulls.end());
+        switch (st) {
+            case AAStore::Raw:
+                raws.insert(raws.end(), src.raws.begin(), src.raws.end());
+                break;
+            case AAStore::I128:
+                i128s.insert(i128s.end(), src.i128s.begin(), src.i128s.end());
+                break;
+            case AAStore::Str:
+                strs.insert(strs.end(),
+                            std::make_move_iterator(src.strs.begin()),
+                            std::make_move_iterator(src.strs.end()));
+                break;
+        }
+        heap_charged += src.heap_charged;
+        src.heap_charged = 0;
+        return true;
+    }
 };
 
 
@@ -945,6 +1155,7 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
         case AggFn::Count:         return GBKind::Valid;
         case AggFn::CountDistinct: return GBKind::CountDistinct;
         case AggFn::ArrayAgg:      return GBKind::ArrayAgg;
+        case AggFn::CidrAgg:       return GBKind::CidrAgg;
         case AggFn::Sum:
             if (m.type == DRAKEN_DECIMAL128) return GBKind::SumD128;
             return m.is_float ? GBKind::SumF : GBKind::SumI;
@@ -1022,6 +1233,7 @@ struct GBLaneView {
     const std::string* sval  = nullptr;   // string extremes
     GBArrayAggState*   aa    = nullptr;   // ARRAY_AGG element lists
     const AggSpec2*    aa_spec = nullptr; // ARRAY_AGG DISTINCT/ORDER BY/LIMIT modifiers
+    opteryx::roaring32::Roaring32* cidr = nullptr;   // CIDR_AGG per-group address sets
     opteryx::ungrouped::MedianState* median = nullptr;   // MEDIAN per-group buffers
     const HllppSketch* hll = nullptr;     // APPROX_COUNT_DISTINCT per-group sketches
     TDigestPtr* td = nullptr;             // APPROX_PERCENTILE per-group sketches
@@ -1115,9 +1327,19 @@ inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& 
     for (uint32_t g = 0; g < n; ++g) {
         if (!states[g].overflowed) continue;
         err.code = 1;
-        err.msg = "ARRAY_AGG: a group exceeded the per-group element cap — fail loud, "
-                  "never a silently truncated list. Narrow the group, add a LIMIT to "
-                  "the aggregate, or raise the cap.";
+        // Deliberately does NOT suggest the aggregate's own LIMIT: ARRAY_AGG's
+        // DISTINCT/ORDER BY/LIMIT modifiers all apply at finalize, AFTER every
+        // element has been buffered, so they reduce the OUTPUT and never the
+        // memory this budget guards. Only reading fewer rows into the aggregate
+        // does that.
+        // Names the budget, quotes no figure — see kMedianCapExceededMsg for why
+        // a literal limit in the text is a copy that a differently-configured
+        // build silently falsifies.
+        err.msg = "native engine: ARRAY_AGG — buffered elements exceeded the memory "
+                  "budget (see @@array_agg_memory_budget_bytes). Filter the input or "
+                  "narrow the groups so fewer rows reach the aggregate; ARRAY_AGG's "
+                  "own LIMIT will not help, it truncates the finished list rather "
+                  "than what is buffered.";
         return CxxColumn{};
     }
 
@@ -1171,6 +1393,99 @@ inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& 
         }
     }
 
+    uint32_t* sel = static_cast<uint32_t*>(
+        draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
+    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
+    DrakenVector v;
+    v.data = offsets; v.selection = sel; v.data_length = n; v.length = n;
+    v.validity = nullptr; v.type = DRAKEN_ARRAY;
+    v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+    CxxColumn c;
+    c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(offsets),
+                                          OwnedBuffer<uint8_t>(nullptr),
+                                          OwnedBuffer<void>(sel));
+    c.own->child_owner = aa_steal_owner(std::move(child_col));
+    c.view = c.own->vec;
+    return c;
+}
+
+// One ARRAY<VARCHAR> of CIDR blocks per group.
+//
+// NEVER NULL. A group whose addresses were every one of them NULL emits an
+// EMPTY array, not a NULL one: the answer to "which addresses did this group
+// hold" is a set, and the empty set is a real answer. That differs from
+// MIN/SUM, where no values means no value is defined — hence no `valid` lane
+// for this kind (see gb_lanes_resize).
+inline CxxColumn emit_cidr_lane_column(opteryx::roaring32::Roaring32* states,
+                                       uint32_t n, ErrCtx& err) {
+    // Collection budget first. A set that stopped accepting addresses describes
+    // FEWER addresses than the data held, so every block derived from it would
+    // be well-formed, confident and wrong — and smaller, which is the direction
+    // nothing downstream can detect.
+    for (uint32_t g = 0; g < n; ++g) {
+        if (!states[g].overflowed) continue;
+        err.code = 1;
+        // Names the budget, quotes no figure. `err.msg` is a const char*, so a
+        // computed string would dangle; a hardcoded "512MB" would be worse still
+        // — it is a second copy of the limit that a build with a different
+        // constant silently falsifies, sending the reader to tune a number
+        // nothing enforces. The variable IS the discoverable figure.
+        err.msg = "native engine: CIDR_AGG — the address sets exceeded the state "
+                  "memory budget (see @@cidr_agg_state_budget_bytes). Narrow the "
+                  "groups or filter the input so fewer DISTINCT addresses reach the "
+                  "aggregate; repeated addresses cost nothing, the set dedups on "
+                  "insert, so only the distinct count counts against this.";
+        return CxxColumn{};
+    }
+
+    // Built into vectors first and copied into draken buffers only once success
+    // is certain: the emit budget can refuse partway through, and allocating the
+    // offsets up front would mean a raw buffer to free on every error path.
+    std::vector<std::string> cstr;
+    std::vector<int32_t> offs(static_cast<size_t>(n) + 1, 0);
+    char buf[opteryx::cidr::kMaxCidrTextBytes];
+    int64_t charged = 0;
+    bool over = false;
+
+    for (uint32_t g = 0; g < n && !over; ++g) {
+        opteryx::cidr::emit_cidrs(states[g], [&](uint32_t base, uint8_t prefix) {
+            // Charge the EXACT text length before rendering it — cidr_text_length
+            // predicts what format_cidr will write, so the budget is never
+            // discovered to be blown only after the bytes exist.
+            const int64_t need = opteryx::cidr::cidr_text_length(base, prefix);
+            if (!opteryx::cidr::emit_budget_take(need)) { over = true; return false; }
+            charged += need;
+            const uint32_t len = opteryx::cidr::format_cidr(base, prefix, buf);
+            cstr.emplace_back(buf, len);
+            return true;
+        });
+        // int32 offsets cannot overflow here: the emit budget caps the block
+        // count at 512MB / 9 bytes ~= 59.6M, two orders below INT32_MAX. Without
+        // that budget the degenerate input (2^31 blocks) would exceed it by one.
+        offs[g + 1] = static_cast<int32_t>(cstr.size());
+    }
+
+    opteryx::cidr::emit_budget_give(charged);
+    if (over) {
+        err.code = 1;
+        err.msg = "native engine: CIDR_AGG — the emitted CIDR list exceeded the "
+                  "output budget (see @@cidr_agg_emit_budget_bytes). This is a "
+                  "SEPARATE limit from the state budget and fitting in memory does "
+                  "not imply fitting here: the worst case is half-density input "
+                  "(every other address), where no block can be folded and the "
+                  "cover is one /32 per address.";
+        return CxxColumn{};
+    }
+
+    const uint32_t total = static_cast<uint32_t>(cstr.size());
+    std::vector<int64_t> v64(total == 0 ? 1 : total, 1);   // no element is ever NULL
+    AggColMeta smeta;
+    smeta.type = DRAKEN_VARCHAR;   // the ELEMENT type, not the operand's UINT32
+    CxxColumn child_col = emit_string_lane_column(smeta, cstr.data(), v64.data(), total);
+
+    const size_t off_bytes = (static_cast<size_t>(n) + 1) * sizeof(int32_t);
+    int32_t* offsets = static_cast<int32_t*>(draken_malloc(off_bytes));
+    std::memcpy(offsets, offs.data(), off_bytes);
     uint32_t* sel = static_cast<uint32_t*>(
         draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
     for (uint32_t i = 0; i < n; ++i) sel[i] = i;
@@ -1256,6 +1571,8 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             return emit_string_lane_column(meta, L.sval, L.valid, n);
         case GBKind::ArrayAgg:
             return emit_array_lane_column(meta, *L.aa_spec, L.aa, n, err);
+        case GBKind::CidrAgg:
+            return emit_cidr_lane_column(L.cidr, n, err);
         case GBKind::Stddev: {
             // Population variance: E[x^2] - E[x]^2, clamped to 0 (float rounding
             // can push a near-zero true variance slightly negative, which would
@@ -1382,11 +1699,31 @@ constexpr size_t kGBArenaChunk = 1u << 20;   // 1 MiB key-arena chunks (string-k
 // Combine a group id with a value hash into one 64-bit dedup key. Both the sink
 // and the merge derive the SAME key for the SAME (group, value) pair, so a
 // distinct value is counted once per group regardless of which worker saw it.
+//
+// The two arguments MUST be pre-mixed by DIFFERENT constructions before they are
+// combined. This used to be `mix_K(a) ^ b` with mix_K == draken's own value-hash
+// finalizer (`x * 0x9E37...15 + 1`, then `^= >>32`). Draken's per-value hash for
+// the integer/BOOL family IS mix_K(raw_value) — so `mix_K(a) ^ b` reduced to
+// `mix_K(gid) ^ mix_K(raw)`, which is SYMMETRIC: group 0 holding value 1 and
+// group 1 holding value 0 produced the SAME dedup key, and the second of the two
+// was silently dropped from COUNT(DISTINCT). BOOL hit it on every query — its
+// raw seeds are exactly 0 and 1, and 0/1 are the first two group ids in every
+// partition — and a small-integer operand collided on ~half of all (group,
+// value) pairs. Which pairs actually met in one partition depended on morsel and
+// worker layout, so the undercount was non-deterministic run to run.
+//
+// Pre-mixing `a` with a different multiplier and `b` with a third breaks the
+// shared algebra: a collision now needs mix_a(a1) ^ mix_b(b1) == mix_a(a2) ^
+// mix_b(b2) across two unrelated constructions, which is the ordinary 64-bit
+// hash-identity contract this engine keys on everywhere else. Each stage is a
+// bijection, so the key stays injective in either argument with the other fixed.
 inline uint64_t gb_mix2(uint64_t a, uint64_t b) {
-    uint64_t h = a * 0x9E3779B97F4A7C15ULL + 1u;
-    h ^= h >> 32;
-    h ^= b;
-    h = h * 0x9E3779B97F4A7C15ULL + 1u;
+    uint64_t ga = a * 0xFF51AFD7ED558CCDULL + 0x165667B19E3779F9ULL;
+    ga ^= ga >> 32;
+    uint64_t vb = b * 0xC4CEB9FE1A85EC53ULL;
+    vb ^= vb >> 29;
+    uint64_t h = ga ^ vb;
+    h *= 0x9E3779B97F4A7C15ULL;
     h ^= h >> 32;
     return h;
 }
@@ -1433,6 +1770,7 @@ struct UngroupedAggLocal : LocalSinkState {
     std::vector<AggCell> cells;
     std::vector<std::string> strs;   // string MIN/MAX extremes, parallel to cells
     std::vector<opteryx::ungrouped::MedianState> medians;  // MEDIAN buffers, parallel to cells
+    std::vector<opteryx::roaring32::Roaring32> cidrs;  // CIDR_AGG address sets, parallel to cells
     std::vector<HllppSketch> hlls;  // APPROX_COUNT_DISTINCT sketches, parallel to cells
     std::vector<TDigestPtr> tds;    // APPROX_PERCENTILE sketches, parallel to cells
     // COUNT(DISTINCT): per-spec, hash-partitioned CarcharSet dedup on draken value
@@ -1446,6 +1784,7 @@ struct UngroupedAggGlobal : GlobalSinkState {
     std::vector<AggCell> cells;
     std::vector<std::string> strs;
     std::vector<opteryx::ungrouped::MedianState> medians;
+    std::vector<opteryx::roaring32::Roaring32> cidrs;
     std::vector<HllppSketch> hlls;
     std::vector<TDigestPtr> tds;
     // per spec, per partition: queued worker tables (disjoint by hash — merged
@@ -1496,6 +1835,21 @@ struct UngroupedAggSink : Sink {
                 err.msg = "native engine: ARRAY_AGG without a GROUP BY reached the "
                           "ungrouped aggregate sink — fail loud, never a silent wrong "
                           "answer";
+                return false;
+            }
+            // CIDR_AGG, unlike ARRAY_AGG above, IS supported ungrouped: its state
+            // lives in a side-vector parallel to `cells` (the shape MEDIAN, HLL and
+            // t-digest already use), so the fixed-width AggCell never has to hold
+            // it. Collapsing a whole address column to one CIDR list is the
+            // primary use, not an edge case.
+            if (specs[s].fn == AggFn::CidrAgg
+                    && !cidr_operand_supported(t, c.own ? c.own->logical_type : nullptr)) {
+                err.code = 1;
+                err.msg = "native engine: CIDR_AGG requires an IPV4 operand (UINT32 "
+                          "carrying the IPV4 descriptor). A plain integer column is "
+                          "refused because folding arbitrary 32-bit values into "
+                          "network ranges produces a well-formed, confident, wrong "
+                          "answer. CAST the column to IPV4 first.";
                 return false;
             }
             // STDDEV never descales DECIMAL's fixed-point unscaled integer — reading
@@ -1555,6 +1909,7 @@ struct UngroupedAggSink : Sink {
             l.cells.assign(specs.size(), AggCell{});
             l.strs.assign(specs.size(), std::string());
             l.medians.resize(specs.size());   // MedianState: not copyable, resize (not assign)
+            l.cidrs.resize(specs.size());     // Roaring32: likewise move-only
             l.hlls.resize(specs.size());
             l.tds.resize(specs.size());
             l.dparts.resize(specs.size());
@@ -1618,6 +1973,17 @@ struct UngroupedAggSink : Sink {
                 bool is_f = l.meta[s].is_float;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (sort_row_valid(v, i)) agg2_update_stddev(c, v, i, is_f);
+                }
+            } else if (specs[s].fn == AggFn::CidrAgg) {
+                // Operand is validated UINT32+IPV4, so the raw read is never a
+                // float and the value IS the address. NULLs are skipped: a NULL
+                // is not an address and so is not a member of the set. A refused
+                // insert latches `overflowed` for emit to raise on — the same
+                // contract the grouped path uses.
+                opteryx::roaring32::Roaring32& R = l.cidrs[s];
+                for (uint32_t i = 0; i < v.length; ++i) {
+                    if (!sort_row_valid(v, i)) continue;
+                    (void)R.add(static_cast<uint32_t>(agg2_read_raw(v, i, false)));
                 }
             } else if (specs[s].fn == AggFn::Median) {
                 bool is_f = l.meta[s].is_float;
@@ -1689,6 +2055,7 @@ struct UngroupedAggSink : Sink {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
             g.medians.resize(specs.size());
+            g.cidrs.resize(specs.size());
             g.hlls.resize(specs.size());
             g.tds.resize(specs.size());
             g.dpending.resize(specs.size());
@@ -1710,6 +2077,11 @@ struct UngroupedAggSink : Sink {
                             return;
                         }
                     }
+                }
+                if (specs[s].fn == AggFn::CidrAgg) {
+                    // Union: order- and duplication-insensitive, so the worker
+                    // split cannot change the answer.
+                    (void)g.cidrs[s].merge_from(l.cidrs[s]);
                 }
                 if (specs[s].fn == AggFn::ApproxCountDistinct) {
                     if (!g.hlls[s].merge(l.hlls[s])) {
@@ -1741,6 +2113,7 @@ struct UngroupedAggSink : Sink {
             g.cells.assign(specs.size(), AggCell{});
             g.strs.assign(specs.size(), std::string());
             g.medians.resize(specs.size());
+            g.cidrs.resize(specs.size());
             g.hlls.resize(specs.size());
             g.tds.resize(specs.size());
             g.dpending.resize(specs.size());
@@ -1841,6 +2214,7 @@ struct UngroupedAggSink : Sink {
             lv.f64 = &f641; lv.f64sq = &f64sq1; lv.i128 = &i1281; lv.sval = &g.strs[s];
             lv.f64y = &f64y1; lv.f64yy = &f64yy1; lv.f64xy = &f64xy1;
             lv.median = &g.medians[s];
+            lv.cidr = &g.cidrs[s];   // one "group": the whole column
             lv.hll = &g.hlls[s];
             lv.td = &g.tds[s];
             lv.pct_spec = &specs[s];
@@ -1890,6 +2264,7 @@ struct GBLanes {
     std::vector<__int128> i128;    // SumD128/AvgD128 sums; MinMaxD128 extremes
     std::vector<std::string> sval; // MinMaxStr extremes
     std::vector<GBArrayAggState> aa;  // ArrayAgg per-group element lists
+    std::vector<opteryx::roaring32::Roaring32> cidr;  // CidrAgg per-group address sets
     std::vector<opteryx::ungrouped::MedianState> median;  // Median per-group buffers
     std::vector<HllppSketch> hll;  // ApproxCountDistinct per-group sketches
     std::vector<TDigestPtr> td;    // ApproxPercentile per-group sketches
@@ -1932,6 +2307,14 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             // No `valid` lane: an ARRAY_AGG row is never NULL, and the element
             // count is the state's own nulls.size().
             L.aa.resize(n);
+            return;
+        case GBKind::CidrAgg:
+            // No `valid` lane: a CIDR_AGG row is never NULL — a group holding no
+            // non-NULL addresses is the EMPTY set, which emits an empty array.
+            // resize() default-constructs empty Roaring32s, the right initial
+            // state for a new group (they are move-only, like MedianState, so a
+            // copy cannot double-release their budget charge).
+            L.cidr.resize(n);
             return;
         case GBKind::Median:
             // No `valid` lane: null-ness is the state's own size==0 (see
@@ -2230,6 +2613,16 @@ struct GroupBySink : Sink {
                     err.code = 1;
                     err.msg = "native engine: unsupported ARRAY_AGG operand type — "
                               "fail loud, never a silent wrong answer";
+                    return false;
+                }
+            } else if (specs[s].fn == AggFn::CidrAgg) {
+                if (!cidr_operand_supported(t, c.own ? c.own->logical_type : nullptr)) {
+                    err.code = 1;
+                    err.msg = "native engine: CIDR_AGG requires an IPV4 operand (UINT32 "
+                              "carrying the IPV4 descriptor). A plain integer column is "
+                              "refused because folding arbitrary 32-bit values into "
+                              "network ranges produces a well-formed, confident, wrong "
+                              "answer. CAST the column to IPV4 first.";
                     return false;
                 }
             } else if (specs[s].fn != AggFn::Count
@@ -2621,7 +3014,6 @@ struct GroupBySink : Sink {
                     // merged list at finalize.
                     const AAStore st = aa_store_of(l.meta[s].type);
                     const bool is_f = l.meta[s].is_float;
-                    const int64_t cap = specs[s].aa_max_per_group;
                     const DrakenStringArena* sa =
                         (st == AAStore::Str) ? string_arena_of(v) : nullptr;
                     for (uint32_t i = 0; i < rows; ++i) {
@@ -2637,14 +3029,34 @@ struct GroupBySink : Sink {
                                     str_data(slot, sa->arena));
                                 len = str_length(slot);
                             }
-                            A.push(st, nul, 0, 0, p, len, cap);
+                            A.push(st, nul, 0, 0, p, len);
                         } else if (st == AAStore::I128) {
                             A.push(st, nul, 0, nul ? 0 : agg2_read_i128(v, i),
-                                   nullptr, 0, cap);
+                                   nullptr, 0);
                         } else {
                             A.push(st, nul, nul ? 0 : agg2_read_raw_at(vtype, vdata, vsel, i, is_f), 0,
-                                   nullptr, 0, cap);
+                                   nullptr, 0);
                         }
+                    }
+                    break;
+                }
+                case GBKind::CidrAgg: {
+                    // NULLs ARE skipped here, unlike ARRAY_AGG one case up. A NULL
+                    // is not an address, so it is not a member of the set; a list
+                    // keeps NULL because it has a slot to keep it in, a set does
+                    // not. The operand is validated UINT32+IPV4, so the raw read
+                    // is never a float and the value IS the address (octet A in
+                    // bits 31..24 — see draken/core/ipv4.h).
+                    for (uint32_t i = 0; i < rows; ++i) {
+                        if (!sort_row_valid(v, i)) continue;
+                        opteryx::roaring32::Roaring32& R =
+                            l.parts[l.mk_hash[i] >> kGBPartShift].lanes[s].cidr[l.mk_ent[i]];
+                        // Return ignored deliberately: a refusal latches
+                        // R.overflowed, which emit_cidr_lane_column raises on.
+                        // Checking per row would branch the hot loop to reach the
+                        // same outcome one morsel earlier.
+                        (void)R.add(static_cast<uint32_t>(
+                            agg2_read_raw_at(vtype, vdata, vsel, i, false)));
                     }
                     break;
                 }
@@ -2840,45 +3252,34 @@ struct GroupBySink : Sink {
                         }
                         break;
                     case GBKind::ArrayAgg: {
-                        // Concatenate the worker's list onto the merged one. The cap
-                        // is re-checked here: N workers may each hold up to `cap` for
-                        // the same group, so a merge can cross it even when no single
-                        // worker did.
+                        // Concatenate the worker's list onto the merged one. The
+                        // destination's growth is charged against the global byte
+                        // budget here just as it is on append: N workers each holding
+                        // a share of one group can cross the budget on merge even when
+                        // no single worker did.
                         const AAStore ast = aa_store_of(g.meta[s].type);
-                        const int64_t cap = specs[s].aa_max_per_group;
                         // The other arms only read the source, so the loop aliases it
                         // const. This one drains it: `src` is released right after the
                         // merge, so its element strings are moved, not copied.
                         GBLanes& SL = src.lanes[s];
                         for (uint32_t e = 0; e < sn; ++e) {
-                            GBArrayAggState& SA = SL.aa[e];
-                            GBArrayAggState& DA = D.aa[ge[e]];
-                            if (SA.overflowed) DA.overflowed = true;
-                            size_t take = SA.size();
-                            if (static_cast<int64_t>(DA.size() + take) > cap) {
-                                DA.overflowed = true;
-                                take = (static_cast<int64_t>(DA.size()) >= cap)
-                                           ? 0u : static_cast<size_t>(cap - DA.size());
-                            }
-                            if (take == 0) continue;
-                            DA.nulls.insert(DA.nulls.end(), SA.nulls.begin(),
-                                            SA.nulls.begin() + take);
-                            switch (ast) {
-                                case AAStore::Raw:
-                                    DA.raws.insert(DA.raws.end(), SA.raws.begin(),
-                                                   SA.raws.begin() + take);
-                                    break;
-                                case AAStore::I128:
-                                    DA.i128s.insert(DA.i128s.end(), SA.i128s.begin(),
-                                                    SA.i128s.begin() + take);
-                                    break;
-                                case AAStore::Str:
-                                    DA.strs.insert(
-                                        DA.strs.end(),
-                                        std::make_move_iterator(SA.strs.begin()),
-                                        std::make_move_iterator(SA.strs.begin() + take));
-                                    break;
-                            }
+                            D.aa[ge[e]].append_from(ast, SL.aa[e]);
+                        }
+                        break;
+                    }
+                    case GBKind::CidrAgg: {
+                        // Union — the set operation, so merging is order- and
+                        // duplication-insensitive and needs no finalize-time
+                        // reconciliation. Two workers that both saw an address
+                        // contribute it once, which is exactly what makes the
+                        // partitioned plan agree with the serial one.
+                        //
+                        // Charged against the state budget the same way an insert
+                        // is: N workers each under the ceiling can still cross it
+                        // combined, and a refusal latches overflowed on the
+                        // destination for emit to raise on.
+                        for (uint32_t e = 0; e < sn; ++e) {
+                            (void)D.cidr[ge[e]].merge_from(src.lanes[s].cidr[e]);
                         }
                         break;
                     }
@@ -2943,6 +3344,9 @@ struct GroupBySink : Sink {
                 } else if (kind == GBKind::ArrayAgg) {
                     lv.aa = const_cast<GBArrayAggState*>(L.aa.data()) + start;
                     lv.aa_spec = &specs[s];
+                } else if (kind == GBKind::CidrAgg) {
+                    // No `valid` lane (see gb_lanes_resize) — never NULL.
+                    lv.cidr = const_cast<opteryx::roaring32::Roaring32*>(L.cidr.data()) + start;
                 } else if (kind == GBKind::Median) {
                     // No `valid` lane (Median never allocates one — see
                     // gb_lanes_resize); null-ness is each state's own size==0.

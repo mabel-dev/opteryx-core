@@ -23,6 +23,7 @@ _GLOBAL_SUPPORTED = frozenset(
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
         "ARRAY_AGG",
+        "CIDR_AGG",
     }
 )
 
@@ -43,6 +44,7 @@ _STRICT_GROUPED_SUPPORTED = frozenset(
         "APPROX_PERCENTILE",
         "ARRAY_AGG",
         "ANY_VALUE",
+        "CIDR_AGG",
     }
 )
 
@@ -51,6 +53,7 @@ _FRIENDLY_NAMES = {
     "APPROX_COUNT_DISTINCT": "Approximate Count Distinct",
     "APPROX_PERCENTILE": "Approximate Percentile",
     "ARRAY_AGG": "Array Aggregate",
+    "CIDR_AGG": "CIDR Aggregate",
     "AVG": "Average",
     "CORR": "Correlation",
     "COUNT": "Count",
@@ -67,6 +70,7 @@ _CATEGORIES = {
     "APPROX_COUNT_DISTINCT": "approximate",
     "APPROX_PERCENTILE": "approximate",
     "ARRAY_AGG": "collection",
+    "CIDR_AGG": "collection",
     "AVG": "numeric",
     "CORR": "numeric",
     "COUNT": "counting",
@@ -83,6 +87,7 @@ _SUMMARIES = {
     "APPROX_COUNT_DISTINCT": "Estimates the number of distinct input values.",
     "APPROX_PERCENTILE": "Estimates a percentile using sketch-based aggregation.",
     "ARRAY_AGG": "Collects input values into an array.",
+    "CIDR_AGG": "Collects IPv4 addresses into the smallest list of CIDR blocks that covers exactly those addresses.",
     "AVG": "Computes the arithmetic mean of the input values.",
     "CORR": "Computes the Pearson correlation coefficient between two numeric columns.",
     "COUNT": "Counts rows or non-null input values.",
@@ -99,6 +104,7 @@ _DOCUMENTATION = {
     "APPROX_COUNT_DISTINCT": "Uses a sketch-based estimator instead of exact deduplication.",
     "APPROX_PERCENTILE": "Accepts an input expression and a percentile literal between 0.0 and 1.0.",
     "ARRAY_AGG": "Supports DISTINCT, ORDER BY, and LIMIT forms in the aggregate surface.",
+    "CIDR_AGG": "Returns ARRAY<VARCHAR> of CIDR blocks, ascending and non-overlapping. The cover is MINIMAL and unique: adjacent addresses fold into the largest aligned block, so 10.0.0.0-10.0.0.7 becomes a single 10.0.0.0/29. The operand must be IPV4 (a plain integer column is rejected). Duplicate addresses are free - the set deduplicates on insert - and NULLs are not members, so a group with no addresses returns an empty array rather than NULL. Works with and without GROUP BY. Bounded by two independent budgets, one on the collected address set and one on the emitted text: see @@cidr_agg_state_budget_bytes and @@cidr_agg_emit_budget_bytes.",
     "AVG": "Ignores nulls and divides the running sum by the number of non-null values.",
     "CORR": "Pearson correlation over (x, y) pairs where both values are non-null. Returns DOUBLE in [-1, 1]; NULL when undefined (no pairs, or zero variance in either input). DECIMAL inputs must be CAST to DOUBLE first.",
     "COUNT": "COUNT(*) counts rows, while COUNT(expr) counts non-null values.",
@@ -114,6 +120,7 @@ _SQL_FORMS = {
     "ANY_VALUE": ["ANY_VALUE(expr)"],
     "APPROX_COUNT_DISTINCT": ["APPROX_COUNT_DISTINCT(expr)"],
     "APPROX_PERCENTILE": ["APPROX_PERCENTILE(expr, percentile)"],
+    "CIDR_AGG": ["CIDR_AGG(ipv4_expr)"],
     "ARRAY_AGG": [
         "ARRAY_AGG(expr)",
         "ARRAY_AGG(DISTINCT expr)",

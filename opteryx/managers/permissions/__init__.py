@@ -5,6 +5,7 @@
 
 from fnmatch import fnmatch
 from typing import Iterable
+from typing import List
 
 from opteryx.exceptions import PermissionsError
 from opteryx.models import ExecutionContext
@@ -29,6 +30,30 @@ ACTION_MAP = {
     # structure), not just data — stricter than a normal READ.
     "MANIFEST": {"owner"},
 }
+
+
+def implicit_policies(username: str) -> List[dict]:
+    """The grants every session holds without a policy being issued for them.
+
+    These are hard-coded in the ENGINE, not handed over by the policy service,
+    so they never appear in `execution_context.access_policies`. This is the
+    SINGLE declaration of them: `can_perform_action` enforces this list and
+    `SHOW GRANTS` ($grants) reports it, so the two cannot drift into disagreeing
+    about what a caller holds.
+
+    Returned in the policy dict shape the issued policies use, and in the order
+    they are evaluated. Every pattern is `<namespace>.*` — see
+    `can_perform_action` for why the `*` is matched as a literal prefix rather
+    than a glob.
+
+    An anonymous session (no username) holds no personal namespace: there is no
+    `personal.<nobody>` for it to own.
+    """
+    policies = []
+    if username:
+        policies.append({"pattern": f"personal.{username}.*", "role": "owner"})
+    policies.append({"pattern": "public.*", "role": "reader"})
+    return policies
 
 
 def can_perform_workspace_action(
@@ -95,15 +120,24 @@ def can_perform_action(
     """
     if table.count(".") == 0:
         return action == "READ"  # Local table, allow reading, nothing else
-    if table.startswith("public."):
-        return action == "READ"  # Public schema, allow reading, nothing else
 
-    username = execution_context.user
-    if table.startswith(f"personal.{username}."):
-        return True  # Personal schema, allow all actions
+    action_map = ACTION_MAP.get(action, set())
+
+    # The implicit grants CAP what they cover: a name inside `public.` or inside
+    # the caller's own `personal.` namespace is answered here and does NOT fall
+    # through to the issued policies. That short-circuit is what makes `public.`
+    # read-only for everyone regardless of what a policy says about it.
+    #
+    # The trailing `*` is stripped and the remainder matched as a literal
+    # prefix, not with fnmatch: fnmatch normalizes case per-platform (so the
+    # same policy would decide differently on macOS and Linux) and would treat
+    # glob metacharacters in a username as live, widening the namespace a
+    # caller owns.
+    for policy in implicit_policies(execution_context.user):
+        if table.startswith(policy["pattern"][:-1]):
+            return policy["role"] in action_map
 
     policies: Iterable[dict] = execution_context.access_policies
-    action_map = ACTION_MAP.get(action, set())
 
     try:
         for policy in policies:

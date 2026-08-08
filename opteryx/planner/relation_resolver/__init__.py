@@ -207,6 +207,15 @@ def join_leg_preprocess(plan: LogicalPlan):
 
     A spliced sub-plan introduces new Scan nodes beneath an existing Join; the Join must
     learn their uuids/aliases or the Binder cannot attribute columns to the correct side.
+
+    Both lists are SETS in all but type: a name means "this leg includes that relation",
+    so a name already present must not be added again. `_splice` runs this over the WHOLE
+    plan on every expansion, so a Join whose legs the logical planner already computed
+    (or an earlier splice already taught) is walked repeatedly. Appending unconditionally
+    made `right_relation_names` read `['b', 'b']`, and the binder's USING handler pops the
+    named column out of each listed relation in turn — the second pop of an already-popped
+    column returns None, and setting `.origin` on it died with an AttributeError. That is
+    a JOIN ... USING inside any view or CTE body.
     """
     for nid, node in (
         (nid, node)
@@ -221,11 +230,15 @@ def join_leg_preprocess(plan: LogicalPlan):
         while location_nid:
             if location_node.node_type == LogicalPlanStepType.Join:
                 if leg == "left":
-                    location_node.left_readers.append(uuid)
-                    location_node.left_relation_names.append(node.alias)
+                    if uuid not in location_node.left_readers:
+                        location_node.left_readers.append(uuid)
+                    if node.alias not in location_node.left_relation_names:
+                        location_node.left_relation_names.append(node.alias)
                 elif leg == "right":
-                    location_node.right_readers.append(uuid)
-                    location_node.right_relation_names.append(node.alias)
+                    if uuid not in location_node.right_readers:
+                        location_node.right_readers.append(uuid)
+                    if node.alias not in location_node.right_relation_names:
+                        location_node.right_relation_names.append(node.alias)
                 plan[location_nid] = location_node
             incoming = plan.outgoing_edges(location_nid)
             if incoming:
@@ -246,38 +259,30 @@ def _cycle_error(relation: str, path: Tuple[str, ...]) -> UnsupportedSyntaxError
     )
 
 
-def _apply_column_aliases(head, relation: str) -> None:
-    """Apply a relation's column-alias list — the `(a, b)` in `WITH t(a, b) AS (...)`.
+def _output_columns(sub_plan: LogicalPlan, head_nid: str):
+    """The projection a relation's body emits, as seen from its plan head.
 
-    The names rename the relation's OUTPUT columns positionally. Applied here, at the
-    splice, because this is where the alias list and the body's projection meet.
+    The head is only the Project when nothing sits above it. A body with ORDER BY or
+    LIMIT leaves an Order/Limit node at the head, and those carry no columns of their
+    own — reading them made the relation look like a bare `SELECT *` and lost the
+    body's names. Walk down (edges run leaf -> head) past the column-less nodes to the
+    projection they wrap.
+
+    Found by walking THIS sub-plan rather than carried from the logical planner: the
+    plan is copied per reference and `LogicalColumn.copy()` takes no memo, so a list
+    stashed elsewhere would hold objects distinct from this copy's own Project.
     """
-    from opteryx.expression import NodeType
-
-    column_aliases = head.column_aliases
-    if not column_aliases:
-        return
-
-    columns = head.columns or []
-
-    # `WITH t(a, b) AS (SELECT * FROM ...)` — a wildcard body has no projection list to
-    # line the names up against until binding resolves the schema (for a bare `SELECT *`
-    # the plan head is the Scan itself, carrying no columns at all). Refuse, rather than
-    # drop the names on the floor, which is what used to happen.
-    if not columns or any(column.node_type == NodeType.WILDCARD for column in columns):
-        raise UnsupportedSyntaxError(
-            f"Relation '{relation}' declares column aliases over a wildcard projection. "
-            "Name the columns in the body instead of using SELECT *."
-        )
-
-    if len(column_aliases) != len(columns):
-        raise UnsupportedSyntaxError(
-            f"Relation '{relation}' declares {len(column_aliases)} column alias(es) "
-            f"but its body produces {len(columns)} column(s)."
-        )
-
-    for column, alias in zip(columns, column_aliases):
-        column.alias = alias
+    nid = head_nid
+    while True:
+        columns = sub_plan[nid].columns
+        if columns:
+            return columns
+        below = sub_plan.ingoing_edges(nid)
+        # a branch (join) or a leaf (bare `SELECT *`, head is the Scan) has no single
+        # projection to descend to — the wildcard is the honest answer
+        if len(below) != 1:
+            return None
+        nid = below[0][0]
 
 
 def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> LogicalPlan:
@@ -290,7 +295,6 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> Logical
 
     sub_plan = rename_relations(sub_plan)
     sub_plan_head = sub_plan.get_exit_points()[0]
-    _apply_column_aliases(sub_plan[sub_plan_head], node.relation)
 
     outgoing = plan.outgoing_edges(nid)
     if not outgoing:
@@ -299,7 +303,7 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> Logical
         )
 
     node.node_type = LogicalPlanStepType.Subquery
-    node.columns = sub_plan[sub_plan_head].columns or [Node(NodeType.WILDCARD)]
+    node.columns = _output_columns(sub_plan, sub_plan_head) or [Node(NodeType.WILDCARD)]
     plan += sub_plan
     plan.add_edge(sub_plan_head, nid, outgoing[0][2])
     return join_leg_preprocess(plan)

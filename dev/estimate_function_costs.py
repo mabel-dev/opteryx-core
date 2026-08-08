@@ -166,6 +166,9 @@ CONST_PARAM_TOKENS: Dict[str, Any] = {
     "part": "day",        # EXTRACT, DATEDIFF
     "unit": "day",        # TRUNC(date/timestamp)
     "units": "day",       # TIME_BUCKET
+    "mode": "words",      # HUMANIZE — the default ladder, so the cost is the
+                          # one the no-mode call pays. The other modes walk a
+                          # table of the same shape; none is the outlier.
 }
 
 # Non-const params whose data must satisfy a per-element shape the generic

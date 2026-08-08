@@ -27,6 +27,7 @@ import os
 import threading
 
 from draken.draken_native import DrakenType
+from draken.draken_native import LogicalKind
 from opteryx.constants import ResultType
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import VariantKeyError
@@ -101,6 +102,41 @@ def resolve_worker_count(requested) -> int:
     return max(1, requested)
 
 
+def _skene_row_group_count(manifest, file_count: int) -> int:
+    """Row groups a skene scan will read — its work item count, not its file count.
+
+    A .skene file holds up to 16 row groups and the scan claims row groups, so
+    reporting the file count here would understate the work by the packing
+    factor. The manifest knows because the connector reads every file's footer to
+    build it (FileEntry.row_group_count).
+
+    The fallback is the file count, and it is a FLOOR rather than a guess: every
+    file holds at least one row group. It is only reachable from a manifest
+    producer that reads no skene footer, of which there is none today — a skene
+    manifest is built exactly one way (FileSystemConnector's SKENE branch).
+    """
+    if manifest is None:
+        return file_count
+    total = manifest.get_row_group_count()
+    return total if total is not None else file_count
+
+
+def _and_conjuncts(node):
+    """Flatten an ON tree's AND spine into its leaf conjuncts.
+
+    Only the AND spine is walked: an OR anywhere in an ON clause is ONE leaf here,
+    and — carrying no extractable equi key — is refused by the caller, which is the
+    correct answer for it too.
+    """
+    from opteryx.expression import NodeType
+
+    if node is None:
+        return []
+    if node.node_type == NodeType.AND:
+        return _and_conjuncts(node.left) + _and_conjuncts(node.right)
+    return [node]
+
+
 def _unsupported(what: str):
     raise NotSupportedError(
         f"native engine: {what} is not supported yet. This query cannot run — there "
@@ -133,6 +169,30 @@ def _logical_tuple(ct):
     lg = ct.logical
     return (int(lg.kind.value), int(getattr(lg.unit, "value", 0)),
             int(lg.precision), int(lg.scale), int(getattr(lg, "dimension", 0) or 0))
+
+
+def _element_chain(ct):
+    """An ARRAY ColumnType's element subtree, flattened for the native wire.
+
+    SIX ints per nesting level — (physical type, kind, unit, precision, scale,
+    dimension) — outermost element first, so ARRAY<VARCHAR> is one level and
+    ARRAY<ARRAY<INT64>> is two. Empty for every non-ARRAY column.
+
+    A zero-row ARRAY column is only well-formed with a child vector (buffers.h /
+    vector_owner.h), and gather_rows builds one even when every row it is asked for
+    is NULL — an all-NULL ARRAY half still emits a typed, empty child. Without the
+    element type there is nothing to type that child as, which is what made a FULL
+    OUTER join with an ARRAY in the probe payload unrunnable. An unresolved element
+    type yields an empty chain here and the native side fails loud on it; it is never
+    guessed. See ``engine.hpp::decode_elem_chain``."""
+    chain = []
+    while ct is not None and ct.physical == DrakenType.ARRAY:
+        ct = ct.element
+        if ct is None:
+            break
+        lg = _logical_tuple(ct) or (0, 0, 0, 0, 0)
+        chain.extend((int(ct.physical.value),) + lg)
+    return chain
 
 
 # WP-11 logical-coercion packing — mirrors the LC_* enum in
@@ -968,7 +1028,8 @@ class _Compiler:
     _AGG_WHOLE_ROW = -2    # CountDistinct: dedup over every column (COUNT(DISTINCT *))
 
     _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG", "STDDEV", "MEDIAN",
-                "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "CORR"}
+                "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "CORR",
+                "CIDR_AGG"}
     # MEDIAN is numeric-only (native_group_sinks.hpp's median_operand_supported) —
     # narrower than _AGG_OPERAND_TYPES (which also allows DECIMAL/BOOL/temporal for
     # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median collectors exactly.
@@ -1026,9 +1087,11 @@ class _Compiler:
     def _array_agg_options(agg):
         """ARRAY_AGG's DISTINCT / ORDER BY / LIMIT modifiers, as the sink's spec wants
         them. The binder has already rejected ORDER BY on anything but the aggregated
-        column, so `order` is at most one entry here."""
-        from opteryx import config
+        column, so `order` is at most one entry here.
 
+        No memory guard travels in the spec: ARRAY_AGG's retained bytes are bounded by
+        a global budget the sink owns natively (kArrayAggBudgetBytes), not by anything
+        planning decides per query."""
         order = getattr(agg, "order", None)
         descending = False
         if order:
@@ -1046,7 +1109,6 @@ class _Compiler:
             "ordered": bool(order),
             "descending": descending,
             "limit": limit,
-            "max_per_group": int(config.ARRAY_AGG_MAX_VALUES_PER_GROUP),
         }
 
     def _project_agg_operands(self, p, node, layout):
@@ -1146,6 +1208,28 @@ class _Compiler:
                 _unsupported(f"{func} over a column the stream does not carry")
             idx = layout.index(psc.identity)
             pt = _physical_type(psc)
+            if func == "CIDR_AGG":
+                # Works grouped AND ungrouped — collapsing a whole address column
+                # to one CIDR list is the primary use. Its state is a Roaring
+                # bitmap held in a side-vector parallel to the ungrouped sink's
+                # cells (the shape MEDIAN/HLL/t-digest already use), so nothing
+                # has to fit in the fixed-width AggCell.
+                #
+                # The operand must carry the IPV4 descriptor, not merely be
+                # UINT32: that descriptor is the only thing separating an address
+                # from any other 32-bit unsigned number, and folding ids or counts
+                # into network ranges would be a well-formed, confident, wrong
+                # answer. The native sink refuses too; rejecting here as well
+                # means the author gets a plan-time error naming the column
+                # instead of an engine error partway through the run.
+                ct = psc.column_type
+                logical = ct.logical if ct is not None else None
+                if pt != DrakenType.UINT32 or logical is None or logical.kind != LogicalKind.IPV4:
+                    _unsupported(
+                        f"CIDR_AGG over a {pt} column — it requires an IPV4 operand; "
+                        "CAST the column to IPV4 first")
+                specs.append((sc.identity, "CidrAgg", idx))
+                continue
             if func == "ARRAY_AGG":
                 # Grouped-only: an ARRAY_AGG list is per group, and the ungrouped
                 # sink's fixed-width AggCell has nowhere to put one. The binder
@@ -1236,7 +1320,11 @@ class _Compiler:
         kind = type(node).__name__
 
         if getattr(node, "is_scan", False):
-            return self._compile_scan(node, kind)
+            # `nid` so a scan can inspect what CONSUMES it — the skene two-pass path
+            # reads its predicate and top-n spec off the Filter/HeapSort above,
+            # because unlike parquet a skene scan carries no pushed predicate. See
+            # _skene_latmat_consumers.
+            return self._compile_scan(node, kind, nid)
 
         in_edges = list(self.plan.ingoing_edges(nid))
 
@@ -1761,6 +1849,234 @@ class _Compiler:
             ],
         )
 
+    def _skene_latmat_consumers(self, nid):
+        """The Filter chain and HeapSort sitting directly above the skene scan at
+        ``nid``, or None when the plan is not that shape.
+
+        Shape: ``SkeneReadNode -> FilterNode+ -> HeapSortNode``. The chain is 1..N
+        Filters because a multi-conjunct WHERE can reach here either way:
+        SplitConjunctivePredicatesStrategy makes one Filter node per conjunct, and
+        PredicateOrderingStrategy may then merge them back into a single AND tree.
+        Both shapes are accepted; anything else between the scan and the sort (a
+        Projection, a second consumer, a Join) declines.
+
+        This walks UP from the scan because, unlike parquet, a skene scan carries no
+        pushed predicate: `FileSystemTable.can_push` declines for skene and that
+        ruling stands (see `_skene_latmat_scan_plan`). The predicate the two-pass
+        scan needs is therefore still sitting on the Filter node, and this is the
+        physical plan, so it is FINAL — no optimizer strategy can rewrite it after
+        this reads it."""
+        filters = []
+        node_id = nid
+        while True:
+            out_edges = list(self.plan.outgoing_edges(node_id))
+            # travers edges are (source, target, relationship).
+            if len(out_edges) != 1:
+                return None
+            node_id = out_edges[0][1]
+            consumer = self.plan[node_id]
+            if consumer is None:
+                return None
+            consumer_kind = type(consumer).__name__
+            if consumer_kind == "FilterNode":
+                filters.append(consumer)
+                continue
+            if consumer_kind == "HeapSortNode" and filters:
+                return filters, consumer
+            return None
+
+    def _skene_latmat_scan_plan(self, scan, nid):
+        """Plan-time setup for the two-pass late-materialization skene Source
+        (`NativeSkeneLatmatScanSource`), or None when this scan is not that shape.
+
+        The shape is `SELECT <wide> FROM t WHERE <pred> ORDER BY <col> LIMIT n` — the
+        parquet path's R3 (`fused_topn`), which is the whole of skene's ClickBench
+        deficit (Q24: 7755ms skene against 787ms parquet on the same data, measured
+        2026-08-08). Pass 1 decodes only the predicate columns plus the sort key for
+        every file; pass 2 decodes the full projection for just the files still
+        holding a top-n candidate.
+
+        **This is NOT the reader-side row filter skene declines.** `can_push` still
+        returns False for skene and this method does not consult or change it. That
+        ruling is about saving FILTER work, and it was measured to LOSE (+460ms on
+        TPC-H SF1) because a reader-side filter serialises work the parallel engine
+        Filter does concurrently. Late materialization saves DECODE work — the 104
+        columns Q24 never looks at, for the 99M rows it discards — which is waste
+        regardless of how parallel the filter is. So the predicate reaches the Source
+        by its own route: read off the Filter node ABOVE the scan
+        (`_skene_latmat_consumers`), with that Filter LEFT IN THE PLAN.
+
+        Leaving the Filter in place is what makes this safe by construction rather
+        than by argument: the Source only ever drops a row that fails the predicate
+        (the Filter would have dropped it) or is strictly worse than the n-th best
+        surviving sort key (the downstream TopNSink would have dropped it), so the
+        Filter re-running over the surviving candidates cannot change the answer.
+
+        Gates, and why each one is here:
+          * `skene_late_materialization_min_deferred_columns` — the projection has to
+            be materially wider than the pass-1 set. This is what keeps two passes
+            away from the narrow-projection shapes (Q25/26/27, one projected column),
+            where deferring buys nothing and costs a second open. It also bounds the
+            downside: pass 2 re-decodes the pass-1 columns as part of the projection,
+            so the worst case is one full scan PLUS pass 1 — capped at the pass-1
+            columns' share, which this gate keeps small.
+          * `skene_late_materialization_max_selectivity` — mirrors the parquet gate.
+            A weak predicate makes two passes cost more than one, and it is also what
+            bounds pass 1's live set (one sort key + one row position per survivor,
+            held across the barrier until the boundary is known).
+
+        There is no runtime abandon-after-N counterpart to the parquet trampoline's
+        `parquet_late_materialization_abandon_after`: the native parquet Source has
+        none either, and skene's per-file barrier has no incremental point at which
+        to abandon. The two plan-time gates above are the guards, and the bounded
+        worst case above is why that is enough.
+
+        Declining is a fallback to the ordinary single-pass native skene Source doing
+        exactly the work it does today — never a wrong answer.
+
+        Returns a tuple of everything `_compile_scan` needs, or None."""
+        from opteryx import config
+        from opteryx.expression import get_all_nodes_of_type
+        from opteryx.expression.evaluator.evaluation import Pass1PredResolver
+        from opteryx.operators._operators import SkeneLatmatScanPlan
+        from opteryx.operators._operators import bytecode_is_all_c_native
+        from opteryx.planner.optimizer.strategies.split_conjunctive_predicates import (
+            _inner_split,
+        )
+        from opteryx.variables import resolve as _resolve_var
+
+        if not config.features.skene_late_materialization:
+            return None
+        read_columns = getattr(scan, "skene_read_schema_columns", None) or []
+        if not read_columns:
+            # Zero-projection (COUNT(*)) — nothing to defer, and it needs the
+            # materialized path's genuine zero-column morsel anyway.
+            return None
+        manifest = getattr(scan, "manifest", None)
+        if manifest is None or manifest.get_file_count() == 0:
+            return None
+
+        shape = self._skene_latmat_consumers(nid)
+        if shape is None:
+            return None
+        filter_nodes, heapsort = shape
+
+        # ── the top-n spec, read off the HeapSort ──────────────────────────────────
+        # Same deliberately narrow scope as TopNScanPushdownStrategy: one ORDER BY
+        # key, and it must be a plain column reference this scan emits.
+        limit = getattr(heapsort, "limit", None)
+        order_by = getattr(heapsort, "order_by", None) or []
+        if limit is None or int(limit) <= 0 or len(order_by) != 1:
+            return None
+        sort_expression, ascending = order_by[0]
+        if sort_expression.node_type != NodeType.IDENTIFIER:
+            return None
+        sort_sc = getattr(sort_expression, "schema_column", None)
+        if sort_sc is None:
+            return None
+        read_by_identity = {sc.identity: sc for sc in read_columns}
+        if sort_sc.identity not in read_by_identity:
+            return None
+        # No plan-time check that the sort key's type is one draken can build a sort
+        # key from: the HeapSort directly above sorts the SAME column with the SAME
+        # `build_sort_keys`, so a key type this Source could not reduce on is a query
+        # that already fails at the TopNSink. Duplicating `sort_key_type_supported`
+        # here would add a list that can drift, to gate a case that cannot arise.
+
+        # ── the predicate ──────────────────────────────────────────────────────────
+        predicates = [node.filter for node in filter_nodes]
+        # Every column the predicate touches must be a column this scan reads —
+        # otherwise pass 1 cannot evaluate it (a hoisted/computed operand lands as an
+        # EVALUATED node referring to a column that only exists above the scan).
+        # Checked before resolving, so an inadmissible shape DECLINES rather than
+        # raising out of Pass1PredResolver's identity lookup.
+        for pred in predicates:
+            for reference in get_all_nodes_of_type(
+                pred, (NodeType.IDENTIFIER, NodeType.EVALUATED)
+            ):
+                referenced_sc = getattr(reference, "schema_column", None)
+                if referenced_sc is None or referenced_sc.identity not in read_by_identity:
+                    return None
+
+        # Pass 1 evaluates the predicate through opteryx_pass1_predicate_eval's C ABI
+        # — the same entry the parquet latmat Source uses — which runs the c-native
+        # bytecode VM and nothing else. Not lowerable → decline, single pass.
+        filter_bc = self._lower_bytecode(self._compose_predicate_nodes(predicates))
+        if not bytecode_is_all_c_native(filter_bc):
+            return None
+
+        # ── the pass-1 column set: the predicate's columns, plus the sort key ───────
+        # Pass1PredResolver owns the literal vectors + col_idx arrays the C ABI
+        # dereferences; the NativePlan holds it for the run (see
+        # set_skene_latmat_scan_source). `col_names` are PHYSICAL (in-file) names, in
+        # the order the ctx's col_idx expects.
+        resolver = Pass1PredResolver(
+            filter_bc, {sc.identity: sc.name for sc in read_columns}
+        )
+        p1_names = list(resolver.col_names)
+        if not p1_names:
+            return None
+        read_by_name = {sc.name: sc for sc in read_columns}
+        p1_scs = [read_by_name[name] for name in p1_names]
+        if sort_sc.name not in p1_names:
+            p1_names.append(sort_sc.name)
+            p1_scs.append(sort_sc)
+        p1_index_by_name = {name: i for i, name in enumerate(p1_names)}
+        pred_col_to_p1 = [p1_index_by_name[name] for name in resolver.col_names]
+
+        # ── the gates ──────────────────────────────────────────────────────────────
+        query_variables = getattr(scan.properties, "variables", None)
+        deferred = [sc for sc in read_columns if sc.name not in p1_index_by_name]
+        min_deferred = int(_resolve_var(
+            "skene_late_materialization_min_deferred_columns",
+            query_variables,
+            config.SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS,
+        ))
+        # At least one deferred column is a hard floor whatever the knob says: with
+        # none, pass 2 reads exactly what pass 1 read and the split is pure loss.
+        if len(deferred) < max(1, min_deferred):
+            return None
+
+        # Estimate each CONJUNCT on its own and combine multiplicatively. Splitting
+        # is not optional: SplitConjunctivePredicatesStrategy breaks a WHERE into one
+        # Filter node per conjunct, but PredicateOrderingStrategy merges them back
+        # into a single AND tree — and estimate_selectivity returns its 1.0 "unknown"
+        # default for an AND node, which would decline every multi-conjunct query
+        # here. `_inner_split` is the one existing definition of that split, imported
+        # rather than re-written so the two cannot disagree about what a conjunct is.
+        # estimate_selectivity never raises and never returns None (it degrades
+        # through stat tiers to a constant), so there is nothing to guard.
+        selectivity = 1.0
+        for pred in predicates:
+            for conjunct in _inner_split(pred):
+                selectivity *= manifest.estimate_selectivity(conjunct)
+        if selectivity > _resolve_var(
+            "skene_late_materialization_max_selectivity",
+            query_variables,
+            config.SKENE_LATE_MATERIALIZATION_MAX_SELECTIVITY,
+        ):
+            return None
+
+        splan = SkeneLatmatScanPlan(
+            list(scan.skene_files),
+            p1_names,
+            [sc.column_type.physical.value for sc in p1_scs],
+            [
+                _wp11_unit(sc) if sc.column_type.physical == DrakenType.TIMESTAMP64 else -1
+                for sc in p1_scs
+            ],
+            [sc.name for sc in read_columns],
+            [sc.identity for sc in read_columns],
+            [sc.column_type.physical.value for sc in read_columns],
+            [
+                _wp11_unit(sc) if sc.column_type.physical == DrakenType.TIMESTAMP64 else -1
+                for sc in read_columns
+            ],
+            pred_col_to_p1,
+        )
+        return (splan, resolver, p1_index_by_name[sort_sc.name], bool(ascending),
+                int(limit), len(p1_names))
+
     def _native_scan_plan(self, scan):
         """Plan-time setup for the zero-Python scan Source (NativeParquetScanSource)
         when this scan is PROVABLY within its increment-1 scope, else None and the
@@ -2264,7 +2580,7 @@ class _Compiler:
                 not bool(getattr(scan, "_topn_descending", False)),
                 int(topn_limit), out_from_p1, out_from_p2, emit_ids)
 
-    def _compile_scan(self, scan, kind):
+    def _compile_scan(self, scan, kind, nid):
         # Tag the scan Source (and any materialized buffer source) with the scan node's
         # identity so its per-operator readings attribute back to the ReadRel node.
         self.nplan.set_current_identity(scan.identity)
@@ -2282,7 +2598,46 @@ class _Compiler:
         # whole-file Morsel per file rather than one per newline-chunk -- rugo's
         # CSV reader has no chunked entry point (see CsvReadNode's docstring).
         if kind == "SkeneReadNode":
-            # Zero-Python skene Source: workers claim files from an atomic
+            # The composed `WHERE ... ORDER BY ... LIMIT` shape over a wide
+            # projection gets the two-pass late-materialization Source. Tried
+            # FIRST — it is a strictly narrower shape than the single-pass path
+            # below, and when it declines the scan falls through to that path,
+            # which is exactly the work skene does today. The Filter node above
+            # STAYS in the plan (it is the correctness backstop, and it is why
+            # this needs no change to skene's predicate-pushdown decline). See
+            # `_skene_latmat_scan_plan`.
+            lat = self._skene_latmat_scan_plan(scan, nid)
+            if lat is not None:
+                from opteryx.expression.evaluator.evaluation import get_pass1_eval_fn_ptr
+
+                (lat_plan, resolver, sort_p1_index, sort_ascending, topn_limit,
+                 p1_column_count) = lat
+                self.scan_sources[scan.identity] = "NativeSkeneLatmatScanSource"
+                manifest = getattr(scan, "manifest", None)
+                file_count = manifest.get_file_count() if manifest is not None else 0
+                row_group_count = _skene_row_group_count(manifest, file_count)
+                self.scan_facts[scan.identity] = {
+                    # Pass 1 reads every row group; pass 2 re-reads only the ones
+                    # still holding a top-n candidate. This counts the pass-1
+                    # sweep — the work the scan is responsible for — the same
+                    # number the single-pass path reports for the same query.
+                    "files_read": file_count,
+                    "row_groups_read": row_group_count,
+                    "row_groups_pruned": 0,
+                    "parquet_rows_before_filter": 0,
+                    # The WIDEST read: pass 2's full projection. Pass 1 reads only
+                    # `p1_column_count` of these, which is the whole point — one
+                    # number cannot say both, and the projection is what the
+                    # single-pass path would have decoded for every row.
+                    "columns_read": len(scan.skene_read_schema_columns or []),
+                }
+                p = self.nplan.new_pipeline()
+                self.nplan.set_skene_latmat_scan_source(
+                    p, lat_plan, get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
+                    resolver, sort_p1_index, sort_ascending, topn_limit)
+                self._remember_types(scan.columns)
+                return p, [sc.identity for sc in scan.skene_read_schema_columns]
+            # Zero-Python skene Source: workers claim ROW GROUPS from an atomic
             # counter and decode them independently (skene::read_morsel is a
             # pure function over a buffer). Replaces the compile-time
             # materialized path, which decoded every file serially on the
@@ -2294,13 +2649,13 @@ class _Compiler:
                 file_count = manifest.get_file_count() if manifest is not None else 0
                 self.scan_facts[scan.identity] = {
                     "files_read": file_count,
-                    # One .skene file IS one row group (skene/FORMAT.md), so the
-                    # two counts are the same number by construction — not a
-                    # placeholder. Files pruned at plan time are already absent
-                    # from the manifest, hence 0 pruned HERE: the manifest
-                    # pruning strategy reports what it dropped, and counting it
-                    # twice would double-report.
-                    "row_groups_read": file_count,
+                    # A .skene file holds up to 16 row groups, so this is NOT
+                    # file_count — it is the manifest's row group total, which is
+                    # also the scan's work item count. Files pruned at plan time
+                    # are already absent from the manifest, hence 0 pruned HERE:
+                    # the manifest pruning strategy reports what it dropped, and
+                    # counting it twice would double-report.
+                    "row_groups_read": _skene_row_group_count(manifest, file_count),
                     "row_groups_pruned": 0,
                     # No reader-side predicate on this path (skene declines
                     # pushdown), so rows-in == rows-out of the scan; the Filter
@@ -2480,6 +2835,45 @@ class _Compiler:
         # path deliberately drops.
         filter_residual = getattr(node, "residual", None) if mode in (2, 3, 4) else None
 
+        # Every conjunct of the ON clause must be evaluated by SOMETHING.
+        #
+        # `left_cols`/`right_cols` are populated only from Eq conjuncts spanning the
+        # two legs (binder/join_helpers.extract_join_fields), so a theta conjunct —
+        # `a.x > b.y` — leaves no trace in them. INNER re-plans such a join as
+        # `nested_loop` and applies the whole ON as a post-join residual filter, so it
+        # is honoured there. Every OTHER join type kept its own join_type, had no
+        # residual channel, and SILENTLY DROPPED the conjunct — returning, exactly, the
+        # answer to the equi-only join:
+        #
+        #   planets JOIN satellites ON planets.id = satellites.planetId
+        #                          AND planets.mass > satellites.radius
+        #                     engine   truth
+        #     INNER               156     156
+        #     LEFT                179     161   <- the equi-only LEFT join's answer
+        #     FULL                179     182
+        #     LEFT SEMI             7       4
+        #     LEFT ANTI             2       5
+        #
+        # and it was invisible to the join-algebra oracles because dropping the
+        # conjunct UNIFORMLY leaves the identities intact (SEMI + ANTI still equalled
+        # |planets|). Per architect ruling only INNER supports a theta conjunct; the
+        # rest refuse. A bare theta ON already refused here ("aligned key lists") — the
+        # loud path and the silent one sat next to each other.
+        on_condition = getattr(node, "on", None)
+        if on_condition is not None and residual is None and filter_residual is None:
+            unkeyed = len(_and_conjuncts(on_condition)) - len(left_cols)
+            if unkeyed > 0:
+                # Deliberately NOT named by `join_type`: a user-written RIGHT JOIN
+                # arrives here as "left outer" (the planner swaps the legs), so
+                # echoing it would tell the user their query says something it does
+                # not. State the rule instead.
+                _unsupported(
+                    f"an ON clause with {unkeyed} condition(s) that are not an equality "
+                    "between the two relations, on a join that is not an INNER join "
+                    "(INNER is the only join type that supports a non-equality join "
+                    "condition)"
+                )
+
         # INNER / CROSS: build = left leg (CROSS builds right for the scalar side).
         # LEFT OUTER / SEMI / ANTI: the LEFT leg is the preserved/filtered side —
         # it must be the PROBE; the RIGHT leg builds the table.
@@ -2514,11 +2908,11 @@ class _Compiler:
         semi_no_payload = mode in (2, 3, 4) and filter_residual is None
         build_payload = [] if semi_no_payload else list(range(len(blayout)))
         if semi_no_payload:
-            build_types, build_logical = [], []
+            build_types, build_logical, build_element = [], [], []
         else:
-            build_types, build_logical = self._payload_types(build_id, blayout)
+            build_types, build_logical, build_element = self._payload_types(build_id, blayout)
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
-                                        build_types, build_logical,
+                                        build_types, build_logical, build_element,
                                         mode == 5)   # FULL OUTER: track matches
 
         pp, playout = self.compile_node(probe_id)
@@ -2562,13 +2956,14 @@ class _Compiler:
             # created AFTER the probe pipeline — pipelines run in creation
             # order, so by the time UnmatchedBuildSource pulls, every probe
             # worker has finished and the matched[] flags are complete.
-            probe_types, probe_logical = self._payload_types(probe_id, playout)
+            probe_types, probe_logical, probe_element = self._payload_types(probe_id, playout)
             buf = self.nplan.new_buffer()
             self.nplan.set_buffer_append_sink(pp, buf)
             tail = self.nplan.new_pipeline()
             self.nplan.set_current_identity(node.identity)
             self.nplan.set_current_display_name(type(node).__name__)
-            self.nplan.set_unmatched_build_source(tail, ref, probe_types, probe_logical)
+            self.nplan.set_unmatched_build_source(tail, ref, probe_types, probe_logical,
+                                                  probe_element)
             self.nplan.set_buffer_append_sink(tail, buf)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
@@ -2671,6 +3066,100 @@ class _Compiler:
                     coercions[identity] = (key_node, target_name, target)
         return coercions
 
+    def _asof_match_coercions(self, node):
+        """Key-coercion entries for an ASOF MATCH_CONDITION whose two sides differ.
+
+        An ASOF match column is a join key by another name, and it has the identical
+        failure mode `_join_key_coercions` exists for: the ASOF bisect orders rows by
+        `sort_num_key`, which normalises each column by ITS OWN physical type — a
+        sign-flip for signed ints, the IEEE order transform for doubles. Each encoding
+        is order-preserving on its own and the two are NOT comparable to each other,
+        so a cross-type MATCH_CONDITION emitted matches that violated the condition
+        the user wrote:
+
+          satellites AS a ASOF JOIN planets AS b MATCH_CONDITION(a.id < b.orbital_velocity)
+            -> 173 of 177 matched rows had a.id >= b.orbital_velocity
+
+        Same-type match columns were, and are, correct. Rather than refuse the
+        cross-type form this reuses the coercion the equi-key path already ratified:
+        CAST the narrower side and order on that, so both sides normalise through one
+        encoding.
+
+        Returns the same {identity: (key_node, target_name, target_ct)} shape
+        `_coerce_join_keys` consumes. The IDENTIFIER operands are SYNTHESISED — an
+        AsofJoinNode keeps only the two column identities, not the bound comparison
+        (`node.on` is None for ASOF) — but they carry the real identity and the real
+        ColumnType, which is all the lowering resolves against.
+        """
+        from opteryx.expression import Node, NodeType
+        from opteryx.types.logical_type import LogicalCategory
+        from opteryx.types.schema import SchemaColumn
+
+        left_identity = getattr(node, "asof_left_column", None)
+        right_identity = getattr(node, "asof_right_column", None)
+        if left_identity is None or right_identity is None:
+            return {}
+        cts = getattr(self, "_cts", None) or {}
+        left_ct, right_ct = cts.get(left_identity), cts.get(right_identity)
+        if left_ct is None or right_ct is None:
+            return {}
+        if left_ct.physical == right_ct.physical:
+            return {}
+        numeric = (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL)
+        left_category, right_category = left_ct.category, right_ct.category
+        if left_category not in numeric or right_category not in numeric:
+            # No coercion exists for this pair, so the two sides would be ordered
+            # through different normalisations and the join would emit matches that
+            # violate the MATCH_CONDITION. REFUSE rather than answer wrongly.
+            #
+            # DATE against TIMESTAMP is the reachable case and it is NOT fixed by
+            # reaching for `find_compatible_type`: that returns VARCHAR for the pair,
+            # which is not an ordering anyone asked for. Casting DATE to TIMESTAMP
+            # would be a new coercion the equi-key path does not perform either, so it
+            # is a decision to take deliberately rather than a mechanical extension.
+            _unsupported(
+                "an ASOF join whose MATCH_CONDITION compares %s to %s (only numeric "
+                "match columns are coerced; CAST one side explicitly)"
+                % (left_category.name, right_category.name)
+            )
+        if left_category == LogicalCategory.INTEGER == right_category:
+            # Integer widths interoperate: the ASOF key normalisation canonicalises
+            # them, exactly as the equi-key hash does.
+            return {}
+
+        from opteryx.operators._operators import JoinNode
+        from opteryx.types.logical_type import find_compatible_type as _lt_find_compatible
+
+        if left_category == right_category:
+            target = _lt_find_compatible([left_category, right_category])
+        else:
+            target = JoinNode._join_numeric_target_type(left_category, right_category)
+        if target is None:
+            return {}
+        target_name = self._JOIN_CAST_TARGETS.get(target.category.name)
+        if target_name is None:
+            _unsupported(
+                "an ASOF join between %s and %s match columns"
+                % (left_category.name, right_category.name)
+            )
+
+        names = getattr(self, "_names", None) or {}
+        coercions = {}
+        for identity, column_type in ((left_identity, left_ct), (right_identity, right_ct)):
+            if column_type.physical == target.physical:
+                continue
+            key_node = Node(
+                NodeType.IDENTIFIER,
+                value=names.get(identity, identity),
+                schema_column=SchemaColumn(
+                    name=names.get(identity, "asof key"),
+                    identity=identity,
+                    column_type=column_type,
+                ),
+            )
+            coercions[identity] = (key_node, target_name, target)
+        return coercions
+
     def _coerce_join_keys(self, p, layout, keys, coercions):
         """Append a CAST column for every key in ``keys`` that needs coercing.
 
@@ -2680,6 +3169,7 @@ class _Compiler:
         if not coercions:
             return layout, keys
         from opteryx.expression import Node, NodeType
+        from opteryx.planner import build_literal_node
         from opteryx.types.schema import FunctionColumn
 
         layout = list(layout)
@@ -2695,11 +3185,25 @@ class _Compiler:
                 column_type=target_ct,
                 aliases=[],
             )
+            # A DECIMAL cast is parameterized: the kernel reads (precision, scale)
+            # off the CAST node's `parameters`, exactly as the SQL path supplies them
+            # for `CAST(x AS DECIMAL(p, s))`. Minting the node with no parameters
+            # made every implicit DECIMAL join-key coercion — any equi-join pairing a
+            # DECIMAL column with an INTEGER or FLOAT one — die at plan time with
+            # `ValueError: CAST to DECIMAL requires (precision, scale)`. The target
+            # ColumnType already carries the descriptor; hand it down rather than
+            # letting it stop at the type object.
+            cast_parameters = []
+            if target_ct.logical is not None and target_name == "DECIMAL":
+                cast_parameters = [
+                    build_literal_node(int(target_ct.logical.precision)),
+                    build_literal_node(int(target_ct.logical.scale)),
+                ]
             cast_node = Node(
                 NodeType.CAST,
                 value=target_name,
                 left=key_node,
-                parameters=[],
+                parameters=cast_parameters,
                 schema_column=schema_column,
             )
             layout = self._add_computed(p, [cast_node], layout)
@@ -2729,6 +3233,9 @@ class _Compiler:
         if source is None:
             _unsupported("a CROSS JOIN UNNEST without a source")
         target_identity = node._unnest_target.identity
+
+        if getattr(node, "_unnest_function", "UNNEST") == "CIDR_UNNEST":
+            return self._compile_cidr_unnest(in_edges, node, source, target_identity)
 
         if source.node_type == NodeType.LITERAL:
             return self._compile_unnest_literal(in_edges, node, source, target_identity)
@@ -2769,6 +3276,46 @@ class _Compiler:
         new_layout = list(layout)
         if drop_source:
             new_layout[array_idx] = target_identity
+        else:
+            new_layout.append(target_identity)
+        return p, new_layout
+
+    def _compile_cidr_unnest(self, in_edges, node, source, target_identity):
+        """CROSS JOIN CIDR_UNNEST: expand text CIDR blocks into one IPV4 row each.
+
+        There is deliberately NO literal variant to mirror _compile_unnest_literal.
+        A literal CIDR is projected as a constant column and expanded through the
+        same streaming operator, because the plan-time route is wrong twice: it
+        would need an arbitrary size limit (a literal /0 is 4.3 billion addresses
+        materialized during compilation), and vector_from_sequence cannot attach
+        the IPV4 descriptor — so the column would DECLARE IPV4 while carrying a
+        bare integer vector, render as numbers, and be refused by CIDR_AGG.
+        """
+        source_sc = getattr(source, "schema_column", None)
+        if source_sc is None:
+            _unsupported("a CROSS JOIN CIDR_UNNEST source without a bound identity")
+
+        (p, layout) = self._compile_only_child(in_edges, "UnnestJoinNode", node)
+        cidr_identity = source_sc.identity
+        if cidr_identity not in layout:
+            # Literal or computed source: nothing projected it, and the operator
+            # addresses its source by COLUMN INDEX. Project it first — the same
+            # hoist the array form does one branch down.
+            layout = self._add_computed(p, [source], layout)
+            if cidr_identity not in layout:
+                _unsupported("a CROSS JOIN CIDR_UNNEST source the stream does not carry")
+        cidr_idx = layout.index(cidr_identity)
+
+        # Same liveness rule as the array form: drop the consumed source only when
+        # projection_pushdown proves nothing above reads it. Absent set == unknown,
+        # so keep it — never lose a column to an assumption.
+        needed = getattr(node, "pre_update_columns", None) or set()
+        drop_source = bool(needed) and cidr_identity not in needed
+
+        self.nplan.add_cidr_unnest(p, cidr_idx, target_identity, drop_source)
+        new_layout = list(layout)
+        if drop_source:
+            new_layout[cidr_idx] = target_identity
         else:
             new_layout.append(target_identity)
         return p, new_layout
@@ -2819,6 +3366,10 @@ class _Compiler:
         if "left" not in legs or "right" not in legs:
             _unsupported("an ASOF join without labelled left/right legs")
 
+        # BOTH legs are compiled before anything is wired. The match-column coercion
+        # below reads each side's ColumnType out of the compiler's identity->type map,
+        # which is populated as a node compiles — computing it any earlier saw an
+        # empty map and silently coerced nothing.
         bp, blayout = self.compile_node(legs["right"])
         build_key_idx = []
         for identity in right_cols:
@@ -2827,17 +3378,8 @@ class _Compiler:
             build_key_idx.append(blayout.index(identity))
         if asof_right not in blayout:
             _unsupported("an ASOF match column the build stream does not carry")
-        ref = self.nplan.new_join2_ref()
-        self.nplan.set_current_identity(node.identity)  # own the asof build sink + probe
-        self.nplan.set_current_display_name(type(node).__name__)
-        build_types, build_logical = self._payload_types(legs["right"], blayout)
-        self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
-                                       blayout.index(asof_right), ref,
-                                       build_types, build_logical)
 
         pp, playout = self.compile_node(legs["left"])
-        self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
-        self.nplan.set_current_display_name(type(node).__name__)
         probe_key_idx = []
         for identity in left_cols:
             if identity not in playout:
@@ -2845,9 +3387,46 @@ class _Compiler:
             probe_key_idx.append(playout.index(identity))
         if asof_left not in playout:
             _unsupported("an ASOF match column the probe stream does not carry")
+
+        # A cross-type MATCH_CONDITION orders the two sides through different
+        # normalisations and silently emits matches that violate it — see
+        # _asof_match_coercions. The CAST columns are appended AFTER each leg's real
+        # columns, so `blayout`/`playout` (payload and output) stay untouched and only
+        # the match-column index moves onto the coerced column.
+        coercions = self._asof_match_coercions(node)
+        bmatchout, (asof_right,) = self._coerce_join_keys(
+            bp, blayout, [asof_right], coercions)
+        pmatchout, (asof_left,) = self._coerce_join_keys(
+            pp, playout, [asof_left], coercions)
+
+        ref = self.nplan.new_join2_ref()
+        self.nplan.set_current_identity(node.identity)  # own the asof build sink + probe
+        self.nplan.set_current_display_name(type(node).__name__)
+        # `blayout` is the leg's REAL output; `bmatchout` may carry a synthetic cast
+        # column at the end. Payload and output use the former — letting the cast
+        # column into the payload would emit a column the declared output layout does
+        # not have, shifting every column after it — and only the match-column INDEX
+        # uses the latter, because the sink reads that one off the INPUT morsel.
+        build_types, build_logical, build_element = self._payload_types(
+            legs["right"], blayout)
+        # The match column's type AFTER coercion decides how the native bisect orders
+        # keys (64-bit numeric / DECIMAL128 / string-family). It is passed explicitly
+        # rather than read out of `build_types`, because a coerced match column is a
+        # synthetic CAST appended past the payload and has no entry there.
+        asof_type = self._layout_type(self.plan[legs["right"]], asof_right)
+        if asof_type is None:
+            _unsupported("an ASOF match column whose type the compiler cannot resolve")
+        self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
+                                       bmatchout.index(asof_right), ref,
+                                       build_types, build_logical, build_element,
+                                       asof_type.value)
+        self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
+        self.nplan.set_current_display_name(type(node).__name__)
         self.nplan.add_asof_probe(pp, ref, probe_key_idx, list(range(len(playout))),
-                                  playout.index(asof_left), op_codes[asof_op])
-        # AsofProbeOperator emits build payload columns first, then probe payload.
+                                  pmatchout.index(asof_left), op_codes[asof_op])
+        # AsofProbeOperator emits build payload columns first, then probe payload —
+        # the SYNTHETIC cast columns are excluded from both, so `SELECT *` is
+        # unchanged by the coercion.
         return pp, list(blayout) + list(playout)
 
     def _compile_materialized_source(self, node):
@@ -2919,14 +3498,17 @@ class _Compiler:
                 names[sc.identity] = name
 
     def _payload_types(self, node_id, layout):
-        """Physical DrakenType (int) + logical tuple for each identity in ``layout``,
-        for the native join build sinks (``set_join2_build_sink``/``set_asof_build_sink``):
-        the compiler already knows every build-side column's type from binding — same
-        source/shape as ``compile_to_native``'s ``final_types``/``final_logical`` — so
-        it hands the type down instead of the C++ build sink ever needing to learn it
-        from data. That learn-from-first-morsel path never runs when the build side
-        genuinely streams zero rows (a filtered-to-empty subquery), which is exactly
-        the shape that broke LEFT OUTER's unmatched-row emit."""
+        """Physical DrakenType (int) + logical tuple + ARRAY element chain for each
+        identity in ``layout``, for the native join build sinks
+        (``set_join2_build_sink``/``set_asof_build_sink``) and the FULL OUTER tail
+        source (``set_unmatched_build_source``): the compiler already knows every
+        payload column's type from binding — same source/shape as
+        ``compile_to_native``'s ``final_types``/``final_logical`` — so it hands the
+        type down instead of the C++ build sink ever needing to learn it from data.
+        That learn-from-first-morsel path never runs when the side genuinely streams
+        zero rows (a filtered-to-empty subquery), which is exactly the shape that
+        broke LEFT OUTER's unmatched-row emit, and it never runs AT ALL for the FULL
+        OUTER tail's probe half, which retains no probe morsel to learn from."""
         node = self.plan[node_id]
         by_identity = {}
         for col in getattr(node, "columns", None) or []:
@@ -2935,7 +3517,7 @@ class _Compiler:
                 by_identity[sc.identity] = getattr(sc, "column_type", None)
         cts = getattr(self, "_cts", None) or {}
         types_map = getattr(self, "_types", None) or {}
-        types, logical = [], []
+        types, logical, element = [], [], []
         for identity in layout:
             ct = by_identity.get(identity) or cts.get(identity)
             pt = ct.physical if ct is not None else types_map.get(identity)
@@ -2947,7 +3529,8 @@ class _Compiler:
             # so a wrong default here cannot mis-materialize a non-empty build side.
             types.append(pt.value if pt is not None else DrakenType.VARCHAR.value)
             logical.append(_logical_tuple(ct))
-        return types, logical
+            element.append(_element_chain(ct))
+        return types, logical, element
 
     def _layout_type(self, node, identity):
         types = getattr(self, "_types", None) or {}

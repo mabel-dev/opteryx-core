@@ -7,7 +7,11 @@
 This is a virtual dataset which is calculated at access time.
 
 It is the access policies held by the current session — the exact list
-`can_perform_action` matches against, projected into rows.
+`can_perform_action` matches against, projected into rows. That includes the
+two grants the ENGINE hard-codes rather than receiving from the policy service
+(`personal.<username>.*` as owner, `public.*` as reader); they are enforced on
+every session, so omitting them would report a strictly smaller set than the
+one that decides queries.
 
 This dataset REPORTS grants; it never confers them. Opteryx has no GRANT or
 REVOKE: policies are issued by the platform's policy service and handed to the
@@ -21,6 +25,7 @@ from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 from opteryx.exceptions import VariableNotFoundError
 from opteryx.managers.permissions import ACTION_MAP
+from opteryx.managers.permissions import implicit_policies
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema, SchemaColumn
 
@@ -49,11 +54,19 @@ def read(at_date=None, variables=None):
     if callable(getattr(policies, "to_pylist", None)):
         policies = policies.to_pylist()
 
+    # The grants the engine hard-codes come FIRST, in the order
+    # can_perform_action evaluates them: they short-circuit, so a caller reading
+    # this top-down sees the same decision the engine makes. They are read from
+    # `implicit_policies` rather than restated, for the same reason `actions` is
+    # derived from ACTION_MAP — a second list would drift from the enforced one.
+    username = _get_variable(variables, "external_user", "")
+    policies = implicit_policies(username) + list(policies or [])
+
     patterns = []
     roles = []
     actions = []
 
-    for policy in policies or []:
+    for policy in policies:
         if not isinstance(policy, dict):
             continue
         # Defaults match can_perform_action's own reads, so this table cannot

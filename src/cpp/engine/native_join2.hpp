@@ -50,6 +50,25 @@ enum class JoinMode : uint8_t {
     Inner = 0, LeftOuter = 1, Semi = 2, AntiNullAware = 3, Anti = 4, FullOuter = 5
 };
 
+// Is this an ARRAY column that cannot have NULL rows gathered against it?
+//
+// gather_rows materializes an ARRAY row by recursing on the column's CHILD vector
+// (vector_owner.h: child_owner is non-null for DRAKEN_ARRAY), and it does so even
+// when every requested row is the null-row sentinel — an all-NULL ARRAY half still
+// has to emit a typed, empty child. A childless ARRAY column therefore has no type
+// to build that child from, and the recursion would read an uninitialized view.
+//
+// The join's plan-typed schema morsels build their child from the planner's element
+// type (make_empty_col), so this only fires when the planner could not resolve one.
+// It checks the whole subtree: ARRAY<ARRAY<T>> needs a child at every level.
+inline bool array_child_missing(const CxxColumn& c) {
+    if (c.view.type != DRAKEN_ARRAY) return false;
+    for (const VectorOwner* o = c.own.get(); ; o = o->child_owner.get()) {
+        if (o == nullptr || o->child_owner == nullptr) return true;
+        if (o->child_owner->vec.type != DRAKEN_ARRAY) return false;
+    }
+}
+
 // The build side RETAINS its payload columns rather than copying their values into a
 // row-store. `morsels` holds one payload-column-only view per accepted build morsel
 // (a CxxColumn is a shared_ptr to its VectorOwner, so slicing to the payload columns
@@ -64,6 +83,11 @@ struct Join2BuildLocal : LocalSinkState {
     std::vector<uint32_t> row_r;       // build row id -> row within that morsel
     std::vector<uint64_t> row_hashes;  // parallel to build rows: the 64-bit key hash
     std::vector<uint64_t> asof_keys;   // ASOF only: per build row, sort_num_key
+    // ASOF with a STRING match column: parallel to asof_keys, pointing into the
+    // retained morsel's arena (see AsofKey). Empty for a numeric/temporal key.
+    std::vector<const uint8_t*> asof_str_ptr;
+    std::vector<uint32_t> asof_str_len;
+    std::vector<__int128> asof_wide;   // ASOF with a DECIMAL128 match column
     // FULL OUTER only (track_matches): NULL-keyed build rows. Every other mode
     // drops them (a NULL key can never equi-match), but FULL OUTER must still
     // emit them in the unmatched-build tail — so their addresses are retained
@@ -72,6 +96,68 @@ struct Join2BuildLocal : LocalSinkState {
     uint32_t next_row = 0;
     bool saw_null_key = false;
 };
+// ---- ASOF ordering key -------------------------------------------------------------
+// One ASOF MATCH_CONDITION key. A numeric/temporal key rides `num`, which is
+// sort_num_key-normalized so unsigned `<` IS value order (IEEE-correct for floats).
+// A STRING-FAMILY key cannot be reduced to 8 bytes without losing order past the
+// eighth, so it rides (ptr, len) pointing straight into the retained build morsel's
+// string arena — the same no-copy ownership the build table already relies on
+// ("no string-arena rebasing, because no arena was ever built: the slots still live
+// in the source vectors, which we hold alive" — Join2BuildSink::combine).
+//
+// Before this existed, `sort_num_key` was applied to string vectors too. It returns
+// a meaningless integer for them, so the bisect ordered garbage and ASOF emitted
+// matches that VIOLATED THE MATCH_CONDITION THE USER WROTE — 1,999 of 2,000 rows on
+// a VARCHAR self-join. Numeric ASOF was and is unaffected.
+// The three-way split MIRRORS build_sort_keys' (num / num128 / str) deliberately:
+// ASOF's "nearest" and ORDER BY's "next" must agree on what order the values are in,
+// and the cheapest way to guarantee that is to order them the same way.
+enum class AsofKeyKind : uint8_t { Numeric = 0, Int128 = 1, String = 2 };
+
+inline AsofKeyKind asof_key_kind(DrakenType t) {
+    if (sort_type_is_string(t)) return AsofKeyKind::String;
+    if (t == DRAKEN_DECIMAL128) return AsofKeyKind::Int128;
+    return AsofKeyKind::Numeric;
+}
+
+struct AsofKey {
+    uint64_t       num  = 0;
+    __int128       wide = 0;
+    const uint8_t* ptr  = nullptr;
+    uint32_t       len  = 0;
+};
+
+inline int asof_key_cmp(AsofKeyKind kind, const AsofKey& a, const AsofKey& b) {
+    if (kind == AsofKeyKind::Numeric)
+        return a.num < b.num ? -1 : (a.num > b.num ? 1 : 0);
+    if (kind == AsofKeyKind::Int128)
+        return a.wide < b.wide ? -1 : (a.wide > b.wide ? 1 : 0);
+    const uint32_t common = a.len < b.len ? a.len : b.len;
+    const int r = common ? std::memcmp(a.ptr, b.ptr, common) : 0;
+    if (r != 0) return r < 0 ? -1 : 1;
+    return a.len < b.len ? -1 : (a.len > b.len ? 1 : 0);
+}
+
+// Read one row's ASOF key out of a live vector.
+inline AsofKey asof_key_of(const DrakenVector& v, uint32_t row, AsofKeyKind kind) {
+    AsofKey key;
+    if (kind == AsofKeyKind::Numeric) {
+        key.num = sort_num_key(v, row);
+        return key;
+    }
+    if (kind == AsofKeyKind::Int128) {
+        std::memcpy(&key.wide,
+                    static_cast<const uint8_t*>(v.data)
+                        + static_cast<size_t>(v.selection[row]) * 16u, 16u);
+        return key;
+    }
+    const DrakenStringArena* sa = string_arena_of(v);
+    const DrakenStringSlot* slot = &sa->slots[v.selection[row]];
+    key.ptr = reinterpret_cast<const uint8_t*>(str_data(slot, sa->arena));
+    key.len = str_length(slot);
+    return key;
+}
+
 // ---- the join build table: a hash-bucketed CSR, built in parallel ------------------
 // Every non-ASOF join builds this. ASOF is the ONE exception (see Join2BuildSink::
 // combine) because it reads the build through CarcharJoinIndex::items()/
@@ -155,6 +241,13 @@ struct Join2BuildGlobal : GlobalSinkState {
     // carry the authoritative (data-observed) types.
     MorselPtr schema_morsel;
     std::vector<uint64_t> asof_keys;   // ASOF only: parallel to build rows
+    // ASOF with a STRING or DECIMAL128 match column — see AsofKey. `asof_kind` is
+    // PLAN-known (the sink reads it off the payload types), never learned from data,
+    // so every worker agrees on it before the first morsel arrives.
+    std::vector<const uint8_t*> asof_str_ptr;
+    std::vector<uint32_t> asof_str_len;
+    std::vector<__int128> asof_wide;   // ASOF with a DECIMAL128 match column
+    AsofKeyKind asof_kind = AsofKeyKind::Numeric;
     // ASOF only: draken hash → index into asof_sorted, materialized once at first
     // probe (ensure_sorted). CarcharJoinIndex stores each key's rows unsorted, so the
     // bisect needs this sorted view — keyed on the same 64-bit hash via a CarcharIndex.
@@ -304,18 +397,33 @@ struct Join2BuildSink : Sink {
     std::vector<size_t> payload_col_idx;
     std::vector<DrakenType> payload_types;             // PLAN-known — see engine.hpp
     std::vector<const LogicalType*> payload_logical;   // set_join2_build_sink's comment
+    // Per payload column, the ARRAY element subtree (empty for every non-ARRAY
+    // column). An ARRAY column with no child vector cannot have NULL rows emitted
+    // against it — see make_empty_col and the guard in build_output below.
+    std::vector<std::vector<EmptyColElem>> payload_element;
     int asof_idx = -1;   // >= 0: ASOF build — capture the asof column's normalized
                          // order key per row (rows with a NULL asof value are
                          // skipped: they can never satisfy the MATCH_CONDITION)
+    // How is that asof column ordered? PLAN-known and passed in EXPLICITLY, not
+    // inferred from `payload_types`: a coerced match column (the synthetic CAST the
+    // compiler appends for a cross-type MATCH_CONDITION) sits PAST the payload, so
+    // there is no payload entry to read it from — and the coercion target can be
+    // DECIMAL128, which orders differently from every 64-bit numeric. See AsofKey.
+    AsofKeyKind asof_kind = AsofKeyKind::Numeric;
     bool track_matches = false;   // FULL OUTER: allocate the matched[] flags and
                                   // retain NULL-keyed rows for the unmatched tail
 
     Join2BuildSink(std::vector<size_t> keys, std::vector<size_t> payload_idx,
                    std::vector<DrakenType> types, std::vector<const LogicalType*> logical,
-                   int asof = -1, bool track = false)
+                   std::vector<std::vector<EmptyColElem>> element,
+                   int asof = -1, int asof_type = 0, bool track = false)
         : key_idx(std::move(keys)), payload_col_idx(std::move(payload_idx)),
           payload_types(std::move(types)), payload_logical(std::move(logical)),
-          asof_idx(asof), track_matches(track) {}
+          payload_element(std::move(element)),
+          asof_idx(asof), track_matches(track) {
+        if (asof_idx >= 0)
+            asof_kind = asof_key_kind(static_cast<DrakenType>(asof_type));
+    }
 
     // Zero-row payload columns at the PLAN-known types. This is the fallback schema
     // for a build side that streams zero rows (a filtered-to-empty subquery): with no
@@ -325,8 +433,11 @@ struct Join2BuildSink : Sink {
     MorselPtr make_schema_morsel() const {
         auto m = std::make_shared<CxxMorsel>();
         m->columns.reserve(payload_col_idx.size());
+        static const std::vector<EmptyColElem> kNoElement;
         for (size_t c = 0; c < payload_col_idx.size(); ++c)
-            m->columns.push_back(make_empty_col(payload_types[c], payload_logical[c]));
+            m->columns.push_back(make_empty_col(
+                payload_types[c], payload_logical[c],
+                c < payload_element.size() ? payload_element[c] : kNoElement));
         m->names.resize(payload_col_idx.size());
         m->zero_col_rows = 0;
         return m;
@@ -335,6 +446,7 @@ struct Join2BuildSink : Sink {
     std::unique_ptr<GlobalSinkState> make_global() override {
         auto g = std::make_unique<Join2BuildGlobal>();
         g->schema_morsel = make_schema_morsel();
+        g->asof_kind = asof_kind;
         return g;
     }
     std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
@@ -394,9 +506,17 @@ struct Join2BuildSink : Sink {
             // Record WHERE the row lives instead of copying its values out.
             l.row_m.push_back(mi);
             l.row_r.push_back(i);
-            if (asof_idx >= 0)
-                l.asof_keys.push_back(
-                    sort_num_key(in->columns[static_cast<size_t>(asof_idx)].view, i));
+            if (asof_idx >= 0) {
+                const AsofKey key = asof_key_of(
+                    in->columns[static_cast<size_t>(asof_idx)].view, i, asof_kind);
+                l.asof_keys.push_back(key.num);
+                if (asof_kind == AsofKeyKind::String) {
+                    l.asof_str_ptr.push_back(key.ptr);
+                    l.asof_str_len.push_back(key.len);
+                } else if (asof_kind == AsofKeyKind::Int128) {
+                    l.asof_wide.push_back(key.wide);
+                }
+            }
             l.row_hashes.push_back(rowh[i]);   // parallel to the build row just added
             ++l.next_row;
         }
@@ -430,6 +550,11 @@ struct Join2BuildSink : Sink {
             g.row_r.push_back(l.row_r[r]);
         }
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
+        g.asof_str_ptr.insert(g.asof_str_ptr.end(),
+                              l.asof_str_ptr.begin(), l.asof_str_ptr.end());
+        g.asof_str_len.insert(g.asof_str_len.end(),
+                              l.asof_str_len.begin(), l.asof_str_len.end());
+        g.asof_wide.insert(g.asof_wide.end(), l.asof_wide.begin(), l.asof_wide.end());
         // FULL OUTER: stage this worker's NULL-keyed rows, rebased to global
         // morsel indices. finalize() appends them after the keyed row space.
         for (size_t r = 0; r < l.null_row_m.size(); ++r) {
@@ -562,11 +687,13 @@ struct Join2ProbeOperator : Operator {
             if (empty_build) schema_only.push_back(g.schema_morsel);
             const std::vector<MorselPtr>& bms = empty_build ? schema_only : g.morsels;
             if (empty_build) {
-                // gather_rows recurses into an ARRAY column's child vector, which a
-                // zero-row schema column does not carry — fail loud rather than read
-                // an uninitialized child view.
+                // gather_rows recurses into an ARRAY column's child vector, so the
+                // plan-typed schema column must carry one (make_empty_col builds it
+                // from the plan's element type). When the planner could not resolve
+                // that element type the column is childless — fail loud rather than
+                // read an uninitialized child view.
                 for (const CxxColumn& c : bms.front()->columns) {
-                    if (c.view.type == DRAKEN_ARRAY) {
+                    if (array_child_missing(c)) {
                         err.code = 1;
                         err.msg = "Join2Probe: ARRAY build payload with an empty build "
                                   "side has no child vector to emit NULLs against — "
@@ -696,8 +823,9 @@ struct Join2ProbeOperator : Operator {
 //   Gt   (probe >  build): largest build key <  probe key   (lower_bound - 1)
 //   LtEq (probe <= build): smallest build key >= probe key  (lower_bound)
 //   Lt   (probe <  build): smallest build key >  probe key  (upper_bound)
-// Keys are sort_num_key-normalized (uint64 order == value order, IEEE-correct for
-// floats), so one comparator covers timestamps, ints and doubles alike.
+// Ordering is AsofKey's: sort_num_key-normalized uint64 for numeric and temporal
+// keys (unsigned `<` IS value order, IEEE-correct for floats), bytes-then-length for
+// string-family ones. One comparator, `asof_key_cmp`, covers both.
 
 enum class AsofOp : uint8_t { GtEq = 0, Gt = 1, LtEq = 2, Lt = 3 };
 
@@ -723,8 +851,9 @@ struct AsofProbeOperator : Join2ProbeOperator {
             g->asof_index.reserve(items.size());
             for (const auto& kv : items) {
                 std::vector<int64_t> rows = g->index.rows_from_payload(kv.second);
+                const AsofKeyKind kind = g->asof_kind;
                 std::sort(rows.begin(), rows.end(), [&](int64_t a, int64_t b) {
-                    return g->asof_keys[a] < g->asof_keys[b];
+                    return asof_key_cmp(kind, build_key(*g, a), build_key(*g, b)) < 0;
                 });
                 g->asof_index.insert_new(kv.first,
                                          static_cast<int64_t>(g->asof_sorted.size()));
@@ -733,11 +862,30 @@ struct AsofProbeOperator : Join2ProbeOperator {
         });
     }
 
-    int64_t match_row(const std::vector<int64_t>& rows, uint64_t k,
-                      const std::vector<uint64_t>& keys) const {
+    // One build row's ASOF key, reassembled from the parallel build vectors.
+    static AsofKey build_key(const Join2BuildGlobal& g, int64_t row) {
+        AsofKey key;
+        if (g.asof_kind == AsofKeyKind::String) {
+            key.ptr = g.asof_str_ptr[static_cast<size_t>(row)];
+            key.len = g.asof_str_len[static_cast<size_t>(row)];
+        } else if (g.asof_kind == AsofKeyKind::Int128) {
+            key.wide = g.asof_wide[static_cast<size_t>(row)];
+        } else {
+            key.num = g.asof_keys[static_cast<size_t>(row)];
+        }
+        return key;
+    }
+
+    int64_t match_row(const std::vector<int64_t>& rows, const AsofKey& k,
+                      const Join2BuildGlobal& g) const {
         const int64_t none = static_cast<int64_t>(kNoBuildRow);
-        auto cmp = [&](int64_t r, uint64_t v) { return keys[r] < v; };
-        auto cmp2 = [&](uint64_t v, int64_t r) { return v < keys[r]; };
+        const AsofKeyKind kind = g.asof_kind;
+        auto cmp = [&](int64_t r, const AsofKey& v) {
+            return asof_key_cmp(kind, build_key(g, r), v) < 0;
+        };
+        auto cmp2 = [&](const AsofKey& v, int64_t r) {
+            return asof_key_cmp(kind, v, build_key(g, r)) < 0;
+        };
         switch (op) {
             case AsofOp::GtEq: {   // largest build <= k
                 auto it = std::upper_bound(rows.begin(), rows.end(), k, cmp2);
@@ -795,7 +943,7 @@ struct AsofProbeOperator : Join2ProbeOperator {
                     // kNoBuildRow, so the narrowing round-trips exactly.
                     build_row = static_cast<uint32_t>(
                         match_row(g.asof_sorted[static_cast<size_t>(idx)],
-                                  sort_num_key(av, row), g.asof_keys));
+                                  asof_key_of(av, row, g.asof_kind), g));
             }
             build_rows.push_back(build_row);
             probe_rows.push_back(row);
@@ -1056,7 +1204,7 @@ struct UnmatchedBuildSource : Source {
             // build half, mirrored.
             if (probe_schema && !probe_schema->columns.empty()) {
                 for (const CxxColumn& c : probe_schema->columns) {
-                    if (c.view.type == DRAKEN_ARRAY) {
+                    if (array_child_missing(c)) {
                         err.code = 1;
                         err.msg = "FULL OUTER: ARRAY probe payload has no child "
                                   "vector to emit NULLs against — fail loud, "

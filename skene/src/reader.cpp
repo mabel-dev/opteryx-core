@@ -134,7 +134,7 @@ Status open_file(const void* file, size_t file_bytes, uint16_t* out_version,
 
     // Only now is it safe to look at footer content.
     const uint64_t actual = checksum_xxh3_64(bytes + footer_offset, tail.footer_bytes);
-    if (actual != tail.footer_checksum)
+    if (actual != tail.footer_checksum && checksum_must_match())
         return fail(Code::kChecksumMismatch,
                     "footer checksum mismatch: recorded %llu, computed %llu — "
                     "the directory is corrupt and every offset in it is suspect",
@@ -217,8 +217,29 @@ Status read_metadata(const void* file, size_t file_bytes, FileMetadata* out) {
     }
 }
 
-Status read_morsel(const void* file, size_t file_bytes, const ReadOptions& options,
-                   CxxMorsel* out) {
+Status read_row_group_metadata(const void* file, size_t file_bytes,
+                               uint32_t row_group, RowGroupMetadata* out) {
+    if (out == nullptr)
+        return fail(Code::kMalformed, "read_row_group_metadata: out is null");
+
+    uint16_t version = 0;
+    uint64_t footer_offset = 0;
+    uint32_t footer_bytes = 0;
+    SKENE_RETURN_IF_ERROR(
+        open_file(file, file_bytes, &version, &footer_offset, &footer_bytes));
+
+    const uint8_t* bytes = static_cast<const uint8_t*>(file);
+    switch (version) {
+        case 1:
+            return v1::read_row_group_metadata(bytes, file_bytes, footer_offset,
+                                               footer_bytes, row_group, out);
+        default:
+            return unsupported_version(version);
+    }
+}
+
+Status read_morsel(const void* file, size_t file_bytes, uint32_t row_group,
+                   const ReadOptions& options, CxxMorsel* out) {
     if (out == nullptr) return fail(Code::kMalformed, "read_morsel: out is null");
 
     uint16_t version = 0;
@@ -231,7 +252,7 @@ Status read_morsel(const void* file, size_t file_bytes, const ReadOptions& optio
     switch (version) {
         case 1:
             return v1::read_morsel(bytes, file_bytes, footer_offset, footer_bytes,
-                                   options, out);
+                                   row_group, options, out);
         default:
             return unsupported_version(version);
     }

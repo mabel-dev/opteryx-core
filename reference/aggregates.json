@@ -92,6 +92,24 @@
             "strict_grouped": true
         }
     },
+    "CIDR_AGG": {
+        "ast_symbol": "CIDR_AGG",
+        "friendly_name": "CIDR Aggregate",
+        "kernel_name": "cidr_agg",
+        "category": "collection",
+        "status": "active",
+        "summary": "Collects IPv4 addresses into the smallest list of CIDR blocks that covers exactly those addresses.",
+        "description": "Collects IPv4 addresses into the smallest list of CIDR blocks that covers exactly those addresses.",
+        "documentation": "Returns ARRAY<VARCHAR> of CIDR blocks, ascending and non-overlapping. The cover is MINIMAL and unique: adjacent addresses fold into the largest aligned block, so 10.0.0.0-10.0.0.7 becomes a single 10.0.0.0/29. The operand must be IPV4 (a plain integer column is rejected). Duplicate addresses are free - the set deduplicates on insert - and NULLs are not members, so a group with no addresses returns an empty array rather than NULL. Works with and without GROUP BY. Bounded by two independent budgets, one on the collected address set and one on the emitted text: see @@cidr_agg_state_budget_bytes and @@cidr_agg_emit_budget_bytes.",
+        "sql_forms": [
+            "CIDR_AGG(ipv4_expr)"
+        ],
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
     "CORR": {
         "ast_symbol": "CORR",
         "friendly_name": "Correlation",

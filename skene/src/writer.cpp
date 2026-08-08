@@ -146,6 +146,7 @@ bool type_requires_logical_type(DrakenType t) {
 struct WriteContext {
     ByteWriter*                writer;
     std::vector<SectionEntry>* sections;
+    SectionCodec               codec = SectionCodec::kNone;
     int                        zstd_level = 0;
 };
 
@@ -192,16 +193,33 @@ bool bitmap_is_all_set(const uint8_t* bits, uint32_t length) {
     return true;
 }
 
+// A fourth gate applies to every codec and is not listed above because it is
+// not a heuristic: a section is only stored compressed when the result is
+// actually SMALLER. Each *_encode returns false to say so, and "not worth it" is
+// a normal answer rather than a failure.
 void emit_encoded(WriteContext& ctx, SectionKind kind, Encoding encoding,
                   const void* stored, size_t stored_bytes, size_t plain_bytes) {
-    if (ctx.zstd_level != 0 && encoding == Encoding::kPlain
+    if (ctx.codec != SectionCodec::kNone && encoding == Encoding::kPlain
             && stored_bytes >= kCompressMinBytes
             && kind_is_compressible(static_cast<uint16_t>(kind))) {
         std::vector<uint8_t> packed;
-        if (zstd_encode(stored, stored_bytes, ctx.zstd_level, &packed)) {
-            emit_raw(ctx, kind, Encoding::kZstd, packed.data(), packed.size(),
-                     plain_bytes);
-            return;
+        switch (ctx.codec) {
+            case SectionCodec::kZstd:
+                if (zstd_encode(stored, stored_bytes, ctx.zstd_level, &packed)) {
+                    emit_raw(ctx, kind, Encoding::kZstd, packed.data(),
+                             packed.size(), plain_bytes);
+                    return;
+                }
+                break;
+            case SectionCodec::kLz4:
+                if (lz4_encode(stored, stored_bytes, &packed)) {
+                    emit_raw(ctx, kind, Encoding::kLz4, packed.data(),
+                             packed.size(), plain_bytes);
+                    return;
+                }
+                break;
+            case SectionCodec::kNone:
+                break;
         }
     }
     emit_raw(ctx, kind, encoding, stored, stored_bytes, plain_bytes);
@@ -644,40 +662,218 @@ uint32_t count_sections(const ColumnPlan& plan) {
     return total;
 }
 
+// ─── File footer ────────────────────────────────────────────────────────────
+
+// The invariant half of a column: what the FILE says about it, as against what
+// one row group says. Captured from the first row group and then ENFORCED on
+// every later one — see FileWriter::add_row_group.
+struct SchemaNode {
+    uint32_t                field_id = 0;
+    std::string             name;
+    uint32_t                type = 0;
+    bool                    logical_present = false;
+    LogicalTypeDescriptor   logical{};
+    std::vector<SchemaNode> children;
+};
+
+// One column's statistics in one row group. `present` is not derivable from the
+// blob — an all-zero ColumnStatistics is a legal tracked value (flags 0 means
+// nothing tracked, but a min of 0 with kStatMin set is ordinary) — so absence is
+// written as an explicit zero length rather than inferred.
+struct StatSlot {
+    bool             present = false;
+    ColumnStatistics statistics{};
+};
+
+SchemaNode schema_from_plan(const ColumnPlan& plan) {
+    SchemaNode node;
+    node.field_id        = plan.head.field_id;
+    node.name            = plan.name;
+    node.type            = plan.head.type;
+    node.logical_present = plan.head.logical_present != 0;
+    node.logical         = plan.logical;
+    node.children.reserve(plan.children.size());
+    for (const ColumnPlan& child : plan.children)
+        node.children.push_back(schema_from_plan(child));
+    return node;
+}
+
+// Every field a reader would use to decide "this is the same column". A
+// divergence here means the file footer's schema directory does not describe
+// this row group, which a reader cannot detect and would silently mis-type.
+Status check_schema_matches(const SchemaNode& expected, const ColumnPlan& plan,
+                            uint32_t row_group) {
+    if (plan.name != expected.name)
+        return fail(Code::kMalformed,
+                    "row group %u has column '%s' where the file's schema has "
+                    "'%s' — every row group in a file must share one schema",
+                    row_group, plan.name.c_str(), expected.name.c_str());
+    if (plan.head.type != expected.type)
+        return fail(Code::kMalformed,
+                    "row group %u: column '%s' is type %u but the file's schema "
+                    "says %u", row_group, plan.name.c_str(), plan.head.type,
+                    expected.type);
+    if ((plan.head.logical_present != 0) != expected.logical_present)
+        return fail(Code::kMalformed,
+                    "row group %u: column '%s' %s a logical type descriptor but "
+                    "the file's schema %s one", row_group, plan.name.c_str(),
+                    plan.head.logical_present ? "carries" : "lacks",
+                    expected.logical_present ? "has" : "does not");
+    if (expected.logical_present
+            && std::memcmp(&plan.logical, &expected.logical,
+                           sizeof(LogicalTypeDescriptor)) != 0)
+        return fail(Code::kMalformed,
+                    "row group %u: column '%s' carries a different logical type "
+                    "descriptor than the file's schema",
+                    row_group, plan.name.c_str());
+    if (plan.head.field_id != expected.field_id)
+        return fail(Code::kMalformed,
+                    "row group %u: column '%s' has field_id %u but the file's "
+                    "schema says %u", row_group, plan.name.c_str(),
+                    plan.head.field_id, expected.field_id);
+    if (plan.children.size() != expected.children.size())
+        return fail(Code::kMalformed,
+                    "row group %u: column '%s' has %zu children but the file's "
+                    "schema says %zu", row_group, plan.name.c_str(),
+                    plan.children.size(), expected.children.size());
+    for (size_t i = 0; i < plan.children.size(); ++i)
+        SKENE_RETURN_IF_ERROR(
+            check_schema_matches(expected.children[i], plan.children[i], row_group));
+    return Status::ok();
+}
+
+void collect_statistics(const ColumnPlan& plan, std::vector<StatSlot>* out) {
+    StatSlot slot;
+    slot.present    = plan.has_statistics;
+    slot.statistics = plan.statistics;
+    out->push_back(slot);
+    for (const ColumnPlan& child : plan.children) collect_statistics(child, out);
+}
+
+void write_schema_entry(ByteWriter& w, const SchemaNode& node) {
+    SchemaEntryHead head{};
+    head.field_id        = node.field_id;
+    head.name_bytes      = static_cast<uint32_t>(node.name.size());
+    head.type            = node.type;
+    head.logical_present = node.logical_present ? 1u : 0u;
+    head.reserved0       = 0;
+    head.reserved1       = 0;
+    head.child_count     = static_cast<uint32_t>(node.children.size());
+    w.pod(head);
+    w.bytes(node.name.data(), node.name.size());
+    if (node.logical_present) w.pod(node.logical);
+    for (const SchemaNode& child : node.children) write_schema_entry(w, child);
+}
+
+Status validate_options(const WriteOptions& options) {
+    // `codec` and `zstd_level` describe one setting between them, so a
+    // combination that means two different things is rejected rather than
+    // resolved. A caller who sets a level and gets no zstd — or selects zstd and
+    // gets an unspecified level — has a file that is not what they asked for,
+    // and nothing downstream would ever tell them.
+    switch (options.codec) {
+        case SectionCodec::kZstd:
+            if (options.zstd_level < 1 || options.zstd_level > 22)
+                return fail(Code::kMalformed,
+                            "codec is zstd but zstd_level is %d — zstd levels "
+                            "run 1 to 22", options.zstd_level);
+            return Status::ok();
+        case SectionCodec::kNone:
+        case SectionCodec::kLz4:
+            if (options.zstd_level != 0)
+                return fail(Code::kMalformed,
+                            "zstd_level is %d but the selected codec is not "
+                            "zstd — the level would be ignored",
+                            options.zstd_level);
+            return Status::ok();
+        default:
+            return fail(Code::kMalformed, "unknown section codec %u",
+                        static_cast<unsigned>(options.codec));
+    }
+}
+
 }  // namespace
 
-Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
-                    std::vector<uint8_t>* out) {
-    if (out == nullptr)
-        return fail(Code::kMalformed, "write_morsel: out is null");
+// ─── FileWriter ─────────────────────────────────────────────────────────────
 
-    const size_t column_count = morsel.columns.size();
-    if (morsel.names.size() != column_count)
-        return fail(Code::kMalformed,
-                    "write_morsel: %zu columns but %zu names",
-                    column_count, morsel.names.size());
-    if (!options.field_ids.empty() && options.field_ids.size() != column_count)
-        return fail(Code::kMalformed,
-                    "write_morsel: %zu field_ids for %zu columns — a partially "
-                    "assigned schema is worse than an unassigned one",
-                    options.field_ids.size(), column_count);
+struct FileWriter::State {
+    WriteOptions          options;
+    std::vector<uint8_t>* out = nullptr;
+    bool                  began = false;
+    bool                  finished = false;
+
+    std::vector<RowGroupEntry> row_groups;
+    uint64_t                   total_rows = 0;
+
+    // Captured from row group 0 and enforced on every later one.
+    std::vector<SchemaNode> schema;
+    // One entry per row group; each is the depth-first column order.
+    std::vector<std::vector<StatSlot>> statistics;
+};
+
+FileWriter::FileWriter() : state_(new State()) {}
+FileWriter::~FileWriter() = default;
+
+uint32_t FileWriter::row_group_count() const {
+    return static_cast<uint32_t>(state_->row_groups.size());
+}
+
+Status FileWriter::begin(const WriteOptions& options, std::vector<uint8_t>* out) {
+    if (out == nullptr) return fail(Code::kMalformed, "FileWriter::begin: out is null");
+    if (state_->began)
+        return fail(Code::kMalformed, "FileWriter::begin called twice");
+
+    SKENE_RETURN_IF_ERROR(validate_options(options));
+
+    state_->options = options;
+    state_->out     = out;
+    state_->began   = true;
 
     out->clear();
     ByteWriter w(out);
 
-    // ── HEAD ──
     FileHead head{};
-    head.magic             = kMagic;
-    head.version           = kVersion;
-    head.endianness        = static_cast<uint8_t>(Endianness::kLittle);
+    head.magic              = kMagic;
+    head.version            = kVersion;
+    head.endianness         = static_cast<uint8_t>(Endianness::kLittle);
     head.checksum_algorithm = static_cast<uint8_t>(ChecksumAlgorithm::kXxh3_64);
-    head.reserved          = 0;
+    head.reserved           = 0;
     w.pod(head);
+
+    return Status::ok();
+}
+
+Status FileWriter::add_row_group(const CxxMorsel& morsel) {
+    if (!state_->began)
+        return fail(Code::kMalformed,
+                    "FileWriter::add_row_group before begin()");
+    if (state_->finished)
+        return fail(Code::kMalformed,
+                    "FileWriter::add_row_group after finish()");
+
+    const WriteOptions& options = state_->options;
+    const size_t column_count = morsel.columns.size();
+    if (morsel.names.size() != column_count)
+        return fail(Code::kMalformed, "%zu columns but %zu names",
+                    column_count, morsel.names.size());
+    if (!options.field_ids.empty() && options.field_ids.size() != column_count)
+        return fail(Code::kMalformed,
+                    "%zu field_ids for %zu columns — a partially assigned "
+                    "schema is worse than an unassigned one",
+                    options.field_ids.size(), column_count);
+
+    const uint32_t index = static_cast<uint32_t>(state_->row_groups.size());
+    ByteWriter w(state_->out);
+
+    RowGroupEntry entry{};
+    entry.row_count   = morsel.num_rows();
+    entry.first_row   = state_->total_rows;
+    entry.data_offset = w.position();
 
     // ── DATA region ──
     std::vector<SectionEntry> sections;
     std::vector<ColumnPlan>   plans(column_count);
-    WriteContext ctx{&w, &sections, options.zstd_level};
+    WriteContext ctx{&w, &sections, options.codec, options.zstd_level};
 
     for (size_t i = 0; i < column_count; ++i) {
         const uint32_t field_id = options.field_ids.empty() ? 0u : options.field_ids[i];
@@ -690,57 +886,162 @@ Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
     // ── INDEX region ──
     for (ColumnPlan& plan : plans) emit_index_sections(ctx, &plan);
 
-    // ── FOOTER ──
-    const uint64_t footer_start = w.position();
+    entry.data_bytes = w.position() - entry.data_offset;
 
-    FooterFileHeader fh{};
-    fh.row_count           = morsel.num_rows();
-    fh.column_count        = static_cast<uint32_t>(column_count);
-    fh.section_count       = static_cast<uint32_t>(sections.size());
-    fh.created_at_unix_us  = options.created_at_unix_us;
-    fh.writer_tag_bytes    = static_cast<uint32_t>(options.writer_tag.size());
-    fh.file_flags          = 0;
+    // ── Schema: capture once, enforce thereafter ──
+    if (index == 0) {
+        state_->schema.reserve(plans.size());
+        for (const ColumnPlan& plan : plans)
+            state_->schema.push_back(schema_from_plan(plan));
+    } else {
+        if (plans.size() != state_->schema.size())
+            return fail(Code::kMalformed,
+                        "row group %u has %zu columns but the file's schema has "
+                        "%zu — every row group in a file must share one schema",
+                        index, plans.size(), state_->schema.size());
+        for (size_t i = 0; i < plans.size(); ++i)
+            SKENE_RETURN_IF_ERROR(
+                check_schema_matches(state_->schema[i], plans[i], index));
+    }
+
+    // ── ROW GROUP FOOTER ──
+    entry.footer_offset = w.position();
+
+    RowGroupFooterHeader fh{};
+    fh.row_count          = morsel.num_rows();
+    fh.column_count       = static_cast<uint32_t>(column_count);
+    fh.section_count      = static_cast<uint32_t>(sections.size());
+    fh.created_at_unix_us = options.created_at_unix_us;
+    fh.writer_tag_bytes   = static_cast<uint32_t>(options.writer_tag.size());
+    fh.file_flags         = 0;
     std::memcpy(fh.file_uuid, options.file_uuid, sizeof(fh.file_uuid));
     w.pod(fh);
     w.bytes(options.writer_tag.data(), options.writer_tag.size());
 
     for (const ColumnPlan& plan : plans) write_column_entry(w, plan);
-    for (const SectionEntry& entry : sections) w.pod(entry);
+    for (const SectionEntry& section : sections) w.pod(section);
     // Statistics blobs, in the SAME depth-first order as the column directory,
     // skipping columns with stats_bytes == 0. Located by order rather than by an
     // offset, so a future longer blob is read prefix-first and the remainder
     // skipped -- which is what lets statistics grow with no version bump.
     for (const ColumnPlan& plan : plans) write_statistics(w, plan);
 
-    const uint64_t footer_bytes = w.position() - footer_start;
+    const uint64_t footer_bytes = w.position() - entry.footer_offset;
     if (footer_bytes > UINT32_MAX)
-        return fail(Code::kMalformed, "footer is %llu bytes, which exceeds the "
-                    "32-bit footer_bytes field",
+        return fail(Code::kMalformed,
+                    "row group %u footer is %llu bytes, which exceeds the "
+                    "32-bit footer_bytes field", index,
                     static_cast<unsigned long long>(footer_bytes));
+    entry.footer_bytes    = static_cast<uint32_t>(footer_bytes);
+    entry.footer_checksum = checksum_xxh3_64(
+        state_->out->data() + entry.footer_offset, static_cast<size_t>(footer_bytes));
+    entry.reserved = 0;
 
-    // ── TAIL ──
-    FileTail tail{};
-    tail.footer_bytes      = static_cast<uint32_t>(footer_bytes);
-    tail.footer_checksum   = checksum_xxh3_64(out->data() + footer_start,
-                                              static_cast<size_t>(footer_bytes));
-    tail.version           = kVersion;
-    tail.endianness        = static_cast<uint8_t>(Endianness::kLittle);
-    tail.checksum_algorithm = static_cast<uint8_t>(ChecksumAlgorithm::kXxh3_64);
-    tail.reserved          = 0;
-    tail.magic             = kMagic;
-    w.pod(tail);
-
-    // Sanity: the section count recorded in the footer must match what the
-    // column tree actually claims, or a reader walking either path sees a
-    // different file.
+    // Sanity: the section count recorded in the row group footer must match what
+    // the column tree actually claims, or a reader walking either path sees a
+    // different row group.
     uint32_t claimed = 0;
     for (const ColumnPlan& plan : plans) claimed += count_sections(plan);
     if (claimed != sections.size())
         return fail(Code::kMalformed,
-                    "internal: column tree claims %u sections but %zu were "
-                    "written", claimed, sections.size());
+                    "internal: row group %u's column tree claims %u sections but "
+                    "%zu were written", index, claimed, sections.size());
 
+    // ── File-level bookkeeping ──
+    state_->statistics.emplace_back();
+    std::vector<StatSlot>& slots = state_->statistics.back();
+    for (const ColumnPlan& plan : plans) collect_statistics(plan, &slots);
+
+    state_->total_rows += entry.row_count;
+    state_->row_groups.push_back(entry);
     return Status::ok();
+}
+
+Status FileWriter::finish() {
+    if (!state_->began)
+        return fail(Code::kMalformed, "FileWriter::finish before begin()");
+    if (state_->finished)
+        return fail(Code::kMalformed, "FileWriter::finish called twice");
+    if (state_->row_groups.empty())
+        return fail(Code::kMalformed,
+                    "FileWriter::finish with no row groups — a .skene file with "
+                    "nothing in it describes no data and would read back as a "
+                    "schema-less object");
+
+    const WriteOptions& options = state_->options;
+    ByteWriter w(state_->out);
+
+    // ── FILE FOOTER ──
+    const uint64_t footer_start = w.position();
+
+    FileFooterHeader fh{};
+    fh.footer_magic       = kFileFooterMagic;
+    fh.footer_version     = kFileFooterVersion;
+    fh.reserved           = 0;
+    fh.row_count          = state_->total_rows;
+    fh.row_group_count    = static_cast<uint32_t>(state_->row_groups.size());
+    fh.column_count       = static_cast<uint32_t>(state_->schema.size());
+    fh.created_at_unix_us = options.created_at_unix_us;
+    fh.writer_tag_bytes   = static_cast<uint32_t>(options.writer_tag.size());
+    fh.file_flags         = 0;
+    std::memcpy(fh.file_uuid, options.file_uuid, sizeof(fh.file_uuid));
+    w.pod(fh);
+    w.bytes(options.writer_tag.data(), options.writer_tag.size());
+
+    for (const RowGroupEntry& entry : state_->row_groups) w.pod(entry);
+    for (const SchemaNode& node : state_->schema) write_schema_entry(w, node);
+
+    // Per-row-group statistics: row group major, then the schema's depth-first
+    // column order. Each blob carries its own length, so a reader that knows a
+    // shorter ColumnStatistics reads the prefix and skips the rest — the same
+    // growth rule the row group footers' blobs follow.
+    //
+    // THIS is what keeps row group pruning alive once manifest bounds coarsen to
+    // the union over a file. It is reachable from the file footer alone: a
+    // pruning reader never opens a row group footer to decide which row groups
+    // to read.
+    for (const std::vector<StatSlot>& row_group : state_->statistics) {
+        for (const StatSlot& slot : row_group) {
+            if (!slot.present) { w.u32(0); continue; }
+            w.u32(static_cast<uint32_t>(sizeof(ColumnStatistics)));
+            w.pod(slot.statistics);
+        }
+    }
+
+    const uint64_t footer_bytes = w.position() - footer_start;
+    if (footer_bytes > UINT32_MAX)
+        return fail(Code::kMalformed,
+                    "file footer is %llu bytes, which exceeds the 32-bit "
+                    "footer_bytes field",
+                    static_cast<unsigned long long>(footer_bytes));
+
+    // ── TAIL ──
+    FileTail tail{};
+    tail.footer_bytes       = static_cast<uint32_t>(footer_bytes);
+    tail.footer_checksum    = checksum_xxh3_64(state_->out->data() + footer_start,
+                                               static_cast<size_t>(footer_bytes));
+    tail.version            = kVersion;
+    tail.endianness         = static_cast<uint8_t>(Endianness::kLittle);
+    tail.checksum_algorithm = static_cast<uint8_t>(ChecksumAlgorithm::kXxh3_64);
+    tail.reserved           = 0;
+    tail.magic              = kMagic;
+    w.pod(tail);
+
+    state_->finished = true;
+    return Status::ok();
+}
+
+Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
+                    std::vector<uint8_t>* out) {
+    // The one-row-group case IS FileWriter, not a parallel implementation of it.
+    // A second path would be a second set of framing, offset and footer rules to
+    // keep in step, and the single-row-group file is exactly the shape most
+    // tests exercise — so a divergence there would be invisible until it reached
+    // a multi-row-group file in production.
+    FileWriter writer;
+    SKENE_RETURN_IF_ERROR(writer.begin(options, out));
+    SKENE_RETURN_IF_ERROR(writer.add_row_group(morsel));
+    return writer.finish();
 }
 
 }  // namespace skene

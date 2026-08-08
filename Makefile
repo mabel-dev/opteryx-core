@@ -331,14 +331,19 @@ json-extract-bench: ## Build + run the draken `->`/`->>` kernel microbenchmark (
 	    -o json_extract_bench
 	@cd $(CURDIR) && $(JSON_BENCH_DIR)/json_extract_bench $(JSON_BENCH_ARGS)
 
-tpch: ## Run TPC-H benchmark vs DuckDB (defaults to SF=1)
+tpch: ## Run TPC-H benchmark vs DuckDB (defaults to SF=10)
 	$(call print_blue,"Running TPC-H benchmark vs DuckDB...")
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py
 
-tpch-skene: ## Run TPC-H benchmark on the skene mirror of the dataset (generates testdata/tpch_1_skene from testdata/tpch_1 on first run)
+tpch-skene: ## Run TPC-H benchmark on the skene mirror of the dataset (generates testdata/tpch_10_skene from testdata/tpch_10 on first run)
 	$(call print_blue,"Running TPC-H benchmark on skene...")
-	@test -d testdata/tpch_1_skene || $(PYTHON) dev/parquet_to_skene.py testdata/tpch_1 testdata/tpch_1_skene
+	@# Stamped on the LAYOUT, not just on the directory: the mirror generated
+	@# before row groups were packed into files is a different set of objects
+	@# with different names, and the converter refuses to write over it. A
+	@# missing stamp with a populated directory therefore means "regenerate",
+	@# which is what the rm does.
+	@test -f testdata/tpch_10_skene.rg16 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene && touch testdata/tpch_10_skene.rg16; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --variant skene
 
@@ -360,14 +365,26 @@ clickbench:
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
-clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene from scratch/hits_rugo_262k on first run)
+clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, LZ4, from scratch/hits_rugo_262k on first run)
 	$(call print_blue,"Running ClickBench benchmark on skene...")
 	@# Gate on a completion stamp, not on the directory: an interrupted conversion
 	@# leaves a partial tree that `test -d` would accept, silently benchmarking a
 	@# fraction of the dataset. The stamp lives outside the dataset dir so it can
 	@# never trip the single-format manifest check. Re-running the converter over
 	@# an existing tree is idempotent (deterministic output filenames).
-	@test -f scratch/hits_skene.converted || { $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene && touch scratch/hits_skene.converted; }
+	@#
+	@# The `lz4` argument is NOT optional. LZ4 is the reference storage posture
+	@# (architect, 2026-08-08), so the mirror this rebuilds must be the mirror the
+	@# benchmark is quoted against. Dropping it rebuilds an UNCOMPRESSED mirror
+	@# into the same path, and nothing downstream would say so — the suite would
+	@# simply report a different number for a dataset nobody knew had changed.
+	@#
+	@# The stamp is named for the LAYOUT (rg16 = 16 row groups per file), not
+	@# just for "converted". A mirror written before row groups were packed into
+	@# files is a different set of objects under different names, so the old
+	@# stamp must not satisfy this gate and the old tree must go — otherwise the
+	@# converter refuses and the benchmark never runs.
+	@test -f scratch/hits_skene.rg16 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.rg16; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene
@@ -445,20 +462,27 @@ coverage: ## Generate test coverage report
 	@$(COVERAGE) html --include=$(SRC_DIR)/**
 	$(call print_green,"Coverage report generated in htmlcov/")
 
-fuzz: check-python dev-install ## Run fuzzing tests (existing + metamorphic)
+# Runs exactly what CI runs, so a local pass means the same thing as a CI pass.
+# The fuzzers seed themselves randomly and print the seed of every case; set
+# TEST_SEED to replay a run, and TEST_ITERATIONS to go deeper than the default.
+fuzz: check-python dev-install ## Run the fuzzing suite (TEST_ITERATIONS=N for a longer run)
 	$(call print_blue,"Running fuzzing suite...")
 	@clear || true
-	$(call print_blue,"Phase 1: Fuzzing literals...")
-	@$(PYTHON) tests/fuzzing/fuzz_literals.py --iterations 100
-	$(call print_blue,"Phase 2: Fuzzing joins...")
-	@$(PYTHON) tests/fuzzing/fuzz_joins.py --iterations 50
-	$(call print_blue,"Phase 3: Fuzzing single table select...")
-	@$(PYTHON) tests/fuzzing/fuzz_single_table_select.py --iterations 50
-	$(call print_blue,"Phase 4: Metamorphic fuzzing...")
-	@$(PYTHON) tests/fuzzing/fuzz_metamorphic.py --iterations 500 --verbose
-	$(call print_blue,"Phase 5: Constant Folding fuzzing...")
-	@$(PYTHON) tests/fuzzing/fuzz_constant_folding.py --iterations 500 --verbose
+	@TEST_ITERATIONS=$${TEST_ITERATIONS:-1000} $(PYTHON) -m pytest tests/fuzzing/ --color=yes
 	$(call print_green,"Fuzzing complete!")
+
+# The file parsers are fuzzed separately from the SQL surface: different inputs
+# (bytes we did not write), different oracle (ASan/UBSan rather than a result
+# comparison), and a different toolchain (clang, no Python). See
+# tests/fuzzing/native/README.md.
+fuzz-native: ## Replay the native parser corpus under ASan/UBSan
+	$(call print_blue,"Replaying native parser corpus...")
+	@$(MAKE) -C tests/fuzzing/native replay
+	$(call print_green,"Native corpus clean!")
+
+fuzz-native-run: ## Search for new parser crashes (FUZZ_SECONDS=N per target)
+	$(call print_blue,"Fuzzing native parsers...")
+	@$(MAKE) -C tests/fuzzing/native run
 
 # === TYPE CHECKING ===
 

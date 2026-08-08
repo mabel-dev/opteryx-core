@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [cxx, bindings]
+        suite: [cxx, bindings, fuzz]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.1.7
@@ -54,6 +54,16 @@ jobs:
               # draken + skene only — no opteryx SQL engine, no rugo, no Rust.
               python skene/setup.py build_ext --inplace
               python -m pytest tests/unit/skene -q
+              ;;
+            fuzz)
+              # Replays every .skene input the fuzzer has ever crashed on, under
+              # ASan and UBSan. A format that reads objects from storage must not
+              # be publishable while a known input can walk off the end of a
+              # buffer, so this gates the wheel exactly like the other two.
+              #
+              # Only the skene target: a Parquet corpus regression is rugo's
+              # release to block, not this one.
+              make -C tests/fuzzing/native replay TARGETS=skene
               ;;
           esac
 

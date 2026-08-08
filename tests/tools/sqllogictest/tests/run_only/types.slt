@@ -205,7 +205,7 @@ SELECT CAST(BLOB('apple') AS VARBINARY) = b'apple'
 statement error UnsupportedSyntaxError
 SELECT BLOB('apple') ILIKE 'a%ple'
 
-statement error SqlError
+statement ok
 SELECT b'apple' ILIKE b'a%ple'
 
 
@@ -531,7 +531,7 @@ SELECT NULL LIKE BLOB('a%ple')
 statement error UnsupportedSyntaxError
 SELECT BLOB('Apple') = 'apple'
 
-statement error SqlError
+statement ok
 SELECT b'Apple' ILIKE b'aPpLe'
 
 statement error UnsupportedSyntaxError

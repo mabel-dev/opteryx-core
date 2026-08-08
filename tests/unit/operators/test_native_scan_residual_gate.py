@@ -472,7 +472,7 @@ _LIMIT_FLAT = "testdata/flat/formats/parquet"
     # LIMIT above the row-group boundary, and above the whole table
     "SELECT followers FROM '%s' LIMIT 100000" % _LIMIT_FLAT,
     "SELECT followers FROM '%s' LIMIT 10000000" % _LIMIT_FLAT,
-    "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT 5",
+    "SELECT l_orderkey FROM testdata.tpch_001.lineitem LIMIT 5",
 ])
 def test_pushed_limit_now_native(sql):
     """R2 close-out: a scan-pushed LIMIT selects the zero-Python native Source.
@@ -491,12 +491,12 @@ def test_pushed_limit_row_count_exact(limit):
     below, at, and above a row-group boundary, and above the whole table."""
     import opteryx
 
-    table_rows = 6001215  # testdata.tpch_1.lineitem
+    table_rows = 60175  # testdata.tpch_001.lineitem
     session = opteryx.session()
     rows = sum(
         morsel.num_rows
         for morsel in session.execute_to_morsels(
-            "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT %d" % limit)
+            "SELECT l_orderkey FROM testdata.tpch_001.lineitem LIMIT %d" % limit)
     )
     assert rows == min(limit, table_rows)
 
@@ -504,9 +504,21 @@ def test_pushed_limit_row_count_exact(limit):
 def test_pushed_limit_skips_uncontributing_row_groups():
     """The I/O win the pushdown exists for: row groups that provably cannot
     contribute to the LIMIT are never decoded. The submit frontier is capped from
-    the footer's per-row-group row counts, so a small LIMIT over a 96-row-group
+    the footer's per-row-group row counts, so a small LIMIT over a many-row-group
     file decodes ONE row group — not the whole prefetch window (in_flight_limit,
-    == workers+2, plus one per worker racing in before the first emit)."""
+    == workers+2, plus one per worker racing in before the first emit).
+
+    Deliberately NOT on tpch_001 like its neighbours in this file. That fixture's
+    lineitem is a single 60,175-row file holding ONE row group, so "decoded one
+    row group" would hold no matter what the frontier did — the assertion would
+    pass without exercising anything.
+
+    `testdata/tpch_1/lineitem` exists SOLELY for this test: one SF1 lineitem file,
+    6,001,215 rows in 23 row groups, the rest of SF1 having been retired when the
+    benchmarks moved to SF10. It is a fixture, not a benchmark dataset — do not
+    point performance work at it, and do not "tidy" it away as a leftover of the
+    old scale. Delete it only together with this test.
+    """
     import opteryx
 
     session = opteryx.session()
@@ -514,7 +526,7 @@ def test_pushed_limit_skips_uncontributing_row_groups():
             "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT 5"):
         pass
     diagnostics = session._telemetry.as_dict()["io_scan_diagnostics"][0]
-    # The full scan decodes 96 row groups; LIMIT 5 fits entirely in the first.
+    # 23 row groups in the file; LIMIT 5 fits entirely in the first.
     assert diagnostics["enqueue_count"] == 1, diagnostics
 
 

@@ -121,6 +121,7 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         ApproxCountDistinct "opteryx::engine::AggFn::ApproxCountDistinct"
         ApproxPercentile "opteryx::engine::AggFn::ApproxPercentile"
         Corr "opteryx::engine::AggFn::Corr"
+        CidrAgg "opteryx::engine::AggFn::CidrAgg"
     cdef cppclass AggSpec2:
         AggFn fn
         int col_idx
@@ -130,7 +131,6 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         bint aa_ordered
         bint aa_descending
         int64_t aa_limit
-        int64_t aa_max_per_group
         double percentile
 
 cdef extern from "core/alloc.h" nogil:
@@ -203,6 +203,19 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[string]* out_identities,
                                           const cppvector[int]* column_types,
                                           const cppvector[int]* retag_units)
+        void set_skene_latmat_scan_source(size_t p,
+                                          const cppvector[string]* files,
+                                          const cppvector[string]* p1_column_names,
+                                          const cppvector[int]* p1_column_types,
+                                          const cppvector[int]* p1_retag_units,
+                                          const cppvector[string]* out_column_names,
+                                          const cppvector[string]* out_identities,
+                                          const cppvector[int]* out_column_types,
+                                          const cppvector[int]* out_retag_units,
+                                          void* pred_fn, void* pred_ctx,
+                                          const cppvector[int]* pred_col_to_p1,
+                                          int sort_p1_index, bint sort_ascending,
+                                          int64_t topn_limit)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -254,6 +267,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     cppvector[string] names)
         void add_limit(size_t p, int64_t offset, int64_t limit)
         void add_unnest(size_t p, uint32_t array_idx, string target_name, bint drop_source)
+        void add_cidr_unnest(size_t p, uint32_t cidr_idx, string target_name, bint drop_source)
         void add_unnest_literal(size_t p, shared_ptr[CxxMorsel] lit, string target_name)
         void add_buffer_morsel(size_t buf, shared_ptr[CxxMorsel] m)
         void set_pipeline_dop(size_t p, int dop)
@@ -273,13 +287,16 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                   cppvector[DrakenType] payload_types,
                                   cppvector[int] lt_kind, cppvector[int] lt_unit,
                                   cppvector[int] lt_precision, cppvector[int] lt_scale,
-                                  cppvector[int] lt_dimension, bint track_matches)
+                                  cppvector[int] lt_dimension,
+                                  cppvector[cppvector[int]] elem_chain,
+                                  bint track_matches)
         void set_unmatched_build_source(size_t p, size_t ref,
                                         cppvector[DrakenType] probe_types,
                                         cppvector[int] lt_kind, cppvector[int] lt_unit,
                                         cppvector[int] lt_precision,
                                         cppvector[int] lt_scale,
-                                        cppvector[int] lt_dimension)
+                                        cppvector[int] lt_dimension,
+                                        cppvector[cppvector[int]] elem_chain)
         void add_join2_probe_residual(size_t p, size_t ref, cppvector[size_t] key_idx,
                                       cppvector[size_t] payload_idx, int mode,
                                       void* instrs, int count, cppvector[int] col_idx,
@@ -291,7 +308,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                  size_t ref, cppvector[DrakenType] payload_types,
                                  cppvector[int] lt_kind, cppvector[int] lt_unit,
                                  cppvector[int] lt_precision, cppvector[int] lt_scale,
-                                 cppvector[int] lt_dimension)
+                                 cppvector[int] lt_dimension,
+                                 cppvector[cppvector[int]] elem_chain,
+                                 int asof_type)
         void add_asof_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                             cppvector[size_t] payload_idx, size_t asof_idx, int op)
         void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf)
@@ -1895,6 +1914,105 @@ cdef class SkeneScanPlan:
             self.retag_units.push_back(<int>retag_unit)
 
 
+cdef class SkeneLatmatScanPlan:
+    """Owns the C++ vectors NativeSkeneLatmatScanSource borrows for a two-pass
+    late-materialized skene scan.
+
+    Same holder-not-planner contract as SkeneScanPlan: the compiler
+    (`_skene_latmat_scan_plan`) already resolved the file list, the pass-1 column
+    split, the predicate's column mapping and the top-n spec. This pins them in C++
+    storage that outlives the driver.
+
+    Two parallel column sets, each with its own (names, types, retag_units):
+    `p1_*` is the predicate's columns plus the sort key — all this scan decodes for
+    the whole table — and `out_*` is the scan's full projection, decoded only for
+    the files that still hold a top-n candidate.
+    """
+
+    cdef cppvector[string] files
+    cdef cppvector[string] p1_column_names
+    cdef cppvector[int] p1_column_types
+    cdef cppvector[int] p1_retag_units
+    cdef cppvector[string] out_column_names
+    cdef cppvector[string] out_identities
+    cdef cppvector[int] out_column_types
+    cdef cppvector[int] out_retag_units
+    # pred_col_to_p1[k] = position in p1_column_names of the predicate's k-th column,
+    # in the order the Pass1PredCtx's col_idx expects.
+    cdef cppvector[int] pred_col_to_p1
+
+    def __init__(self, list files, list p1_column_names, list p1_column_types,
+                 list p1_retag_units, list out_column_names, list out_identities,
+                 list out_column_types, list out_retag_units, list pred_col_to_p1):
+        if not (len(p1_column_names) == len(p1_column_types) == len(p1_retag_units)):
+            raise ValueError(
+                "SkeneLatmatScanPlan: p1_column_names/p1_column_types/p1_retag_units "
+                "must be parallel — the Source indexes all three by the same position."
+            )
+        if not (len(out_column_names) == len(out_identities) == len(out_column_types)
+                == len(out_retag_units)):
+            raise ValueError(
+                "SkeneLatmatScanPlan: out_column_names/out_identities/out_column_types/"
+                "out_retag_units must be parallel — the Source indexes all four by the "
+                "same position."
+            )
+        for path in files:
+            self.files.push_back(<string>(path.encode("utf-8") if isinstance(path, str) else path))
+        for name in p1_column_names:
+            self.p1_column_names.push_back(<string>(name.encode("utf-8") if isinstance(name, str) else name))
+        for physical_type in p1_column_types:
+            self.p1_column_types.push_back(<int>physical_type)
+        for retag_unit in p1_retag_units:
+            self.p1_retag_units.push_back(<int>retag_unit)
+        for name in out_column_names:
+            self.out_column_names.push_back(<string>(name.encode("utf-8") if isinstance(name, str) else name))
+        for identity in out_identities:
+            self.out_identities.push_back(<string>(identity.encode("utf-8") if isinstance(identity, str) else identity))
+        for physical_type in out_column_types:
+            self.out_column_types.push_back(<int>physical_type)
+        for retag_unit in out_retag_units:
+            self.out_retag_units.push_back(<int>retag_unit)
+        for position in pred_col_to_p1:
+            self.pred_col_to_p1.push_back(<int>position)
+
+
+cdef void _fill_payload_types(list types, object logical, object element,
+                              cppvector[DrakenType]& ts,
+                              cppvector[int]& lk, cppvector[int]& lu,
+                              cppvector[int]& lp, cppvector[int]& lsc,
+                              cppvector[int]& ld,
+                              cppvector[cppvector[int]]& ec):
+    """Fill the join build/probe payload TYPE wire vectors from the compiler's lists.
+
+    One writer for all three join schema entry points (``set_join2_build_sink``,
+    ``set_asof_build_sink``, ``set_unmatched_build_source``) — they describe the same
+    thing (a payload column's plan-known type) and were drifting apart as copies.
+
+    ``logical`` is a per-column ``(kind, unit, precision, scale, dimension)`` tuple or
+    None; ``element`` is a per-column ARRAY element chain, flattened to SIX ints per
+    nesting level — ``(physical type, kind, unit, precision, scale, dimension)``,
+    outermost element first — and empty for a non-ARRAY column. See
+    ``engine.hpp::decode_elem_chain``.
+    """
+    cdef Py_ssize_t i
+    cdef cppvector[int] chain
+    for t in types:
+        ts.push_back(<DrakenType><int>t)
+    for i in range(len(types)):
+        entry = logical[i] if logical is not None and i < len(logical) else None
+        if entry is None:
+            lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
+        else:
+            lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
+            lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
+        chain.clear()
+        levels = element[i] if element is not None and i < len(element) else None
+        if levels is not None:
+            for value in levels:
+                chain.push_back(<int>value)
+        ec.push_back(chain)
+
+
 cdef class NativePlan:
     """The compiled-native execution plan: owns the C++ ``Engine`` pipeline graph plus
     the Python references (scan plan nodes, compiled expression programs) whose
@@ -1905,7 +2023,8 @@ cdef class NativePlan:
     cdef public list scans   # BasePlanNode scan objects StreamingScanSource borrows
     cdef public list held    # CompiledBytecode programs (own instrs + literal vectors)
     cdef public list scan_plans  # NativeScanPlan objects NativeParquetScanSource borrows
-    cdef public list skene_scan_plans  # SkeneScanPlan objects NativeSkeneScanSource borrows
+    # SkeneScanPlan / SkeneLatmatScanPlan objects the skene Sources borrow
+    cdef public list skene_scan_plans
 
     def __cinit__(self):
         self._e = new Engine()
@@ -1995,6 +2114,29 @@ cdef class NativePlan:
         self._e.set_native_skene_scan_source(p, &splan.files, &splan.column_names,
                                              &splan.out_identities, &splan.column_types,
                                              &splan.retag_units)
+
+    def set_skene_latmat_scan_source(self, size_t p, SkeneLatmatScanPlan splan,
+                                     size_t pred_fn, size_t pred_ctx,
+                                     object pred_anchor, int sort_p1_index,
+                                     bint sort_ascending, int64_t topn_limit):
+        """Source = the two-pass late-materialization skene scan
+        (NativeSkeneLatmatScanSource): pass 1 decodes only the predicate columns +
+        the sort key over every file and reduces the survivors to the top-n
+        boundary; pass 2 decodes the full projection for just the files that still
+        hold a candidate. The composed `WHERE ... ORDER BY ... LIMIT` shape over a
+        wide projection — ClickBench Q24.
+
+        ``pred_anchor`` is the Pass1PredResolver that owns ``pred_ctx`` — held here
+        because the C ABI callback dereferences it from native worker threads with
+        no reference of its own, exactly as set_latmat_scan_source does."""
+        self.skene_scan_plans.append(splan)
+        self.held.append(pred_anchor)
+        self._e.set_skene_latmat_scan_source(
+            p, &splan.files, &splan.p1_column_names, &splan.p1_column_types,
+            &splan.p1_retag_units, &splan.out_column_names, &splan.out_identities,
+            &splan.out_column_types, &splan.out_retag_units,
+            <void*>pred_fn, <void*>pred_ctx, &splan.pred_col_to_p1,
+            sort_p1_index, sort_ascending, topn_limit)
 
     def set_native_scan_source(self, size_t p, NativeScanPlan splan, object row_limit=None):
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers
@@ -2146,55 +2288,45 @@ cdef class NativePlan:
 
     def set_join2_build_sink(self, size_t p, list key_idx, list payload_idx, size_t ref,
                              list payload_types, list payload_logical=None,
+                             list payload_element=None,
                              bint track_matches=False):
-        """``payload_types``/``payload_logical`` are the build-side payload columns'
-        PLAN-KNOWN physical (DrakenType ints) + logical ((kind, unit, precision, scale,
-        dimension) tuples or None) types — same shape as ``set_final_schema`` — so the
-        native build sink can size+type its row-store up front instead of learning it
-        from the first morsel, which never arrives when the build side streams zero
-        rows (a filtered-to-empty subquery)."""
+        """``payload_types``/``payload_logical``/``payload_element`` are the build-side
+        payload columns' PLAN-KNOWN physical (DrakenType ints), logical ((kind, unit,
+        precision, scale, dimension) tuples or None) and ARRAY element-chain types —
+        so the native build sink can size+type its row-store up front instead of
+        learning it from the first morsel, which never arrives when the build side
+        streams zero rows (a filtered-to-empty subquery). ``payload_element`` is
+        described on ``_fill_payload_types``."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         cdef cppvector[DrakenType] ts
         cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef cppvector[cppvector[int]] ec
         cdef int i
         for i in key_idx:
             keys.push_back(<size_t>i)
         for i in payload_idx:
             pay.push_back(<size_t>i)
-        for t in payload_types:
-            ts.push_back(<DrakenType><int>t)
-        for i in range(len(payload_types)):
-            entry = payload_logical[i] if payload_logical is not None and i < len(payload_logical) else None
-            if entry is None:
-                lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
-            else:
-                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
-                lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
-        self._e.set_join2_build_sink(p, keys, pay, ref, ts, lk, lu, lp, lsc, ld,
+        _fill_payload_types(payload_types, payload_logical, payload_element,
+                            ts, lk, lu, lp, lsc, ld, ec)
+        self._e.set_join2_build_sink(p, keys, pay, ref, ts, lk, lu, lp, lsc, ld, ec,
                                      track_matches)
 
     def set_unmatched_build_source(self, size_t p, size_t ref, list probe_types,
-                                   list probe_logical=None):
+                                   list probe_logical=None, list probe_element=None):
         """FULL OUTER tail pipeline source: emits build rows no probe matched,
-        NULL-padded on the probe half. ``probe_types``/``probe_logical`` are the
-        PROBE payload columns' plan-known types — the mirror of
-        ``set_join2_build_sink``'s payload types, and for the same reason: the
-        all-NULL probe half needs a typed schema even when the probe side
-        streamed zero rows."""
+        NULL-padded on the probe half. ``probe_types``/``probe_logical``/
+        ``probe_element`` are the PROBE payload columns' plan-known types — the mirror
+        of ``set_join2_build_sink``'s payload types, and for the same reason: the
+        all-NULL probe half needs a typed schema even when the probe side streamed
+        zero rows. An ARRAY column's element chain is not optional here: gathering a
+        NULL ARRAY row still emits a typed, empty child vector."""
         cdef cppvector[DrakenType] ts
         cdef cppvector[int] lk, lu, lp, lsc, ld
-        cdef int i
-        for t in probe_types:
-            ts.push_back(<DrakenType><int>t)
-        for i in range(len(probe_types)):
-            entry = probe_logical[i] if probe_logical is not None and i < len(probe_logical) else None
-            if entry is None:
-                lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
-            else:
-                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
-                lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
-        self._e.set_unmatched_build_source(p, ref, ts, lk, lu, lp, lsc, ld)
+        cdef cppvector[cppvector[int]] ec
+        _fill_payload_types(probe_types, probe_logical, probe_element,
+                            ts, lk, lu, lp, lsc, ld, ec)
+        self._e.set_unmatched_build_source(p, ref, ts, lk, lu, lp, lsc, ld, ec)
 
     def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                         int mode):
@@ -2232,28 +2364,30 @@ cdef class NativePlan:
 
     def set_asof_build_sink(self, size_t p, list key_idx, list payload_idx,
                             size_t asof_idx, size_t ref, list payload_types,
-                            list payload_logical=None):
-        """``payload_types``/``payload_logical``: see set_join2_build_sink — same
-        plan-known-type wiring, shared build sink implementation."""
+                            list payload_logical=None, list payload_element=None,
+                            int asof_type=0):
+        """``payload_types``/``payload_logical``/``payload_element``: see
+        set_join2_build_sink — same plan-known-type wiring, shared build sink
+        implementation.
+
+        ``asof_type`` is the DrakenType int of the MATCH_CONDITION column AFTER any
+        cross-type coercion. Passed separately from ``payload_types`` because a
+        coerced match column is a synthetic CAST appended past the payload, so it has
+        no payload entry — and its type decides how the ASOF bisect orders keys."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         cdef cppvector[DrakenType] ts
         cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef cppvector[cppvector[int]] ec
         cdef int i
         for i in key_idx:
             keys.push_back(<size_t>i)
         for i in payload_idx:
             pay.push_back(<size_t>i)
-        for t in payload_types:
-            ts.push_back(<DrakenType><int>t)
-        for i in range(len(payload_types)):
-            entry = payload_logical[i] if payload_logical is not None and i < len(payload_logical) else None
-            if entry is None:
-                lk.push_back(0); lu.push_back(0); lp.push_back(0); lsc.push_back(0); ld.push_back(0)
-            else:
-                lk.push_back(<int>entry[0]); lu.push_back(<int>entry[1])
-                lp.push_back(<int>entry[2]); lsc.push_back(<int>entry[3]); ld.push_back(<int>entry[4])
-        self._e.set_asof_build_sink(p, keys, pay, asof_idx, ref, ts, lk, lu, lp, lsc, ld)
+        _fill_payload_types(payload_types, payload_logical, payload_element,
+                            ts, lk, lu, lp, lsc, ld, ec)
+        self._e.set_asof_build_sink(p, keys, pay, asof_idx, ref, ts, lk, lu, lp, lsc,
+                                    ld, ec, asof_type)
 
     def add_asof_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                        size_t asof_idx, int op):
@@ -2373,6 +2507,19 @@ cdef class NativePlan:
         cdef string nm = <string>(target_name if isinstance(target_name, bytes)
                                   else (<str>target_name).encode("utf-8"))
         self._e.add_unnest(p, <uint32_t>array_idx, nm, drop_source)
+
+    def add_cidr_unnest(self, size_t p, size_t cidr_idx, target_name, bint drop_source):
+        """CROSS JOIN CIDR_UNNEST on pipeline ``p``: expand columns[cidr_idx] (text
+        CIDR blocks) into one IPV4 row per address, under ``target_name``.
+
+        Unlike add_unnest this operator is RESUMABLE — one input morsel can hold
+        blocks covering billions of addresses, so it emits bounded batches and the
+        executor re-drives it until the input is consumed. There is no literal
+        variant: a literal CIDR is projected as a constant column and expanded
+        through this same path, so nothing is materialized at plan time."""
+        cdef string nm = <string>(target_name if isinstance(target_name, bytes)
+                                  else (<str>target_name).encode("utf-8"))
+        self._e.add_cidr_unnest(p, <uint32_t>cidr_idx, nm, drop_source)
 
     def add_unnest_literal(self, size_t p, Morsel lit, target_name):
         """CROSS JOIN UNNEST over a LITERAL array: ``lit`` is a plan-constant
@@ -2514,6 +2661,8 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.fn = AggFn.ApproxPercentile
         elif fn == "Corr":
             s.fn = AggFn.Corr
+        elif fn == "CidrAgg":
+            s.fn = AggFn.CidrAgg
         else:
             raise ValueError(f"native engine: unknown aggregate function {fn!r}")
         s.col_idx = <int>col_idx
@@ -2526,7 +2675,6 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.aa_ordered = False
             s.aa_descending = False
             s.aa_limit = -1
-            s.aa_max_per_group = 1000
             s.percentile = 0.5
         else:
             s.col_idx2 = <int>opts.get("col_idx2", -1)
@@ -2534,7 +2682,6 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.aa_ordered = <bint>bool(opts.get("ordered", False))
             s.aa_descending = <bint>bool(opts.get("descending", False))
             s.aa_limit = <int64_t>(-1 if opts.get("limit") is None else opts["limit"])
-            s.aa_max_per_group = <int64_t>opts.get("max_per_group", 1000)
             s.percentile = <double>opts.get("percentile", 0.5)
         out.push_back(s)
     return out

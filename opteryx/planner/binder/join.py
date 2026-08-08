@@ -20,6 +20,38 @@ from opteryx.types.schema import RelationSchema
 from opteryx.utils import random_string
 
 
+def _pop_using_column(
+    context: BindingContext, relation_names: list, column_name: str, side: str
+) -> Tuple[object, str]:
+    """Take `column_name` out of the one relation on this leg that holds it.
+
+    A leg can name more than one relation — a subquery boundary alongside the scans
+    spliced beneath it, or several relations chained into the same side — and only one
+    of them holds the column. Popping from every name in turn and keeping the LAST
+    result is wrong twice over: `pop_column` REMOVES the column, so a duplicated name
+    (see join_leg_preprocess) popped it and then returned None on the second pass, and
+    the caller then set `.origin` on that None. Stop at the first relation that has it,
+    and skip names no longer in scope rather than raising KeyError on them.
+
+    Returns (column, relation_name). Never returns None — a USING column that no
+    relation on this leg holds is a broken join, and says so.
+    """
+    from opteryx.exceptions import ColumnNotFoundError
+
+    for relation_name in relation_names:
+        schema = context.schemas.get(relation_name)
+        if schema is None:
+            continue
+        column = schema.pop_column(column_name)
+        if column is not None:
+            return column, relation_name
+
+    raise ColumnNotFoundError(
+        message=f"JOIN ... USING references column '{column_name}', which is not present "
+        f"in the {side} side of the join."
+    )
+
+
 def _bind_on_condition_split(
     on_node: Node, left_context: BindingContext, right_context: BindingContext, right_set: set
 ) -> Node:
@@ -273,13 +305,12 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         left_relation_name = ""
         right_relation_name = ""
         for column_name in (n.value for n in node.using):
-            # Pop the column from the left relation
-            for left_relation_name in node.left_relation_names:
-                left_column = context.schemas[left_relation_name].pop_column(column_name)
-
-            # Pop the column from the right relation
-            for right_relation_name in node.right_relation_names:
-                right_column = context.schemas[right_relation_name].pop_column(column_name)
+            left_column, left_relation_name = _pop_using_column(
+                context, node.left_relation_names, column_name, "left"
+            )
+            _, right_relation_name = _pop_using_column(
+                context, node.right_relation_names, column_name, "right"
+            )
 
             # we need to decide which column we're going to keep
             left_column.origin = [left_relation_name, right_relation_name]

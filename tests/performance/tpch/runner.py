@@ -100,8 +100,15 @@ def main() -> int:
     parser.add_argument(
         "--scale",
         type=str,
-        default="1",
-        help="Scale factor suffix matching testdata/tpch_<scale> (default: 1)",
+        default="10",
+        # SF10, not SF1. At SF1 planning is 19.1% of the suite's total work, so
+        # the benchmark substantially measures the PLANNER and dilutes any engine
+        # change by ~1.2x before it can be seen; at SF10 planning is 2.6%. SF1
+        # also puts each table in one parquet file, so the scan's per-file
+        # parallelism is barely exercised, and the whole dataset is page-cache
+        # resident, which makes codec measurements say the opposite of what they
+        # say at a realistic size. Smaller scales stay available via --scale.
+        help="Scale factor suffix matching testdata/tpch_<scale> (default: 10)",
     )
     parser.add_argument(
         "--iterations",

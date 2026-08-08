@@ -89,4 +89,37 @@ bool zstd_encode(const void* plain, size_t plain_bytes, int level,
 Status zstd_decode(const uint8_t* stored, uint64_t stored_bytes,
                    uint64_t plain_bytes, uint8_t* out);
 
+// ─── General-purpose compression: kLz4 ──────────────────────────────────────
+//
+// The read-first codec. Same per-section application as kZstd, different trade:
+// measured on a ClickBench row group (dev/skene_codec_bench.cpp), 4.49x at
+// 8931 MB/s decode against zstd-9's 7.34x at 3477 MB/s. 8931 MB/s is the rate
+// the reader's own uncompressed path runs at on the same file, so LZ4's decode
+// is roughly free relative to work already being done.
+//
+// LZ4 BLOCK format, not the frame format: a block carries no header, so it
+// cannot self-describe its decoded size — the section directory's `plain_bytes`
+// supplies it. That is deliberate (a frame header per section would be bytes
+// spent restating what the directory already stores), and it is why the decode
+// side below must treat `plain_bytes` as an exact requirement rather than a
+// capacity hint.
+
+// Returns false when compression would not be smaller — the writer then emits
+// the uncompressed form. Never a failure: "not worth it" is a normal answer.
+// Also returns false above LZ4's block-size ceiling, which is the same answer
+// for the same reason: the section is stored plain.
+bool lz4_encode(const void* plain, size_t plain_bytes, std::vector<uint8_t>* out);
+
+// Decodes into `out`, which must hold exactly `plain_bytes`.
+//
+// EXACTLY is load-bearing on the upper side as well as the lower: `plain_bytes`
+// is handed to LZ4 as the destination CAPACITY, and LZ4 is entitled to write
+// anywhere within a capacity it is given — its final copy is a 16-byte wildcopy
+// that can run past the decoded length while staying inside the declared bound.
+// A caller that declares more than it allocated therefore gets a buffer overrun
+// even on a body that decodes correctly. Every caller passes the section
+// directory's `plain_bytes` and allocates to the same value.
+Status lz4_decode(const uint8_t* stored, uint64_t stored_bytes,
+                  uint64_t plain_bytes, uint8_t* out);
+
 }  // namespace skene

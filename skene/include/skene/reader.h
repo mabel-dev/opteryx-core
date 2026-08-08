@@ -99,12 +99,62 @@ struct ColumnMetadata {
     std::vector<ColumnMetadata> children;  // ARRAY only
 };
 
+// Identity and type of one column: the part that CANNOT vary between the file's
+// row groups, and all the FILE FOOTER carries about a column. Everything
+// per-row-group (lengths, encoding shape, extents, zone maps, blooms) is in
+// ColumnMetadata and needs that row group's own footer.
+struct ColumnSchema {
+    std::string           name;
+    uint32_t              field_id = 0;
+    uint32_t              type = 0;          // DrakenType
+    bool                  logical_present = false;
+    LogicalTypeDescriptor logical{};
+    std::vector<ColumnSchema> children;      // ARRAY only
+};
+
+// One column's statistics in one row group, read straight out of the file
+// footer. `present` means TRACKED — absent is never "zero" (format.h).
+struct RowGroupColumnStatistics {
+    bool             present = false;
+    ColumnStatistics statistics{};
+};
+
+// One row group as the FILE FOOTER describes it.
+//
+// Everything here is reachable from the file footer alone, which is the point:
+// a reader prunes on `column_statistics` and only then range-reads the surviving
+// row groups. Nothing in this struct required opening a row group footer.
+struct RowGroupSummary {
+    uint64_t row_count = 0;
+    uint64_t first_row = 0;      // this row group's first row, in file row order
+
+    // The row group's DATA + INDEX extent — everything but its footer.
+    uint64_t byte_offset = 0;
+    uint64_t byte_bytes  = 0;
+
+    // Its own footer, which is where its column and section directories live.
+    uint64_t footer_offset = 0;
+    uint32_t footer_bytes  = 0;
+
+    // Depth-first over FileMetadata::columns, ARRAY children included — the same
+    // order the schema directory is written in, so index i means the same column
+    // in every row group.
+    std::vector<RowGroupColumnStatistics> column_statistics;
+};
+
 struct FileMetadata {
     uint16_t    version = 0;
-    uint64_t    row_count = 0;
+    uint64_t    row_count = 0;   // TOTAL across every row group
     uint8_t     file_uuid[16] = {};
     uint64_t    created_at_unix_us = 0;
     std::string writer_tag;
+    std::vector<ColumnSchema>    columns;
+    std::vector<RowGroupSummary> row_groups;
+};
+
+// One row group in full, from its own footer.
+struct RowGroupMetadata {
+    uint64_t                    row_count = 0;
     std::vector<ColumnMetadata> columns;
 };
 
@@ -141,20 +191,34 @@ struct ReadOptions {
 Status bloom_may_contain(const ColumnMetadata& column, const void* value_bytes,
                          uint32_t value_length, bool* out_may_contain);
 
-// Parses the footer. Does not touch the data region, so this is cheap and is the
-// input to any pruning decision.
+// Parses the FILE FOOTER only: the schema, the row group directory, and every
+// row group's per-column statistics. Touches no data region and no row group
+// footer, so this is cheap and is the input to any pruning decision.
 Status read_metadata(const void* file, size_t file_bytes, FileMetadata* out);
 
-// Reconstructs a morsel. Validates before interpreting: magic, version,
-// endianness, checksum algorithm, declared extents against the real size, the
-// footer checksum, then every section's checksum before that section is used,
-// then structural consistency (selection kind against the counts, code bounds,
-// the string arena invariants, array offset monotonicity).
-Status read_morsel(const void* file, size_t file_bytes, const ReadOptions& options,
-                   CxxMorsel* out);
+// Parses ONE row group's own footer: per-column lengths, encoding shape, byte
+// extents, zone maps and blooms. This is the expensive metadata — a row group
+// directory is tens of kilobytes on a wide schema — which is exactly why it is
+// a separate call reached per row group rather than folded into read_metadata.
+Status read_row_group_metadata(const void* file, size_t file_bytes,
+                               uint32_t row_group, RowGroupMetadata* out);
 
-inline Status read_morsel(const void* file, size_t file_bytes, CxxMorsel* out) {
-    return read_morsel(file, file_bytes, ReadOptions(), out);
+// Reconstructs ONE row group as a morsel. Validates before interpreting: magic,
+// version, endianness, checksum algorithm, declared extents against the real
+// size, the file footer checksum, the row group's footer checksum, then every
+// section's checksum before that section is used, then structural consistency
+// (selection kind against the counts, code bounds, the string arena invariants,
+// array offset monotonicity).
+//
+// `row_group` is REQUIRED and has no default. A default of 0 would silently read
+// one sixteenth of a packed file and return a well-formed morsel while doing it,
+// which is the failure this format's whole validation posture exists to prevent.
+Status read_morsel(const void* file, size_t file_bytes, uint32_t row_group,
+                   const ReadOptions& options, CxxMorsel* out);
+
+inline Status read_morsel(const void* file, size_t file_bytes, uint32_t row_group,
+                          CxxMorsel* out) {
+    return read_morsel(file, file_bytes, row_group, ReadOptions(), out);
 }
 
 }  // namespace skene

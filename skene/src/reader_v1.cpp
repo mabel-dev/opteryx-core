@@ -74,11 +74,29 @@ struct ParsedColumn {
     std::vector<ParsedColumn> children;
 };
 
-struct ParsedFooter {
-    FooterFileHeader          file_header{};
+struct ParsedRowGroupFooter {
+    RowGroupFooterHeader      header{};
     std::string               writer_tag;
     std::vector<ParsedColumn> columns;
     std::vector<SectionEntry> sections;
+};
+
+// ─── Parsed FILE footer (the file index) ────────────────────────────────────
+
+struct ParsedSchema {
+    SchemaEntryHead           head{};
+    std::string               name;
+    LogicalTypeDescriptor     logical{};
+    std::vector<ParsedSchema> children;
+};
+
+struct ParsedFileFooter {
+    FileFooterHeader           header{};
+    std::string                writer_tag;
+    std::vector<RowGroupEntry> row_groups;
+    std::vector<ParsedSchema>  schema;
+    // Row group major, then the schema's depth-first column order.
+    std::vector<std::vector<RowGroupColumnStatistics>> statistics;
 };
 
 Status parse_column(Cursor& cursor, ParsedColumn* out, int depth) {
@@ -150,49 +168,277 @@ Status parse_statistics(Cursor& cursor, ParsedColumn* column) {
     return Status::ok();
 }
 
-Status parse_footer(const uint8_t* footer, uint32_t footer_bytes, ParsedFooter* out) {
+Status parse_row_group_footer(const uint8_t* footer, uint32_t footer_bytes,
+                              uint32_t row_group, ParsedRowGroupFooter* out) {
     Cursor cursor(footer, footer_bytes);
 
-    if (!cursor.take(&out->file_header, sizeof(FooterFileHeader)))
-        return fail(Code::kTruncated, "footer is too small to hold its file header");
+    if (!cursor.take(&out->header, sizeof(RowGroupFooterHeader)))
+        return fail(Code::kTruncated,
+                    "row group %u footer is too small to hold its header",
+                    row_group);
 
-    const uint8_t* tag = cursor.raw(out->file_header.writer_tag_bytes);
+    const uint8_t* tag = cursor.raw(out->header.writer_tag_bytes);
     if (tag == nullptr)
         return fail(Code::kTruncated,
-                    "writer tag claims %u bytes but only %zu remain in the footer",
-                    out->file_header.writer_tag_bytes, cursor.remaining());
+                    "row group %u: writer tag claims %u bytes but only %zu "
+                    "remain in the footer", row_group,
+                    out->header.writer_tag_bytes, cursor.remaining());
     out->writer_tag.assign(reinterpret_cast<const char*>(tag),
-                           out->file_header.writer_tag_bytes);
+                           out->header.writer_tag_bytes);
 
     // Bound the counts by what could possibly fit before allocating for them: a
     // corrupt column_count of 4 billion must not become a 4-billion-element
     // reserve.
-    if (static_cast<uint64_t>(out->file_header.column_count) * sizeof(ColumnEntryHead)
+    if (static_cast<uint64_t>(out->header.column_count) * sizeof(ColumnEntryHead)
             > cursor.remaining())
         return fail(Code::kMalformed,
-                    "footer claims %u columns, which cannot fit in its remaining "
-                    "%zu bytes", out->file_header.column_count, cursor.remaining());
+                    "row group %u claims %u columns, which cannot fit in its "
+                    "remaining %zu footer bytes", row_group,
+                    out->header.column_count, cursor.remaining());
 
-    out->columns.resize(out->file_header.column_count);
-    for (uint32_t i = 0; i < out->file_header.column_count; ++i)
+    out->columns.resize(out->header.column_count);
+    for (uint32_t i = 0; i < out->header.column_count; ++i)
         SKENE_RETURN_IF_ERROR(parse_column(cursor, &out->columns[i], 0));
 
-    if (static_cast<uint64_t>(out->file_header.section_count) * sizeof(SectionEntry)
+    if (static_cast<uint64_t>(out->header.section_count) * sizeof(SectionEntry)
             > cursor.remaining())
         return fail(Code::kMalformed,
-                    "footer claims %u sections, which cannot fit in its remaining "
-                    "%zu bytes", out->file_header.section_count, cursor.remaining());
+                    "row group %u claims %u sections, which cannot fit in its "
+                    "remaining %zu footer bytes", row_group,
+                    out->header.section_count, cursor.remaining());
 
-    out->sections.resize(out->file_header.section_count);
-    for (uint32_t i = 0; i < out->file_header.section_count; ++i) {
+    out->sections.resize(out->header.section_count);
+    for (uint32_t i = 0; i < out->header.section_count; ++i) {
         if (!cursor.take(&out->sections[i], sizeof(SectionEntry)))
-            return fail(Code::kTruncated, "footer ends inside the section directory");
+            return fail(Code::kTruncated,
+                        "row group %u footer ends inside the section directory",
+                        row_group);
     }
 
     // Statistics blobs: same depth-first order as the column directory, skipping
     // columns whose stats_bytes is 0. Located by ORDER, not by an offset.
     for (ParsedColumn& column : out->columns)
         SKENE_RETURN_IF_ERROR(parse_statistics(cursor, &column));
+
+    return Status::ok();
+}
+
+// ─── FILE footer ────────────────────────────────────────────────────────────
+
+Status parse_schema(Cursor& cursor, ParsedSchema* out, int depth) {
+    if (depth > 32)
+        return fail(Code::kMalformed,
+                    "schema nesting exceeds 32 levels; refusing to recurse further");
+
+    if (!cursor.take(&out->head, sizeof(SchemaEntryHead)))
+        return fail(Code::kTruncated, "file footer ends inside a schema entry");
+
+    const uint8_t* name = cursor.raw(out->head.name_bytes);
+    if (name == nullptr)
+        return fail(Code::kTruncated,
+                    "schema entry name claims %u bytes but only %zu remain in "
+                    "the file footer", out->head.name_bytes, cursor.remaining());
+    out->name.assign(reinterpret_cast<const char*>(name), out->head.name_bytes);
+
+    if (out->head.logical_present) {
+        if (!cursor.take(&out->logical, sizeof(LogicalTypeDescriptor)))
+            return fail(Code::kTruncated,
+                        "schema entry '%s' declares a logical type descriptor "
+                        "but the file footer ends before it", out->name.c_str());
+    }
+
+    const bool is_array = out->head.type == static_cast<uint32_t>(DRAKEN_ARRAY);
+    if (is_array && out->head.child_count != 1u)
+        return fail(Code::kMalformed,
+                    "schema entry '%s' is ARRAY with child_count %u; exactly one "
+                    "child is required", out->name.c_str(), out->head.child_count);
+    if (!is_array && out->head.child_count != 0u)
+        return fail(Code::kMalformed,
+                    "schema entry '%s' has child_count %u but type %u is not "
+                    "ARRAY", out->name.c_str(), out->head.child_count,
+                    out->head.type);
+
+    out->children.resize(out->head.child_count);
+    for (uint32_t i = 0; i < out->head.child_count; ++i)
+        SKENE_RETURN_IF_ERROR(parse_schema(cursor, &out->children[i], depth + 1));
+    return Status::ok();
+}
+
+uint32_t count_schema_columns(const ParsedSchema& node) {
+    uint32_t total = 1;
+    for (const ParsedSchema& child : node.children) total += count_schema_columns(child);
+    return total;
+}
+
+// Validates one row group directory entry against the object it claims to live
+// in. Every field here is an OFFSET a later read follows, so each is checked
+// against the file footer's own start — the one bound this reader already knows
+// is real, because the tail put it there and the footer checksum covered it.
+Status validate_row_group_entry(const RowGroupEntry& entry, uint32_t index,
+                                uint64_t file_footer_offset, uint64_t expected_first_row) {
+    if (entry.reserved != 0)
+        return fail(Code::kMalformed,
+                    "row group %u: reserved bytes are %u, not 0", index,
+                    entry.reserved);
+
+    if (entry.first_row != expected_first_row)
+        return fail(Code::kMalformed,
+                    "row group %u declares first_row %llu but the row groups "
+                    "before it hold %llu rows", index,
+                    static_cast<unsigned long long>(entry.first_row),
+                    static_cast<unsigned long long>(expected_first_row));
+
+    if (entry.data_offset < kFileHeadBytes)
+        return fail(Code::kMalformed,
+                    "row group %u: data region starts at %llu, inside the "
+                    "%zu-byte head", index,
+                    static_cast<unsigned long long>(entry.data_offset),
+                    kFileHeadBytes);
+
+    // Written so an overflowing sum cannot wrap past the comparison.
+    if (entry.data_bytes > file_footer_offset
+            || entry.data_offset > file_footer_offset - entry.data_bytes)
+        return fail(Code::kMalformed,
+                    "row group %u: data region spans [%llu, %llu) which runs "
+                    "past the file footer at %llu", index,
+                    static_cast<unsigned long long>(entry.data_offset),
+                    static_cast<unsigned long long>(entry.data_offset + entry.data_bytes),
+                    static_cast<unsigned long long>(file_footer_offset));
+
+    if (entry.footer_bytes == 0)
+        return fail(Code::kMalformed,
+                    "row group %u declares a zero-byte footer, which cannot "
+                    "hold even its header", index);
+
+    if (entry.footer_offset < entry.data_offset + entry.data_bytes)
+        return fail(Code::kMalformed,
+                    "row group %u: its footer at %llu overlaps its own data "
+                    "region, which ends at %llu", index,
+                    static_cast<unsigned long long>(entry.footer_offset),
+                    static_cast<unsigned long long>(entry.data_offset + entry.data_bytes));
+
+    if (entry.footer_bytes > file_footer_offset
+            || entry.footer_offset > file_footer_offset - entry.footer_bytes)
+        return fail(Code::kMalformed,
+                    "row group %u: its footer spans [%llu, %llu) which runs past "
+                    "the file footer at %llu", index,
+                    static_cast<unsigned long long>(entry.footer_offset),
+                    static_cast<unsigned long long>(entry.footer_offset)
+                        + entry.footer_bytes,
+                    static_cast<unsigned long long>(file_footer_offset));
+
+    return Status::ok();
+}
+
+Status parse_file_footer(const uint8_t* footer, uint32_t footer_bytes,
+                         uint64_t file_footer_offset, ParsedFileFooter* out) {
+    Cursor cursor(footer, footer_bytes);
+
+    if (!cursor.take(&out->header, sizeof(FileFooterHeader)))
+        return fail(Code::kTruncated,
+                    "file footer is too small to hold its header");
+
+    // The guard that separates this layout from the single-row-group v1 files
+    // written before it. Those are framed identically and their footer checksum
+    // verifies, so nothing else in the file distinguishes them — parsing one as
+    // a file index would read a row count as a magic and a writer tag as a row
+    // group directory.
+    if (out->header.footer_magic != kFileFooterMagic)
+        return fail(Code::kMalformed,
+                    "file footer magic is 0x%08X, not 0x%08X. This is almost "
+                    "certainly a .skene file written before row groups were "
+                    "packed into files, when one file WAS one row group; v1 was "
+                    "draft and its layout changed. Regenerate the file with the "
+                    "current writer.",
+                    out->header.footer_magic, kFileFooterMagic);
+
+    if (out->header.footer_version != kFileFooterVersion)
+        return fail(Code::kUnsupportedVersion,
+                    "file footer declares layout version %u; this build "
+                    "implements %u", out->header.footer_version,
+                    kFileFooterVersion);
+
+    if (out->header.reserved != 0)
+        return fail(Code::kMalformed,
+                    "file footer header reserved bytes are %u, not 0",
+                    out->header.reserved);
+
+    const uint8_t* tag = cursor.raw(out->header.writer_tag_bytes);
+    if (tag == nullptr)
+        return fail(Code::kTruncated,
+                    "file writer tag claims %u bytes but only %zu remain in the "
+                    "file footer", out->header.writer_tag_bytes, cursor.remaining());
+    out->writer_tag.assign(reinterpret_cast<const char*>(tag),
+                           out->header.writer_tag_bytes);
+
+    if (out->header.row_group_count == 0)
+        return fail(Code::kMalformed,
+                    "file declares 0 row groups; a .skene file with no row "
+                    "groups describes no data");
+
+    if (static_cast<uint64_t>(out->header.row_group_count) * sizeof(RowGroupEntry)
+            > cursor.remaining())
+        return fail(Code::kMalformed,
+                    "file claims %u row groups, which cannot fit in its "
+                    "remaining %zu footer bytes",
+                    out->header.row_group_count, cursor.remaining());
+
+    out->row_groups.resize(out->header.row_group_count);
+    uint64_t running_rows = 0;
+    for (uint32_t i = 0; i < out->header.row_group_count; ++i) {
+        if (!cursor.take(&out->row_groups[i], sizeof(RowGroupEntry)))
+            return fail(Code::kTruncated,
+                        "file footer ends inside the row group directory");
+        SKENE_RETURN_IF_ERROR(validate_row_group_entry(
+            out->row_groups[i], i, file_footer_offset, running_rows));
+        running_rows += out->row_groups[i].row_count;
+    }
+
+    if (running_rows != out->header.row_count)
+        return fail(Code::kMalformed,
+                    "file declares %llu rows but its row groups hold %llu",
+                    static_cast<unsigned long long>(out->header.row_count),
+                    static_cast<unsigned long long>(running_rows));
+
+    if (static_cast<uint64_t>(out->header.column_count) * sizeof(SchemaEntryHead)
+            > cursor.remaining())
+        return fail(Code::kMalformed,
+                    "file claims %u columns, which cannot fit in its remaining "
+                    "%zu footer bytes", out->header.column_count,
+                    cursor.remaining());
+
+    out->schema.resize(out->header.column_count);
+    for (uint32_t i = 0; i < out->header.column_count; ++i)
+        SKENE_RETURN_IF_ERROR(parse_schema(cursor, &out->schema[i], 0));
+
+    uint32_t flat_columns = 0;
+    for (const ParsedSchema& node : out->schema) flat_columns += count_schema_columns(node);
+
+    // Per-row-group statistics, row group major, in the schema's depth-first
+    // order. Each blob is length-prefixed, so a blob longer than this build
+    // understands is read prefix-first and the rest skipped — the same growth
+    // rule the row group footers' blobs follow.
+    out->statistics.resize(out->header.row_group_count);
+    for (uint32_t g = 0; g < out->header.row_group_count; ++g) {
+        out->statistics[g].resize(flat_columns);
+        for (uint32_t c = 0; c < flat_columns; ++c) {
+            uint32_t declared = 0;
+            if (!cursor.take(&declared, sizeof(declared)))
+                return fail(Code::kTruncated,
+                            "file footer ends inside row group %u's statistics", g);
+            if (declared == 0) continue;
+            const uint8_t* blob = cursor.raw(declared);
+            if (blob == nullptr)
+                return fail(Code::kTruncated,
+                            "row group %u column %u declares %u statistics bytes "
+                            "but only %zu remain in the file footer", g, c,
+                            declared, cursor.remaining());
+            const size_t known = declared < sizeof(ColumnStatistics)
+                               ? declared : sizeof(ColumnStatistics);
+            std::memcpy(&out->statistics[g][c].statistics, blob, known);
+            out->statistics[g][c].present = true;
+        }
+    }
 
     return Status::ok();
 }
@@ -215,9 +461,14 @@ struct SectionRef {
 
 class SectionResolver {
   public:
-    SectionResolver(const uint8_t* file, uint64_t data_region_end,
+    // The region is ONE ROW GROUP'S data+index extent, not the whole file's.
+    // A section entry in row group 3 that addresses row group 0's bytes is
+    // corruption, and bounding on the file would accept it — the checksum would
+    // then pass, because it is computed over whatever bytes the offset names.
+    SectionResolver(const uint8_t* file, uint64_t region_begin, uint64_t region_end,
                     const std::vector<SectionEntry>& sections)
-        : file_(file), data_region_end_(data_region_end), sections_(sections) {}
+        : file_(file), region_begin_(region_begin), region_end_(region_end),
+          sections_(sections) {}
 
     // Finds the single section of `kind` within a column's slice. An absent
     // section is legal for several kinds (no validity means all-valid; no arena
@@ -226,12 +477,8 @@ class SectionResolver {
                 SectionKind kind, SectionRef* out) const {
         *out = SectionRef();
 
-        if (static_cast<uint64_t>(head.section_index) + head.section_count
-                > sections_.size())
-            return fail(Code::kMalformed,
-                        "column '%s' references sections [%u, %u) but only %zu "
-                        "exist", column_name, head.section_index,
-                        head.section_index + head.section_count, sections_.size());
+        SKENE_RETURN_IF_ERROR(check_slice(head.section_index, head.section_count,
+                                          "", column_name));
 
         for (uint32_t i = 0; i < head.section_count; ++i) {
             const SectionEntry& entry = sections_[head.section_index + i];
@@ -250,13 +497,9 @@ class SectionResolver {
     Status find_index(const ColumnEntryHead& head, const char* column_name,
                       SectionKind kind, SectionRef* out) const {
         *out = SectionRef();
-        if (static_cast<uint64_t>(head.index_section_index) + head.index_section_count
-                > sections_.size())
-            return fail(Code::kMalformed,
-                        "column '%s' references index sections [%u, %u) but only "
-                        "%zu exist", column_name, head.index_section_index,
-                        head.index_section_index + head.index_section_count,
-                        sections_.size());
+        SKENE_RETURN_IF_ERROR(check_slice(head.index_section_index,
+                                          head.index_section_count,
+                                          "index ", column_name));
 
         for (uint32_t i = 0; i < head.index_section_count; ++i) {
             const SectionEntry& entry = sections_[head.index_section_index + i];
@@ -285,6 +528,9 @@ class SectionResolver {
     // one is skipped. This is the rule the whole extensibility story rests on,
     // so it is enforced once, here.
     Status check_kinds(const ColumnEntryHead& head, const char* column_name) const {
+        SKENE_RETURN_IF_ERROR(check_slice(head.section_index, head.section_count,
+                                          "", column_name));
+
         for (uint32_t i = 0; i < head.section_count; ++i) {
             const SectionEntry& entry = sections_[head.section_index + i];
             if (!section_is_required(entry.kind)) continue;  // skippable
@@ -306,7 +552,38 @@ class SectionResolver {
         return Status::ok();
     }
 
+    // The data-slice bounds on their own, for the one caller that walks the
+    // directory itself instead of going through find().
+    Status check_data_slice(const ColumnEntryHead& head,
+                            const char* column_name) const {
+        return check_slice(head.section_index, head.section_count, "", column_name);
+    }
+
   private:
+    // A column's section slice is two footer fields, so it is exactly as
+    // trustworthy as the rest of the footer: nothing stops a crafted head from
+    // naming a slice that runs off the end of the section directory. The
+    // footer checksum does not help — whoever writes the bytes computes the
+    // checksum over them too.
+    //
+    // Indexing the directory on an unvalidated slice reads whatever follows the
+    // vector, which is memory corruption rather than a wrong answer (status.h),
+    // so EVERY walk of a slice validates it here first. One home for the rule,
+    // because the one accessor that restated it independently is the one that
+    // forgot it.
+    //
+    // `slice_name` is "" for the data slice and "index " for the index slice.
+    Status check_slice(uint32_t index, uint32_t count, const char* slice_name,
+                       const char* column_name) const {
+        const uint64_t end = static_cast<uint64_t>(index) + count;
+        if (end > sections_.size())
+            return fail(Code::kMalformed,
+                        "column '%s' references %ssections [%u, %llu) but only "
+                        "%zu exist", column_name, slice_name, index,
+                        static_cast<unsigned long long>(end), sections_.size());
+        return Status::ok();
+    }
+
     Status resolve(const SectionEntry& entry, const char* column_name,
                    SectionRef* out) const {
         switch (static_cast<Encoding>(entry.encoding)) {
@@ -322,6 +599,7 @@ class SectionResolver {
             case Encoding::kBitpack:
             case Encoding::kDeltaBitpack:
             case Encoding::kZstd:
+            case Encoding::kLz4:
                 break;
             default:
                 // A required section this build cannot decode is fatal. Adding an
@@ -333,21 +611,21 @@ class SectionResolver {
                             column_name, entry.kind, entry.encoding);
         }
 
-        if (entry.offset < kFileHeadBytes
-                || entry.stored_bytes > data_region_end_
-                || entry.offset > data_region_end_ - entry.stored_bytes)
+        if (entry.offset < region_begin_
+                || entry.stored_bytes > region_end_
+                || entry.offset > region_end_ - entry.stored_bytes)
             return fail(Code::kMalformed,
                         "column '%s': section kind %u spans [%llu, %llu) which "
-                        "is outside the data region [%zu, %llu)",
+                        "is outside this row group's region [%llu, %llu)",
                         column_name, entry.kind,
                         static_cast<unsigned long long>(entry.offset),
                         static_cast<unsigned long long>(entry.offset + entry.stored_bytes),
-                        kFileHeadBytes,
-                        static_cast<unsigned long long>(data_region_end_));
+                        static_cast<unsigned long long>(region_begin_),
+                        static_cast<unsigned long long>(region_end_));
 
         const uint8_t* data = file_ + entry.offset;
         const uint64_t actual = checksum_xxh3_64(data, entry.stored_bytes);
-        if (actual != entry.checksum)
+        if (actual != entry.checksum && checksum_must_match())
             return fail(Code::kChecksumMismatch,
                         "column '%s': section kind %u fails its checksum "
                         "(recorded %llu, computed %llu)",
@@ -364,7 +642,8 @@ class SectionResolver {
     }
 
     const uint8_t*                   file_;
-    uint64_t                         data_region_end_;
+    uint64_t                         region_begin_;
+    uint64_t                         region_end_;
     const std::vector<SectionEntry>& sections_;
 };
 
@@ -470,6 +749,9 @@ Status decode_into(const SectionRef& section, const char* column_name,
         case Encoding::kZstd:
             return zstd_decode(section.stored, section.stored_bytes,
                                section.plain_bytes, destination);
+        case Encoding::kLz4:
+            return lz4_decode(section.stored, section.stored_bytes,
+                              section.plain_bytes, destination);
     }
     return fail(Code::kUnsupportedEncoding,
                 "column '%s': unhandled encoding %u", column_name,
@@ -923,10 +1205,9 @@ Status fill_metadata(const ParsedColumn& parsed,
     // whole column subtree with one range request.
     uint64_t begin = UINT64_MAX;
     uint64_t end = 0;
+    SKENE_RETURN_IF_ERROR(resolver.check_data_slice(head, parsed.name.c_str()));
     for (uint32_t i = 0; i < head.section_count; ++i) {
-        const uint64_t index = static_cast<uint64_t>(head.section_index) + i;
-        if (index >= sections.size()) break;
-        const SectionEntry& entry = sections[index];
+        const SectionEntry& entry = sections[head.section_index + i];
         if (entry.offset < begin) begin = entry.offset;
         if (entry.offset + entry.stored_bytes > end) end = entry.offset + entry.stored_bytes;
     }
@@ -969,22 +1250,116 @@ Status fill_metadata(const ParsedColumn& parsed,
     return Status::ok();
 }
 
+void fill_schema(const ParsedSchema& parsed, ColumnSchema* out) {
+    out->name            = parsed.name;
+    out->field_id        = parsed.head.field_id;
+    out->type            = parsed.head.type;
+    out->logical_present = parsed.head.logical_present != 0;
+    out->logical         = parsed.logical;
+    out->children.resize(parsed.children.size());
+    for (size_t i = 0; i < parsed.children.size(); ++i)
+        fill_schema(parsed.children[i], &out->children[i]);
+}
+
+// Parses the file footer, picks out one row group, and parses ITS footer —
+// verifying that footer's checksum against the file footer's record of it first.
+//
+// The two-step is the point of the layout: the file footer is small and is the
+// only thing a pruning reader fetches, and a row group's directory is opened
+// only once that reader has decided to read it.
+Status open_row_group(const uint8_t* file, uint64_t file_footer_offset,
+                      uint32_t file_footer_bytes, uint32_t row_group,
+                      ParsedFileFooter* file_footer,
+                      ParsedRowGroupFooter* out, RowGroupEntry* out_entry) {
+    SKENE_RETURN_IF_ERROR(parse_file_footer(file + file_footer_offset,
+                                            file_footer_bytes, file_footer_offset,
+                                            file_footer));
+
+    if (row_group >= file_footer->row_groups.size())
+        return fail(Code::kMalformed,
+                    "row group %u was requested but this file has %zu",
+                    row_group, file_footer->row_groups.size());
+
+    const RowGroupEntry& entry = file_footer->row_groups[row_group];
+
+    // The row group footer's checksum lives in the file footer, which has
+    // already been checksum-verified as a whole — so this is a check against
+    // something already trusted, not against a number sitting beside the bytes
+    // it claims to cover.
+    const uint64_t actual = checksum_xxh3_64(file + entry.footer_offset,
+                                             entry.footer_bytes);
+    if (actual != entry.footer_checksum && checksum_must_match())
+        return fail(Code::kChecksumMismatch,
+                    "row group %u footer checksum mismatch: recorded %llu, "
+                    "computed %llu — its directory is corrupt and every offset "
+                    "in it is suspect", row_group,
+                    static_cast<unsigned long long>(entry.footer_checksum),
+                    static_cast<unsigned long long>(actual));
+
+    SKENE_RETURN_IF_ERROR(parse_row_group_footer(file + entry.footer_offset,
+                                                 entry.footer_bytes, row_group, out));
+
+    if (out->header.row_count != entry.row_count)
+        return fail(Code::kMalformed,
+                    "row group %u's footer declares %llu rows but the file's row "
+                    "group directory says %llu", row_group,
+                    static_cast<unsigned long long>(out->header.row_count),
+                    static_cast<unsigned long long>(entry.row_count));
+
+    *out_entry = entry;
+    return Status::ok();
+}
+
 }  // namespace
 
 Status read_metadata(const uint8_t* file, size_t file_bytes,
                      uint64_t footer_offset, uint32_t footer_bytes,
                      FileMetadata* out) {
     (void)file_bytes;
-    ParsedFooter footer;
-    SKENE_RETURN_IF_ERROR(parse_footer(file + footer_offset, footer_bytes, &footer));
+    ParsedFileFooter footer;
+    SKENE_RETURN_IF_ERROR(parse_file_footer(file + footer_offset, footer_bytes,
+                                            footer_offset, &footer));
 
     out->version            = 1u;
-    out->row_count          = footer.file_header.row_count;
-    out->created_at_unix_us = footer.file_header.created_at_unix_us;
+    out->row_count          = footer.header.row_count;
+    out->created_at_unix_us = footer.header.created_at_unix_us;
     out->writer_tag         = footer.writer_tag;
-    std::memcpy(out->file_uuid, footer.file_header.file_uuid, sizeof(out->file_uuid));
+    std::memcpy(out->file_uuid, footer.header.file_uuid, sizeof(out->file_uuid));
 
-    SectionResolver resolver(file, footer_offset, footer.sections);
+    out->columns.resize(footer.schema.size());
+    for (size_t i = 0; i < footer.schema.size(); ++i)
+        fill_schema(footer.schema[i], &out->columns[i]);
+
+    out->row_groups.resize(footer.row_groups.size());
+    for (size_t i = 0; i < footer.row_groups.size(); ++i) {
+        const RowGroupEntry& entry = footer.row_groups[i];
+        RowGroupSummary& summary = out->row_groups[i];
+        summary.row_count         = entry.row_count;
+        summary.first_row         = entry.first_row;
+        summary.byte_offset       = entry.data_offset;
+        summary.byte_bytes        = entry.data_bytes;
+        summary.footer_offset     = entry.footer_offset;
+        summary.footer_bytes      = entry.footer_bytes;
+        summary.column_statistics = std::move(footer.statistics[i]);
+    }
+
+    return Status::ok();
+}
+
+Status read_row_group_metadata(const uint8_t* file, size_t file_bytes,
+                               uint64_t footer_offset, uint32_t footer_bytes,
+                               uint32_t row_group, RowGroupMetadata* out) {
+    (void)file_bytes;
+    ParsedFileFooter file_footer;
+    ParsedRowGroupFooter footer;
+    RowGroupEntry entry{};
+    SKENE_RETURN_IF_ERROR(open_row_group(file, footer_offset, footer_bytes, row_group,
+                                         &file_footer, &footer, &entry));
+
+    SectionResolver resolver(file, entry.data_offset,
+                             entry.data_offset + entry.data_bytes, footer.sections);
+
+    out->row_count = footer.header.row_count;
     out->columns.resize(footer.columns.size());
     for (size_t i = 0; i < footer.columns.size(); ++i)
         SKENE_RETURN_IF_ERROR(fill_metadata(footer.columns[i], footer.sections,
@@ -995,12 +1370,16 @@ Status read_metadata(const uint8_t* file, size_t file_bytes,
 
 Status read_morsel(const uint8_t* file, size_t file_bytes,
                    uint64_t footer_offset, uint32_t footer_bytes,
-                   const ReadOptions& options, CxxMorsel* out) {
+                   uint32_t row_group, const ReadOptions& options, CxxMorsel* out) {
     (void)file_bytes;
-    ParsedFooter footer;
-    SKENE_RETURN_IF_ERROR(parse_footer(file + footer_offset, footer_bytes, &footer));
+    ParsedFileFooter file_footer;
+    ParsedRowGroupFooter footer;
+    RowGroupEntry entry{};
+    SKENE_RETURN_IF_ERROR(open_row_group(file, footer_offset, footer_bytes, row_group,
+                                         &file_footer, &footer, &entry));
 
-    SectionResolver resolver(file, footer_offset, footer.sections);
+    SectionResolver resolver(file, entry.data_offset,
+                             entry.data_offset + entry.data_bytes, footer.sections);
     BuildContext ctx{&resolver};
 
     // Select columns. A requested name that is not present is an error: silently
@@ -1027,11 +1406,11 @@ Status read_morsel(const uint8_t* file, size_t file_bytes,
     for (const ParsedColumn* column : wanted) {
         CxxColumn built;
         SKENE_RETURN_IF_ERROR(build_column(ctx, *column, &built));
-        if (built.view.length != footer.file_header.row_count)
+        if (built.view.length != footer.header.row_count)
             return fail(Code::kMalformed,
                         "column '%s' has %u rows but the file declares %llu",
                         column->name.c_str(), built.view.length,
-                        static_cast<unsigned long long>(footer.file_header.row_count));
+                        static_cast<unsigned long long>(footer.header.row_count));
         morsel.columns.push_back(std::move(built));
         morsel.names.push_back(column->name);
     }
@@ -1039,7 +1418,7 @@ Status read_morsel(const uint8_t* file, size_t file_bytes,
     // A zero-column morsel still has a row count, and it lives nowhere else.
     if (morsel.columns.empty())
         morsel.zero_col_rows =
-            static_cast<uint32_t>(footer.file_header.row_count);
+            static_cast<uint32_t>(footer.header.row_count);
 
     *out = std::move(morsel);
     return Status::ok();

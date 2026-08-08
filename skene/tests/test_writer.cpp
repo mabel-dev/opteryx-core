@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "build_vectors.h"
+#include "footer_probe.h"
 #include "harness.h"
 #include "skene/checksum.h"
 #include "skene/format.h"
@@ -33,7 +34,7 @@ struct ParsedColumn {
 struct ParsedFile {
     FileHead                  head;
     FileTail                  tail;
-    FooterFileHeader          file_header;
+    RowGroupFooterHeader      file_header;   // row group 0's
     std::vector<ParsedColumn> columns;
     std::vector<SectionEntry> sections;
 };
@@ -53,18 +54,23 @@ static const uint8_t* read_column(const uint8_t* p, ParsedColumn* out) {
     return p;
 }
 
-static bool parse(const std::vector<uint8_t>& bytes, ParsedFile* out) {
-    if (bytes.size() < kFileHeadBytes + kFileTailBytes) return false;
+// Parses row group `index`'s footer, reached the way the specification says:
+// tail -> file footer -> row group directory -> that row group's own footer.
+static bool parse_row_group(const std::vector<uint8_t>& bytes, uint32_t index,
+                            ParsedFile* out) {
+    if (bytes.size() < kMinFileBytes) return false;
     std::memcpy(&out->head, bytes.data(), sizeof(FileHead));
     std::memcpy(&out->tail, bytes.data() + bytes.size() - kFileTailBytes,
                 sizeof(FileTail));
 
-    const size_t footer_end   = bytes.size() - kFileTailBytes;
-    const size_t footer_start = footer_end - out->tail.footer_bytes;
+    size_t footer_start = 0, footer_bytes = 0;
+    if (!skene_test::row_group_footer_extent(bytes, index, &footer_start, &footer_bytes))
+        return false;
+    const size_t footer_end = footer_start + footer_bytes;
     const uint8_t* p = bytes.data() + footer_start;
 
-    std::memcpy(&out->file_header, p, sizeof(FooterFileHeader));
-    p += sizeof(FooterFileHeader) + out->file_header.writer_tag_bytes;
+    std::memcpy(&out->file_header, p, sizeof(RowGroupFooterHeader));
+    p += sizeof(RowGroupFooterHeader) + out->file_header.writer_tag_bytes;
 
     out->columns.resize(out->file_header.column_count);
     for (uint32_t i = 0; i < out->file_header.column_count; ++i)
@@ -76,6 +82,10 @@ static bool parse(const std::vector<uint8_t>& bytes, ParsedFile* out) {
         p += sizeof(SectionEntry);
     }
     return p == bytes.data() + footer_end;
+}
+
+static bool parse(const std::vector<uint8_t>& bytes, ParsedFile* out) {
+    return parse_row_group(bytes, 0, out);
 }
 
 // Sections belonging to one column, keyed by kind.

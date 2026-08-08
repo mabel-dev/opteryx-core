@@ -57,6 +57,7 @@ using ::gather_rows;
 using ::gather_elem_size;
 using ::flatten_rows;
 using ::make_empty_col;
+using ::EmptyColElem;
 using ::kGatherNullRow;
 
 // Sort `ms` and append the fully sorted rows, chunked, into `out`. The engine's

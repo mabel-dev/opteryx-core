@@ -3,17 +3,42 @@
 //
 // Design: opteryx-core/docs/SKENE_FILE_FORMAT_DESIGN.md
 //
-// A .skene file is ONE row group of draken vectors, losslessly — including the
-// things Parquet drops: the LogicalType descriptor (so an IPv4 column reads back
-// typed IPV4, not bare UINT32), DrakenVector.flags verbatim, and the dictionary
-// selection RESTORED rather than re-derived.
+// A .skene file holds ONE OR MORE row groups of draken vectors, losslessly —
+// including the things Parquet drops: the LogicalType descriptor (so an IPv4
+// column reads back typed IPV4, not bare UINT32), DrakenVector.flags verbatim,
+// and the dictionary selection RESTORED rather than re-derived.
 //
 // ─── Layout ──────────────────────────────────────────────────────────────────
-//   HEAD          16 bytes, magic first
-//   DATA region   per column, all its sections contiguous (one range GET/column)
-//   INDEX region  optional sections; adjacent to the footer so one GET takes both
-//   FOOTER        file header + column directory + section directory + stats
-//   TAIL          24 bytes, fixed, magic last
+//   HEAD             16 bytes, magic first
+//   per row group, in order:
+//     DATA region    per column, all its sections contiguous (one range GET/column)
+//     INDEX region   optional sections; adjacent to the RG FOOTER, one GET takes both
+//     RG FOOTER      row group header + column directory + section directory + stats
+//   FILE FOOTER      file index: schema + row group directory + per-RG statistics
+//   TAIL             24 bytes, fixed, magic last
+//
+// ─── Why a row group is not a file ───────────────────────────────────────────
+// It used to be. That made a ClickBench mirror 396 objects against parquet's 99
+// for the same data: ~0.1ms of fixed per-file cost locally (open+mmap, footer
+// fetch) is ~40ms of a full scan before a byte of data is read, and on object
+// storage each of those is a GET with tens of milliseconds of latency instead of
+// a syscall. Packing row groups amortises that.
+//
+// Three properties make the packing pay rather than cost, and each is a
+// constraint on everything downstream:
+//
+//  1. THE UNIT OF WORK IS (file, row group), NEVER file. A scan that claims
+//     whole files coarsens its parallelism by the packing factor and starves.
+//     Measured on 16M rows with the claim unit tied to row group size: flat from
+//     64k to 256k rows per claim, then 2.4x at 1M and 5.8x at 4M.
+//  2. EVERY ROW GROUP IS INDEPENDENTLY ADDRESSABLE. Each carries its own footer
+//     at its own offset with its own checksum (RowGroupEntry), so a reader
+//     fetches the small FILE FOOTER, prunes, and then reads only the surviving
+//     row groups' directories — not all of them.
+//  3. PER-ROW-GROUP STATISTICS LIVE IN THE FILE FOOTER. Catalog/manifest bounds
+//     necessarily coarsen to the union across a file's row groups; what recovers
+//     the lost pruning is the file footer's per-row-group per-column min/max,
+//     which is reachable without touching a single row group footer.
 //
 // ─── Validation order is TOTAL and comes before interpretation ───────────────
 //   magic -> version -> endianness -> declared lengths vs real object size
@@ -77,8 +102,76 @@ inline constexpr size_t kFileTailBytes = 24u;
 static_assert(sizeof(FileHead) == kFileHeadBytes, "FileHead layout drift");
 static_assert(sizeof(FileTail) == kFileTailBytes, "FileTail layout drift");
 
-// Smallest possible well-formed file: head + tail + an empty footer.
-inline constexpr size_t kMinFileBytes = kFileHeadBytes + kFileTailBytes;
+// ─── File footer: the file index ────────────────────────────────────────────
+
+// First four bytes of the FILE FOOTER. This is not decoration and not a second
+// format check — it is what makes the multi-row-group change fail LOUD against
+// the single-row-group files v1 wrote before it.
+//
+// Those files are framed identically (same head, same tail, same version, a
+// footer whose checksum verifies), so framing alone cannot tell them apart: the
+// tail points at what used to be a lone row group footer and is now expected to
+// be a file index. Parsing one as the other is not a wrong answer, it is a
+// FooterFileHeader::row_count read as a magic and a writer tag read as a row
+// group directory. The magic stops that at the first field, with a message that
+// names the change and says to regenerate.
+//
+// v1 was still DRAFT and not frozen when this landed (FORMAT.md §1), so the
+// layout changed without a version bump — which is exactly why the guard has to
+// be in the bytes rather than in the version.
+inline constexpr uint32_t kFileFooterMagic = 0x494E4B53u;  // "SKNI"
+
+// Versions the FILE FOOTER's own layout, independently of kVersion. Both are
+// 1 today; they are separate fields because the file index and the row group
+// layout are separately extensible.
+inline constexpr uint16_t kFileFooterVersion = 1u;
+
+#pragma pack(push, 1)
+
+// First record of the FILE FOOTER.
+struct FileFooterHeader {
+    uint32_t footer_magic;       // kFileFooterMagic
+    uint16_t footer_version;     // kFileFooterVersion
+    uint16_t reserved;           // 0
+    uint64_t row_count;          // TOTAL logical rows, summed over row groups
+    uint32_t row_group_count;    // >= 1
+    uint32_t column_count;       // top-level schema columns; children nested
+    uint8_t  file_uuid[16];      // all-zero means unset
+    uint64_t created_at_unix_us; // provenance only, NEVER load-bearing
+    uint32_t writer_tag_bytes;   // followed by writer_tag_bytes; provenance only
+    uint32_t file_flags;         // 0; reserved
+};
+
+// One entry of the row group directory. Everything needed to read a row group
+// without parsing any other one: where its bytes are, where its footer is, and
+// whether that footer is intact.
+//
+// footer_checksum is here rather than beside the footer because the file footer
+// is the only thing a ranged reader has fetched at the point it decides which
+// row group footers to request — a checksum stored next to the bytes it covers
+// would have to be fetched with them, and could not be validated against
+// anything the reader already trusts.
+struct RowGroupEntry {
+    uint64_t row_count;       // logical rows in this row group
+    uint64_t first_row;       // this row group's first row, in file row order
+    uint64_t data_offset;     // absolute; start of its DATA region
+    uint64_t data_bytes;      // its DATA + INDEX regions, up to its footer
+    uint64_t footer_offset;   // absolute; start of its own footer
+    uint64_t footer_checksum; // over exactly footer_bytes at footer_offset
+    uint32_t footer_bytes;
+    uint32_t reserved;        // 0
+};
+
+#pragma pack(pop)
+
+static_assert(sizeof(FileFooterHeader) == 56u, "FileFooterHeader layout drift");
+static_assert(sizeof(RowGroupEntry) == 56u, "RowGroupEntry layout drift");
+
+// Smallest possible well-formed file: head + tail + a file footer that at least
+// holds its own header. A file with no row groups at all is rejected separately;
+// this bound only makes the framing arithmetic safe.
+inline constexpr size_t kMinFileBytes =
+    kFileHeadBytes + sizeof(FileFooterHeader) + kFileTailBytes;
 
 // ─── Sections ───────────────────────────────────────────────────────────────
 
@@ -132,11 +225,26 @@ inline constexpr bool section_is_required(uint16_t kind) noexcept {
 // ever produce one. Delta only pays combined with bit packing, which is what
 // kDeltaBitpack is.
 //
-// ZSTD is applied to SOME sections, never to the whole file. Compressing the file as
-// a unit would be smaller still, but it would destroy the one property the
-// layout exists for: a reader cannot decompress a slice, so reading one column
-// by range request would become reading everything. Per-section keeps every
-// extent independently fetchable and independently decodable.
+// A GENERAL-PURPOSE CODEC is applied to SOME sections, never to the whole file.
+// Compressing the file as a unit would be smaller still, but it would destroy
+// the one property the layout exists for: a reader cannot decompress a slice, so
+// reading one column by range request would become reading everything.
+// Per-section keeps every extent independently fetchable and independently
+// decodable.
+//
+// Two codecs, because they answer different questions and the writer picks per
+// POSTURE, not per section. Measured on a ClickBench row group (154.7MB of
+// section bytes, 256KB blocks, Apple Silicon, dev/skene_codec_bench.cpp):
+//
+//   zstd-9   7.34x ratio, 3477 MB/s decode, 219 MB/s encode
+//   lz4      4.49x ratio, 8931 MB/s decode, 1822 MB/s encode
+//
+// zstd's decode rate is essentially LEVEL-INDEPENDENT (3284/3043/3477 MB/s at
+// levels 1/3/9), so a low zstd level buys nothing on the read side and costs
+// ratio — there is no reason to write one. LZ4 decodes at roughly the rate the
+// reader's own uncompressed path runs at (a full-width raw decode of that same
+// file measured ~8840 MB/s), so it is close to free on read for ~70% of zstd's
+// ratio.
 enum class Encoding : uint16_t {
     kPlain        = 0,  // verbatim; stored_bytes == plain_bytes
     kBitpack      = 1,  // uint32 array at a fixed bit width (BitpackHeader)
@@ -144,6 +252,11 @@ enum class Encoding : uint16_t {
                         // then first-order differences bit-packed
                         // (DeltaBitpackHeader)
     kZstd         = 3,  // zstd frame; plain_bytes is the decoded size
+    kLz4          = 4,  // LZ4 BLOCK (not frame); plain_bytes is the decoded size.
+                        // The block format carries no length of its own, which is
+                        // exactly why the directory's plain_bytes is load-bearing
+                        // here: LZ4_decompress_safe is given that size as its
+                        // capacity and must produce exactly it.
 };
 
 // Below this, a section is stored plain without attempting compression.
@@ -416,10 +529,16 @@ static_assert(sizeof(LogicalTypeDescriptor) == 12u, "LogicalTypeDescriptor layou
 
 // ─── Column directory ───────────────────────────────────────────────────────
 
-// Fixed-size head of a column directory entry. The variable-size parts (name
-// bytes, the optional LogicalTypeDescriptor, and child entries for ARRAY) follow
-// in the footer stream. Every variable-length field carries an explicit length
-// and is bounds-checked against the footer extent before it is read.
+// Fixed-size head of a column directory entry, PER ROW GROUP: one of these per
+// column per row group, in that row group's own footer. Its identity/type half
+// necessarily repeats the file's SchemaEntryHead; everything else (length,
+// data_length, selection_kind, value_order, the section slices, the string arena
+// counts) describes this row group only and exists nowhere else.
+//
+// The variable-size parts (name bytes, the optional LogicalTypeDescriptor, and
+// child entries for ARRAY) follow in the footer stream. Every variable-length
+// field carries an explicit length and is bounds-checked against the footer
+// extent before it is read.
 #pragma pack(push, 1)
 
 struct ColumnEntryHead {
@@ -476,12 +595,51 @@ static_assert(sizeof(ColumnEntryHead) == 80u, "ColumnEntryHead layout drift");
 // Either violation is a hard error. One linear pass over the slots, cheap
 // against the arena memcpy it guards.
 
-// ─── File header (first record of the footer) ───────────────────────────────
+// ─── Schema directory (FILE FOOTER) ─────────────────────────────────────────
 
+// The part of a column that CANNOT vary between row groups: its identity and its
+// type. Everything else about a column — length, data_length, selection kind,
+// value order, section extents, string arena counts — is a property of one row
+// group and lives in that row group's ColumnEntryHead.
+//
+// It exists so the FILE FOOTER alone answers "what columns does this file have,
+// and what types are they" and gives the per-row-group statistics block a
+// defined column order. Without it a reader would have to open a row group
+// footer to learn the schema, which is the one thing the file index is for.
+//
+// The writer PROVES the invariant rather than assuming it: a row group whose
+// columns differ from the first one's in name, type, logical descriptor or
+// nesting is rejected, because a schema directory that does not describe every
+// row group is a lie a reader has no way to detect.
 #pragma pack(push, 1)
 
-struct FooterFileHeader {
-    uint64_t row_count;
+struct SchemaEntryHead {
+    uint32_t field_id;
+    uint32_t name_bytes;      // followed by name_bytes of column identity
+    uint32_t type;            // DrakenType, verbatim
+    uint8_t  logical_present; // 0/1 — a LogicalTypeDescriptor follows the name
+    uint8_t  reserved0;       // 0
+    uint16_t reserved1;       // 0
+    uint32_t child_count;     // 0 except DRAKEN_ARRAY, which has 1
+    // Followed by name_bytes, the optional LogicalTypeDescriptor, then children
+    // depth first — the same shape and the same order as the column directory.
+};
+
+#pragma pack(pop)
+
+static_assert(sizeof(SchemaEntryHead) == 20u, "SchemaEntryHead layout drift");
+
+// ─── Row group header (first record of a ROW GROUP footer) ──────────────────
+
+// Named for what it heads: one row group, not the file. The file-level
+// equivalents (total row count, lineage, provenance) live in FileFooterHeader
+// and are NOT repeated per row group — the two fields that look duplicated
+// (file_uuid, created_at_unix_us) are carried here as well so that a row group
+// footer extracted on its own still names the file it came from.
+#pragma pack(push, 1)
+
+struct RowGroupFooterHeader {
+    uint64_t row_count;         // logical rows in THIS row group
     uint32_t column_count;      // top-level columns; ARRAY children are nested
     uint32_t section_count;
     uint8_t  file_uuid[16];     // lineage and manifest dedup
@@ -492,7 +650,8 @@ struct FooterFileHeader {
 
 #pragma pack(pop)
 
-static_assert(sizeof(FooterFileHeader) == 48u, "FooterFileHeader layout drift");
+static_assert(sizeof(RowGroupFooterHeader) == 48u,
+              "RowGroupFooterHeader layout drift");
 
 // ─── Version support window ─────────────────────────────────────────────────
 

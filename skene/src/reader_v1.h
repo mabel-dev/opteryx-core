@@ -15,14 +15,19 @@
 namespace skene {
 namespace v1 {
 
-// `file` is the whole object; framing has already been validated by the caller.
+// `file` is the whole object and `footer_offset`/`footer_bytes` locate the FILE
+// FOOTER; framing has already been validated by the caller.
 Status read_metadata(const uint8_t* file, size_t file_bytes,
                      uint64_t footer_offset, uint32_t footer_bytes,
                      FileMetadata* out);
 
+Status read_row_group_metadata(const uint8_t* file, size_t file_bytes,
+                               uint64_t footer_offset, uint32_t footer_bytes,
+                               uint32_t row_group, RowGroupMetadata* out);
+
 Status read_morsel(const uint8_t* file, size_t file_bytes,
                    uint64_t footer_offset, uint32_t footer_bytes,
-                   const ReadOptions& options, CxxMorsel* out);
+                   uint32_t row_group, const ReadOptions& options, CxxMorsel* out);
 
 }  // namespace v1
 }  // namespace skene

@@ -66,7 +66,7 @@ STATEMENTS = [
         # addressable by name, by any route.
         # This battery runs without entitlements, so RESTRICTED variables are
         # withheld — the full list is asserted in tests/unit/security/.
-        ("SHOW VARIABLES", 18, 5, None),
+        ("SHOW VARIABLES", 21, 5, None),
         ("SELECT * FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT * FROM $VARIABLES", None, None, UnsupportedSyntaxError),
@@ -542,6 +542,91 @@ def test_bool_group_by_key_values():
     )
 
 
+def test_humanize_modes():
+    """
+    VALUE-level regression: HUMANIZE's scale systems and the two defects the
+    mode work uncovered.
+
+    Shape-only coverage cannot see any of this — every case here is one row of
+    one VARCHAR column, so a wrong ladder, a dropped sign or a NULL that should
+    be a string all pass a shape check. Guards
+    draken/ops/kernels/string_humanize.cpp and the bind-time mode lowering in
+    opteryx/compiled/expression/compiled_expression.pyx.
+
+    The negatives cases are the regression proper: the bucket test used to be on
+    the signed value, so a negative could never reach +0.9 and HUMANIZE(-2.5e9)
+    rendered "-2,500,000,000".
+    """
+    cases = [
+        # default ladder — unchanged by the mode parameter
+        ("SELECT HUMANIZE(1000000)", "1.0 million"),
+        ("SELECT HUMANIZE(0)", "0"),
+        # negatives abbreviate
+        ("SELECT HUMANIZE(-2500000000)", "-2.5 billion"),
+        ("SELECT HUMANIZE(-1500)", "-1.5 thousand"),
+        # bytes: 1024-based, IEC labels
+        ("SELECT HUMANIZE(512, 'bytes')", "512 B"),
+        ("SELECT HUMANIZE(1536, 'bytes')", "1.5 KiB"),
+        ("SELECT HUMANIZE(1500000000, 'bytes')", "1.4 GiB"),
+        # si: 1000-based, both directions
+        ("SELECT HUMANIZE(1500, 'si')", "1.5k"),
+        ("SELECT HUMANIZE(0.0000012, 'si')", "1.2µ"),
+        # time: mixed radix, inflected labels, seconds base
+        ("SELECT HUMANIZE(90, 'time')", "1.5 minutes"),
+        ("SELECT HUMANIZE(3600, 'time')", "1.0 hour"),
+        ("SELECT HUMANIZE(31557600000, 'time')", "1.0 millennium"),
+        ("SELECT HUMANIZE(0.0025, 'time')", "2.5 milliseconds"),
+        # clock / percent / compact
+        ("SELECT HUMANIZE(5025, 'clock')", "01:23:45"),
+        ("SELECT HUMANIZE(1000000, 'clock')", "277:46:40"),
+        ("SELECT HUMANIZE(0.4212, 'percent')", "42.1%"),
+        ("SELECT HUMANIZE(1500000, 'compact')", "1.5M"),
+        # odds: defined on (0, 1]; outside it the row is NULL, never clamped
+        ("SELECT HUMANIZE(0.000001, 'odds')", "1 in 1 million"),
+        ("SELECT HUMANIZE(0.5, 'odds')", "1 in 2"),
+        ("SELECT HUMANIZE(0, 'odds')", None),
+        ("SELECT HUMANIZE(2, 'odds')", None),
+        # A mode's own arithmetic can overflow a FINITE input — odds' 1/x on a
+        # subnormal, percent's x100 near DBL_MAX. Ryu spells infinity "Infinity",
+        # which comma-grouping would mangle to "In,fin,ity" if it ever reached
+        # the formatter.
+        ("SELECT HUMANIZE(CAST(5e-324 AS FLOAT64), 'odds')", None),
+        ("SELECT HUMANIZE(CAST(1e307 AS FLOAT64), 'percent')", "Infinity"),
+        ("SELECT HUMANIZE(CAST(-1e307 AS FLOAT64), 'percent')", "-Infinity"),
+        ("SELECT HUMANIZE(CAST(1e300 AS FLOAT64), 'clock')", None),
+        # mode spelling is case-insensitive but the SET is closed
+        ("SELECT HUMANIZE(1536, 'BYTES')", "1.5 KiB"),
+    ]
+
+    for statement, expected in cases:
+        session = opteryx.session()
+        values = []
+        for morsel in session.execute_to_morsels(statement):
+            morsel.materialize()
+            values.extend(morsel.column(morsel.column_names[0]).to_pylist())
+        assert values == [expected], f"{statement} -> {values!r}, expected [{expected!r}]"
+
+    # An unknown mode must fail at PLAN time, not produce a wrong rendering.
+    for bad in ("SELECT HUMANIZE(1000, 'kilobytes')", "SELECT HUMANIZE(1000, 'bits')"):
+        session = opteryx.session()
+        try:
+            list(session.execute_to_morsels(bad))
+        except InvalidFunctionParameterError:
+            continue
+        raise AssertionError(f"{bad} was accepted; the mode set is meant to be closed")
+
+    # A FLOAT64 large enough to make Ryu emit ~290 digits used to overflow a
+    # 40-byte stack buffer and abort the process. It must render, not crash.
+    session = opteryx.session()
+    lengths = []
+    for morsel in session.execute_to_morsels(
+        "SELECT LENGTH(HUMANIZE(CAST(1e300 AS FLOAT64))) AS n"
+    ):
+        morsel.materialize()
+        lengths.extend(morsel.column("n").to_pylist())
+    assert lengths == [396], f"huge-double rendering changed length: {lengths!r}"
+
+
 if __name__ == "__main__":  # pragma: no cover
     import shutil
     import time
@@ -593,7 +678,10 @@ if __name__ == "__main__":  # pragma: no cover
 
     # VALUE-level regressions (the battery above is shape-only).
     print("RUNNING VALUE-LEVEL REGRESSIONS")
-    for name, fn in (("bool group-by key values", test_bool_group_by_key_values),):
+    for name, fn in (
+        ("bool group-by key values", test_bool_group_by_key_values),
+        ("humanize scale systems", test_humanize_modes),
+    ):
         print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)
         try:
             fn()

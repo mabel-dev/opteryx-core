@@ -2,11 +2,18 @@
 
 A draken-native columnar file format: reader, writer, and specification.
 
-`.skene` stores one row group of [draken](../opteryx-core/draken) vectors
-losslessly — including the things Parquet drops. An IPv4 column is a `UINT32`
-refined by an `IPV4` logical descriptor; Parquet stores the 32 bits and loses the
-refinement on every round trip. `.skene` carries it. It likewise **restores** a
-column's dictionary encoding and layout hints rather than re-deriving them.
+`.skene` stores one or more row groups of [draken](../opteryx-core/draken)
+vectors losslessly — including the things Parquet drops. An IPv4 column is a
+`UINT32` refined by an `IPV4` logical descriptor; Parquet stores the 32 bits and
+loses the refinement on every round trip. `.skene` carries it. It likewise
+**restores** a column's dictionary encoding and layout hints rather than
+re-deriving them.
+
+Reads are per row group and the index is always explicit —
+`read_morsel(buf, row_group)`. Pruning goes through the small file-level index
+(`read_metadata`), which carries the schema, the row group directory and every
+row group's per-column statistics without opening a single row group's own
+footer.
 
 It is not portable, and no foreign reader is promised. Parquet stays the default
 for interchange and for most stored datasets; `.skene` is for the cases where the
@@ -48,9 +55,15 @@ with the selection carrying row order, so a predicate becomes a binary search an
 `data_length` is the exact distinct count) and **statistics** (min/max ordinals,
 null count, exact 128-bit sum).
 
-Also implemented: three encodings (bit packing for selection codes,
-delta+bitpack for ascending integer data, and per-section zstd), zone maps, and
-bloom filters.
+Also implemented: four encodings (bit packing for selection codes,
+delta+bitpack for ascending integer data, and two per-section general-purpose
+codecs — zstd and lz4), zone maps, and bloom filters.
+
+The two codecs are postures rather than alternatives to pick per section: zstd
+for ratio (7.34x at level 9 on ClickBench section bytes), lz4 for read latency
+(4.49x, but decoding at roughly the rate the reader's own uncompressed path
+runs at). zstd's decode rate does not vary with the level that produced the
+bytes, so a low zstd level gives up ratio and buys nothing back.
 
 Per-section compression matters more than expected: on TPC-H, skene without it is
 1.9-3.8x larger than the equivalent ZSTD Parquet, and with it 0.92-1.09x. See

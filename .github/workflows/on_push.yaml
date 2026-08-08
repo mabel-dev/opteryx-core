@@ -15,3 +15,6 @@ jobs:
 
   code-form:
     uses: ./.github/workflows/code_form.yaml
+
+  native-fuzz-replay:
+    uses: ./.github/workflows/fuzz_native_replay.yaml

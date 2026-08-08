@@ -36,7 +36,7 @@ static std::vector<uint8_t> write_ordered(const CxxMorsel& in) {
 }
 
 static void read_back(const std::vector<uint8_t>& bytes, CxxMorsel* out) {
-    Status st = read_morsel(bytes.data(), bytes.size(), out);
+    Status st = read_morsel(bytes.data(), bytes.size(), 0, out);
     if (!st.is_ok()) {
         std::fprintf(stderr, "  read failed: %s\n", st.message().c_str());
         ++skene_test::g_failures;
@@ -51,7 +51,7 @@ static void check_rows(const DrakenVector& v, const std::vector<T>& expect) {
         CHECK_EQ(data[v.selection[i]], expect[i]);
 }
 
-static const ColumnMetadata& meta_of(const FileMetadata& meta, size_t i) {
+static const ColumnMetadata& meta_of(const RowGroupMetadata& meta, size_t i) {
     return meta.columns[i];
 }
 
@@ -83,8 +83,8 @@ static void test_data_is_sorted_and_deduplicated_rows_unchanged() {
     CHECK((v.flags & DRAKEN_DICT_KEYS_SORTED) != 0);
     CHECK((v.flags & DRAKEN_DICT_CODES_DENSE) != 0);
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta_of(meta, 0).value_order == ValueOrder::kAscending);
 
     // data_length IS the exact distinct count — COUNT(DISTINCT n) with no read.
@@ -117,8 +117,8 @@ static void test_all_distinct_int_declines_ordering() {
     CHECK_EQ(v.data_length, v.length);
     CHECK((v.flags & DRAKEN_SEL_IDENTITY) != 0);
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta_of(meta, 0).value_order == ValueOrder::kAsWritten);
 }
 
@@ -133,8 +133,8 @@ static void test_near_unique_strings_are_not_ordered() {
     auto in = morsel_of({{"s", string_column(rows)}});
     auto bytes = write_ordered(in);
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta.columns[0].value_order == ValueOrder::kAsWritten);
     CHECK(meta.columns[0].selection_kind == SelectionKind::kIdentity);
 
@@ -290,8 +290,8 @@ static void test_ineligible_columns_are_written_as_written() {
     });
 
     auto bytes = write_ordered(in);
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     for (size_t i = 0; i < meta.columns.size(); ++i) {
         ++skene_test::g_checks;
@@ -330,8 +330,8 @@ static void test_min_max_null_count_and_sum() {
         rows, DRAKEN_INT64, {true, false, true, true, false})}});
 
     auto bytes = write_ordered(in);
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     const ColumnMetadata& column = meta_of(meta, 0);
     CHECK(column.has_statistics);
@@ -361,8 +361,8 @@ static void test_sum_is_128_bit() {
     auto in = morsel_of({{"n", dense_column<int64_t>({big, big, big, big}, DRAKEN_INT64)}});
 
     auto bytes = write_ordered(in);
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     const ColumnStatistics& stats = meta_of(meta, 0).statistics;
     const __int128 total = (static_cast<__int128>(stats.sum_high) << 64)
@@ -378,8 +378,8 @@ static void test_floats_get_no_sum() {
     auto in = morsel_of({{"f", dense_column<double>({1.5, 2.5, 3.5}, DRAKEN_FLOAT64)}});
 
     auto bytes = write_ordered(in);
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     const ColumnStatistics& stats = meta_of(meta, 0).statistics;
     CHECK((stats.flags & kStatSum) == 0);
@@ -404,8 +404,8 @@ static void test_types_without_order_get_no_min_max() {
     });
 
     auto bytes = write_ordered(in);
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     for (const ColumnMetadata& column : meta.columns) {
         ++skene_test::g_checks;
@@ -422,8 +422,8 @@ static void test_spill_profile_carries_no_statistics() {
     std::vector<uint8_t> bytes;
     CHECK(write_morsel(in, WriteOptions::for_spill(), &bytes).is_ok());
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(!meta_of(meta, 0).has_statistics);
     CHECK(meta_of(meta, 0).value_order == ValueOrder::kAsWritten);
 }
@@ -431,8 +431,8 @@ static void test_spill_profile_carries_no_statistics() {
 static void test_string_min_max_are_ordinals_not_bytes() {
     auto in = morsel_of({{"s", string_column({"delta", "alpha", "charlie"})}});
     auto bytes = write_ordered(in);
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     const ColumnStatistics& stats = meta_of(meta, 0).statistics;
     CHECK((stats.flags & kStatMin) != 0);
@@ -455,8 +455,8 @@ static void test_zone_map_enables_chunk_skipping() {
     auto in = morsel_of({{"clustered", dense_column<int64_t>(values, DRAKEN_INT64)}});
     auto bytes = write_ordered(in);
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
     const ColumnMetadata& column = meta_of(meta, 0);
     CHECK(column.zone_map.present());
@@ -501,8 +501,8 @@ static void test_sorted_unique_key_gets_a_zone_map() {
     auto in = morsel_of({{"id", dense_column<int64_t>(values, DRAKEN_INT64)}});
     auto bytes = write_ordered(in);
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     const ColumnMetadata& column = meta_of(meta, 0);
 
     CHECK(column.selection_kind == SelectionKind::kIdentity);  // no codes at all
@@ -530,8 +530,8 @@ static void test_unordered_column_still_gets_a_zone_map() {
     options.read_acceleration = true;
     CHECK(write_morsel(in, options, &bytes).is_ok());
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta_of(meta, 0).zone_map.present());
 
     // Whatever the bounds are, they must never rule out a chunk that holds the
@@ -563,8 +563,8 @@ static void test_all_null_chunk_prunes_itself() {
     options.read_acceleration = true;
     CHECK(write_morsel(in, options, &bytes).is_ok());
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     const ZoneMap& zones = meta_of(meta, 0).zone_map;
     CHECK(zones.present());
 
@@ -578,8 +578,8 @@ static void test_zone_map_absent_when_it_could_not_help() {
     // zone map would be overhead that can never skip anything.
     auto small = morsel_of({{"n", dense_column<int64_t>({3, 1, 2}, DRAKEN_INT64)}});
     auto bytes = write_ordered(small);
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(!meta_of(meta, 0).zone_map.present());
 
     // And an UNORDERED column gets none either: its codes carry no order, so
@@ -589,8 +589,8 @@ static void test_zone_map_absent_when_it_could_not_help() {
     auto unordered = morsel_of({{"n", dense_column<int64_t>(many, DRAKEN_INT64)}});
     std::vector<uint8_t> spill;
     CHECK(write_morsel(unordered, WriteOptions::for_spill(), &spill).is_ok());
-    FileMetadata spill_meta;
-    CHECK(read_metadata(spill.data(), spill.size(), &spill_meta).is_ok());
+    RowGroupMetadata spill_meta;
+    CHECK(read_row_group_metadata(spill.data(), spill.size(), 0, &spill_meta).is_ok());
     CHECK(!spill_meta.columns[0].zone_map.present());
 }
 
@@ -623,8 +623,8 @@ static void test_statistics_are_correct_on_both_paths() {
     auto in = morsel_of({{"n", dense_column<int64_t>(values, DRAKEN_INT64, valid)}});
     auto bytes = write_ordered(in);
 
-    FileMetadata meta;
-    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    RowGroupMetadata meta;
+    CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     const ColumnStatistics& stats = meta_of(meta, 0).statistics;
 
     CHECK(meta_of(meta, 0).value_order == ValueOrder::kAscending);
@@ -645,8 +645,8 @@ static void test_statistics_are_correct_on_both_paths() {
     auto bool_in = morsel_of({{"b", bool_column(bits, bool_valid)}});
     auto bool_bytes = write_ordered(bool_in);
 
-    FileMetadata bool_meta;
-    CHECK(read_metadata(bool_bytes.data(), bool_bytes.size(), &bool_meta).is_ok());
+    RowGroupMetadata bool_meta;
+    CHECK(read_row_group_metadata(bool_bytes.data(), bool_bytes.size(), 0, &bool_meta).is_ok());
     const ColumnMetadata& bc = bool_meta.columns[0];
 
     CHECK(bc.value_order == ValueOrder::kAsWritten);

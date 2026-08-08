@@ -27,6 +27,7 @@ from libc.string cimport memset
 
 import draken.draken_native as _draken_native
 from opteryx.exceptions import IncorrectTypeError
+from opteryx.exceptions import InvalidFunctionParameterError
 
 import datetime as _datetime
 import decimal as _decimal
@@ -517,6 +518,17 @@ cdef dict _LIKE_ANY_MODES = {
     "AnyOpNotLike": (False, True),
     "AnyOpILike": (True, False),
     "AnyOpNotILike": (True, True),
+}
+
+# draken_humanize mode ids (kernel contract — string_humanize.cpp HzMode). This
+# table IS the closed set: a mode not spelled here is rejected at PLAN time by the
+# HUMANIZE lowering arm, so the kernel never sees an id it cannot dispatch.
+# Canonical spellings only — no aliases, no plurals, deliberately (an alias pool
+# is a second vocabulary to keep in step with the docs and the kernel). Matching
+# is case-insensitive on the literal, as it is for every other unit literal here.
+cdef dict _HUMANIZE_MODES = {
+    "WORDS": 0, "COMPACT": 1, "BYTES": 2, "SI": 3,
+    "TIME": 4, "CLOCK": 5, "PERCENT": 6, "ODDS": 7,
 }
 
 # draken_date_trunc unit ids (kernel contract — function_kernels.cpp FK_TR_*).
@@ -2178,6 +2190,65 @@ cdef Py_ssize_t _linearize(
                             bc._hold(_tr_ctx)
                             slot.ctx_ptr = <void*>(<unsigned long long>_tr_ctx.ctx_ptr)
                         return sub_depth
+
+        # HUMANIZE(val, mode) — the mode literal names a scale system (bytes, time,
+        # odds, ...) and is consumed HERE into binary_op_ctx.op_code, exactly as
+        # DATE_TRUNC's unit is above; only the value operand is pushed, so the
+        # kernel still takes one argument.
+        #
+        # This arm is TOTAL for the 2-argument form: every path below either emits
+        # the instruction or raises. It must not be allowed to decline, because
+        # falling through would reach the generic name-only kernel lookup with
+        # arity=2 (the kernel would reject it as "expected 1 argument") or, past
+        # that, the Python callable_ref, whose humanize() takes no mode at all.
+        #
+        # The single-argument form is deliberately NOT handled here — it keeps its
+        # existing route through the generic lookup below, where op_code is 0,
+        # which is HZ_WORDS. Same bytes out as before this parameter existed.
+        if _tr_func == "HUMANIZE" and n == 2:
+            _hz_mv = None
+            if node.parameters[1] != NULL \
+                    and node.parameters[1].node_type == _NT_LITERAL:
+                _hz_mv = <object>node.parameters[1].value
+                if isinstance(_hz_mv, bytes):
+                    _hz_mv = _hz_mv.decode("utf-8")
+            if not isinstance(_hz_mv, str):
+                raise InvalidFunctionParameterError(
+                    "HUMANIZE mode must be a string literal, one of: "
+                    + ", ".join(sorted(m.lower() for m in _HUMANIZE_MODES))
+                )
+            _hz_mode = _HUMANIZE_MODES.get(_hz_mv.upper(), -1)
+            if _hz_mode < 0:
+                raise InvalidFunctionParameterError(
+                    f"HUMANIZE: unknown mode '{_hz_mv}'. Valid modes are: "
+                    + ", ".join(sorted(m.lower() for m in _HUMANIZE_MODES))
+                )
+            # A DECIMAL value operand still needs its bind-time scale — the kernel
+            # reads an unscaled int64 otherwise. Same ctx, second field.
+            _hz_scale = 0
+            if node.parameters[0] != NULL and node.parameters[0].schema_column != NULL:
+                _hz_ct = getattr(<object>node.parameters[0].schema_column, "column_type", None)
+                if (_hz_ct is not None and _hz_ct.logical is not None
+                        and getattr(_hz_ct.physical, "name", "") == "DECIMAL"):
+                    _hz_scale = _binop_dec_scale(_hz_ct)
+            from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _hz_alloc
+            _hz_fn, _hz_ctx = _resolve_kernel_and_context(
+                "draken_humanize", _hz_alloc, (_hz_mode, _hz_scale, 0, 0, 0, 0, 0))
+            if _hz_fn is None:
+                raise InvalidFunctionParameterError(
+                    "HUMANIZE: the draken_humanize kernel is not registered in this build"
+                )
+            sub_depth = _linearize(node.parameters[0], bc, depth)
+            slot = bc._push_instr()
+            slot.opcode = BC_FUNCTION
+            slot.arity = 1
+            slot.bool_value = 0
+            slot.flags = BC_INSTR_C_NATIVE
+            slot.kernel_fn = <void*>(<unsigned long long>_hz_fn)
+            if _hz_ctx is not None:
+                bc._hold(_hz_ctx)
+                slot.ctx_ptr = <void*>(<unsigned long long>_hz_ctx.ctx_ptr)
+            return sub_depth
 
         # EXTRACT(part FROM x) / YEAR(x)-family — bind-time lowering to the C-ABI
         # draken_date_part kernel. The part literal is consumed HERE (never pushed);

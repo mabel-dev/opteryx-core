@@ -32,6 +32,7 @@ def _warn_no_native_sketches() -> None:
             "(NDV / histogram) fall back to the slower Python path. Upgrade the "
             "opteryx_catalog package to enable native sketch reductions."
         )
+from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
@@ -46,7 +47,7 @@ from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
 
 
-class OpteryxTable(Diachronic, PredicatePushable):
+class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
     """
     Plan-time table metadata provider for Opteryx tables.
 
@@ -57,17 +58,33 @@ class OpteryxTable(Diachronic, PredicatePushable):
 
     This class is PLAN-TIME ONLY - it does not perform any data reading.
     Execution uses generic filesystem readers based on file paths from the manifest.
+
+    It derives ``BaseTable`` for the same reason every other table engine does:
+    the optimizer probes capabilities off the table engine the binder puts on
+    ``Scan.connector``, and ``BaseTable`` is where the full set of capability
+    defaults lives. Declaring them by hand here instead left this class blind to
+    every capability added later - which is exactly how it came to be missing
+    ``supports_int64_timestamp_retag``.
     """
 
     __mode__ = "Blob"
     __type__ = "OPTERYX"
     __synchronousity__ = "asynchronous"
 
-    # Capability declarations (for plan-time)
+    # Capability declarations (for plan-time). Only the ones that differ from
+    # the BaseTable defaults belong here.
     supports_diachronic = True  # Time-travel queries
     supports_statistics = True  # Manifest provides stats
     supports_predicate_pushdown = True  # Allow optimizer to push predicates to reader
     supports_limit_pushdown = True  # Allow optimizer to push LIMIT to OpteryxTable
+    # The reader that serves a catalog scan is not this class - it is chosen
+    # from the manifest's FileEntry.file_format (physical_planner
+    # `_scan_reader_for_manifest`), and a catalog manifest is parquet-only
+    # (`FileEntry.from_datafile` types every entry PARQUET). That reader is
+    # ParquetReadNode, which honours a scan-declared TIMESTAMP64 on an
+    # int64-stored column. If the catalog ever hands back a non-parquet format,
+    # this has to become format-aware the way FileSystemTable's is.
+    supports_int64_timestamp_retag = True
 
     PUSHABLE_OPS: Dict[str, bool] = {
         "Eq": True,

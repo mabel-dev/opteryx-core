@@ -79,7 +79,7 @@ def _count(sql):
 
 
 _Q7_SHAPE_SQL = (
-    "SELECT n1.n_name, n2.n_name FROM testdata.tpch_1.nation AS n1, testdata.tpch_1.nation AS n2 "
+    "SELECT n1.n_name, n2.n_name FROM testdata.tpch_001.nation AS n1, testdata.tpch_001.nation AS n2 "
     "WHERE (n1.n_name = 'KENYA' AND n2.n_name = 'PERU') "
     "OR (n1.n_name = 'PERU' AND n2.n_name = 'KENYA')"
 )
@@ -112,7 +112,7 @@ def test_original_disjunction_survives_untouched():
 
 def test_no_derivation_when_branch_leaves_column_unconstrained():
     sql = (
-        "SELECT n1.n_name, n2.n_name FROM testdata.tpch_1.nation AS n1, testdata.tpch_1.nation AS n2 "
+        "SELECT n1.n_name, n2.n_name FROM testdata.tpch_001.nation AS n1, testdata.tpch_001.nation AS n2 "
         "WHERE (n1.n_name = 'KENYA' AND n2.n_name = 'PERU') OR (n1.n_name = 'PERU')"
     )
     plan, telemetry = _optimized_plan(sql)
@@ -126,7 +126,7 @@ def test_no_derivation_when_branch_leaves_column_unconstrained():
 def test_range_hull_derived_across_branches():
     sql = (
         "SELECT n1.n_nationkey, n2.n_nationkey "
-        "FROM testdata.tpch_1.nation AS n1, testdata.tpch_1.nation AS n2 "
+        "FROM testdata.tpch_001.nation AS n1, testdata.tpch_001.nation AS n2 "
         "WHERE (n1.n_nationkey > 5 AND n1.n_nationkey < 10 AND n2.n_nationkey > 20 AND n2.n_nationkey < 25) "
         "OR (n1.n_nationkey > 1 AND n1.n_nationkey < 3 AND n2.n_nationkey > 15 AND n2.n_nationkey < 18)"
     )
@@ -158,7 +158,7 @@ def test_mixed_point_and_range_on_same_column_blocks_derivation():
     # original OR still runs post-join regardless of what got pushed early).
     sql = (
         "SELECT n1.n_nationkey, n2.n_name "
-        "FROM testdata.tpch_1.nation AS n1, testdata.tpch_1.nation AS n2 "
+        "FROM testdata.tpch_001.nation AS n1, testdata.tpch_001.nation AS n2 "
         "WHERE (n1.n_nationkey = 5 AND n2.n_name = 'PERU') "
         "OR (n1.n_nationkey > 10 AND n2.n_name = 'KENYA')"
     )

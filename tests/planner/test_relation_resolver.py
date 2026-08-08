@@ -91,6 +91,8 @@ def views():
         "CREATE VIEW ws.wants_outer_cte AS SELECT id FROM some_outer_cte",
         "CREATE VIEW ws.group_by_all AS SELECT UPPER(name) AS n, COUNT(*) AS total "
         "  FROM $planets GROUP BY ALL",
+        "CREATE VIEW ws.using_join AS SELECT id, a.name FROM $planets AS a "
+        "  INNER JOIN $planets AS b USING (id)",
     ):
         list(session.execute_to_morsels(statement))
 
@@ -314,6 +316,68 @@ def test_get_relation_branch_expands_a_view_with_a_cte(catalog):
 def test_get_relation_branch_detects_a_cycle(catalog):
     with pytest.raises(UnsupportedSyntaxError, match="defined in terms of itself"):
         _rows("SELECT * FROM cat.self_ref")
+
+
+# ---------------------------------------------------------------------------
+# 5. splicing does not duplicate a join's leg relation names
+# ---------------------------------------------------------------------------
+
+
+def _join_legs(sql):
+    """(left_relation_names, right_relation_names) for every Join in the resolved plan."""
+    ast = sqloxide.parse_sql(sql, _dialect="opteryx")[0]
+    plan, _, ctes = do_logical_planning_phase(ast)
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry())
+    return [
+        (list(node.left_relation_names or []), list(node.right_relation_names or []))
+        for _, node in plan.nodes(True)
+        if node.node_type == LogicalPlanStepType.Join
+    ]
+
+
+def test_splicing_does_not_duplicate_leg_relation_names():
+    """`_splice` re-runs join_leg_preprocess over the WHOLE plan on every expansion,
+    so a Join whose legs the logical planner already computed gets walked again. It
+    used to append unconditionally, giving `['b', 'b']`."""
+    legs = _join_legs(
+        "WITH c AS (SELECT id FROM $planets AS a INNER JOIN $planets AS b USING (id)) "
+        "SELECT * FROM c"
+    )
+    assert legs, "no Join survived resolution"
+    for left, right in legs:
+        assert len(left) == len(set(left)), f"duplicate left leg names: {left}"
+        assert len(right) == len(set(right)), f"duplicate right leg names: {right}"
+
+
+def test_join_using_inside_a_cte_body_binds():
+    """The duplicate leg name reached the binder's USING handler, which pops the
+    named column out of each listed relation in turn. The second pop of an
+    already-popped column returned None and setting `.origin` on it died with
+    `AttributeError: 'NoneType' object has no attribute 'origin'`."""
+    assert _rows(
+        "WITH c AS (SELECT id FROM $planets AS a INNER JOIN $planets AS b USING (id)) "
+        "SELECT * FROM c"
+    ) == [(i,) for i in range(1, 10)]
+
+
+def test_join_using_inside_a_view_body_binds(views):
+    """Same defect, reached the way it was actually reported — through a view."""
+    assert len(_rows("SELECT * FROM ws.using_join")) == 9
+
+
+def test_join_using_still_binds_without_a_splice():
+    """The control: the same join with nothing to expand never had the duplicate."""
+    assert _rows(
+        "SELECT id FROM $planets AS a INNER JOIN $planets AS b USING (id)"
+    ) == [(i,) for i in range(1, 10)]
+
+
+def test_join_using_on_a_column_neither_leg_has_fails_clean():
+    """No relation on the leg holds the column — a real error with a real message,
+    not an AttributeError on None."""
+    with pytest.raises(Exception) as excinfo:
+        _rows("SELECT * FROM $planets AS a INNER JOIN $planets AS b USING (no_such_column)")
+    assert "no_such_column" in str(excinfo.value)
 
 
 def test_insert_from_a_cte_resolves(tmp_path):

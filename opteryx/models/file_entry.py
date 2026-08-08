@@ -34,6 +34,17 @@ class FileEntry:
     file_size_in_bytes: int
     uncompressed_size_in_bytes: Optional[int] = None
 
+    # How many row groups the file holds. None means UNKNOWN, on the same
+    # doctrine as record_count above — never a fabricated 1.
+    #
+    # A .skene file used to BE one row group, so file count and row group count
+    # were the same number and neither had to be carried. They are not the same
+    # number any more (a .skene file holds up to 16), and the scan's unit of work
+    # is the row group — so a telemetry field reporting the file count as the row
+    # group count would understate the work by the packing factor. Populated by
+    # the producer that reads footers to build the manifest.
+    row_group_count: Optional[int] = None
+
     # Per-column statistics indexed by field_id
     # Values are serialized bytes (catalog format)
     lower_bounds: Optional[Dict[int, bytes]] = None

@@ -1,6 +1,7 @@
 #include "value_order.h"
 
 #include <algorithm>
+#include <set>
 #include <unordered_set>
 #include <cstdarg>
 #include <cstdio>
@@ -113,6 +114,63 @@ CompareFn comparator_for(DrakenType type) {
         default:                 return nullptr;
     }
 }
+
+// ── KMV (K-minimum-values) distinct-count sketch ────────────────────────────
+//
+// Estimates how many DISTINCT values a column holds, in one pass, from the K
+// smallest value hashes. Bounded memory (K entries) and — once warm — one
+// compare per value, because a hash at or above the current K-th smallest is
+// rejected before it can be inserted.
+//
+// This is what separates it from the deduplicating hashtable it exists to
+// decide FOR or AGAINST: what makes that table expensive is the table (an
+// insert, a probe, and a rehash per distinct value), not the hash. So a sketch
+// can afford to look at every row where the table cannot.
+//
+// EXACT, not estimated, whenever the column holds fewer than K distinct values:
+// the sketch then holds all of them and its size IS the answer. That is the
+// regime the decline below cares most about getting right, and it is the regime
+// where a ratio test has the least room for error.
+//
+// Above K distinct values it is the standard KMV estimator: with the K-th
+// smallest hash at normalized position v in [0,1), the distinct count is
+// (K-1)/v. Relative standard error is ~1/sqrt(K-2) — at K=1024 that is ~3%,
+// which is far inside the margin a 50% threshold needs, and three orders of
+// magnitude better than what a fixed-size row sample can offer (see the
+// decline in order_column for why that is not a fixable property of sampling).
+class KmvSketch {
+  public:
+    void add(uint64_t hash) {
+        if (smallest_.size() < kK) {
+            smallest_.insert(hash);   // std::set dedups identical hashes for us
+            return;
+        }
+        // Warm: the overwhelmingly common case, and O(1).
+        if (hash >= *smallest_.rbegin()) return;
+        if (!smallest_.insert(hash).second) return;
+        smallest_.erase(std::prev(smallest_.end()));
+    }
+
+    double estimate() const {
+        if (smallest_.size() < kK) return static_cast<double>(smallest_.size());
+        // 2^64 as a double. The K-th smallest hash divided by this is the
+        // fraction of the hash space the K smallest distinct values occupy.
+        constexpr double kHashSpace = 18446744073709551616.0;
+        const double v = static_cast<double>(*smallest_.rbegin()) / kHashSpace;
+        // Guard the divide: v == 0 needs the K-th smallest hash to be 0, which
+        // means every sampled hash collided at 0. Report K rather than infinity.
+        if (v <= 0.0) return static_cast<double>(kK);
+        return static_cast<double>(kK - 1u) / v;
+    }
+
+  private:
+    // 1024, not the 32 the manifest's KMV sketches use. Those are sized to be
+    // STORED per file and unioned across thousands of them, where width costs
+    // bytes forever; this one is thrown away at the end of the column and its
+    // only cost is 8KB of transient memory, so it buys the accuracy instead.
+    static constexpr size_t kK = 1024u;
+    std::set<uint64_t> smallest_;
+};
 
 }  // namespace
 
@@ -252,6 +310,10 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
         }
         // More than half the sample distinct means repeats are rare, so hashing
         // would pay its full per-value cost for almost no deduplication.
+        //
+        // This verdict picks the STRATEGY and nothing else. It is emphatically
+        // not a measurement of the column's cardinality — see the decline below,
+        // which needs one and therefore does not reuse this.
         prefer_hashing = sampled == 0 || sample.size() * 2 <= sampled;
     }
 
@@ -267,17 +329,80 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
     // buy with that). A column that ALREADY carries a selection keeps its
     // eligibility: ordering it reuses the indirection the reader pays anyway.
     //
-    // Decided from the SAMPLE so the expensive sort is never paid just to
-    // discover it was not worth paying — measured at 220 ms on a million
-    // near-unique strings.
+    // Measured with a KMV sketch over every valid row, so the expensive sort is
+    // never paid just to discover it was not worth paying — and, far more
+    // importantly, so a column that WOULD have deduplicated is never declined.
+    //
+    // This decision must NOT be taken from the stride sample above, and the
+    // reason is not a tuning matter. Distinct-count-in-a-sample is not an
+    // estimator of distinct-fraction-in-a-column: drawing m rows from a column
+    // holding k distinct values yields about k(1 - e^(-m/k)) distinct, which
+    // saturates toward m — that is, toward "100% distinct" — for every k much
+    // larger than m. A 4096-row sample therefore cannot distinguish a column
+    // with 38,000 distinct values from one with 262,144, and declines both.
+    //
+    // Measured on the ClickBench mirror before this was fixed, per 262,144-row
+    // file: URL 14.5% distinct read as 69.1% and was declined (6.9x dedup lost);
+    // Title 10.4% read as 57.2% (9.6x lost); UserID 7.0% read as 86.3%
+    // (14.2x lost). Those columns were then stored dense forever, which the
+    // reader pays on every scan and every predicate over them.
+    //
+    // Sketching is affordable where the sample was chosen to avoid a cost the
+    // sketch does not have: it allocates nothing per value and, once its K
+    // smallest hashes are settled, rejects a value in a single compare. The
+    // hash is the one already defined for deduplication, so a value that would
+    // dedup counts as one value here — the estimate and the operation it gates
+    // cannot disagree about what "distinct" means.
     //
     // Gated on the column being big enough for the sort to be worth avoiding.
-    // Below the sample size the "sample" is the whole column, and a small
-    // column with a few repeats reads as high-cardinality on a ratio test —
-    // 3 distinct in 5 rows is 60% — so a short column takes the exact path
-    // instead, where the sort costs nothing anyway.
-    if (length >= kSampleRows && !prefer_hashing && !draken_is_compressed(&vector))
-        return Status::ok();   // declines: written as-is
+    // Below the sketch's exact regime a short column takes the ordering path
+    // anyway, where the sort costs nothing.
+    //
+    // ── Why only the string family measures, and fixed width does not ──────
+    //
+    // The 50% rule is a statement about SIZE, but what a dictionary actually
+    // costs on read is an added 4-byte code per row and an indirection on every
+    // access — and whether that is worth paying depends on how wide a value is,
+    // which one distinct-count ratio cannot express. Measured per column on a
+    // 262,144-row ClickBench file, decoding dense vs dictionary:
+    //
+    //   Title       239B/value   62.7 -> 7.8MB   3.70 -> 0.53ms   6.98x FASTER
+    //   URL          93B/value   24.2 -> 4.8MB   1.45 -> 0.38ms   3.76x FASTER
+    //   Referer      99B/value   26.0 -> 5.8MB   1.56 -> 0.45ms   3.47x FASTER
+    //   UserID        8B/value    2.1 -> 0.6MB   0.07 -> 0.23ms   3.1x SLOWER
+    //   RefererHash   8B/value    2.1 -> 0.8MB   0.07 -> 0.32ms   4.3x SLOWER
+    //
+    // A dense fixed-width column decodes at memcpy speed, so replacing 2.1MB of
+    // values with 0.6MB of values PLUS a 1.05MB code array PLUS the indirection
+    // is more work for fewer bytes — a loss even at 14x deduplication. A wide
+    // string has no such floor and wins outright.
+    //
+    // So fixed-width columns keep the sample verdict, deliberately. It is the
+    // biased estimator described above, but its bias runs toward declining, and
+    // declining is the right answer for these columns anyway — it is only the
+    // string family the bias was costing. Whether a dictionary pays for narrow
+    // columns SOMEWHERE ELSE (dict int keys give a grouped aggregate far fewer
+    // values to hash) is a real question this decision does not settle, and it
+    // wants measuring against the aggregate, not against decode.
+    if (length >= kSampleRows && !draken_is_compressed(&vector)) {
+        bool near_unique;
+        if (is_string) {
+            KmvSketch sketch;
+            uint32_t valid_rows = 0;
+            for (uint32_t row = 0; row < length; ++row) {
+                if (vector.validity != nullptr
+                        && (vector.validity[row >> 3] & (1u << (row & 7u))) == 0)
+                    continue;
+                sketch.add(static_cast<uint64_t>(key.hash(vector.selection[row])));
+                ++valid_rows;
+            }
+            // Same 50% policy the sample expressed, now against a measurement.
+            near_unique = sketch.estimate() * 2.0 > static_cast<double>(valid_rows);
+        } else {
+            near_unique = !prefer_hashing;
+        }
+        if (near_unique) return Status::ok();   // declines: written as-is
+    }
 
     // representative_of[code] is the canonical index for that code's VALUE.
     std::vector<uint32_t> representative_of(vector.data_length, 0);

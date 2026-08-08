@@ -3,7 +3,7 @@
 Run TPC-H queries against DuckDB on Parquet datasets and emit a results JSON file.
 
 Usage:
-    python run_duckdb.py --scale 1        # runs against testdata/tpch_1
+    python run_duckdb.py --scale 10       # runs against testdata/tpch_10
     python run_duckdb.py --scale 001      # runs against testdata/tpch_001
     python run_duckdb.py --scale 001 --warm --iterations 3
 
@@ -15,7 +15,7 @@ The output JSON follows the same schema as the ClickBench baseline:
         "system": "DuckDB (Parquet)",
         "date": "<ISO date>",
         "machine": "<hostname>",
-        "scale_factor": 1,
+        "scale_factor": 10,
         "result": [[run1_ms, run2_ms, run3_ms], ...]
     }
 """
@@ -38,7 +38,7 @@ def queries(scale_path: str) -> list[tuple[str, str]]:
     Return a list of (name, sql) pairs.
 
     `scale_path` is the FROM-clause prefix for tables, e.g.
-        `testdata/tpch_001/`   or   `testdata/tpch_1/`
+        `testdata/tpch_001/`   or   `testdata/tpch_10/`
     """
     T = f"'{scale_path}/'"
 
@@ -787,7 +787,11 @@ def main():
 
     parser = argparse.ArgumentParser(description="DuckDB TPC-H benchmark")
     parser.add_argument(
-        "--scale", type=str, default="001", help="Scale factor suffix (001, 1, etc.)"
+        # Matches the Opteryx runner's default so `make tpch-bench-duckdb`
+        # regenerates the baseline the suite is actually quoted against. A
+        # calibration written at a different scale than the run it is compared
+        # to is worse than none — the ratio would be silently meaningless.
+        "--scale", type=str, default="10", help="Scale factor suffix (001, 1, 10, etc.)"
     )
     parser.add_argument(
         "--warm",
@@ -810,7 +814,7 @@ def main():
 
     if not os.path.isdir(scale_path):
         print(f"ERROR: Scale directory not found: {scale_path}")
-        print("       Expected: testdata/tpch_001 or testdata/tpch_1 etc.")
+        print("       Expected: testdata/tpch_001 or testdata/tpch_10 etc.")
         return 1
 
     output_path = args.output or os.path.join(

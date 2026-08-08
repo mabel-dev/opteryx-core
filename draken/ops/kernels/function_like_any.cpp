@@ -226,9 +226,8 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
         if (!la_is_string(child->type))
             { draken_free(out); if (validity) draken_free(validity);
               return draken_error_sentinel("draken_like_any: ARRAY elements must be string-typed"); }
-        if (m.ci && child->type == DRAKEN_VARBINARY)
-            { draken_free(out); if (validity) draken_free(validity);
-              return draken_error_sentinel("draken_like_any: ILIKE needs VARCHAR/NVARCHAR elements (not VARBINARY)"); }
+        // VARBINARY elements are a legal ILIKE ANY subject: la_fold with utf8=false
+        // is the ASCII fold VARCHAR already gets. See draken_like for the ruling.
         const bool child_utf8 = child->type == DRAKEN_NVARCHAR;
         if (child_utf8 && m.glob_has_byte('_'))
             { draken_free(out); if (validity) draken_free(validity);
@@ -261,9 +260,7 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
         if (!la_is_string(subject->type))
             { draken_free(out); if (validity) draken_free(validity);
               return draken_error_sentinel("draken_like_any: string or ARRAY<string> subject required"); }
-        if (m.ci && subject->type == DRAKEN_VARBINARY)
-            { draken_free(out); if (validity) draken_free(validity);
-              return draken_error_sentinel("draken_like_any: ILIKE needs VARCHAR/NVARCHAR (not VARBINARY)"); }
+        // A VARBINARY subject folds ASCII, like VARCHAR — see draken_like.
         const bool subj_utf8 = subject->type == DRAKEN_NVARCHAR;
         if (subj_utf8 && m.glob_has_byte('_'))
             { draken_free(out); if (validity) draken_free(validity);

@@ -231,7 +231,44 @@ def _query_body(branch):
     return branch.get("Query", branch)
 
 
-def extract_ctes(branch, planner):
+def _apply_column_aliases(column_aliases: list, columns: list, relation: str) -> None:
+    """Apply a relation's column-alias list — the `(a, b)` in `WITH t(a, b) AS (...)`.
+
+    The names rename the relation's OUTPUT columns positionally.
+
+    Applied HERE, at the point the CTE's plan is built, and not later at the splice: the
+    Relation Resolver copies a CTE's plan per reference, and `LogicalColumn.copy()` takes
+    no memo, so after a copy the head's view of the projection is a set of DISTINCT
+    objects from the Project node's. Renaming those renamed nothing the query could see.
+    At this point `columns` is still the very list the Project node holds.
+    """
+    from opteryx.expression import NodeType
+
+    if not column_aliases:
+        return
+
+    columns = columns or []
+
+    # `WITH t(a, b) AS (SELECT * FROM ...)` — a wildcard body has no projection list to
+    # line the names up against until binding resolves the schema. Refuse, rather than
+    # drop the names on the floor, which is what used to happen.
+    if not columns or any(column.node_type == NodeType.WILDCARD for column in columns):
+        raise UnsupportedSyntaxError(
+            f"Relation '{relation}' declares column aliases over a wildcard projection. "
+            "Name the columns in the body instead of using SELECT *."
+        )
+
+    if len(column_aliases) != len(columns):
+        raise UnsupportedSyntaxError(
+            f"Relation '{relation}' declares {len(column_aliases)} column alias(es) "
+            f"but its body produces {len(columns)} column(s)."
+        )
+
+    for column, alias in zip(columns, column_aliases):
+        column.alias = alias
+
+
+def extract_ctes(branch):
     ctes = {}
     with_clause = _query_body(branch).get("with")
     if with_clause:
@@ -245,23 +282,30 @@ def extract_ctes(branch, planner):
             )
         for _ast in with_clause["cte_tables"]:
             alias = _ast.get("alias")["name"]["value"]
-            logical_plan = planner(_ast["query"]["body"])
-            # CTEs don't have an exit node
+            # Plan the whole Query node, not just its `body`. ORDER BY / LIMIT / OFFSET
+            # are siblings of `body` in the AST and it is plan_query that hoists them
+            # into it. Planning `body` alone silently discarded them, so the LIMIT in
+            # `WITH c AS (SELECT ... LIMIT 3)` was dropped and the CTE returned every
+            # row — while the identical inline derived table honoured it. This is the
+            # same entry point the derived-table path uses (create_node_relation), so
+            # the two forms now converge on the same logical plan.
+            logical_plan = plan_query(_ast["query"])
+            # CTEs don't have an exit node. Its columns ARE the CTE's output
+            # projection — the same list object the Project node holds — so read them
+            # before it goes. The node left at the head is whatever the body ends with,
+            # and for a body with ORDER BY or LIMIT that is an Order/Limit node, which
+            # carries no columns of its own.
             plan_head = logical_plan.get_exit_points()[0]
+            output_columns = logical_plan[plan_head].columns
             logical_plan.remove_node(plan_head, True)
 
             # `WITH t(a, b) AS (...)` renames the CTE's output columns. The names were
             # previously parsed and dropped, so the rename silently did nothing and the
-            # body's own column names leaked out. Carry them on the plan head; the
-            # Relation Resolver applies them when it splices the CTE in.
+            # body's own column names leaked out.
             column_aliases = [
                 col["name"]["value"] for col in (_ast.get("alias").get("columns") or [])
             ]
-            if column_aliases:
-                head_nid = logical_plan.get_exit_points()[0]
-                head = logical_plan[head_nid]
-                head.column_aliases = column_aliases
-                logical_plan[head_nid] = head
+            _apply_column_aliases(column_aliases, output_columns, alias)
 
             ctes[alias] = logical_plan
     return ctes
@@ -1221,16 +1265,25 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
 
         return join_on, join_using
 
-    def create_unnest_node(join: dict, join_step: Node) -> Node:
+    def create_unnest_node(join: dict, join_step: Node, function: str = "UNNEST") -> Node:
         """
         Extracts information for an UNNEST dataset from the AST node representing the join.
+
+        Shared by UNNEST (expand an ARRAY column) and CIDR_UNNEST (expand a CIDR
+        block into one row per address). Both are the same PLAN shape — one value
+        per parent row fanning out to many rows — and differ only in the expansion
+        rule, so they share this node type rather than adding a second one. A
+        distinct LogicalPlanStepType would need a matching `visit_` in the binder
+        or it would silently pass through unbound, and the three optimizer
+        strategies that treat Unnest as a barrier want identical treatment for
+        both. `unnest_function` is what the binder and compiler branch on.
         """
         if join_step.type != "cross join":
-            raise UnsupportedSyntaxError("JOIN on UNNEST only supported for CROSS joins.")
+            raise UnsupportedSyntaxError(f"JOIN on {function} only supported for CROSS joins.")
         unnest_column = logical_planner_builders.build(join["relation"]["Table"]["args"]["args"][0])
         if join["relation"]["Table"].get("alias") is None:
             raise UnnamedColumnError(
-                "Column created by UNNEST has no name, use AS to name the column."
+                f"Column created by {function} has no name, use AS to name the column."
             )
         unnest_alias = join["relation"]["Table"]["alias"]["name"]["value"]
 
@@ -1238,6 +1291,7 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
         join_step.node_type = LogicalPlanStepType.Unnest
         join_step.unnest_column = unnest_column
         join_step.unnest_alias = unnest_alias
+        join_step.unnest_function = function
         join_step.alias = f"$unnest-{random_string(6)}"
 
         # return the updated node
@@ -1273,8 +1327,8 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
         relation_name = ".".join(
             logical_planner_builders.build(p).value for p in join["relation"]["Table"]["name"]
         )
-        if relation_name.upper() == "UNNEST":
-            join_step = create_unnest_node(join, join_step)
+        if relation_name.upper() in ("UNNEST", "CIDR_UNNEST"):
+            join_step = create_unnest_node(join, join_step, relation_name.upper())
 
     return join_step
 
@@ -2867,5 +2921,5 @@ def do_logical_planning_phase(parsed_statement: dict) -> tuple:
             f"Opteryx does not support '{convert_camel_to_sql_case(statement_type)}' type queries."
         )
     # CTEs are Common Table Expressions, they're variations of subqueries
-    ctes = extract_ctes(parsed_statement, inner_query_planner)
+    ctes = extract_ctes(parsed_statement)
     return QUERY_BUILDERS[statement_type](parsed_statement), parsed_statement, ctes

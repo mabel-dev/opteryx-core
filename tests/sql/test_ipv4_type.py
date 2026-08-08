@@ -988,6 +988,94 @@ def test_ipv4_and_same_valued_integer_literals_are_distinct_columns():
     ]
 
 
+# ---------------------------------------------------------------------------
+# CIDR containment reaches the READER
+#
+# The point of rewriting containment to a range is not that a range is a faster
+# per-row test — it is barely different. It is that a range PRUNES: it reaches the
+# connector, the manifest and the row-group min/max, so the rows are never read.
+# A rewrite that produces a correct answer but still reads every row has failed at
+# the only thing it exists to do, so these assert the plan, not just the count.
+#
+# `testdata.flat.ipv4` (see dev/generate_ipv4_testdata.py) is a real Parquet scan
+# with a UINT32 `addr` column — Parquet cannot carry the IPV4 descriptor, so this
+# is what a stored address actually looks like coming off disk.
+# ---------------------------------------------------------------------------
+
+
+IPV4_TABLE = "testdata.flat.ipv4"
+
+
+def _telemetry_for(sql):
+    session = opteryx.session()
+    for _ in session.execute_to_morsels(sql):
+        pass
+    return session.telemetry
+
+
+@pytest.mark.parametrize(
+    "cidr,expected",
+    [
+        ("10.0.0.0/8", 1000),
+        ("10.0.0.0/16", 1000),
+        ("10.0.0.0/24", 256),
+        ("10.0.0.1/32", 1),
+        ("192.168.1.0/24", 256),
+        ("0.0.0.0/0", 4000),
+        ("172.16.0.0/12", 0),
+    ],
+)
+def test_cidr_over_a_uint32_scan_column_is_pushed_into_the_reader(cidr, expected):
+    """Right rows AND no Filter node: `optimization_predicate_pushdown_into_scan`
+    is the counter that only fires when the predicate reaches the reader and the
+    Filter disappears — the bare `_pushdown` counter also fires for a predicate
+    merely relocated to another point in the plan."""
+    sql = f"SELECT COUNT(*) AS c FROM {IPV4_TABLE} WHERE addr::IPV4 <<= '{cidr}'"
+    assert one(sql) == [expected]
+
+    telemetry = _telemetry_for(f"SELECT label FROM {IPV4_TABLE} WHERE addr::IPV4 <<= '{cidr}'")
+    assert telemetry.get("optimization_predicate_rewriter_cidr_to_range") is not None
+    assert telemetry.get("optimization_predicate_pushdown_into_scan") is not None, (
+        f"CIDR range for {cidr} did not reach the reader"
+    )
+
+
+def test_cidr_pushdown_survives_a_join():
+    """The shape that motivated this: with the range stranded above the join it
+    filtered a materialised join result instead of the scan feeding it."""
+    sql = (
+        f"SELECT a.label FROM {IPV4_TABLE} AS a "
+        f"INNER JOIN {IPV4_TABLE} AS b ON a.label = b.label "
+        f"WHERE a.addr::IPV4 <<= '10.0.0.0/8'"
+    )
+    telemetry = _telemetry_for(sql)
+    assert telemetry.get("optimization_predicate_pushdown_into_scan") is not None
+
+
+def test_cidr_rewrite_selects_exactly_what_the_kernel_selects():
+    """The rewrite is only legitimate if it is an identity on the row set. Compared
+    against the containment kernel itself, per bound, on both operand orders."""
+    for cidr in ("10.0.0.0/8", "10.0.3.232/30", "192.168.0.0/12", "255.255.255.255/32"):
+        contained = one(
+            f"SELECT SUM(addr) AS c FROM {IPV4_TABLE} WHERE addr::IPV4 <<= '{cidr}'"
+        )
+        contains = one(
+            f"SELECT SUM(addr) AS c FROM {IPV4_TABLE} WHERE '{cidr}' >>= addr::IPV4"
+        )
+        assert contained == contains, cidr
+
+
+def test_a_varchar_address_is_not_stripped_of_its_cast():
+    """`_unwrap_ipv4_retag` is UINT32-only on purpose. A VARCHAR address is PARSED
+    by the cast, and string order is not address order, so the bounds must stay
+    behind the cast — pushing them onto the raw column would be a wrong answer.
+    The range still forms (it is still worth relocating), it just cannot prune."""
+    sql = "SELECT COUNT(*) AS c FROM testdata.flat.hosts WHERE address::IPV4 <<= '10.0.0.0/8'"
+    telemetry = _telemetry_for(sql)
+    assert telemetry.get("optimization_predicate_rewriter_cidr_to_range") is not None
+    assert telemetry.get("optimization_predicate_pushdown_into_scan") is None
+
+
 if __name__ == "__main__":  # pragma: no cover
     import pytest as _pytest
 

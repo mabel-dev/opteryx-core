@@ -35,8 +35,10 @@
 #include "native_parquet_scan_source.hpp"  // NativeParquetScanSource (zero-Python pull)
 #include "native_latmat_scan_source.hpp"   // LatmatScanSource (R3 two-pass late-mat)
 #include "native_skene_scan_source.hpp"    // NativeSkeneScanSource (zero-Python skene)
+#include "native_skene_latmat_scan_source.hpp"  // NativeSkeneLatmatScanSource (two-pass skene)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
+#include "native_cidr_unnest.hpp"   // CidrUnnestOperator — CROSS JOIN CIDR_UNNEST
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
 #include "native_queue_sink.hpp"    // QueueSink/Global — the terminal output edge
 #include "streaming_scan_source.hpp"
@@ -68,6 +70,40 @@ inline std::vector<const LogicalType*> intern_logical_vec(
         lt.dimension = static_cast<uint32_t>(dimension[i]);
         out.push_back(logical_type_intern(lt));
     }
+    return out;
+}
+
+// Decode one column's ARRAY element chain (see NativePlan.set_join2_build_sink's
+// `elem_chain`): a flat list of SIX ints per nesting level —
+// (physical type, logical kind, unit, precision, scale, dimension) — outermost
+// element first, so ARRAY<VARCHAR> is one level and ARRAY<ARRAY<INT64>> is two.
+// Empty for every non-ARRAY column, and empty for an ARRAY whose element type the
+// planner could not resolve (make_empty_col then leaves the column childless and
+// the consumers fail loud — see its comment).
+inline std::vector<EmptyColElem> decode_elem_chain(const std::vector<int>& flat) {
+    std::vector<EmptyColElem> out;
+    out.reserve(flat.size() / 6);
+    for (size_t i = 0; i + 6 <= flat.size(); i += 6) {
+        const LogicalType* lt = nullptr;
+        if (flat[i + 1] != 0) {
+            LogicalType l;
+            l.kind      = static_cast<LogicalKind>(flat[i + 1]);
+            l.unit      = static_cast<TimestampUnit>(flat[i + 2]);
+            l.precision = static_cast<uint8_t>(flat[i + 3]);
+            l.scale     = static_cast<uint8_t>(flat[i + 4]);
+            l.dimension = static_cast<uint32_t>(flat[i + 5]);
+            lt = logical_type_intern(l);
+        }
+        out.push_back(EmptyColElem{static_cast<DrakenType>(flat[i]), lt});
+    }
+    return out;
+}
+
+inline std::vector<std::vector<EmptyColElem>> decode_elem_chains(
+        const std::vector<std::vector<int>>& flat, size_t ncols) {
+    std::vector<std::vector<EmptyColElem>> out(ncols);
+    for (size_t i = 0; i < ncols && i < flat.size(); ++i)
+        out[i] = decode_elem_chain(flat[i]);
     return out;
 }
 
@@ -302,13 +338,16 @@ public:
                               std::vector<int> lt_kind, std::vector<int> lt_unit,
                               std::vector<int> lt_precision, std::vector<int> lt_scale,
                               std::vector<int> lt_dimension,
+                              std::vector<std::vector<int>> elem_chain,
                               bool track_matches = false) {
         auto payload_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
                                                    lt_scale, lt_dimension);
+        auto payload_element = decode_elem_chains(elem_chain, payload_types.size());
         set_sink_(p, std::make_unique<Join2BuildSink>(
             std::move(key_idx), std::move(payload_idx),
             std::move(payload_types), std::move(payload_logical),
-            /*asof=*/-1, track_matches));
+            std::move(payload_element),
+            /*asof=*/-1, /*asof_type=*/0, track_matches));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_join2_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
@@ -326,13 +365,16 @@ public:
                                     std::vector<int> lt_kind, std::vector<int> lt_unit,
                                     std::vector<int> lt_precision,
                                     std::vector<int> lt_scale,
-                                    std::vector<int> lt_dimension) {
+                                    std::vector<int> lt_dimension,
+                                    std::vector<std::vector<int>> elem_chain) {
         auto probe_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
                                                 lt_scale, lt_dimension);
+        auto probe_element = decode_elem_chains(elem_chain, probe_types.size());
         auto schema = std::make_shared<CxxMorsel>();
         schema->columns.reserve(probe_types.size());
         for (size_t c = 0; c < probe_types.size(); ++c)
-            schema->columns.push_back(make_empty_col(probe_types[c], probe_logical[c]));
+            schema->columns.push_back(make_empty_col(probe_types[c], probe_logical[c],
+                                                     probe_element[c]));
         schema->names.resize(probe_types.size());
         schema->zero_col_rows = 0;
         set_source_(p, std::make_unique<UnmatchedBuildSource>(
@@ -363,13 +405,17 @@ public:
                              size_t ref, std::vector<DrakenType> payload_types,
                              std::vector<int> lt_kind, std::vector<int> lt_unit,
                              std::vector<int> lt_precision, std::vector<int> lt_scale,
-                             std::vector<int> lt_dimension) {
+                             std::vector<int> lt_dimension,
+                             std::vector<std::vector<int>> elem_chain,
+                             int asof_type) {
         auto payload_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
                                                    lt_scale, lt_dimension);
+        auto payload_element = decode_elem_chains(elem_chain, payload_types.size());
         set_sink_(p, std::make_unique<Join2BuildSink>(
             std::move(key_idx), std::move(payload_idx),
             std::move(payload_types), std::move(payload_logical),
-            static_cast<int>(asof_idx)));
+            std::move(payload_element),
+            static_cast<int>(asof_idx), asof_type));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_asof_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
@@ -415,6 +461,34 @@ public:
                                       const std::vector<int>* retag_units) {
         set_source_(p, std::make_unique<NativeSkeneScanSource>(
                            files, column_names, out_identities, column_types, retag_units));
+    }
+
+    // The two-pass late-materialization skene scan: pass 1 decodes only the
+    // predicate columns + the sort key over every file and reduces the survivors to
+    // the top-n boundary; pass 2 decodes the full projection for just the files that
+    // still hold a candidate. See native_skene_latmat_scan_source.hpp for the
+    // algorithm, for why the reduction reuses draken's own sort comparator, and for
+    // why this is NOT the reader-side row filter skene's can_push still declines.
+    // Every pointer is borrowed from the NativePlan, which holds the owners alive.
+    void set_skene_latmat_scan_source(size_t p,
+                                      const std::vector<std::string>* files,
+                                      const std::vector<std::string>* p1_column_names,
+                                      const std::vector<int>* p1_column_types,
+                                      const std::vector<int>* p1_retag_units,
+                                      const std::vector<std::string>* out_column_names,
+                                      const std::vector<std::string>* out_identities,
+                                      const std::vector<int>* out_column_types,
+                                      const std::vector<int>* out_retag_units,
+                                      void* pred_fn, void* pred_ctx,
+                                      const std::vector<int>* pred_col_to_p1,
+                                      int sort_p1_index, bool sort_ascending,
+                                      int64_t topn_limit) {
+        set_source_(p, std::make_unique<NativeSkeneLatmatScanSource>(
+                           files, p1_column_names, p1_column_types, p1_retag_units,
+                           out_column_names, out_identities, out_column_types,
+                           out_retag_units,
+                           reinterpret_cast<SkeneLatmatPredFn>(pred_fn), pred_ctx,
+                           pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit));
     }
 
     void set_native_scan_source(size_t p, rugo::ParquetIOPipeline* pipeline,
@@ -600,6 +674,14 @@ public:
                     bool drop_source) {
         add_op_(p, std::make_unique<UnnestOperator>(array_idx, std::move(target_name),
                                                     drop_source));
+    }
+    // CROSS JOIN CIDR_UNNEST. Unlike add_unnest, this operator is RESUMABLE: one
+    // input morsel can expand to billions of rows, so it emits bounded batches
+    // and the executor re-drives it (HAVE_MORE) until the input is consumed.
+    void add_cidr_unnest(size_t p, uint32_t cidr_idx, std::string target_name,
+                         bool drop_source) {
+        add_op_(p, std::make_unique<CidrUnnestOperator>(cidr_idx, std::move(target_name),
+                                                        drop_source));
     }
     void add_unnest_literal(size_t p, MorselPtr lit, std::string target_name) {
         add_op_(p, std::make_unique<UnnestLiteralOperator>(std::move(lit),

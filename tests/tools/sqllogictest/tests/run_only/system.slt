@@ -1,7 +1,7 @@
 # Source: system.run_tests
 
 statement ok
-SELECT version()
+SELECT @@version
 
 statement ok
 SELECT connection_id() AS pid

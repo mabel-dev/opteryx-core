@@ -18,8 +18,16 @@ is stale** — fix the document.
 
 ## 1. What it is
 
-`.skene` stores one **row group** of [draken](https://github.com/mabel-dev)
+`.skene` stores one or more **row groups** of [draken](https://github.com/mabel-dev)
 columnar vectors, losslessly.
+
+It held exactly one row group until 2026-08-08. That made a file's count and a
+row group's count the same number, and a ClickBench mirror 396 objects against
+Parquet's 99 for the same data — ~0.1ms of fixed per-file cost locally, tens of
+milliseconds per GET remotely, paid before any data is read. Packing amortises
+it. **v1 was DRAFT and not frozen, so the layout changed without a version
+bump**; §12's guard against reading a pre-packing file is the file footer's own
+magic (§5.1), not the version.
 
 It exists because Parquet cannot express draken's logical types. An IPv4 column
 is a `UINT32` refined by an `IPV4` descriptor; Parquet stores the 32 bits and
@@ -59,15 +67,18 @@ redefined here. Their authority is `draken/core/buffers.h`,
  byte 0
  ┌────────────────────────────────────────────┐
  │ HEAD                             16 bytes  │  magic FIRST
+ ├════════════════════════════════════════════┤
+ │ ROW GROUP 0                                │
+ │   DATA region                              │
+ │     column 0 sections (then its children's)│  a column subtree is contiguous
+ │     column 1 sections …                    │
+ │   INDEX region                             │  optional sections
+ │   ROW GROUP FOOTER                         │  its own directories + stats
  ├────────────────────────────────────────────┤
- │ DATA region                                │
- │   column 0 sections (then its children's)  │  a column subtree is contiguous
- │   column 1 sections …                      │
- ├────────────────────────────────────────────┤
- │ INDEX region                               │  optional sections
- ├────────────────────────────────────────────┤
- │ FOOTER                     footer_bytes    │
- ├────────────────────────────────────────────┤
+ │ ROW GROUP 1 …                              │
+ ├════════════════════════════════════════════┤
+ │ FILE FOOTER                footer_bytes    │  schema + row group directory
+ ├────────────────────────────────────────────┤  + per-row-group statistics
  │ TAIL                             24 bytes  │  magic LAST
  └────────────────────────────────────────────┘
  EOF
@@ -75,23 +86,37 @@ redefined here. Their authority is `draken/core/buffers.h`,
 
 Magic appears at **both** ends. The head magic rejects an unrelated or
 front-truncated object on the first four bytes read; the tail magic plus
-`footer_bytes` locates the footer in one range request with no linear parse.
+`footer_bytes` locates the FILE footer in one range request with no linear
+parse.
 
-**All sections of one column, and of its descendants, are contiguous**, so
-reading a column is a single range request.
+**All sections of one column, and of its descendants, are contiguous within a
+row group**, so reading one column of one row group is a single range request.
 
-The INDEX region is adjacent to the footer so that one range request can fetch
-the footer together with every filter and index.
+Each row group is a self-contained `[DATA][INDEX][FOOTER]` unit at a known
+offset, so it is readable without parsing any other. Its INDEX region is
+adjacent to its own footer, so one request fetches that row group's directories
+together with every filter and index it carries.
+
+The FILE footer is small and holds no section directory. That is deliberate: it
+is the only thing a pruning reader has to fetch, and the expensive metadata — a
+column directory is tens of kilobytes on a wide schema — stays behind the row
+group footers, paid for only by the row groups that survive.
 
 ### 3.1 Read procedure
 
 1. Read the last 24 bytes. Validate the tail (§4.2).
 2. Read `[filesize - 24 - footer_bytes, filesize - 24)`. Verify
-   `footer_checksum`. A reader wanting indexes SHOULD extend this request
-   backwards over the INDEX region — it is contiguous with the footer.
-3. Parse the footer (§5). Validate (§11).
-4. Prune using statistics (§8) and optional filters (§9).
-5. For each surviving column, read its section extents and reconstruct (§7).
+   `footer_checksum`. This is the FILE footer.
+3. Parse it (§5.1–5.3). Validate (§11).
+4. Prune ROW GROUPS using the per-row-group statistics (§5.4) it carries. No row
+   group footer has been read at this point, and the ones ruled out never are.
+5. For each surviving row group, read `[footer_offset, footer_offset +
+   footer_bytes)`, verify it against the `footer_checksum` recorded for it in
+   the row group directory, and parse it (§5.5–5.8). A reader wanting that row
+   group's indexes SHOULD extend the request backwards over its INDEX region —
+   it is contiguous with its footer.
+6. Prune columns using statistics (§8) and optional filters (§9).
+7. For each surviving column, read its section extents and reconstruct (§7).
 
 The head MAY be validated at any point; a reader that never reads byte 0 (a
 range-GET reader) MUST still validate the tail's `version`, `endianness` and
@@ -154,26 +179,128 @@ file on the version alone.
 
 ---
 
-## 5. Footer
+## 5. Footers
 
-The footer is a flat byte stream, parsed sequentially. It contains no internal
-offsets and requires no allocation to walk. Order:
+There are two, at two levels, and the split is the point of the format's read
+path: the FILE footer is small, is fetched always, and is enough to prune; a ROW
+GROUP footer is large, and is fetched only for a row group that survived.
 
-1. **File header** (§5.1) — 48 bytes
-2. **Writer tag** — `writer_tag_bytes` bytes, provenance only
-3. **Column directory** — `column_count` entries (§5.2), each of which nests its
-   own children
-4. **Section directory** — `section_count` entries (§5.3), 36 bytes each
-5. **Statistics blobs** (§8), in the same order columns appear in the directory
+Both are flat byte streams, parsed sequentially, containing no internal offsets
+and requiring no allocation to walk.
 
-The footer MUST end exactly at the start of the tail. A reader MUST treat a
+The FILE footer MUST end exactly at the start of the tail. A reader MUST treat a
 trailing or short remainder as `kMalformed`.
 
-### 5.1 File header — 48 bytes
+**FILE footer**, in order:
+
+1. **File footer header** (§5.1) — 56 bytes
+2. **Writer tag** — `writer_tag_bytes` bytes, provenance only
+3. **Row group directory** — `row_group_count` entries (§5.2), 56 bytes each
+4. **Schema directory** — `column_count` entries (§5.3), each nesting its children
+5. **Per-row-group statistics** (§5.4)
+
+**ROW GROUP footer**, in order:
+
+1. **Row group header** (§5.5) — 48 bytes
+2. **Writer tag** — `writer_tag_bytes` bytes, provenance only
+3. **Column directory** — `column_count` entries (§5.6), each of which nests its
+   own children
+4. **Section directory** — `section_count` entries (§5.8), 36 bytes each
+5. **Statistics blobs** (§8), in the same order columns appear in the directory
+
+### 5.1 File footer header — 56 bytes
 
 | offset | size | field | notes |
 |---|---|---|---|
-| 0 | 8 | `row_count` | logical rows in the row group |
+| 0 | 4 | `footer_magic` | `0x494E4B53` — ASCII `SKNI`. See below. |
+| 4 | 2 | `footer_version` | file-footer layout version, `1` |
+| 6 | 2 | `reserved` | `0` |
+| 8 | 8 | `row_count` | **total** logical rows, summed over row groups |
+| 16 | 4 | `row_group_count` | at least 1 |
+| 20 | 4 | `column_count` | **top-level** columns; children are nested, not counted here |
+| 24 | 16 | `file_uuid` | all-zero means unset |
+| 40 | 8 | `created_at_unix_us` | provenance only, **never load-bearing** |
+| 48 | 4 | `writer_tag_bytes` | length of the tag that follows |
+| 52 | 4 | `file_flags` | `0`; reserved |
+
+`footer_magic` is what makes the packing change fail LOUD against the
+single-row-group files v1 wrote before it. Those files are framed identically —
+same head, same tail, same version, a footer whose checksum verifies — so
+framing alone cannot tell them apart, and parsing one as a file index would read
+a row count as a magic and a writer tag as a row group directory. A reader MUST
+reject a mismatch, naming the change and saying to regenerate the file.
+
+### 5.2 Row group directory entry — 56 bytes
+
+Everything needed to read one row group without parsing any other.
+
+| offset | size | field | notes |
+|---|---|---|---|
+| 0 | 8 | `row_count` | logical rows in this row group |
+| 8 | 8 | `first_row` | this row group's first row, in file row order |
+| 16 | 8 | `data_offset` | absolute; start of its DATA region |
+| 24 | 8 | `data_bytes` | its DATA + INDEX regions, up to its footer |
+| 32 | 8 | `footer_offset` | absolute; start of its own footer |
+| 40 | 8 | `footer_checksum` | over exactly `footer_bytes` at `footer_offset` |
+| 48 | 4 | `footer_bytes` | |
+| 52 | 4 | `reserved` | `0` |
+
+A row group's footer checksum is recorded HERE rather than beside the bytes it
+covers, because the FILE footer is the only thing a ranged reader has fetched
+when it decides which row group footers to request — a checksum stored next to
+its own bytes could not be validated against anything already trusted.
+
+A reader MUST check, before following any of them: `reserved == 0`; `first_row`
+equals the sum of the preceding row groups' `row_count`; the sum of every
+`row_count` equals the header's `row_count`; `data_offset >= 16`;
+`data_offset + data_bytes` does not exceed the file footer's offset;
+`footer_bytes > 0`; `footer_offset >= data_offset + data_bytes`; and
+`footer_offset + footer_bytes` does not exceed the file footer's offset.
+
+### 5.3 Schema directory entry — 20-byte head, then variable parts
+
+The part of a column that CANNOT vary between row groups. Everything else about
+a column — length, `data_length`, selection kind, value order, section extents,
+string arena counts — is a property of one row group and lives in that row
+group's column directory entry (§5.6).
+
+| offset | size | field | notes |
+|---|---|---|---|
+| 0 | 4 | `field_id` | stable identity across schema evolution; `0` means unassigned |
+| 4 | 4 | `name_bytes` | length of the name that follows the head |
+| 8 | 4 | `type` | `DrakenType`, verbatim |
+| 12 | 1 | `logical_present` | `0`/`1`; a `LogicalTypeDescriptor` follows the name |
+| 13 | 1 | `reserved0` | `0` |
+| 14 | 2 | `reserved1` | `0` |
+| 16 | 4 | `child_count` | `0` except `DRAKEN_ARRAY`, which has `1` |
+
+Then, in order: `name_bytes` of identity, a `LogicalTypeDescriptor` if
+`logical_present == 1`, then `child_count` complete child entries — the same
+shape and the same order as the column directory.
+
+A writer MUST reject a row group whose columns differ from the first's in name,
+type, logical descriptor, `field_id` or nesting. A schema directory that does
+not describe every row group is a lie a reader has no way to detect.
+
+### 5.4 Per-row-group statistics
+
+Row group major, then the schema's depth-first column order (ARRAY children
+included). Each entry is a `u32` byte length followed by that many bytes of
+`ColumnStatistics` (§8); a length of `0` means NOT TRACKED, which is never the
+same as zero. A blob longer than a reader understands is read prefix-first and
+the remainder skipped — the same growth rule §8's blobs follow.
+
+This is what keeps row group pruning alive once catalog/manifest bounds coarsen.
+A file-level bound is necessarily the union over the file's row groups and so is
+wider than any one of them; that coarsening is expected and correct. What
+recovers it is here: reachable from the file footer alone, so a reader prunes
+row groups without opening a single row group footer.
+
+### 5.5 Row group header — 48 bytes
+
+| offset | size | field | notes |
+|---|---|---|---|
+| 0 | 8 | `row_count` | logical rows in **this** row group |
 | 8 | 4 | `column_count` | **top-level** columns; children are nested, not counted here |
 | 12 | 4 | `section_count` | total entries in the section directory, children included |
 | 16 | 16 | `file_uuid` | all-zero means unset |
@@ -181,7 +308,11 @@ trailing or short remainder as `kMalformed`.
 | 40 | 4 | `writer_tag_bytes` | length of the tag that follows |
 | 44 | 4 | `file_flags` | `0`; reserved |
 
-### 5.2 Column directory entry
+`file_uuid` and `created_at_unix_us` repeat the file footer's so that a row group
+footer extracted on its own still names the file it came from. A reader MUST
+reject a `row_count` that disagrees with the row group directory's.
+
+### 5.6 Column directory entry
 
 A fixed 72-byte head, then variable-length parts, then children — depth first.
 
@@ -205,14 +336,14 @@ A fixed 72-byte head, then variable-length parts, then children — depth first.
 | 56 | 8 | `string_arena_cap` | string family only |
 | 64 | 1 | `string_payloads_elided` | string family only (§7.4) |
 | 65 | 3 | `pad` | `0` |
-| 68 | 4 | `index_section_index` | first **optional**-section directory entry (§5.4) |
+| 68 | 4 | `index_section_index` | first **optional**-section directory entry (§5.7) |
 | 72 | 4 | `index_section_count` | how many optional entries belong to this column |
 | 76 | 4 | `reserved` | `0` |
 
-### 5.4 Two slices, because there are two regions
+### 5.7 Two slices, because there are two regions
 
 A column's required sections live in the DATA region and its optional ones in
-the INDEX region next to the footer, so each column carries **two** contiguous
+the INDEX region next to its row group footer, so each column carries **two** contiguous
 directory slices rather than one.
 
 This is what makes a pruning read one request: fetch the footer and the index
@@ -232,7 +363,7 @@ Immediately following the head, in order:
 2. a `LogicalTypeDescriptor` (§6), only if `logical_present == 1`
 3. `child_count` complete child entries, recursively
 
-### 5.3 Section directory entry — 36 bytes
+### 5.8 Section directory entry — 36 bytes
 
 | offset | size | field |
 |---|---|---|
@@ -421,6 +552,7 @@ references, or `data_length` ceases to be the exact distinct count.
 | 1 | `BITPACK` | `u32` arrays (selection codes) at a fixed bit width |
 | 2 | `DELTA_BITPACK` | ascending 4- or 8-byte integer arrays |
 | 3 | `ZSTD` | any body; `plain_bytes` is the decoded size |
+| 4 | `LZ4` | any body; LZ4 **block** format; `plain_bytes` is the decoded size |
 
 There is deliberately no bare `DELTA`: differences stored at the source width are
 never smaller than the values, so nothing would produce one. Delta only pays
@@ -437,7 +569,38 @@ type's range. It applies ONLY where ascending order is established by
 construction — a value-ordered column — never inferred from data that happens to
 look sorted.
 
-`ZSTD` is applied **per section**, never to the whole file. Whole-file
+`LZ4` is the LZ4 **block** format, not the frame format. A block carries no
+header and cannot state its own decoded size, so `plain_bytes` supplies it and is
+load-bearing: a decoder is given that value as its destination capacity and MUST
+produce exactly it. A body that decodes short is as malformed as one that
+overruns — the directory decides the section's shape, and a short decode would
+leave the tail of the destination holding whatever was there before. Readers MUST
+NOT narrow `plain_bytes` or `stored_bytes` to fit the codec's `int`-sized API; a
+value past that ceiling is rejected, never truncated into a plausible one.
+
+**Which codec is a writer POSTURE, not a per-section choice.** A file uses at
+most one of `ZSTD` and `LZ4`. Both are decoded per section independently, so
+mixing them within a file would buy a reader nothing while making the file's cost
+model unstateable. Readers MUST decode either.
+
+The two answer different questions. Measured on a ClickBench row group, 154.7 MB
+of section bytes in 256 KB blocks, Apple Silicon:
+
+| codec | ratio | compress MB/s | decompress MB/s |
+|---|---|---|---|
+| `LZ4` | 4.49x | 1743 | 8414 |
+| `ZSTD` level 1 | 6.47x | 1081 | 2882 |
+| `ZSTD` level 9 | 7.34x | 188 | 3078 |
+| `ZSTD` level 19 | 7.71x | 9 | 3173 |
+
+zstd's decompression rate does **not** vary with the level that produced the
+bytes. A low zstd level therefore gives up ratio and buys nothing back on read,
+so writers SHOULD use a high one; level 9 is the knee (9 → 12 costs 7x the
+compression time for 1.6% more ratio). LZ4 decodes at roughly the rate the
+reader's own uncompressed path runs at on the same file (~8840 MB/s measured),
+which makes its decompression close to free relative to work already being done.
+
+`ZSTD` and `LZ4` are applied **per section**, never to the whole file. Whole-file
 compression is 0.7–5.7% smaller (measured on TPC-H) but a reader cannot
 decompress a slice, so reading one column would mean fetching and decompressing
 every column — destroying the property §3 exists for. Per-section keeps each
@@ -461,7 +624,7 @@ high-entropy by definition, and `ZONE_MAP` is kilobytes per file.
 of all sections but hold ~1.2% of the recoverable bytes.
 
 These are writer-side policy, not reader obligations: a reader MUST decode any
-`ZSTD` section it is given, on any kind, at any size.
+`ZSTD` or `LZ4` section it is given, on any kind, at any size.
 
 Every encoder DECLINES when the result would not be smaller than plain, and the
 writer then emits `PLAIN`. "Not worth it" is a normal outcome measured on actual
@@ -592,7 +755,7 @@ key_count × { u32 column_ordinal │ u8 descending │ u8 nulls_first │ u16 r
 length   × u32 row ordinals
 ```
 
-`length` MUST equal the file's `row_count`. `nulls_first` MUST follow draken's
+`length` MUST equal its row group's `row_count`. `nulls_first` MUST follow draken's
 single sort null-ordering rule — NULLS FIRST ascending, NULLS LAST descending — a
 permutation written under a different rule is a different order, silently.
 
@@ -617,8 +780,8 @@ Written ONLY for a value-ordered column with a stored selection. With
 whose `[min_code, max_code]` misses that interval provably contains no matching
 row and its slice of the `SELECTION` section need not be read. On an unordered
 column the codes carry no order and the bounds would be noise, so none is
-written. None is written below one chunk either: the footer's own min/max
-already covers the column.
+written. None is written below one chunk either: the row group footer's own
+min/max already covers the column.
 
 A negative answer from a zone map is PROOF that a chunk holds no match; a
 positive answer is only "cannot rule it out", so a reader must still evaluate the
@@ -645,17 +808,29 @@ content before all of it passes:
 2. `version` within the supported window (§12) — otherwise fail naming **both**
    the file's version and the reader's.
 3. `endianness` matches the host; `checksum_algorithm` is one this build implements.
-4. `footer_bytes` is consistent with the object size; every section's
-   `offset + stored_bytes` lies within the data region.
-5. `footer_checksum`, then each section's `checksum` before that section is used.
-6. Structural consistency: `selection_kind` against `data_length`/`length`
+4. `footer_bytes` is consistent with the object size.
+5. `footer_checksum` over the FILE footer.
+6. `footer_magic` (§5.1) — a mismatch is a file written before row groups were
+   packed, and MUST be reported as one.
+7. Every row group directory entry against the object (§5.2), and the row group
+   row counts against the file's total, BEFORE any of those offsets is followed.
+8. Per row group, as it is opened: its `footer_checksum` as recorded in the row
+   group directory, then each of its sections' `offset + stored_bytes` within
+   THAT ROW GROUP's data extent — not merely within the file — then each
+   section's `checksum` before that section is used.
+9. Structural consistency: `selection_kind` against `data_length`/`length`
    (§7.2); every selection code `< data_length`; `data_length <=
    string_slot_count` for string columns; `string_payloads_elided` against the
    slots and arena (§7.4); `child_count == 1` iff the type is `DRAKEN_ARRAY`.
-7. Unrecognised **required** section kind or encoding → reject. Unrecognised
-   **optional** section kind → skip.
-8. `reserved` in the head and tail is zero (§4.3) — the only bytes in the file
-   no checksum covers.
+10. Unrecognised **required** section kind or encoding → reject. Unrecognised
+    **optional** section kind → skip.
+11. `reserved` in the head, the tail (§4.3) and every row group directory entry
+    is zero.
+
+Bounding a section against its own row group rather than against the file is not
+belt and braces: a section entry in row group 3 that addresses row group 0's
+bytes would otherwise pass, and its checksum would pass too, because the
+checksum is computed over whatever the offset names.
 
 **There is no partial or best-effort read.** The format copies buffers verbatim
 and rebuilds absolute pointers from stored offsets; continuing past a detected
@@ -702,14 +877,21 @@ yet. That is what freezes bytes 0–5 (§4.1).
 | New required section kind, or a layout change to one | **Yes** |
 | New encoding on a required section | **Yes** |
 | Any change to the column or section directory layout | **Yes** |
+| Any change to the file footer, row group directory or schema directory layout | **Yes**, once v1 is frozen — and `footer_version` (§5.1) tracks it independently |
 | Any change to bytes 0–5 of the head | **Never permitted** |
+
+While v1 is DRAFT (§1) none of the above applies: the layout may change without
+a bump, which is how row groups came to be packed into files. The one obligation
+a draft change still carries is that files written before it MUST NOT be
+misread — which is why that change added `footer_magic` rather than relying on
+the version.
 
 ---
 
 ## 13. Implementation status
 
 Implemented and tested, writer **and** reader: §4, §5, §6, §7 in full (including
-§7.6 value ordering and all three §7.7 encodings), §8, §9.1 bloom filters, §9.3
+§7.6 value ordering and all §7.7 encodings), §8, §9.1 bloom filters, §9.3
 zone maps, §10, §11 in full, §12 version window and identification.
 
 Not implemented: §9.2 permutations. Deliberately deferred rather than

@@ -260,6 +260,11 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
     if name == "ARRAY_AGG":
         # Element type is unknown at bind time; VARIANT is a safe placeholder.
         return _lt.ARRAY(_lt.VARIANT)
+    if name == "CIDR_AGG":
+        # Unlike ARRAY_AGG, the element type is FIXED and known here: CIDR_AGG
+        # always renders blocks as text regardless of its operand, so there is
+        # nothing to infer and no reason to fall back to VARIANT.
+        return _lt.ARRAY(_lt.VARCHAR)
     if name in _AGGREGATE_RESULT_PASSTHROUGH or name == "AVG":
         # SUM/MIN/MAX/ANY_VALUE pass through the input column's type. AVG is a ratio,
         # not a value drawn from the data, so it returns DOUBLE for both INTEGER and
@@ -454,13 +459,26 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
     from opteryx.planner.binder import BindingContext
 
     def create_variable_node(node: Node, context: BindingContext) -> Node:
-        """Populates a Node object for a variable."""
-        schema_column = context.execution_context.variables.as_column(node.value)
+        """Populates a Node object for a variable.
+
+        The lookup key is `source_column` — the `@@name` exactly as written. It is
+        NOT `value`/`current_name`, which are `alias or source_column`: under
+        `SELECT @@version AS v` those read `v`, so the container was asked for a
+        variable named `v` and reported it missing.
+
+        The alias rides onto the new node and onto the column's aliases, so it names
+        the output column and resolves elsewhere in the query — the same treatment an
+        aliased literal gets in `inner_binder`.
+        """
+        schema_column = context.execution_context.variables.as_column(node.source_column)
+        if node.alias:
+            schema_column.aliases = [*(schema_column.aliases or []), node.alias]
         new_node = Node(
             node_type=NodeType.LITERAL,
             schema_column=schema_column,
             type=schema_column.column_type,
             value=schema_column.value,
+            alias=node.alias,
             relations={},
         )
         return new_node
@@ -515,8 +533,11 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
 
     # if we didn't find the column, suggest alternatives
     if not column:
-        # Check if the identifier is a variable
-        if node.current_name[0] == "@":
+        # Check if the identifier is a variable. Test the name AS WRITTEN
+        # (`source_column`), never `current_name` — that is `alias or source_column`,
+        # so an aliased variable (`@@version AS v`) tests `v`, fails the `@` check and
+        # falls through to ColumnNotFoundError.
+        if node.source_column[0] == "@":
             node = create_variable_node(node, context)
             context.schemas["$derived"].columns.append(node.schema_column)
             return node, context
@@ -533,12 +554,16 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
             ],
         )
         raise ColumnNotFoundError(column=node.value, suggestion=suggestion)
-    elif node.current_name[0] == "@":
+    elif node.source_column[0] == "@":
+        # A second reference to a variable already bound in this query — it was
+        # appended to `$derived` above, so the lookup found it. Same rule as the
+        # not-found branch: test the name as written, and keep the alias.
         new_node = Node(
             node_type=NodeType.LITERAL,
             schema_column=column,
             type=column.column_type,
             value=column.value,
+            alias=node.alias,
         )
         return new_node, context
 

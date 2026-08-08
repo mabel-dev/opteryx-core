@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
         if (!st.is_ok()) { std::fprintf(stderr, "%s\n", st.message().c_str()); return 1; }
 
         CxxMorsel morsel;
-        st = read_morsel(bytes.data(), bytes.size(), &morsel);
+        st = read_morsel(bytes.data(), bytes.size(), 0, &morsel);
         if (!st.is_ok()) { std::fprintf(stderr, "%s\n", st.message().c_str()); return 1; }
 
         bool printed_header = false;

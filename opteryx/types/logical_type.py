@@ -34,6 +34,9 @@ from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
+# Draken owns the physical+descriptor -> SQL name mapping; this is the one
+# entry point onto it. Never reimplement the table here (see __str__).
+from draken.vectors.vector import type_display_name as _draken_type_display_name
 from draken.draken_native import LogicalType
 from draken.draken_native import TimestampUnit
 
@@ -332,33 +335,37 @@ class ColumnType:
         return physical.ordinalize(value)
 
     def __str__(self) -> str:
-        if self.physical == DrakenType.DECIMAL or self.physical == DrakenType.DECIMAL128:
-            return f"DECIMAL({self.logical.precision}, {self.logical.scale})"
-        if self.physical == DrakenType.VECTOR_FP16:
-            return f"VECTOR({self.logical.dimension})"
-        # The UNIT is part of the type, and this string is what gets PERSISTED —
-        # a schema stored at ms and read back as the us default reads every value
-        # 1000x off, silently. Emitted always rather than only for non-default
-        # units, so a reader never has to know what the default is; the parse side
-        # still accepts the bare name, which is what every schema written before
-        # this says.
-        if self.physical == DrakenType.TIMESTAMP64:
-            if self.logical is not None and self.logical.unit in _UNIT_TO_SQL:
-                return f"TIMESTAMP[{_UNIT_TO_SQL[self.logical.unit]}]"
-            return "TIMESTAMP"
-        if self.physical in (DrakenType.TIME32, DrakenType.TIME64):
-            if self.logical is not None and self.logical.unit in _UNIT_TO_SQL:
-                return f"TIME[{_UNIT_TO_SQL[self.logical.unit]}]"
-            return "TIME"
+        """The SQL type name — DELEGATED to draken, which owns that mapping.
+
+        Draken is the single source (architect's ruling, 2026-08-08): the
+        descriptor is what decides the name, and draken owns LogicalType. Keeping
+        a second table here is how one surface renders a column `UINT32` while
+        another renders the same column `IPV4` — which is exactly the defect this
+        replaced, in draken's own Morsel renderer.
+
+        This string is PERSISTED into stored schemas, so it is a format, not a
+        display choice: a TIMESTAMP stored at ms and read back as the us default
+        reads every value 1000x off, silently. Delegation was gated on a parity
+        check over every constructible type — see
+        tests/unit/types/test_type_name_parity.py, which also pins `_NAME_OF`
+        (still the source of the PARSE direction, `_NAME_TO_PHYSICAL`) against
+        draken, so the two directions cannot drift apart.
+
+        ARRAY stays here: its element is a nested ColumnType, which draken has no
+        concept of, so draken names the tag and this composes the rest.
+        """
         if self.physical == DrakenType.ARRAY:
             return f"ARRAY<{self.element}>"
-        # IPv4 shares UINT32's physical tag, so the descriptor — not the tag —
-        # decides the name. Checked before _NAME_OF so a refined UINT32 does not
-        # serialize as plain "UINT32" and lose its logical type on round-trip.
-        if self.logical is not None and self.logical.kind == LogicalKind.IPV4:
-            return "IPV4"
-        name = _NAME_OF.get(self.physical)
-        if name is None:
+        logical = self.logical
+        name = _draken_type_display_name(
+            self.physical,
+            kind=(logical.kind if logical is not None else None),
+            unit=(_UNIT_TO_SQL.get(logical.unit) if logical is not None else None),
+            precision=(logical.precision if logical is not None else 0),
+            scale=(logical.scale if logical is not None else 0),
+            dimension=(logical.dimension if logical is not None else 0),
+        )
+        if not name:
             raise NotImplementedError(f"no display name for {self.physical!r}")
         return name
 

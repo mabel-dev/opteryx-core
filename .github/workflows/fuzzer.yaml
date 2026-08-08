@@ -1,7 +1,18 @@
 #
-# CI runs short-form fuzz testing (100 iterations), this performs larger set of
-# iterations on a schedule (currently 100k, daily).
-# 
+# CI runs short-form fuzz testing, this performs a larger set of iterations on a
+# schedule (currently 100k, daily).
+#
+# TEST_ITERATIONS is honoured by every fuzzer in tests/fuzzing. It used to reach
+# only the hypothesis-driven files -- the SQL fuzzers carried a hardcoded case
+# count and ignored it, so "100k nightly" applied to two of them and not the
+# rest. Raising it now genuinely multiplies the work of the whole directory, so
+# the job carries an explicit timeout: an overrun should fail visibly rather
+# than be killed at the six-hour platform cap with no explanation.
+#
+# The SQL fuzzers seed themselves randomly and print the seed of every case, so
+# a nightly failure is reproduced from the job log by pinning that seed in
+# tests/fuzzing/seeds/.
+#
 name: Fuzzing
 
 on:
@@ -12,6 +23,7 @@ jobs:
   fuzz_testing:
     name: "Fuzz Testing"
     runs-on: ubuntu-latest
+    timeout-minutes: 330
     steps:
 
       - name: Checkout code
@@ -40,4 +52,34 @@ jobs:
         run: python -m pytest tests/fuzzing/.
         env:
           TEST_ITERATIONS: 100000
+
+  # Coverage-guided search over the file parsers. Separate from the job above:
+  # different input (bytes we did not write), different oracle (ASan/UBSan
+  # rather than a result comparison), and no Python or engine build needed.
+  #
+  # A crashing input is written into tests/fuzzing/native/corpus/ and uploaded,
+  # because the input IS the bug report — commit it and `make fuzz-native`
+  # replays it forever after. The fast deterministic replay of that corpus runs
+  # on every push (fuzz_native_replay.yaml); this job is the search.
+  native_fuzzing:
+    name: "Native Parser Fuzzing"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Fuzz the parsers
+        run: make fuzz-native-run
+        env:
+          FUZZ_SECONDS: 900
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: tests/fuzzing/native/corpus/
+          retention-days: 30
 

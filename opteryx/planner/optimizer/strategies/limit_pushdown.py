@@ -45,6 +45,14 @@ class LimitPushdownStrategy(OptimizationStrategy):
         # LIMIT below it onto the scan caps the wrong side of the expansion.
         # Same reasoning as the Join case below, just a different node type.
         LogicalPlanStepType.Unnest,
+        # A window function is evaluated over the whole (partitioned) input, and SQL
+        # evaluates it BEFORE the LIMIT. Pushing a LIMIT below it changes what the
+        # window sees: a ranking window then numbers an arbitrary N-row subset
+        # (`ROW_NUMBER() OVER (ORDER BY x DESC) ... LIMIT 3` returned the numbering of
+        # the first three rows read, not the top three), and an aggregate window
+        # computes its per-partition value over a truncated partition. Both are wrong
+        # answers, silently, so the LIMIT stays above the Window.
+        LogicalPlanStepType.Window,
     }
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:

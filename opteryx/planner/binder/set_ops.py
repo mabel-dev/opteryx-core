@@ -572,6 +572,51 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # we create a new schema for the unnested column
     unnest_schema = node.alias
 
+    if node.unnest_function == "CIDR_UNNEST":
+        # CIDR_UNNEST's output type is FIXED at IPV4 whatever its input, so unlike
+        # UNNEST there is no element type to infer and no VARIANT fallback. The
+        # IPV4 descriptor is load-bearing rather than cosmetic: without it the
+        # column renders as an integer and CIDR_AGG refuses to take it back, so
+        # the round trip would not close.
+        from opteryx.exceptions import IncorrectTypeError
+        from opteryx.types.schema import mint_column_identity
+
+        # A literal source is bound like any other expression rather than
+        # special-cased. That keeps ONE compile path: the literal becomes a
+        # projected constant column and streams through the same operator, so
+        # nothing is materialized at plan time (a literal /0 would be 4.3 billion
+        # addresses) and the IPV4 descriptor is attached by the operator that
+        # generates the values.
+        from opteryx.planner.binder.binder import inner_binder
+
+        node.unnest_column, context = inner_binder(node.unnest_column, context)
+        category = node.unnest_column.schema_column.category
+        if category not in (None, LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR,
+                            LogicalCategory.NULL):
+            raise IncorrectTypeError(
+                "CROSS JOIN CIDR_UNNEST requires a text CIDR block such as "
+                f"'10.0.0.0/24', not {category}."
+            )
+        node.columns += [node.unnest_column]
+
+        schema_column = SchemaColumn(
+            name=node.unnest_alias,
+            column_type=_lt.IPV4,
+            identity=mint_column_identity(node.unnest_alias, node.unnest_alias),
+        )
+        node.unnest_target = LogicalColumn(
+            alias=node.unnest_alias,
+            node_type=NodeType.IDENTIFIER,
+            source_column=node.unnest_alias,
+            source=unnest_schema,
+            schema_column=schema_column,
+        )
+        context.schemas[unnest_schema] = RelationSchema(
+            name=unnest_schema, columns=[schema_column]
+        )
+        node.columns.append(node.unnest_target)
+        return node, context
+
     # this is the column which is being unnested
     if node.unnest_column.node_type == NodeType.LITERAL:
         # Phase 2: node.unnest_column.type is ARRAY(element) ColumnType.

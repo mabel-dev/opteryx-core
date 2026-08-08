@@ -26,6 +26,7 @@
 DRAKEN_ROOT ?= $(CURDIR)/..
 
 CXX      ?= c++
+CC       ?= cc
 # C++20 because that is what opteryx-core compiles draken with (build_common.py
 # CPP_FLAGS). skene compiles the SAME draken headers, so a different standard
 # would be a real hazard, not a preference: draken's frozen structs and inline
@@ -39,6 +40,7 @@ WARN     := -Wall -Wextra -Wno-unused-parameter
 # simd_hash.cpp. skene depends on draken alone.
 INCLUDES := -Iinclude \
             -I$(DRAKEN_ROOT)/third_party/zstd \
+            -I$(DRAKEN_ROOT)/third_party/lz4 \
             -I$(DRAKEN_ROOT)/draken \
             -I$(DRAKEN_ROOT)/draken/core \
             -I$(DRAKEN_ROOT)/draken/simd \
@@ -53,7 +55,7 @@ BUILD := build
 # globals (draken/core/vector_alloc.cpp header comment), so compiling it in is
 # correct rather than a layering violation.
 LIB_SRCS := src/checksum.cpp src/probe.cpp src/writer.cpp src/reader.cpp src/reader_v1.cpp src/value_order.cpp src/statistics.cpp src/encoding.cpp src/bloom.cpp src/file_io.cpp $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp
-LIB_OBJS := $(BUILD)/checksum.o $(BUILD)/probe.o $(BUILD)/writer.o $(BUILD)/reader.o $(BUILD)/reader_v1.o $(BUILD)/value_order.o $(BUILD)/statistics.o $(BUILD)/encoding.o $(BUILD)/bloom.o $(BUILD)/file_io.o $(BUILD)/draken_vector_alloc.o
+LIB_OBJS := $(BUILD)/checksum.o $(BUILD)/probe.o $(BUILD)/writer.o $(BUILD)/reader.o $(BUILD)/reader_v1.o $(BUILD)/value_order.o $(BUILD)/statistics.o $(BUILD)/encoding.o $(BUILD)/bloom.o $(BUILD)/file_io.o $(BUILD)/draken_vector_alloc.o $(BUILD)/lz4.o
 
 TEST_SRCS := $(wildcard tests/test_*.cpp)
 TEST_BINS := $(patsubst tests/%.cpp,$(BUILD)/%,$(TEST_SRCS))
@@ -139,6 +141,15 @@ $(BUILD)/bloom.o: src/bloom.cpp | $(BUILD)
 $(BUILD)/draken_vector_alloc.o: $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# lz4 is C, unlike the vendored zstd sources, which this tree carries renamed to
+# .cpp. It is compiled with the C compiler rather than fed to $(CXX) as the
+# bench targets do: lz4.h wraps its declarations in extern "C" either way, so the
+# linkage matches, and this keeps the vendored source under the language it was
+# written for. -w because it is vendored, not ours to warn about — same posture
+# as the zstd rule below.
+$(BUILD)/lz4.o: $(DRAKEN_ROOT)/third_party/lz4/lz4.c | $(BUILD)
+	$(CC) $(OPT) -I$(DRAKEN_ROOT)/third_party/lz4 -w -c $< -o $@
+
 $(BUILD)/libskene.a: $(LIB_OBJS) $(ZSTD_OBJS)
 	@rm -f $@
 	ar rcs $@ $(LIB_OBJS) $(ZSTD_OBJS)
@@ -149,7 +160,7 @@ $(BUILD)/skene: tools/skene_cli.cpp $(BUILD)/libskene.a
 $(BUILD)/%: tests/%.cpp $(BUILD)/libskene.a
 	$(CXX) $(CXXFLAGS) -Itests -Isrc $< $(BUILD)/libskene.a -o $@
 
-test: all check-disjoint
+test: all check-disjoint check-no-fuzz-flag
 	@fail=0; \
 	for t in $(TEST_BINS); do \
 	  echo "== $$t"; \
@@ -280,6 +291,26 @@ check-disjoint:
 	  exit 1; \
 	fi
 	@echo "ok: libskene has no rugo dependency"
+
+# SKENE_FUZZING_SKIP_CHECKSUM makes the reader ACCEPT files whose checksums do
+# not match (see include/skene/checksum.h). It exists so the native fuzzer can
+# reach past the integrity layer, and it must never reach a shippable artifact.
+# Checked rather than trusted, exactly like check-disjoint: a stray -D in a
+# build definition would be invisible until a corrupt file was read in anger.
+.PHONY: check-no-fuzz-flag
+# Matches the ways the macro can actually be DEFINED (-D on a command line, or
+# a define_macros entry in setuptools), not the bare name, which the comment
+# above legitimately uses. The bracket in the pattern keeps this rule from
+# matching its own text.
+check-no-fuzz-flag:
+	@if grep -nE '(-D|["'"'"'])SKENE_FUZZING[_]SKIP_CHECKSUM' \
+	     Makefile setup.py pyproject.toml \
+	     $(DRAKEN_ROOT)/setup.py $(DRAKEN_ROOT)/build_common.py \
+	     $(DRAKEN_ROOT)/rugo/setup.py 2>/dev/null; then \
+	  echo "ERROR: the fuzzing checksum-skip flag is set in a build that ships"; \
+	  exit 1; \
+	fi
+	@echo "ok: no checksum-skip flag in any shipping build"
 
 clean:
 	rm -rf $(BUILD)

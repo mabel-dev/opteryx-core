@@ -148,15 +148,6 @@ execution starts and restored when result iteration completes.
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 
-ARRAY_AGG_MAX_VALUES_PER_GROUP: int = int(get("ARRAY_AGG_MAX_VALUES_PER_GROUP", 1000))
-"""Hard cap on the elements ARRAY_AGG retains per group.
-
-A per-group list is unbounded by nature, so a high-cardinality grouping can hold the
-whole relation in sink state. Exceeding the cap raises rather than truncating — a
-short list silently passed off as complete is a wrong answer. Mirrors MEDIAN's
-per-group cap. Raise it when a query legitimately needs longer lists.
-"""
-
 KVSTORE_LOCATION: str = str(get("KVSTORE_LOCATION", "")).strip()
 """Single-store KV location (e.g. file://, valkey://, gs://, memory://)."""
 
@@ -414,6 +405,7 @@ class Features:
     disable_manifest_pruning = get_bool("FEATURE_DISABLE_MANIFEST_PRUNING", False)
     parquet_pool_reader = str(get("FEATURE_PARQUET_POOL_READER", "1")).lower() in ("1", "true", "yes")
     parquet_late_materialization = str(get("FEATURE_PARQUET_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
+    skene_late_materialization = str(get("FEATURE_SKENE_LATE_MATERIALIZATION", "1")).lower() in ("1", "true", "yes")
     enable_dpccp_join_planning = get_bool("FEATURE_ENABLE_DPCCP_JOIN_PLANNING", True)
 
     # One kill-switch per optimizer strategy (opteryx/planner/optimizer/__init__.py's
@@ -474,5 +466,33 @@ for a wide/string filter column can cost more memory than reading everything in
 one single pass would have. Estimation failures fail open (two-pass stays
 eligible) rather than silently disabling the optimization for well-behaved
 predicates the estimator just doesn't model."""
+
+SKENE_LATE_MATERIALIZATION_MAX_SELECTIVITY: float = float(
+    get("SKENE_LATE_MATERIALIZATION_MAX_SELECTIVITY", 0.7)
+)
+"""Skip two-pass late materialization on a skene scan when the manifest's
+file-stats selectivity estimate for the filter exceeds this. Same reasoning and
+same default as the parquet knob above; separate because skene's two passes have
+a different cost shape (whole-file decodes, no row mask) and should be tunable
+without moving parquet. What this bounds on skene specifically is pass 1's live
+set: one sort-key value plus one row position per SURVIVING row, held across the
+barrier until the top-n boundary is known."""
+
+SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS: int = int(
+    get("SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS", 8)
+)
+"""Minimum number of projected columns NOT read in pass 1 before a skene scan is
+worth splitting into two passes. This is the gate that keeps late materialization
+away from the narrow-projection shapes the reader-side-filter ruling was about
+(ClickBench Q25/26/27: `SELECT SearchPhrase ... ORDER BY EventTime LIMIT 10`,
+where deferring one column would cost a second open and a second decode of the
+pass-1 columns to save nothing). Late materialization pays when the deferred set
+dominates -- the shape it was built for, Q24, defers 103 of 105 columns.
+
+It is also what bounds the downside. Pass 2 re-decodes the pass-1 columns as part
+of the projection, so the worst case (a predicate and limit so weak that every
+file survives the reduction) is a full single-pass scan PLUS pass 1 -- i.e. the
+regression is capped at the pass-1 columns' share of the scan, which this gate
+holds small by construction."""
 
 # fmt:on

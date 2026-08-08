@@ -7,6 +7,7 @@
 // the one-hop migration chain depends on NOT being true.
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,32 @@
 #include "morsels/cxx_morsel.h"
 
 namespace skene {
+
+// Which general-purpose codec the writer offers each eligible section.
+//
+// A POSTURE, not a per-section decision: the choice is between two different
+// answers to "what is this file for", and mixing them within a file would buy
+// nothing a reader can use — every section is decoded independently anyway, so
+// the ratio/latency trade is the same trade at every section.
+//
+// Measured on a ClickBench row group, 154.7MB of section bytes, 256KB blocks,
+// Apple Silicon (dev/skene_codec_bench.cpp):
+//
+//   codec     ratio   compress MB/s   decompress MB/s
+//   lz4       4.49x        1743             8414
+//   zstd-1    6.47x        1081             2882
+//   zstd-9    7.34x         188             3078
+//   zstd-19   7.71x           9             3173
+//
+// zstd's DECODE rate does not vary with level. A low zstd level therefore gives
+// up ratio and buys nothing back, which is why the level here is high rather
+// than light: within zstd, level 9 is the knee (9 -> 12 costs 7x the compression
+// time for 1.6% more ratio; 9 -> 19 costs 20x for 5%).
+enum class SectionCodec : uint8_t {
+    kNone = 0,   // sections are stored plain
+    kZstd = 1,   // ratio-first; `zstd_level` selects the level
+    kLz4  = 2,   // read-first; decodes at roughly the reader's own raw rate
+};
 
 struct WriteOptions {
     // Everything that exists to make a LATER READ faster, as one switch:
@@ -39,16 +66,13 @@ struct WriteOptions {
     // wrong answers, not slow ones.
     bool read_acceleration = false;
 
-    // Per-SECTION zstd. 0 disables it; otherwise the zstd level.
-    //
-    // Level 1 is the right default and is what `for_storage()` uses. Measured
-    // across 35 MB of TPC-H sections: zstd-1 reaches 0.30x in 58 ms, zstd-3
-    // 0.28x in 66 ms, zstd-9 0.26x in 356 ms. lz4 is faster (44 ms) but only
-    // reaches 0.43x, and snappy is beaten by zstd-1 on BOTH axes (0.41x, 66 ms),
-    // so neither earns a second codec in the format.
+    // Per-SECTION general-purpose compression. `codec` is the switch; `kNone`
+    // means every section is stored plain.
     //
     // Only some section kinds are attempted (kind_is_compressible) and only
     // above kCompressMinBytes — see format.h for the measurements behind both.
+    // A section that does not come out SMALLER is stored plain regardless of
+    // codec, so selecting one is a request to try, never a guarantee it is used.
     //
     // Applied per section rather than to the whole file, so every column extent
     // stays independently fetchable and decodable — whole-file compression would
@@ -59,8 +83,14 @@ struct WriteOptions {
     // text does not, and comment-style columns dominate real tables. Off, skene
     // is ~3x larger than zstd Parquet there; on, roughly at parity.
     //
-    // Off by default: spill wants raw bytes, and a section only pays for the
-    // codec when the result is actually smaller.
+    // Off by default: spill wants raw bytes.
+    SectionCodec codec = SectionCodec::kNone;
+
+    // The zstd level, and ONLY meaningful when `codec == kZstd`. The two fields
+    // are checked against each other rather than left to disagree quietly: a
+    // level set alongside a non-zstd codec is a caller who thinks compression is
+    // configured one way while the writer does something else, so write_morsel
+    // rejects it instead of picking a winner (see writer.cpp).
     int zstd_level = 0;
 
     // Narrows which columns get a bloom filter. EMPTY MEANS ALL of them, under
@@ -98,19 +128,91 @@ struct WriteOptions {
     // Stored data: read many times, kept for a long time, so read acceleration
     // and compression both pay. Without compression skene is 1.9-3.8x larger
     // than the equivalent ZSTD Parquet on TPC-H; with it, 0.92-1.09x.
+    //
+    // zstd at level 9, not level 1. This posture previously pinned level 1,
+    // which measurement showed to be the WORST available zstd setting on both
+    // axes a stored file is read for: zstd decodes at the same rate whatever
+    // level produced the bytes (2882 MB/s at level 1, 3078 at level 9 — level 9
+    // measured FASTER, within noise of flat), so level 1 gave up 12% of the
+    // ratio and bought nothing. 9 is the knee of the ratio-vs-compress-time
+    // curve; past it the writer pays multiples for single-digit percentages.
     static WriteOptions for_storage() {
         WriteOptions options;
         options.read_acceleration = true;
-        options.zstd_level = 1;
+        options.codec = SectionCodec::kZstd;
+        options.zstd_level = 9;
+        return options;
+    }
+
+    // Read-first stored data: the same acceleration, LZ4 instead of zstd.
+    //
+    // Where `for_storage()` trades read latency for bytes, this trades bytes for
+    // read latency — 4.49x against 7.34x, but decoding at 8414 MB/s against
+    // 3078, which is close to the rate the reader's uncompressed path runs at on
+    // the same file. For a working set read far more often than it is written,
+    // and where the bytes still have to come down from somewhere.
+    static WriteOptions for_fast_reads() {
+        WriteOptions options;
+        options.read_acceleration = true;
+        options.codec = SectionCodec::kLz4;
         return options;
     }
 };
 
-// Serializes `morsel` into `out` (replacing its contents).
+// ─── Writing a file ─────────────────────────────────────────────────────────
+
+// A .skene file holds one or more row groups. This is the only writer; the
+// single-row-group case is `write_morsel` below, which is a two-line wrapper
+// rather than a second implementation, so the two cannot drift.
 //
-// Fails loud rather than degrading, on: a type this build cannot materialize, a
-// parameterized physical type missing its mandatory LogicalType descriptor, a
-// selection code out of range, or an internally inconsistent string arena.
+// STREAMING BY ROW GROUP, deliberately. The alternative — take a vector of
+// morsels and write them all — would hold every row group resident at once,
+// which for a wide schema at the 16-row-group default is the better part of a
+// gigabyte of input on top of the output buffer. Here a caller decodes a row
+// group, hands it over, and drops it; only the output buffer and the accumulated
+// METADATA (a row group directory entry plus one statistics blob per column per
+// row group — kilobytes) grow with the row group count.
+//
+// EVERY ROW GROUP MUST SHARE ONE SCHEMA. The file footer's schema directory
+// describes the file, not a row group, so a row group whose columns differ in
+// name, type, logical descriptor or nesting is REJECTED by add_row_group rather
+// than written into a file whose index does not describe it. This is checked,
+// not documented: a reader has no way to detect the lie.
+//
+// Usage is strictly begin -> add_row_group* -> finish. Calling out of order, or
+// finishing with no row groups, is an error and says so.
+class FileWriter {
+  public:
+    FileWriter();
+    ~FileWriter();
+
+    FileWriter(const FileWriter&) = delete;
+    FileWriter& operator=(const FileWriter&) = delete;
+
+    // Validates `options` and writes the file head into `out` (replacing its
+    // contents). `out` must outlive the writer.
+    Status begin(const WriteOptions& options, std::vector<uint8_t>* out);
+
+    // Appends one row group. Fails loud rather than degrading, on: a type this
+    // build cannot materialize, a parameterized physical type missing its
+    // mandatory LogicalType descriptor, a selection code out of range, an
+    // internally inconsistent string arena, or a schema that diverges from the
+    // first row group's.
+    Status add_row_group(const CxxMorsel& morsel);
+
+    // Writes the file footer and the tail. After this the buffer is a complete
+    // .skene file and the writer must not be reused.
+    Status finish();
+
+    uint32_t row_group_count() const;
+
+  private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
+
+// Serializes `morsel` into `out` (replacing its contents) as a file of exactly
+// one row group — the degenerate case of FileWriter, and implemented as one.
 Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
                     std::vector<uint8_t>* out);
 
@@ -119,8 +221,8 @@ Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
 // IMPLEMENTED: the complete required-section layout — every family
 // (fixed-width, BOOL, the string family including length-only columns, ARRAY
 // with recursive children, DRAKEN_NULL), all three selection kinds, LogicalType
-// round-trip, per-section and footer checksums, head/tail framing, both
-// encodings, value ordering, statistics and zone maps.
+// round-trip, per-section and footer checksums, head/tail framing, every
+// encoding, value ordering, statistics and zone maps.
 //
 // NOT YET IMPLEMENTED: bloom filters and permutations. Both are additive — new
 // optional sections — so neither requires a format change. v1 is not frozen

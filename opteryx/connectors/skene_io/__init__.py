@@ -25,7 +25,34 @@ from opteryx.types.schema import RelationSchema
 from opteryx.types.schema import SchemaColumn
 from opteryx.types.schema import mint_column_identity
 
-__all__ = ["skene_column_type", "skene_metadata_to_schema"]
+__all__ = [
+    "skene_column_type",
+    "skene_metadata_to_schema",
+    "skene_statistics_positions",
+]
+
+
+def skene_statistics_positions(columns, position_by_name: Dict[str, int]) -> list:
+    """Map each per-row-group statistics slot to a schema position, or None.
+
+    A row group's `column_statistics` list is DEPTH FIRST over the schema and
+    includes ARRAY children, so slot i stops being column i the moment any
+    column has one. Resolving by position rather than by this walk would land a
+    child's bounds on whichever top-level column happened to follow it.
+
+    Children map to None: manifest bounds are keyed by top-level schema position,
+    and an element's min/max is not the array's.
+    """
+    positions: list = []
+
+    def walk(column: Dict[str, Any], top_level: bool) -> None:
+        positions.append(position_by_name.get(column["name"]) if top_level else None)
+        for child in column.get("children") or ():
+            walk(child, False)
+
+    for column in columns:
+        walk(column, True)
+    return positions
 
 
 def skene_column_type(column: Dict[str, Any]) -> ColumnType:

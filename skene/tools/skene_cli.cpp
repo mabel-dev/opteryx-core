@@ -192,10 +192,31 @@ static int command_info(const char* path) {
 
     std::printf("rows      %" PRIu64 "\n", meta.row_count);
     std::printf("columns   %zu\n", meta.columns.size());
+    std::printf("row groups %zu\n", meta.row_groups.size());
     if (!meta.writer_tag.empty())
         std::printf("writer    %s\n", meta.writer_tag.c_str());
     std::printf("\n");
-    for (const ColumnMetadata& column : meta.columns) print_column(column, 0);
+
+    // The row group directory, from the file footer alone — no row group footer
+    // opened. This IS the pruning view a ranged reader gets for one small read.
+    for (size_t i = 0; i < meta.row_groups.size(); ++i) {
+        const RowGroupSummary& rg = meta.row_groups[i];
+        std::printf("row group %zu  rows=%" PRIu64 " first_row=%" PRIu64
+                    " data=[%" PRIu64 ", %" PRIu64 ") footer=[%" PRIu64 ", %" PRIu64 ")\n",
+                    i, rg.row_count, rg.first_row, rg.byte_offset,
+                    rg.byte_offset + rg.byte_bytes, rg.footer_offset,
+                    rg.footer_offset + rg.footer_bytes);
+    }
+    std::printf("\n");
+
+    // Per-column detail comes from each row group's OWN footer. Printed for row
+    // group 0 only: on a packed file this is tens of kilobytes per row group and
+    // dumping every one buries the thing an operator opened the file to see.
+    RowGroupMetadata first;
+    st = read_row_group_metadata(bytes.data(), bytes.size(), 0, &first);
+    if (!st.is_ok()) { std::fprintf(stderr, "error: %s\n", st.message().c_str()); return 1; }
+    std::printf("columns of row group 0:\n");
+    for (const ColumnMetadata& column : first.columns) print_column(column, 0);
     return 0;
 }
 

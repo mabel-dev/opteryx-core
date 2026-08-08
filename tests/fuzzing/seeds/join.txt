@@ -1,0 +1,40 @@
+# Seeds that have found a bug in the join fuzzer.
+#
+# When a random seed fails, add it here with a one-line note. Pinned seeds run
+# on every invocation, ahead of the random ones and regardless of TEST_SEED, so
+# a fixed bug cannot come back unnoticed.
+#
+# One decimal seed per line; `#` starts a comment.
+#
+# READ THIS BEFORE RELYING ON A PINNED SEED
+# -----------------------------------------
+# A seed is an input to the GENERATOR, not a query. Reweight a join type, widen
+# the joinable-category families, add a column to a fuzz table — and the same
+# seed produces a different join. A pinned seed keeps a case in the corpus for
+# as long as the generator is stable; it is NOT a durable regression test.
+#
+# The durable pin for each defect below is the matching `test_regression_*` in
+# test_sql_fuzzer_join.py, which is SQL and does not drift. Same split the
+# single-table fuzzer uses (seeds/single_table_select.txt).
+
+86298910301839659    # FULL OUTER with an ARRAY column in the PROBE payload: the
+                     # plan-typed probe schema had no child vector, so the tail
+                     # could not emit its NULL half. -> test_regression_full_outer_array_probe_payload
+
+7404969417978723277  # equi-join keying a DECIMAL column against an INTEGER/FLOAT
+                     # one: the implicit key cast was minted without its
+                     # (precision, scale). -> test_regression_decimal_join_key_coercion
+
+6687558910505863807  # ILIKE / NOT ILIKE on a VARBINARY column, which the whole
+                     # rest of the LIKE family accepts. -> test_regression_ilike_accepts_varbinary
+
+# --- added with the ASOF / theta / self-join / three-relation widening ---------
+1352827777288676465  # cross-type ASOF MATCH_CONDITION (INT64 vs FLOAT64): matches
+                     # violated their own condition. -> test_regression_asof_string_and_cross_type_match_columns
+275212115021484783   # ASOF on a VARCHAR match column — same defect, string half.
+2212554613944025132  # NaN join key matches itself under SEMI but not INNER.
+                     # -> test_wrong_answer_nan_join_key_still_matches_itself
+6396709119774785473  # ASOF tie-breaking is not deterministic across executions.
+                     # -> test_wrong_answer_asof_tie_breaking_is_still_unstable
+1118737654742736156  # ASOF DATE vs TIMESTAMP — now a loud refusal, was silent.
+8860250132622347222  # theta ON a DECIMAL column — a ratified binder refusal.

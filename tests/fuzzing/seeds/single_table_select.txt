@@ -1,0 +1,31 @@
+# Pinned regression seeds for the single-table SELECT fuzzer.
+#
+# Seeds listed here run FIRST on every invocation, before the random ones and
+# regardless of TEST_SEED. Add one when a random seed finds a bug.
+#
+#   TEST_SEED=<root seed printed by the failing run> \
+#     python -m pytest tests/fuzzing/test_sql_fuzzer_single_table_select.py
+#
+# reproduces the whole run; the per-case seed printed above the failing SQL is
+# what belongs in this file.
+#
+# READ THIS BEFORE RELYING ON A PINNED SEED
+# -----------------------------------------
+# A seed is an input to the GENERATOR, not a query. Change the generator — add a
+# function, reweight a shape, fix a type rule — and the same seed produces a
+# different statement. So a pinned seed is a cheap way to keep a specific case in
+# the corpus for as long as the grammar is stable, and it is NOT a durable
+# regression test.
+#
+# The durable pins for everything this fuzzer has found are elsewhere, and
+# deliberately so:
+#
+#   * `single_table_known_gaps.REGISTER` holds a minimal repro for each defect,
+#     and `test_registered_defect_still_reproduces` runs every one on every
+#     invocation. A repro is SQL; it does not drift with the generator.
+#   * each wrong answer additionally has a `test_wrong_answer_*` test that
+#     asserts the broken behaviour directly, so a fix turns it red.
+#
+# This file is therefore empty of seeds today: every bug found while writing the
+# fuzzer is pinned by a repro, which is strictly stronger. It exists so that the
+# next person who finds one at 3am has somewhere to put it.

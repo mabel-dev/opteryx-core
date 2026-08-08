@@ -604,9 +604,10 @@ already-agreed direction in
 is to spill by **raising radix bits inside the sink** (more, smaller partitions,
 processed one at a time), which is Grace-style partitioning, not run-and-merge.
 That design would consume the store and the serialization from here, and none of
-the strategy. `ARRAY_AGG`/`MEDIAN`-style unbounded per-group lists
-(`native_group_sinks.hpp:316-318`, capped at `aa_max_per_group = 1000` and
-failing loud) are a third shape again. **None of that is designed here.**
+the strategy. `ARRAY_AGG`/`MEDIAN`-style unbounded per-group lists (each bounded
+by its own GLOBAL byte budget in `native_group_sinks.hpp` /
+`_agg_kernels.hpp`, failing loud at finalize, with a plan-time estimate gate in
+front of it) are a third shape again. **None of that is designed here.**
 
 ---
 

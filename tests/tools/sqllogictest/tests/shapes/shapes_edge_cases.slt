@@ -241,7 +241,7 @@ query shape 177 8
 SELECT * FROM testdata.satellites
 
 query shape 1 1
-SELECT VERSION()
+SELECT @@version
 
 query error io failed
 SELECT is_reply_to FROM testdata.flat.formats.parquet WITH(NO_PARTITION) WHERE COALESCE(is_reply_to, -1) < 0

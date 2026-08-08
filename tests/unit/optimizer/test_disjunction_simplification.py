@@ -76,7 +76,7 @@ def _optimized_plan(sql):
 
 
 _SELF_JOIN_SWAPPED_SQL = (
-    "SELECT n1.n_name, n2.n_name FROM testdata.tpch_1.nation AS n1, testdata.tpch_1.nation AS n2 "
+    "SELECT n1.n_name, n2.n_name FROM testdata.tpch_001.nation AS n1, testdata.tpch_001.nation AS n2 "
     "WHERE (n1.n_name = 'KENYA' AND n2.n_name = 'PERU') "
     "OR (n1.n_name = 'PERU' AND n2.n_name = 'KENYA')"
 )
@@ -111,7 +111,7 @@ def test_common_join_key_still_factored_across_branches():
     # column repeated identically in every branch is still factored out.
     sql = (
         "SELECT SUM(l_extendedprice) AS revenue "
-        "FROM testdata.tpch_1.lineitem, testdata.tpch_1.part "
+        "FROM testdata.tpch_001.lineitem, testdata.tpch_001.part "
         "WHERE (p_partkey = l_partkey AND p_brand = 'Brand#12') "
         "OR (p_partkey = l_partkey AND p_brand = 'Brand#23')"
     )

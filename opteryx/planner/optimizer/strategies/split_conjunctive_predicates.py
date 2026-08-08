@@ -21,6 +21,19 @@ def _inner_split(node):
     while node.node_type == NodeType.NESTED:
         node = node.centre
 
+    if node.node_type == NodeType.DNF:
+        # Despite the name, DNF is this engine's n-ary AND — its `parameters` ARE
+        # the conjuncts (see opteryx/expression/__init__.pyx, and the FilterNode's
+        # own walk in operators/filter/filter.pyx). This strategy itself never meets
+        # one, because PredicateOrderingStrategy builds DNF nodes long after it has
+        # run; the branch is here so LATER callers that need "the ANDed terms of an
+        # already-optimized filter" — compiler.py::_skene_latmat_scan_plan — get the
+        # same answer from the same splitter instead of writing a second one.
+        terms = []
+        for param in node.parameters or []:
+            terms.extend(_inner_split(param))
+        return terms
+
     if node.node_type != NodeType.AND:
         return [node]
 
