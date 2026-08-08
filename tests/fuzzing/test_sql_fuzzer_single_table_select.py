@@ -325,30 +325,38 @@ def test_limited_statements_keep_the_guarantees_that_survive_ratification():
     assert list(rows(f"SELECT row_id FROM testdata.fuzzing.wide OFFSET {total}")) == []
 
 
-def test_wrong_answer_not_over_boolean_tautology_still_overlaps():
-    """Pins single_table_known_gaps/not-over-a-boolean-tautology-disjunction-...
+def test_not_over_a_boolean_tautology_disjunction_partitions_cleanly():
+    """Regression for the fixed not-over-a-boolean-tautology-disjunction defect.
 
-    Asserts the OVERLAP. `p` and `NOT p` cannot both select a row; when they stop
-    doing so this goes red and both this test and the register entry go.
+    _simplify_and_chain used to dedup the conjuncts of a flattened AND chain by
+    `Node.uuid`. De Morgan over `NOT ((A OR NOT A) OR NOT B)` yields
+    `A != TRUE AND A = TRUE AND B`, and the first two conjuncts carried the SAME
+    uuid — the binder copies uuid across expressions that render alike, and the
+    NOT(A = B) => A != B rule inverts the comparison in place without refreshing
+    it. Dedup deleted the contradiction, so `NOT p` matched 492 rows while `p`
+    matched all 2,000.
+
+    Both the BOOLEAN and the nullable-INTEGER right operand are covered: the
+    defect fired on each.
     """
     from tests.fuzzing.harness import scalar
-
-    predicate = (
-        "((b_value = TRUE) OR NOT (b_value = TRUE)) OR NOT (b_value = b_null)"
-    )
 
     def matching(where):
         return scalar(f"SELECT COUNT(*) AS n FROM testdata.fuzzing.mixed WHERE {where}")
 
     total = matching("row_id IS NOT NULL")
-    assert matching(predicate) == total, (
-        "the un-negated predicate no longer matches every row; re-derive the expectation before "
-        "trusting this test"
-    )
-    assert matching(f"NOT ({predicate})") != 0, (
-        "`p` and `NOT p` no longer overlap — the defect is FIXED. Delete this test and the "
-        "`not-over-a-boolean-tautology-disjunction-overlaps-itself` register entry."
-    )
+
+    for right in ("b_value = b_null", "i_null > 0"):
+        predicate = f"((b_value = TRUE) OR NOT (b_value = TRUE)) OR NOT ({right})"
+        # the left disjunct is a tautology, so `p` holds for every row...
+        assert matching(predicate) == total, predicate
+        # ...and the three buckets must partition the relation exactly once.
+        buckets = (
+            matching(predicate)
+            + matching(f"NOT ({predicate})")
+            + matching(f"({predicate}) IS NULL")
+        )
+        assert buckets == total, f"{predicate} covers {buckets} of {total} rows"
 
 
 def test_wrong_answer_nan_row_still_falls_outside_every_bucket():

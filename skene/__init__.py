@@ -19,6 +19,7 @@ package is the Python boundary only.
 # which skene_native's draken-header inlines rely on at symbol resolution.
 import draken  # noqa: F401
 
+from skene.__version__ import __version__
 from skene.skene_native import SkeneError
 from skene.skene_native import SkeneWriter
 from skene.skene_native import footer_extent
@@ -31,6 +32,7 @@ from skene.skene_native import write_morsel
 __all__ = [
     "SkeneError",
     "SkeneWriter",
+    "__version__",
     "footer_extent",
     "probe_version",
     "read_metadata",

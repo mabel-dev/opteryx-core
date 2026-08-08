@@ -20,6 +20,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
+from .optimization_strategy import predicate_key
 
 # Operations safe to invert.
 HALF_INVERSIONS: dict = {
@@ -200,14 +201,20 @@ def _simplify_and_chain(node: LogicalPlanNode, telemetry: QueryTelemetry):
         return true_node
 
     # Dedup only kicks in for chains longer than two, matching the prior >2 gate.
+    # Keyed on the conjunct's CURRENT rendered content, never on Node.uuid — by
+    # this point conjuncts have been rewritten in place (NOT (A = B) inverts the
+    # comparison node and keeps its uuid), and the binder hands out uuid-
+    # preserving copies of expressions that rendered alike at bind time. See
+    # predicate_key() for why uuid is not an expression identity.
     if len(kept) > 2:
         unique: list = []
         seen: set = set()
         for cond in kept:
-            if cond.uuid in seen:
+            key = predicate_key(cond)
+            if key in seen:
                 telemetry.optimization_boolean_rewrite_and_redundant += 1
                 continue
-            seen.add(cond.uuid)
+            seen.add(key)
             unique.append(cond)
         telemetry.optimization_boolean_rewrite_and_flatten += 1
         return _rebuild_and_chain(unique)

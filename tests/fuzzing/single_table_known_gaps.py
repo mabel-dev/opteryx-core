@@ -132,33 +132,18 @@ REGISTER: List[RegisteredDefect] = [
     # constructions. The exclusion this drove in applicable_oracles(), and the
     # Statement/SelectQuery flag it read, are gone with it — every oracle now
     # runs on DISTINCT aggregates.
-    RegisteredDefect(
-        id="not-over-a-boolean-tautology-disjunction-overlaps-itself",
-        repro=(
-            "SELECT COUNT(*) AS n FROM testdata.fuzzing.mixed WHERE "
-            "NOT (((b_value = TRUE) OR NOT (b_value = TRUE)) OR NOT (b_value = b_null))"
-        ),
-        error_type="WrongAnswer",
-        signature="",
-        detail=(
-            "`p` and `NOT p` select OVERLAPPING sets of rows, which is impossible under two- or "
-            "three-valued logic. With\n"
-            "  p = ((b_value = TRUE) OR NOT (b_value = TRUE)) OR NOT (b_value = b_null)\n"
-            "over a 2,000-row relation:\n"
-            "  WHERE p       -> 2000 rows   (correct: the left disjunct is a tautology)\n"
-            "  WHERE NOT p   ->  492 rows   WRONG: must be 0\n"
-            "  the two together account for 2,492 rows out of 2,000.\n"
-            "The trigger is the BOOLEAN-COLUMN tautology on the left. Every variation is right:\n"
-            "  the tautology alone                       -> 2000 / 0\n"
-            "  tautology OR (b_value = b_null)           -> 2000 / 0   (right operand not negated)\n"
-            "  (i_value = i_value) OR NOT (b = b_null)   -> 2000 / 0   (non-boolean tautology)\n"
-            "  ((i>0) OR NOT (i>0)) OR NOT (i_null > 0)  -> 2000 / 0   (integer tautology)\n"
-            "and it also fires with a nullable INTEGER right operand:\n"
-            "  ((b_value = TRUE) OR NOT (b_value = TRUE)) OR NOT (i_null > 0) -> 2000 / 403.\n"
-            "Found by the predicate_partition oracle.\n"
-            "Pinned by test_wrong_answer_not_over_boolean_tautology_still_overlaps."
-        ),
-    ),
+    # `not-over-a-boolean-tautology-disjunction-overlaps-itself` was registered
+    # here as a WrongAnswer. It is FIXED — _simplify_and_chain
+    # (opteryx/planner/optimizer/strategies/boolean_simplication.py) deduped the
+    # conjuncts of a flattened AND chain by `Node.uuid`. A uuid names a node
+    # INSTANCE, not a value: the binder hands out uuid-preserving copies of
+    # expressions that rendered alike, and the same strategy's NOT(A = B) => A
+    # != B rule inverts the comparison in place without refreshing it. De
+    # Morgan over NOT((A OR NOT A) OR NOT B) produced the chain
+    # `A != TRUE AND A = TRUE AND B`, whose first two conjuncts carried the SAME
+    # uuid — dedup deleted the contradiction and left `A != TRUE AND B`, which
+    # matched 492 rows instead of 0. Dedup now keys on predicate_key(), the same
+    # content-plus-bound-identity key DisjunctionSimplificationStrategy uses.
     RegisteredDefect(
         id="nan-rows-fall-outside-every-predicate-bucket",
         repro=(
