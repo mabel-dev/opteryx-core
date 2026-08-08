@@ -41,15 +41,22 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
     for column in node.columns:
         if column.node_type == NodeType.WILDCARD:
-            # Wildcard expansion — schema-driven. Each underlying column produces
-            # exactly one output column.
+            # Wildcard expansion — schema-driven. Each SCHEMA COLUMN produces exactly
+            # one output column, deduped on (identity, name) rather than identity
+            # alone: the same schema can be reachable under more than one
+            # `context.schemas` key (shared/view schemas) and must expand once, but a
+            # derived relation legitimately holds two DISTINCT columns over one
+            # underlying identity — `SELECT id AS x, id` names two columns, and
+            # visit_subquery emits both (see binder/subquery.py). Deduping on identity
+            # alone dropped every copy after the first, so wrapping a query in a
+            # derived table silently lost a column.
             if column.value is not None:
                 # Qualified wildcard: only columns whose origin matches the qualifier.
                 qualifier = column.value[0]
                 seen_identities = set()
                 for schema in context.schemas.values():
                     for schema_col in schema.columns:
-                        if schema_col.identity in seen_identities:
+                        if (schema_col.identity, schema_col.name) in seen_identities:
                             continue
                         origin = schema_col.origin
                         if isinstance(origin, str):
@@ -65,18 +72,18 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                                     schema_column=schema_col,
                                 )
                             )
-                            seen_identities.add(schema_col.identity)
+                            seen_identities.add((schema_col.identity, schema_col.name))
             else:
-                # Bare wildcard: every column from every relation schema (deduped by
-                # identity). `$derived` is excluded — it's scratch space for computed
-                # expressions bound elsewhere (e.g. ORDER BY LENGTH(name) with no
-                # explicit Project step), never a real relation `*` should expand into.
+                # Bare wildcard: every column from every relation schema. `$derived` is
+                # excluded — it's scratch space for computed expressions bound elsewhere
+                # (e.g. ORDER BY LENGTH(name) with no explicit Project step), never a
+                # real relation `*` should expand into.
                 seen_identities = set()
                 for name, schema in context.schemas.items():
                     if name == "$derived":
                         continue
                     for schema_col in schema.columns:
-                        if schema_col.identity in seen_identities:
+                        if (schema_col.identity, schema_col.name) in seen_identities:
                             continue
                         output_columns.append(
                             LogicalColumn(
@@ -87,7 +94,7 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                                 schema_column=schema_col,
                             )
                         )
-                        seen_identities.add(schema_col.identity)
+                        seen_identities.add((schema_col.identity, schema_col.name))
             continue
 
         # Explicit projection: emit one output per `node.columns` entry, even when

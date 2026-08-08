@@ -1284,8 +1284,10 @@ def _build_projection(generator: Generator, relation: Relation) -> SelectQuery:
         )
     projection: List[str] = []
     outputs: List[Column] = []
-    # A column projected twice raises AmbiguousIdentifierError, so each source
-    # column may appear at most once un-aliased.
+    # Two columns with the same OUTPUT name raise AmbiguousIdentifierError, so each
+    # output name may appear at most once. `used` holds output names only — a source
+    # column may be projected any number of times as long as each appearance is
+    # differently named, so `SELECT id AS e1, id` is generated on purpose.
     used: Set[str] = set()
     for _ in range(rng.randint(1, 4)):
         if rng.random() < 0.55:
@@ -1299,14 +1301,6 @@ def _build_projection(generator: Generator, relation: Relation) -> SelectQuery:
             ty = rng.choice(_projectable_types(relation))
             expression = generator.expression(ty)
             rendered = _unparenthesise(expression.sql)
-            # `SELECT id AS x, id FROM t` loses the bare copy when the query is
-            # wrapped (single_table_known_gaps/wrapping-drops-a-column-projected-twice),
-            # and it is a spelling nobody writes deliberately. One appearance per
-            # source column, whichever form it takes.
-            bare_name = rendered.strip('"')
-            if bare_name in used:
-                continue
-            used.add(bare_name)
             alias = generator.names.next("e")
             used.add(alias)
             projection.append(f"{rendered} AS {alias}")
@@ -1536,13 +1530,13 @@ class Statement:
     # a WITH both fail to resolve the inner CTE name. Oracles that wrap the
     # statement have to know.
     is_cte: bool = False
-    # Whether ANY level of the statement carries a LIMIT/OFFSET or a HAVING.
-    # Two registered wrong-answer defects are triggered by exactly those shapes
-    # under a wrapping oracle, so the oracles decline them structurally rather
-    # than by matching the violation text — see applicable_oracles().
+    # Whether ANY level of the statement carries a LIMIT/OFFSET. LIMIT selects an
+    # arbitrary subset (see RATIFIED/limit-and-offset-select-an-arbitrary-subset),
+    # so an oracle that compares two separate executions declines them
+    # structurally rather than by matching the violation text — see
+    # applicable_oracles().
     contains_limit: bool = False
     contains_offset: bool = False
-    contains_having: bool = False
 
 
 def generate(rng: random.Random, relation: Relation) -> Statement:
@@ -1566,7 +1560,6 @@ def generate(rng: random.Random, relation: Relation) -> Statement:
         tags=select.tags,
         contains_limit=_has_limit(select),
         contains_offset=select.offset is not None,
-        contains_having=select.having is not None,
     )
 
 
@@ -1585,7 +1578,6 @@ def _wrap_cte(rng: random.Random, relation: Relation, names: Names) -> Statement
         is_cte=True,
         contains_limit=_has_limit(inner) or _has_limit(outer),
         contains_offset=inner.offset is not None or outer.offset is not None,
-        contains_having=inner.having is not None or outer.having is not None,
     )
 
 
@@ -1604,7 +1596,6 @@ def _wrap_subquery(rng: random.Random, relation: Relation, names: Names) -> Stat
         tags=inner.tags | outer.tags | {"subquery"},
         contains_limit=_has_limit(inner) or _has_limit(outer),
         contains_offset=inner.offset is not None or outer.offset is not None,
-        contains_having=inner.having is not None or outer.having is not None,
     )
 
 

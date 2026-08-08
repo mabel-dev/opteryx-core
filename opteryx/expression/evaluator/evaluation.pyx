@@ -2287,6 +2287,14 @@ ctypedef struct Pass1PredCtx:
     int             count
     const int*      col_idx    # per-instr: index into the `cols` array (BC_LOAD_COL)
     DrakenVector**  lit_dv      # per-instr: literal DV* (BC_LOAD_LIT_CONST), else NULL
+    # per pass-1 COLUMN (indexed by col_idx's values, not by instr): the DrakenType
+    # the PLAN says that column is. The producer of `cols` tags its views from what
+    # it can see in the decoded buffers, which is the physical layout — rugo, being
+    # opteryx-free by contract, cannot know that a byte_array chunk is VARBINARY
+    # rather than VARCHAR. Only the plan knows. So the tag is carried here and
+    # stamped on entry: the predicate always sees each column tagged as the plan
+    # says it is, which is exactly what the serial fallback passes.
+    const int*      col_type
 
 
 ctypedef int (*Pass1EvalFn)(void*, DrakenVector**, int, uint32_t, uint8_t*) noexcept nogil
@@ -2298,16 +2306,30 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
     (resolved once on the main thread, kept alive by the scan). `cols[i]` is decoded
     pass-1 predicate column i; `out_mask` is caller-owned, nbytes=(num_rows+7)//8.
     Returns 0 → out_mask is the survivor bitmap (data-bit AND validity); else the
-    c_execute_dv_inner rc (worker fails loud)."""
+    c_execute_dv_inner rc (worker fails loud).
+
+    `cols[i].type` is advisory: the caller tags its views from the physical buffers,
+    which is all a producer outside the plan can see. `ctx.col_type[i]` is the tag
+    the PLAN gives that column, and it wins — see Pass1PredCtx. A caller that
+    already tags correctly (the serial fallbacks, which pass the consumer's own
+    morsel columns) matches it and no copy happens."""
     cdef Pass1PredCtx* c = <Pass1PredCtx*>ctx
     cdef BytecodeInstr* instrs = c.instrs
     cdef int count = c.count
     cdef const int* col_idx = c.col_idx
     cdef DrakenVector** lit_dv = c.lit_dv
+    cdef const int* col_type = c.col_type
     cdef Py_ssize_t nbytes = <Py_ssize_t>((num_rows + 7) >> 3)
     cdef DrakenVector* dv_cache[256]
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
+    # Retag scratch, one slot per INSTRUCTION so it shares dv_cache's existing 256
+    # bound and adds no new failure mode. Only touched for a load whose incoming tag
+    # disagrees with the plan's; every other load points straight at the caller's
+    # vector, untouched.
+    cdef DrakenVector  col_store[256]
+    cdef int ci = 0
+    cdef int want = 0
     cdef int rc = 0
     cdef int err_op = 0
     cdef int opcode = 0
@@ -2326,7 +2348,18 @@ cdef int opteryx_pass1_predicate_eval(void* ctx, DrakenVector** cols, int ncols,
     for k in range(count):
         opcode = instrs[k].opcode
         if opcode == BC_LOAD_COL:
-            dv_cache[k] = cols[col_idx[k]]
+            ci = col_idx[k]
+            want = col_type[ci]
+            if cols[ci].type == <DrakenType>want:
+                dv_cache[k] = cols[ci]
+            else:
+                # The producer tagged this view from the physical buffers and got a
+                # different type than the plan's. Stamp the plan's tag on a copy —
+                # the caller's vector is left alone, and the predicate now runs over
+                # exactly the operands the serial fallback would hand it.
+                col_store[k] = cols[ci][0]
+                col_store[k].type = <DrakenType>want
+                dv_cache[k] = &col_store[k]
         elif opcode == BC_LOAD_LIT_CONST:
             dv_cache[k] = lit_dv[k]
         else:
@@ -2361,20 +2394,26 @@ cpdef size_t get_pass1_eval_fn_ptr():
 cdef class Pass1PredResolver:
     """Resolves a CompiledBytecode predicate to a Pass1PredCtx once (GIL) and keeps
     everything the worker callback needs alive for the scan's life: the bytecode
-    (instrs + literal Vectors), the owned col_idx / lit_dv arrays. `col_idx[k]` maps
-    each BC_LOAD_COL to its position in `col_names` (the predicate's columns in first-
-    seen order); `col_names` are PHYSICAL names the rugo worker matches against its
-    decoded result.column_names. Only usable when the predicate is all-c-native."""
+    (instrs + literal Vectors), the owned col_idx / lit_dv / col_type arrays.
+    `col_idx[k]` maps each BC_LOAD_COL to its position in `col_names` (the predicate's
+    columns in first-seen order); `col_names` are PHYSICAL names the rugo worker
+    matches against its decoded result.column_names. `identity_to_type` gives each
+    identity's plan DrakenType, which the eval entry stamps on the incoming view —
+    the producer of those views cannot know it (see Pass1PredCtx.col_type). Only
+    usable when the predicate is all-c-native."""
     cdef Pass1PredCtx ctx
     cdef CompiledBytecode _bc
     cdef int* _col_idx
     cdef DrakenVector** _lit_dv
+    cdef int* _col_type
     cdef list _col_names
     cdef list _lit_anchors
 
-    def __cinit__(self, CompiledBytecode bc, dict identity_to_physical):
+    def __cinit__(self, CompiledBytecode bc, dict identity_to_physical,
+                  dict identity_to_type):
         cdef int count = bc.count
         cdef int k
+        cdef int pos
         cdef BytecodeInstr* instrs = bc.instrs
         cdef bytes ident
         cdef object lit_obj
@@ -2384,16 +2423,25 @@ cdef class Pass1PredResolver:
         self._lit_anchors = []
         self._col_idx = <int*>malloc(<size_t>count * sizeof(int))
         self._lit_dv = <DrakenVector**>malloc(<size_t>count * sizeof(void*))
-        if self._col_idx == NULL or self._lit_dv == NULL:
+        # Indexed by column POSITION, of which there are at most `count` (one per
+        # instruction), so this bound is exact-or-generous by construction.
+        self._col_type = <int*>malloc(<size_t>count * sizeof(int))
+        if self._col_idx == NULL or self._lit_dv == NULL or self._col_type == NULL:
             raise MemoryError("Pass1PredResolver: malloc failed")
         for k in range(count):
             self._col_idx[k] = -1
             self._lit_dv[k] = NULL
+            self._col_type[k] = 0
             if instrs[k].opcode == BC_LOAD_COL:
                 ident = <bytes>instrs[k].column_identity
                 if ident not in ident_pos:
-                    ident_pos[ident] = len(self._col_names)
+                    pos = len(self._col_names)
+                    ident_pos[ident] = pos
                     self._col_names.append(identity_to_physical[ident])
+                    # A missing entry is a resolver bug, not a shape to tolerate: the
+                    # eval entry would then stamp 0 (not a DrakenType) and every load
+                    # of the column would copy-and-mistag. KeyError here, loudly.
+                    self._col_type[pos] = <int>identity_to_type[ident]
                 self._col_idx[k] = <int>ident_pos[ident]
             elif instrs[k].opcode == BC_LOAD_LIT_CONST:
                 lit_obj = <object>instrs[k].literal_obj
@@ -2403,6 +2451,7 @@ cdef class Pass1PredResolver:
         self.ctx.count = count
         self.ctx.col_idx = self._col_idx
         self.ctx.lit_dv = self._lit_dv
+        self.ctx.col_type = self._col_type
 
     @property
     def col_names(self):
@@ -2416,6 +2465,8 @@ cdef class Pass1PredResolver:
             free(self._col_idx)
         if self._lit_dv != NULL:
             free(self._lit_dv)
+        if self._col_type != NULL:
+            free(self._col_type)
 
 
 cdef size_t _dv_result_elem_size(DrakenType t) noexcept nogil:

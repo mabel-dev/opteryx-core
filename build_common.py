@@ -16,8 +16,11 @@ IMPORTANT: this module must stay import-safe. No subprocess calls, no file
 generation, no ``setup()`` — only pure definitions driven by env/platform.
 The side-effectful, opteryx-only pieces (libcurl resolution, consolidated
 nanobind module generation, onnxruntime) live in the root ``setup.py``.
+``write_draken_abi_modules`` is *defined* here so all three wheels stamp
+identically, but it writes nothing until a ``setup.py`` calls it.
 """
 
+import hashlib
 import os
 import platform
 import sysconfig as _sysconfig
@@ -1086,3 +1089,201 @@ def skene_extensions():
             extra_link_args=LD_EXTRA,
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# draken ABI stamp
+#
+# opteryx_core, rugo and libskene are three distributions that each bundle the
+# SAME `draken/` package, to the SAME site-packages path. pip cannot see that:
+# whichever installs LAST silently overwrites the others' copy. When the winner
+# comes from a different tree state, the consumer's extensions are left bound to
+# a draken they were never compiled against. That is how 0.9.56 shipped an
+# `undefined symbol: draken_cast_uint_to_string` on every query while every
+# pre-release signal was green (see dev/verify-wheel-imports.sh), and it is the
+# leading suspect for a later SIGSEGV inside free().
+#
+# The stamp gives draken an identity, so that collision surfaces as an
+# immediate, named ImportError naming both sides — instead of an undefined
+# symbol at first query, or a fault much later. It does NOT prevent the overlay:
+# nothing at this layer can. Honest and diagnosable, not fixed.
+#
+# WHAT IT MEASURES: a content hash of every draken header — the struct layouts,
+# type enums and kernel declarations consumers compile against — plus the kernel
+# registry's name table. The registry counts because opteryx resolves kernels by
+# NAME at runtime (see opteryx/expression/casts.pyx), so a missing registry
+# entry is an ABI break even when no header moved.
+#
+# It deliberately answers the WEAKER question "were these built from the same
+# ABI surface?" rather than "are these two technically compatible?". A
+# comment-only edit to a header changes the stamp. That bias is the point: the
+# three wheels are ruled to release in lockstep from one tree state, so
+# "different tree state" and "must not be mixed" are the same statement here.
+# Over-sensitivity costs a rebuild; under-sensitivity costs a production outage.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Not a header, but its contents ARE the ABI: consumers look kernels up by name
+# in this table at runtime.
+DRAKEN_ABI_EXTRA_SOURCES = ("draken/ops/kernels/kernel_registry.cpp",)
+
+# If any of these is absent we are not looking at a draken tree, and a hash over
+# whatever remains would be a confident-looking answer to the wrong question.
+DRAKEN_ABI_ANCHORS = (
+    "draken/core/buffers.h",
+    "draken/core/draken_bridge.h",
+    "draken/logical_type.h",
+)
+
+
+def _draken_abi_files():
+    """Every file whose content defines the draken ABI, as sorted repo-relative paths."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(_REPO_ROOT, "draken")):
+        dirnames[:] = [d for d in dirnames if d != "tests" and not d.startswith(".")]
+        for name in filenames:
+            if name.endswith((".h", ".hpp")):
+                rel = os.path.relpath(os.path.join(dirpath, name), _REPO_ROOT)
+                found.append(rel.replace(os.sep, "/"))
+    found.extend(DRAKEN_ABI_EXTRA_SOURCES)
+    return sorted(set(found))
+
+
+def draken_abi_stamp():
+    """Content hash of the draken ABI surface — 16 hex chars.
+
+    Deterministic across machines: sorted repo-relative paths and raw bytes, so
+    the same tree state always produces the same stamp.
+    """
+    files = _draken_abi_files()
+    for anchor in DRAKEN_ABI_ANCHORS + DRAKEN_ABI_EXTRA_SOURCES:
+        if anchor not in files:
+            raise RuntimeError(
+                f"draken ABI surface is incomplete: {anchor} was not found under "
+                f"{_REPO_ROOT}. Refusing to stamp a partial tree — the stamp would "
+                "look valid and mean nothing."
+            )
+    digest = hashlib.sha256()
+    for rel in files:
+        with open(os.path.join(_REPO_ROOT, rel), "rb") as handle:
+            payload = handle.read()
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+_DRAKEN_STAMP_MODULE = '''\
+# GENERATED FILE — do not edit, do not commit.
+#
+# Written by build_common.write_draken_abi_modules() on every build. Identifies
+# the draken ABI surface this copy of the draken package was built from, so a
+# consumer can tell whether the draken it is importing is the one it was
+# compiled against. See the "draken ABI stamp" section of build_common.py.
+
+DRAKEN_ABI_STAMP = "@@STAMP@@"
+'''
+
+
+_CONSUMER_ABI_MODULE = '''\
+# GENERATED FILE — do not edit, do not commit.
+#
+# Written by build_common.write_draken_abi_modules() on every build. Holds the
+# draken ABI stamp `@@PKG@@` was compiled against, and the check that refuses to
+# run against a different one. All three distributions that bundle draken
+# (opteryx_core, rugo, libskene) get this same module from one template, so the
+# check cannot drift between them.
+#
+# There is deliberately NO environment variable to skip this check: a draken
+# that does not match is not a degraded configuration, it is a broken one.
+
+REQUIRED_DRAKEN_ABI_STAMP = "@@STAMP@@"
+
+
+def check_draken_abi() -> None:
+    """Raise ImportError unless the installed draken is the one we were built against.
+
+    Called at the top of @@PKG@@/__init__.py, before any extension that resolves
+    draken symbols is imported.
+    """
+    import importlib.util
+
+    draken_spec = importlib.util.find_spec("draken")
+    if draken_spec is None:
+        raise ImportError(
+            "`@@PKG@@` requires the `draken` package, which is not installed. "
+            "It normally ships inside this wheel; a missing draken means the "
+            "installation is incomplete."
+        )
+    location = draken_spec.origin or "unknown location"
+
+    stamp_spec = importlib.util.find_spec("draken._abi_stamp")
+    if stamp_spec is None:
+        raise ImportError(
+            "The installed `draken` carries no ABI stamp, so it cannot be matched "
+            "against the draken `@@PKG@@` was built with "
+            f"({REQUIRED_DRAKEN_ABI_STAMP}).\\n"
+            f"  installed draken: {location}\\n"
+            "An unstamped draken predates this check, which means it comes from an "
+            "older release of opteryx_core, rugo or libskene that overwrote this "
+            "one. Reinstall all the draken-bundling distributions you use from the "
+            "same release."
+        )
+
+    from draken._abi_stamp import DRAKEN_ABI_STAMP
+
+    if DRAKEN_ABI_STAMP != REQUIRED_DRAKEN_ABI_STAMP:
+        raise ImportError(
+            "draken ABI mismatch — the installed `draken` is not the one "
+            "`@@PKG@@` was built against.\\n"
+            f"  `@@PKG@@` was built against draken ABI  {REQUIRED_DRAKEN_ABI_STAMP}\\n"
+            f"  the installed draken carries      ABI  {DRAKEN_ABI_STAMP}\\n"
+            f"  installed draken: {location}\\n"
+            "opteryx_core, rugo and libskene each bundle their own copy of "
+            "`draken` at this same path, so whichever was installed LAST wins — "
+            "and the winner here is not the one `@@PKG@@` was compiled against. "
+            "Continuing would fail on an undefined draken_* symbol, or crash "
+            "later inside native code.\\n"
+            "Fix: install the draken-bundling distributions you use from the same "
+            "release (they are tagged and published together), or install only "
+            "the one you need."
+        )
+'''
+
+
+def write_draken_abi_modules(*consumer_packages):
+    """Generate the draken stamp module and each consumer's matching check.
+
+    Writes ``draken/_abi_stamp.py`` (what this draken IS) and, for every package
+    named, ``<package>/_draken_abi.py`` (what that package REQUIRES). All come
+    from the same computed stamp, so an in-tree build always agrees with itself
+    and the check only ever fires across tree states — which is exactly the
+    install-overlay case it exists to catch.
+
+    EVERY draken-consuming package the wheel ships must be named, not just the
+    one the distribution is named after: the opteryx_core wheel also ships
+    ``rugo`` and ``skene``, and a bundled package without its generated module
+    would fail to import at all. The generated module is keyed on the PACKAGE,
+    so the copy of ``rugo/_draken_abi.py`` inside opteryx_core is byte-identical
+    to the one in the standalone rugo wheel.
+
+    Called explicitly by each setup.py; never at import time (see module
+    docstring). Returns the stamp so the caller can log it.
+    """
+    stamp = draken_abi_stamp()
+
+    with open(
+        os.path.join(_REPO_ROOT, "draken", "_abi_stamp.py"), "w", encoding="utf-8"
+    ) as handle:
+        handle.write(_DRAKEN_STAMP_MODULE.replace("@@STAMP@@", stamp))
+
+    for package in consumer_packages:
+        content = _CONSUMER_ABI_MODULE.replace("@@STAMP@@", stamp).replace("@@PKG@@", package)
+        with open(
+            os.path.join(_REPO_ROOT, package, "_draken_abi.py"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(content)
+
+    return stamp

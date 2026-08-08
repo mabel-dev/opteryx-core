@@ -12,20 +12,23 @@ each predicate column's decoded buffers in a NON-owning DrakenVector. It tags th
 vector with the buffers' own physical type — the only thing it can know, since rugo
 is opteryx-free by contract.
 
-For most columns that is exactly the tag the consumer would use. For some it is
-not: the scan RETAGS a column after decode, from plan state rugo has no access to.
+That tag is no longer trusted. `Pass1PredCtx.col_type` carries the PLAN's DrakenType
+for every predicate column, and `opteryx_pass1_predicate_eval` stamps it on the view
+before running the program, so the worker evaluates over exactly the operands the
+serial fallback would. A tag rugo cannot derive is therefore no longer a reason to
+refuse.
 
-* DATE / TIMESTAMP decode as a physical int stream and are retagged DRAKEN_DATE32 /
-  DRAKEN_TIMESTAMP64 (the latter with a mandatory unit descriptor).
-* DECIMAL (int64-backed) and DECIMAL128 carry precision/scale in a logical
-  descriptor attached OUTSIDE the DrakenVector.
-* NVARCHAR / VARBINARY share VARCHAR's byte layout but not its semantics — case
-  folding, LENGTH and regex all dispatch on the tag.
+What IS still a reason to refuse: a type whose meaning does not fit in the
+DrakenVector at all, because it lives in a logical descriptor the scan attaches
+alongside the column.
 
-A worker-side view of one of those would answer a different question than the
-serial fallback: not a fast path, a wrong one (CLAUDE.md §11). rugo cannot detect
-it, so the decision is made here, where the schema is: the predicate is pushed to
-the workers only when EVERY predicate column lands on its natural physical tag.
+* DECIMAL (int64-backed) and DECIMAL128 carry precision and scale outside the
+  vector, so a view of them is a decimal with no scale.
+* TIMESTAMP carries a mandatory unit descriptor, same problem.
+* DATE32 has no descriptor and would now be admissible; it is left out because this
+  gate has only ever been exercised for the types below and widening it wants its
+  own measurement, not a free ride on this one.
+
 Refusing is free — the consumer already evaluates the identical program itself
 whenever the survivor mask comes back empty.
 
@@ -38,17 +41,25 @@ from __future__ import annotations
 
 from draken.draken_native import DrakenType
 
-# Physical types the scan hands downstream with NO retag and NO logical descriptor,
-# so the tag rugo derives from the decoded buffers is the tag the consumer uses.
+# Physical types whose whole meaning is the DrakenVector's own type tag, so stamping
+# the plan's tag on a worker-side view makes it answer the consumer's question
+# exactly. Nothing here carries a logical descriptor.
 #
 # Integers and floats: `_classify_scan_columns` records logical_coerce 0 for every
 # width and signedness, and the consumer wraps them with `draken_type_for(dk)` —
 # the same physical-kind→type mapping `pass1_natural_type` applies in rugo.
 # TIME32/TIME64: parquet TIME decodes as a plain int stream and no TIME coercion is
-# modelled on either scan path, so it reaches output as that int — natural too.
+# modelled on either scan path, so it reaches output as that int.
 # BOOL: self-describing, bit-packed, no descriptor.
-# VARCHAR: the default string tag, which is what rugo stamps on a string view.
-_NATURAL_TAG_TYPES = frozenset(
+# VARCHAR / VARBINARY: one byte layout, two tags, and the tag alone selects the
+# semantics (byte-length ops either way; character ops throw on VARBINARY, and the
+# stamp is what makes them throw on the worker exactly as they do on the main
+# thread). VARBINARY admitted by architect ruling 2026-08-08 — the downloaded
+# ClickBench files declare URL as parquet `binary` with no UTF8 annotation, so it
+# binds VARBINARY and Q24's whole predicate was running serially. NVARCHAR is
+# mechanically safe under the stamp too, and is deliberately NOT added here: it was
+# not part of that ruling.
+_DESCRIPTOR_FREE_TYPES = frozenset(
     (
         DrakenType.INT8,
         DrakenType.INT16,
@@ -64,6 +75,7 @@ _NATURAL_TAG_TYPES = frozenset(
         DrakenType.TIME64,
         DrakenType.BOOL,
         DrakenType.VARCHAR,
+        DrakenType.VARBINARY,
     )
 )
 
@@ -77,6 +89,6 @@ def pass1_worker_predicate_admissible(column_types) -> bool:
     predicate serially exactly as it does today for a shape rugo declines.
     """
     for ct in column_types:
-        if ct is None or ct.physical not in _NATURAL_TAG_TYPES:
+        if ct is None or ct.physical not in _DESCRIPTOR_FREE_TYPES:
             return False
     return True

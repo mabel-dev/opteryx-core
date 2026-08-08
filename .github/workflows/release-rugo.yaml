@@ -10,10 +10,18 @@ name: Release rugo to PyPI
 # rugo targets a broad matrix:
 #   Python  : 3.11, 3.12, 3.13, 3.14 (GIL)
 #   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64
+#
+# `all-*` is the one tag that fires all three pipelines (opteryx_core, rugo,
+# libskene) from a single release decision — see release.yaml. It does NOT make
+# the three releases one release: each pipeline still runs its own floor, builds
+# its own wheels and publishes independently, so one can go red or fail to
+# publish while the others ship. Each component's version still comes from its
+# own `__version__.py`, never from the tag.
 on:
   push:
     tags:
       - 'rugo-*'
+      - 'all-*'
 
 jobs:
   # ── Release floor: three parallel suites that MUST all pass before any wheel
@@ -220,12 +228,36 @@ jobs:
     needs: upload
     runs-on: ubuntu-latest
     steps:
+      # Needed only to read rugo/__version__.py below.
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
       - name: Create notes-only release on mabel-dev/rugo.dev
         env:
           GH_TOKEN: ${{ secrets.RUGO_DEV_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
+          # rugo.dev is rugo's public changelog, so its release must be named for
+          # the rugo version that just shipped. Under a `rugo-*` tag the trigger
+          # tag IS that name. Under an `all-*` tag it is not — that tag names a
+          # combined release decision across three components — so fall back to
+          # rugo's own single source of truth rather than publishing an `all-…`
+          # entry in rugo's changelog.
+          case "${GITHUB_REF_NAME}" in
+            all-*)
+              VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' rugo/__version__.py)
+              if [ -z "${VERSION}" ]; then
+                echo "ERROR: could not read __version__ from rugo/__version__.py" >&2
+                exit 1
+              fi
+              RELEASE_TAG="rugo-${VERSION}"
+              ;;
+            *)
+              RELEASE_TAG="${GITHUB_REF_NAME}"
+              ;;
+          esac
+          echo "Creating rugo.dev release: ${RELEASE_TAG}"
+          gh release create "${RELEASE_TAG}" \
             --repo mabel-dev/rugo.dev \
-            --title "${GITHUB_REF_NAME}" \
+            --title "${RELEASE_TAG}" \
             --generate-notes

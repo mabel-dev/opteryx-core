@@ -29,10 +29,13 @@ from build_common import (
     draken_rugo_extensions,
     get_lz4_vendor_sources,
     get_parquet_vendor_sources,
+    get_zstd_compress_sources,
+    get_zstd_vendor_sources,
     include_dirs,
     is_mac,
     is_win,
     skene_extensions,
+    write_draken_abi_modules,
 )
 
 LIBRARY = "opteryx"
@@ -692,7 +695,20 @@ extensions = [
             # — and RUGO_ENABLE_HTTP must therefore MATCH pool_reader's, for two
             # independent reasons (see define_macros below).
             "src/cpp/http_client.cpp",
-        ],
+        ]
+        # skene's kZstd section codec, both halves. Same argument as lz4.c above,
+        # and it is NOT optional: skene/src/encoding.cpp calls ZSTD_compress /
+        # ZSTD_compressBound / ZSTD_decompress / ZSTD_isError / ZSTD_getErrorName
+        # unguarded. Leaving them undefined made this .so depend on some OTHER
+        # extension being dlopen'd RTLD_GLOBAL first, and pool_reader.so — the only
+        # candidate loaded on the import path — carries the DECOMPRESS set only
+        # (get_parquet_vendor_sources). The compress symbols therefore resolved
+        # nowhere and Linux failed the whole `import opteryx.operators` with
+        # "undefined symbol: ZSTD_compressBound"; macOS hid it because
+        # -undefined dynamic_lookup defers the binding. skene_native and
+        # rugo_native already compile both halves in for exactly this reason.
+        + get_zstd_vendor_sources()
+        + get_zstd_compress_sources(),
         include_dirs=include_dirs
         + [
             "opteryx/operators/aggregate",
@@ -719,7 +735,15 @@ extensions = [
         #
         # A remote scan reaching NativeParquetScanSource hit (2) and silently returned
         # ZERO ROWS. Keep these two extensions' macro sets in lockstep.
-        define_macros=[("RUGO_ENABLE_HTTP", "1")],
+        #
+        # HAVE_ZSTD / ZSTD_STATIC_LINKING_ONLY match skene_native and rugo_native —
+        # the vendored zstd TUs added to sources above are built the same way in
+        # every extension that carries them.
+        define_macros=[
+            ("RUGO_ENABLE_HTTP", "1"),
+            ("HAVE_ZSTD", "1"),
+            ("ZSTD_STATIC_LINKING_ONLY", "1"),
+        ],
         language="c++",
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA
@@ -1314,6 +1338,15 @@ def discover_packages():
             if "__init__.pyx" in filenames or "__init__.py" in filenames:
                 base.add(".".join(parts))
     return sorted(base)
+
+
+# Stamp the draken ABI surface BEFORE setup() collects packages, so the generated
+# modules ship in the wheel. All THREE consumers are named because this wheel
+# bundles rugo and skene as well as opteryx (see discover_packages above) — a
+# bundled package without its generated module would not import at all. Each
+# package's __init__ calls the generated check; see the "draken ABI stamp"
+# section of build_common.py for what it defends against.
+print(f"draken ABI stamp: {write_draken_abi_modules('opteryx', 'rugo', 'skene')}")
 
 
 # Setup configuration

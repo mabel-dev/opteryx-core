@@ -167,32 +167,6 @@ REGISTER: List[RegisteredDefect] = [
             "Pinned by test_wrong_answer_nan_row_still_falls_outside_every_bucket."
         ),
     ),
-    RegisteredDefect(
-        id="having-leaks-its-internal-count",
-        repro=(
-            "SELECT * FROM (SELECT i_group, COUNT(row_id) AS a1 FROM testdata.fuzzing.mixed "
-            "GROUP BY i_group HAVING COUNT(*) <= 5000) AS s"
-        ),
-        error_type="WrongAnswer",
-        signature="",
-        detail=(
-            "Wrapping a GROUP BY ... HAVING query exposes HAVING's own internal aggregate as a "
-            "projected column. For\n"
-            "  SELECT i_group, COUNT(row_id) AS a1 FROM t GROUP BY i_group HAVING COUNT(*) <= N\n"
-            "the column names are:\n"
-            "  run directly       ['i_group', 'a1']              <- correct\n"
-            "  SELECT * FROM (q)  ['i_group', 'a1', 'COUNT(*)']  <- HAVING's internal aggregate\n"
-            "  WITH c AS (q) ...  ['i_group', 'a1', 'COUNT(*)']     leaks, in both wrappings\n"
-            "Without the HAVING both wrappings agree with the direct form. Values are correct "
-            "in every form; it is the projected column set that is wrong.\n"
-            "NARROWED 2026-08-08: the CTE form used to leak AND lose the user's alias "
-            "(['i_group', 'COUNT(row_id)', 'COUNT(*)']). That half is fixed — the splice read "
-            "its column names off whatever node topped the CTE's plan, which is the HAVING "
-            "Filter, not the Project. The two wrappings now agree; what is left is the leak "
-            "they share.\n"
-            "Pinned by test_wrong_answer_having_column_leak_is_still_present."
-        ),
-    ),
     # ─────────────────────────────────────────────────────────────────────────
     # CATALOG DISAGREES WITH THE ENGINE — `reference/` declares support the
     # engine does not provide. Either the engine or the catalog is wrong; both
@@ -266,19 +240,6 @@ REGISTER: List[RegisteredDefect] = [
     # where one works and the other does not. These share a root: redundant
     # parentheses are not normalised away before the plan is built.
     # ─────────────────────────────────────────────────────────────────────────
-    RegisteredDefect(
-        id="wrapping-drops-a-column-projected-twice",
-        repro="SELECT * FROM (SELECT id AS x, id FROM testdata.planets) AS s",
-        error_type="WrongAnswer",
-        signature="",
-        detail=(
-            "A projection that lists a column both aliased and bare loses the bare copy when the "
-            "query is wrapped. `SELECT id AS x, id FROM testdata.planets` returns two columns, "
-            "['x', 'id']; `SELECT * FROM (<that>) AS s` returns one, ['x']. Both spellings are "
-            "legal SQL and the un-aliased column is silently gone.\n"
-            "Pinned by test_wrong_answer_wrapping_still_drops_a_twice-projected_column."
-        ),
-    ),
     RegisteredDefect(
         id="parenthesised-expression-loses-its-alias",
         repro="SELECT x FROM (SELECT (id + 1) AS x FROM testdata.planets) AS s",
@@ -373,27 +334,6 @@ REGISTER: List[RegisteredDefect] = [
             "same subquery works (`SELECT rn FROM (...)`, `SELECT * FROM (...)`, "
             "`SELECT row_id FROM (...)`) — only the empty projection of COUNT(*) fails. Same "
             "class as the READ_JSONL COUNT(*) empty-projection bug."
-        ),
-    ),
-    RegisteredDefect(
-        id="havings-leaked-count-makes-an-outer-alias-ambiguous",
-        repro=(
-            "SELECT oz_a1, COUNT(*) AS oz_a2 FROM (SELECT Location, AVG(Price) AS oz_a1 FROM "
-            "testdata.missions GROUP BY Location HAVING COUNT(*) <= 2) AS sub GROUP BY oz_a1 "
-            "ORDER BY oz_a2"
-        ),
-        error_type="AmbiguousIdentifierError",
-        # Scoped to the generator's alias namespace (a1, a2, ...) so a genuine
-        # ambiguity on a real column name still fails the run.
-        signature="Identifier reference 'oz_",
-        detail=(
-            "A direct consequence of having-leaks-its-internal-count: "
-            "the subquery's HAVING leaks a COUNT(*) column, the outer query aliases its own "
-            "COUNT(*), and ORDER BY on that alias is then ambiguous between the two. Removing "
-            "the HAVING makes it work, as does removing the ORDER BY — the query the user wrote "
-            "contains no ambiguity at all.\n"
-            "Fixing the leak fixes this too; it is registered separately because it surfaces as "
-            "an exception rather than as a wrong answer."
         ),
     ),
     # ─────────────────────────────────────────────────────────────────────────

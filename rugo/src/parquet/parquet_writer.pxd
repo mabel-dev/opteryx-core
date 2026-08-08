@@ -28,6 +28,8 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
     cdef enum:
         CODEC_UNCOMPRESSED
         CODEC_ZSTD
+        PROFILE_FAST
+        PROFILE_STORAGE
         TU_MILLIS
         TU_MICROS
         TU_NANOS
@@ -82,13 +84,13 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
 
     vector[uint8_t] WriteParquet(const vector[ColumnInput]& cols,
                                  size_t num_rows, int codec,
-                                 int zstd_level,
+                                 int profile,
                                  vector[ColumnStats]* out_stats,
                                  size_t max_rows_per_rg,
                                  size_t max_page_bytes) except + nogil
 
     cdef cppclass StreamingParquetWriter:
-        StreamingParquetWriter(int codec, int zstd_level,
+        StreamingParquetWriter(int codec, int profile,
                                size_t max_page_bytes) except +
         void add_row_group(const vector[ColumnInput]& rg_cols,
                            size_t rg_rows) except + nogil

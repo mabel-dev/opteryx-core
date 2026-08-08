@@ -66,6 +66,16 @@ inline std::vector<uint8_t> zstd_compress_block(const std::vector<uint8_t> &src,
 #endif
 }
 
+// ---- compression profile ----
+//
+// FAST is the default: the write side of CTAS and uploads, where latency is
+// the constraint. STORAGE is for the defragmenter, which rewrites bytes that
+// are then read many times and can afford to compress slowly.
+enum WriteProfile : int32_t {
+  PROFILE_FAST = 0,
+  PROFILE_STORAGE = 1,
+};
+
 // Parquet physical Type enum (parquet.thrift `enum Type`).
 enum PType : int32_t {
   PT_BOOLEAN = 0,
@@ -248,6 +258,24 @@ inline int level_bit_width(uint32_t maxval) {
   int bw = 0;
   while (maxval) { bw++; maxval >>= 1; }
   return bw;
+}
+
+// ---- compression policy ----
+//
+// The zstd level is chosen PER COLUMN from its physical type; callers pick a
+// profile, never a level. Measured on ClickBench with
+// dev/rugo_parquet_codec_bench.cpp (10M rows, interleaved rounds): BYTE_ARRAY
+// is the only physical type that responds to level — 4 -> 7 buys 13.7% on the
+// string columns, but only ~2% on INT32/INT64 for 2-3x the compress time, and
+// high-cardinality integers (WatchID) are incompressible at EVERY level. So
+// numerics stay at 4 in both profiles and only the string level moves; a
+// blanket level 7 costs 14% more compress time than "strings 7, ints 4" for
+// 1.2% fewer bytes.
+inline int zstd_level_for(const ColumnInput &col, int profile) {
+  const PType t = col.is_array ? col.elem_type : col.type;
+  if (t == PT_BYTE_ARRAY)
+    return (profile == PROFILE_STORAGE) ? 7 : 4;
+  return 4;
 }
 
 // ---- small endian helpers ----
@@ -685,10 +713,29 @@ inline std::vector<uint8_t> build_bloom_header(int32_t num_bytes) {
 
 // A built column chunk: the on-disk bytes (page header + possibly-compressed
 // body) plus the uncompressed total (page header + raw body) for metadata.
+//
+// `plain_bytes` carries the SAME pages built under CODEC_UNCOMPRESSED, so the
+// caller can apply the keep-whichever-is-smaller rule (see
+// write_row_group_chunks) without re-encoding the column. It is populated only
+// when a compressing codec was requested — under CODEC_UNCOMPRESSED `bytes` is
+// already the plain form and duplicating it would be pure waste. Holding both
+// costs no extra peak memory: the raw body and the compressed body are both
+// live inside the builders anyway.
 struct PageBuild {
   std::vector<uint8_t> bytes;
+  std::vector<uint8_t> plain_bytes;
   size_t uncompressed_total;
 };
+
+// header ++ body, sized exactly.
+inline std::vector<uint8_t> concat_page(const std::vector<uint8_t> &header,
+                                        const std::vector<uint8_t> &body) {
+  std::vector<uint8_t> out;
+  out.reserve(header.size() + body.size());
+  out.insert(out.end(), header.begin(), header.end());
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
 
 // ---- per-column data page (v1) ----
 //
@@ -704,29 +751,36 @@ inline PageBuild build_data_page(const ColumnInput &col, size_t num_rows,
   encode_values(col, num_rows, body);
 
   size_t uncompressed_body = body.size();
-  std::vector<uint8_t> stored =
-      (codec == CODEC_ZSTD) ? zstd_compress_block(body, zstd_level) : body;
 
-  // PageHeader (Compact Protocol).
-  TCompactWriter h;
-  h.structBegin();
-  h.writeI32Field(1, PAGE_DATA);                    // type
-  h.writeI32Field(2, (int32_t)uncompressed_body);   // uncompressed_page_size
-  h.writeI32Field(3, (int32_t)stored.size());       // compressed_page_size
-  h.writeFieldHeader(CT_STRUCT, 5);                 // data_page_header
-  h.structBegin();
-  h.writeI32Field(1, (int32_t)num_rows);            // num_values (incl. nulls)
-  h.writeI32Field(2, ENC_PLAIN);                    // encoding
-  h.writeI32Field(3, ENC_RLE);                      // definition_level_encoding
-  h.writeI32Field(4, ENC_RLE);                      // repetition_level_encoding (required)
-  h.structEnd();
-  h.structEnd();
+  // PageHeader (Compact Protocol). Only compressed_page_size differs between
+  // the stored and plain variants, so the header is built per variant.
+  auto header = [&](size_t stored_size) {
+    TCompactWriter h;
+    h.structBegin();
+    h.writeI32Field(1, PAGE_DATA);                    // type
+    h.writeI32Field(2, (int32_t)uncompressed_body);   // uncompressed_page_size
+    h.writeI32Field(3, (int32_t)stored_size);         // compressed_page_size
+    h.writeFieldHeader(CT_STRUCT, 5);                 // data_page_header
+    h.structBegin();
+    h.writeI32Field(1, (int32_t)num_rows);            // num_values (incl. nulls)
+    h.writeI32Field(2, ENC_PLAIN);                    // encoding
+    h.writeI32Field(3, ENC_RLE);                      // definition_level_encoding
+    h.writeI32Field(4, ENC_RLE);                      // repetition_level_encoding (required)
+    h.structEnd();
+    h.structEnd();
+    return h.buf;
+  };
 
   PageBuild pb;
-  pb.bytes.reserve(h.buf.size() + stored.size());
-  pb.bytes.insert(pb.bytes.end(), h.buf.begin(), h.buf.end());
-  pb.bytes.insert(pb.bytes.end(), stored.begin(), stored.end());
-  pb.uncompressed_total = h.buf.size() + uncompressed_body;
+  if (codec == CODEC_ZSTD) {
+    std::vector<uint8_t> stored = zstd_compress_block(body, zstd_level);
+    pb.bytes = concat_page(header(stored.size()), stored);
+    pb.plain_bytes = concat_page(header(uncompressed_body), body);
+    pb.uncompressed_total = pb.plain_bytes.size();
+  } else {
+    pb.bytes = concat_page(header(uncompressed_body), body);
+    pb.uncompressed_total = pb.bytes.size();
+  }
   return pb;
 }
 
@@ -760,28 +814,34 @@ inline PageBuild build_array_data_page(const ColumnInput &col, int codec,
   encode_values(elem, col.num_elements, body);
 
   size_t uncompressed_body = body.size();
-  std::vector<uint8_t> stored =
-      (codec == CODEC_ZSTD) ? zstd_compress_block(body, zstd_level) : body;
 
-  TCompactWriter h;
-  h.structBegin();
-  h.writeI32Field(1, PAGE_DATA);
-  h.writeI32Field(2, (int32_t)uncompressed_body);
-  h.writeI32Field(3, (int32_t)stored.size());
-  h.writeFieldHeader(CT_STRUCT, 5); // data_page_header
-  h.structBegin();
-  h.writeI32Field(1, (int32_t)col.num_levels); // num_values = level count
-  h.writeI32Field(2, ENC_PLAIN);
-  h.writeI32Field(3, ENC_RLE); // definition_level_encoding
-  h.writeI32Field(4, ENC_RLE); // repetition_level_encoding
-  h.structEnd();
-  h.structEnd();
+  auto header = [&](size_t stored_size) {
+    TCompactWriter h;
+    h.structBegin();
+    h.writeI32Field(1, PAGE_DATA);
+    h.writeI32Field(2, (int32_t)uncompressed_body);
+    h.writeI32Field(3, (int32_t)stored_size);
+    h.writeFieldHeader(CT_STRUCT, 5); // data_page_header
+    h.structBegin();
+    h.writeI32Field(1, (int32_t)col.num_levels); // num_values = level count
+    h.writeI32Field(2, ENC_PLAIN);
+    h.writeI32Field(3, ENC_RLE); // definition_level_encoding
+    h.writeI32Field(4, ENC_RLE); // repetition_level_encoding
+    h.structEnd();
+    h.structEnd();
+    return h.buf;
+  };
 
   PageBuild pb;
-  pb.bytes.reserve(h.buf.size() + stored.size());
-  pb.bytes.insert(pb.bytes.end(), h.buf.begin(), h.buf.end());
-  pb.bytes.insert(pb.bytes.end(), stored.begin(), stored.end());
-  pb.uncompressed_total = h.buf.size() + uncompressed_body;
+  if (codec == CODEC_ZSTD) {
+    std::vector<uint8_t> stored = zstd_compress_block(body, zstd_level);
+    pb.bytes = concat_page(header(stored.size()), stored);
+    pb.plain_bytes = concat_page(header(uncompressed_body), body);
+    pb.uncompressed_total = pb.plain_bytes.size();
+  } else {
+    pb.bytes = concat_page(header(uncompressed_body), body);
+    pb.uncompressed_total = pb.bytes.size();
+  }
   return pb;
 }
 
@@ -835,6 +895,7 @@ inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
   rows_per_page = (rows_per_page + 7) & ~(size_t)7; // byte-aligned validity slicing
 
   std::vector<uint8_t> out;
+  std::vector<uint8_t> plain_out;
   size_t total_uncompressed = 0;
   for (size_t start = 0; start < rg_rows; start += rows_per_page) {
     size_t count = std::min(rows_per_page, rg_rows - start);
@@ -848,10 +909,12 @@ inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
     if (col.validity) sub.validity = col.validity + (start >> 3);
     PageBuild pb = build_data_page(sub, count, codec, zstd_level);
     out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
+    plain_out.insert(plain_out.end(), pb.plain_bytes.begin(), pb.plain_bytes.end());
     total_uncompressed += pb.uncompressed_total;
   }
   PageBuild result;
   result.bytes = std::move(out);
+  result.plain_bytes = std::move(plain_out);
   result.uncompressed_total = total_uncompressed;
   return result;
 }
@@ -905,6 +968,7 @@ inline PageBuild build_array_data_pages(const ColumnInput &rg_col, int codec,
   rows_per_page = (rows_per_page + 7) & ~(size_t)7;
 
   std::vector<uint8_t> out;
+  std::vector<uint8_t> plain_out;
   size_t total_uncompressed = 0;
   for (size_t start = 0; start < rg_rows; start += rows_per_page) {
     size_t count = std::min(rows_per_page, rg_rows - start);
@@ -921,10 +985,12 @@ inline PageBuild build_array_data_pages(const ColumnInput &rg_col, int codec,
     if (rg_col.strs)    sub.strs    = rg_col.strs    + el_s;
     PageBuild pb = build_array_data_page(sub, codec, zstd_level);
     out.insert(out.end(), pb.bytes.begin(), pb.bytes.end());
+    plain_out.insert(plain_out.end(), pb.plain_bytes.begin(), pb.plain_bytes.end());
     total_uncompressed += pb.uncompressed_total;
   }
   PageBuild result;
   result.bytes = std::move(out);
+  result.plain_bytes = std::move(plain_out);
   result.uncompressed_total = total_uncompressed;
   return result;
 }
@@ -1231,6 +1297,13 @@ struct DictColumnBuild {
   std::vector<uint8_t> bytes;
   size_t uncompressed_total; // both page headers + both raw bodies
   size_t dict_page_len;      // bytes occupied by the dictionary page
+  // The same two pages under CODEC_UNCOMPRESSED, for the
+  // keep-whichever-is-smaller rule. Populated only when a compressing codec was
+  // requested. The dictionary page has its own length in this variant, so the
+  // caller must swap BOTH fields together or data_page_offset will point into
+  // the middle of the dictionary page.
+  std::vector<uint8_t> plain_bytes;
+  size_t plain_dict_page_len = 0;
 };
 
 inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows,
@@ -1308,18 +1381,22 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
                                          ? zstd_compress_block(dict_body, zstd_level)
                                          : dict_body;
 
-  TCompactWriter dh;
-  dh.structBegin();
-  dh.writeI32Field(1, PAGE_DICTIONARY);             // type
-  dh.writeI32Field(2, (int32_t)dict_uncompressed);  // uncompressed_page_size
-  dh.writeI32Field(3, (int32_t)dict_stored.size()); // compressed_page_size
-  dh.writeFieldHeader(CT_STRUCT, 7);                // dictionary_page_header
-  dh.structBegin();
-  dh.writeI32Field(1, (int32_t)col.dict_count);     // num_values
-  dh.writeI32Field(2, ENC_PLAIN);                   // encoding (PLAIN values)
-  dh.writeBoolField(3, sorted);                     // is_sorted (see above)
-  dh.structEnd();
-  dh.structEnd();
+  auto dict_header = [&](size_t stored_size) {
+    TCompactWriter dh;
+    dh.structBegin();
+    dh.writeI32Field(1, PAGE_DICTIONARY);            // type
+    dh.writeI32Field(2, (int32_t)dict_uncompressed); // uncompressed_page_size
+    dh.writeI32Field(3, (int32_t)stored_size);       // compressed_page_size
+    dh.writeFieldHeader(CT_STRUCT, 7);               // dictionary_page_header
+    dh.structBegin();
+    dh.writeI32Field(1, (int32_t)col.dict_count);    // num_values
+    dh.writeI32Field(2, ENC_PLAIN);                  // encoding (PLAIN values)
+    dh.writeBoolField(3, sorted);                    // is_sorted (see above)
+    dh.structEnd();
+    dh.structEnd();
+    return dh.buf;
+  };
+  std::vector<uint8_t> dh_buf = dict_header(dict_stored.size());
 
   // ---- data page: def levels, bit_width byte, RLE/bit-packed indices ----
   std::vector<uint8_t> data_body;
@@ -1342,29 +1419,49 @@ inline DictColumnBuild build_dict_column(const ColumnInput &col, size_t num_rows
                                          ? zstd_compress_block(data_body, zstd_level)
                                          : data_body;
 
-  TCompactWriter ph;
-  ph.structBegin();
-  ph.writeI32Field(1, PAGE_DATA);
-  ph.writeI32Field(2, (int32_t)data_uncompressed);
-  ph.writeI32Field(3, (int32_t)data_stored.size());
-  ph.writeFieldHeader(CT_STRUCT, 5); // data_page_header
-  ph.structBegin();
-  ph.writeI32Field(1, (int32_t)num_rows);  // num_values (incl. nulls)
-  ph.writeI32Field(2, ENC_RLE_DICTIONARY); // encoding
-  ph.writeI32Field(3, ENC_RLE);            // definition_level_encoding
-  ph.writeI32Field(4, ENC_RLE);            // repetition_level_encoding
-  ph.structEnd();
-  ph.structEnd();
+  auto data_header = [&](size_t stored_size) {
+    TCompactWriter ph;
+    ph.structBegin();
+    ph.writeI32Field(1, PAGE_DATA);
+    ph.writeI32Field(2, (int32_t)data_uncompressed);
+    ph.writeI32Field(3, (int32_t)stored_size);
+    ph.writeFieldHeader(CT_STRUCT, 5); // data_page_header
+    ph.structBegin();
+    ph.writeI32Field(1, (int32_t)num_rows);  // num_values (incl. nulls)
+    ph.writeI32Field(2, ENC_RLE_DICTIONARY); // encoding
+    ph.writeI32Field(3, ENC_RLE);            // definition_level_encoding
+    ph.writeI32Field(4, ENC_RLE);            // repetition_level_encoding
+    ph.structEnd();
+    ph.structEnd();
+    return ph.buf;
+  };
+  std::vector<uint8_t> ph_buf = data_header(data_stored.size());
+
+  auto assemble = [](const std::vector<uint8_t> &dhb,
+                     const std::vector<uint8_t> &dbody,
+                     const std::vector<uint8_t> &phb,
+                     const std::vector<uint8_t> &pbody) {
+    std::vector<uint8_t> b;
+    b.reserve(dhb.size() + dbody.size() + phb.size() + pbody.size());
+    b.insert(b.end(), dhb.begin(), dhb.end());
+    b.insert(b.end(), dbody.begin(), dbody.end());
+    b.insert(b.end(), phb.begin(), phb.end());
+    b.insert(b.end(), pbody.begin(), pbody.end());
+    return b;
+  };
 
   DictColumnBuild out;
-  out.dict_page_len = dh.buf.size() + dict_stored.size();
-  out.uncompressed_total =
-      dh.buf.size() + dict_uncompressed + ph.buf.size() + data_uncompressed;
-  out.bytes.reserve(out.dict_page_len + ph.buf.size() + data_stored.size());
-  out.bytes.insert(out.bytes.end(), dh.buf.begin(), dh.buf.end());
-  out.bytes.insert(out.bytes.end(), dict_stored.begin(), dict_stored.end());
-  out.bytes.insert(out.bytes.end(), ph.buf.begin(), ph.buf.end());
-  out.bytes.insert(out.bytes.end(), data_stored.begin(), data_stored.end());
+  out.dict_page_len = dh_buf.size() + dict_stored.size();
+  out.bytes = assemble(dh_buf, dict_stored, ph_buf, data_stored);
+  if (codec == CODEC_ZSTD) {
+    std::vector<uint8_t> pdh = dict_header(dict_uncompressed);
+    std::vector<uint8_t> pph = data_header(data_uncompressed);
+    out.plain_dict_page_len = pdh.size() + dict_uncompressed;
+    out.plain_bytes = assemble(pdh, dict_body, pph, data_body);
+    out.uncompressed_total = out.plain_bytes.size();
+  } else {
+    out.uncompressed_total = out.bytes.size();
+  }
   return out;
 }
 
@@ -1636,6 +1733,11 @@ struct RGMeta {
   std::vector<ColumnStats> stats;
   std::vector<int64_t>     bloom_offset;
   std::vector<int32_t>     bloom_length;
+  // Codec is PER COLUMN CHUNK, not per file: a chunk whose compressed form is
+  // no smaller than its raw form is stored raw and records CODEC_UNCOMPRESSED
+  // here. Parquet declares the codec in ColumnMetaData, so this is legal and
+  // every conforming reader dispatches on it (rugo's own does).
+  std::vector<int32_t>     codecs;
   size_t row_count      = 0;
   size_t total_byte_size = 0;
 };
@@ -1647,7 +1749,7 @@ struct RGMeta {
 // streaming writer, so the two encode paths cannot drift.
 inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offset,
                                    const std::vector<ColumnInput> &rg_cols,
-                                   size_t rg_rows, int codec, int zstd_level,
+                                   size_t rg_rows, int codec, int profile,
                                    size_t max_page_bytes, RGMeta &meta) {
   const size_t ncols = rg_cols.size();
   meta.row_count = rg_rows;
@@ -1658,12 +1760,29 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
   meta.stats.assign(ncols, ColumnStats{});
   meta.bloom_offset.assign(ncols, -1);
   meta.bloom_length.assign(ncols, 0);
+  meta.codecs.assign(ncols, codec);
+
+  // Keep whichever is smaller. zstd emits a frame header even when it finds
+  // nothing to compress, so an incompressible chunk comes back LARGER than the
+  // bytes that went in — 17 of ClickBench hits' 105 columns land at 0.847x.
+  // Storing the raw pages and recording CODEC_UNCOMPRESSED for that chunk is
+  // exact and costs no bytes; the wasted compress work is bounded because the
+  // chunks that fail this test are precisely the ones zstd bails out of at
+  // near-memcpy speed.
+  auto keep_smaller = [&](PageBuild &pb, size_t i) {
+    if (codec != CODEC_ZSTD) return;
+    if (pb.bytes.size() < pb.plain_bytes.size()) return;
+    pb.bytes = std::move(pb.plain_bytes);
+    meta.codecs[i] = CODEC_UNCOMPRESSED;
+  };
 
   for (size_t i = 0; i < ncols; i++) {
+    const int level = zstd_level_for(rg_cols[i], profile);
     if (rg_cols[i].is_array) {
       int64_t page_start = base_offset + (int64_t)out.size();
-      PageBuild pb = build_array_data_pages(rg_cols[i], codec, zstd_level,
+      PageBuild pb = build_array_data_pages(rg_cols[i], codec, level,
                                             rg_rows, max_page_bytes);
+      keep_smaller(pb, i);
       meta.data_offsets[i] = page_start;
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
@@ -1696,7 +1815,7 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
     BuiltDict bd;
     if (rg_cols[i].codes != nullptr) {
       use_dict = true;
-      dcb = build_dict_column(rg_cols[i], rg_rows, codec, zstd_level);
+      dcb = build_dict_column(rg_cols[i], rg_rows, codec, level);
     } else if (rg_cols[i].dict_enabled) {
       size_t present = rg_rows - (size_t)meta.stats[i].null_count;
       ColumnInput dcol = rg_cols[i];
@@ -1738,19 +1857,28 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
       if (built) {
         dcol.codes = bd.codes.data();
         use_dict = true;
-        dcb = build_dict_column(dcol, rg_rows, codec, zstd_level);
+        dcb = build_dict_column(dcol, rg_rows, codec, level);
       }
     }
 
     if (use_dict) {
+      // Both the bytes and the dictionary-page length move together — the
+      // plain dictionary page is a different size, and data_page_offset is
+      // derived from it.
+      if (codec == CODEC_ZSTD && dcb.bytes.size() >= dcb.plain_bytes.size()) {
+        dcb.bytes = std::move(dcb.plain_bytes);
+        dcb.dict_page_len = dcb.plain_dict_page_len;
+        meta.codecs[i] = CODEC_UNCOMPRESSED;
+      }
       meta.dict_offsets[i] = page_start;
       meta.data_offsets[i] = page_start + (int64_t)dcb.dict_page_len;
       meta.sizes[i]        = dcb.bytes.size();
       meta.uncompressed[i] = dcb.uncompressed_total;
       out.insert(out.end(), dcb.bytes.begin(), dcb.bytes.end());
     } else {
-      PageBuild pb = build_data_pages(rg_cols[i], rg_rows, codec, zstd_level,
+      PageBuild pb = build_data_pages(rg_cols[i], rg_rows, codec, level,
                                       max_page_bytes);
+      keep_smaller(pb, i);
       meta.data_offsets[i] = page_start;
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
@@ -1796,8 +1924,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
                                  const std::vector<ColumnInput> &schema_cols,
                                  size_t total_rows,
                                  const std::vector<RGMeta> &rg_meta,
-                                 const std::vector<std::vector<ColumnInput>> &all_rg_cols,
-                                 int codec) {
+                                 const std::vector<std::vector<ColumnInput>> &all_rg_cols) {
   const char *MAGIC = "PAR1";
   TCompactWriter fm;
   fm.structBegin();
@@ -1815,7 +1942,8 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     for (size_t i = 0; i < schema_cols.size(); i++)
       write_column_chunk(fm, all_rg_cols[rg][i], meta.row_count, meta.data_offsets[i],
                          meta.dict_offsets[i], meta.sizes[i], meta.uncompressed[i],
-                         codec, meta.stats[i], meta.bloom_offset[i], meta.bloom_length[i]);
+                         meta.codecs[i], meta.stats[i], meta.bloom_offset[i],
+                         meta.bloom_length[i]);
     fm.writeI64Field(2, (int64_t)meta.total_byte_size); // total_byte_size
     fm.writeI64Field(3, (int64_t)meta.row_count);       // num_rows
     write_sorting_columns(fm, all_rg_cols[rg]);         // sorting_columns (field 4, optional)
@@ -1854,7 +1982,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
 inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
                                          size_t num_rows,
                                          int codec = CODEC_UNCOMPRESSED,
-                                         int zstd_level = 3,
+                                         int profile = PROFILE_FAST,
                                          std::vector<ColumnStats> *out_stats =
                                              nullptr,
                                          size_t max_rows_per_rg = 0,
@@ -1948,10 +2076,10 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     // writer). base_offset == 0: `file` already starts at absolute 0 and
     // includes the leading PAR1, so file.size() is the absolute page offset.
     write_row_group_chunks(file, /*base_offset=*/0, rg_cols, rg_rows, codec,
-                           zstd_level, max_page_bytes, rg_meta[rg]);
+                           profile, max_page_bytes, rg_meta[rg]);
   } // end row group loop
 
-  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols, codec);
+  write_parquet_footer(file, cols, num_rows, rg_meta, all_rg_cols);
   // out_stats: only meaningful for single-RG files; unsupported for multi-RG.
   if (out_stats && n_rg == 1)
     *out_stats = std::move(rg_meta[0].stats);
@@ -1974,8 +2102,8 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
 // (names/types); the schema is captured from the first batch.
 class StreamingParquetWriter {
  public:
-  StreamingParquetWriter(int codec, int zstd_level, size_t max_page_bytes)
-      : codec_(codec), zstd_level_(zstd_level), max_page_bytes_(max_page_bytes) {
+  StreamingParquetWriter(int codec, int profile, size_t max_page_bytes)
+      : codec_(codec), profile_(profile), max_page_bytes_(max_page_bytes) {
     const char *MAGIC = "PAR1";
     buf_.insert(buf_.end(), MAGIC, MAGIC + 4); // header (drained with row group 1)
   }
@@ -1989,7 +2117,7 @@ class StreamingParquetWriter {
     }
     rg_meta_.emplace_back();
     write_row_group_chunks(buf_, abs_offset_, rg_cols, rg_rows, codec_,
-                           zstd_level_, max_page_bytes_, rg_meta_.back());
+                           profile_, max_page_bytes_, rg_meta_.back());
     // Footer reads only shape fields (never data pointers) from these — store a
     // stripped copy so no per-batch data buffer is retained across row groups.
     all_rg_cols_.push_back(strip_data(rg_cols));
@@ -2010,7 +2138,7 @@ class StreamingParquetWriter {
   // row-group bytes not yet drained). After this the writer is complete.
   std::vector<uint8_t> finish() {
     write_parquet_footer(buf_, schema_cols_, (size_t)total_rows_, rg_meta_,
-                         all_rg_cols_, codec_);
+                         all_rg_cols_);
     return take_pending();
   }
 
@@ -2032,7 +2160,7 @@ class StreamingParquetWriter {
   }
 
   int codec_;
-  int zstd_level_;
+  int profile_;
   size_t max_page_bytes_;
   bool have_schema_ = false;
   int64_t abs_offset_ = 0;             // bytes already drained via take_pending

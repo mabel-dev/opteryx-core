@@ -55,6 +55,7 @@ from build_common import (  # noqa: E402
     build_ext,
     draken_rugo_extensions,
     skene_extensions,
+    write_draken_abi_modules,
 )
 
 # libskene's own version — single source of truth in skene/__version__.py.
@@ -104,6 +105,13 @@ def discover_packages():
             if "__init__.pyx" in filenames or "__init__.py" in filenames:
                 base.add(".".join(parts))
     return sorted(base)
+
+
+# Stamp the draken ABI surface into draken/_abi_stamp.py and skene/_draken_abi.py
+# BEFORE setup() collects packages, so both generated modules ship in the wheel.
+# skene/__init__.py calls the generated check on import; see the "draken ABI
+# stamp" section of build_common.py for what it defends against.
+print(f"draken ABI stamp: {write_draken_abi_modules('skene')}")
 
 
 setup(

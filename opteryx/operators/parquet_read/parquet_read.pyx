@@ -1497,18 +1497,34 @@ cdef class ParquetReadNode(ReaderNode):
             # runs in parallel there (nogil), not serially on this thread. Only when the
             # predicate is fully c-native (the worker VM requires it); rugo silently
             # falls back to serial for column shapes it can't view (survivor_mask empty).
-            if self.compiled_predicate is not None and self.compiled_predicate.is_all_c_native:
+            _col_type_by_name = {c.name: c.column_type for c in base_schema.columns}
+            if (
+                self.compiled_predicate is not None
+                and self.compiled_predicate.is_all_c_native
+                # The resolver needs a plan type for every column it resolves, to
+                # stamp on rugo's worker-side view (Pass1PredCtx.col_type). An
+                # untyped pass-1 column has no tag to stamp, so decline the push
+                # rather than resolve one and find out. This is checked over ALL
+                # pass-1 columns, not just the predicate's — the sort key rides
+                # along, and requiring it too only ever declines, never mis-pushes.
+                and all(_col_type_by_name.get(n) is not None
+                        for n in self._sp_pass1_name_to_identity)
+            ):
                 identity_to_physical = {
                     ident: name for name, ident in self._sp_pass1_name_to_identity.items()
                 }
-                self._pass1_resolver = _Pass1PredResolver(self.compiled_predicate, identity_to_physical)
-                # ...and only when every predicate column reaches the predicate on its
-                # natural physical tag. rugo tags its worker-side view from the decoded
-                # buffers, so a column this scan retags afterwards (DATE / TIMESTAMP /
-                # DECIMAL — _sp_coerce_ops) or declares NVARCHAR / VARBINARY would be
-                # matched as a different type there than here. Same rule, same helper,
-                # as the native LatmatScanSource plan.
-                _col_type_by_name = {c.name: c.column_type for c in base_schema.columns}
+                identity_to_type = {
+                    ident: _col_type_by_name[name].physical.value
+                    for name, ident in self._sp_pass1_name_to_identity.items()
+                }
+                self._pass1_resolver = _Pass1PredResolver(
+                    self.compiled_predicate, identity_to_physical, identity_to_type
+                )
+                # ...and only when every predicate column's type fits entirely in the
+                # DrakenVector. A column carrying a logical descriptor (DECIMAL scale,
+                # TIMESTAMP unit) cannot be reconstructed from a view no matter what
+                # tag is stamped on it. Same rule, same helper, as the native
+                # LatmatScanSource plan.
                 if _pass1_worker_predicate_admissible(
                     [_col_type_by_name.get(n) for n in self._pass1_resolver.col_names]
                 ):

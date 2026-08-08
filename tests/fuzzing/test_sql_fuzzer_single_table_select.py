@@ -491,60 +491,6 @@ def test_is_null_over_temporal_and_empty_string_predicates_reports_unknown():
         )
 
 
-def test_wrong_answer_wrapping_still_drops_a_twice_projected_column():
-    """Pins single_table_known_gaps/wrapping-drops-a-column-projected-twice."""
-    import opteryx
-
-    def column_names(sql):
-        session = opteryx.session()
-        morsels = list(session.execute_to_morsels(sql))
-        assert morsels, f"expected rows from {sql!r}"
-        return [name.decode() for name in morsels[0].column_names]
-
-    inner = "SELECT id AS x, id FROM testdata.planets"
-    assert column_names(inner) == ["x", "id"], "the direct projection has changed"
-    assert column_names(f"SELECT * FROM ({inner}) AS s") == ["x"], (
-        "wrapping no longer drops the un-aliased duplicate — the defect is FIXED. Delete this "
-        "test, the register entry, and the de-duplication in _build_projection."
-    )
-
-
-def test_wrong_answer_having_column_leak_is_still_present():
-    """Pins single_table_known_gaps/having-leaks-its-internal-count.
-
-    Asserts the current, wrong column sets. Goes red when the projection is
-    fixed, at which point this test and the register entry both go.
-
-    The two wrapped forms must agree with EACH OTHER here — the CTE form used to
-    also lose the user's alias, and that half is fixed. Asserting them separately
-    keeps a regression on that half visible instead of folding it into the leak.
-    """
-    import opteryx
-
-    def column_names(sql):
-        session = opteryx.session()
-        morsels = list(session.execute_to_morsels(sql))
-        assert morsels, f"expected rows from {sql!r}"
-        return [name.decode() for name in morsels[0].column_names]
-
-    query = (
-        "SELECT i_group, COUNT(row_id) AS a1 FROM testdata.fuzzing.mixed "
-        "GROUP BY i_group HAVING COUNT(*) <= 5000"
-    )
-    assert column_names(query) == ["i_group", "a1"], "the direct form's projection has changed"
-    assert column_names(f"SELECT * FROM ({query}) AS s") == ["i_group", "a1", "COUNT(*)"], (
-        "the subquery form no longer leaks HAVING's internal COUNT(*) — the defect may be fixed"
-    )
-    assert column_names(f"WITH c AS ({query}) SELECT * FROM c") == [
-        "i_group",
-        "a1",
-        "COUNT(*)",
-    ], (
-        "the CTE form's projection has changed. If it now matches the direct form the defect is "
-        "FIXED — delete this test and the register entry."
-    )
-
-
 def test_catalog_coverage_is_accounted_for():
     """Every catalog function is either generated or explicitly excluded.
 

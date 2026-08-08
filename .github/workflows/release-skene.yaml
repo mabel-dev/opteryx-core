@@ -12,10 +12,17 @@ name: Release libskene to PyPI
 # Matrix mirrors rugo's:
 #   Python  : 3.11, 3.12, 3.13, 3.14 (GIL)
 #   Platform: Linux x86-64 + aarch64 (manylinux), macOS arm64
+#
+# `all-*` also fires this pipeline: it is the single tag that releases
+# opteryx_core, rugo and libskene together (see release.yaml). The three
+# pipelines stay independent under it — same floor, same wheels, same publish,
+# each gated on its own result — and libskene's version still comes from
+# skene/__version__.py, never from the tag.
 on:
   push:
     tags:
       - 'skene-*'
+      - 'all-*'
 
 jobs:
   # ── Release floor: both suites MUST pass before any wheel is built or

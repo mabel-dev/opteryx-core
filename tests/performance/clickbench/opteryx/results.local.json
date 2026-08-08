@@ -59,7 +59,7 @@ current (14.52s) (08-AUG) [1.36x]
 make clickbench-skene (11.45s) (08-AUG) [1.07x]
 
 (125.62 seconds) <- 0.26.8
-(20.10 seconds) <- best on clickbench parquet files (13-JUL)
+(17.71s seconds) <- best on clickbench parquet files (08-AUG)
 (10.65 seconds) <- DuckDB Baseline
 
 make tpch - (11047.1ms) (08-AUG) [SF10] [2.65x]

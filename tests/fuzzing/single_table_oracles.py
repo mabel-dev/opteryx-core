@@ -606,16 +606,7 @@ def applicable_oracles(statement: Statement) -> List[Oracle]:
     if nestable and not statement.contains_limit and not statement.contains_offset:
         oracles.append(count_star_matches_materialised_rows)
     if nestable:
-        # A registered wrong-answer defect is triggered by wrapping this exact
-        # shape, and it is pinned by its own test_wrong_answer_* test. Declining
-        # it here — structurally, by query shape, naming the entry — keeps the
-        # wrapping oracles able to fail on everything else. Delete this condition
-        # when the entry is deleted.
-        wrap_hits_a_registered_defect = (
-            # single_table_known_gaps/having-leaks-its-internal-count
-            statement.contains_having
-        )
-        if statement.deterministic_multiset and not wrap_hits_a_registered_defect:
+        if statement.deterministic_multiset:
             oracles.append(subquery_wrapping_is_neutral)
             oracles.append(cte_matches_inline_subquery)
 

@@ -8,10 +8,85 @@ on:
       # this ran on every `release: published`, so a `rugo-` GitHub Release fired
       # it too; tag-prefix triggers make the two release decisions independent.
       - 'opteryx-*'   # release opteryx_core to PyPI
+      - 'all-*'       # release opteryx_core + rugo + libskene together
       - 'ci-*'        # CI / dry-run builds
 
 jobs:
+  # ── Release floor: the absolute minimum operational proof, run BEFORE any
+  # wheel is built or published. rugo and skene have had this since their
+  # pipelines were written (release-rugo.yaml / release-skene.yaml `floor`);
+  # opteryx_core — the component that bundles both — had no test gate at all:
+  # it went straight from a tag to building and publishing wheels, with only
+  # the post-build import check standing between a broken tree and PyPI.
+  #
+  # The four suites are the sanctioned local floor from the engineering
+  # contract, run here exactly as a developer runs them:
+  #   make q   — minimum SQL regression battery (shapes)
+  #   make rt  — rugo unit tests
+  #   make dt  — draken unit tests
+  #   make st  — skene native C++ suite + Python binding/scan/dispatch tests
+  #
+  # None of them need cloud credentials, so this job needs no secrets.
+  #
+  # Every suite runs even after an earlier one fails (`if: '!cancelled()'`) so
+  # one red suite does not hide the state of the other three — but the job is
+  # still red, and build-manylinux/build-macos `needs: floor`, so the publish
+  # is blocked. This is a hard gate: never make a step continue-on-error.
+  #
+  # This is the floor, not the ceiling — sqllogictest (`make slt`) and the wider
+  # battery are the next things to fold in.
+  floor:
+    name: opteryx floor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+
+      # libssl-dev/pkg-config are needed by the vendored libcurl the HTTP client
+      # statically links; Rust builds the opteryx.compute crate. Mirrors the
+      # environment regression_suite.yaml compiles in.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m uv pip install --upgrade numpy cython setuptools-rust
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+
+      - name: Compile
+        run: make compile
+
+      - name: make q — SQL shape regression battery
+        if: ${{ !cancelled() }}
+        run: make q
+
+      - name: make rt — rugo unit tests
+        if: ${{ !cancelled() }}
+        run: make rt
+
+      - name: make dt — draken unit tests
+        if: ${{ !cancelled() }}
+        run: make dt
+
+      - name: make st — skene native suite + Python bindings
+        if: ${{ !cancelled() }}
+        run: make st
+
   build-manylinux:
+    needs: floor
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -162,6 +237,7 @@ jobs:
           path: io/dist/*manylinux2014_x86_64*.whl
 
   build-macos:
+    needs: floor
     # macos-14 = Apple Silicon (arm64) only, Python 3.14 GIL build only.
     # Mirrors rugo's macOS build (release-rugo.yaml) but opteryx_core
     # additionally needs Rust (opteryx.compute) and libcurl.

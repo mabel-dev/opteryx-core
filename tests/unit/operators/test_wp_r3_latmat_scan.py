@@ -474,6 +474,97 @@ def test_trampoline_apply_topn_keeps_nan_rows(tmp_path, monkeypatch):
     assert sorted(tramp_rows) == sorted(ref_rows)
 
 
+# --------------------------------------------------------------------------------
+# The pass-1 predicate push, and the type tag it runs under.
+#
+# A parquet column declared `binary` with no UTF8 annotation binds VARBINARY, not
+# VARCHAR — which is how the ClickBench `hits` files as downloaded declare `URL`. The
+# worker-side push used to refuse that outright, so the whole predicate ran serially
+# on the pass-1 thread while the decode workers idled (ClickBench Q24: 2.5s at 3.4x
+# parallelism, vs 0.9s at 9.9x once admitted). It is admitted now, and the tag the
+# predicate runs under is stamped from the plan rather than inferred from the decoded
+# buffers (Pass1PredCtx.col_type) — because VARCHAR and VARBINARY share a byte layout
+# but not their semantics, so inferring is how a fast path becomes a wrong one.
+# --------------------------------------------------------------------------------
+
+
+def _binary_dataset(sort_values):
+    """The standard fixture with the PREDICATE column declared parquet `binary`,
+    which binds VARBINARY."""
+    cols = {"tag": (pa.binary(), [t.encode("utf-8") for t in _tags()]),
+            "k": (pa.int64(), sort_values)}
+    cols.update(_payload_columns())
+    return cols
+
+
+def test_latmat_varbinary_predicate_column(tmp_path, monkeypatch):
+    """A VARBINARY predicate column answers exactly what the un-pushed plan does."""
+    _assert_latmat_parity(
+        tmp_path, "varbinary_pred", _binary_dataset([N - i for i in range(N)]),
+        "* FROM {DATASET} WHERE tag LIKE '" + NEEDLE + "' ORDER BY k LIMIT 10",
+        monkeypatch)
+
+
+def test_varbinary_predicate_is_pushed_to_the_workers(tmp_path, monkeypatch):
+    """...and it reaches the workers, rather than passing the parity test by quietly
+    running on the serial fallback. The gate is the only guard on the push, so a
+    True return from it IS the push."""
+    from opteryx.managers.execution import compiler as _compiler
+    from opteryx.connectors.parquet_io import pass1_predicate_gate as _gate
+
+    verdicts = []
+    real = _gate.pass1_worker_predicate_admissible
+
+    def spy(column_types):
+        types = list(column_types)
+        out = real(types)
+        verdicts.append((tuple(str(t.physical) for t in types if t is not None), out))
+        return out
+
+    monkeypatch.setattr(_gate, "pass1_worker_predicate_admissible", spy)
+    monkeypatch.setattr(_compiler, "pass1_worker_predicate_admissible", spy,
+                        raising=False)
+
+    path = _write(os.path.join(str(tmp_path), "varbinary_push"),
+                  _binary_dataset([N - i for i in range(N)]))
+    sql = (f"SELECT * FROM '{path}' WHERE tag LIKE '{NEEDLE}' ORDER BY k LIMIT 10")
+    _rows, _names, src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
+
+    assert src == ["LatmatScanSource"], f"not exercising the latmat scan at all: {src}"
+    assert verdicts, "the push gate was never consulted — the predicate was not pushed"
+    assert all(v for _types, v in verdicts), (
+        f"a VARBINARY predicate column was refused the worker push: {verdicts}")
+
+
+def test_pass1_gate_admits_descriptor_free_types_and_refuses_the_rest():
+    """The gate's rule, stated directly: a type whose whole meaning is its DrakenVector
+    tag may be pushed (the eval entry stamps the plan's tag on the view); a type that
+    carries a logical descriptor alongside the column may not, at any tag."""
+    from draken.draken_native import DrakenType
+
+    from opteryx.connectors.parquet_io.pass1_predicate_gate import (
+        pass1_worker_predicate_admissible,
+    )
+    from opteryx.types.logical_type import DECIMAL, TIMESTAMP, ColumnType
+    from draken.draken_native import TimestampUnit
+
+    varchar = ColumnType(physical=DrakenType.VARCHAR)
+    varbinary = ColumnType(physical=DrakenType.VARBINARY)
+    int64 = ColumnType(physical=DrakenType.INT64)
+
+    assert pass1_worker_predicate_admissible([varbinary])
+    assert pass1_worker_predicate_admissible([varbinary, varchar, int64])
+
+    # An untyped column has no tag to stamp — fail closed.
+    assert not pass1_worker_predicate_admissible([None])
+    assert not pass1_worker_predicate_admissible([varbinary, None])
+
+    # Descriptor-carrying types stay out: scale and unit live outside the vector.
+    for descriptor_carrying in (DECIMAL(18, 4), DECIMAL(30, 4), TIMESTAMP(TimestampUnit.SECONDS)):
+        assert not pass1_worker_predicate_admissible([descriptor_carrying])
+        assert not pass1_worker_predicate_admissible([varbinary, descriptor_carrying])
+
+
 if __name__ == "__main__":  # pragma: no cover
     import pytest as _p
     raise SystemExit(_p.main([__file__, "-q"]))

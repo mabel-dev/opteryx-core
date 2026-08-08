@@ -20,13 +20,6 @@ class Dataset(enum.Enum):
     FULL_SPLIT = "scratch.hits"
     FULL_SPLIT_RUGO_262K = "scratch.hits_rugo_262k" # preferred
     FULL_SINGLE = "scratch.hits_single"
-    # skene mirror of FULL_SPLIT_RUGO_262K, written in the reference storage
-    # posture: read acceleration on, LZ4 section codec (architect, 2026-08-08).
-    # There is deliberately ONE skene mirror rather than one per codec — a
-    # per-posture dataset outlives the experiment that motivated it and then
-    # quietly ages into a mirror written by a writer that no longer exists,
-    # which is what happened to the zstd-1 and uncompressed mirrors that used
-    # to sit here. Compare postures by rebuilding this one, not by accumulating.
     FULL_SPLIT_SKENE = "scratch.hits_skene"
 
 

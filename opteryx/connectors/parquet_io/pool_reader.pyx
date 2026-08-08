@@ -1969,9 +1969,12 @@ cdef class NativeScanPlan:
         rugo evaluates it only for column shapes it can view without a copy (the direct
         string and fixed-width kinds — see pass1_build_dv_view); anything else comes back
         with an empty survivor_mask and LatmatScanSource evaluates the identical program
-        itself over the built columns. The CALLER must also have checked
-        pass1_worker_predicate_admissible before pushing at all — rugo tags its view from
-        the decoded buffers and cannot know about a plan-time retag.
+        itself over the built columns. rugo tags those views from the decoded buffers,
+        which is only the physical layout; the ctx carries the plan's DrakenType per
+        column and the eval entry stamps it before running, so the worker sees the same
+        operands the consumer's own fallback would. The CALLER must still have checked
+        pass1_worker_predicate_admissible before pushing at all — a type whose meaning
+        lives in a logical descriptor cannot be rebuilt from a view at any tag.
         An empty plan (every row group pruned) has no pipeline — nothing to push to."""
         cdef vector[string] v
         cdef bytes b

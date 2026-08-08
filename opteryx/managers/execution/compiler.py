@@ -2011,7 +2011,9 @@ class _Compiler:
         # set_skene_latmat_scan_source). `col_names` are PHYSICAL (in-file) names, in
         # the order the ctx's col_idx expects.
         resolver = Pass1PredResolver(
-            filter_bc, {sc.identity: sc.name for sc in read_columns}
+            filter_bc,
+            {sc.identity: sc.name for sc in read_columns},
+            {sc.identity: sc.column_type.physical.value for sc in read_columns},
         )
         p1_names = list(resolver.col_names)
         if not p1_names:
@@ -2544,7 +2546,8 @@ class _Compiler:
         # reads, and OWNS the literal vectors + col_idx arrays the worker dereferences
         # — the NativePlan holds it for the run (see set_latmat_scan_source).
         identity_to_physical = {sc.identity: sc.name for sc in p1_scs}
-        resolver = Pass1PredResolver(filter_bc, identity_to_physical)
+        identity_to_type = {sc.identity: sc.column_type.physical.value for sc in p1_scs}
+        resolver = Pass1PredResolver(filter_bc, identity_to_physical, identity_to_type)
         p1_index_by_name = {name: i for i, name in enumerate(p1_names)}
         pred_col_to_p1 = [p1_index_by_name[n] for n in resolver.col_names]
         # Hand it to rugo as well, so the match runs on the decode workers (in
@@ -2552,10 +2555,11 @@ class _Compiler:
         # declines, LatmatScanSource runs the identical program itself — same ctx,
         # same bytecode, same answer.
         #
-        # Not handed over at all when a predicate column is retagged after decode
-        # (DATE / TIMESTAMP / DECIMAL) or declared NVARCHAR / VARBINARY: rugo tags its
-        # view from the decoded buffers, which for those columns is a DIFFERENT type
-        # than the one the predicate is compiled against. See pass1_predicate_gate.
+        # rugo's view is tagged from the decoded buffers, so the resolver carries the
+        # plan's type per column and the eval entry stamps it before running — the
+        # worker sees the same operands this thread's fallback would. Not handed over
+        # at all when a predicate column's type does not fit in a DrakenVector
+        # (DECIMAL scale, TIMESTAMP unit). See pass1_predicate_gate.
         _p1_sc_by_name = {sc.name: sc for sc in p1_scs}
         if pass1_worker_predicate_admissible(
             _p1_sc_by_name[n].column_type for n in resolver.col_names
