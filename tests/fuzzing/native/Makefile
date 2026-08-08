@@ -44,14 +44,28 @@ DRAKEN_INC := -I$(ROOT)/draken -I$(ROOT)/draken/core -I$(ROOT)/draken/simd \
 # --- skene --------------------------------------------------------------------
 # zstd is compiled in because per-section compression is part of the format, so
 # a decompressor fed a hostile section is in scope.
+#
+# huf_decompress.cpp references BMI2 fast-path symbols
+# (HUF_decompress4X1/4X2_usingDTable_internal_fast_asm_loop) that are defined
+# in huf_decompress_amd64.S, not in any .cpp — the *.cpp wildcard alone links
+# on arm64 (the asm is dead code there) but leaves those symbols undefined on
+# x86-64. skene/Makefile hits the same trap; see its ZSTD_OBJS comment.
 ZSTD_DIR  := $(ROOT)/third_party/zstd
 ZSTD_SRCS := $(wildcard $(ZSTD_DIR)/common/*.cpp) \
              $(wildcard $(ZSTD_DIR)/compress/*.cpp) \
-             $(wildcard $(ZSTD_DIR)/decompress/*.cpp)
+             $(wildcard $(ZSTD_DIR)/decompress/*.cpp) \
+             $(ZSTD_DIR)/decompress/huf_decompress_amd64.S
 
-SKENE_INC  := -I$(ROOT)/skene/include -I$(ROOT)/skene/src -I$(ZSTD_DIR) $(DRAKEN_INC)
+# skene's LZ4 codec (skene/src/encoding.cpp) needs the vendored implementation;
+# without -I/lz4.c this only fails at link time, since Ubuntu CI runners have
+# liblz4-dev's header on the system include path already.
+LZ4_DIR   := $(ROOT)/third_party/lz4
+
+SKENE_INC  := -I$(ROOT)/skene/include -I$(ROOT)/skene/src -I$(ZSTD_DIR) \
+              -I$(LZ4_DIR) $(DRAKEN_INC)
 SKENE_SRCS := $(wildcard $(ROOT)/skene/src/*.cpp) \
               $(ROOT)/draken/core/vector_alloc.cpp \
+              $(LZ4_DIR)/lz4.c \
               $(ZSTD_SRCS)
 # skene_native.cpp is the Cython shim and needs Python; the format code does not.
 SKENE_SRCS := $(filter-out %/skene_native.cpp,$(SKENE_SRCS))
