@@ -21,6 +21,9 @@ google-cloud-storage
 minio
 openpyxl
 
+# test oracle only - never imported by opteryx/, rugo/, or draken/
+pyarrow
+
 setuptools_rust
 
 pydantic==2.13.4
