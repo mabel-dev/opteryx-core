@@ -70,8 +70,8 @@ from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
 m = Morsel.from_vectors(["a"], [vector_from_sequence([1, 2, None], DrakenType.INT64)])
-buf = skene.write_morsel(m, read_acceleration=True, zstd_level=1)
-r = skene.read_morsel(buf)
+buf = skene.write_morsel(m, read_acceleration=True, codec="zstd", zstd_level=1)
+r = skene.read_morsel(buf, 0)
 r.materialize()
 assert r.column("a").to_pylist() == [1, 2, None], "skene wheel round-trip failed"'
     ;;
