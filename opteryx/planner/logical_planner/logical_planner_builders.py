@@ -1261,7 +1261,25 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
     if base_type == "VARBINARY":
         sql_type = _CT_VARBINARY
     elif base_type == "DATE" and _node_cat in (LogicalCategory.INTEGER, LogicalCategory.DATE):
-        value = date_to_int64_days(_EPOCH_DATE + datetime.timedelta(days=int(literal_node.value)))
+        # An integer DATE literal is days-since-epoch — the same reading the column
+        # kernel (draken_cast_integer_to_date32 / _uint_to_date32) uses, so the
+        # folded and the executed form of CAST(<int> AS DATE) cannot disagree.
+        # A day count with no representable date raises out of timedelta; this
+        # branch returns BEFORE the try/except at the end of the function that
+        # applies the two cast dispositions, so it has to apply them itself —
+        # otherwise a plain CAST surfaced a bare OverflowError instead of the
+        # SqlError every other target gives, and TRY_CAST raised instead of
+        # yielding the NULL that is its entire contract.
+        try:
+            value = date_to_int64_days(
+                _EPOCH_DATE + datetime.timedelta(days=int(literal_node.value))
+            )
+        except Exception as e:
+            if kind in {"TryCast", "SafeCast"}:
+                return Node(NodeType.LITERAL, value=None, type=_CT_NULL, alias=alias)
+            raise SqlError(
+                f"Error casting value '{literal_node.value}' to type '{base_type}': {e}"
+            )
         return Node(NodeType.LITERAL, type=_CT_DATE, value=value, alias=alias)
     # Special case: INTEGER to TIMESTAMP conversion
     elif base_type == "TIMESTAMP" and (

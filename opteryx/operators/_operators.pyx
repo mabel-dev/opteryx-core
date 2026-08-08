@@ -201,7 +201,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[string]* files,
                                           const cppvector[string]* column_names,
                                           const cppvector[string]* out_identities,
-                                          const cppvector[int]* column_types)
+                                          const cppvector[int]* column_types,
+                                          const cppvector[int]* retag_units)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -786,67 +787,6 @@ cdef class BasePlanNode:
             self.is_join = bool(_meta.is_join)
             self.is_stateless = bool(_meta.is_stateless)
             self.is_not_explained = bool(_meta.is_not_explained)
-
-    # ---- Worker spec/state contract (native scheduler rewrite, slice 2a) ---------
-    # The fan-out replacement for `_clone_op`. Each operator's fields split into
-    # SPEC (built once, immutable after `resolve_schema`, shared read-only across
-    # worker threads) and STATE (per-worker, mutable during push). See
-    # docs/NATIVE_SCHEDULER_REWRITE_DESIGN.md §9.3.
-
-    cdef void resolve_schema(self, object input_schema) except *:
-        """Bind-time hook: freeze any first-push-resolved SPEC (column indices,
-        types, key-kinds) against the known input schema. Default: no-op — operators
-        with lazy first-morsel resolution override this. Called once before
-        execution; after it, SPEC is frozen."""
-        pass
-
-    cdef bint is_partition_parallel(self):
-        """False for operators whose STATE carries global semantics that cannot be
-        data-partitioned per worker (window running-counters, global DISTINCT, union
-        schema/leg-count). The scheduler runs those serial/merge-only and never calls
-        `make_worker` on them. Default: True."""
-        return True
-
-    cdef BasePlanNode make_worker(self):
-        """Return a worker instance with fresh STATE that borrows this operator's
-        SPEC by reference. Replaces `_clone_op`. Default: the interim reflection
-        clone (re-runs `__init__`, recompiles) — operators migrated to the contract
-        override to share SPEC with no recompile. Never returns `self` (that would
-        share mutable STATE — a lost-update race in free-threaded builds)."""
-        return <BasePlanNode>type(self)(properties=self.properties, **self.parameters)
-
-    cdef void _copy_worker_base(self, BasePlanNode w) except *:
-        """Helper for `make_worker` overrides: copy BasePlanNode SPEC into `w` by
-        reference and initialise its base STATE fresh. `w` must be freshly allocated
-        via `Cls.__new__(Cls)` (so `__cinit__` has zeroed the pointer/trace infra).
-        The override then assigns its OWN spec (by reference) and fresh state."""
-        from collections import defaultdict
-        from opteryx.utils import random_string
-        from opteryx.models import QueryTelemetry
-        # SPEC — shared read-only across workers.
-        w.properties = self.properties
-        w.parameters = self.parameters
-        w.columns = self.columns
-        w._time_stat_key = self._time_stat_key
-        w.is_scan = self.is_scan
-        w.is_join = self.is_join
-        w.is_stateless = self.is_stateless
-        w.is_not_explained = self.is_not_explained
-        w.manifest = self.manifest
-        w.uuid = self.uuid
-        # STATE — fresh per worker (matches __init__; clone stats are not merged
-        # back today, so a fresh telemetry/readings is byte-identical to _clone_op).
-        w.telemetry = QueryTelemetry(self.properties.query_id)
-        w.identity = random_string()
-        w.readings = defaultdict(int)
-        w.execution_time = 0
-        w.downstream_time = 0
-        w.calls = 0
-        w.records_in = 0
-        w.records_out = 0
-        w.bytes_in = 0
-        w.bytes_out = 0
-        w._empty_morsel_cache = None
 
     # ---- Properties (overridable by subclasses; cdef class supports @property) ----
     @property
@@ -1541,199 +1481,6 @@ cdef inline shared_ptr[CxxMorsel] _carrier_from_py(object morsel):
     return cxm
 
 
-def push_one_to_sink(BasePlanNode head, exit_node, object morsel, object sink):
-    """Push one Morsel (or the EOS sentinel) through the chain ``head`` `nogil`, then
-    drain ``exit_node``'s pending output into ``sink`` (a PyMorselQueue). Returns
-    False if the consumer abandoned the sink (LIMIT / early close), else True. The
-    native push replacement for the per-morsel ``push_one`` + ``out_q.put`` shim."""
-    cdef ErrCtx err
-    cdef object out, _exc
-    cdef shared_ptr[CxxMorsel] cxm = _carrier_from_py(morsel)
-    if cxm.get() == NULL:
-        return True
-    err.code = 0
-    err.msg = NULL
-    with nogil:
-        head.push(cxm, &err)
-    if err.code != 0:
-        _exc = head._take_exc()
-        raise _exc if _exc is not None else RuntimeError("pipeline push failed")
-    if exit_node is not None:
-        while exit_node.has_pending():
-            out = exit_node.pop_pending()
-            if not sink.put(out):
-                return False
-    return True
-
-
-def stateless_worker_drive(BasePlanNode head, exit_node, object next_input,
-                           PipelineContext ctx, object sink):
-    """Native per-worker push loop for the parallel STATELESS shape (slice 4). Pulls
-    via ``next_input()`` (shared scan + row-floor buffer under a lock), pushes each
-    morsel `nogil` through the chain, drains the Exit clone's pending into ``sink``.
-    No EOS push — byte-identical to the current ``_stateless_stream`` worker, whose
-    Exit clones never see EOS (the empty-result schema morsel is emitted once by the
-    original Exit). Returns on consumer abandonment."""
-    cdef object morsel
-    while True:
-        morsel = next_input()
-        if morsel is None:
-            break
-        if ctx.is_terminated():
-            break
-        if not push_one_to_sink(head, exit_node, morsel, sink):
-            return
-
-
-def accumulate_worker_drive(BasePlanNode head, object next_input, PipelineContext ctx):
-    """Native per-worker ACCUMULATE loop for barrier breakers (agg / distinct / GROUP
-    BY). Pulls via ``next_input()`` and pushes each morsel `nogil` through a chain
-    whose tail is a breaker clone that ACCUMULATES into its private engine (no emit,
-    no downstream) — so there is no sink and no drain. Returns the total row count
-    pushed (the worker's ``local_rows``). The native replacement for the breaker
-    worker's per-morsel ``push_one``."""
-    cdef object morsel
-    cdef long long count = 0
-    while True:
-        morsel = next_input()
-        if morsel is None:
-            break
-        # exit_node=None / sink=None → push only, the breaker accumulates internally.
-        push_one_to_sink(head, None, morsel, None)
-        count += morsel.num_rows
-    return count
-
-
-cdef struct _AccArg:
-    PyObject* head      # worker k's pre-cloned chain head (borrowed)
-    PyObject* source    # the shared self-pull source callable (borrowed)
-    PyObject* ctx       # the PipelineContext (borrowed)
-    PyObject* counts    # shared result list[int]  (borrowed)
-    PyObject* errors    # shared result list[exc]  (borrowed)
-    int index
-
-
-cdef void _acc_worker_run(_AccArg* a) noexcept with gil:
-    """GIL-held body of the native worker task — holds the Python locals a nogil
-    function cannot. Drives one pre-cloned breaker chain via the native ACCUMULATE
-    loop (whose per-morsel push releases the GIL again), recording the row count or
-    any exception into the shared result lists by index."""
-    cdef object exc
-    cdef long long count
-    try:
-        count = accumulate_worker_drive(
-            <BasePlanNode>(<object>a.head),
-            <object>a.source,
-            <PipelineContext>(<object>a.ctx),
-        )
-        (<object>a.counts)[a.index] = count
-    except BaseException as exc:
-        (<object>a.errors)[a.index] = exc
-
-
-cdef void _acc_worker_task(void* arg) noexcept nogil:
-    """Native task entry (matches ``native_task_fn``) submitted to
-    ``CppThreadPool.submit_native`` — no Python worker closure, no Future. Casts the
-    opaque arg and hands to the GIL-held body."""
-    _acc_worker_run(<_AccArg*>arg)
-
-
-def native_accumulate_fanout(CppThreadPool pool, list heads, object source,
-                             PipelineContext ctx, list counts, list errors):
-    """Native W-way ACCUMULATE fan-out: submit one NATIVE task per pre-cloned worker
-    chain to ``pool`` (no Python worker closure, no Future), then barrier on
-    ``wait_native``. ``heads[k]`` is worker k's chain head; ``source`` is the shared
-    self-pull callable every worker drains disjointly. Row counts land in ``counts[k]``
-    and exceptions in ``errors[k]`` — pre-sized length-W lists the caller owns, whose
-    elements stay alive across the blocking wait. The native replacement for the
-    breaker skeleton's ``[pool.submit(worker, k) for k in range(W)]`` loop + barrier.
-
-    The per-worker ``_AccArg`` structs hold BORROWED PyObject pointers into the caller's
-    live lists; the blocking ``wait_native`` guarantees every task has finished reading
-    them before the array is freed, so no refcount churn is needed."""
-    cdef Py_ssize_t W = len(heads)
-    cdef _AccArg* args = <_AccArg*>malloc(W * sizeof(_AccArg))
-    if args == NULL:
-        raise MemoryError()
-    cdef Py_ssize_t k
-    try:
-        for k in range(W):
-            args[k].head = <PyObject*>heads[k]
-            args[k].source = <PyObject*>source
-            args[k].ctx = <PyObject*>ctx
-            args[k].counts = <PyObject*>counts
-            args[k].errors = <PyObject*>errors
-            args[k].index = <int>k
-            pool.submit_native(_acc_worker_task, &args[k])
-        with nogil:
-            pool.wait_native()
-    finally:
-        free(args)
-
-
-cdef struct _ReadoutArg:
-    PyObject* breaker   # the ORIGINAL breaker (owns readout_partition) (borrowed)
-    PyObject* chunks    # this partition's raw scattered chunk list (borrowed)
-    PyObject* ctx       # the PipelineContext (borrowed)
-    PyObject* engines   # shared result list[engine] (borrowed)
-    PyObject* counts    # shared result list[int]    (borrowed)
-    PyObject* errors    # shared result list[exc]    (borrowed)
-    int index
-
-
-cdef void _readout_run(_ReadoutArg* a) noexcept with gil:
-    """GIL-held body of the native READ-OUT task: call the breaker's operator-owned
-    ``readout_partition`` for one global hash partition (key its chunks into a fresh
-    engine), recording ``(engine, row_count)`` or any exception by index. The breaker
-    is reached via the PyObject seam (its concrete type varies — grouped agg / distinct
-    both expose ``readout_partition``)."""
-    cdef object exc, result
-    try:
-        result = (<object>a.breaker).readout_partition(
-            <object>a.chunks, <PipelineContext>(<object>a.ctx)
-        )
-        (<object>a.engines)[a.index] = result[0]
-        (<object>a.counts)[a.index] = result[1]
-    except BaseException as exc:
-        (<object>a.errors)[a.index] = exc
-
-
-cdef void _readout_task(void* arg) noexcept nogil:
-    """Native task entry (matches ``native_task_fn``) for the READ-OUT fan-out."""
-    _readout_run(<_ReadoutArg*>arg)
-
-
-def native_readout_fanout(CppThreadPool pool, breaker, list chunk_lists,
-                          PipelineContext ctx, list engines, list counts, list errors):
-    """Native per-partition READ-OUT fan-out (HASH_REPARTITION recombination): submit
-    one NATIVE task per global hash partition to ``pool`` (no Python worker closure, no
-    Future), each calling ``breaker.readout_partition(chunk_lists[p], ctx)`` to key that
-    partition into a fresh engine, then barrier on ``wait_native``. Engines land in
-    ``engines[p]``, row counts in ``counts[p]``, faults in ``errors[p]`` (pre-sized
-    length-R lists the caller owns). The native replacement for the read-out pool's
-    ``[rpool.submit(readout_worker, p) ...]`` loop. Borrowed PyObject pointers are kept
-    alive by the caller's live lists across the blocking wait."""
-    cdef Py_ssize_t R = len(chunk_lists)
-    cdef _ReadoutArg* args = <_ReadoutArg*>malloc(R * sizeof(_ReadoutArg))
-    if args == NULL:
-        raise MemoryError()
-    cdef Py_ssize_t p
-    try:
-        for p in range(R):
-            args[p].breaker = <PyObject*>breaker
-            args[p].chunks = <PyObject*>chunk_lists[p]
-            args[p].ctx = <PyObject*>ctx
-            args[p].engines = <PyObject*>engines
-            args[p].counts = <PyObject*>counts
-            args[p].errors = <PyObject*>errors
-            args[p].index = <int>p
-            pool.submit_native(_readout_task, &args[p])
-        with nogil:
-            pool.wait_native()
-    finally:
-        free(args)
-
-
 cdef class NativeFanoutHandle:
     """Keeps a STREAMING fan-out's per-worker arg array alive while the workers run
     asynchronously (they read the borrowed pointers after the fan-out returns). The
@@ -1824,37 +1571,6 @@ cdef void _scan_pull_trampoline(void* scan_ptr, shared_ptr[CxxMorsel]* out,
     caller's Python stack frame holds the real reference for the run's duration,
     exactly like the slice 5a-d demo bridges' borrowed pointers)."""
     _scan_pull_run(scan_ptr, out, finished, err_code)
-
-
-cpdef BasePlanNode spawn_worker(BasePlanNode op):
-    """Python-callable edge over the cdef `make_worker` contract — the fan-out
-    replacement for `_clone_op`. Used by the (still-Python) scheduler at worker
-    fan-out; once the scheduler is native it calls `make_worker` directly.
-
-    Backstop for the partition-parallel contract: an operator whose STATE carries
-    global semantics that CANNOT be data-partitioned per worker (a running window
-    counter, a global DISTINCT set, a union schema/leg-count) declares
-    `is_partition_parallel() == False`. Cloning one across workers would change the
-    ANSWER — so fanning it out is a scheduler bug. Fail loud here rather than
-    silently mis-split (the old `_clone_op` did the latter)."""
-    if not op.is_partition_parallel():
-        from opteryx.exceptions import InvalidInternalStateError
-        raise InvalidInternalStateError(
-            f"{type(op).__name__} carries global-semantics state and cannot be "
-            f"data-partitioned across workers; the scheduler must run it "
-            f"serial/merge-only, never fan it out."
-        )
-    return op.make_worker()
-
-
-cpdef bint operator_is_partition_parallel(BasePlanNode op):
-    """Python-callable edge over the cdef `is_partition_parallel` marker."""
-    return op.is_partition_parallel()
-
-
-cpdef void operator_resolve_schema(BasePlanNode op, object input_schema) except *:
-    """Python-callable edge over the cdef `resolve_schema` bind-time hook."""
-    op.resolve_schema(input_schema)
 
 
 cpdef void push_one(BasePlanNode head, object morsel) except *:
@@ -2155,13 +1871,17 @@ cdef class SkeneScanPlan:
     cdef cppvector[string] column_names
     cdef cppvector[string] out_identities
     cdef cppvector[int] column_types
+    # Per column: the draken timestamp unit when the plan declares TIMESTAMP64
+    # (permitting a verbatim retag of an INT64-stored column), else -1.
+    cdef cppvector[int] retag_units
 
     def __init__(self, list files, list column_names, list out_identities,
-                 list column_types):
-        if not (len(column_names) == len(out_identities) == len(column_types)):
+                 list column_types, list retag_units):
+        if not (len(column_names) == len(out_identities) == len(column_types)
+                == len(retag_units)):
             raise ValueError(
-                "SkeneScanPlan: column_names/out_identities/column_types must be "
-                "parallel — the Source indexes all three by the same position."
+                "SkeneScanPlan: column_names/out_identities/column_types/retag_units "
+                "must be parallel — the Source indexes all four by the same position."
             )
         for path in files:
             self.files.push_back(<string>(path.encode("utf-8") if isinstance(path, str) else path))
@@ -2171,6 +1891,8 @@ cdef class SkeneScanPlan:
             self.out_identities.push_back(<string>(identity.encode("utf-8") if isinstance(identity, str) else identity))
         for physical_type in column_types:
             self.column_types.push_back(<int>physical_type)
+        for retag_unit in retag_units:
+            self.retag_units.push_back(<int>retag_unit)
 
 
 cdef class NativePlan:
@@ -2271,7 +1993,8 @@ cdef class NativePlan:
         ``splan``; this plan holds it alive for the driver's lifetime."""
         self.skene_scan_plans.append(splan)
         self._e.set_native_skene_scan_source(p, &splan.files, &splan.column_names,
-                                             &splan.out_identities, &splan.column_types)
+                                             &splan.out_identities, &splan.column_types,
+                                             &splan.retag_units)
 
     def set_native_scan_source(self, size_t p, NativeScanPlan splan, object row_limit=None):
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers
@@ -3138,7 +2861,6 @@ include "skene_read/skene_read.pyx"
 include "limit/limit.pyx"
 include "window/row_number.pyx"
 include "nested_loop_join/nested_loop_join.pyx"
-include "non_equi_join/non_equi_join.pyx"
 include "null_reader/null_reader.pyx"
 include "outer_join/outer_join.pyx"
 include "parquet_read/parquet_read.pyx"
@@ -3156,8 +2878,7 @@ include "union/union.pyx"
 include "unnest_join/unnest_join.pyx"
 include "view_management/view_management.pyx"
 
-# Aggregate: ungrouped engine first (aggregate_node uses its accumulator classes)
-include "aggregate/ungrouped_agg.pyx"
+# Aggregate
 include "aggregate/aggregate_node.pyx"
 
 # Grouped aggregate (self-contained via .pxi includes inside _grouped_agg.pyx)

@@ -49,6 +49,12 @@ cdef extern from "morsels/cxx_morsel.h" nogil:
     # column is out of range, unowned, or has no child.
     const DrakenVector* cxx_column_child_vec(const CxxMorsel* m, uint32_t idx) noexcept
 
+    # In-place INT64→TIMESTAMP64 retag (tag + the owner's mandatory unit
+    # descriptor; payload untouched). The second sanctioned C-level reach into
+    # `own`. False — changing nothing — when the column is out of range,
+    # unowned, or not INT64.
+    bint cxx_column_retag_timestamp64(CxxMorsel* m, uint32_t idx, uint8_t unit) noexcept
+
     # Approximate in-memory footprint (bytes): sum of each column view's real owned
     # payload. C++-substrate twin of Morsel.nbytes; see cxx_morsel.h. nogil.
     size_t cxx_morsel_nbytes(const CxxMorsel* m) noexcept

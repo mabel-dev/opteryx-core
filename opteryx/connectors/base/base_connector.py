@@ -127,6 +127,18 @@ class BaseTable:
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
 
+    # This reader honours a SCAN-DECLARED DrakenType.TIMESTAMP64 on a column its
+    # files store as INT64, emitting the int64 payload verbatim under a
+    # TIMESTAMP64 tag (plus the unit descriptor). The temporal-ness comes from
+    # SQL, not the file — see TimestampCastSinkStrategy, which retypes the scan
+    # output for `<int64 column>::TIMESTAMP[unit]` and REQUIRES this capability.
+    #
+    # A reader that decodes exactly the type its footer declares must leave this
+    # False: the strategy then leaves the cast alone (an unoptimised cast, never
+    # a mistyped column). Declaring it without implementing the retag makes the
+    # plan and the reader disagree about a column's type.
+    supports_int64_timestamp_retag = False
+
     @property
     def __mode__(self):  # pragma: no cover
         raise NotImplementedError("__mode__ not defined")

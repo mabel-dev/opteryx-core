@@ -825,7 +825,7 @@ def _join_stats(
     left_keys = _join_key_identities(getattr(node, "left_columns", None))
     right_keys = _join_key_identities(getattr(node, "right_columns", None))
 
-    if not left_keys or not right_keys or join_type == "non equi":
+    if not left_keys or not right_keys:
         # Without a usable equi key, fall back to a cross-product upper bound;
         # JoinOrdering already guards against nested-loop blow-up by row count.
         out_rows = max(1, left.row_count * right.row_count)

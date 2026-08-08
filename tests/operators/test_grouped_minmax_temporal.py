@@ -82,36 +82,13 @@ def test_grouped_min_max_bool():
     assert res["Active"] == (False, True)
 
 
-def test_grouped_min_max_interval():
-    """MIN/MAX(INTERVAL) ordered by the engine's approximate fold (months*30d+ms),
-    keeping the winning row's original (months, us) slot; nulls skipped.
-
-    Driven directly through GroupHashEngine because interval columns can't be
-    produced via grouped-agg SQL in this build (interval arithmetic gaps).
-    """
-    import draken.draken_native as dn
-    from draken.vectors.vector import Vector as V
-    from draken.morsels.morsel import Morsel
-    import opteryx.operators._operators as ops
-
-    g = V(dn.vector_from_sequence([0, 1, 0, 1, 0]))
-    d = V(dn.vector_interval_from_sequence([(1, 500), (0, 200), (3, 0), None, (0, 999)]))
-    m = Morsel.from_vectors([b"g", b"d"], [g, d])
-
-    mn = ops._DeferredMinCollector(); mn.column_name = b"d"; mn.result_name = b"mn"
-    mx = ops._DeferredMaxCollector(); mx.column_name = b"d"; mx.result_name = b"mx"
-    eng = ops.GroupHashEngine([b"g"], [mn, mx], True, False)
-    eng.ingest(m)
-    res = {}
-    for out in eng.finalize_morsels():
-        for gg, a, b in zip(out.column(b"g").to_pylist(),
-                            out.column(b"mn").to_pylist(),
-                            out.column(b"mx").to_pylist()):
-            res[gg] = (a, b)
-    # group 0: folds 2_592_000_500 / 7_776_000_000 / 999 → MIN (0,999), MAX (3,0)
-    assert res[0] == ((0, 999), (3, 0)), res[0]
-    # group 1: only non-null (0,200); the None row is skipped.
-    assert res[1] == ((0, 200), (0, 200)), res[1]
+# MIN/MAX(INTERVAL) had a test here. It drove the Cython GroupHashEngine and its
+# _DeferredMin/MaxCollector directly, because interval columns cannot be produced
+# through grouped-agg SQL in this build (interval arithmetic gaps). That engine was
+# deleted when the Cython operator push paths were removed (execution is 100%
+# native), taking the only coverage of grouped MIN/MAX over INTERVAL with it —
+# there is no SQL-level expression of the same behaviour to port the test to.
+# Re-add coverage here if grouped-agg SQL ever gains interval operands.
 
 
 def test_grouped_min_max_int_unregressed():

@@ -55,6 +55,11 @@ from opteryx.utils import random_string
 # JSONL-dataset schema inference so the two gates cannot drift.
 from opteryx.connectors.jsonl_io import JSONL_SUPPORTED_TYPES as _JSONL_SUPPORTED_TYPES
 
+# Bind-time JSONL schema inference decodes exactly the first chunk the SCAN will
+# decode; taken from the scan's own splitter so the two cannot drift. See the call
+# site in the READ_JSONL branch for why it must be this chunk and not a smaller one.
+from opteryx.connectors.jsonl_io import iter_newline_chunks as _iter_newline_chunks
+
 # CSV columns rugo's decoder can currently produce (rugo's sniff_csv_column_types
 # only widens INT64 -> FLOAT64 -> VARCHAR -- no BOOL, unlike JSONL, since CSV has
 # no native boolean literal syntax to sniff).
@@ -459,43 +464,106 @@ def visit_function_dataset(
         else:
             jsonl_files = [path]
 
-        # Bind-time schema is resolved from the first matched file (matches
-        # sorted lexicographically by path above); every other matched file's
-        # decoded columns/types are validated against this same schema at
-        # execution time (JsonlReadNode.read_morsels), the identical
-        # fail-loud-on-mismatch policy already applied across chunks of a
-        # single file.
+        # Bind-time schema is resolved from the first matched file that actually
+        # CONTAINS A RECORD (matches sorted lexicographically by path above);
+        # every other matched file's decoded columns/types are validated against
+        # this same schema at execution time (JsonlReadNode.read_morsels), the
+        # identical fail-loud-on-mismatch policy already applied across chunks of
+        # a single file.
+        #
+        # A record-less file -- zero bytes, or nothing but blank/whitespace lines
+        # -- carries no schema to infer: rugo yields NO morsel at all for it, so
+        # `next(iter(reader))` used to leak a bare StopIteration out of the
+        # binder (surfacing as "RuntimeError: generator raised StopIteration",
+        # PEP 479). Such a file is a legitimately empty relation, not a read
+        # failure, so it is SKIPPED as a schema source rather than being allowed
+        # to define one.
+        #
+        # Skipping matters beyond tidiness: with zero columns bound,
+        # read_morsels' zero-column branch deliberately suppresses the per-file
+        # schema-drift checks (nothing is projected, so nothing can disagree), so
+        # binding zero columns off an empty FIRST file would make a glob silently
+        # return column-less rows for every other matched file. Skipping keeps
+        # the schema coming from a file that has one.
+        sample_morsel = None
         schema_source_path = jsonl_files[0]
 
-        file_obj = filesystem.open_input_file(schema_source_path)
-        try:
-            # rugo.jsonl.read_metadata()'s type inference is a no-op today (the
-            # 'schema' dict it returns is never populated in
-            # rugo/src/jsonl/_jsonl_reader.pxi -> every column reports "object"),
-            # so the real per-column DrakenType is read off an actual decode
-            # instead. This pays the same full-parse cost read_metadata already
-            # pays internally -- it is not a lightweight metadata-only path
-            # either, so there is no cheaper alternative available today.
-            # The resolved options are honored here too -- e.g. ignore_errors
-            # must apply to this bind-time sample read, not just per-chunk
-            # decode, or a malformed file would still fail loud at bind time
-            # regardless of the option.
-            with _rugo_read_jsonl(
-                file_obj.memoryview,
-                fail_on_error=fail_on_error,
-                infer_schema=infer_schema,
-                infer_sample_size=infer_sample_size,
-            ) as reader:
-                sample_morsel = next(iter(reader))
-        except RuntimeError as err:
-            raise DatasetReadError(f"Cannot read JSONL file '{schema_source_path}': {err}") from err
-        finally:
-            file_obj.close()
+        for candidate_path in jsonl_files:
+            file_obj = filesystem.open_input_file(candidate_path)
+            try:
+                # rugo.jsonl.read_metadata()'s type inference is a no-op today (the
+                # 'schema' dict it returns is never populated in
+                # rugo/src/jsonl/_jsonl_reader.pxi -> every column reports "object"),
+                # so the real per-column DrakenType is read off an actual decode
+                # instead -- there is no metadata-only path that reports types.
+                #
+                # That decode is bounded to the file's FIRST newline-aligned chunk
+                # rather than the whole file. Decoding the whole file materialised a
+                # vector for every row of every column purely to read the types back
+                # off the result: ~450MB of peak RSS and half the wall time on a
+                # 100MB file, and unbounded -- peak grew with file size, so a large
+                # enough file could not be planned at all, however cheap its
+                # execution.
+                #
+                # The bound is `iter_newline_chunks`' first chunk SPECIFICALLY, not
+                # a smaller sample, and it is taken from that function rather than
+                # recomputed here so the two cannot drift. rugo's inferred column
+                # TYPES come from the whole buffer it is handed, not from the first
+                # `infer_sample_size` records (that governs the column SET) -- a
+                # column of ints that turns into floats halfway down a file decodes
+                # as INT64 from a short prefix and FLOAT64 from the whole file. Since
+                # read_morsels validates every chunk's decoded types against the
+                # schema bound here, binding off anything OTHER than the exact bytes
+                # of chunk 0 would make that check fail on chunk 0 itself for such a
+                # file. Binding off chunk 0 makes them agree by construction.
+                #
+                # This does not make cross-chunk type drift safe -- a file whose
+                # later chunks decode differently still fails loud there, exactly as
+                # it did before this change; it just no longer fails on the first
+                # chunk for a file that used to read fine.
+                #
+                # The resolved options are honored here too -- e.g. ignore_errors
+                # must apply to this bind-time sample read, not just per-chunk
+                # decode, or a malformed file would still fail loud at bind time
+                # regardless of the option. A malformed record beyond chunk 0 is now
+                # caught by that chunk's decode at execution time instead, under the
+                # same fail_on_error policy and with the same error.
+                schema_chunk = next(_iter_newline_chunks(file_obj.memoryview), None)
+                if schema_chunk is None:
+                    # Zero-byte file: no chunk at all, so no schema to infer. Handled
+                    # as the record-less case below, the same as a file of blank lines.
+                    candidate_morsel = None
+                else:
+                    with _rugo_read_jsonl(
+                        schema_chunk,
+                        fail_on_error=fail_on_error,
+                        infer_schema=infer_schema,
+                        infer_sample_size=infer_sample_size,
+                    ) as reader:
+                        candidate_morsel = next(iter(reader), None)
+            except RuntimeError as err:
+                raise DatasetReadError(f"Cannot read JSONL file '{candidate_path}': {err}") from err
+            finally:
+                file_obj.close()
 
-        physical_names = [
-            name.decode("utf-8") if isinstance(name, bytes) else name
-            for name in sample_morsel.column_names
-        ]
+            if candidate_morsel is not None:
+                sample_morsel = candidate_morsel
+                schema_source_path = candidate_path
+                break
+
+        # Every matched file is record-less: the relation is genuinely empty and
+        # binds with ZERO columns -- `SELECT *` over it returns no rows, and
+        # naming a column fails loud with ColumnNotFoundError. This is exactly
+        # what READ_CSV already binds for the same input (rugo.csv returns a
+        # zero-column morsel rather than yielding nothing), so the two readers
+        # agree on what an empty file means.
+        if sample_morsel is None:
+            physical_names = []
+        else:
+            physical_names = [
+                name.decode("utf-8") if isinstance(name, bytes) else name
+                for name in sample_morsel.column_names
+            ]
 
         if node.columns:
             # READ_JSONL('...') AS alias(col1, col2, ...) -- renaming columns via
@@ -861,31 +929,53 @@ def visit_function_dataset(
             csv_files = [path]
 
         # Bind-time schema: a real, full rugo.csv.read_csv() pass over the first
-        # matched file. Unlike READ_JSONL's cheap first-chunk peek, this reads the
-        # whole file -- rugo.csv has no chunked entry point to sample from cheaply
-        # (see opteryx.connectors.csv_io's module docstring), and unlike Parquet
-        # there is no embedded footer schema to read instead. The same file is
-        # read again at execution time by CsvReadNode; this double-read is an
-        # accepted v1 cost, not an oversight.
+        # matched file that actually CONTAINS A RECORD. Unlike READ_JSONL's cheap
+        # first-chunk peek, this reads the whole file -- rugo.csv has no chunked
+        # entry point to sample from cheaply (see opteryx.connectors.csv_io's
+        # module docstring), and unlike Parquet there is no embedded footer schema
+        # to read instead. The same file is read again at execution time by
+        # CsvReadNode; this double-read is an accepted v1 cost, not an oversight.
+        #
+        # rugo.csv reports a record-less file (zero bytes, whitespace only, or a
+        # header with no data rows) as a morsel with ZERO COLUMNS -- it does not
+        # even carry the header names through. Such a file has no schema to give,
+        # so it is skipped as a schema source for the same reason READ_JSONL skips
+        # its record-less files: binding zero columns off an empty FIRST file would
+        # make a glob silently return column-less rows for every other matched
+        # file, because the zero-column branch in CsvReadNode.read_morsels
+        # deliberately suppresses the cross-file drift check.
+        sample_morsel = None
         schema_source_path = csv_files[0]
-        file_obj = filesystem.open_input_file(schema_source_path)
-        try:
-            sample_morsel = read_csv_file(
-                file_obj.memoryview,
-                delimiter=separator,
-                has_header=has_header_row,
-                fail_on_error=fail_on_error,
-                infer_sample_size=infer_sample_size,
-            )
-        except RuntimeError as err:
-            raise DatasetReadError(f"Cannot read CSV file '{schema_source_path}': {err}") from err
-        finally:
-            file_obj.close()
 
-        physical_names = [
-            name.decode("utf-8") if isinstance(name, bytes) else name
-            for name in sample_morsel.column_names
-        ]
+        for candidate_path in csv_files:
+            file_obj = filesystem.open_input_file(candidate_path)
+            try:
+                candidate_morsel = read_csv_file(
+                    file_obj.memoryview,
+                    delimiter=separator,
+                    has_header=has_header_row,
+                    fail_on_error=fail_on_error,
+                    infer_sample_size=infer_sample_size,
+                )
+            except RuntimeError as err:
+                raise DatasetReadError(f"Cannot read CSV file '{candidate_path}': {err}") from err
+            finally:
+                file_obj.close()
+
+            if len(candidate_morsel.column_names) > 0:
+                sample_morsel = candidate_morsel
+                schema_source_path = candidate_path
+                break
+
+        # Every matched file is record-less -- a genuinely empty relation, bound
+        # with zero columns. Matches READ_JSONL's identical case above.
+        if sample_morsel is None:
+            physical_names = []
+        else:
+            physical_names = [
+                name.decode("utf-8") if isinstance(name, bytes) else name
+                for name in sample_morsel.column_names
+            ]
 
         if node.columns:
             # See the identical check/comment on the READ_JSONL branch above --

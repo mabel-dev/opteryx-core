@@ -45,16 +45,33 @@ pruning return with the native scan source.
 Schema is not inferred and not sampled: every file's footer carries the exact
 DrakenType + LogicalType per column, and every decoded file is validated
 against the bind-time schema by name and physical type — a divergent file in
-a dataset fails loud, naming the file.
+a dataset fails loud, naming the file. The single sanctioned exception is a
+scan-declared INT64→TIMESTAMP64 retag (TimestampCastSinkStrategy sinking a
+`col::TIMESTAMP[unit]` into the scan): an allowlist of one verbatim retag,
+matching NativeSkeneScanSource, not a loosening of the check.
 """
 
+from libc.stdint cimport uint32_t
 from libcpp.memory cimport shared_ptr
 from libcpp.string cimport string
 
 from draken.morsels.cxx_morsel cimport CxxMorsel
+from draken.morsels.cxx_morsel cimport cxx_column_retag_timestamp64
 
 from opteryx.exceptions import DatasetReadError
 from opteryx.models import QueryProperties
+
+# TimestampUnit enum-name → draken unit code (logical_type.h TimestampUnit),
+# mirroring the compiler's `_TS_UNIT_TO_INT`; microseconds is the same default.
+_TS_UNIT_TO_CODE = {"SECONDS": 0, "MILLISECONDS": 1, "MICROSECONDS": 2, "NANOSECONDS": 3}
+
+
+cdef inline unsigned char _timestamp_unit_code(object schema_column):
+    """draken unit code for a column the plan declares TIMESTAMP64."""
+    logical = schema_column.column_type.logical
+    if logical is None or logical.unit is None:
+        return 2
+    return _TS_UNIT_TO_CODE.get(logical.unit.name, 2)
 
 # BasePlanNode/ReaderNode/Morsel/morsel_to_cxx in scope via _operators.pyx include.
 
@@ -127,14 +144,35 @@ cdef class SkeneReadNode(ReaderNode):
             # .value: DrakenType is a nanobind enum — it compares equal only to
             # itself, never to a bare int, so the C-side tag must be compared
             # against the enum's integer value.
-            if <int>mp.columns[i].view.type != <int>expected_column.column_type.physical.value:
-                raise DatasetReadError(
-                    f"skene scan '{path}': column '{decoded_name}' is "
-                    f"type {<int>mp.columns[i].view.type} in this file but "
-                    f"{expected_column.column_type.physical!r} at bind time "
-                    "(schema read from the dataset's first file). This "
-                    "dataset's files do not share one schema."
-                )
+            file_type = <int>mp.columns[i].view.type
+            bound_type = <int>expected_column.column_type.physical.value
+            if file_type != bound_type:
+                # The ONE permitted divergence, matching NativeSkeneScanSource:
+                # the plan declares TIMESTAMP64 for a column this file stores as
+                # INT64, because TimestampCastSinkStrategy sank a
+                # `col::TIMESTAMP[unit]` into the scan. INT64 and TIMESTAMP64
+                # share the same 8-byte payload and these units keep the integer
+                # verbatim, so this is a pure retag — not schema drift. Every
+                # other mismatch still fails loud.
+                # DRAKEN_* are the C-level tags cimported by the enclosing
+                # _operators.pyx (this file is include'd into it).
+                if not (bound_type == <int>DRAKEN_TIMESTAMP64
+                        and file_type == <int>DRAKEN_INT64):
+                    raise DatasetReadError(
+                        f"skene scan '{path}': column '{decoded_name}' is "
+                        f"type {file_type} in this file but "
+                        f"{expected_column.column_type.physical!r} at bind time "
+                        "(schema read from the dataset's first file). This "
+                        "dataset's files do not share one schema."
+                    )
+                if not cxx_column_retag_timestamp64(
+                    mp, <uint32_t>i, _timestamp_unit_code(expected_column)
+                ):
+                    raise DatasetReadError(
+                        f"skene scan '{path}': column '{decoded_name}' could not "
+                        "be retagged to TIMESTAMP64 — the decoded column is "
+                        "unowned or not INT64."
+                    )
             identity = expected_column.identity
             if isinstance(identity, str):
                 identity = identity.encode("utf-8")

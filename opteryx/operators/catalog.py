@@ -195,7 +195,6 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.limit import LimitNode
     from opteryx.operators.window import WindowNode
     from opteryx.operators.nested_loop_join import NestedLoopJoinNode
-    from opteryx.operators.non_equi_join import NonEquiJoinNode
     from opteryx.operators.null_reader import NullReaderNode
     from opteryx.operators.outer_join import OuterJoinNode
     from opteryx.operators.parquet_read import ParquetReadNode
@@ -388,13 +387,6 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         FilterJoinNode,
         name="Filter Join",
-        category=OperatorCategory.JOIN,
-        is_join=True,
-        is_pipeline_breaking=True,
-    )
-    r.register(
-        NonEquiJoinNode,
-        name="Non Equi Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,

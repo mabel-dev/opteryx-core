@@ -20,9 +20,18 @@ class Dataset(enum.Enum):
     FULL_SPLIT = "scratch.hits"
     FULL_SPLIT_RUGO_262K = "scratch.hits_rugo_262k" # preferred
     FULL_SINGLE = "scratch.hits_single"
+    FULL_SPLIT_SKENE = "scratch.hits_skene"  # skene mirror of FULL_SPLIT_RUGO_262K
 
 
 DATASET = Dataset.FULL_SPLIT_RUGO_262K
+
+# Format variant -> dataset. `--variant skene` runs the identical battery against
+# the skene mirror (built by dev/parquet_to_skene.py) so the two formats are
+# compared on the same queries, same machine, same iteration count.
+VARIANT_DATASETS = {
+    "": DATASET,
+    "skene": Dataset.FULL_SPLIT_SKENE,
+}
 
 # fmt:off
 STATEMENTS = [
@@ -146,7 +155,17 @@ if __name__ == "__main__":  # pragma: no cover
         help="After the benchmark, run a tracing pass (EXPLAIN ANALYZE) and report "
         "per-operator self-time, per-query and aggregated across the suite.",
     )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="",
+        choices=sorted(VARIANT_DATASETS),
+        help="Dataset format variant: `skene` runs against the skene mirror "
+        "(default: the parquet dataset)",
+    )
     args = parser.parse_args()
+
+    DATASET = VARIANT_DATASETS[args.variant]
 
     # Resolve DuckDB baseline path: prefer local results if present
     _script_dir = os.path.dirname(os.path.abspath(__file__))

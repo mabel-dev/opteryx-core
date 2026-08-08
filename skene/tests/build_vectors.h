@@ -197,6 +197,52 @@ inline CxxColumn string_column(const std::vector<std::string>& values,
     return column;
 }
 
+// VECTOR_FP16 cannot go through dense_column either, and for the opposite
+// reason to BOOL: its data buffer is LARGER than one item per row. `data` is a
+// flat uint16 array of rows * dimension, while `length` and `data_length` count
+// ROWS — dense_column would set both from the half count and write a column
+// `dimension` times too long. The dimension itself lives ONLY in the logical
+// descriptor, which is why every one of these takes it.
+inline CxxColumn fp16_column(const std::vector<uint16_t>& halves, uint32_t rows,
+                             const LogicalType* logical,
+                             const std::vector<bool>& valid = {}) {
+    void*    data     = copy_values(halves);
+    uint8_t* validity = valid.empty() ? nullptr : make_validity(valid);
+    DrakenVector v = draken_vector_from_dense(data, rows, DRAKEN_VECTOR_FP16, validity);
+
+    CxxColumn column;
+    column.view = v;
+    column.own  = std::make_shared<VectorOwner>(
+        v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(validity));
+    column.own->logical_type = logical;
+    return column;
+}
+
+// Dictionary-encoded VECTOR_FP16: `halves` holds distinct * dimension values,
+// `codes` one per row. dict_column cannot serve here — it sizes data from the
+// value count and carries no logical type, and fp16 needs both corrected.
+inline CxxColumn fp16_dict_column(const std::vector<uint16_t>& halves,
+                                  uint32_t distinct,
+                                  const std::vector<uint32_t>& codes,
+                                  const LogicalType* logical) {
+    void*     data  = copy_values(halves);
+    uint32_t* owned = static_cast<uint32_t*>(
+        draken_malloc(codes.size() * sizeof(uint32_t)));
+    std::memcpy(owned, codes.data(), codes.size() * sizeof(uint32_t));
+
+    DrakenVector v = draken_vector_from_dict(
+        data, distinct, owned, static_cast<uint32_t>(codes.size()),
+        DRAKEN_VECTOR_FP16, nullptr);
+
+    CxxColumn column;
+    column.view = v;
+    column.own  = std::make_shared<VectorOwner>(
+        v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr),
+        OwnedBuffer<void>(owned));
+    column.own->logical_type = logical;
+    return column;
+}
+
 // ARRAY: int32 offsets[length+1] in `data`, elements on child_owner.
 inline CxxColumn array_column(const std::vector<std::vector<int64_t>>& rows,
                               const std::vector<bool>& valid = {}) {

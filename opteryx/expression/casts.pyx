@@ -354,6 +354,17 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
     if t in ("DATE", "DATE32"):
         if s in _CAST_STRINGS:
             return ("draken_cast_string_to_date32", 0)
+        # <integer> → DATE: the integer already holds days-since-epoch, which is
+        # exactly DATE32's own storage, so this is the int32 narrowing with the
+        # temporal tag (range-checked in the kernel, never wrapped). It is the
+        # same reading the planner's CAST-predicate rewrite asserts
+        # (_try_normalize_cast_predicate), and the two MUST agree — otherwise a
+        # `col::DATE >= <date>` that the optimizer rewrote and one it left alone
+        # would return different rows.
+        if s in _CAST_NARROW_INT or s == "INT64":
+            return ("draken_cast_integer_to_date32", 0)
+        if s in _CAST_UNSIGNED_INT:
+            return ("draken_cast_uint_to_date32", 0)
         return None
     # IPv4. The kernel yields UINT32; the IPV4 descriptor is re-attached from the
     # bound output type via add_expr_project's `logical` tuple, not from the
@@ -679,6 +690,12 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return vector_cast_string_to_date32, True, True
         if s == "TIMESTAMP64":
             return vector_timestamp_to_date32, True, True
+        # Native-only, exactly like the narrow-signed target above: the range
+        # check that separates a representable day number from one that is not
+        # lives in the kernel, and a Python row-loop standing in for it would be
+        # a second, driftable implementation of it (§2).
+        if s in _CAST_NARROW_INT or s == "INT64" or s in _CAST_UNSIGNED_INT:
+            return _native_only_cast(source_physical, "DATE"), False, False
         raise NotImplementedError(f"No native CAST {source_physical} → DATE")
 
     # ---- IPV4 target ----

@@ -17,6 +17,7 @@ nothing to chunk, so CsvReadNode reads one Morsel per file, not one per chunk.
 from typing import Optional, Sequence
 
 from opteryx.connectors.capabilities import PredicatePushable
+from opteryx.exceptions import DatasetReadError
 from opteryx.expression import NodeType
 from opteryx.types.logical_type import LogicalCategory
 from rugo.csv import read_csv as _rugo_read_csv
@@ -100,10 +101,17 @@ def read_csv_file(
     pre-alias names) and predicate tuples for this scan. ``delimiter``/
     ``has_header``/``fail_on_error``/``infer_sample_size`` are READ_CSV's
     resolved options (see opteryx.planner.binder.dataset), forwarded
-    unchanged to rugo. Always returns a Morsel (possibly zero rows) --
+    unchanged to rugo. Always returns a Morsel (possibly zero rows, and
+    possibly zero COLUMNS -- rugo reports a record-less file that way) --
     unlike JSONL's decode_chunk, there is no "every row filtered out of this
     chunk" ambiguity to signal with None, because CSV reads the whole file
     in one pass rather than chunk by chunk.
+
+    rugo.csv yields exactly one morsel for any input, including a zero-byte
+    buffer, so the `None` branch below is unreachable today. It is a loud
+    guard rather than a bare `next(iter(reader))` so that a future rugo that
+    yields nothing surfaces as a named error instead of leaking StopIteration
+    into whatever generator happens to be on the stack (PEP 479).
     """
     with _rugo_read_csv(
         data,
@@ -114,4 +122,10 @@ def read_csv_file(
         fail_on_error=fail_on_error,
         infer_sample_size=infer_sample_size,
     ) as reader:
-        return next(iter(reader))
+        morsel = next(iter(reader), None)
+    if morsel is None:
+        raise DatasetReadError(
+            "rugo.csv.read_csv yielded no morsel; it is contracted to yield exactly "
+            "one morsel for any input, including an empty buffer."
+        )
+    return morsel

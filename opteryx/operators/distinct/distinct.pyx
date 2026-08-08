@@ -19,10 +19,12 @@ Distinct Node
 This is a SQL Query Execution Plan Node.
 
 This Node eliminates duplicate records.
-"""
 
-from opteryx.compiled.morsel_ops.distinct import distinct as _distinct
-from opteryx.compiled.structures.carchar_set import CarcharSetWrapper as _CarcharSetWrapper
+Execution is 100% native (see opteryx/managers/execution/compiler.py's
+DistinctNode branch, which reads `._distinct_on`/`._distinct_on_exprs`/
+`.distinct_ndv_estimate` off this class and compiles them into the engine's
+set_distinct_sink). This class is plan-time config only.
+"""
 
 # BasePlanNode in scope via _operators.pyx include.
 
@@ -36,15 +38,9 @@ cdef class DistinctNode(BasePlanNode):
     # carry; `_distinct_on` alone (bare identities) throws that expression
     # tree away before the compiler ever sees it.
     cdef public object _distinct_on_exprs
-    cdef public str _set_variant
     # Planner distinct-count estimate (int or None) — consumed by the native
     # plan compiler to gate DistinctSink's parvi front set.
     cdef public object distinct_ndv_estimate
-    cdef public object _hash_set
-    cdef public bint at_least_one_yielded
-    # Row-routing producer seam (M4 parallel DISTINCT). None = normal serial
-    # dedup. Mirrors the grouped-agg scatter-collector `_engine` swap.
-    cdef public object _scatter_engine
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -54,46 +50,7 @@ cdef class DistinctNode(BasePlanNode):
             self._distinct_on = [
                 col.schema_column.identity for col in self._distinct_on
             ]
-        self._set_variant = parameters.get("set_variant", "carchar")
         self.distinct_ndv_estimate = parameters.get("distinct_ndv_estimate")
-        self._hash_set = None
-        self.at_least_one_yielded = False
-        self._scatter_engine = None
-
-    cdef BasePlanNode make_worker(self):
-        # SPEC: _distinct_on (dedup column identities) + _set_variant. STATE: fresh
-        # dedup set + scatter seam.
-        cdef DistinctNode w = DistinctNode.__new__(DistinctNode)
-        self._copy_worker_base(w)
-        w._distinct_on = self._distinct_on
-        w._distinct_on_exprs = self._distinct_on_exprs
-        w._set_variant = self._set_variant
-        w.distinct_ndv_estimate = self.distinct_ndv_estimate
-        w._hash_set = None
-        w.at_least_one_yielded = False
-        w._scatter_engine = None
-        return w
-
-    cpdef readout_partition(self, list chunks, PipelineContext ctx):
-        """Operator-owned per-partition DEDUP read-out (HASH_REPARTITION recombination):
-        dedup ONE global hash partition's chunks in place against a PRIVATE carchar set
-        (``hash(key) % radix`` co-locates every copy of a value in one partition, so the
-        partitions are disjoint key slices — no cross-worker merge), returning
-        ``(survivor_chunks, row_count)`` for the sink to push downstream. The operator
-        owns its recombination; the native read-out fan-out (``native_readout_fanout``)
-        drives partitions in parallel. Mirrors the serial dedup kernel exactly."""
-        cdef object hash_set = _CarcharSetWrapper()
-        cdef list out = []
-        cdef Morsel chunk
-        cdef long long count = 0
-        for chunk in chunks:
-            if ctx.is_terminated():
-                break
-            _distinct(chunk, hash_set, columns=self._distinct_on)
-            if chunk.num_rows > 0:
-                out.append(chunk)
-            count += chunk.num_rows
-        return out, count
 
     @property
     def config(self):  # pragma: no cover

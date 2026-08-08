@@ -28,8 +28,6 @@ config only.
 """
 
 from opteryx.exceptions import ColumnNotFoundError
-from opteryx.expression import NodeType
-from opteryx.expression.evaluator import compile_eval_nodes
 
 # BasePlanNode in scope via textual include from _operators.pyx.
 
@@ -37,7 +35,6 @@ from opteryx.expression.evaluator import compile_eval_nodes
 cdef class HeapSortNode(BasePlanNode):
     cdef public list order_by
     cdef public object limit
-    cdef public list _compiled_evals
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -51,19 +48,6 @@ cdef class HeapSortNode(BasePlanNode):
                 raise ColumnNotFoundError(
                     f"`ORDER BY` must reference columns from `SELECT`. {cnfe}"
                 ) from cnfe
-
-        eval_nodes = [col for col, _ in self.order_by if col.node_type != NodeType.IDENTIFIER]
-        self._compiled_evals = compile_eval_nodes(eval_nodes)
-
-    cdef BasePlanNode make_worker(self):
-        # SPEC: order_by + limit + compiled evals — all derived once and
-        # read-only at run time, shared by reference (no recompile).
-        cdef HeapSortNode w = HeapSortNode.__new__(HeapSortNode)
-        self._copy_worker_base(w)
-        w.order_by = self.order_by
-        w.limit = self.limit
-        w._compiled_evals = self._compiled_evals
-        return w
 
     @property
     def config(self):  # pragma: no cover

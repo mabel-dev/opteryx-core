@@ -1736,6 +1736,14 @@ class _Compiler:
         native Source serves — today only the zero-projection (COUNT(*)) case,
         which needs the materialized path's genuine zero-column morsel.
         Declining is a fallback to a slower CORRECT path, never a wrong answer.
+
+        `retag_units` is the ONE sanctioned type divergence between the plan and
+        a skene footer: a column the plan declares TIMESTAMP64 may be stored as
+        INT64, because TimestampCastSinkStrategy sank a `col::TIMESTAMP[unit]`
+        into the scan and the temporal-ness comes from SQL, not the file. The
+        entry carries the unit for that column (draken's code, as `_wp11_unit`)
+        and -1 for every other column, so the Source can permit exactly this
+        retag and keep failing loud on every other mismatch.
         """
         from opteryx.operators._operators import SkeneScanPlan
 
@@ -1747,6 +1755,10 @@ class _Compiler:
             [sc.name for sc in read_columns],
             [sc.identity for sc in read_columns],
             [sc.column_type.physical.value for sc in read_columns],
+            [
+                _wp11_unit(sc) if sc.column_type.physical == DrakenType.TIMESTAMP64 else -1
+                for sc in read_columns
+            ],
         )
 
     def _native_scan_plan(self, scan):

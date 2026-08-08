@@ -530,13 +530,6 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     Extension(
-        "opteryx.compiled.structures.bloom_filter",
-        sources=["opteryx/compiled/structures/bloom_filter.pyx"],
-        include_dirs=include_dirs + ["src/cpp"],
-        language="c++",
-        extra_compile_args=CPP_FLAGS,
-    ),
-    Extension(
         "opteryx.compiled.structures.column_deserializer",
         sources=[
             "opteryx/compiled/structures/column_deserializer.pyx",
@@ -716,7 +709,6 @@ extensions = [
             "third_party/mabel/carchar/carchar_index.hpp",
             "third_party/mabel/carchar/carchar_common.hpp",
             "third_party/mabel/carchar/carchar_simd.hpp",
-            "src/cpp/operators/loop_join_kernels.hpp",
         ],
     ),
     Extension(
@@ -1325,7 +1317,6 @@ setup(
                 not in {
                     "opteryx.operators._operators",
                     "opteryx.compiled.structures.column_deserializer",
-                    "opteryx.compiled.structures.bloom_filter",
                 }
             ]
             if os.environ.get("DRAKEN_BUILD")

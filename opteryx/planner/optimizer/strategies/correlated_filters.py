@@ -24,10 +24,17 @@ instead. Only inner / nested-loop joins are eligible — the pushed range is a
 necessary condition for a match, which would be unsound for outer joins.
 """
 
+import datetime
+import decimal
+import math
+import struct
+
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.types.logical_type import DrakenType
+from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.logical_type import integer_bounds
 from opteryx.utils import random_string
 
@@ -147,27 +154,136 @@ def _representable(bound, target_type) -> bool:
     return bounds[0] <= bound <= bounds[1]
 
 
+# The Python value a literal of each category must carry. `build_literal_node`
+# TAGS the literal with `suggested_type` but never re-expresses the value, and
+# `_materialise_constant_literal` dispatches on the VALUE's Python type for
+# floats/Decimals/temporals — so a float bound tagged INT32 materialises a
+# FLOAT64 constant. The compare kernel is identical-type only, so that pair
+# declines and the native ExprFilter (which has no fallback) hard-fails with
+# `err_op=11`. Every bound therefore gets re-expressed here, or dropped.
+_CATEGORY_VALUE_TYPES = {
+    LogicalCategory.BOOLEAN: bool,
+    LogicalCategory.INTEGER: int,
+    LogicalCategory.FLOAT: float,
+    LogicalCategory.DECIMAL: decimal.Decimal,
+    LogicalCategory.DATE: datetime.date,
+    LogicalCategory.TIME: datetime.time,
+    LogicalCategory.TIMESTAMP: datetime.datetime,
+    LogicalCategory.VARCHAR: str,
+    LogicalCategory.NVARCHAR: str,
+    LogicalCategory.VARBINARY: bytes,
+}
+
+
+def _as_float(bound, target_type, keep_upper):
+    """*bound* as a float that is never TIGHTER than *bound* itself.
+
+    `float(2**53 + 1)` rounds DOWN; used as an upper bound that would exclude a
+    row the join still matches. Nudge outward (toward the bound's own side of
+    the range) until the float is on the safe side. FLOAT32 targets round again
+    on materialisation, so the nudge is done in float32 space for those."""
+    single = getattr(target_type, "physical", None) is DrakenType.FLOAT32
+    try:
+        result = float(bound)
+    except (OverflowError, ValueError):
+        return None  # magnitude has no float — drop, it is only a pruning hint
+    if single:
+        result = struct.unpack("<f", struct.pack("<f", result))[0]
+    if not math.isfinite(result):
+        return None
+    # At most a couple of iterations: one ULP either side of the true value.
+    for _ in range(4):
+        if (result >= bound) if keep_upper else (result <= bound):
+            return result
+        result = math.nextafter(result, math.inf if keep_upper else -math.inf)
+        if single:
+            result = struct.unpack("<f", struct.pack("<f", result))[0]
+    return None
+
+
+def _coerce_bound(bound, target_type, keep_upper):
+    """*bound* re-expressed as the Python value a *target_type* literal must
+    carry, or None when it cannot be carried without narrowing the range.
+
+    Bounds come from the OTHER leg of the join, so their type is the other
+    column's — an int32 key gets float64 bounds and vice versa. Returning None
+    is always sound: these are derived necessary-condition filters layered on
+    top of the join, so a dropped bound only forgoes pruning (same reasoning as
+    `_representable`).
+
+    No rounding may NARROW the range beyond what the target's value domain
+    already implies — a rounded bound must never exclude a row the join would
+    have matched."""
+    if target_type is None:
+        return bound  # untyped target — build_literal_node infers from the value
+
+    category = target_type.category
+    wanted = _CATEGORY_VALUE_TYPES.get(category)
+    if wanted is None:
+        return None  # NULL / INTERVAL / VARIANT / ARRAY / VECTOR — no literal form
+
+    # bool is a subclass of int; a boolean bound is only ever a boolean bound.
+    if isinstance(bound, bool) or wanted is bool:
+        return bound if (isinstance(bound, bool) and wanted is bool) else None
+
+    if category is LogicalCategory.INTEGER:
+        if isinstance(bound, int):
+            return bound
+        # Over an integer domain `k <= 4.7` and `k <= 4` select the same rows, so
+        # truncating TOWARD the range is exact, not narrowing.
+        if isinstance(bound, float):
+            if not math.isfinite(bound):
+                return None
+            return math.floor(bound) if keep_upper else math.ceil(bound)
+        if isinstance(bound, decimal.Decimal):
+            if not bound.is_finite():
+                return None
+            rounding = decimal.ROUND_FLOOR if keep_upper else decimal.ROUND_CEILING
+            return int(bound.to_integral_value(rounding=rounding))
+        return None
+
+    if category is LogicalCategory.FLOAT:
+        if isinstance(bound, (int, float, decimal.Decimal)):
+            return _as_float(bound, target_type, keep_upper)
+        return None
+
+    if category is LogicalCategory.DECIMAL:
+        if isinstance(bound, decimal.Decimal):
+            return bound
+        if isinstance(bound, int):
+            return decimal.Decimal(bound)
+        # A float bound would have to be quantized to the column's declared
+        # scale, and the quantize rounds in a direction this layer cannot see.
+        return None
+
+    # TIMESTAMP is a datetime.datetime; DATE is a date that is NOT a datetime
+    # (build_literal_node converts a datetime to microseconds even when the
+    # target is DATE32, which is days — a silent 1970 bound).
+    if category is LogicalCategory.DATE:
+        return bound if type(bound) is datetime.date else None
+    return bound if isinstance(bound, wanted) else None
+
+
 def _range_conditions(target_col, value_range):
     """Build GtEq/LtEq COMPARISON_OPERATOR condition Nodes pushing *value_range*
     (native, post-filter bounds) onto *target_col*, correctly typed."""
     target_type = getattr(getattr(target_col, "schema_column", None), "column_type", None)
     conditions = []
-    if value_range.upper_bound is not None and _representable(value_range.upper_bound, target_type):
+    for bound, operator, keep_upper in (
+        (value_range.upper_bound, "LtEq", True),
+        (value_range.lower_bound, "GtEq", False),
+    ):
+        if bound is None:
+            continue
+        bound = _coerce_bound(bound, target_type, keep_upper)
+        if bound is None or not _representable(bound, target_type):
+            continue
         conditions.append(
             Node(
                 NodeType.COMPARISON_OPERATOR,
-                value="LtEq",
+                value=operator,
                 left=target_col,
-                right=build_literal_node(value_range.upper_bound, suggested_type=target_type),
-            )
-        )
-    if value_range.lower_bound is not None and _representable(value_range.lower_bound, target_type):
-        conditions.append(
-            Node(
-                NodeType.COMPARISON_OPERATOR,
-                value="GtEq",
-                left=target_col,
-                right=build_literal_node(value_range.lower_bound, suggested_type=target_type),
+                right=build_literal_node(bound, suggested_type=target_type),
             )
         )
     return conditions

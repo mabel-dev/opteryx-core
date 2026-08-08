@@ -1472,6 +1472,16 @@ DRAKEN_CAST_SIGNED_TO_INT(draken_cast_integer_to_int8,  int8_t,  DRAKEN_INT8,  -
 DRAKEN_CAST_SIGNED_TO_INT(draken_cast_integer_to_int16, int16_t, DRAKEN_INT16, -32768LL, 32767LL)
 DRAKEN_CAST_SIGNED_TO_INT(draken_cast_integer_to_int32, int32_t, DRAKEN_INT32, -2147483648LL, 2147483647LL)
 
+// <signed integer> -> DATE32. A DATE32 *is* an int32 days-since-epoch, so this is
+// the int32 narrowing above with the temporal tag — the integer is taken to
+// already hold days-since-epoch, exactly the reading the planner's
+// CAST(<int> AS DATE) predicate rewrite asserts (_try_normalize_cast_predicate in
+// predicate_pushdown.py). The two must agree: if this kernel meant anything else,
+// a pushed-down and a non-pushed-down `col::DATE >= <date>` would answer
+// differently. Instantiated here, next to the int32 narrowing whose range check
+// it reuses verbatim, rather than re-typed by hand in cast_temporal.cpp.
+DRAKEN_CAST_SIGNED_TO_INT(draken_cast_integer_to_date32, int32_t, DRAKEN_DATE32, -2147483648LL, 2147483647LL)
+
 #undef DRAKEN_CAST_SIGNED_TO_INT
 
 // --- unsigned integer -> narrow signed integer ----------------------------------
@@ -1517,6 +1527,11 @@ VecResult fn_name(void* ctx, const DrakenVector* v) {                           
 DRAKEN_CAST_UINT_TO_INT(draken_cast_uint_to_int8,  int8_t,  DRAKEN_INT8,  127LL)
 DRAKEN_CAST_UINT_TO_INT(draken_cast_uint_to_int16, int16_t, DRAKEN_INT16, 32767LL)
 DRAKEN_CAST_UINT_TO_INT(draken_cast_uint_to_int32, int32_t, DRAKEN_INT32, 2147483647LL)
+
+// <unsigned integer> -> DATE32. The unsigned twin of draken_cast_integer_to_date32
+// above; same days-since-epoch reading, same range check. This is the pair a
+// UINT16 ClickBench EventDate arrives on.
+DRAKEN_CAST_UINT_TO_INT(draken_cast_uint_to_date32, int32_t, DRAKEN_DATE32, 2147483647LL)
 
 #undef DRAKEN_CAST_UINT_TO_INT
 

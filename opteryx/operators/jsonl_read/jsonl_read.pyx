@@ -227,6 +227,30 @@ cdef class JsonlReadNode(ReaderNode):
                             infer_sample_size=self.jsonl_infer_sample_size,
                         )
                         if probe_morsel is None:
+                            # Two different situations reach here, and the probe's
+                            # return value alone cannot tell them apart: this chunk
+                            # has RECORDS but none of the expected columns (real
+                            # schema drift -- fail loud), or this chunk has NO
+                            # RECORDS at all (blank/whitespace-only lines -- an
+                            # empty file, which is not an error). One more
+                            # projection-free decode of the same chunk separates
+                            # them: with no columns requested, rugo returns
+                            # whatever the chunk holds, so None can only mean
+                            # "no records". It costs a second decode only on a
+                            # path that was previously an unconditional raise.
+                            unprojected_morsel = decode_chunk(
+                                chunk,
+                                None,
+                                None,
+                                fail_on_error=self.jsonl_fail_on_error,
+                                infer_schema=self.jsonl_infer_schema,
+                                infer_sample_size=self.jsonl_infer_sample_size,
+                            )
+                            if unprojected_morsel is None:
+                                # Record-less chunk: contributes no rows, and
+                                # leaves this file unvalidated so the next chunk
+                                # that does hold records is still probed.
+                                continue
                             raise DatasetReadError(
                                 f"READ_JSONL('{path}'): none of the expected columns "
                                 f"{sorted(expected_physical_names)} (from the bind-time schema, "

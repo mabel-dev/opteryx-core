@@ -360,6 +360,18 @@ clickbench:
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
+clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene from scratch/hits_rugo_262k on first run)
+	$(call print_blue,"Running ClickBench benchmark on skene...")
+	@# Gate on a completion stamp, not on the directory: an interrupted conversion
+	@# leaves a partial tree that `test -d` would accept, silently benchmarking a
+	@# fraction of the dataset. The stamp lives outside the dataset dir so it can
+	@# never trip the single-format manifest check. Re-running the converter over
+	@# an existing tree is idempotent (deterministic output filenames).
+	@test -f scratch/hits_skene.converted || { $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene && touch scratch/hits_skene.converted; }
+	@clear || true
+	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene
+
 clickbench-profile: ## ClickBench + per-operator self-time profile (where the time goes)
 	@clear || true
 	@$(PYTHON) tests/performance/clickbench/opteryx/runner.py --profile

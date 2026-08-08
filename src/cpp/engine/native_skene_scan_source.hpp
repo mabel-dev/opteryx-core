@@ -38,6 +38,9 @@
 //   - Projection IS pushed: only the requested columns are materialized.
 //   - No schema evolution: every projected column must exist in every file,
 //     with the type the plan bound. A divergent file fails loud, naming itself.
+//     The single exception is a scan-declared INT64→TIMESTAMP64 retag, which the
+//     plan requests explicitly per column (see `retag_units_`) — an allowlist of
+//     one, not a loosening of the guard.
 
 #include <atomic>
 #include <cstdint>
@@ -52,6 +55,7 @@
 
 #include "operator.hpp"
 
+#include "logical_type.h"  // LogicalType / logical_type_intern (TIMESTAMP64 descriptor)
 #include "morsels/cxx_morsel.h"
 #include "skene/reader.h"
 #include "skene/status.h"
@@ -113,11 +117,13 @@ class NativeSkeneScanSource : public Source {
     NativeSkeneScanSource(const std::vector<std::string>* files,
                           const std::vector<std::string>* column_names,
                           const std::vector<std::string>* out_identities,
-                          const std::vector<int>* column_types)
+                          const std::vector<int>* column_types,
+                          const std::vector<int>* retag_units)
         : files_(files),
           column_names_(column_names),
           out_identities_(out_identities),
-          column_types_(column_types) {}
+          column_types_(column_types),
+          retag_units_(retag_units) {}
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         return std::make_unique<NativeSkeneScanGlobal>();
@@ -202,18 +208,66 @@ class NativeSkeneScanSource : public Source {
                 err.msg = err_msg_.c_str();
                 return false;
             }
-            if (static_cast<int>(morsel.columns[i].view.type) != (*column_types_)[want]) {
-                err.code = 1;
-                err_msg_ = "NativeSkeneScanSource: '" + path + "': column '" +
-                           morsel.names[i] + "' is type " +
-                           std::to_string(static_cast<int>(morsel.columns[i].view.type)) +
-                           " in this file but " + std::to_string((*column_types_)[want]) +
-                           " at bind time — this dataset's files do not share one schema";
-                err.msg = err_msg_.c_str();
-                return false;
+            const int file_type = static_cast<int>(morsel.columns[i].view.type);
+            const int bound_type = (*column_types_)[want];
+            if (file_type != bound_type) {
+                // The ONE permitted divergence: the plan declares TIMESTAMP64 for
+                // a column this file stores as INT64. That is not schema drift —
+                // it is TimestampCastSinkStrategy having sunk a
+                // `col::TIMESTAMP[unit]` into the scan, so the temporal-ness comes
+                // from SQL rather than the footer. INT64 and TIMESTAMP64 share the
+                // same 8-byte payload and these units keep the integer verbatim,
+                // so this is a pure retag: no rescale, no reallocation, no row
+                // touched. `retag_units_[want] >= 0` is the plan SAYING so — the
+                // compiler sets it only for a declared-TIMESTAMP64 column.
+                //
+                // Deliberately a closed allowlist of one, not a "types are close
+                // enough" relaxation: every other mismatch is a file that does not
+                // share the dataset's schema, and must still fail loud.
+                if (!(bound_type == DRAKEN_TIMESTAMP64 && file_type == DRAKEN_INT64 &&
+                      (*retag_units_)[want] >= 0)) {
+                    err.code = 1;
+                    err_msg_ = "NativeSkeneScanSource: '" + path + "': column '" +
+                               morsel.names[i] + "' is type " + std::to_string(file_type) +
+                               " in this file but " + std::to_string(bound_type) +
+                               " at bind time — this dataset's files do not share one schema";
+                    err.msg = err_msg_.c_str();
+                    return false;
+                }
+                if (!retag_as_timestamp64(morsel.columns[i], (*retag_units_)[want], path, err))
+                    return false;
             }
             morsel.names[i] = (*out_identities_)[want];
         }
+        return true;
+    }
+
+    // Retag an INT64-decoded column to TIMESTAMP64 in place. Payload-preserving
+    // by construction: only the type tag and the owner's logical descriptor
+    // change — `data`, `selection`, `validity`, `length` and `data_length` are
+    // untouched, so the column keeps its shape (dense/constant/dict) and every
+    // row survives. Mirrors the parquet Source's build_temporal_column
+    // LC_TIMESTAMP branch, which attaches the same interned descriptor.
+    bool retag_as_timestamp64(CxxColumn& column, int unit, const std::string& path,
+                              ErrCtx& err) {
+        // draken treats a TIMESTAMP64 vector with a nullptr descriptor as a hard
+        // error, and the descriptor hangs off the owner — so a borrowed/unowned
+        // column cannot be retagged. skene's decode always owns its buffers; if
+        // that ever changes, fail loud rather than emit an undescribed timestamp.
+        if (!column.own) {
+            err.code = 1;
+            err_msg_ = "NativeSkeneScanSource: '" + path +
+                       "': cannot retag an unowned column to TIMESTAMP64";
+            err.msg = err_msg_.c_str();
+            return false;
+        }
+        LogicalType lt;
+        lt.kind = LogicalKind::TIMESTAMP;
+        lt.unit = static_cast<TimestampUnit>(unit);
+        lt.offset_minutes = 0;
+        column.own->logical_type = logical_type_intern(lt);
+        column.own->vec.type = DRAKEN_TIMESTAMP64;
+        column.view.type = DRAKEN_TIMESTAMP64;
         return true;
     }
 
@@ -221,6 +275,9 @@ class NativeSkeneScanSource : public Source {
     const std::vector<std::string>* column_names_;
     const std::vector<std::string>* out_identities_;
     const std::vector<int>* column_types_;
+    // Parallel to column_types_: the draken timestamp unit for a column the plan
+    // declares TIMESTAMP64, else -1. See the retag allowlist above.
+    const std::vector<int>* retag_units_;
     // Error text must outlive the call (ErrCtx.msg is a borrowed const char*).
     // One Source instance reports at most one error before the scan stops, so a
     // single member is enough; a second failing worker overwrites a message for

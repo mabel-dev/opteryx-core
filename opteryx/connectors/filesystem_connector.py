@@ -154,6 +154,29 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             return JsonlPredicatePushable.can_push(JsonlPredicatePushable(), operator, types)
         return False
 
+    @property
+    def supports_int64_timestamp_retag(self) -> bool:
+        """Format-aware declaration of the scan-declared INT64→TIMESTAMP64 retag.
+
+        Per-format like can_push, and for the same reason: this one class fronts
+        readers with genuinely different capabilities, so the capability has to
+        be answered per instance, after get_dataset_metadata has discovered the
+        format.
+
+        PARQUET honours it: the footer gate admits a bare-int64 column asked for
+        as TIMESTAMP (pool_reader.pyx, "R7b close-out") and build_temporal_column
+        retags it from `logical_coerce`, which the compiler derives from the
+        PLAN-declared type — so a scan retyped by TimestampCastSinkStrategy is
+        picked up end to end.
+
+        SKENE honours it: NativeSkeneScanSource and SkeneReadNode both allowlist
+        exactly this one verbatim retag against the bind-time schema.
+
+        JSONL does not: its reader types columns from the data it decodes, with
+        no plan-declared retag path.
+        """
+        return self.dataset_file_format in (PARQUET, SKENE)
+
     def get_list_of_blob_names(self, prefix: str, predicates=None):
         """
         Get list of blob names (file paths) matching the prefix.
@@ -253,27 +276,77 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             file_obj.close()
         return skene_metadata_to_schema(metadata, self.dataset)
 
-    def _infer_jsonl_schema(self, blob_name: str) -> RelationSchema:
-        """Schema for a JSONL dataset, inferred by decoding its first file.
+    def _infer_jsonl_schema(self, blob_names: list) -> RelationSchema:
+        """Schema for a JSONL dataset, inferred by decoding its first file that
+        actually contains a record.
 
         JSONL has no cheap metadata path (rugo.jsonl.read_metadata fully
-        decodes too), so this pays one file's decode at bind time — the same
-        cost READ_JSONL's binder branch pays for the same reason.
+        decodes too), so this pays one decode at bind time — the same cost
+        READ_JSONL's binder branch pays for the same reason, and bounded the
+        same way: to the file's FIRST newline-aligned chunk rather than the
+        whole file. Decoding the whole file materialised a vector for every row
+        of every column purely to read the types back off it, so bind-time peak
+        RSS grew with file size (~4.7MB per input MB) and a large enough blob
+        could not be planned at all however cheap its execution.
+
+        The bound is `iter_newline_chunks`' first chunk SPECIFICALLY, taken
+        from the scan's own splitter so the two cannot drift, and NOT a smaller
+        sample. rugo infers column TYPES from the whole buffer it is handed,
+        not from the first `infer_sample_size` records (that governs the column
+        SET) — a column of ints that becomes floats partway down a file decodes
+        as INT64 from a short prefix and FLOAT64 from the whole file. Since
+        JsonlReadNode validates every chunk's decoded types against the schema
+        bound here, binding off anything other than the exact bytes of chunk 0
+        would make that check fail on chunk 0 itself for such a file. Binding
+        off chunk 0 makes them agree by construction. Cross-chunk drift within
+        a blob still fails loud there, exactly as before.
+
+        rugo yields NO morsel for a record-less file (zero bytes, or only
+        blank/whitespace lines), so a bare `next()` used to leak a StopIteration
+        out of read_dataset's generator as "RuntimeError: generator raised
+        StopIteration" (PEP 479). Such a file is an empty relation, not a read
+        failure — but it also has no schema to give, so it is SKIPPED as the
+        schema source rather than defining a zero-column one. Binding zero
+        columns off an empty first blob would make `SELECT *` over the dataset
+        return nothing at all while other blobs held rows: a silent wrong
+        answer where there used to be a loud crash. Only when EVERY blob is
+        record-less is the dataset genuinely empty, and bound with no columns.
+        This is the same rule READ_JSONL's binder branch applies to a glob's
+        matched-file set.
         """
         from opteryx.connectors.jsonl_io import JSONL_SUPPORTED_TYPES
+        from opteryx.connectors.jsonl_io import iter_newline_chunks
         from opteryx.types.logical_type import column_type_from_vector
         from opteryx.types.schema import SchemaColumn
         from opteryx.types.schema import mint_column_identity
         from rugo.jsonl import read_jsonl as _rugo_read_jsonl
 
-        file_obj = self.filesystem.open_input_file(blob_name)
-        try:
-            with _rugo_read_jsonl(file_obj.memoryview) as reader:
-                sample_morsel = next(iter(reader))
-        except RuntimeError as err:
-            raise DataError(f"Cannot read JSONL file '{blob_name}': {err}") from err
-        finally:
-            file_obj.close()
+        sample_morsel = None
+        for blob_name in blob_names:
+            file_obj = self.filesystem.open_input_file(blob_name)
+            try:
+                schema_chunk = next(iter_newline_chunks(file_obj.memoryview), None)
+                if schema_chunk is None:
+                    # Zero-byte blob: no chunk at all, so no schema to infer.
+                    # Falls through to the record-less skip below, the same as a
+                    # blob of nothing but blank lines.
+                    sample_morsel = None
+                else:
+                    # No reader options are passed, exactly as before — this path
+                    # has no READ_JSONL-style option syntax to resolve, so rugo's
+                    # defaults apply. Only the buffer handed over has changed.
+                    with _rugo_read_jsonl(schema_chunk) as reader:
+                        sample_morsel = next(iter(reader), None)
+            except RuntimeError as err:
+                raise DataError(f"Cannot read JSONL file '{blob_name}': {err}") from err
+            finally:
+                file_obj.close()
+
+            if sample_morsel is not None:
+                break
+
+        if sample_morsel is None:
+            return RelationSchema(name=self.dataset, columns=[])
 
         schema_columns = []
         for raw_name in sample_morsel.column_names:
@@ -330,8 +403,10 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             # one exists, first-file inference as the fallback; filesystem
             # datasets have no declared schema, so this is the fallback path).
             # Every other file is validated against it at read time by
-            # JsonlReadNode's per-file/per-chunk fail-loud checks.
-            yield self._infer_jsonl_schema(blob_names[0])
+            # JsonlReadNode's per-file/per-chunk fail-loud checks. Record-less
+            # blobs are skipped when choosing that first file — they have no
+            # schema to give; see _infer_jsonl_schema.
+            yield self._infer_jsonl_schema(blob_names)
             return
 
         if just_schema:

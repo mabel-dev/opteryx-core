@@ -82,27 +82,27 @@ class HashMapVariantStrategy(OptimizationStrategy):
 
         # Handle both GROUP BY and DISTINCT nodes.
         if node.node_type == LogicalPlanStepType.AggregateAndGroup:
-            # GROUP BY — use group_map_variant hint
+            # `group_map_variant` is the re-entry marker only — nothing reads it
+            # downstream (see the module docstring).
             if getattr(node, "group_map_variant", None) is not None:
                 return context
             variant, estimate = self._variant_and_estimate(node, context)
             node.group_map_variant = variant
-            # Raw distinct-group-count estimate for the native sink's own gate
-            # (int or None). Kept separate from the variant tag: the Cython
-            # engine's single 16-slot map and the native sink's 64 partitioned
-            # maps have different capacity envelopes.
+            # THE payload: raw distinct-group-count estimate for the native
+            # GroupBySink's own gate (int, or None for unknown).
             node.groupby_ndv_estimate = estimate
             context.optimized_plan[context.node_id] = node
             return context
 
         elif node.node_type == LogicalPlanStepType.Distinct:
-            # DISTINCT — use set_variant hint
+            # `set_variant` is the re-entry marker only — nothing reads it
+            # downstream (see the module docstring).
             if getattr(node, "set_variant", None) is not None:
                 return context
             variant, estimate = self._variant_and_estimate(node, context)
             node.set_variant = variant
-            # Raw distinct-count estimate for the native DistinctSink's parvi
-            # gate (kDistinctParviGateNDV) — int or None.
+            # THE payload: raw distinct-count estimate for the native
+            # DistinctSink's parvi gate (kDistinctParviGateNDV) — int or None.
             node.distinct_ndv_estimate = estimate
             context.optimized_plan[context.node_id] = node
             return context

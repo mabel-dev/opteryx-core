@@ -9,46 +9,68 @@
 # cython: optimize.unpack_method_calls=True
 
 """
-Grouped aggregate (hashed) — single compiled module.
+Grouped aggregate (hashed) node.
 
-Compilation order matters: each .pxi file depends on symbols from the ones
-included before it.  The include order below is topologically sorted.
+Execution is 100% native (see opteryx/managers/execution/compiler.py's
+GroupedAggregateHashedNode branch). The compiler reads `.group_by_columns` for
+the key indices, `.groups` to materialize a COMPUTED group key and to name keys
+in error messages, `.aggregates` for _project_agg_operands / _parse_aggregates,
+`.groupby_ndv_estimate` to gate the sink's per-partition parvi front maps, and
+`._having_condition` for the post-aggregate filter. A GROUP BY with no aggregate
+functions is routed to the native DistinctSink instead of the GroupBySink.
 
-  _key_store.pxi         → KeyStore
-  _collectors_base.pxi   → BaseCollector
-  _collectors_numeric.pxi → numeric collectors (depends on BaseCollector)
-  _collectors_distinct.pxi → distinct collectors (depends on numeric helpers)
-  _collectors_approx.pxi  → approx + array_agg collectors
-  _engine.pxi            → GroupHashEngine (depends on all collectors + KeyStore)
-  _factory.pxi           → create_collectors / resolve_deferred_collectors
-  _node.pxi              → GroupedAggregateHashedNode (Python class)
+This class is plan-time config only. The Cython execution stack that used to
+live here — KeyStore, BaseCollector and the numeric / distinct / approx /
+buffered collector families, GroupHashEngine, and the collector factory — was
+deleted when the push path went dead.
 """
 
-from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t, INT64_MAX, INT64_MIN
-from libc.math cimport HUGE_VAL
-from libc.stdlib cimport malloc, free
-from libc.string cimport memset, memcpy
-from libcpp.string cimport string
-from libcpp.vector cimport vector
+from opteryx.expression import NodeType
+from opteryx.expression import get_all_nodes_of_type
 
-from draken.core.buffers cimport DrakenFixedBuffer, DrakenVarBuffer, DrakenType, DrakenVector
-from draken.morsels.morsel cimport Morsel
-from draken.vectors.vector cimport Vector, NULL_HASH, mix_hash, from_decoded as _from_decoded
-from libc.stddef cimport size_t
-from cpython.object cimport PyObject
-from draken.morsels.cxx_morsel cimport (
-    CxxMorsel, ErrCtx, cxx_hash_c, cxx_morsel_delete, cxx_morsel_raw_ptr,
-)
+# BasePlanNode in scope via textual include from _operators.pyx (umbrella unit).
 
-cdef extern from "core/alloc.h" nogil:
-    void* draken_malloc(size_t n) nogil
-    void  draken_free(void* p) nogil
-include "_key_store.pxi"
-include "_collectors_base.pxi"
-include "_collectors_numeric.pxi"
-include "_collectors_distinct.pxi"
-include "_collectors_approx.pxi"
-include "_collectors_buffered.pxi"
-include "_engine.pxi"
-include "_factory.pxi"
-include "_node.pxi"
+
+cdef class GroupedAggregateHashedNode(BasePlanNode):
+    cdef public list groups
+    cdef public list aggregates
+    cdef public list group_by_columns
+    cdef public object _having_condition
+    # Planner distinct-group-count estimate (int or None) — consumed by the
+    # native plan compiler to gate GroupBySink's per-partition parvi maps.
+    cdef public object groupby_ndv_estimate
+
+    def __init__(self, properties: QueryProperties, **parameters):
+        BasePlanNode.__init__(self, properties=properties, **parameters)
+
+        self.groups = list(parameters["groups"])
+        self.aggregates = list(parameters["aggregates"])
+        projection = list(parameters["projection"])
+
+        # Resolve integer position GROUP BY references (e.g. GROUP BY 1)
+        self.groups = [
+            (
+                group
+                if not (group.node_type == NodeType.LITERAL and group.type.__class__.__name__ == "INTEGER")
+                else projection[group.value - 1]
+            )
+            for group in self.groups
+        ]
+
+        self.group_by_columns = list({node.schema_column.identity for node in self.groups})
+
+        self.groupby_ndv_estimate = parameters.get("groupby_ndv_estimate")
+
+        self._having_condition = parameters.get("having_condition")
+
+    @property
+    def config(self):  # pragma: no cover
+        from opteryx.expression import format_expression
+        return (
+            f"AGGREGATE ({', '.join(format_expression(col) for col in self.aggregates)}) "
+            f"GROUP BY ({', '.join(format_expression(col) for col in self.groups)})"
+        )
+
+    @property
+    def name(self):  # pragma: no cover
+        return "Grouped Aggregate (Hashed)"

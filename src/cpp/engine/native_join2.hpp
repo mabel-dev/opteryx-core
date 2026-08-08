@@ -94,18 +94,31 @@ struct Join2BuildLocal : LocalSinkState {
 // that hash, then compare the stored hash. Measured on TPC-H SF1: the isolated
 // build-heavy join went 1.15x → 2.88x across 1→8 workers (parallel fraction 0.15 →
 // 0.75), the 21-query total 1.93x → 2.48x (0.55 → 0.68), and Q21 480ms → 165ms.
+//
+// `hashes` and `rows` stay SEPARATE arrays, deliberately.
+//
+// Interleaving them into one 16-byte {hash, row} entry looks like the obvious win —
+// one stream instead of two — and it was tried. It is wrong for this table: a bucket
+// scan compares hashes and reads the row id ONLY on a match, so a probe that misses
+// touches `hashes` alone at 8 bytes per entry. Interleaving drags the row id into the
+// same cache line and doubles the bytes touched on exactly the path that dominates
+// (measured on JOB: 73.7% of 2.4bn probe rows match nothing). Two streams where only
+// one is usually read beats one stream that is always read in full.
+//
+// `rows` is uint32: build row ids index row_m/row_r, which are uint32, and
+// kNoBuildRow is UINT32_MAX.
 struct JoinCsr {
     size_t mask = 0;
     std::vector<uint32_t> off;      // bucket offsets, size N+1
-    std::vector<int64_t> rows;      // build row ids, grouped by bucket
+    std::vector<uint32_t> rows;     // build row ids, grouped by bucket
     std::vector<uint64_t> hashes;   // parallel to `rows`: the stored key hash
     bool built = false;
 
-    // Mirrors CarcharJoinIndex::append_probe_matches — const and thread-safe: the
-    // data is read-only once built, so N probe workers share one CSR with no scratch.
-    void append_probe_matches(uint64_t key, int64_t probe_row,
-                              std::vector<int64_t>& build_out,
-                              std::vector<int64_t>& probe_out) const {
+    // const and thread-safe: the data is read-only once built, so N probe workers
+    // share one CSR with no scratch.
+    void append_probe_matches(uint64_t key, uint32_t probe_row,
+                              std::vector<uint32_t>& build_out,
+                              std::vector<uint32_t>& probe_out) const {
         if (!built) return;
         const size_t b = static_cast<size_t>(key) & mask;
         for (uint32_t i = off[b]; i < off[b + 1]; ++i) {
@@ -157,6 +170,7 @@ struct Join2BuildGlobal : GlobalSinkState {
     std::vector<std::vector<uint64_t>> hash_chunks;   // per-worker hashes, queued O(1)
     bool csr_active = false;
 
+
     // FULL OUTER (track_matches) state, allocated/appended in finalize():
     //   matched[r]     — build row r received >= 1 probe match. mutable + atomic
     //                    because probes are const and concurrent; relaxed byte
@@ -173,17 +187,21 @@ struct Join2BuildGlobal : GlobalSinkState {
     // row space is sealed.
     std::vector<uint32_t> null_row_m, null_row_r;
 
-    // The two build-table operations the probe modes use. Routing them through the
-    // global keeps the ASOF carve-out in ONE place rather than at each call site.
-    void probe_append(uint64_t key, int64_t probe_row,
-                      std::vector<int64_t>& build_out,
-                      std::vector<int64_t>& probe_out) const {
-        if (csr_active) csr.append_probe_matches(key, probe_row, build_out, probe_out);
-        else            index.append_probe_matches(key, probe_row, build_out, probe_out);
+    // The two build-table operations the probe modes use.
+    //
+    // These route straight to the CSR: `index` is NOT an alternative table here. It
+    // is populated only for ASOF, and AsofProbeOperator overrides execute() to walk
+    // its own sorted view — it never calls either of these. The `csr_active ? csr :
+    // index` dispatch these used to carry was therefore unreachable on the index
+    // side. An empty build (combine() never ran, so csr.built is false) is handled
+    // by the CSR itself, which returns no matches — identical to the empty index it
+    // would have consulted.
+    void probe_append(uint64_t key, uint32_t probe_row,
+                      std::vector<uint32_t>& build_out,
+                      std::vector<uint32_t>& probe_out) const {
+        csr.append_probe_matches(key, probe_row, build_out, probe_out);
     }
-    size_t probe_row_count(uint64_t key) const {
-        return csr_active ? csr.row_count_for(key) : index.row_count_for(key);
-    }
+    size_t probe_row_count(uint64_t key) const { return csr.row_count_for(key); }
 };
 
 // Two-pass parallel CSR construction. Called once from finalize(), which the executor
@@ -218,6 +236,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
 
     std::vector<std::atomic<uint32_t>> counts(n);
     for (size_t i = 0; i < n; ++i) counts[i].store(0, std::memory_order_relaxed);
+
 
     // Pass 1: per-bucket histogram. Chunks are claimed atomically so a skewed chunk
     // distribution cannot leave a thread idle.
@@ -263,7 +282,7 @@ inline void build_join_csr(Join2BuildGlobal& g) {
                     const uint64_t h = chunk[r];
                     const size_t b = static_cast<size_t>(h) & c.mask;
                     const uint32_t p = cursor[b].fetch_add(1, std::memory_order_relaxed);
-                    c.rows[p] = static_cast<int64_t>(b0 + r);
+                    c.rows[p] = static_cast<uint32_t>(b0 + r);
                     c.hashes[p] = h;
                 }
             }
@@ -473,6 +492,22 @@ struct Join2ProbeState : OperatorState {
     std::vector<uint64_t> rowh;   // per-morsel probe-key hashes (draken-owned)
 };
 
+
+// Can ANY key column of this morsel carry a NULL? A DrakenVector with a null
+// `validity` pointer is all-valid (draken invariant, see sort_row_valid), so when
+// no key column has one, no probe row can have a NULL key and the per-row,
+// per-column validity scan in the probe loops is dead work.
+//
+// Hoisted rather than turned into a packed per-row mask: a mask only helps when
+// keys really are nullable, whereas this collapses the COMMON case (non-nullable
+// join keys — every surrogate key in TPC-H and JOB) to a single check per morsel.
+// The row loops keep their exact per-row logic for the nullable case.
+inline bool probe_keys_nullable(const MorselPtr& in, const std::vector<size_t>& key_idx) {
+    for (size_t k : key_idx)
+        if (in->columns[k].view.validity != nullptr) return true;
+    return false;
+}
+
 struct Join2ProbeOperator : Operator {
     std::vector<size_t> probe_key_idx;
     std::vector<size_t> probe_payload_idx;
@@ -494,11 +529,14 @@ struct Join2ProbeOperator : Operator {
     }
 
     // Build one output morsel for the parallel (build_row | kNoBuildRow, probe_row)
-    // arrays. build_rows/probe_rows are int64 (CarcharJoinIndex row ids); an unmatched
-    // LEFT/ASOF row carries kNoBuildRow in build_rows.
+    // arrays. Both are uint32: build row ids index row_m/row_r (uint32), probe row
+    // ids are morsel-local, and kNoBuildRow is UINT32_MAX. They were int64, which
+    // doubled the traffic through these buffers on every matched row and then had to
+    // be narrowed again below to build the gather order — this removes a conversion
+    // rather than adding one.
     MorselPtr build_output(const MorselPtr& probe_in,
-                           const std::vector<int64_t>& build_rows,
-                           const std::vector<int64_t>& probe_rows,
+                           const std::vector<uint32_t>& build_rows,
+                           const std::vector<uint32_t>& probe_rows,
                            ErrCtx& err) {
         const Join2BuildGlobal& g = *ref->g;
         uint32_t n = static_cast<uint32_t>(build_rows.size());
@@ -539,12 +577,11 @@ struct Join2ProbeOperator : Operator {
             }
             std::vector<uint32_t> order(n);
             for (uint32_t i = 0; i < n; ++i) {
-                uint32_t br = static_cast<uint32_t>(build_rows[i]);
                 // LEFT OUTER / ASOF unmatched probe row: no build row exists, so hand
                 // gather_rows its null-row sentinel. A build row that EXISTS but holds
                 // a NULL value needs nothing here — the source vector's own validity
                 // already says so and the gather honours it.
-                order[i] = (br == kNoBuildRow) ? kGatherNullRow : br;
+                order[i] = (build_rows[i] == kNoBuildRow) ? kGatherNullRow : build_rows[i];
             }
             MorselPtr gathered = gather_rows(bms, order, 0, n, g.row_m, g.row_r,
                                              bms.front()->names, err);
@@ -560,12 +597,20 @@ struct Join2ProbeOperator : Operator {
             for (size_t pc : probe_payload_idx) view->columns.push_back(probe_in->columns[pc]);
             view->names.resize(view->columns.size());
             view->zero_col_rows = pn;
-            std::vector<uint32_t> order(n);
-            for (uint32_t i = 0; i < n; ++i) order[i] = static_cast<uint32_t>(probe_rows[i]);
-            std::vector<uint32_t> row_m(pn, 0), row_r(pn);
-            for (uint32_t i = 0; i < pn; ++i) row_r[i] = i;
+            // The probe half is ONE morsel, so its address map is trivial: every row
+            // lives in morsel 0 at its own index. Rebuilding those two vectors per
+            // 8192-row batch was allocating and filling 2*pn entries to express the
+            // identity; thread_local scratch reuses them across batches (per-thread,
+            // so concurrent probe workers still never share).
+            static thread_local std::vector<uint32_t> row_m, row_r;
+            if (row_r.size() < pn) {
+                row_m.assign(pn, 0);
+                row_r.resize(pn);
+                for (uint32_t i = 0; i < pn; ++i) row_r[i] = i;
+            }
             std::vector<MorselPtr> ms{view};
-            MorselPtr gathered = gather_rows(ms, order, 0, n, row_m, row_r, view->names, err);
+            MorselPtr gathered =
+                gather_rows(ms, probe_rows, 0, n, row_m, row_r, view->names, err);
             if (err.code != 0 || gathered == nullptr) return nullptr;
             for (CxxColumn& c : gathered->columns) out->columns.push_back(std::move(c));
         }
@@ -591,27 +636,29 @@ struct Join2ProbeOperator : Operator {
                 return OpResult::NEED_INPUT;
         }
         uint32_t n = in->num_rows();
-        std::vector<int64_t> build_rows, probe_rows;
+        std::vector<uint32_t> build_rows, probe_rows;
         build_rows.reserve(kBatch);
         probe_rows.reserve(kBatch);
+        const bool keys_nullable = probe_keys_nullable(in, probe_key_idx);
 
         while (st.row < n) {
             uint32_t row = st.row;
             bool any_null = false;
-            for (size_t k : probe_key_idx) {
-                if (!sort_row_valid(in->columns[k].view, row)) { any_null = true; break; }
+            if (keys_nullable) {
+                for (size_t k : probe_key_idx) {
+                    if (!sort_row_valid(in->columns[k].view, row)) { any_null = true; break; }
+                }
             }
             if (any_null) {
                 if (left_outer) {   // unmatched preserved-side row → NULL build payload
-                    build_rows.push_back(static_cast<int64_t>(kNoBuildRow));
-                    probe_rows.push_back(static_cast<int64_t>(row));
+                    build_rows.push_back(kNoBuildRow);
+                    probe_rows.push_back(row);
                 }
             } else {
                 size_t before = build_rows.size();
                 // const + thread-safe fan-out: appends (build_row, probe_row) for every
                 // build row whose key hash matches. Equality is 64-bit hash identity.
-                g.probe_append(st.rowh[row], static_cast<int64_t>(row),
-                               build_rows, probe_rows);
+                g.probe_append(st.rowh[row], row, build_rows, probe_rows);
                 if (track_matches) {
                     std::atomic<uint8_t>* m = g.matched.get();
                     for (size_t bi = before; bi < build_rows.size(); ++bi)
@@ -619,8 +666,8 @@ struct Join2ProbeOperator : Operator {
                             1, std::memory_order_relaxed);
                 }
                 if (build_rows.size() == before && left_outer) {
-                    build_rows.push_back(static_cast<int64_t>(kNoBuildRow));
-                    probe_rows.push_back(static_cast<int64_t>(row));
+                    build_rows.push_back(kNoBuildRow);
+                    probe_rows.push_back(row);
                 }
             }
             ++st.row;
@@ -727,14 +774,14 @@ struct AsofProbeOperator : Join2ProbeOperator {
                 return OpResult::NEED_INPUT;
         }
         uint32_t n = in->num_rows();
-        std::vector<int64_t> build_rows, probe_rows;
+        std::vector<uint32_t> build_rows, probe_rows;
         build_rows.reserve(kBatch);
         probe_rows.reserve(kBatch);
         const DrakenVector& av = in->columns[asof_probe_idx].view;
 
         while (st.row < n) {
             uint32_t row = st.row;
-            int64_t build_row = static_cast<int64_t>(kNoBuildRow);
+            uint32_t build_row = kNoBuildRow;
             bool usable = sort_row_valid(av, row);
             for (size_t k : probe_key_idx) {
                 if (!usable) break;
@@ -743,11 +790,15 @@ struct AsofProbeOperator : Join2ProbeOperator {
             if (usable) {
                 int64_t idx = -1;
                 if (g.asof_index.lookup_fast(st.rowh[row], idx))
-                    build_row = match_row(g.asof_sorted[static_cast<size_t>(idx)],
-                                          sort_num_key(av, row), g.asof_keys);
+                    // match_row still speaks int64 — it bisects asof_sorted, whose
+                    // row lists come from CarcharJoinIndex. Its "no match" is
+                    // kNoBuildRow, so the narrowing round-trips exactly.
+                    build_row = static_cast<uint32_t>(
+                        match_row(g.asof_sorted[static_cast<size_t>(idx)],
+                                  sort_num_key(av, row), g.asof_keys));
             }
             build_rows.push_back(build_row);
-            probe_rows.push_back(static_cast<int64_t>(row));
+            probe_rows.push_back(row);
             ++st.row;
             if (build_rows.size() >= kBatch) {
                 out = build_output(in, build_rows, probe_rows, err);
@@ -800,8 +851,8 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
     // Evaluate the residual over one batch of candidate (build_row, probe_row) pairs
     // and mark every probe row that has >=1 satisfying build row. Clears the batch.
     // Returns false with `err` set on failure.
-    bool resolve_pairs(const MorselPtr& in, std::vector<int64_t>& build_rows,
-                       std::vector<int64_t>& probe_rows, std::vector<uint8_t>& found,
+    bool resolve_pairs(const MorselPtr& in, std::vector<uint32_t>& build_rows,
+                       std::vector<uint32_t>& probe_rows, std::vector<uint8_t>& found,
                        ErrCtx& err) {
         if (build_rows.empty()) return true;
         MorselPtr pairs = build_output(in, build_rows, probe_rows, err);
@@ -866,6 +917,7 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
         std::vector<uint64_t> rowh;
         if (!build_empty && !compute_row_hashes(in, probe_key_idx, rowh, err))
             return OpResult::NEED_INPUT;
+        const bool keys_nullable = probe_keys_nullable(in, probe_key_idx);
 
         // With a residual, existence has to be decided per candidate pair, so the
         // key-matching pairs are materialized and the predicate evaluated over them
@@ -875,17 +927,21 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
         if (residual_fn != nullptr) {
             matched.assign(n, 0);
             if (!build_empty) {
-                std::vector<int64_t> build_rows, probe_rows;
+                std::vector<uint32_t> build_rows, probe_rows;
                 build_rows.reserve(kBatch);
                 probe_rows.reserve(kBatch);
                 for (uint32_t i = 0; i < n; ++i) {
                     bool any_null = false;
-                    for (size_t k : probe_key_idx) {
-                        if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+                    if (keys_nullable) {
+                        for (size_t k : probe_key_idx) {
+                            if (!sort_row_valid(in->columns[k].view, i)) {
+                                any_null = true;
+                                break;
+                            }
+                        }
                     }
                     if (any_null) continue;   // NULL key never equi-matches
-                    g.probe_append(rowh[i], static_cast<int64_t>(i),
-                                   build_rows, probe_rows);
+                    g.probe_append(rowh[i], i, build_rows, probe_rows);
                     // Bound the pair batch: fan-out is probe_rows x rows-per-key, which
                     // is unbounded in general. Flushing after a COMPLETE probe row keeps
                     // every row's pairs contiguous (a single high-fan-out row may push
@@ -903,8 +959,10 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
         survivors.reserve(n);
         for (uint32_t i = 0; i < n; ++i) {
             bool any_null = false;
-            for (size_t k : probe_key_idx) {
-                if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+            if (keys_nullable) {
+                for (size_t k : probe_key_idx) {
+                    if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+                }
             }
             if (any_null) {
                 // NULL probe key never equi-matches, so SEMI drops it.

@@ -15,6 +15,7 @@
 #include "skene/reader.h"
 #include "skene/writer.h"
 
+#include "core/interval_slot.h"
 #include "core/ipv4.h"
 
 using namespace skene;
@@ -110,6 +111,96 @@ static void test_bool() {
     const uint8_t* packed = static_cast<const uint8_t*>(out.columns[0].view.data);
     for (uint32_t i = 0; i < bits.size(); ++i)
         CHECK_EQ(((packed[i >> 3] >> (i & 7u)) & 1u) != 0, bits[i]);
+}
+
+// INTERVAL is a 16-byte two-component slot, and the components are stored
+// SEPARATELY on purpose: months are calendar months (28-31 days) and the
+// sub-month field is microseconds, so a round trip that normalized them into one
+// number would come back a different interval. Value equality per component is
+// therefore the contract, not equality of any total.
+static void test_interval_round_trips() {
+    const std::vector<DrakenIntervalSlot> values = {
+        {1, 0},                  // whole months, no sub-month part
+        {-3, 123456789},         // mixed signs across the two components
+        {0, -1},                 // sub-month only, negative
+        {14, 2592000000000LL},   // a sub-month part equal to one normalized month
+    };
+    auto in = morsel_of({{"iv", dense_column<DrakenIntervalSlot>(
+                                    values, DRAKEN_INTERVAL,
+                                    {true, false, true, true})}});
+    CxxMorsel out;
+    round_trip(in, &out);
+
+    const DrakenVector& v = out.columns[0].view;
+    check_vector_identical(in.columns[0].view, v);
+    CHECK_EQ(static_cast<int>(v.type), static_cast<int>(DRAKEN_INTERVAL));
+
+    // check_values cannot serve: DrakenIntervalSlot has no operator== and
+    // CHECK_EQ would need to stringify it. Compare component-wise instead.
+    const DrakenIntervalSlot* got = static_cast<const DrakenIntervalSlot*>(v.data);
+    for (uint32_t i = 0; i < values.size(); ++i) {
+        CHECK_EQ(got[v.selection[i]].months, values[i].months);
+        CHECK_EQ(got[v.selection[i]].us, values[i].us);
+    }
+}
+
+// The dict shape is what Parquet re-derives rather than restores, and an
+// interval dictionary is the realistic case — a column of "1 month" and
+// "1 year" repeated is how intervals actually arrive.
+static void test_interval_dict_shape_survives() {
+    const std::vector<DrakenIntervalSlot> distinct = {{2, 500}, {-7, 0}};
+    const std::vector<uint32_t> codes = {0, 1, 1, 0, 1};
+    auto in = morsel_of({{"iv", dict_column<DrakenIntervalSlot>(
+                                    distinct, codes, DRAKEN_INTERVAL)}});
+    CxxMorsel out;
+    round_trip(in, &out);
+
+    const DrakenVector& v = out.columns[0].view;
+    check_vector_identical(in.columns[0].view, v);
+    CHECK(draken_is_dict(&v));
+    CHECK_EQ(v.data_length, uint32_t{2});
+
+    const DrakenIntervalSlot* got = static_cast<const DrakenIntervalSlot*>(v.data);
+    for (uint32_t i = 0; i < codes.size(); ++i) {
+        CHECK_EQ(got[v.selection[i]].months, distinct[codes[i]].months);
+        CHECK_EQ(got[v.selection[i]].us, distinct[codes[i]].us);
+    }
+}
+
+// INTERVAL has a defined order (value_order.cpp's compare_interval) and an
+// ordinalization, so read acceleration must actually engage on it — sort,
+// deduplicate, and produce min/max — and the values must still come back in
+// their original ROW order through the permutation. A type that silently fell
+// back to kAsWritten would pass every test above and lose every pruning path.
+static void test_interval_value_ordering_engages() {
+    const std::vector<DrakenIntervalSlot> distinct = {
+        {5, 0}, {-2, 999}, {0, 0}, {1, -500}};
+    std::vector<DrakenIntervalSlot> values;
+    for (int i = 0; i < 400; ++i) values.push_back(distinct[i % 4]);
+
+    auto in = morsel_of({{"iv", dense_column<DrakenIntervalSlot>(values, DRAKEN_INTERVAL)}});
+
+    std::vector<uint8_t> bytes;
+    CHECK(write_morsel(in, WriteOptions::for_storage(), &bytes).is_ok());
+
+    FileMetadata meta;
+    CHECK(read_metadata(bytes.data(), bytes.size(), &meta).is_ok());
+    CHECK_EQ(static_cast<int>(meta.columns[0].value_order),
+             static_cast<int>(ValueOrder::kAscending));
+    CHECK(meta.columns[0].has_statistics);
+    CHECK((meta.columns[0].statistics.flags & kStatMin) != 0);
+    CHECK((meta.columns[0].statistics.flags & kStatMax) != 0);
+    CHECK(meta.columns[0].statistics.min_ordinal < meta.columns[0].statistics.max_ordinal);
+
+    CxxMorsel out;
+    CHECK(read_morsel(bytes.data(), bytes.size(), &out).is_ok());
+    const DrakenVector& v = out.columns[0].view;
+    CHECK_EQ(v.data_length, uint32_t{4});  // deduplicated to the distinct count
+    const DrakenIntervalSlot* got = static_cast<const DrakenIntervalSlot*>(v.data);
+    for (uint32_t i = 0; i < values.size(); ++i) {
+        CHECK_EQ(got[v.selection[i]].months, values[i].months);
+        CHECK_EQ(got[v.selection[i]].us, values[i].us);
+    }
 }
 
 // A bitmap saying "nothing is null" states what an absent section already means,
@@ -406,6 +497,100 @@ static void test_timestamp_and_decimal_descriptors() {
     CHECK_EQ(d->scale, uint8_t{6});
 }
 
+// VECTOR_FP16 is the type whose descriptor is LOAD-BEARING rather than
+// refining: `dimension` is the item width, so losing it does not degrade the
+// column the way losing IPV4 does — it makes the bytes unreadable. Every
+// assertion here is about that width surviving.
+static void test_fp16_vector_survives_with_dimension() {
+    LogicalType lt;
+    lt.kind = LogicalKind::VECTOR;
+    lt.dimension = 4u;
+    const LogicalType* interned = logical_type_intern(lt);
+
+    // 3 rows of dimension 4 — 12 halves in a buffer whose row count is 3.
+    const std::vector<uint16_t> halves = {
+        0x3C00, 0x4000, 0x4200, 0x4400,   // 1, 2, 3, 4
+        0x0000, 0xBC00, 0x3555, 0x7BFF,   // 0, -1, ~1/3, max finite
+        0x0001, 0x8000, 0x3C00, 0xC000,   // min subnormal, -0, 1, -2
+    };
+    auto in = morsel_of({{"emb", fp16_column(halves, 3u, interned)}});
+
+    CxxMorsel out;
+    round_trip(in, &out);
+
+    const DrakenVector& v = out.columns[0].view;
+    check_vector_identical(in.columns[0].view, v);
+    CHECK_EQ(static_cast<int>(v.type), static_cast<int>(DRAKEN_VECTOR_FP16));
+    CHECK_EQ(v.length, uint32_t{3});
+
+    const VectorOwner* owner = out.columns[0].own.get();
+    CHECK(owner->logical_type != nullptr);
+    if (owner->logical_type != nullptr) {
+        CHECK(owner->logical_type->kind == LogicalKind::VECTOR);
+        CHECK_EQ(owner->logical_type->dimension, uint32_t{4});
+        CHECK(owner->logical_type == interned);  // interned, not copied
+    }
+
+    // Bit-exact, not approximately equal: these are stored halves, and this
+    // format memcpys them. -0 must not come back as 0, and the subnormal must
+    // not come back flushed.
+    const uint16_t* got = static_cast<const uint16_t*>(v.data);
+    for (uint32_t row = 0; row < 3; ++row)
+        for (uint32_t d = 0; d < 4; ++d)
+            CHECK_EQ(got[v.selection[row] * 4u + d], halves[row * 4u + d]);
+}
+
+// Two shapes an embedding column really takes: repeated vectors (dict) and
+// missing ones (null rows). Both must survive with the width intact.
+static void test_fp16_vector_dict_and_null_shapes() {
+    LogicalType lt;
+    lt.kind = LogicalKind::VECTOR;
+    lt.dimension = 3u;
+    const LogicalType* interned = logical_type_intern(lt);
+
+    const std::vector<uint16_t> halves = {0x3C00, 0x4000, 0x4200,
+                                          0xBC00, 0xC000, 0xC200};
+    const std::vector<uint32_t> codes = {0, 1, 1, 0, 1};
+    auto in = morsel_of({{"emb", fp16_dict_column(halves, 2u, codes, interned)}});
+
+    CxxMorsel out;
+    round_trip(in, &out);
+    const DrakenVector& v = out.columns[0].view;
+    check_vector_identical(in.columns[0].view, v);
+    CHECK(draken_is_dict(&v));
+    CHECK_EQ(v.data_length, uint32_t{2});
+    const uint16_t* got = static_cast<const uint16_t*>(v.data);
+    for (uint32_t row = 0; row < codes.size(); ++row)
+        for (uint32_t d = 0; d < 3; ++d)
+            CHECK_EQ(got[v.selection[row] * 3u + d], halves[codes[row] * 3u + d]);
+
+    // A null row still occupies its slot in the data buffer — the width is a
+    // property of the column, not of the rows that happen to be present.
+    auto with_null = morsel_of({{"emb", fp16_column(halves, 2u, interned,
+                                                    {true, false})}});
+    CxxMorsel out2;
+    round_trip(with_null, &out2);
+    const DrakenVector& v2 = out2.columns[0].view;
+    CHECK_EQ(v2.length, uint32_t{2});
+    CHECK(!row_is_valid(v2, 1));
+    const uint16_t* got2 = static_cast<const uint16_t*>(v2.data);
+    for (uint32_t d = 0; d < 3; ++d)
+        CHECK_EQ(got2[v2.selection[0] * 3u + d], halves[d]);
+}
+
+// The other half of the contract: without the descriptor there is no width, so
+// the write must FAIL rather than emit a column no reader can size. This is the
+// case IPV4 deliberately does not share — a bare UINT32 is still a column.
+static void test_fp16_vector_without_descriptor_is_refused() {
+    const std::vector<uint16_t> halves = {0x3C00, 0x4000, 0x4200, 0x4400};
+    auto in = morsel_of({{"emb", fp16_column(halves, 2u, nullptr)}});
+
+    std::vector<uint8_t> bytes;
+    Status write = write_morsel(in, WriteOptions::for_spill(), &bytes);
+    CHECK(!write.is_ok());
+    CHECK(write.code() == Code::kMalformed);
+}
+
 // ─── ARRAY ──────────────────────────────────────────────────────────────────
 
 static void test_array_round_trip() {
@@ -554,6 +739,9 @@ int main() {
     test_file_on_disk_round_trips();
     test_fixed_width();
     test_bool();
+    test_interval_round_trips();
+    test_interval_dict_shape_survives();
+    test_interval_value_ordering_engages();
     test_nulls();
     test_all_valid_bitmap_is_dropped();
     test_all_valid_ignores_padding_bits();
@@ -566,6 +754,9 @@ int main() {
     test_flags_survive_verbatim();
     test_ipv4_survives_typed_and_renders();
     test_timestamp_and_decimal_descriptors();
+    test_fp16_vector_survives_with_dimension();
+    test_fp16_vector_dict_and_null_shapes();
+    test_fp16_vector_without_descriptor_is_refused();
     test_array_round_trip();
     test_column_selection();
     test_metadata_and_column_extent();

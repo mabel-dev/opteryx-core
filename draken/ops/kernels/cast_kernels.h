@@ -185,6 +185,11 @@ VecResult draken_cast_integer_to_int32(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_uint_to_int8(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_uint_to_int16(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_uint_to_int32(void* ctx, const DrakenVector* vector);
+// <integer> -> DATE32: the int32 narrowing with the temporal tag. A DATE32 is an
+// int32 days-since-epoch, and the source integer is taken to already hold days
+// (see the note at the instantiations in cast_numeric.cpp).
+VecResult draken_cast_integer_to_date32(void* ctx, const DrakenVector* vector);
+VecResult draken_cast_uint_to_date32(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_float_to_int8(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_float_to_int16(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_float_to_int32(void* ctx, const DrakenVector* vector);

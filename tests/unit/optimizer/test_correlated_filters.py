@@ -143,5 +143,76 @@ def test_pushed_range_preserves_results():
     assert on_result > 0
 
 
+# ---- derived-bound typing -------------------------------------------------------
+#
+# The bound comes from the OTHER leg, so its Python type is the other column's.
+# `build_literal_node` TAGS the literal with the target's type but never
+# re-expresses the value, and the constant materialiser dispatches on the VALUE's
+# Python type — so a float bound tagged INT32 became a FLOAT64 constant. The
+# compare kernel is identical-type only, and the native ExprFilter has no
+# fallback, so an int32 x float64 INNER JOIN died with
+# `ExprFilterOperator: predicate evaluation failed (err_op=11)`.
+
+
+def _column(column_type):
+    from opteryx.models import Node
+    from opteryx.types.schema import FunctionColumn
+
+    return Node(
+        node_type=None,
+        value="k",
+        schema_column=FunctionColumn(name="k", column_type=column_type, aliases=[]),
+    )
+
+
+@pytest.mark.parametrize(
+    "column_type_name, upper, lower, expected_upper, expected_lower",
+    [
+        # float bounds onto an integer key: truncate TOWARD the range. Over an
+        # integer domain `k <= 4.7` and `k <= 4` select the same rows.
+        ("INT32", 4.0, 2.0, 4, 2),
+        ("INT32", 4.7, 2.3, 4, 3),
+        ("INT64", 4.0, 2.0, 4, 2),
+        # integer bounds onto a float key.
+        ("FLOAT64", 4, 2, 4.0, 2.0),
+    ],
+)
+def test_derived_bound_matches_the_target_type(
+    column_type_name, upper, lower, expected_upper, expected_lower
+):
+    """A pushed bound's Python value must match the type the literal is TAGGED
+    with — anything else materialises a constant of the wrong physical type and
+    the identical-type compare kernel declines it (err_op=11)."""
+    from opteryx.planner.optimizer.strategies import correlated_filters as cf
+    from opteryx.types import logical_type
+
+    column_type = getattr(logical_type, column_type_name)
+    conditions = cf._range_conditions(
+        _column(column_type), type("R", (), {"upper_bound": upper, "lower_bound": lower})()
+    )
+    by_op = {c.value: c.right for c in conditions}
+    assert by_op["LtEq"].value == expected_upper
+    assert type(by_op["LtEq"].value) is type(expected_upper)
+    assert by_op["GtEq"].value == expected_lower
+    assert type(by_op["GtEq"].value) is type(expected_lower)
+    for literal in by_op.values():
+        assert literal.type is column_type
+
+
+def test_derived_bound_is_dropped_when_it_cannot_be_carried():
+    """Dropping is always sound — a correlated filter is a derived
+    necessary-condition, so a missing bound only forgoes pruning."""
+    from opteryx.planner.optimizer.strategies import correlated_filters as cf
+    from opteryx.types import logical_type
+
+    # A float bound onto a DECIMAL key would have to be quantized to the
+    # column's declared scale, rounding in a direction this layer cannot see.
+    conditions = cf._range_conditions(
+        _column(logical_type.DECIMAL(18, 6)),
+        type("R", (), {"upper_bound": 4.5, "lower_bound": 2.5})(),
+    )
+    assert conditions == []
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

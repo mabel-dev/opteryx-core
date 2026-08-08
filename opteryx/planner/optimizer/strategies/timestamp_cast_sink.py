@@ -17,14 +17,26 @@ TIMESTAMP64 share the same 8-byte payload, and ``[s]``/``[ms]``/``[us]``/``[ns]`
 keep the integer verbatim (only the unit *tag* differs — verified against the
 ``draken_cast_int64_to_timestamp`` kernel, which copies verbatim for these
 units). So instead of decoding the column as int64 and then running a cast pass,
-we retype the *scan output* to TIMESTAMP64 with the cast's unit. The parquet
-reader already retags int64→timestamp for schema-typed timestamp columns, so it
-picks the column up automatically; the now-``TIMESTAMP64`` operand makes the
-``CAST`` resolve to identity (``resolve_cast`` returns the identity kernel for a
-TIMESTAMP64 source), so no per-row cast runs.
+we retype the *scan output* to TIMESTAMP64 with the cast's unit. The now-
+``TIMESTAMP64`` operand makes the ``CAST`` resolve to identity (``resolve_cast``
+returns the identity kernel for a TIMESTAMP64 source), so no per-row cast runs.
+
+Retyping the scan output only works if the reader that serves the scan honours a
+scan-declared type it does not find in the file. That is a *reader capability*,
+declared as ``BaseTable.supports_int64_timestamp_retag`` — parquet and skene
+implement it, and each does so as a strict allowlist of this one verbatim retag.
+A reader that decodes exactly what its footer declares does not, and its columns
+are not retyped here: the cast stays an ordinary cast. Retyping under a reader
+that cannot retag does not produce a slow query, it produces a plan and a reader
+that disagree about a column's type — which is precisely what the skene scan's
+schema guard exists to catch, and did.
 
 Correctness — this is fail-safe by construction:
 
+* Eligibility requires that the column is emitted by a Scan whose connector
+  declares the retag capability. A column with no Scan producer at all — a
+  projection alias, a CTE, a function dataset — is therefore never eligible:
+  nothing downstream would perform the retag the retyping assumes.
 * Eligibility requires that *every* reference to the column is the same
   pure-retag cast. References are enumerated through the authoritative
   :func:`expression_roots` accessor (it cannot under-count), so a column used
@@ -127,9 +139,26 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         casted: dict = {}
         raw: set = set()
+        # identity -> every emitting Scan's connector declares the retag. Absent
+        # means no Scan emits it at all, which is a hard decline (see below).
+        retag_capable: dict = {}
 
         for _, node in plan.nodes(True):
             if node.node_type == LogicalPlanStepType.Scan:
+                # Whether this scan's reader will honour a declared TIMESTAMP64
+                # on an int64-stored column. A scan with no connector (or one
+                # that does not declare the capability) disqualifies every
+                # column it emits — including a column another, capable scan
+                # also emits, which is why this ANDs rather than overwrites.
+                capable = bool(
+                    node.connector is not None
+                    and node.connector.supports_int64_timestamp_retag
+                )
+                if node.schema is not None:
+                    for col in node.schema.columns or []:
+                        retag_capable[col.identity] = (
+                            retag_capable.get(col.identity, True) and capable
+                        )
                 # The emit-column list is not a use; pushed predicates are (and
                 # disqualify the column from retyping).
                 for predicate in node.predicates or []:
@@ -149,9 +178,14 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
                 for root in expression_roots(node, exclude=exclude):
                     _classify(root, casted, raw)
 
-        # Eligible: cast-only use, single consistent unit, never used raw.
+        # Eligible: emitted by a retag-capable Scan, cast-only use, single
+        # consistent unit, never used raw.
         eligible: dict = {}
         for identity, units in casted.items():
+            # Default False: an identity no Scan emits has no reader to perform
+            # the retag, so retyping it would mistype it.
+            if not retag_capable.get(identity, False):
+                continue
             if identity in raw:
                 continue
             if len(units) != 1:
@@ -172,13 +206,11 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
         # scan's emitted column (so the reader retags it) and every cast operand
         # (so the cast resolves to identity). These are usually the same shared
         # object, but updating all is robust to any copy that broke sharing.
-        retyped = 0
         for _, node in plan.nodes(True):
             if node.node_type == LogicalPlanStepType.Scan and node.schema is not None:
                 for col in node.schema.columns or []:
                     if col.identity in eligible:
                         col.column_type = eligible[col.identity]
-                        retyped += 1
             for root in expression_roots(node):
                 if root.node_type == NodeType.IDENTIFIER and root.schema_column is not None:
                     if root.schema_column.identity in eligible:

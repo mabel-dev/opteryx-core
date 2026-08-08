@@ -20,18 +20,19 @@ This is a SQL Query Execution Plan Node.
 
 This Node eliminates columns that are not needed in a Relation. This is also the Node
 that performs column renames.
-"""
 
-from opteryx.expression import NodeType
-from opteryx.expression.evaluator import compile_eval_nodes
+Execution is 100% native (see opteryx/managers/execution/compiler.py's
+ProjectionNode branch, which reads `.projection` off this class for the output
+identities and re-derives the computed expressions from `node.parameters`
+— hoisted_columns, projection, passthrough_columns — via _add_computed). This
+class is plan-time config only.
+"""
 
 # BasePlanNode in scope via textual include from _operators.pyx.
 
 
 cdef class ProjectionNode(BasePlanNode):
     cdef public list projection
-    cdef public list _compiled_evals
-    cdef public set _literal_identities
 
     def __init__(self, properties=None, **parameters):
         """
@@ -64,28 +65,7 @@ cdef class ProjectionNode(BasePlanNode):
         for column in projection:
             self.projection.append(column.schema_column.identity)
 
-        eval_nodes = [
-            column for column in (hoisted + projection) if column.node_type != NodeType.IDENTIFIER
-        ]
-        self._compiled_evals = compile_eval_nodes(eval_nodes)
-        self._literal_identities = {
-            column.schema_column.identity
-            for column in eval_nodes
-            if column.node_type == NodeType.LITERAL
-        }
-
         self.columns = proj
-
-    cdef BasePlanNode make_worker(self):
-        # SPEC: projection identities + compiled evals + literal set — all read-only
-        # at run time, shared by reference (no recompile). STATE: only the base
-        # `readings`/counters, freshly initialised by `_copy_worker_base`.
-        cdef ProjectionNode w = ProjectionNode.__new__(ProjectionNode)
-        self._copy_worker_base(w)
-        w.projection = self.projection
-        w._compiled_evals = self._compiled_evals
-        w._literal_identities = self._literal_identities
-        return w
 
     @property
     def config(self):  # pragma: no cover

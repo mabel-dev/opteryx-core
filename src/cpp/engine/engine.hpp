@@ -403,15 +403,18 @@ public:
     // independently (skene::read_morsel is a pure function over a buffer), so
     // there is no pipeline, no in-flight window and no footer map to carry —
     // just the file list, the projected in-file names, the identities to emit
-    // them under, and the bound physical type per projected column. Every
-    // pointer is borrowed from the NativePlan, which holds the owners alive.
+    // them under, the bound physical type per projected column, and the
+    // timestamp unit for any column the plan declares TIMESTAMP64 (-1 for the
+    // rest) so the Source can honour a scan-declared INT64→TIMESTAMP64 retag.
+    // Every pointer is borrowed from the NativePlan, which holds the owners alive.
     void set_native_skene_scan_source(size_t p,
                                       const std::vector<std::string>* files,
                                       const std::vector<std::string>* column_names,
                                       const std::vector<std::string>* out_identities,
-                                      const std::vector<int>* column_types) {
+                                      const std::vector<int>* column_types,
+                                      const std::vector<int>* retag_units) {
         set_source_(p, std::make_unique<NativeSkeneScanSource>(
-                           files, column_names, out_identities, column_types));
+                           files, column_names, out_identities, column_types, retag_units));
     }
 
     void set_native_scan_source(size_t p, rugo::ParquetIOPipeline* pipeline,

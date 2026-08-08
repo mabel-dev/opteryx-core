@@ -22,36 +22,22 @@ This node orders a dataset using a permutation-based sort (C++ std::sort /
 std::stable_sort with memcmp tiebreak) over Draken morsels. Dictionary-encoded
 columns are ORDER BY-correct (codes are remapped to value rank before sorting,
 with AVX2/NEON SIMD acceleration for uint8 codes).
-"""
 
-from opteryx.expression import NodeType
-from opteryx.expression.evaluator import compile_eval_nodes
+Execution is 100% native (see opteryx/managers/execution/compiler.py's
+SortNode branch, which reads `.order_by` off this class and compiles it into
+the engine's set_sort_sink; `_sort_spec` materializes a computed ORDER BY key
+itself). This class is plan-time config only.
+"""
 
 # BasePlanNode in scope via textual include from _operators.pyx.
 
 
 cdef class SortNode(BasePlanNode):
     cdef public list order_by
-    cdef public list _morsels
-    cdef public list _compiled_evals
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.order_by = parameters.get("order_by", [])
-        self._morsels = []
-        eval_nodes = [col for col, _ in self.order_by if col.node_type != NodeType.IDENTIFIER]
-        self._compiled_evals = compile_eval_nodes(eval_nodes)
-
-    cdef BasePlanNode make_worker(self):
-        # SPEC: order_by + compiled evals — read-only at run time, shared by
-        # reference (no recompile). STATE: a fresh `_morsels` accumulator (and the
-        # base `readings`/counters via `_copy_worker_base`).
-        cdef SortNode w = SortNode.__new__(SortNode)
-        self._copy_worker_base(w)
-        w.order_by = self.order_by
-        w._compiled_evals = self._compiled_evals
-        w._morsels = []
-        return w
 
     @property
     def config(self):  # pragma: no cover

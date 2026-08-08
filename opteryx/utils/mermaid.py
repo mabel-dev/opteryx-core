@@ -401,8 +401,6 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 schema_columns = getattr(getattr(node, "schema", None), "columns", None)
                 if schema_columns:
                     node_stat["columns_total"] = len(schema_columns)
-            if getattr(node, "left_filter", None) is not None:
-                node_stat["bloom_filter"] = True
             if getattr(node, "at_date", None):
                 node_stat["at_date"] = str(node.at_date)
             if getattr(node, "committed_at", None):

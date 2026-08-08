@@ -192,6 +192,13 @@ class MabelTable(BaseTable, Diachronic):
 
     supports_diachronic = True
 
+    # Unconditional, unlike FileSystemTable's per-format property: a Mabel
+    # dataset is always parquet. Only `.parquet` blobs are collected, and every
+    # FileEntry this builds is stamped file_format="PARQUET", so the physical
+    # planner's manifest-format dispatch (_scan_reader_for_manifest) can only
+    # ever select ParquetReadNode — the reader that implements the retag.
+    supports_int64_timestamp_retag = True
+
     def __init__(
         self,
         dataset: str,

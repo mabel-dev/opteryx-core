@@ -22,6 +22,8 @@ the number of rows returned from a JOIN the better, so rather than filter
 after a join, we add conditions to the JOIN.
 """
 
+from draken.draken_native import TimestampUnit
+
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
@@ -166,21 +168,56 @@ def _unwrap_nested(expression):
     return expression
 
 
-# Microseconds per unit for each CAST target type name (from cast_node.value).
-# _TIMESTAMP_NS is sub-µs (fractional scale) so is intentionally excluded.
-_LITERAL_SCALE_US: dict = {
-    "DATE":            86_400_000_000,
-    "_TIMESTAMP_DAYS": 86_400_000_000,
-    "_TIMESTAMP_S":    1_000_000,
-    "_TIMESTAMP_MS":   1_000,
-    "_TIMESTAMP_US":   1,
+_DAYS_US = 86_400_000_000
+
+# Microseconds per STORED unit of a TIMESTAMP64 carrying this unit tag. A
+# TIMESTAMP[s] holds seconds verbatim, a TIMESTAMP[ms] milliseconds, and so on
+# (see the retag note in timestamp_cast_sink.py). NANOSECONDS is deliberately
+# absent: it is sub-µs, so no integral scale exists and the rewrite declines.
+_TIMESTAMP_UNIT_SCALE_US: dict = {
+    TimestampUnit.SECONDS:      1_000_000,
+    TimestampUnit.MILLISECONDS: 1_000,
+    TimestampUnit.MICROSECONDS: 1,
 }
 
-# Microseconds per column-unit for LogicalCategory that can appear as a CAST target.
-_COL_SCALE_US: dict = {
-    LogicalCategory.DATE:      86_400_000_000,  # stores int32 days
-    LogicalCategory.TIMESTAMP: 1,               # stores int64 µs
+# For each CAST target type name (from cast_node.value): the LogicalCategory the
+# cast produces, and the microseconds-per-unit of the value an INTEGER source is
+# ASSERTED to already hold (see the type-assertion branch in
+# _try_normalize_cast_predicate). _TIMESTAMP_NS is excluded for the reason above.
+_CAST_TARGET_ASSERTED: dict = {
+    "DATE":            (LogicalCategory.DATE,      _DAYS_US),
+    "_TIMESTAMP_DAYS": (LogicalCategory.TIMESTAMP, _DAYS_US),
+    "_TIMESTAMP_S":    (LogicalCategory.TIMESTAMP, 1_000_000),
+    "_TIMESTAMP_MS":   (LogicalCategory.TIMESTAMP, 1_000),
+    "_TIMESTAMP_US":   (LogicalCategory.TIMESTAMP, 1),
 }
+
+
+def _temporal_storage_scale_us(column_type):
+    """Microseconds per unit ACTUALLY STORED by a value of this type, or None.
+
+    This is the scale of the integer sitting in the buffer, not the scale the
+    type's name suggests: a DATE stores days, a TIMESTAMP stores whatever its
+    unit tag says. Deriving it from the value's own type — rather than from the
+    CAST target's name — is what keeps the literal rescale in
+    _try_normalize_cast_predicate honest; assuming a literal is expressed in the
+    cast target's units silently multiplied µs literals by 10^6 for a
+    ``::TIMESTAMP[s]`` target (a wrong-answer, not a missed optimisation).
+    Returns None for anything with no exact integral µs scale, which makes the
+    caller decline the rewrite.
+    """
+    if column_type is None:
+        return None
+    category = column_type.category
+    if category is LogicalCategory.DATE:
+        return _DAYS_US
+    if category is LogicalCategory.TIMESTAMP:
+        logical = column_type.logical
+        if logical is None:
+            return None
+        return _TIMESTAMP_UNIT_SCALE_US.get(logical.unit)
+    return None
+
 
 # When l_scale > c_scale (the CAST truncates via floor division), LtEq and Gt
 # need the literal bumped by one column-unit and the operator flipped so that
@@ -255,9 +292,20 @@ def _make_implied_filter(op, target_col, lit_node):
 def _try_normalize_cast_predicate(condition: Node):
     """Strip CAST from CAST(IDENTIFIER) op LITERAL predicates and rescale the literal.
 
-    Converts ``CAST(col, T2) op literal(T2)`` into ``col op rescaled_literal``
-    where the literal value is converted from T2 units to col's native units using
-    the ratio ``l_scale / c_scale`` (both expressed in microseconds).
+    Converts ``CAST(col, T) op literal`` into the equivalent cast-free
+    ``col op' rescaled_literal``, so the comparison runs on the column's raw stored
+    integers and needs no per-row CAST pass. Three scales are involved, all held in
+    microseconds-per-stored-unit and all derived from the values' own types:
+
+      c_scale  the column's           (or, for an INTEGER column, the unit the cast
+                                       asserts it already holds)
+      t_scale  the cast target's
+      l_scale  the literal's
+
+    Which way the rescale goes depends on whether the cast truncates
+    (``t_scale > c_scale``) or is exact. Both directions are handled; anything that
+    cannot be expressed EXACTLY as a single comparison returns None rather than an
+    approximation — this rewrite must never change which rows match.
 
     Returns a new condition Node, or None if the predicate cannot be normalised.
     """
@@ -284,34 +332,102 @@ def _try_normalize_cast_predicate(condition: Node):
     if col_sc is None or cast_sc is None:
         return None
 
-    c_scale = _COL_SCALE_US.get(col_sc.category)
-    l_scale = _LITERAL_SCALE_US.get(cast_node.value)
+    target = _CAST_TARGET_ASSERTED.get(cast_node.value)
+    if target is None:
+        return None
+    target_category, target_scale = target
+
+    # The literal's scale comes from the LITERAL's own type. The comparison is only
+    # modelled here when the literal is the same temporal category the cast produces —
+    # a cross-category compare (a TIMESTAMP literal against a ::DATE cast) carries an
+    # implicit coercion this rewrite does not reproduce, so it declines.
+    literal_type = literal_node.type
+    if literal_type is None or literal_type.category is not target_category:
+        return None
+    l_scale = _temporal_storage_scale_us(literal_type)
     if l_scale is None:
         return None
+
+    c_scale = _temporal_storage_scale_us(col_sc.column_type)
     # An INTEGER column being cast to a temporal type is a type assertion — the integer
     # stores values in the cast target's units already (e.g. EventDate::DATE stores days).
     if c_scale is None and col_sc.category == LogicalCategory.INTEGER:
-        c_scale = l_scale
-    if c_scale is None or l_scale < c_scale:
-        return None  # unknown column type or literal is finer-grained than column
+        c_scale = target_scale
+    if c_scale is None:
+        return None  # unknown column type
 
     literal_value = literal_node.value
     if not isinstance(literal_value, int):
         return None
 
-    # Eq/NotEq across different scales can't be expressed as a single comparison.
-    if l_scale != c_scale and op in ("Eq", "NotEq"):
-        return None
+    # Everything below reasons in canonical microseconds, where the three scales are
+    # directly comparable: a stored value v of scale s is v*s µs. The literal is
+    # `literal_us`; the CAST maps the column into the target's domain, which either
+    # TRUNCATES (target coarser than the column) or is exact (a retag, or a widening
+    # to a finer unit).
+    literal_us = literal_value * l_scale
 
-    # LtEq / Gt with floor-truncating casts need +1 on the literal and a flipped op.
-    adjusted_op = _FLOOR_CAST_OP_ADJUST.get(op, op) if l_scale != c_scale else op
-    literal_adjust = 1 if op in _FLOOR_CAST_OP_ADJUST and l_scale != c_scale else 0
-
-    rescaled = (literal_value + literal_adjust) * l_scale // c_scale
+    if target_scale > c_scale:
+        # Truncating cast: CAST(col) = floor(col*c_scale / target_scale), compared in
+        # TARGET units. Only modelled when the literal is already expressed in those
+        # units (a DATE literal against a ::DATE cast) — a finer-grained literal would
+        # need a bucket index that is not the literal itself. target_scale must also be
+        # a whole number of column units, or the rescale below is not exact.
+        if l_scale != target_scale or target_scale % c_scale != 0:
+            return None
+        # Eq/NotEq against a truncating cast select a RANGE of column values, which is
+        # not a single comparison.
+        if op in ("Eq", "NotEq"):
+            return None
+        # LtEq / Gt need +1 on the literal and a flipped op:
+        #   floor(col*c/t) <= lit  <=>  col*c < (lit+1)*t  <=>  col < (lit+1)*t/c
+        #   floor(col*c/t) >  lit  <=>  col*c >= (lit+1)*t <=>  col >= (lit+1)*t/c
+        adjusted_op = _FLOOR_CAST_OP_ADJUST.get(op, op)
+        literal_adjust = 1 if op in _FLOOR_CAST_OP_ADJUST else 0
+        rescaled = (literal_value + literal_adjust) * target_scale // c_scale
+    else:
+        # Exact cast — no information is lost, so the comparison is simply
+        # `col * c_scale OP literal_us`, and dividing through by c_scale gives the
+        # equivalent predicate on the raw column. The division is rounded per operator
+        # so a literal that does not land exactly on a column unit still selects the
+        # identical row set (floor division here, and Python's floor-toward-negative
+        # divmod, are what make this correct for pre-epoch values too).
+        #
+        # This is the direction that used to decline outright. It is how
+        # `int_seconds_col::TIMESTAMP[s] >= <µs literal>` becomes a plain integer
+        # comparison instead of a full CAST pass over the column.
+        quotient, remainder = divmod(literal_us, c_scale)
+        if op in ("Eq", "NotEq"):
+            # A literal between two column units matches no row (Eq) or every row
+            # (NotEq). Neither is a comparison against a column value, so decline
+            # rather than fabricate a constant predicate.
+            if remainder != 0:
+                return None
+            adjusted_op, rescaled = op, quotient
+        elif op == "GtEq":      # col*c >= L  <=>  col >= ceil(L/c)
+            adjusted_op, rescaled = "GtEq", quotient + (1 if remainder else 0)
+        elif op == "Gt":        # col*c >  L  <=>  col >= floor(L/c) + 1
+            adjusted_op, rescaled = "GtEq", quotient + 1
+        elif op == "LtEq":      # col*c <= L  <=>  col <= floor(L/c)
+            adjusted_op, rescaled = "LtEq", quotient
+        elif op == "Lt":        # col*c <  L  <=>  col <= ceil(L/c) - 1
+            adjusted_op, rescaled = "LtEq", quotient + (1 if remainder else 0) - 1
+        else:
+            return None
 
     new_literal = Node(node_type=NodeType.LITERAL)
     new_literal.value = rescaled
     new_literal.schema_column = col_sc
+    # The rescaled value is expressed in the COLUMN's own units, so the column's
+    # ColumnType is exactly its type — unit tag included. This must be stamped:
+    # the expression compiler reads `literal.type.physical` to materialise the
+    # native constant, and an untyped literal materialises as a bare INT64. That
+    # was invisible while this rewrite only ever fed the connector's can_push (a
+    # pushed predicate is consumed by the reader, never by the executor), but a
+    # normalised predicate that STAYS in the Filter is compiled and run — and an
+    # INT64 constant against a TIMESTAMP64 column is not a comparison the kernels
+    # accept (err_op=11), it is a dead query.
+    new_literal.type = col_sc.column_type
 
     new_condition = Node(node_type=NodeType.COMPARISON_OPERATOR)
     new_condition.value = adjusted_op
@@ -994,25 +1110,19 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 not_pushable.append(predicate)
                 continue
 
-            # Try to normalise CAST(col, T) op literal predicates before the
-            # can_push check — CAST nodes are not in can_push's allowlist, but
-            # a stripped/rescaled form may be pushable and semantically equivalent.
-            # Normalisation only fires for COMPARISON_OPERATOR, so a hit is selective.
+            # Normalise CAST(col, T) op literal predicates into the equivalent
+            # cast-free comparison against a rescaled literal. This is a strictly
+            # cheaper, exactly equivalent form of the predicate (the rewrite
+            # declines outright on every case it cannot express exactly), so it is
+            # adopted whether or not it turns out to be pushable — gating it on
+            # can_push left every connector that DECLINES pushdown (the skene
+            # reader, by design) evaluating a CAST the optimizer had already
+            # proved unnecessary: a full per-row pass to compute a value the
+            # rewrite shows the comparison never needed. Normalisation only fires
+            # for COMPARISON_OPERATOR, so an adopted rewrite is always selective.
             normalized = _try_normalize_cast_predicate(predicate.condition)
             if normalized is not None:
-                norm_types = set()
-                if normalized.left.schema_column:
-                    norm_types.add(normalized.left.schema_column.category)
-                if normalized.right.schema_column:
-                    norm_types.add(normalized.right.schema_column.category)
-                norm_predicate = Node(node_type=predicate.node_type)
-                norm_predicate.condition = normalized
-                norm_predicate.relations = predicate.relations
-                if node.connector.supports_predicate_pushdown and node.connector.can_push(
-                    norm_predicate, norm_types
-                ):
-                    selective_to_push.append((predicate, normalized))
-                    continue
+                predicate.condition = normalized
 
             types = set()
             if predicate.condition.node_type == NodeType.UNARY_OPERATOR:

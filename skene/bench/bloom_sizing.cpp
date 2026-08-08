@@ -93,19 +93,28 @@ void measure(uint32_t ndv, double target) {
                 observed / target);
 }
 
-// ─── The join filter's construction, for comparison ─────────────────────────
+// ─── A classic k=2 filter, for comparison ───────────────────────────────────
 //
-// opteryx's join-side bloom (src/cpp/bloom_filter_ops.hpp) is a CLASSIC Bloom
-// filter with k=2, the second bit position derived from the first by a golden
-// ratio multiply rather than a second hash:
+// This models a CLASSIC Bloom filter with k=2, the second bit position derived
+// from the first by a golden ratio multiply rather than a second hash:
 //
 //   a = h & mask
 //   b = (h * 0x9E3779B97F4A7C15) & mask
 //
-// Two differences from skene's split-block filter matter. It sets 2 bits, not 8,
-// and it scatters them across the WHOLE array rather than confining them to one
-// 32-byte block. The first governs bits-per-key; the second governs cache misses
-// per probe — two scattered touches against one block.
+// It is kept purely as a sizing baseline against skene's split-block filter: it
+// sets 2 bits, not 8, and scatters them across the WHOLE array rather than
+// confining them to one 32-byte block. The first governs bits-per-key; the
+// second governs cache misses per probe — two scattered touches against one
+// block.
+//
+// NOTE: this described opteryx's join-side bloom, which no longer exists. That
+// filter was deleted in 2026-08 after measurement — the join's CSR resolves a
+// MISSING key in ~5-13ns (an empty bucket stops at off[]), so a prefilter could
+// not beat it at either extreme of build size. Deriving the second position from
+// the LOW bits of the multiply, as written above, is also a known trap: low
+// product bits depend only on low input bits, which the word index already
+// spent, so it degenerates toward a single hash. Do not copy this construction
+// into new code.
 constexpr uint64_t kGoldenRatio = 0x9E3779B97F4A7C15ULL;
 
 // Bits/key needed for a target rate, from the classic k=2 model:

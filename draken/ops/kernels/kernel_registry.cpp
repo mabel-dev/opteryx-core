@@ -417,6 +417,8 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_decimal128_to_int16", (kernel_fn_t)&draken_cast_decimal128_to_int16},
     {"draken_cast_integer_to_int32", (kernel_fn_t)&draken_cast_integer_to_int32},
     {"draken_cast_uint_to_int32", (kernel_fn_t)&draken_cast_uint_to_int32},
+    {"draken_cast_integer_to_date32", (kernel_fn_t)&draken_cast_integer_to_date32},
+    {"draken_cast_uint_to_date32", (kernel_fn_t)&draken_cast_uint_to_date32},
     {"draken_cast_float_to_int32", (kernel_fn_t)&draken_cast_float_to_int32},
     {"draken_cast_bool_to_int32", (kernel_fn_t)&draken_cast_bool_to_int32},
     {"draken_cast_string_to_int32", (kernel_fn_t)&draken_cast_string_to_int32},

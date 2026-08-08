@@ -14,6 +14,7 @@
 
 #include "core/buffers.h"        // DrakenVector
 #include "core/vector_owner.h"   // VectorOwner
+#include "logical_type.h"        // LogicalType / logical_type_intern
 
 // One column: the 40-byte POD view (uniform data[selection[i]] access) plus a
 // shared owner that keeps the underlying buffers alive. `view` mirrors `own->vec`;
@@ -73,6 +74,36 @@ static inline const DrakenVector* cxx_column_child_vec(const CxxMorsel* m,
     const CxxColumn& c = m->columns[idx];
     if (!c.own || !c.own->child_owner) return nullptr;
     return &c.own->child_owner->vec;
+}
+
+// Retag an INT64 column in place as TIMESTAMP64 with `unit`, the second
+// sanctioned C-level reach into `own` (like cxx_column_child_vec above, which
+// exists because `own` stays undeclared in the .pxd). The descriptor is
+// MANDATORY and hangs off the owner — a TIMESTAMP64 vector with a nullptr
+// logical_type is a hard error in draken (vector_owner.h) — so this cannot be
+// done through `view` alone.
+//
+// Payload-preserving by construction: only the tag and the descriptor change.
+// `data`, `selection`, `validity`, `length` and `data_length` are untouched, so
+// the column keeps its shape (dense/constant/dict) and every row survives —
+// INT64 and TIMESTAMP64 share the same 8-byte payload.
+//
+// Returns false (changing nothing) when the column is out of range, unowned, or
+// not INT64: the caller decides whether that is an error, and nothing is left
+// half-retagged either way.
+static inline bool cxx_column_retag_timestamp64(CxxMorsel* m, uint32_t idx,
+                                                uint8_t unit) noexcept {
+    if (m == nullptr || idx >= m->columns.size()) return false;
+    CxxColumn& c = m->columns[idx];
+    if (!c.own || c.view.type != DRAKEN_INT64) return false;
+    LogicalType lt;
+    lt.kind = LogicalKind::TIMESTAMP;
+    lt.unit = static_cast<TimestampUnit>(unit);
+    lt.offset_minutes = 0;
+    c.own->logical_type = logical_type_intern(lt);
+    c.own->vec.type = DRAKEN_TIMESTAMP64;
+    c.view.type = DRAKEN_TIMESTAMP64;
+    return true;
 }
 
 // Approximate in-memory footprint (bytes) of a morsel: the sum of each column

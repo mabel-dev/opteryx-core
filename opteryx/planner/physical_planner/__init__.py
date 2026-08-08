@@ -16,7 +16,7 @@ operator registry based on the node type and its properties:
 - Scan         → ParquetReadNode (all-parquet manifests), Reader (internal datasets),
                  NullReaderNode (empty-result scans with contradictory predicates)
 - Join         → DrakenInnerJoinNode, OuterJoinNode, FilterJoinNode (semi/anti),
-                 CrossJoinNode, NonEquiJoinNode, NestedLoopJoinNode, AsofJoinNode
+                 CrossJoinNode, NestedLoopJoinNode, AsofJoinNode
 - Aggregate    → Aggregate or AggregateAndGroupNode
 - Project      → ProjectionNode
 - Filter       → FilterNode
@@ -207,7 +207,7 @@ def _create_aggregate_and_group_node(logical_node, query_properties, registry):
     return registry.create(
         "Aggregate and Group",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "group_map_variant", "groupby_ndv_estimate")},
+        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "groupby_ndv_estimate")},
     )
 
 
@@ -216,7 +216,7 @@ def _create_distinct_node(logical_node, query_properties, registry):
     return registry.create(
         "Distinct",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("on", "set_variant", "distinct_ndv_estimate")},
+        **{k: v for k, v in node_config.items() if k in ("on", "distinct_ndv_estimate")},
     )
 
 
@@ -314,9 +314,6 @@ def _create_join_node(logical_node, query_properties, registry):
     elif join_type == "nested loop":
         # NESTED LOOP JOIN (INNER JOIN)
         return registry.create("Nested Loop Join", query_properties, **node_config)
-    elif join_type == "non equi":
-        # NON-EQUI JOIN (!=, >, >=, <, <=)
-        return registry.create("Non Equi Join", query_properties, **node_config)
     elif join_type in ("left outer", "full outer", "right outer"):
         # LEFT JOIN, RIGHT JOIN, FULL JOIN
         return registry.create("Outer Join", query_properties, **node_config)
