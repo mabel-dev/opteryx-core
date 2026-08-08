@@ -446,11 +446,8 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_date_to_blob", (kernel_fn_t)&draken_cast_date_to_blob},
     {"draken_cast_timestamp_to_blob", (kernel_fn_t)&draken_cast_timestamp_to_blob},
     {"draken_cast_interval_to_blob", (kernel_fn_t)&draken_cast_interval_to_blob},
-    // P9.0: draken_cast_timestamp_to_date32 stays unregistered — it is still a STUB
-    // (cast_temporal.cpp returns "not yet implemented"). The registry holds ONLY real,
-    // nogil, byte-identical kernels; a registered stub is a trap (the binder would mark
-    // it BC_INSTR_C_NATIVE and dispatch an error sentinel). Re-add when implemented.
-    // Its sibling draken_cast_date32_to_timestamp is now real and registered above.
+    // TIMESTAMP64 -> DATE32 (truncates the time component). Real, nogil.
+    {"draken_cast_timestamp_to_date32", (kernel_fn_t)&draken_cast_timestamp_to_date32},
 
     // Dispatch helpers (any → target type)
     {"draken_cast_to_float64", (kernel_fn_t)&draken_cast_to_float64},

@@ -365,6 +365,11 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
             return ("draken_cast_integer_to_date32", 0)
         if s in _CAST_UNSIGNED_INT:
             return ("draken_cast_uint_to_date32", 0)
+        # TIMESTAMP64 → DATE32: truncates the time component. The source's
+        # TimestampUnit rides in binary_op_ctx.left_unit (compiled_expression.pyx
+        # allocates it), since the raw int64 payload's scale depends on it.
+        if s == "TIMESTAMP64":
+            return ("draken_cast_timestamp_to_date32", 0)
         return None
     # IPv4. The kernel yields UINT32; the IPV4 descriptor is re-attached from the
     # bound output type via add_expr_project's `logical` tuple, not from the

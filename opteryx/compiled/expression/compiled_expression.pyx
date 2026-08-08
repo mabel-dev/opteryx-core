@@ -3014,6 +3014,20 @@ cdef Py_ssize_t _linearize(
                     _cn_dst_unit = int(_cn_res_ct.logical.unit.value)
                 from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
                 _cn_arg = (0, 0, 0, 0, 0, _cn_src_unit, _cn_dst_unit)
+            elif _cn[0] == "draken_cast_timestamp_to_date32":
+                # TIMESTAMP64 -> DATE32: truncates the time component. Only the
+                # SOURCE unit matters (DATE32 carries no descriptor) — same
+                # source-unit determination as the rescale branch above: the
+                # operand's declared LogicalType when the binder attached one,
+                # otherwise the SQL suffix (`x::DATE` interprets x per its own
+                # column type, so this is the defensive fallback, not the
+                # common path).
+                _cn_sfx_map = {"s": 0, "ms": 1, "us": 2, "ns": 3}
+                _cn_src_unit = _cn_sfx_map.get(cast_unit, 2)
+                if source_sql is not None and source_sql.logical is not None:
+                    _cn_src_unit = int(source_sql.logical.unit.value)
+                from draken.ops.kernels._kernel_registry import alloc_binary_op_ctx as _cn_alloc
+                _cn_arg = (0, 0, 0, 0, 0, _cn_src_unit, 0)
             elif _cn[0].endswith("_to_decimal"):
                 # DECIMAL(p, s): params are the cast's (precision, scale) literals.
                 # left_scale carries the SOURCE scale — zero for the float source

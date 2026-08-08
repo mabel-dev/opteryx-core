@@ -337,8 +337,16 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         file_entries = []
         protocols = set()
 
+        # The manifest rows carry per-column stats as POSITIONAL lists in schema
+        # order and no `field_ids` key of their own, but every reader of those
+        # stats resolves a column through `Manifest._resolve_field_id`, which
+        # returns the catalog field_id this schema assigns. Hand the schema's
+        # field ids down so both sides speak one key space - see the keying note
+        # in `FileEntry.from_datafile` for what the mismatch silently did.
+        schema_field_ids = [column.field_id for column in self.schema.columns]
+
         for data_file in scan:
-            file_entry = FileEntry.from_datafile(data_file)
+            file_entry = FileEntry.from_datafile(data_file, schema_field_ids=schema_field_ids)
             file_entries.append(file_entry)
 
             # Extract protocol for validation (gs://, s3://, file://)

@@ -62,7 +62,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt et q rugo-floor reference function-costs
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs
 
 # Default target
 .DEFAULT_GOAL := help
@@ -180,6 +180,15 @@ rt: ## Run rugo unit tests
 	$(call print_blue,"Running rugo unit tests...")
 	@clear || true
 	@$(PYTEST) tests/rugo/ -v --tb=short
+
+st: ## Run skene regression suite (native C++ suite + Python binding/scan/dispatch tests)
+	$(call print_blue,"Running skene native test suite...")
+	@clear || true
+	@$(MAKE) -C skene test
+	$(call print_blue,"Running skene Python binding tests...")
+	@$(PYTEST) tests/unit/skene/ tests/unit/operators/test_skene_latmat_scan.py \
+	  tests/sql/test_dataset_formats.py tests/unit/planner/test_dataset_format.py \
+	  -v --tb=short
 
 et: compile ## Run expression engine tests (value-checked gates)
 	$(call print_blue,"Running expression engine tests...")

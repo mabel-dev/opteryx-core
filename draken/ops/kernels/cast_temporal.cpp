@@ -852,10 +852,40 @@ VecResult draken_cast_timestamp_rescale(void* ctx, const DrakenVector* v) {
     });
 }
 
-// DATE32 → TIMESTAMP64 is implemented above (real, registered). timestamp→date32
-// remains a stub.
-VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* vector) {
-    DRAKEN_KERNEL_TRY({ return draken_error_sentinel("cast timestamp->date32 not yet implemented"); });
+// TIMESTAMP64 → DATE32: truncates the time component (floor-divide by the
+// source unit's ticks-per-day), matching DATE32's own days-since-epoch
+// storage. ctx = binary_op_ctx: left_unit = source TimestampUnit (0=s,1=ms,
+// 2=us,3=ns) — same convention as draken_cast_timestamp_rescale and
+// draken_date_trunc; right_unit is unused (DATE32 carries no unit). Floors
+// toward -inf via ta_floor_div for correctness on pre-epoch timestamps. No
+// range check: the widest unit (ns) still floors to well under INT32_MAX
+// days, so unlike the integer->DATE32 narrowings this cast cannot overflow.
+// DENSE emit (gather through selection, identity-selection output) — the same
+// dict-shape lesson as draken_cast_date32_to_timestamp above.
+VecResult draken_cast_timestamp_to_date32(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_TIMESTAMP64)
+            return draken_error_sentinel_fmt("cast timestamp->date32: expected TIMESTAMP64, got %d", v->type);
+        int unit_code = 2;  // default microseconds
+        if (ctx) unit_code = static_cast<const binary_op_ctx*>(ctx)->left_unit;
+        const int64_t tpd = ta_ticks_per_day(unit_code);
+
+        const uint32_t n = v->length;
+        const int64_t* src = static_cast<const int64_t*>(v->data);
+        int32_t* out = static_cast<int32_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int32_t)));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        for (uint32_t j = 0u; j < n; ++j)
+            out[j] = static_cast<int32_t>(ta_floor_div(src[v->selection[j]], tpd));
+        VecResult r;
+        r.data = out; r.type = DRAKEN_DATE32; r.validity_embedded = 0u; r.ts_unit = 0xFFu;
+        r.length = n; r.data_length = n;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.validity = kernel_copy_validity(v);
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        return r;
+    });
 }
 
 }  // extern "C"

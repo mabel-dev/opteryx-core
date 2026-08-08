@@ -97,13 +97,19 @@ class FileEntry:
     column_uncompressed_sizes_in_bytes: Optional[List[int]] = None
 
     @classmethod
-    def from_datafile(cls, datafile, file_format: str = "PARQUET"):
+    def from_datafile(cls, datafile, file_format: str = "PARQUET", schema_field_ids=None):
         """
         Create FileEntry from a catalog DataFile object.
 
         Args:
             datafile: PyIceberg DataFile or similar from catalog
             file_format: File format (default: PARQUET)
+            schema_field_ids: The field_id of each column of the schema this
+                manifest row was written against, in schema order — i.e. the
+                key for `min_values[i]` when the row carries no `field_ids`
+                list of its own. REQUIRED whenever the schema assigns field_ids
+                at all, because that is the key space `Manifest._resolve_field_id`
+                will look these stats up by; see the keying note below.
 
         Returns:
             FileEntry instance
@@ -133,112 +139,88 @@ class FileEntry:
 
             column_uncompressed_sizes = entry.get("column_uncompressed_sizes_in_bytes")
 
-            # `field_ids[i]` is the stable, catalog-assigned id for whichever
-            # column produced `min_values[i]`/`max_values[i]` — present for
-            # manifest rows written after field-ids existed. When present,
-            # bounds MUST be keyed by that id, not by raw list position: a
-            # file's own write-time column order need not match "position in
-            # today's schema" once schema evolution has happened (that
-            # mismatch is exactly what previously caused MIN/MAX on one
-            # column to silently read another column's bound). Fall back to
-            # positional indexing only for older manifest rows with no
-            # field_ids at all.
+            # Every per-column stat the manifest row carries — min_values,
+            # max_values, min_lengths, max_lengths, null_counts — is a
+            # POSITIONAL list in the row's own column order. The key each one
+            # must end up under is whatever `Manifest._resolve_field_id` will
+            # look it up by, and that is the column's catalog field_id whenever
+            # the schema assigns one (position only when it does not). So the
+            # key list is resolved ONCE here, for all five:
+            #
+            #  * `field_ids[i]` — the stable, catalog-assigned id for whichever
+            #    column produced `min_values[i]`; present for manifest rows
+            #    written after field-ids existed. A file's own write-time column
+            #    order need not match "position in today's schema" once schema
+            #    evolution has happened, which is why the row's own list wins.
+            #  * `schema_field_ids` — the caller's schema in schema order, used
+            #    for rows that predate the row-level list. The current
+            #    opteryx_catalog writes NO `field_ids` key at all, so this is
+            #    the live path, not a legacy one.
+            #  * positional — only when neither is available, which means the
+            #    schema assigns no field_ids either, so `_resolve_field_id`
+            #    falls back to load-time position and the two spaces agree.
+            #
+            # ⛔ Keying positionally while the reader resolves by field_id is a
+            # SILENT WRONG ANSWER, not a missed optimisation: with 1-based
+            # catalog ids every column reads its NEIGHBOUR's stats — a pushed
+            # `id = 3` compared against `name`'s string ordinals and pruned
+            # every file, and `SELECT MIN(id)` answered out of the manifest with
+            # a string ordinal. Hence: when a key list exists but does not line
+            # up with a stat list, that stat is DROPPED (no stats = no pruning =
+            # correct but slower) rather than keyed by position.
             field_ids = entry.get("field_ids")
-            if (
-                field_ids
-                and isinstance(field_ids, list)
-                and isinstance(min_values, list)
-                and len(field_ids) == len(min_values)
-            ):
-                lower_bounds = {
+            if not (field_ids and isinstance(field_ids, list)):
+                # A schema that assigns no field_id to some column cannot key
+                # these stats: `_resolve_field_id` answers that column with its
+                # load-time POSITION, so a partially-keyed dict would put some
+                # columns in one key space and the rest in another. All-or-
+                # nothing keeps the two sides in step - and all-None (no field
+                # ids anywhere, e.g. the filesystem path) means both sides use
+                # position, which the `field_ids is None` branch below does.
+                field_ids = schema_field_ids
+                if field_ids is not None and any(fid is None for fid in field_ids):
+                    field_ids = None
+            if not (field_ids and isinstance(field_ids, list)):
+                field_ids = None
+
+            def _key_by_field_id(values):
+                """Key a positional per-column stat list by `field_ids`, or by
+                position when there are no field_ids at all. None when the two
+                cannot be lined up - see the ⛔ note above."""
+                if not values or not isinstance(values, list):
+                    return None
+                if field_ids is None:
+                    return {i: val for i, val in enumerate(values) if val is not None}
+                if len(field_ids) != len(values):
+                    return None
+                return {
                     fid: val
-                    for fid, val in zip(field_ids, min_values)
+                    for fid, val in zip(field_ids, values)
                     if fid is not None and val is not None
                 }
-            elif min_values and isinstance(min_values, list):
-                lower_bounds = {i: val for i, val in enumerate(min_values) if val is not None}
 
-            if (
-                field_ids
-                and isinstance(field_ids, list)
-                and isinstance(max_values, list)
-                and len(field_ids) == len(max_values)
-            ):
-                upper_bounds = {
-                    fid: val
-                    for fid, val in zip(field_ids, max_values)
-                    if fid is not None and val is not None
-                }
-            elif max_values and isinstance(max_values, list):
-                upper_bounds = {i: val for i, val in enumerate(max_values) if val is not None}
+            lower_bounds = _key_by_field_id(min_values)
+            upper_bounds = _key_by_field_id(max_values)
 
-            # Same field_id-vs-position treatment for string lengths — the
-            # catalog's ParquetManifestEntry.to_dict() carries "min_lengths"/
-            # "max_lengths" as positional lists parallel to field_ids, exactly
-            # like min_values/max_values (verified against the installed
-            # opteryx_catalog package). Prior to this, from_datafile silently
-            # dropped these entirely (min_length_bounds/max_length_bounds
-            # were never set), so the length-aware selectivity guards had no
-            # signal at all for catalog-backed datasets.
+            # The catalog's ParquetManifestEntry.to_dict() carries "min_lengths"/
+            # "max_lengths" as positional lists parallel to the values lists
+            # (verified against the installed opteryx_catalog package). Before
+            # they were read here, from_datafile dropped them entirely, so the
+            # length-aware selectivity guards had no signal at all for
+            # catalog-backed datasets.
             min_lengths = entry.get("min_lengths")
             max_lengths = entry.get("max_lengths")
-            min_length_bounds = None
-            max_length_bounds = None
-            if (
-                field_ids
-                and isinstance(field_ids, list)
-                and isinstance(min_lengths, list)
-                and len(field_ids) == len(min_lengths)
-            ):
-                min_length_bounds = {
-                    fid: val
-                    for fid, val in zip(field_ids, min_lengths)
-                    if fid is not None and val is not None
-                }
-            elif min_lengths and isinstance(min_lengths, list):
-                min_length_bounds = {i: val for i, val in enumerate(min_lengths) if val is not None}
+            min_length_bounds = _key_by_field_id(min_lengths)
+            max_length_bounds = _key_by_field_id(max_lengths)
 
-            if (
-                field_ids
-                and isinstance(field_ids, list)
-                and isinstance(max_lengths, list)
-                and len(field_ids) == len(max_lengths)
-            ):
-                max_length_bounds = {
-                    fid: val
-                    for fid, val in zip(field_ids, max_lengths)
-                    if fid is not None and val is not None
-                }
-            elif max_lengths and isinstance(max_lengths, list):
-                max_length_bounds = {i: val for i, val in enumerate(max_lengths) if val is not None}
-
-            # Same field_id-vs-position treatment for null counts — the catalog's
-            # ParquetManifestEntry.to_dict() carries "null_counts" as a positional
-            # list parallel to field_ids, exactly like min_lengths/max_lengths
-            # above (verified against the installed opteryx_catalog package).
-            # Prior to this, from_datafile hardcoded null_value_counts=None for
-            # every catalog-backed FileEntry regardless of what the entry
-            # actually carried, so anything gated on Manifest.get_total_null_count
+            # Likewise "null_counts". Before it was read here, from_datafile
+            # hardcoded null_value_counts=None for every catalog-backed
+            # FileEntry, so anything gated on Manifest.get_total_null_count
             # (e.g. TopNManifestPruningStrategy's NULL-safety check) silently
             # treated every catalog-backed column as "unknown nullability" and
             # never fired.
             catalog_null_counts = entry.get("null_counts")
-            null_value_counts = None
-            if (
-                field_ids
-                and isinstance(field_ids, list)
-                and isinstance(catalog_null_counts, list)
-                and len(field_ids) == len(catalog_null_counts)
-            ):
-                null_value_counts = {
-                    fid: val
-                    for fid, val in zip(field_ids, catalog_null_counts)
-                    if fid is not None and val is not None
-                }
-            elif catalog_null_counts and isinstance(catalog_null_counts, list):
-                null_value_counts = {
-                    i: val for i, val in enumerate(catalog_null_counts) if val is not None
-                }
+            null_value_counts = _key_by_field_id(catalog_null_counts)
 
             # Raw positional-by-field_id lists, kept alongside the field_id-keyed
             # dict forms above — mirrors min_values/max_values, which are passed
