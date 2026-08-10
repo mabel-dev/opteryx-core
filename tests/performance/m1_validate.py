@@ -211,7 +211,7 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
             walls.append(w)
             cpus.append(c)
             out_rows = rows
-            telemetry = s._telemetry.as_dict()
+            telemetry = s.telemetry
     finally:
         pool_reader.native_scan_supported = orig
 

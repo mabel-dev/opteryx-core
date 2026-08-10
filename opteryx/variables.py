@@ -48,6 +48,7 @@ from enum import Enum
 from typing import Any, Dict, Tuple, Type
 
 from opteryx import config
+from opteryx.__version__ import __build__
 from opteryx.__version__ import __version__
 from opteryx.compiled.platform import cgroup_memory_limit_bytes
 from opteryx.compiled.platform import cpu_count as _cpu_count
@@ -121,15 +122,31 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # The pattern/role grants this session was handed at construction
     # (ExecutionContext.access_policies) — the same list can_perform_action reads.
     # RESTRICTED not because the caller may not see their own grants (SHOW GRANTS
-    # exists precisely so they can) but because SHOW VARIABLES renders values as
-    # text, and a list of dicts there is noise, not an answer. INTERNAL-owned, so
-    # a caller cannot SET themselves a wider grant.
+    # exists precisely so they can) but because SHOW VARIABLES renders one grant
+    # list into one cell, which SHOW GRANTS already answers a column at a time.
+    # (It renders as JSON now — variables_data._render — so it is at least parseable
+    # rather than a Python repr, but SHOW GRANTS remains the surface for this.)
+    # INTERNAL-owned, so a caller cannot SET themselves a wider grant.
     "access_policies": (ARRAY(VARIANT), [[]], VariableOwner.INTERNAL, Visibility.RESTRICTED),
     # Detected from the CPU at import; there is no env var and no SET for these.
     "architecture": (ARRAY(VARIANT), cpu_architecture(), VariableOwner.INTERNAL, Visibility.RESTRICTED),
     # UNRESTRICTED: `SELECT @@version` is THE way to read the version, so hiding it
     # from SHOW VARIABLES would conceal nothing while making the two surfaces disagree.
     "version": (VARCHAR, __version__, VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
+    # The build counter, stamped automatically into __version__.py and monotonic, so
+    # it identifies a build where the version cannot: two deployments can both report
+    # 0.9.63 and be different code, and asking "is this deployment current?" then has
+    # no answer. That is not hypothetical — a change was reported as missing from a
+    # deployment whose `@@version` matched the tree it was missing from, and there was
+    # nothing to query that would have settled it.
+    #
+    # INT64, not a string: monotonic means comparable, and `@@build >= 3037` is the
+    # question people actually have. A VARCHAR would order "999" after "3037".
+    #
+    # UNRESTRICTED alongside `version`, for its reason: this identifies the ENGINE,
+    # which every caller already sees the version of. It says nothing about the host,
+    # so it does not belong with the RESTRICTED deployment facts below.
+    "build": (INT64, __build__, VariableOwner.INTERNAL, Visibility.UNRESTRICTED),
 
     # ── USER — settable per session with `SET` ──────────────────────────────────
     # See docs/EXECUTION_TRACING_DESIGN.md. Read fresh per statement (query_session's

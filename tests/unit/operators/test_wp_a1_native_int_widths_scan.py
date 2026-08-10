@@ -80,7 +80,7 @@ def _drain(sql, force_trampoline, monkeypatch):
                 repr(None if morsel.column(n) is None else morsel.column(n)[i])
                 for n in names
             ))
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     if force_trampoline:
         monkeypatch.undo()
     return (sig, tuple(sorted(rows))), src
@@ -260,7 +260,7 @@ def test_clickbench_annotated_int_columns_native(sql):
     session = opteryx.session()
     for morsel in session.execute_to_morsels(sql):
         _ = morsel.num_rows
-    sources = list(session._telemetry.as_dict()["scan_sources"].values())
+    sources = list(session.telemetry["scan_sources"].values())
     assert sources == ["NativeParquetScanSource"], sources
 
 
@@ -275,7 +275,7 @@ def test_clickbench_unsigned_predicate_input_native(sql):
     session = opteryx.session()
     for morsel in session.execute_to_morsels(sql):
         _ = morsel.num_rows
-    sources = list(session._telemetry.as_dict()["scan_sources"].values())
+    sources = list(session.telemetry["scan_sources"].values())
     assert sources == ["NativeParquetScanSource"], sources
 
 

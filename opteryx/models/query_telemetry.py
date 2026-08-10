@@ -6,6 +6,11 @@
 
 from collections import defaultdict
 
+from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import compose
+from opteryx.exceptions import md_cause
+from opteryx.exceptions import md_code
+
 
 class _QueryTelemetry:
     def __init__(self):
@@ -103,9 +108,30 @@ class _QueryTelemetry:
             # times are recorded in ns but reported in seconds
             if k.startswith("time_"):
                 readings_dict[k] = self._ns_to_s(v)
-        readings_dict["time_total"] = self._ns_to_s(
-            readings_dict.pop("end_time", 0) - readings_dict.pop("start_time", 0)
-        )
+        # `time_total` is the query's wall clock, and it is only computable once the
+        # timing window has been CLOSED. `_reading` is a defaultdict(int), so an unset
+        # `end_time` read back as 0 and `0 - start_time` was reported as a total of
+        # around -1.79 billion seconds - a number no caller can tell apart from a
+        # measurement. `Session.telemetry` stamps `end_time` before it calls here and
+        # is the only sanctioned way in; anything that reaches as_dict() around it is
+        # holding an open window and gets told so rather than handed a bogus reading.
+        start_time = readings_dict.pop("start_time", 0)
+        end_time = readings_dict.pop("end_time", 0)
+        if start_time == 0 or end_time == 0:
+            raise InvalidInternalStateError(
+                compose(
+                    "Query telemetry cannot be reported",
+                    md_cause(
+                        "the query was never started"
+                        if start_time == 0
+                        else "the query timing window was never closed"
+                    ),
+                    f"Read telemetry through {md_code('Session.telemetry')}, which closes"
+                    f" the window, rather than calling {md_code('as_dict()')} on the"
+                    " readings directly",
+                )
+            )
+        readings_dict["time_total"] = self._ns_to_s(end_time - start_time)
         # sort the keys in the dictionary
         readings_dict = {key: readings_dict[key] for key in sorted(readings_dict)}
         # put messages and edges at the end

@@ -43,6 +43,17 @@
         "default": null,
         "default_source": "session"
     },
+    "build": {
+        "name": "build",
+        "type": "INT64",
+        "owner": "INTERNAL",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": 3037,
+        "default_source": "literal"
+    },
     "character_set_client": {
         "name": "character_set_client",
         "type": "VARCHAR",

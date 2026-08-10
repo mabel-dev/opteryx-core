@@ -291,7 +291,15 @@ class Session(DataFrame):
 
         from opteryx.planner import query_planner
 
+        # Planning a statement is a whole operation, so it opens and closes its own
+        # timing window exactly as _execute_statements() does, and resets first for
+        # the same reason: the readings are per-operation and a plan() following an
+        # execute() on this session would otherwise report that execute's timings as
+        # part of its own. The window closes below rather than here, so `time_total`
+        # covers the whole call and `time_planning` remains the planner's slice of it.
+        self._telemetry.reset()
         start = time.time_ns()
+        self._telemetry.start_time = start
         physical_plan = query_planner(
             operation=operation,
             parameters=params,
@@ -308,6 +316,7 @@ class Session(DataFrame):
         plan_dict = self._get_plan_dict()
         self._plan = old_plan
 
+        self._telemetry.end_time = time.time_ns()
         return plan_dict
 
     @property
@@ -463,7 +472,12 @@ class Session(DataFrame):
     @property
     def telemetry(self) -> Dict[str, Any]:
         """Gets the execution telemetry as a dictionary."""
-        if self._telemetry.end_time == 0:  # pragma: no cover
+        # Closing the timing window is this property's job, and it is what makes it
+        # the only sanctioned way to read telemetry: `as_dict()` refuses to report a
+        # `time_total` for a window still open. The engine streams, so there is no
+        # earlier point that knows the query is over - it is over when someone asks
+        # for the readings.
+        if self._telemetry.end_time == 0:
             self._telemetry.end_time = time.time_ns()
 
         # Populate per-node/edge telemetry from the plan (operations + edges).

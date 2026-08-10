@@ -64,7 +64,7 @@ DEFAULT_WORKER_WHITELIST = ("_scan_pull_run", "_stash_exc")
 
 def _telemetry_of(session) -> dict:
     """Read the drained query's telemetry dict from a session."""
-    return session._telemetry.as_dict()
+    return session.telemetry
 
 
 def run_and_report(sql: str, session_factory: Optional[Callable] = None) -> dict:

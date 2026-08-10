@@ -91,7 +91,7 @@ def _drain(sql, latmat, monkeypatch):
         names = [n.decode("utf-8") if isinstance(n, bytes) else n for n in raw]
         for i in range(morsel.num_rows):
             rows.append(tuple(repr(morsel.column(n)[i]) for n in raw))
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     if not latmat:
         monkeypatch.undo()
     return rows, names, src
@@ -308,7 +308,7 @@ def test_feature_flag_off_declines(tmp_path, monkeypatch):
         "SELECT * FROM '%s' WHERE tag LIKE '%s' ORDER BY k LIMIT 10" % (path, NEEDLE)
     ):
         pass
-    assert list(session._telemetry.as_dict()["scan_sources"].values()) == [
+    assert list(session.telemetry["scan_sources"].values()) == [
         "NativeSkeneScanSource"]
 
 

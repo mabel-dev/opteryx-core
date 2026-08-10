@@ -95,7 +95,7 @@ def _drain(sql, force_trampoline, monkeypatch):
                 repr(None if morsel.column(n) is None else morsel.column(n)[i])
                 for n in names
             ))
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     if force_trampoline:
         monkeypatch.undo()
     return (sig, tuple(sorted(rows))), src
@@ -539,7 +539,7 @@ def test_instrumentation_decimal_timestamp_zero_gil(tmp_path, monkeypatch):
     session = opteryx.session()
     for _ in session.execute_to_morsels(sql):
         pass
-    td = session._telemetry.as_dict()
+    td = session.telemetry
 
     assert list(td["scan_sources"].values()) == ["NativeParquetScanSource"]
     assert td["gil_held_ns"] == 0

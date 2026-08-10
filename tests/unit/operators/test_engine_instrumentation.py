@@ -61,7 +61,7 @@ def _run(sql):
     rows = 0
     for morsel in session.execute_to_morsels(sql):
         rows += morsel.num_rows
-    return session._telemetry.as_dict(), rows
+    return session.telemetry, rows
 
 
 @pytest.fixture

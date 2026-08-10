@@ -81,7 +81,7 @@ def _count_star(sql, force_trampoline, monkeypatch):
     for morsel in session.execute_to_morsels(sql):
         for i in range(morsel.num_rows):
             value = morsel.column(morsel.column_names[0])[i]
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     if force_trampoline:
         monkeypatch.undo()
     return value, src

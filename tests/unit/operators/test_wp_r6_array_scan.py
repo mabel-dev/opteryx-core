@@ -71,7 +71,7 @@ def _drain(sql, force_trampoline, monkeypatch):
                 repr(None if morsel.column(n) is None else morsel.column(n)[i])
                 for n in names
             ))
-    src = sorted(set(session._telemetry.as_dict()["scan_sources"].values()))
+    src = sorted(set(session.telemetry["scan_sources"].values()))
     if force_trampoline:
         monkeypatch.undo()
     return tuple(sorted(rows)), src

@@ -91,7 +91,7 @@ def scan_residuals(sql: str) -> Tuple[Dict, Dict, Optional[BaseException]]:
             _ = morsel.num_rows
     except BaseException as exc:  # noqa: BLE001 — the census records, never swallows
         return {}, {}, exc
-    telemetry = session._telemetry.as_dict()
+    telemetry = session.telemetry
     sources = dict(telemetry.get("scan_sources", {}))
     reasons = dict(telemetry.get("scan_residual_reasons", {}))
     return sources, reasons, None

@@ -67,7 +67,8 @@ STATEMENTS = [
         # addressable by name, by any route.
         # This battery runs without entitlements, so RESTRICTED variables are
         # withheld — the full list is asserted in tests/unit/security/.
-        ("SHOW VARIABLES", 21, 5, None),
+        # 22 since `build` joined `version` as an UNRESTRICTED engine-identity row.
+        ("SHOW VARIABLES", 22, 5, None),
         ("SELECT * FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $variables", None, None, UnsupportedSyntaxError),
         ("SELECT * FROM $VARIABLES", None, None, UnsupportedSyntaxError),

@@ -9,6 +9,8 @@ This is a virtual dataset which is calculated at access time.
 It is the system variables collection.
 """
 
+import json
+
 from draken.draken_native import DrakenType
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
@@ -36,6 +38,24 @@ def _entitlements_of(variables) -> frozenset:
     if not isinstance(held, (list, tuple, set, frozenset)):
         return frozenset()
     return frozenset(str(item) for item in held)
+
+
+def _render(value) -> str:
+    """The `value` column's text form.
+
+    Composite values (the ARRAY variables — memberships, entitlements,
+    access_policies, architecture) are rendered as JSON, not `str()`. `str()` of a
+    list of dicts is a Python repr — single-quoted, `True`/`None` — which no JSON
+    reader can parse, so the value was readable only by eye. Scalars keep their
+    `str()` form: JSON-encoding them would wrap every VARCHAR in quotes for no gain.
+
+    `default=str` covers element types with no JSON form (a `SET @x = ...` array of
+    dates, say): this column is a rendering, and one exotic ad-hoc variable must not
+    take the whole listing down with it.
+    """
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(value, default=str)
+    return str(value)
 
 
 def read(at_date=None, variables=None):
@@ -71,7 +91,7 @@ def read(at_date=None, variables=None):
         if variable_visibility == Visibility.RESTRICTED and not show_restricted:
             continue
         names.append(variable)
-        values.append(str(variable_value))
+        values.append(_render(variable_value))
         types.append(variable_type.category.value)
         owners.append(variable_owner.name)
         visibilities.append(variable_visibility.name)

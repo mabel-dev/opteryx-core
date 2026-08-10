@@ -67,7 +67,7 @@ def _digest(sql, force_trampoline, monkeypatch):
             for i in range(morsel.num_rows):
                 h.update(b"\x1f")
                 h.update(repr(None if c is None else c[i]).encode("utf-8", "surrogatepass"))
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     return rows, src, h.hexdigest()
 
 
@@ -249,7 +249,7 @@ def test_pushed_numeric_predicate_relocates_native(tmp_path, monkeypatch):
     rows = 0
     for m in session.execute_to_morsels(sql):
         rows += m.num_rows
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     assert src == ["NativeParquetScanSource"], src
     assert rows == 49
 
@@ -269,7 +269,7 @@ def test_regex_predicate_now_native_and_still_correct(tmp_path, monkeypatch):
     rows = 0
     for m in session.execute_to_morsels(sql):
         rows += m.num_rows
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     assert src == ["NativeParquetScanSource"], src
     assert rows == 25  # only 'ax' matches /a/
 

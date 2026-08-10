@@ -267,7 +267,7 @@ def test_bool_predicate_survivor_count_matches_trampoline(predicate, expected):
             "SELECT user_id FROM '%s' WHERE %s" % (_BOOL_FLAT, predicate))
     )
     assert rows == expected
-    assert set(session._telemetry.as_dict()["scan_sources"].values()) == {
+    assert set(session.telemetry["scan_sources"].values()) == {
         "NativeParquetScanSource"}
 
 
@@ -340,7 +340,7 @@ def test_bool_is_predicate_survivor_count_matches_eq_form(predicate, expected):
             "SELECT user_id FROM '%s' WHERE %s" % (_BOOL_FLAT, predicate))
     )
     assert rows == expected
-    assert set(session._telemetry.as_dict()["scan_sources"].values()) == {
+    assert set(session.telemetry["scan_sources"].values()) == {
         "NativeParquetScanSource"}
 
 
@@ -525,7 +525,7 @@ def test_pushed_limit_skips_uncontributing_row_groups():
     for _ in session.execute_to_morsels(
             "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT 5"):
         pass
-    diagnostics = session._telemetry.as_dict()["io_scan_diagnostics"][0]
+    diagnostics = session.telemetry["io_scan_diagnostics"][0]
     # 23 row groups in the file; LIMIT 5 fits entirely in the first.
     assert diagnostics["enqueue_count"] == 1, diagnostics
 
@@ -678,7 +678,7 @@ def test_regex_predicate_survivor_count_matches_trampoline():
     def _count():
         session = opteryx.session()
         rows = sum(m.num_rows for m in session.execute_to_morsels(sql))
-        return rows, set(session._telemetry.as_dict()["scan_sources"].values())
+        return rows, set(session.telemetry["scan_sources"].values())
 
     native_rows, native_src = _count()
 

@@ -95,7 +95,7 @@ def _drain(sql, latmat, monkeypatch, trampoline=False):
         names = [n.decode("utf-8") if isinstance(n, bytes) else n for n in raw]
         for i in range(morsel.num_rows):
             rows.append(tuple(repr(morsel.column(n)[i]) for n in raw))
-    src = list(session._telemetry.as_dict()["scan_sources"].values())
+    src = list(session.telemetry["scan_sources"].values())
     if not latmat or trampoline:
         monkeypatch.undo()
     return rows, names, src
