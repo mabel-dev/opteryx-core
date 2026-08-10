@@ -236,7 +236,7 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
             columns.append(column)
             continue
         raise UnsupportedSyntaxError(
-            "ORDER BY and HAVING do not support wildcard projections."
+            "**ORDER BY** and **HAVING** do not support wildcard projections."
         )
 
     # Bind the local columns to physical columns

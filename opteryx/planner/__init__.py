@@ -41,6 +41,7 @@ import decimal
 import time
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 
+from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.expression.intervals import normalize_interval_value
 from opteryx.models import Node
@@ -230,6 +231,78 @@ _DROP_TRIGGER_RE = _re.compile(
 _DROP_TRIGGER_LEAD = _re.compile(r"^\s*DROP\s+TRIGGER\b", _re.IGNORECASE)
 _CREATE_TRIGGER_LEAD = _re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b", _re.IGNORECASE)
 
+# REFRESH MATERIALIZED VIEW <name>. sqlparser has no REFRESH statement in the
+# Opteryx dialect, so it takes the same pre-parse route DROP TRIGGER does.
+_REFRESH_MV_RE = _re.compile(
+    r"^\s*REFRESH\s+MATERIALIZED\s+VIEW\s+(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    _re.IGNORECASE | _re.DOTALL,
+)
+_REFRESH_LEAD = _re.compile(r"^\s*REFRESH\b", _re.IGNORECASE)
+
+
+def _intercept_refresh_statements(clean_sql: str):
+    """Recognize `REFRESH MATERIALIZED VIEW <name>` before the SQL parser.
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    does not begin with REFRESH.
+
+    Anything else beginning with REFRESH is rejected here by name rather than
+    left to the parser, which would report it as a generic syntax error several
+    layers away from the word that caused it.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _REFRESH_LEAD.match(clean_sql):
+        return None
+    match = _REFRESH_MV_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **REFRESH MATERIALIZED VIEW** <name>. It is the only "
+            "**REFRESH** statement, and it takes no options."
+        )
+    return [{"RefreshMaterializedView": {"name": match.group("name")}}]
+
+
+# ALTER MATERIALIZED VIEW <name> OWNER TO <principal>. Same pre-parse route as
+# REFRESH, but narrower: ALTER has other legitimate forms (ALTER TABLE, ALTER
+# WORKSPACE), so anything not aimed at a materialized view falls through to the
+# parser untouched.
+_ALTER_MV_LEAD = _re.compile(r"^\s*ALTER\s+MATERIALIZED\s+VIEW\b", _re.IGNORECASE)
+_ALTER_MV_OWNER_RE = _re.compile(
+    r"^\s*ALTER\s+MATERIALIZED\s+VIEW\s+(?P<name>[A-Za-z_][\w.$]*)\s+"
+    r"OWNER\s+TO\s+(?P<owner>'[^']+'|\"[^\"]+\"|[\w.@:+-]+)\s*;?\s*$",
+    _re.IGNORECASE | _re.DOTALL,
+)
+
+
+def _intercept_alter_materialized_view(clean_sql: str):
+    """Recognize `ALTER MATERIALIZED VIEW <name> OWNER TO <principal>`.
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    is not aimed at a materialized view - every other ALTER goes to the parser.
+
+    A statement that IS aimed at one but does not match is rejected here by
+    name: ownership is the only alterable property of a view, because
+    everything else about it follows from its defining SELECT and changes by
+    redefining that.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _ALTER_MV_LEAD.match(clean_sql):
+        return None
+    match = _ALTER_MV_OWNER_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **ALTER MATERIALIZED VIEW** <name> **OWNER TO** <principal>. "
+            "Ownership is the only alterable property of a materialized view - "
+            "everything else follows from its defining SELECT, so change it with "
+            "**CREATE OR REPLACE MATERIALIZED VIEW**."
+        )
+    owner = match.group("owner")
+    if owner[0] in "'\"":
+        owner = owner[1:-1]
+    return [{"AlterMaterializedViewOwner": {"name": match.group("name"), "owner": owner}}]
+
 
 def _intercept_trigger_statements(clean_sql: str):
     """Recognize `DROP TRIGGER [IF EXISTS] <name> ON <table>` before the SQL
@@ -245,7 +318,7 @@ def _intercept_trigger_statements(clean_sql: str):
     if _CREATE_TRIGGER_LEAD.match(clean_sql):
         raise UnsupportedSyntaxError(
             "CREATE TRIGGER is not supported; triggers are created automatically "
-            "by CREATE MATERIALIZED VIEW."
+            "by **CREATE MATERIALIZED VIEW**. A materialized view gets its trigger when it is created."
         )
     if not _DROP_TRIGGER_LEAD.match(clean_sql):
         return None
@@ -254,7 +327,7 @@ def _intercept_trigger_statements(clean_sql: str):
         # CASCADE/RESTRICT (or any other trailing modifier) lands here: the
         # grammar above accepts nothing after the table name.
         raise UnsupportedSyntaxError(
-            "Expected: DROP TRIGGER [IF EXISTS] <name> ON <table> "
+            "Expected: DROP TRIGGER [IF **EXISTS**] <name> ON <table> "
             "(no CASCADE/RESTRICT; the table name is required)"
         )
     return [
@@ -268,6 +341,47 @@ def _intercept_trigger_statements(clean_sql: str):
     ]
 
 
+def attach_source_position(error, statement) -> None:
+    """Give `error` a `SourcePosition` over the SQL its `span` came from.
+
+    The two halves of a positioned error are known in different places: a raise site
+    deep in the planner knows WHICH node went wrong but not what the statement said,
+    and only here do we have both. So raise sites set `SqlError.span` and this maps it
+    onto the text the reader submitted.
+
+    The result is a RANGE. The span already had an end - the parser gives one for every
+    identifier - and it is what lets the editor underline the whole name rather than
+    put a mark under its first character and leave the reader to work out how far it
+    goes. Both endpoints are mapped independently, because a rewrite between them (a
+    `b'..'` inside the offending expression) moves them by different amounts.
+
+    The error is untouched otherwise - same type, same identity, same message. Silent
+    when there is no span, no statement, or the position does not resolve; an error
+    with no position is the normal case for anything the reader did not write down.
+    """
+    from opteryx.exceptions import SourcePosition
+    from opteryx.planner.sql_rewriter import RewrittenStatement
+
+    span = error.span
+    if span is None or statement is None or error.position is not None:
+        return
+
+    if not isinstance(statement, RewrittenStatement):
+        # A statement nothing rewrote is its own source, and the identity mapping is
+        # the general one with an empty edit list - no second code path needed.
+        statement = RewrittenStatement(str(statement), source=str(statement))
+
+    start = statement.to_source_point(span[0], span[1])
+    end = statement.to_source_point(span[2], span[3])
+    if start is None:
+        return
+    if end is None or end[2] < start[2]:
+        # An unmappable or backwards end degrades to an empty range at the start: the
+        # editor draws a caret there. Better a narrow truth than a wrong underline.
+        end = start
+    error.position = SourcePosition(start[0], start[1], end[0], end[1], start[2], end[2])
+
+
 def query_planner(
     operation: str,
     parameters: Union[Iterable, Dict, None],
@@ -276,7 +390,19 @@ def query_planner(
     query_id: str,
     telemetry,
     output_format: str = "physical",
+    source: Optional[str] = None,
+    source_offset: int = 0,
 ) -> Union[Generator[Any, Any, Any], Dict[str, Any]]:
+    """
+    Plan `operation`.
+
+    `source` and `source_offset` say where `operation` came from - the whole text the
+    caller submitted, and where this statement starts inside it. They exist so that a
+    position reported by the parser, or a span carried on an AST node, can be quoted
+    back against the text the reader wrote rather than the text the rewriter produced.
+    A caller that has only one statement and no rewriting to account for can leave them
+    alone; `operation` is then its own source.
+    """
     from opteryx.models import QueryProperties
     from opteryx.planner.ast_rewriter import do_ast_rewriter
     from opteryx.planner.binder import do_bind_phase
@@ -290,7 +416,7 @@ def query_planner(
 
     # SQL Rewriter
     start = time.monotonic_ns()
-    clean_sql = do_sql_rewrite(operation)
+    clean_sql = do_sql_rewrite(operation, source=source, source_offset=source_offset)
     telemetry.time_planning_sql_rewriter += time.monotonic_ns() - start
 
     params: Union[list, dict, None] = None
@@ -309,20 +435,36 @@ def query_planner(
     if parsed_statements is None:
         parsed_statements = _intercept_trigger_statements(clean_sql)
     if parsed_statements is None:
+        parsed_statements = _intercept_refresh_statements(clean_sql)
+    if parsed_statements is None:
+        parsed_statements = _intercept_alter_materialized_view(clean_sql)
+    if parsed_statements is None:
         try:
             parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
         except ValueError as parser_error:
-            from opteryx.exceptions import SqlError
+            from opteryx.planner.parse_error import raise_parse_error
 
-            raise SqlError(parser_error) from parser_error
+            # `clean_sql` carries both texts: the one the parser was given, which the
+            # reported line/column index, and the one the reader wrote, which is what
+            # the caret gets printed against. It maps between them.
+            raise_parse_error(clean_sql, parser_error)
     # AST Rewriter adds temporal filters and parameters to the AST
     start = time.monotonic_ns()
     parsed_statement = do_ast_rewriter(parsed_statements, parameters=params)[0]
     telemetry.time_planning_ast_rewriter += time.monotonic_ns() - start
 
-    # Logical Planner converts ASTs to logical plans
-
-    logical_plan, ast, ctes = do_logical_planning_phase(parsed_statement)  # type: ignore
+    # Logical Planner converts ASTs to logical plans.
+    #
+    # From here to the end of binding, an error that named a node - an unknown column,
+    # an unknown function - gets a caret pointing at where that node was written. This
+    # is the only place that holds both halves: the raise sites know the node, and
+    # `clean_sql` knows both the text the parser saw and the text the reader submitted.
+    # The error is re-raised unchanged; only its presentation is filled in.
+    try:
+        logical_plan, ast, ctes = do_logical_planning_phase(parsed_statement)  # type: ignore
+    except SqlError as error:
+        attach_source_position(error, clean_sql)
+        raise
 
     # Relation Resolver: expand CTE and view references into the plan. Runs BEFORE the
     # rewriter so the rewriter sees one fully-expanded plan — a subquery inside a view or
@@ -346,13 +488,17 @@ def query_planner(
 
     # The Binder adds schema information to the logical plan
     start = time.monotonic_ns()
-    bound_plan = do_bind_phase(
-        logical_plan,
-        execution_context=execution_context,
-        query_id=query_id,
-        visibility_filters=visibility_filters,
-        telemetry=telemetry,
-    )
+    try:
+        bound_plan = do_bind_phase(
+            logical_plan,
+            execution_context=execution_context,
+            query_id=query_id,
+            visibility_filters=visibility_filters,
+            telemetry=telemetry,
+        )
+    except SqlError as error:
+        attach_source_position(error, clean_sql)
+        raise
     telemetry.time_planning_binder += time.monotonic_ns() - start
 
     start = time.monotonic_ns()

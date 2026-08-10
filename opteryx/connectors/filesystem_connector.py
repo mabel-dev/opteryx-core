@@ -13,10 +13,13 @@ from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.connectors.capabilities import LimitPushable, PredicatePushable
 from opteryx.exceptions import (
+    InvalidInternalStateError,
     DataError,
     DatasetNotFoundError,
     EmptyDatasetError,
     UnsupportedSyntaxError,
+    md_cause,
+    md_code,
 )
 from opteryx.models.dataset_format import JSONL
 from opteryx.models.dataset_format import PARQUET
@@ -254,8 +257,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             UnsupportedSyntaxError: For data reads
         """
         if not just_schema:
-            raise UnsupportedSyntaxError(
-                "All Parquet scans use ParquetReadNode. FileSystemConnector data reads are not supported."
+            raise InvalidInternalStateError(
+                "A Parquet read reached FileSystemConnector; all Parquet scans go "
+                "through ParquetReadNode."
             )
 
         # Schema-only read using rugo metadata extraction
@@ -298,7 +302,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         try:
             metadata = _skene_read_metadata(file_obj.memoryview)
         except SkeneError as err:
-            raise DataError(f"Cannot read skene file '{blob_name}': {err}") from err
+            raise DataError(f"The skene file {md_code(blob_name)} could not be read. {md_cause(err)}") from err
         finally:
             file_obj.close()
         return skene_metadata_to_schema(metadata, self.dataset)
@@ -365,7 +369,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     with _rugo_read_jsonl(schema_chunk) as reader:
                         sample_morsel = next(iter(reader), None)
             except RuntimeError as err:
-                raise DataError(f"Cannot read JSONL file '{blob_name}': {err}") from err
+                raise DataError(f"The JSONL file {md_code(blob_name)} could not be read. {md_cause(err)}") from err
             finally:
                 file_obj.close()
 
@@ -459,8 +463,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     ) from err
             return
 
-        raise UnsupportedSyntaxError(
-            "All Parquet scans use ParquetReadNode. FileSystemConnector data reads are not supported."
+        raise InvalidInternalStateError(
+            "A Parquet read reached FileSystemConnector; all Parquet scans go through "
+            "ParquetReadNode."
         )
 
     def get_dataset_schema(self) -> RelationSchema:
@@ -613,7 +618,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 try:
                     footer = _skene_read_metadata(file_obj.memoryview)
                 except SkeneError as err:
-                    raise DataError(f"Cannot read skene file '{blob_name}': {err}") from err
+                    raise DataError(f"The skene file {md_code(blob_name)} could not be read. {md_cause(err)}") from err
                 finally:
                     file_obj.close()
                 row_groups = footer["row_groups"]

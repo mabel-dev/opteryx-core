@@ -192,13 +192,29 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
             lifecycle=LifecycleSpec(status="active"),
             summary="Concatenate strings.",
             documentation="Concatenates multiple string arguments into a single string.",
+            # ONE OVERLOAD PER STRING TYPE. CONCAT concatenates a single string
+            # type; VARCHAR, NVARCHAR and VARBINARY each get their own overload so
+            # the catalog states two things the old single `any`-typed overload
+            # could not. First, HOMOGENEITY: mixed operands match no overload and
+            # are refused by resolution, rather than binding and then failing
+            # further down. Second, the RETURN TYPE: it is the operand type, not a
+            # hardcoded VARCHAR — `CONCAT(b'a', b'b')` is VARBINARY, the same
+            # answer `b'a' || b'b'` gives, and the two spellings agreeing is the
+            # whole point since one desugars into the other.
+            #
+            # The old overload typed every parameter `any`, which coerced
+            # non-strings to VARCHAR — `CONCAT(id, name)` worked. That is
+            # deliberately gone (architect, 2026-08-09): the cast is now the
+            # caller's to write, `CONCAT(CAST(id AS VARCHAR), name)`, matching `||`,
+            # which never coerced. See
+            # RATIFIED/string-concatenation-requires-homogeneous-string-types.
             overloads=(
                 FunctionOverload(
-                    id="CONCAT_variadic",
+                    id="CONCAT_varchar",
                     parameters=(
-                        ParameterSpec(name="str1", type_family="any"),
-                        ParameterSpec(name="str2", type_family="any"),
-                        ParameterSpec(name="strs", type_family="any", variadic=True, optional=True),
+                        ParameterSpec(name="str1", type_family="varchar"),
+                        ParameterSpec(name="str2", type_family="varchar"),
+                        ParameterSpec(name="strs", type_family="varchar", variadic=True, optional=True),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
                     kernel=KernelSpec(
@@ -214,6 +230,36 @@ def get_builtin_text_functions() -> List[FunctionDefinition]:
                         # 2026-07-17 in every mode: with the optimizer enabled it never reaches
                         # kernel dispatch; with it disabled it is refused before reaching here.
                         callable_ref=None,
+                        cost_us_per_million=523.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="CONCAT_nvarchar",
+                    parameters=(
+                        ParameterSpec(name="str1", type_family="nvarchar"),
+                        ParameterSpec(name="str2", type_family="nvarchar"),
+                        ParameterSpec(name="strs", type_family="nvarchar", variadic=True, optional=True),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_NVARCHAR),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=None,  # rewritten to `||`; see CONCAT_varchar
+                        cost_us_per_million=523.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="CONCAT_varbinary",
+                    parameters=(
+                        ParameterSpec(name="str1", type_family="varbinary"),
+                        ParameterSpec(name="str2", type_family="varbinary"),
+                        ParameterSpec(name="strs", type_family="varbinary", variadic=True, optional=True),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARBINARY),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=None,  # rewritten to `||`; see CONCAT_varchar
                         cost_us_per_million=523.0,
                     ),
                 ),
@@ -371,8 +417,33 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
 
     # Parameter shortcuts
     _string = ParameterSpec(name="string", type_family="string")
-    _pattern = ParameterSpec(name="pattern", type_family="string", constant_only=True)
-    _replacement = ParameterSpec(name="replacement", type_family="string", constant_only=True)
+    # REGEXP_REPLACE is implemented ONLY as whole-match capture extraction: the
+    # optimizer rewrites REGEXP_REPLACE(s, pat, '\1') to _DFA_EXTRACT when `pat`
+    # compiles to an anchored DFA program, and everything else reaches
+    # implementations.text.regex_replace, which raises — RE2 was removed from the
+    # execution path and there is no general replacement kernel. The catalog
+    # declared the unrestricted three-argument form, so it claimed a capability
+    # the engine does not have. Both restrictions are now on the parameters.
+    _pattern = ParameterSpec(
+        name="pattern",
+        type_family="string",
+        constant_only=True,
+        value_format="dfa-regex",
+        documentation=(
+            "Must compile to a DFA program — anchored, consuming the whole input. "
+            "A pattern outside that subset is refused; there is no runtime regex matcher."
+        ),
+    )
+    _replacement = ParameterSpec(
+        name="replacement",
+        type_family="string",
+        constant_only=True,
+        domain=("\\1",),
+        documentation=(
+            "Only the whole-match capture reference `'\\1'` is supported. An arbitrary "
+            "replacement template is refused."
+        ),
+    )
     _compiled_program = ParameterSpec(
         name="compiled_program", type_family="binary", constant_only=True
     )
@@ -381,6 +452,37 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
     def _trim_return_type(arg_nodes):
         """TRIM/LTRIM/RTRIM always return VARCHAR."""
         return _CT_VARCHAR
+
+    # SQL-92's `TRIM([LEADING|TRAILING|BOTH] <chars> FROM <str>)` — the dialect
+    # parses it and logical_planner_builders.trim_string maps the three directions
+    # onto TRIM/LTRIM/RTRIM with the characters as a second argument, so this
+    # parameter is what makes that spelling reachable. It is also the call form,
+    # `TRIM(s, 'ab')`, which is how Postgres and DuckDB spell the same thing.
+    #
+    # A SET OF CHARACTERS, not a substring: `TRIM(BOTH 'ab' FROM 'baXab')` is 'X'
+    # (architect ruling, 2026-08-10). Empty set strips nothing.
+    #
+    # `constant_only` is load-bearing, not decoration. draken_trim is
+    # SHAPE-PRESERVING — it computes the trimmed range ONCE per physical unique
+    # value and carries the input's selection and validity onto the result — and
+    # that is sound only while the trimmed range is a function of the value's bytes
+    # alone. A per-ROW character set would make it a function of the row too.
+    # `constant_only` is enforced at BIND (compiled_expression.pyx), which is where
+    # a caller gets a message naming the argument; draken_trim refuses a non-constant
+    # set as well, because it is a C ABI kernel with callers that never pass through
+    # the binder.
+    _trim_characters = ParameterSpec(
+        name="characters",
+        type_family="string",
+        optional=True,
+        constant_only=True,
+        documentation=(
+            "The SET of characters to strip, not a substring to match: "
+            "`TRIM(BOTH 'ab' FROM 'baXab')` is `X`. Must be constant. Omitted, "
+            "ASCII whitespace is stripped. Over an NVARCHAR operand the set is "
+            "matched by codepoint, so a multibyte character can never be split."
+        ),
+    )
 
     vector_dfa_extract = getattr(compiled_vector_ops, "vector_dfa_extract")
 
@@ -394,13 +496,18 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             lifecycle=LifecycleSpec(status="active"),
             summary="Concatenate strings with separator.",
             documentation="Concatenates strings with specified separator, skipping nulls.",
+            # One overload per string type, as CONCAT — and the SEPARATOR is bound
+            # by the same rule, because it is concatenated into the result like any
+            # other operand. `CONCAT_WS('-', b'a', b'b')` is refused: a VARCHAR
+            # separator against VARBINARY values is exactly the mix the ruling
+            # forbids, and it would desugar into a mixed `||` chain.
             overloads=(
                 FunctionOverload(
-                    id="CONCAT_WS_variadic",
+                    id="CONCAT_WS_varchar",
                     parameters=(
-                        ParameterSpec(name="separator", type_family="string"),
-                        ParameterSpec(name="str1", type_family="any"),
-                        ParameterSpec(name="strs", type_family="any", variadic=True, optional=True),
+                        ParameterSpec(name="separator", type_family="varchar"),
+                        ParameterSpec(name="str1", type_family="varchar"),
+                        ParameterSpec(name="strs", type_family="varchar", variadic=True, optional=True),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
                     kernel=KernelSpec(
@@ -411,6 +518,36 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                         # execution; see CONCAT's kernel comment above for why callable_ref is
                         # unreachable in every mode, including DISABLE_OPTIMIZER=1.
                         callable_ref=None,
+                        cost_us_per_million=587.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="CONCAT_WS_nvarchar",
+                    parameters=(
+                        ParameterSpec(name="separator", type_family="nvarchar"),
+                        ParameterSpec(name="str1", type_family="nvarchar"),
+                        ParameterSpec(name="strs", type_family="nvarchar", variadic=True, optional=True),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_NVARCHAR),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=None,  # rewritten to `||`; see CONCAT_WS_varchar
+                        cost_us_per_million=587.0,
+                    ),
+                ),
+                FunctionOverload(
+                    id="CONCAT_WS_varbinary",
+                    parameters=(
+                        ParameterSpec(name="separator", type_family="varbinary"),
+                        ParameterSpec(name="str1", type_family="varbinary"),
+                        ParameterSpec(name="strs", type_family="varbinary", variadic=True, optional=True),
+                    ),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARBINARY),
+                    kernel=KernelSpec(
+                        engine="draken",
+                        id="default",
+                        callable_ref=None,  # rewritten to `||`; see CONCAT_WS_varchar
                         cost_us_per_million=587.0,
                     ),
                 ),
@@ -561,7 +698,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="TRIM_1",
-                    parameters=(_string,),
+                    parameters=(_string, _trim_characters),
                     return_spec=ReturnSpec(mode="resolver", resolver=_trim_return_type),
                     kernel=KernelSpec(
                         engine="draken",
@@ -584,7 +721,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="LTRIM_1",
-                    parameters=(_string,),
+                    parameters=(_string, _trim_characters),
                     return_spec=ReturnSpec(mode="resolver", resolver=_trim_return_type),
                     kernel=KernelSpec(
                         engine="draken",
@@ -607,7 +744,7 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="RTRIM_1",
-                    parameters=(_string,),
+                    parameters=(_string, _trim_characters),
                     return_spec=ReturnSpec(mode="resolver", resolver=_trim_return_type),
                     kernel=KernelSpec(
                         engine="draken",
@@ -645,8 +782,15 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     id="LPAD_3",
                     parameters=(
                         _string,
-                        ParameterSpec(name="width", type_family="integer"),
-                        ParameterSpec(name="fill", type_family="string"),
+                        # `width` and `fill` are CONSTANTS. left_pad/right_pad
+                        # (implementations/text.pyx) read `width[0]` and
+                        # `fill[0]` — the FIRST row's value — and apply it to
+                        # every row, so a column-valued width or fill is a
+                        # silent wrong answer, not an error. The catalog typed
+                        # them as an ordinary `integer` and `varchar`, which is
+                        # what let `RPAD('eta', 8, s_null)` be written at all.
+                        ParameterSpec(name="width", type_family="integer", constant_only=True),
+                        ParameterSpec(name="fill", type_family="string", constant_only=True),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
                     kernel=KernelSpec(
@@ -672,8 +816,15 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
                     id="RPAD_3",
                     parameters=(
                         _string,
-                        ParameterSpec(name="width", type_family="integer"),
-                        ParameterSpec(name="fill", type_family="string"),
+                        # `width` and `fill` are CONSTANTS. left_pad/right_pad
+                        # (implementations/text.pyx) read `width[0]` and
+                        # `fill[0]` — the FIRST row's value — and apply it to
+                        # every row, so a column-valued width or fill is a
+                        # silent wrong answer, not an error. The catalog typed
+                        # them as an ordinary `integer` and `varchar`, which is
+                        # what let `RPAD('eta', 8, s_null)` be written at all.
+                        ParameterSpec(name="width", type_family="integer", constant_only=True),
+                        ParameterSpec(name="fill", type_family="string", constant_only=True),
                     ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
                     kernel=KernelSpec(
@@ -697,7 +848,24 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="TO_CHAR_1",
-                    parameters=(ParameterSpec(name="num", type_family="integer"),),
+                    parameters=(
+                        ParameterSpec(
+                            name="num",
+                            type_family="integer",
+                            # A Unicode CODEPOINT, not an arbitrary integer. Typed
+                            # as a plain `integer`, TO_CHAR(-303083) satisfied the
+                            # signature and the kernel answered with a raw
+                            # `ValueError: draken_to_char: codepoint -303083 is not
+                            # a Unicode scalar value`.
+                            minimum=0,
+                            maximum=1114111,
+                            documentation=(
+                                "A Unicode codepoint in 0..1114111 (U+10FFFF). The surrogate "
+                                "range 55296..57343 (U+D800..U+DFFF) is excluded as well — "
+                                "those are not Unicode scalar values."
+                            ),
+                        ),
+                    ),
                     return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_VARCHAR),
                     kernel=KernelSpec(
                         engine="draken",

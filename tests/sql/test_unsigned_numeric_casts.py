@@ -100,7 +100,7 @@ def test_foreign_unsigned_spellings_are_rejected_never_silently_signed():
     for spelling in ("UINTEGER", "UBIGINT", "USMALLINT", "UTINYINT"):
         with pytest.raises(Exception) as err:
             _col(f"SELECT CAST('42' AS {spelling}) AS x")
-        assert "Unsupported type for CAST" in str(err.value), (spelling, err.value)
+        assert "is not a type **CAST** can produce" in str(err.value), (spelling, err.value)
         assert spelling in str(err.value), (spelling, err.value)
 
 
@@ -118,13 +118,15 @@ def test_uinteger_is_reported_as_a_typo_and_named_canonically():
     """
     with pytest.raises(Exception) as err:
         _col("SELECT CAST('42' AS UINTEGER) AS x")
-    assert "did you mean 'INT64'" in str(err.value), err.value
-    assert "INTEGER'" not in str(err.value).replace("'UINTEGER'", ""), err.value
+    assert "Did you mean `INT64`?" in str(err.value), err.value
+    # the suggestion must name INT64 and never the INTEGER alias - checked on the
+    # code chip, which is where a suggestion lives now
+    assert "`INTEGER`" not in str(err.value), err.value
 
     for spelling in ("UBIGINT", "USMALLINT", "UTINYINT"):
         with pytest.raises(Exception) as err:
             _col(f"SELECT CAST('42' AS {spelling}) AS x")
-        assert "did you mean" not in str(err.value), (spelling, err.value)
+        assert "did you mean" not in str(err.value).lower(), (spelling, err.value)
 
 
 def test_a_name_that_merely_contains_a_type_name_is_not_that_type():
@@ -143,7 +145,7 @@ def test_a_name_that_merely_contains_a_type_name_is_not_that_type():
             _col(f"SELECT CAST('42' AS {spelling}) AS x")
         # An SqlError naming the type — never a KeyError from indexing an AST node
         # that a substring match wrongly promised was there.
-        assert "Unsupported type for CAST" in str(err.value), (spelling, repr(err.value))
+        assert "is not a type **CAST** can produce" in str(err.value), (spelling, repr(err.value))
         assert spelling in str(err.value), (spelling, repr(err.value))
 
 
@@ -181,7 +183,7 @@ def test_suggestions_never_name_a_non_canonical_type():
                                ("REAL", "FLOAT32"), ("DOUBEL", "FLOAT64")):
         with pytest.raises(Exception) as err:
             _col(f"SELECT CAST('1' AS {spelling}) AS x")
-        assert f"did you mean '{expected}'" in str(err.value), (spelling, err.value)
+        assert f"Did you mean `{expected}`?" in str(err.value), (spelling, err.value)
 
 
 def test_unsigned_casts_preserve_nulls():

@@ -253,8 +253,18 @@ def _nc_describe_branch(node):
 
 
 def _check_blend_compatible(branches, func_name):
-    """branches: list[(node, ColumnType)], already filtered to non-NULL types."""
-    if len(branches) < 2:
+    """branches: list[(node, ColumnType)], already filtered to non-NULL types.
+
+    A SINGLE surviving branch is still checked. `branches` is what is left after
+    the caller drops typed-NULL literals, so IIF(c, NULL, <array>) arrives here
+    with one entry — and the family question ("can nc_dispatch blend this type at
+    all?") is answered by that one branch alone, with no partner needed. Guarding
+    this on len >= 2 let every unblendable family (ARRAY, DECIMAL, INTERVAL,
+    VARIANT, VECTOR_FP16) reach the kernel and die mid-execution with only a type
+    code — the exact failure this mirror exists to prevent, reached by pairing the
+    branch with NULL instead of with a second real branch.
+    """
+    if not branches:
         return
     node0, ct0 = branches[0]
     t0 = ct0.physical

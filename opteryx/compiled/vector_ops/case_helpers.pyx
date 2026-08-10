@@ -19,8 +19,6 @@ Design contract (matches case_eval.py):
 
 E.25 migration: DrakenFixedBuffer/StringVector removed. assemble_fixed and
 assemble_bool rewritten against DrakenVector* via Vector.unified().
-assemble_flat_string and assemble_dict_string stubbed pending E.29
-StringVectorBuilder port.
 """
 
 from cpython.array cimport array as _cparr, clone as _clone
@@ -519,24 +517,3 @@ def assemble_flat_string(
         s.encode("utf-8") if isinstance(s, str) else s for s in result_list
     ]
     return Vector(_draken_native_ch.vector_from_string_sequence(result_list))
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 — assemble_dict_string  [STUB — E.29 gap: StringVector old API]
-# ---------------------------------------------------------------------------
-
-def assemble_dict_string(
-    list parts,
-    object else_part,
-    int16_t[::1] branch_id,
-    int32_t[::1] pos_in_branch,
-    Py_ssize_t n,
-):
-    """Build a dict-encoded string Vector.
-
-    Stubbed pending E.29 StringVector old-API removal.
-    """
-    raise NotImplementedError(
-        "assemble_dict_string: StringVector old API not yet ported (E.29 gap). "
-        "CASE WHEN with dict-encoded VARCHAR result is not yet supported."
-    )

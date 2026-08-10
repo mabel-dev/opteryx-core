@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 from opteryx import EOS, config, utils
 from opteryx.constants import QueryStatus, ResultType
 from opteryx.exceptions import (
+    ExecutionError,
     InconsistentSchemaError,
     InvalidCursorStateError,
     MissingSqlStatement,
@@ -39,6 +40,9 @@ from opteryx.exceptions import (
     ResultTooLargeError,
     SqlError,
     UnsupportedSyntaxError,
+    compose,
+    md_cause,
+    md_code,
 )
 from opteryx.managers.billing import DEFAULT_BILLING_ACCOUNT, BillingEventType, write_billing_event
 from opteryx.variables import resolve as _resolve_var
@@ -79,15 +83,15 @@ class Session(DataFrame):
             )
         # input validation consistent with the old Connection
         if memberships and not all(isinstance(v, str) for v in memberships):
-            raise ProgrammingError("Invalid memberships provided to Session")
+            raise ProgrammingError("Session memberships must all be strings.")
         if entitlements and not all(isinstance(v, str) for v in entitlements):
-            raise ProgrammingError("Invalid entitlements provided to Session")
+            raise ProgrammingError("Session entitlements must all be strings.")
         if user and not isinstance(user, str):
-            raise ProgrammingError("Invalid user provided to Session")
+            raise ProgrammingError("A Session user must be a string.")
         if access_policies and not all(isinstance(v, dict) for v in access_policies):
-            raise ProgrammingError("Invalid access_policies provided to Session")
+            raise ProgrammingError("Session access_policies must all be dictionaries.")
         if billing_account and not isinstance(billing_account, str):
-            raise ProgrammingError("Invalid billing_account provided to Session")
+            raise ProgrammingError("A Session billing_account must be a string.")
         if memberships is None:
             # `public` — the group every caller is in by virtue of being a caller.
             # NOT a product/tenant name: a caller who supplied no memberships holds
@@ -145,12 +149,14 @@ class Session(DataFrame):
         operation: str,
         params: Union[Iterable, Dict, None] = None,
         visibility_filters: Optional[Dict[str, Any]] = None,
+        source: Optional[str] = None,
+        source_offset: int = 0,
     ) -> Any:
         from opteryx.managers.execution import execute
         from opteryx.planner import query_planner
 
         if not operation:  # pragma: no cover
-            raise MissingSqlStatement("SQL provided was empty.")
+            raise MissingSqlStatement("SQL provided was empty. Provide a statement to run.")
 
         start = time.time_ns()
         try:
@@ -161,9 +167,21 @@ class Session(DataFrame):
                 execution_context=self.context,
                 query_id=self.query_id,
                 telemetry=self._telemetry,
+                source=source,
+                source_offset=source_offset,
             )
         except RuntimeError as err:  # pragma: no cover
-            raise SqlError(f"Error Executing SQL Statement ({err}) (QID:{self.query_id})") from err
+            # ExecutionError, not SqlError: the planner failed, which is not the same
+            # as the statement being wrong, and SqlError told the reader their SQL was
+            # at fault. The query id goes in its own clause rather than glued into the
+            # sentence in brackets - it is the thing to quote when reporting this.
+            raise ExecutionError(
+                compose(
+                    "The query could not be planned",
+                    md_cause(err),
+                    f"Quote {md_code(self.query_id)} if you report this",
+                )
+            ) from err
         finally:
             self._telemetry.time_planning += time.time_ns() - start
 
@@ -223,12 +241,14 @@ class Session(DataFrame):
         if getattr(operation, "decode", None) is not None:
             operation = operation.decode()
 
-        operation = sql.remove_comments(operation)
-        operation = sql.clean_statement(operation)
+        # The statement is handed on exactly as it was written - comments, line breaks
+        # and all. Everything downstream that reports a position (the parse-error
+        # formatter, the binder pointing at a column) quotes it back at the reader, so
+        # normalising it here would be normalising away the thing being pointed at.
         statements = sql.split_sql_statements(operation)
 
         if len(statements) == 0:
-            raise MissingSqlStatement("No statement found")
+            raise MissingSqlStatement("No statement found. Provide a statement to run.")
 
         if len(statements) > 1 and params is not None and not isinstance(params, dict) and params:
             raise UnsupportedSyntaxError(
@@ -237,7 +257,13 @@ class Session(DataFrame):
 
         results = None
         for index, statement in enumerate(statements):
-            results = self._inner_execute(statement, params, visibility_filters)
+            results = self._inner_execute(
+                statement.text,
+                params,
+                visibility_filters,
+                source=operation,
+                source_offset=statement.offset,
+            )
             if index < len(statements) - 1:
                 for _ in results:
                     pass

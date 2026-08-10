@@ -1,0 +1,8 @@
+# Pinned seeds for tests/fuzzing/test_sql_fuzzer_predicate_subquery.py.
+#
+# One seed per line, `#` starts a comment. These run BEFORE the random seeds on
+# every invocation, regardless of TEST_SEED — so a bug a random seed found once
+# cannot come back unnoticed after it is fixed.
+#
+# When a run fails, take the `Seed:` printed with the failing case and add it
+# here with a line saying what it found.

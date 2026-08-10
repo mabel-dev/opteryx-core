@@ -51,6 +51,7 @@ from opteryx.planner.optimizer.strategies import (
     FunctionRewriteStrategy,
     GroupKeyReductionStrategy,
     HashMapVariantStrategy,
+    JoinBuildShapeStrategy,
     JoinEliminationStrategy,
     JoinOrderingStrategy,
     JoinPlanningStrategy,
@@ -103,6 +104,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "FunctionRewriteStrategy": "disable_function_rewrite",
     "GroupKeyReductionStrategy": "disable_group_key_reduction",
     "HashMapVariantStrategy": "disable_hash_map_variant",
+    "JoinBuildShapeStrategy": "disable_join_build_shape",
     "JoinEliminationStrategy": "disable_join_elimination",
     "JoinOrderingStrategy": "disable_join_ordering",
     "JoinPlanningStrategy": "disable_join_planning",
@@ -247,6 +249,12 @@ class OptimizerVisitor:
             # Runs last: all other strategies have had their say.
             # Uses FileEntry.stats_by_name for range detection — projection-stable.
             HashMapVariantStrategy(telemetry),
+            # Also runs late, and for the same reason: it annotates each join with
+            # the row count that join is expected to EMIT, so every strategy that
+            # can add, remove or reorder a join (JoinElimination/JoinRewrite/
+            # JoinOrdering above) must already have had its say — otherwise the
+            # estimate describes a join the plan no longer contains.
+            JoinBuildShapeStrategy(telemetry),
             # Runs dead last: it enumerates every reference to a column, so
             # every strategy that can add, remove or rewrite one must already
             # have run. Annotates scans only — it rewrites nothing.

@@ -24,11 +24,8 @@ query shape 1 8
 query shape 1 8
 /* comment */ SELECT * FROM testdata.satellites /* comment */ WHERE name = 'Calypso' /* comment */
 
-query error
+query error sql failed QueryParseError: The query could not be parsed at column 11\.(?s).*A block comment opens here and is never closed.*
 /* comment
-----
-sql failed SqlError: Query parsing failed.
-	sql parser error: Unexpected EOF while in a multi-line comment at Line: 1, Column: 11
 
 
 query shape 1 8
@@ -49,7 +46,7 @@ statement error MissingSqlStatement
 statement error MissingSqlStatement
 /* SELECT * FROM $planets */
 
-statement error SqlError
+statement error QueryParseError
 /* outer /* inner */ */ SELECT * FROM testdata.satellites WHERE name = 'Calypso'
 
 query shape 1 8
@@ -166,7 +163,7 @@ SELECT name, id, name FROM testdata.satellites
 query shape 357 1
 SELECT DISTINCT name FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*alma_mater\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT * FROM testdata.astronauts
 
 query shape 357 1
@@ -190,7 +187,7 @@ SELECT DISTINCT birth_place FROM testdata.astronauts
 query shape 2 1
 SELECT DISTINCT gender FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*alma_mater\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT alma_mater FROM testdata.astronauts
 
 query shape 84 1
@@ -217,7 +214,7 @@ SELECT DISTINCT space_walks FROM testdata.astronauts
 query shape 52 1
 SELECT DISTINCT space_walks_hours FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*missions\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT missions FROM testdata.astronauts
 
 query shape 39 1
@@ -226,7 +223,7 @@ SELECT DISTINCT death_date FROM testdata.astronauts
 query shape 4 1
 SELECT DISTINCT death_mission FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*missions\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT name, birth_date, missions, birth_place, group FROM testdata.astronauts
 
 query shape 357 2
@@ -247,22 +244,22 @@ SELECT DISTINCT year, birth_date FROM testdata.astronauts
 query shape 357 2
 SELECT DISTINCT name, birth_place FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*alma_mater\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT name, alma_mater FROM testdata.astronauts
 
 query shape 346 2
 SELECT DISTINCT year, birth_place FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*alma_mater\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT year, alma_mater FROM testdata.astronauts
 
 query shape 356 2
 SELECT DISTINCT birth_date, birth_place FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*alma_mater\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT birth_date, alma_mater FROM testdata.astronauts
 
-query error TypeError: DISTINCT: one or more key columns have a type that cannot be hashed
+query error NotSupportedError: \*\*DISTINCT\*\* on \*alma_mater\* \(type `ARRAY`\) is not supported\. This query cannot run as written - it will need rewriting to avoid that construct\.
 SELECT DISTINCT birth_place, alma_mater FROM testdata.astronauts
 
 query shape 177 1
@@ -332,7 +329,7 @@ SELECT s.id as satelliteID, p.id as planetID FROM testdata.satellites s JOIN $pl
 query shape 9 1
 SELECT x.ID FROM (SELECT id as ID FROM testdata.satellites WHERE id < 10) x
 
-statement error SqlError
+statement error QueryParseError
 SELECT name as n as m FROM testdata.satellites
 
 query shape 177 1
@@ -558,22 +555,22 @@ SELECT * FROM testdata.satellites WHERE name !~ '^C.'
 query shape 165 8
 SELECT * FROM testdata.satellites WHERE name NOT SIMILAR TO '^C.'
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR name = 'Europa') AND TRUE
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR name = 'Europa') OR FALSE
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE id = 5 OR (name = 'Europa' AND TRUE)
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 AND TRUE) OR name = 'Europa'
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR FALSE) OR name = 'Europa'
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE id = 5 OR (name = 'Europa' OR FALSE)
 
 query shape 1 8
@@ -588,25 +585,25 @@ SELECT * FROM testdata.satellites WHERE id = 5 OR (name = 'Europa' AND ('a'='a')
 query shape 1 8
 SELECT * FROM testdata.satellites WHERE (id = 5 OR (3=4)) OR name = 'Europa'
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE ((id = 5 AND (1=1)) OR (name = 'Europa' AND (TRUE OR FALSE)))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR (name = 'Europa' AND (TRUE AND (2>1))))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE ((id = 5 OR FALSE) AND TRUE) OR (name = 'Europa' AND ('x'='x'))
 
 query shape 1 8
 SELECT * FROM testdata.satellites WHERE ((id = 5 OR (4=5)) AND (6!=7)) OR (name = 'Europa')
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 AND (NOT FALSE)) OR (name = 'Europa' OR (7=8))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE ((id = 5 AND ((8<>8) OR TRUE)) OR name = 'Europa')
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR (name = 'Europa' AND (FALSE AND TRUE)))
 
 query shape 1 8
@@ -618,34 +615,34 @@ SELECT * FROM testdata.satellites WHERE (id = 5 OR (name = 'Europa' AND ('x'='x'
 query shape 1 8
 SELECT * FROM testdata.satellites WHERE (id = 5 OR ((11<12) AND name = 'Europa'))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE ((id = 5 AND (TRUE AND (1=1))) OR (name = 'Europa' AND (FALSE OR (2!=2))))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR ((name = 'Europa' OR (TRUE AND FALSE)) AND (3>3)))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (((id = 5 OR FALSE) AND (TRUE OR (4<4))) OR (name = 'Europa' AND ('x'='y')))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE ((id = 5 AND ((5=6) OR TRUE)) OR (name = 'Europa' AND (FALSE OR (6=7))))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR (name = 'Europa' AND (TRUE OR (7!=7) AND FALSE)))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE ((id = 5 AND (NOT (8=8))) OR (name = 'Europa' AND (9>10 OR TRUE)))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (((id = 5 OR (10<11)) AND ('a'='b')) OR (name = 'Europa' AND (TRUE AND (11=11))))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (id = 5 OR ((name = 'Europa' OR (FALSE AND TRUE)) AND (12>13)))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE (((id = 5 AND (14=14)) OR FALSE) AND ((name = 'Europa' OR (14<15)) AND ('x'='x')))
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(False\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`False`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT * FROM testdata.satellites WHERE ((id = 5 OR (name = 'Europa' AND ((15=16) OR FALSE))) AND (TRUE AND (16!=17)))
 
 query shape 1 1
@@ -744,22 +741,22 @@ SELECT planetId, ARRAY_AGG(name) FROM testdata.satellites GROUP BY planetId
 query shape 7 1
 SELECT planetId FROM testdata.satellites GROUP BY planetId
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `BOOLEAN\(Minus\)` — use `Minus::BOOL`\.
+query error sql failed UnsupportedSyntaxError: \*\*BOOLEAN\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `BOOLEAN\(Minus\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `Minus::BOOL`\.
 SELECT BOOLEAN(planetId - 3) FROM testdata.satellites GROUP BY BOOLEAN(planetId - 3)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `VARCHAR\(planetId\)` — use `planetId::VARCHAR`\.
+query error sql failed UnsupportedSyntaxError: \*\*VARCHAR\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `VARCHAR\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::VARCHAR`\.
 SELECT VARCHAR(planetId) FROM testdata.satellites GROUP BY VARCHAR(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `VARCHAR\(planetId\)` — use `planetId::VARCHAR`\.
+query error sql failed UnsupportedSyntaxError: \*\*VARCHAR\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `VARCHAR\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::VARCHAR`\.
 SELECT COUNT(*) FROM testdata.satellites GROUP BY TIMESTAMP('2022-01-0' || VARCHAR(planetId))
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `DOUBLE\(planetId\)` — use `planetId::FLOAT64`\.
+query error sql failed UnsupportedSyntaxError: \*\*DOUBLE\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `DOUBLE\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::FLOAT64`\.
 SELECT DOUBLE(planetId) FROM testdata.satellites GROUP BY DOUBLE(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INT\(planetId\)` — use `planetId::INT64`\.
+query error sql failed UnsupportedSyntaxError: \*\*INT\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `INT\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::INT64`\.
 SELECT INT(planetId) FROM testdata.satellites GROUP BY INT(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INTEGER\(planetId\)` — use `planetId::INT64`\.
+query error sql failed UnsupportedSyntaxError: \*\*INTEGER\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `INTEGER\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::INT64`\.
 SELECT INTEGER(planetId) FROM testdata.satellites GROUP BY INTEGER(planetId)
 
 query shape 177 1
@@ -768,7 +765,7 @@ SELECT CAST(planetId AS BOOLEAN) FROM testdata.satellites
 query shape 177 1
 SELECT CAST(planetId AS VARCHAR) FROM testdata.satellites
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `VARCHAR\(planetId\)` — use `planetId::VARCHAR`\.
+query error sql failed UnsupportedSyntaxError: \*\*VARCHAR\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `VARCHAR\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::VARCHAR`\.
 SELECT CAST('2022-01-0' || VARCHAR(planetId) AS TIMESTAMP) FROM testdata.satellites
 
 query shape 177 1
@@ -804,13 +801,13 @@ SELECT TRY_CAST(planetId AS TIMESTAMP) FROM testdata.satellites
 query shape 177 1
 SELECT TRY_CAST(planetId AS INTEGER) FROM testdata.satellites
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `DOUBLE\(planetId\)` — use `planetId::FLOAT64`\.
+query error sql failed UnsupportedSyntaxError: \*\*DOUBLE\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `DOUBLE\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::FLOAT64`\.
 SELECT DOUBLE(planetId) AS VALUE FROM testdata.satellites GROUP BY DOUBLE(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INT\(planetId\)` — use `planetId::INT64`\.
+query error sql failed UnsupportedSyntaxError: \*\*INT\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `INT\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::INT64`\.
 SELECT INT(planetId) AS VALUE FROM testdata.satellites GROUP BY INT(planetId)
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `INTEGER\(planetId\)` — use `planetId::INT64`\.
+query error sql failed UnsupportedSyntaxError: \*\*INTEGER\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `INTEGER\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::INT64`\.
 SELECT INTEGER(planetId) AS VALUE FROM testdata.satellites GROUP BY INTEGER(planetId)
 
 query shape 177 1
@@ -819,7 +816,7 @@ SELECT CAST(planetId AS BOOLEAN) AS VALUE FROM testdata.satellites
 query shape 177 1
 SELECT CAST(planetId AS VARCHAR) AS VALUE FROM testdata.satellites
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `VARCHAR\(planetId\)` — use `planetId::VARCHAR`\.
+query error sql failed UnsupportedSyntaxError: \*\*VARCHAR\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `VARCHAR\(planetId\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `planetId::VARCHAR`\.
 SELECT CAST('2022-01-0' || VARCHAR(planetId) AS TIMESTAMP) AS VALUE FROM testdata.satellites
 
 query shape 177 1
@@ -861,7 +858,7 @@ SELECT * FROM $planets WHERE name = b'Earth'
 query shape 0
 SELECT * FROM $planets WHERE name = b'Ea th'
 
-query error sql failed UnsupportedSyntaxError: Invalid cast syntax `TIMESTAMP\(1700000000000000\)` — use `1700000000000000::TIMESTAMP`\.
+query error sql failed UnsupportedSyntaxError: \*\*TIMESTAMP\*\*\ is\ a\ type\ name,\ not\ a\ function,\ so\ `TIMESTAMP\(1700000000000000\)`\ is\ not\ a\ cast\.\ Write\ the\ cast\ as\ `1700000000000000::TIMESTAMP`\.
 SELECT TIMESTAMP(1700000000000000)
 
 query error sql failed UnsupportedSyntaxError: Ambiguous cast: INTEGER → TIMESTAMP requires a unit\. Use `expr::TIMESTAMP\[ms\]`, `expr::TIMESTAMP\[s\]`, or `expr::TIMESTAMP\[us\]`\.

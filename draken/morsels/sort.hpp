@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -615,23 +616,69 @@ inline size_t gather_elem_size(DrakenType t, const LogicalType* lt) {
     return draken_type_itemsize(t, lt);
 }
 
+// `emit_cols`, when non-null, is the subset of INPUT column indices to materialize,
+// in output order — the gather is where a column costs (a two-pass arena rebuild for
+// a string), so a column whose purpose is spent by the time we get here must not be
+// copied at all; a select above the gather would only free a buffer already built.
+// `names` stays the FULL input name list in every caller: the subsetting of names
+// happens here, beside the subsetting of columns, so the two cannot drift.
+// nullptr (the default) emits every column — the behaviour every existing caller,
+// including the standalone rugo wheel, keeps unchanged.
 inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
                              const std::vector<uint32_t>& order,
                              size_t first, size_t count,
                              const std::vector<uint32_t>& row_m,
                              const std::vector<uint32_t>& row_r,
                              const std::vector<std::string>& names,
-                             ErrCtx& err) {
+                             ErrCtx& err,
+                             const std::vector<uint32_t>* emit_cols = nullptr) {
     uint32_t n = static_cast<uint32_t>(count);
     auto out = std::make_shared<CxxMorsel>();
-    out->names = names;
     out->zero_col_rows = n;
-    if (ms.empty()) return out;
+    if (ms.empty()) {
+        out->names = names;
+        return out;
+    }
     size_t ncols = ms.front()->columns.size();
-    out->columns.reserve(ncols);
+    size_t nemit = emit_cols == nullptr ? ncols : emit_cols->size();
+
+    // Names are POSITIONAL and optional inside the engine: a morsel handed between
+    // native operators normally carries none at all (a join's output morsel is built
+    // from columns alone; the cursor takes its names from the plan's final schema),
+    // while rugo's callers do carry a full parallel array. So subset `names` only
+    // when it is parallel to the input columns, and leave it empty when the input
+    // had none — never index it independently of `columns`.
+    if (emit_cols == nullptr) {
+        out->names = names;
+    } else if (names.size() == ncols) {
+        out->names.reserve(nemit);
+        for (uint32_t ci : *emit_cols) {
+            if (ci >= ncols) {
+                err.code = 1;
+                err.msg = "gather_rows: emit column index out of range for the input "
+                          "column list";
+                return out;
+            }
+            out->names.push_back(names[ci]);
+        }
+    } else if (!names.empty()) {
+        err.code = 1;
+        err.msg = "gather_rows: input name list is neither empty nor parallel to the "
+                  "input columns — cannot narrow it to the emit subset";
+        return out;
+    }
+
+    out->columns.reserve(nemit);
     size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
 
-    for (size_t ci = 0; ci < ncols; ++ci) {
+    for (size_t ei = 0; ei < nemit; ++ei) {
+        size_t ci = emit_cols == nullptr ? ei : static_cast<size_t>((*emit_cols)[ei]);
+        if (ci >= ncols) {
+            err.code = 1;
+            err.msg = "gather_rows: emit column index out of range for the input "
+                      "column list";
+            return out;
+        }
         DrakenType t = ms.front()->columns[ci].view.type;
         // Parameterized physical types (DECIMAL scale, TIMESTAMP unit, …) carry a
         // registry-interned logical descriptor on the owner — it must survive the
@@ -944,10 +991,18 @@ inline size_t flatten_rows(const std::vector<MorselPtr>& ms,
 // Engine-agnostic on purpose: no Sink, no MorselBuffer, no plan. This is what rugo
 // calls with no query engine present, and what opteryx's SortSink/TopNSink wrap.
 // Returns false with `err` set on failure — never a silent partial or wrong order.
+//
+// `emit_cols` (nullptr = every column, which is what rugo passes) narrows what the
+// gather materializes — see gather_rows. It NEVER narrows what is sorted: `spec`
+// indexes the INPUT columns and the keys are built from `src`, which is alive for
+// the whole call, so a key that is not emitted is still read normally. That also
+// means SortKeyColumn's raw `sptr`/`slen` into a string key's source arena stay
+// valid — nothing is released early here, only not copied out.
 inline bool sort_morsels(const std::vector<MorselPtr>& ms,
                          const std::vector<SortKeySpec>& spec,
                          size_t take_first, size_t chunk_rows,
-                         std::vector<MorselPtr>& out, ErrCtx& err) {
+                         std::vector<MorselPtr>& out, ErrCtx& err,
+                         const std::vector<uint32_t>* emit_cols = nullptr) {
     std::vector<MorselPtr> src;
     src.reserve(ms.size());
     for (const MorselPtr& m : ms) if (m->num_rows() > 0) src.push_back(m);
@@ -963,9 +1018,27 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
 
     size_t total = n < take_first ? n : take_first;
     const std::vector<std::string>& names = src.front()->names;
+
+    // Output position of the PRIMARY sort key, for the DRAKEN_ROW_SORTED stamp below.
+    // Under an emit subset the input index `spec[0].col_idx` addresses a DIFFERENT
+    // output column (or none at all), and stamping it would claim a column is sorted
+    // when it is not — a silent wrong answer downstream, not a slowdown. SIZE_MAX =
+    // the key is not emitted, so there is nothing to stamp.
+    size_t sorted_out_idx = SIZE_MAX;
+    if (!spec.empty()) {
+        if (emit_cols == nullptr) {
+            sorted_out_idx = spec[0].col_idx;
+        } else {
+            for (size_t i = 0; i < emit_cols->size(); ++i) {
+                if ((*emit_cols)[i] == spec[0].col_idx) { sorted_out_idx = i; break; }
+            }
+        }
+    }
+
     for (size_t start = 0; start < total; start += chunk_rows) {
         size_t count = std::min(chunk_rows, total - start);
-        MorselPtr m = gather_rows(src, perm, start, count, row_m, row_r, names, err);
+        MorselPtr m = gather_rows(src, perm, start, count, row_m, row_r, names, err,
+                                  emit_cols);
         if (err.code != 0) return false;
         // Each chunk is a contiguous slice of the globally-sorted permutation, so
         // the PRIMARY (leading) sort key is PROVEN monotonic within it — not a
@@ -978,8 +1051,8 @@ inline bool sort_morsels(const std::vector<MorselPtr>& ms,
         // cxx_morsel.h) — the Python-visible Vector reads own->vec via
         // to_vectors(), so both copies must be set or the flag is invisible
         // outside this translation unit despite compiling clean.
-        if (!spec.empty() && spec[0].col_idx < m->columns.size()) {
-            CxxColumn& col = m->columns[spec[0].col_idx];
+        if (sorted_out_idx != SIZE_MAX && sorted_out_idx < m->columns.size()) {
+            CxxColumn& col = m->columns[sorted_out_idx];
             uint8_t bits = DRAKEN_ROW_SORTED | (spec[0].ascending ? 0 : DRAKEN_ROW_SORTED_DESC);
             uint8_t clear = static_cast<uint8_t>(~(DRAKEN_ROW_SORTED | DRAKEN_ROW_SORTED_DESC));
             col.view.flags = static_cast<uint8_t>((col.view.flags & clear) | bits);

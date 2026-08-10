@@ -9,7 +9,6 @@ pytest-xdist
 black
 isort
 pycln
-jellyfish
 
 valkey
 rich
@@ -21,8 +20,9 @@ google-cloud-storage
 minio
 openpyxl
 
-# test oracle only - never imported by opteryx/, rugo/, or draken/
+# test oracles only - never imported by opteryx/, rugo/, or draken/
 pyarrow
+jellyfish  # SOUNDEX reference for tests/unit/functions/test_soundex.py
 
 setuptools_rust
 

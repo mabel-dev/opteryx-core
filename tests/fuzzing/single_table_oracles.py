@@ -446,6 +446,39 @@ def aggregate_identities(statement: Statement, rng: random.Random) -> OracleResu
     return OracleResult("aggregate_identities", 1)
 
 
+def aggregate_filter_matches_where(statement: Statement, rng: random.Random) -> OracleResult:
+    """`COUNT(*) FILTER (WHERE p)` == the row count of the same relation under `p`.
+
+    An exact identity, not a metamorphic approximation: FILTER counts the rows
+    that survive the query's WHERE and satisfy `p`, which is by definition the
+    cardinality of `WHERE (w) AND (p)`. Two independent code paths — the
+    aggregate's own predicate and the filter operator — computing one number.
+
+    Was declined while FILTER was parsed, bound and then dropped — the clause
+    did nothing, so this identity failed on every statement carrying one. FILTER
+    is now lowered to `AGG(IIF(p, x, NULL))` in the logical planner and the
+    oracle runs normally.
+    """
+    select = _require_select(statement, "aggregate_filter_matches_where")
+    if select.aggregate_filter is None:
+        raise AssertionError("aggregate_filter oracle applied to a statement with no FILTER")
+
+    predicate = select.aggregate_filter
+    where = f"WHERE {select.where}" if select.where else ""
+    filtered = scalar(
+        f"SELECT COUNT(*) FILTER (WHERE {predicate}) AS n FROM {select.source} {where}".strip()
+    )
+    combined = predicate if not select.where else f"({select.where}) AND ({predicate})"
+    counted = scalar(f"SELECT COUNT(*) AS n FROM {select.source} WHERE {combined}")
+
+    if filtered != counted:
+        raise OracleViolation(
+            f"COUNT(*) FILTER (WHERE p) = {filtered} but the same relation under `p` has "
+            f"{counted} rows\n  source: {select.source}, where: {select.where}\n  p: {predicate}"
+        )
+    return OracleResult("aggregate_filter_matches_where", 2)
+
+
 def group_counts_sum_to_the_total(statement: Statement, rng: random.Random) -> OracleResult:
     """Every row belongs to exactly one group, so the group counts must total |R|.
 
@@ -489,22 +522,55 @@ def group_counts_sum_to_the_total(statement: Statement, rng: random.Random) -> O
 # attributes at import so a renamed flag fails loudly rather than silently
 # disabling the oracle.
 #
-# TWO FLAGS ARE DELIBERATELY ABSENT, and their absence is itself a finding —
-# both are registered in single_table_known_gaps:
+# THREE FLAGS IN THIS FAMILY ARE ABSENT, and their absence is itself a finding.
+# config.py documents the whole family as "One kill-switch per optimizer strategy
+# ... for A/B testing a strategy against the rest of the pipeline. All default
+# False (every strategy enabled) — this changes no behaviour until a specific one
+# is set." For the first two below, setting one does not disable an optimization;
+# it breaks planning, so including them here would compare a result against an
+# error on every case:
 #
-#   disable_projection_pushdown   breaks EVERY query, including
-#                                 `SELECT * FROM t LIMIT 5` (12/12 in a
-#                                 representative battery: KeyError, TypeError,
-#                                 NotSupportedError).
 #   disable_redundant_operations  leaves a `Subquery` logical node the physical
-#                                 planner cannot dispatch.
+#                                 planner cannot dispatch — that strategy is the
+#                                 only remover of Subquery nodes. Fails on every
+#                                 CTE / derived table.
+#   disable_decorrelate_subquery  leaves a NodeType.SUBQUERY expression node in
+#                                 the predicate, which no downstream stage can
+#                                 lower ("unsupported node type 39"). Fails on
+#                                 `IN (subquery)` / `EXISTS (subquery)`. Never
+#                                 reached by THIS oracle — the single-table
+#                                 grammar generates no subqueries — so it is
+#                                 listed as a warning against adding it here
+#                                 before it is fixed, not as a live exclusion.
 #
-# config.py documents this whole family as "One kill-switch per optimizer
-# strategy ... for A/B testing a strategy against the rest of the pipeline. All
-# default False (every strategy enabled) — this changes no behaviour until a
-# specific one is set." For these two, setting one does not disable an
-# optimization; it breaks planning. Including them here would make this oracle
-# compare a result against an error on every case.
+#   disable_projection_pushdown   no longer breaks planning — the binder seeds
+#                                 every Scan with its full schema, so this pass
+#                                 only NARROWS (see binder/dataset.py). It is
+#                                 still absent here, for two reasons found by
+#                                 running this oracle pinned to it over 1,500
+#                                 generated statements (40 violations):
+#                                   * 35 are this ORACLE's own soundness gap, not
+#                                     engine defects: it compares full row
+#                                     CONTENT, and a LIMIT/OFFSET without a total
+#                                     order returns a ratified-arbitrary subset.
+#                                     Scan width changes morsel packing, so it
+#                                     changes WHICH rows that subset holds. A
+#                                     nested LIMIT changes the row COUNT too, so
+#                                     comparing counts instead is not sound
+#                                     either — the precondition has to exclude
+#                                     non-deterministic LIMIT outright.
+#                                   * 1 is a genuine wrong answer, and a third
+#                                     load-bearing dependency on this strategy:
+#                                     `SELECT DISTINCT "flag" FROM
+#                                     testdata.fuzzing.wide WHERE ("flag" IS
+#                                     FALSE) ORDER BY "flag" ASC NULLS LAST`
+#                                     returns 1 row with the strategy on and
+#                                     99,891 with it off. `SELECT DISTINCT` gets
+#                                     no Project node — Exit carries the
+#                                     projection — so DISTINCT dedups the stream
+#                                     AS IS, and the stream only equals the
+#                                     SELECT list because projection pushdown
+#                                     narrowed the scan.
 _DIFFERENTIAL_STRATEGIES = (
     "disable_predicate_pushdown",
     "disable_predicate_rewrite",
@@ -603,6 +669,13 @@ def applicable_oracles(statement: Statement) -> List[Oracle]:
     # PERMANENT, not a deadline. It costs ~25% of generated statements this one
     # oracle; limit_returns_the_right_number_of_rows and
     # limit_rows_come_from_the_unlimited_result still cover them below.
+    #
+    # A `not statement.distinct_set_operation` condition also stood here, for
+    # count-star-over-a-distinct-set-operation-returns-one. That defect is FIXED
+    # (projection_pushdown recorded the outer demand below a Distinct, so the
+    # anti/semi join a DISTINCT set operation compiles to pruned the dedup key
+    # away), the register entry is gone, and INTERSECT/EXCEPT are back under this
+    # oracle.
     if nestable and not statement.contains_limit and not statement.contains_offset:
         oracles.append(count_star_matches_materialised_rows)
     if nestable:
@@ -618,13 +691,7 @@ def applicable_oracles(statement: Statement) -> List[Oracle]:
             # The partition oracle rewrites the WHERE against the raw source, so
             # it needs a source it can name — a derived source would need the
             # subquery repeated, which is a different query.
-            #
-            # A NaN row is selected by none of p / NOT p / p IS NULL, so the
-            # partition cannot hold over a column that has one — see
-            # single_table_known_gaps/nan-rows-fall-outside-every-predicate-bucket,
-            # pinned by its own test. Delete this when the entry goes.
-            if not select.predicate_touches_nan:
-                oracles.append(predicate_partition)
+            oracles.append(predicate_partition)
             if statement.deterministic_multiset:
                 oracles.append(tautology_is_neutral)
                 oracles.append(double_negation_is_neutral)
@@ -641,6 +708,8 @@ def applicable_oracles(statement: Statement) -> List[Oracle]:
             oracles.append(aggregate_identities)
         if _pick_groupable_column(select, random.Random(0)) is not None:
             oracles.append(group_counts_sum_to_the_total)
+        if select.aggregate_filter is not None:
+            oracles.append(aggregate_filter_matches_where)
 
     return oracles
 

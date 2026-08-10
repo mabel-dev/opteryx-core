@@ -284,16 +284,16 @@ SELECT * FROM testdata.astronauts WHERE birth_date < current_timestamp + interva
 statement ok
 SELECT LTRIM('   ABC')
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM(LEADING '_' FROM '___ABC')
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM('_' FROM '__init__')
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM(BOTH '_' FROM '____dunder_')
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM(TRAILING '__' FROM '_dunder_')
 
 statement ok
@@ -305,7 +305,7 @@ SELECT TRIM('    ABC   ')
 statement ok
 SELECT TRIM(name) FROM $planets
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM(LEADING ' ' FROM name) FROM $planets
 
 

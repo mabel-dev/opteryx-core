@@ -27,6 +27,7 @@ from typing import Optional
 
 from opteryx.expression import NodeType
 from opteryx.expression import get_all_nodes_of_type
+from opteryx.models import LogicalColumn
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, INT64 as _CT_INT64
@@ -148,7 +149,31 @@ def is_simple_aggregate(aggregate_node) -> bool:
             col_type = getattr(expr.schema_column, "category", None)
             if col_type is None:
                 return False
-            # DATE, INTEGER and TIMESTAMP types preserve exact values in BRIN bounds
+            # This allowlist is the ONLY thing standing between `MIN`/`MAX` and a
+            # wrong answer, because `get_min_max_from_manifest` returns whatever
+            # the bounds hold without re-checking anything. Two invariants make
+            # these three categories safe, and BOTH must hold for anything added:
+            #
+            # 1. ORDINAL BOUNDS ARE THE VALUE. An ANALYZE/skene manifest carries
+            #    `Vector.ordinalize()` int64 keys, not decoded values, and this
+            #    strategy hands the bound straight back as the answer. For DATE,
+            #    INTEGER and TIMESTAMP ordinalize is an identity widen from
+            #    INT32/INT64 (ColumnType.ordinalize says so; `INT64.ordinalize(-5)`
+            #    is `-5`), so the ordinal IS the value. FLOAT's is not — it is a
+            #    monotonic bit-twiddle, and `FLOAT64.ordinalize(3.5)` is
+            #    4615063718147915776. Admitting FLOAT here would answer
+            #    `MIN(density)` with that integer.
+            # 2. THE BOUNDS COVER EVERY VALUE. Only a float can hold a NaN, and
+            #    Parquet excludes NaN from min/max by spec while draken ranks NaN
+            #    ABOVE everything (float_ops.h, architect-locked 2026-05-22). So a
+            #    float `MAX` read off parquet-sourced bounds is the largest FINITE
+            #    value where the engine says NaN. (`MIN` does not have this
+            #    problem — NaN is never the minimum — so FLOAT `MIN` is the one
+            #    piece of this that could be turned on, deliberately and alone.)
+            #
+            # `tests/unit/optimizer/statistics/test_statistics_only_min_max_type_gate.py`
+            # asserts both invariants against the list, so widening it without
+            # satisfying them fails rather than silently answering wrongly.
             if col_type not in (LogicalCategory.DATE, LogicalCategory.INTEGER, LogicalCategory.TIMESTAMP):
                 return False
             continue
@@ -770,6 +795,24 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Ensure origin is set for schema columns
         for col in getattr(scan_node.schema, "columns", []) or []:
             col.origin = [scan_node.alias]
+
+        # The scan's `.columns` describes the scan's OWN schema (the binder seeds it
+        # that way -- see binder/dataset.py::visit_scan), so re-pointing the scan at
+        # `$no_table` has to re-seed them too. Left stale, they still name the real
+        # table's columns while the reader now emits `$no_table`'s single column, and
+        # the native compiler rejects the plan with "a virtual dataset missing plan
+        # columns". Projection pushdown hid this by overwriting `.columns` from the
+        # NEW schema afterwards -- but only when it runs; with its kill-switch set the
+        # stale list survived to compile time.
+        scan_node.columns = [
+            LogicalColumn(
+                node_type=NodeType.IDENTIFIER,
+                source_column=col.name,
+                source=(col.origin[0] if col.origin else None),
+                schema_column=col,
+            )
+            for col in getattr(scan_node.schema, "columns", []) or []
+        ]
 
         # Finally, clear the manifest to avoid file-based readers from
         # providing file lists (we prefer virtual connector semantics

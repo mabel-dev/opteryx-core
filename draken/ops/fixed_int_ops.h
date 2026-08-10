@@ -43,6 +43,7 @@
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
 #include "ops/dict_take.h"
+#include "ops/slice_shape.h"  // slice_keep_dict — the shared keep-or-flatten rule
 #include "ops/int64_compare.h"    // CmpEq/Ne/Gt/Ge/Lt/Le, cmp_alloc_bool_buf,
                                   // cmp_copy_validity, cmp_and_validity
 #include "ops/int64_predicates.h" // BetweenOp<lo_incl,hi_incl>
@@ -1318,6 +1319,22 @@ static inline VecResult fixed_int_slice(const DrakenVector& v, uint32_t start, u
     const T*       data     = static_cast<const T*>(v.data);
     const uint8_t* src_null = v.validity;
 
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr && n > 0u) {
+        const uint32_t nb = (n + 7u) >> 3;
+        out_null = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!out_null) throw std::bad_alloc();
+        fi_copy_validity_range(out_null, src_null, start, n);
+        out_null = fi_normalize_validity(out_null, n);
+    }
+
+    // Keep the source's dictionary when that copies strictly fewer bytes than
+    // flattening it. One rule for every fixed-width family (ops/slice_shape.h);
+    // the width arithmetic there makes this unreachable for types <= 4 bytes.
+    VecResult kept;
+    if (slice_keep_dict<T>(v, start, n, out_null, TAG, kept)) return kept;
+
+
     T* dst = fi_alloc<T>(n);
 
     // Physical memcpy valid ONLY when selection is identity; data_length==length
@@ -1329,14 +1346,6 @@ static inline VecResult fixed_int_slice(const DrakenVector& v, uint32_t start, u
             dst[i] = data[v.selection[start + i]];
     }
 
-    uint8_t* out_null = nullptr;
-    if (src_null != nullptr && n > 0u) {
-        const uint32_t nb = (n + 7u) >> 3;
-        out_null = static_cast<uint8_t*>(draken_malloc(nb));
-        if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
-        fi_copy_validity_range(out_null, src_null, start, n);
-        out_null = fi_normalize_validity(out_null, n);
-    }
 
     VecResult r;
     r.data           = dst;

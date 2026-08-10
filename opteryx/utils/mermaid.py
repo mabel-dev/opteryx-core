@@ -225,6 +225,8 @@ _FILTER_JOIN_DIRECTIONS = {
     "left semi": "LEFT SEMI",
     "left anti": "LEFT ANTI",
     "left anti null-aware": "LEFT ANTI NULL-AWARE",
+    "left semi not-distinct": "LEFT SEMI (NULL=NULL)",
+    "left anti not-distinct": "LEFT ANTI (NULL=NULL)",
 }
 
 

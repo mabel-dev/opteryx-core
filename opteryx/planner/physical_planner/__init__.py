@@ -31,8 +31,10 @@ The Physical Planner does NOT optimize, bind, or rewrite the plan.
 """
 
 from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType
+from opteryx.expression import binary_operands
 from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import PhysicalPlan
 from opteryx.models.dataset_format import PARQUET
@@ -64,7 +66,7 @@ def _translate_jsonl_predicates(predicates, physical_by_identity):
 
     translated = []
     for condition in predicates or []:
-        left, right = condition.left, condition.right
+        left, right = binary_operands(condition)
         if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
             ident, literal, op = left, right, condition.value
         elif right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
@@ -94,7 +96,7 @@ def _translate_csv_predicates(predicates, physical_by_identity):
 
     translated = []
     for condition in predicates or []:
-        left, right = condition.left, condition.right
+        left, right = binary_operands(condition)
         if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
             ident, literal, op = left, right, condition.value
         elif right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
@@ -128,7 +130,7 @@ def _jsonl_scan_config(node_config):
     # A pushed predicate's column is not necessarily projected; its own
     # schema_column carries the same identity→name mapping.
     for condition in predicates:
-        for side in (condition.left, condition.right):
+        for side in binary_operands(condition):
             schema_column = getattr(side, "schema_column", None)
             if schema_column is not None:
                 physical_by_identity.setdefault(schema_column.identity, schema_column.name)
@@ -207,7 +209,11 @@ def _create_aggregate_and_group_node(logical_node, query_properties, registry):
     return registry.create(
         "Aggregate and Group",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "groupby_ndv_estimate")},
+        # pre_update_columns: a GROUP BY key that nothing above reads still has to be
+        # HASHED to separate the groups, but its values never have to be stored — the
+        # grouping contract is 64-bit hash identity. Carrying the set here is what lets
+        # the sink kill the key once it is hashed.
+        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "groupby_ndv_estimate", "pre_update_columns")},
     )
 
 
@@ -228,7 +234,10 @@ def _create_window_node(logical_node, query_properties, registry):
         **{
             k: v
             for k, v in node_config.items()
-            if k in ("partition_by", "order_by", "window_functions", "top_k")
+            # pre_update_columns: same reason as the sort — the PARTITION BY / ORDER BY
+            # keys are not in it, so it is the set the window must still emit.
+            if k in ("partition_by", "order_by", "window_functions", "top_k",
+                     "pre_update_columns")
         },
     )
 
@@ -310,7 +319,15 @@ def _create_join_node(logical_node, query_properties, registry):
         # INNER JOIN, NATURAL JOIN
         if DrakenInnerJoinNode.supports(**node_config):
             return registry.create("Inner Join", query_properties, **node_config)
-        raise UnsupportedSyntaxError("Draken inner join does not support this query shape")
+        # NotSupportedError, not UnsupportedSyntaxError: the statement parsed and bound
+        # fine, so nothing about the SQL is wrong - the engine's inner-join operator
+        # simply has no plan for this shape. Naming Draken told the reader about a
+        # component they have no way to act on.
+        raise NotSupportedError(
+            "This JOIN is not supported. The engine's inner join cannot handle the "
+            "shape of this query - rewriting the join conditions, or joining the "
+            "relations in a different order, may let it run."
+        )
     elif join_type == "nested loop":
         # NESTED LOOP JOIN (INNER JOIN)
         return registry.create("Nested Loop Join", query_properties, **node_config)
@@ -320,8 +337,15 @@ def _create_join_node(logical_node, query_properties, registry):
     elif join_type == "cross join":
         # CROSS JOIN, CROSS JOIN UNNEST
         return registry.create("Cross Join", query_properties, **node_config)
-    elif join_type in ("left anti", "left semi", "left anti null-aware"):
-        # LEFT SEMI, LEFT ANTI, LEFT ANTI NULL-AWARE (NOT IN) JOIN
+    elif join_type in (
+        "left anti",
+        "left semi",
+        "left anti null-aware",
+        "left semi not-distinct",
+        "left anti not-distinct",
+    ):
+        # LEFT SEMI, LEFT ANTI, LEFT ANTI NULL-AWARE (NOT IN), and the two
+        # not-distinct forms (INTERSECT / EXCEPT, where NULL equals NULL) JOIN
         return registry.create("Filter Join", query_properties, **node_config)
     elif join_type == "asof":
         # ASOF JOIN — nearest-neighbour time-series join
@@ -345,7 +369,16 @@ def _create_order_node(logical_node, query_properties, registry):
     return registry.create(
         "Sort",
         query_properties,
-        **{k: v for k, v in node_config.items() if k in ("order_by", "all_relations")},
+        **{
+            k: v
+            for k, v in node_config.items()
+            # pre_update_columns: the sort's ORDER BY keys are not in it (it is
+            # snapshotted before the node's own columns are collected), so it is
+            # precisely the set the sort must still emit — what lets the sink drop a
+            # key column once the sort keys are built instead of gathering it into
+            # every output row and having the Exit select throw it away.
+            if k in ("order_by", "all_relations", "pre_update_columns")
+        },
     )
 
 
@@ -484,6 +517,10 @@ def _create_drop_trigger_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_trigger", **logical_node.properties)
 
 
+def _create_alter_materialized_view_owner_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="alter_materialized_view_owner", **logical_node.properties)
+
+
 _DISPATCH = {
     LogicalPlanStepType.Aggregate:        _create_aggregate_node,
     LogicalPlanStepType.AggregateAndGroup: _create_aggregate_and_group_node,
@@ -520,6 +557,7 @@ _DISPATCH = {
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.Insert:           _create_insert_node,
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
+    LogicalPlanStepType.AlterMaterializedViewOwner: _create_alter_materialized_view_owner_node,
 }
 
 

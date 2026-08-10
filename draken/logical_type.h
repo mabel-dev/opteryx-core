@@ -52,17 +52,27 @@ enum class TimestampUnit : uint8_t {
 // IPV4 is the first kind that REFINES an otherwise-unparameterized physical
 // type rather than completing a parameterized one.  TIMESTAMP/TIME/DECIMAL/
 // VECTOR are mandatory — their physical tag is uninterpretable without the
-// descriptor.  IPV4 is optional: a DRAKEN_UINT32 vector with no descriptor is
-// a perfectly well-formed unsigned integer column, and one carrying
-// LogicalKind::IPV4 is the SAME 32 bits with a narrower meaning.
+// descriptor.  A DRAKEN_UINT32 vector with no descriptor is still a perfectly
+// well-formed unsigned integer column, and one carrying LogicalKind::IPV4 is
+// the SAME 32 bits with a narrower meaning.
+//
+// IPV4 is nonetheless CARRIED, not droppable.  This descriptor was originally
+// specified as optional, on the reasoning that losing it costs only rendering.
+// That does not hold: CIDR_AGG requires the descriptor and hard-refuses without
+// it, so a producer that drops it turns a valid query into an error.  A source
+// that KNOWS a column is IPv4 — a catalog-declared schema, a cast — must attach
+// the descriptor; it is not free to emit a bare UINT32 and rely on consumers
+// coping.  (Parquet scan: LC_IPV4 in native_parquet_scan_source.hpp.)
 //
 // Consequences, which every consumer must respect:
 //   - Dispatch stays on the PHYSICAL tag.  IPv4 sorts, groups, joins, hashes
 //     and compares as UINT32, which is exactly correct for IPv4 ordering.
 //   - Only the value-rendering and cast edges read this kind.  Nothing in a
 //     hot loop may branch on it.
-//   - Dropping the descriptor degrades an IPv4 column to UINT32 — a display
-//     and cast regression, never a wrong answer.
+//   - Because dispatch is physical, a dropped descriptor never produces a wrong
+//     ANSWER — but it does produce integer rendering where dotted-decimal was
+//     asked for, and a refusal from any consumer that requires IPv4.  Treat a
+//     missing descriptor on known-IPv4 data as a defect in the producer.
 //
 // No parameter fields are used: the prefix length is NOT carried on the value
 // (unlike a Postgres `inet`).  Prefix length is always an operand of the

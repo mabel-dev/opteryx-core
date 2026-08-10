@@ -15,6 +15,8 @@
 #include <limits>
 
 #include "engine/agg_budgets.hpp"   // kMedianBytes — shared with variables.py's report
+#include "ops/float_ops.h"          // draken::ops::fp_total_lt — THE ratified float order,
+                                    // imported not re-derived (see finalize_median)
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #  include <arm_neon.h>
@@ -287,10 +289,11 @@ struct CountState {
 // check and raise (fail loud; a query author who wants approximate opts in
 // by name via APPROX_PERCENTILE, the budget never silently decides).
 //
-// The counter is a per-shared-object static (inline function local): the one
-// extension that actually executes MEDIAN (the native engine) accounts
-// against a single instance; the legacy Cython spec-carrier modules never
-// append.
+// The counter is a per-shared-object static (inline function local). The
+// native engine is the only thing that compiles this header, so there is
+// exactly one instance and every MEDIAN buffer in the process accounts
+// against it. A second .so including this header would get its own counter
+// and its own budget — check that before adding an includer.
 // ---------------------------------------------------------------------------
 constexpr int64_t kMedianBudgetBytes = opteryx::agg_budgets::kMedianBytes;   // 512MB
 
@@ -363,16 +366,38 @@ struct MedianState {
 
     // Compute median in place. Mutates buf via std::nth_element.
     // Returns 0.0 if size==0; caller must check size first.
+    //
+    // MEDIAN OVER NaN — RATIFIED SEMANTICS.
+    // MEDIAN is an ORDER STATISTIC, and the order is the one float_ops.h
+    // locked on 2026-05-22 and MIN/MAX already answer under: NaN is a VALUE
+    // (validity bit set, not a null) that ranks above every other value,
+    // including +inf. So a NaN in the input does NOT poison the result — it
+    // sorts to the top and reaches the answer only when it is genuinely one
+    // of the middle elements. 2000 values of which 24 are NaN: the 24 sit at
+    // the top and the median is the mean of the 1000th and 1001st smallest,
+    // exactly as if they were any other large values. For an even count where
+    // exactly one of the two middles is NaN, the mean of the two selected
+    // values is NaN — that is IEEE arithmetic on the selected pair, not NaN
+    // propagation through the selection.
+    //
+    // The comparator MUST be fp_total_lt. Raw `<` is not a strict weak
+    // ordering in the presence of NaN (every comparison with NaN is false),
+    // so std::nth_element's precondition is violated and the partition
+    // depends on the order values happened to arrive in — which varies with
+    // morsel scheduling. That produced a silently wrong AND unstable MEDIAN.
     inline double finalize_median() noexcept {
         if (size == 0) return 0.0;
+        constexpr auto total_lt = [](double a, double b) noexcept {
+            return draken::ops::fp_total_lt<double>(a, b);
+        };
         size_t mid = size / 2;
-        std::nth_element(buf, buf + mid, buf + size);
+        std::nth_element(buf, buf + mid, buf + size, total_lt);
         double upper = buf[mid];
         if (size % 2 == 1) return upper;
         // Even count: lower middle is the max of the lower partition.
         // Partition [0, mid) was left after the first nth_element; the
         // largest element in it is the (mid-1)-th order statistic.
-        std::nth_element(buf, buf + mid - 1, buf + mid);
+        std::nth_element(buf, buf + mid - 1, buf + mid, total_lt);
         double lower = buf[mid - 1];
         return (lower + upper) * 0.5;
     }

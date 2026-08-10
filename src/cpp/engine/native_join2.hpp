@@ -46,9 +46,21 @@
 
 namespace opteryx::engine {
 
+// SemiNotDistinct/AntiNotDistinct are Semi/Anti under SQL's IS NOT DISTINCT FROM key
+// comparison — NULL is a value equal to itself. That is how INTERSECT and EXCEPT
+// compare rows, and it is a THIRD rule, distinct from BOTH of the others: Semi/Anti
+// make a NULL key unmatchable, and AntiNullAware propagates NOT IN's UNKNOWN (one
+// NULL on the build side empties the result). Using either for a set operation is a
+// wrong answer — see Join2BuildSink::null_equal.
 enum class JoinMode : uint8_t {
-    Inner = 0, LeftOuter = 1, Semi = 2, AntiNullAware = 3, Anti = 4, FullOuter = 5
+    Inner = 0, LeftOuter = 1, Semi = 2, AntiNullAware = 3, Anti = 4, FullOuter = 5,
+    SemiNotDistinct = 6, AntiNotDistinct = 7
 };
+
+// Does this mode compare keys with IS NOT DISTINCT FROM (NULL equals NULL)?
+inline bool join_mode_null_equal(JoinMode m) {
+    return m == JoinMode::SemiNotDistinct || m == JoinMode::AntiNotDistinct;
+}
 
 // Is this an ARRAY column that cannot have NULL rows gathered against it?
 //
@@ -240,6 +252,19 @@ struct Join2BuildGlobal : GlobalSinkState {
     // all-NULL build half against. Never consulted when real morsels exist — those
     // carry the authoritative (data-observed) types.
     MorselPtr schema_morsel;
+    // Non-null once finalize() has decided the build payload is worth
+    // CONSOLIDATING: every retained morsel gathered, in build-row-id order, into
+    // ONE morsel whose columns are dense. Build row id then indexes it directly
+    // (row i of the consolidated morsel IS build row i), which is what lets the
+    // probe emit its build half as a DICT — codes over this one block — instead of
+    // copying a physical value per output row.
+    //
+    // `morsels`/`row_m`/`row_r` stay valid and are NOT rewritten: ASOF holds raw
+    // arena pointers into the source vectors (asof_str_ptr), so the originals
+    // cannot be dropped here. The consolidated block is therefore an ADDITIONAL
+    // copy of the build payload, which is why finalize() only builds it when the
+    // estimated output is large enough to repay it many times over.
+    MorselPtr consolidated;
     std::vector<uint64_t> asof_keys;   // ASOF only: parallel to build rows
     // ASOF with a STRING or DECIMAL128 match column — see AsofKey. `asof_kind` is
     // PLAN-known (the sink reads it off the payload types), never learned from data,
@@ -412,15 +437,33 @@ struct Join2BuildSink : Sink {
     AsofKeyKind asof_kind = AsofKeyKind::Numeric;
     bool track_matches = false;   // FULL OUTER: allocate the matched[] flags and
                                   // retain NULL-keyed rows for the unmatched tail
+    // SET OPERATIONS (`left semi/anti not-distinct`): NULL is an ordinary key VALUE
+    // that equals itself, i.e. SQL's IS NOT DISTINCT FROM, which is how INTERSECT and
+    // EXCEPT compare rows. This is a THIRD key rule, not a variant of the ANTI
+    // `null_aware` flag on the probe — that one is NOT IN's UNKNOWN propagation and
+    // makes a single NULL annihilate the whole result. Here NULL-keyed rows go into
+    // the table like any other row and hash identity does the rest: draken hashes
+    // NULL per column to the NULL_HASH sentinel before combining, so (2, NULL)
+    // already hashes alike on both sides. The rule is therefore the ABSENCE of the
+    // exclusion below, never a second comparison path.
+    bool null_equal = false;
+    // Rows this join is ESTIMATED to emit (JoinBuildShapeStrategy), or -1 for
+    // unknown. The only input finalize() cannot measure for itself; it weighs this
+    // against the REAL byte size of the retained build payload to decide whether to
+    // consolidate. -1 keeps the pre-existing behaviour exactly, so a plan with no
+    // statistics is never moved onto the consolidating path by a fabricated number.
+    int64_t est_output_rows = -1;
 
     Join2BuildSink(std::vector<size_t> keys, std::vector<size_t> payload_idx,
                    std::vector<DrakenType> types, std::vector<const LogicalType*> logical,
                    std::vector<std::vector<EmptyColElem>> element,
-                   int asof = -1, int asof_type = 0, bool track = false)
+                   int asof = -1, int asof_type = 0, bool track = false,
+                   bool null_eq = false, int64_t est_rows = -1)
         : key_idx(std::move(keys)), payload_col_idx(std::move(payload_idx)),
           payload_types(std::move(types)), payload_logical(std::move(logical)),
           payload_element(std::move(element)),
-          asof_idx(asof), track_matches(track) {
+          asof_idx(asof), track_matches(track), null_equal(null_eq),
+          est_output_rows(est_rows) {
         if (asof_idx >= 0)
             asof_kind = asof_key_kind(static_cast<DrakenType>(asof_type));
     }
@@ -484,10 +527,14 @@ struct Join2BuildSink : Sink {
         if (!compute_row_hashes(in, key_idx, rowh, err)) return SinkResult::CONTINUE;
         for (uint32_t i = 0; i < rows; ++i) {
             // NULL in ANY key column: the row can never equi-match; record for the
-            // null-aware ANTI contract and skip the table insert.
+            // null-aware ANTI contract and skip the table insert. Under `null_equal`
+            // (set operations) there is nothing to exclude — NULL is a value that
+            // matches itself, so the row is inserted on the ordinary path below.
             bool any_null = false;
-            for (size_t k : key_idx) {
-                if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+            if (!null_equal) {
+                for (size_t k : key_idx) {
+                    if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+                }
             }
             if (any_null) {
                 l.saw_null_key = true;
@@ -582,7 +629,88 @@ struct Join2BuildSink : Sink {
         g.total_rows += l.next_row;
     }
 
-    void finalize(GlobalSinkState& gs, ErrCtx&) override {
+    // Should the build payload be consolidated into one block so the probe can emit
+    // its build half as a dict?
+    //
+    // The dense emit copies `dense_bpr` bytes per OUTPUT row. The dict emit copies
+    // the payload ONCE (`block_bytes`) and then 4 bytes of code per output row, per
+    // column. So consolidating pays exactly when
+    //
+    //     block_bytes + est*4*ncols  <  est*dense_bpr
+    //
+    // `block_bytes` and `dense_bpr` are MEASURED here from the retained vectors —
+    // the sink is holding them, so there is nothing to estimate about the build
+    // side. Only the output row count is a guess, and an unknown one refuses.
+    //
+    // A refusal costs nothing: the build side stays exactly as it is today (views,
+    // no copy, no arena). A wrong ACCEPT costs one copy of the build payload and
+    // keeps that block resident.
+    //
+    // ⚠️ kMargin is 2.0 and MUST NOT be relaxed to break-even. That was tried and
+    // MEASURED: at 1.0 (plain byte break-even) TPC-H Q18 went from ~1.0s to 10.4s.
+    //
+    // The reason the byte model alone is not enough is a PARALLELISM asymmetry it
+    // cannot see. The dense per-row copy happens inside the probe, spread across
+    // every probe worker and every batch. Consolidation happens ONCE, in finalize(),
+    // SINGLE-THREADED. So a job that merely moves fewer total bytes can still be far
+    // slower in wall time, because it moved them all on one thread. Q18's largest
+    // join consolidated 15M rows out of 1840 morsels (400MB) to buy a 28 -> 20
+    // bytes/row saving: a 1.04x byte win, paid for with a serial 400MB gather.
+    //
+    // kMargin therefore has to cover the serial/parallel gap, not just estimate
+    // error. 2.0 is the value at which the measured regressions disappear.
+    static constexpr double kMargin = 2.0;
+
+    // The second half of the same lesson: a payload has to be WIDE enough per row for
+    // codes to be a real saving. Q18's killer had dense_bpr=28 against code_bpr=20 —
+    // five fixed-width columns, where a 4-byte code replaces an 8-byte value and the
+    // ratio is 1.4x. Consolidating can never repay a serial pass for that. A
+    // string-carrying payload is 8-13x (Q10: 226 vs 28; cross join: 153 vs 12), which
+    // is the shape this optimization is actually for.
+    static constexpr double kMinPerRowRatio = 4.0;
+
+    static bool should_consolidate(const Join2BuildGlobal& g, int64_t est_rows) {
+        if (est_rows < 0) return false;            // unknown -> today's behaviour
+        if (g.morsels.empty() || g.total_rows == 0) return false;
+        // A single retained morsel is ALREADY one block; consolidating would copy it
+        // for nothing. (The dict emit still cannot use it directly — build row ids
+        // address it through row_m/row_r, not by position — so v1 simply declines.)
+        if (g.morsels.size() == 1) return false;
+
+        size_t block_bytes = 0;
+        size_t ncols = 0;
+        for (const MorselPtr& m : g.morsels) {
+            ncols = m->columns.size();
+            for (const CxxColumn& c : m->columns) {
+                // ARRAY declines. A dict shares only `data` (the offsets), while an
+                // ARRAY's values live in a CHILD VectorOwner reached through
+                // `own->child_owner` — which a borrowing owner does not have, so the
+                // emitted column would carry offsets into nothing. Sharing the child
+                // subtree too is a bigger change than this one; until then an ARRAY
+                // payload stays on the gather that already handles it.
+                if (c.view.type == DRAKEN_ARRAY) return false;
+                block_bytes += c.own ? draken_vector_owner_nbytes(c.own.get())
+                                     : draken_vector_nbytes(&c.view);
+            }
+        }
+        if (ncols == 0 || block_bytes == 0) return false;
+
+        // Dense bytes per output row: what one row of every payload column costs when
+        // materialized. Derived from the same measured block, so a dict-encoded build
+        // column (which the dense gather EXPANDS) is not mistaken for a cheap one:
+        // block_bytes/total_rows understates its per-row cost, making this test
+        // conservative in the direction of refusing. Never the other way.
+        const double dense_bpr =
+            static_cast<double>(block_bytes) / static_cast<double>(g.total_rows);
+        const double code_bpr = 4.0 * static_cast<double>(ncols);
+        if (dense_bpr < kMinPerRowRatio * code_bpr) return false;  // payload too narrow
+
+        const double est = static_cast<double>(est_rows);
+        return static_cast<double>(block_bytes) + est * code_bpr
+               < (est * dense_bpr) / kMargin;
+    }
+
+    void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         // No-op for ASOF, whose combine() populated `index` instead of queuing chunks.
         auto& g = static_cast<Join2BuildGlobal&>(gs);
         if (g.csr_active) build_join_csr(g);
@@ -601,6 +729,31 @@ struct Join2BuildSink : Sink {
             for (size_t i = 0; i < flags; ++i)
                 g.matched[i].store(0, std::memory_order_relaxed);
         }
+
+        // Consolidation runs LAST, after the block above has appended FULL OUTER's
+        // NULL-keyed rows to row_m/row_r, so the consolidated morsel covers the whole
+        // build address space — the unmatched tail gathers those rows too, and a
+        // consolidated block that stopped at total_rows would leave them unreachable.
+        if (!should_consolidate(g, est_output_rows)) return;
+        const size_t addressable = g.row_m.size();
+        std::vector<uint32_t> order(addressable);
+        for (size_t i = 0; i < addressable; ++i) order[i] = static_cast<uint32_t>(i);
+        // The engine's own row gather, over the entire build side in build-row-id
+        // order. Deliberately NOT a hand-written per-type copy: this is the one
+        // function that already handles every type a join can carry (strings with
+        // their arena, ARRAY child subtrees, DECIMAL/TIMESTAMP descriptors), so
+        // consolidation cannot develop a per-type gap the emit path does not have.
+        MorselPtr block = gather_rows(g.morsels, order, 0, addressable, g.row_m,
+                                      g.row_r, g.morsels.front()->names, err);
+        if (err.code != 0 || block == nullptr) {
+            // Consolidation is an OPTIMIZATION, and a failed one must not fail the
+            // query: clear the error and leave `consolidated` null so the probe takes
+            // the same gather it has always taken.
+            err.code = 0;
+            err.msg = nullptr;
+            return;
+        }
+        g.consolidated = std::move(block);
     }
 };
 
@@ -641,16 +794,95 @@ struct Join2ProbeOperator : Operator {
     // FULL OUTER: mark matched build rows so the UnmatchedBuildSource tail can
     // emit the rest. Relaxed idempotent byte stores — probes stay const/parallel.
     bool track_matches = false;
+    // Set-operation key rule — see Join2BuildSink::null_equal. Must agree with the
+    // build sink's flag: one side excluding NULL keys while the other admits them
+    // would silently drop every NULL row instead of matching it.
+    bool null_equal = false;
     static constexpr size_t kBatch = 8192;
     static constexpr uint32_t kNoBuildRow = UINT32_MAX;
 
     Join2ProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
-                       const Join2Ref* r, bool outer, bool track = false)
+                       const Join2Ref* r, bool outer, bool track = false,
+                       bool null_eq = false)
         : probe_key_idx(std::move(keys)), probe_payload_idx(std::move(payload)),
-          ref(r), left_outer(outer), track_matches(track) {}
+          ref(r), left_outer(outer), track_matches(track), null_equal(null_eq) {}
 
     std::unique_ptr<OperatorState> make_state() override {
         return std::make_unique<Join2ProbeState>();
+    }
+
+    // Emit the build half as a DICT over the consolidated build payload — the whole
+    // point of consolidating. Appends one column per consolidated column to `out`.
+    //
+    // Row i of `g.consolidated` IS build row i, so the physical index for output row
+    // i is just build_rows[i] resolved through the source's own selection (read
+    // uniformly — the consolidated column is dense, but nothing here depends on
+    // that, per the data[selection[i]] contract).
+    //
+    // Two things are genuinely per-output-row and cannot be shared: the CODES, and
+    // the VALIDITY. Validity is a per-LOGICAL-row mask (buffers.h), so a NULL in the
+    // build side, or a LEFT OUTER row with no build match at all, has to be
+    // reprojected onto the output's own bitmap. That is one bit per row against the
+    // 16+ bytes the dense gather would have copied.
+    static bool emit_build_dict(const Join2BuildGlobal& g,
+                                const std::vector<uint32_t>& build_rows, uint32_t n,
+                                CxxMorsel& out, ErrCtx& err) {
+        const size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
+        for (const CxxColumn& src : g.consolidated->columns) {
+            if (!src.own) {
+                err.code = 1;
+                err.msg = "Join2Probe: consolidated build column has no owner to "
+                          "share its payload from — fail loud, never silent corruption";
+                return false;
+            }
+            uint32_t* codes = static_cast<uint32_t*>(
+                draken_malloc((n == 0 ? 1 : static_cast<size_t>(n)) * sizeof(uint32_t)));
+            uint8_t* vbits = nullptr;
+            auto mark_null = [&](uint32_t i) {
+                if (vbits == nullptr) {
+                    vbits = static_cast<uint8_t*>(draken_malloc(vbytes == 0 ? 1 : vbytes));
+                    std::memset(vbits, 0xFF, vbytes == 0 ? 1 : vbytes);
+                }
+                vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+            };
+            for (uint32_t i = 0; i < n; ++i) {
+                const uint32_t br = build_rows[i];
+                if (br == kNoBuildRow) {
+                    // LEFT OUTER / ASOF unmatched probe row: no build row exists. Any
+                    // in-range code will do — the validity bit is what makes it NULL.
+                    codes[i] = 0;
+                    mark_null(i);
+                    continue;
+                }
+                if (br >= src.view.length) {
+                    draken_free(codes);
+                    if (vbits) draken_free(vbits);
+                    err.code = 1;
+                    err.msg = "Join2Probe: build row id outside the consolidated build "
+                              "payload — fail loud, never silent corruption";
+                    return false;
+                }
+                codes[i] = src.view.selection[br];
+                if (!sort_row_valid(src.view, br)) mark_null(i);
+            }
+            DrakenVector v;
+            v.data = src.view.data;              // BORROWED — see VectorOwner::data_source
+            v.selection = codes;
+            v.data_length = src.view.data_length;
+            v.length = n;
+            v.validity = vbits;
+            v.type = src.view.type;
+            v.flags = 0;                         // owned codes: neither identity nor a permutation
+            CxxColumn c;
+            c.own = std::make_shared<VectorOwner>(
+                v, OwnedBuffer<void>(nullptr), OwnedBuffer<uint8_t>(vbits),
+                OwnedBuffer<void>(codes));
+            c.own->logical_type = src.own->logical_type;
+            c.own->data_source = src.own;        // keeps the shared block alive
+            c.view = c.own->vec;
+            out.columns.push_back(std::move(c));
+        }
+        return true;
     }
 
     // Build one output morsel for the parallel (build_row | kNoBuildRow, probe_row)
@@ -702,6 +934,14 @@ struct Join2ProbeOperator : Operator {
                     }
                 }
             }
+            // Consolidated build side: emit CODES over the one shared block instead
+            // of copying a physical value per output row. Row i of `consolidated` IS
+            // build row i (finalize gathered it in build-row-id order), so the code
+            // for an output row is just its build row id — no rebasing, and no
+            // per-type code here at all.
+            if (!empty_build && g.consolidated != nullptr) {
+                if (!emit_build_dict(g, build_rows, n, *out, err)) return nullptr;
+            } else {
             std::vector<uint32_t> order(n);
             for (uint32_t i = 0; i < n; ++i) {
                 // LEFT OUTER / ASOF unmatched probe row: no build row exists, so hand
@@ -714,6 +954,7 @@ struct Join2ProbeOperator : Operator {
                                              bms.front()->names, err);
             if (err.code != 0 || gathered == nullptr) return nullptr;
             for (CxxColumn& c : gathered->columns) out->columns.push_back(std::move(c));
+            }
         }
 
         // Probe payload: the engine's one row gather (validity/strings/descriptors).
@@ -766,7 +1007,11 @@ struct Join2ProbeOperator : Operator {
         std::vector<uint32_t> build_rows, probe_rows;
         build_rows.reserve(kBatch);
         probe_rows.reserve(kBatch);
-        const bool keys_nullable = probe_keys_nullable(in, probe_key_idx);
+        // `null_equal` (set operations) makes NULL an ordinary matching value, so
+        // there is no null row to special-case — the per-row checks below collapse
+        // onto the same path a non-nullable key already takes.
+        const bool keys_nullable =
+            !null_equal && probe_keys_nullable(in, probe_key_idx);
 
         while (st.row < n) {
             uint32_t row = st.row;
@@ -968,7 +1213,7 @@ struct SemiAntiProbeState : OperatorState {};   // whole-morsel filter; no resum
 // Derives from Join2ProbeOperator purely to reuse `build_output` — the (build
 // payload | probe payload) pair gather — for the residual path below. The emit is
 // this class's own: probe rows only, never a joined row.
-struct SemiAntiProbeOperator : Join2ProbeOperator {
+struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
     bool anti;         // false = SEMI, true = ANTI (either flavour)
     bool null_aware;   // ANTI only: true = NOT IN's UNKNOWN rules, false = plain anti
 
@@ -985,12 +1230,29 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
     ExprProgram residual;
     ExprEvalFn residual_fn = nullptr;   // null = no residual; the cheap path below
 
+    // What this operator EMITS, which is not what it READS. A SEMI/ANTI join is an
+    // existence FILTER: it emits surviving probe rows unchanged, so its probe key —
+    // read here on every row — is usually wanted by nothing above it. `emit_prune`
+    // + `emit_cols` (EmitSubset, from native_sort.hpp) narrow the survivor gather
+    // below; unset means emit every probe column, exactly as before.
+    //
+    // Distinct from `probe_payload_idx`, which this operator inherits and which
+    // means something ELSE: the columns build_output puts in the PAIR morsel a
+    // correlated residual reads. The residual needs the full pair layout even when
+    // the output can be narrow, so the two must not be conflated into one field.
     SemiAntiProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
                           const Join2Ref* r, bool anti_, bool null_aware_,
-                          ExprProgram res, ExprEvalFn res_fn)
-        : Join2ProbeOperator(std::move(keys), std::move(payload), r, /*outer=*/false),
+                          ExprProgram res, ExprEvalFn res_fn,
+                          bool emit_prune_ = false,
+                          std::vector<uint32_t> emit_cols_ = {},
+                          bool null_eq = false)
+        : Join2ProbeOperator(std::move(keys), std::move(payload), r, /*outer=*/false,
+                             /*track=*/false, null_eq),
           anti(anti_), null_aware(null_aware_),
-          residual(std::move(res)), residual_fn(res_fn) {}
+          residual(std::move(res)), residual_fn(res_fn) {
+        emit_prune = emit_prune_;
+        emit_cols = std::move(emit_cols_);
+    }
 
     std::unique_ptr<OperatorState> make_state() override {
         return std::make_unique<SemiAntiProbeState>();
@@ -1065,7 +1327,11 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
         std::vector<uint64_t> rowh;
         if (!build_empty && !compute_row_hashes(in, probe_key_idx, rowh, err))
             return OpResult::NEED_INPUT;
-        const bool keys_nullable = probe_keys_nullable(in, probe_key_idx);
+        // `null_equal` (set operations) makes NULL an ordinary matching value, so
+        // there is no null row to special-case — the per-row checks below collapse
+        // onto the same path a non-nullable key already takes.
+        const bool keys_nullable =
+            !null_equal && probe_keys_nullable(in, probe_key_idx);
 
         // With a residual, existence has to be decided per candidate pair, so the
         // key-matching pairs are materialized and the predicate evaluated over them
@@ -1131,7 +1397,11 @@ struct SemiAntiProbeOperator : Join2ProbeOperator {
         std::vector<MorselPtr> ms{in};
         std::vector<uint32_t> row_m(n, 0), row_r(n);
         for (uint32_t i = 0; i < n; ++i) row_r[i] = i;
-        out = gather_rows(ms, survivors, 0, survivors.size(), row_m, row_r, in->names, err);
+        // The probe key's purpose is spent the moment `survivors` exists — every
+        // existence verdict above is already decided — so it is gathered only if
+        // something above this join actually reads it (see EmitSubset above).
+        out = gather_rows(ms, survivors, 0, survivors.size(), row_m, row_r, in->names,
+                          err, emit_ptr());
         return (err.code != 0 || out == nullptr) ? OpResult::NEED_INPUT : OpResult::EMIT;
     }
 };
@@ -1190,8 +1460,17 @@ struct UnmatchedBuildSource : Source {
             auto morsel = std::make_shared<CxxMorsel>();
             morsel->zero_col_rows = n;
 
-            // Build payload: real rows, the engine's one row gather.
-            if (!g.morsels.empty()) {
+            // Build payload: real rows, the engine's one row gather — or codes over
+            // the consolidated block when the probe half is already emitting those.
+            // On its own the tail is a SUBSET emit (fanout < 1), the one shape where
+            // a dict costs more memory than it saves; but when `consolidated` exists
+            // the probe's own outputs are already holding that block alive, so the
+            // tail's marginal memory cost here is zero and it saves the copy. If the
+            // block is absent the tail takes the gather exactly as before.
+            if (g.consolidated != nullptr) {
+                if (!Join2ProbeOperator::emit_build_dict(g, order, n, *morsel, err))
+                    return SourceResult::FINISHED;
+            } else if (!g.morsels.empty()) {
                 MorselPtr bhalf = gather_rows(g.morsels, order, 0, n, g.row_m, g.row_r,
                                               g.morsels.front()->names, err);
                 if (err.code != 0 || bhalf == nullptr) return SourceResult::FINISHED;
@@ -1238,16 +1517,22 @@ struct DeferredJoin2Probe : Operator {
     // SEMI/ANTI only: correlated non-equality residual (see SemiAntiProbeOperator).
     ExprProgram residual;
     ExprEvalFn residual_fn = nullptr;
+    // SEMI/ANTI only: the emit subset (see SemiAntiProbeOperator's EmitSubset). Held
+    // here only to hand to the inner operator when it is constructed.
+    bool emit_prune = false;
+    std::vector<uint32_t> emit_cols;
     std::once_flag once;
     std::unique_ptr<Operator> inner;
 
     DeferredJoin2Probe(std::vector<size_t> keys, std::vector<size_t> payload,
                        const Join2Ref* r, JoinMode m,
                        int asof_idx = -1, int asof_op_code = 0,
-                       ExprProgram res = ExprProgram(), ExprEvalFn res_fn = nullptr)
+                       ExprProgram res = ExprProgram(), ExprEvalFn res_fn = nullptr,
+                       bool emit_prune_ = false, std::vector<uint32_t> emit_cols_ = {})
         : key_idx(std::move(keys)), payload_idx(std::move(payload)), ref(r), mode(m),
           asof_probe_idx(asof_idx), asof_op(asof_op_code),
-          residual(std::move(res)), residual_fn(res_fn) {}
+          residual(std::move(res)), residual_fn(res_fn),
+          emit_prune(emit_prune_), emit_cols(std::move(emit_cols_)) {}
 
     std::unique_ptr<OperatorState> make_state() override {
         std::call_once(once, [this] {
@@ -1256,10 +1541,15 @@ struct DeferredJoin2Probe : Operator {
                     key_idx, payload_idx, ref,
                     static_cast<size_t>(asof_probe_idx), asof_op);
             } else if (mode == JoinMode::Semi || mode == JoinMode::Anti
-                       || mode == JoinMode::AntiNullAware) {
+                       || mode == JoinMode::AntiNullAware
+                       || mode == JoinMode::SemiNotDistinct
+                       || mode == JoinMode::AntiNotDistinct) {
+                const bool is_anti = mode != JoinMode::Semi
+                                     && mode != JoinMode::SemiNotDistinct;
                 inner = std::make_unique<SemiAntiProbeOperator>(
-                    key_idx, payload_idx, ref, mode != JoinMode::Semi,
-                    mode == JoinMode::AntiNullAware, residual, residual_fn);
+                    key_idx, payload_idx, ref, is_anti,
+                    mode == JoinMode::AntiNullAware, residual, residual_fn,
+                    emit_prune, emit_cols, join_mode_null_equal(mode));
             } else {
                 // FULL OUTER probes exactly like LEFT OUTER (preserved probe side,
                 // NULL build half on miss) and additionally marks matched build

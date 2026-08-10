@@ -51,7 +51,152 @@ Exception
                  └── VariableNotFoundError
 """
 
-from typing import Any, Optional, Union
+import re
+from typing import Any, Iterable, NamedTuple, Optional, Union
+
+# ======================== Begin Message Markup ========================
+# Error messages ARE markdown. The surface that displays them renders it; this
+# module owns what the markup means, and that separation is the whole contract -
+# the renderer never inspects the text, and nothing here knows how it is drawn.
+#
+#   column / variable name   italic          *user_id*
+#   SQL syntax               bold uppercase  **SHOW COLUMNS FROM**
+#   table name               code span       `public.astronomy.planets`
+#   suggestion               code span       `planetId`   (copyable in the UI)
+#   underlying error         underline       __Expected: end of statement__
+#
+# Markdown has no underline of its own. `__text__` is the token limited-markdown
+# renderers use for it (CommonMark would read it as bold), so it is the one
+# convention here that the renderer has to agree with. Every message goes through
+# these helpers so all five can be changed in one place.
+
+# Only the characters the display surface actually treats as marks. It consumes a
+# backslash ONLY in front of one of its own marks and leaves every other backslash
+# alone, which decides the two exclusions here:
+#
+#   '\\' is NOT escaped. Raw backslashes survive intact - `C:\temp\file.csv` and
+#        `'\d+'` render as written - so escaping them would DOUBLE every backslash
+#        in a path or a regex pattern. The cost is a name containing a literal
+#        backslash before a mark (`a\*b`), which is not a thing anyone has.
+#   '['  is NOT escaped. There is no evidence it is a mark on that surface, and a
+#        backslash in front of a non-mark is left in place - so escaping it would
+#        just show the reader a stray backslash.
+#
+# A SINGLE '_' is likewise absent: `_text_` is not italic there, deliberately,
+# because SQL is full of snake_case. `user_id` and `CIDR_AGG` must reach the
+# reader unbackslashed.
+_EMPHASIS_SPECIALS = "`*"
+
+# A RUN of underscores is different: `__text__` IS the underline mark. The surface
+# ignores it inside a word (`foo__bar__baz` stays literal), but at the edge of a
+# span it is not inside a word - `*__dunder__*` puts the run against a `*`, and an
+# underlying error containing `my__col` can pair its run with the closing mark of
+# md_cause. Both cases underline something nobody asked to underline.
+_UNDERSCORE_RUN = re.compile(r"__+")
+
+
+def _escape_emphasis(value: str) -> str:
+    """Backslash-escape the characters that would end an emphasis span early.
+
+    A column really can be named `a*b` - quoted identifiers permit it, and JSONL
+    keys are whatever the file says. Rendering `*a*b*` would break the span and
+    swallow the rest of the message, which is the one moment the reader most needs
+    to see the name intact.
+    """
+    text = "".join(f"\\{ch}" if ch in _EMPHASIS_SPECIALS else ch for ch in str(value))
+    return _UNDERSCORE_RUN.sub(lambda run: "\\_" * len(run.group()), text)
+
+
+def md_column(name: Any) -> str:
+    """A column or variable name, in italic."""
+    return f"*{_escape_emphasis(name)}*"
+
+
+def md_syntax(text: Any) -> str:
+    """SQL syntax, in bold uppercase."""
+    return f"**{_escape_emphasis(str(text).upper())}**"
+
+
+def md_code(value: Any) -> str:
+    """A code span - table names, suggestions, literals, type names, settings.
+
+    A code span cannot be escaped with backslashes; the fence has to grow past the
+    longest backtick run in the content, and a value that starts or ends with a
+    backtick needs padding spaces (CommonMark strips exactly one).
+    """
+    text = str(value)
+    longest = 0
+    run = 0
+    for ch in text:
+        run = run + 1 if ch == "`" else 0
+        longest = max(longest, run)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def md_table(name: Any) -> str:
+    """A table name, in a code span. Named for the call sites' sake - a table and a
+    suggestion are drawn the same way, but they are not the same thing."""
+    return md_code(name)
+
+
+def md_cause(text: Any) -> str:
+    """The underlying error, underlined."""
+    return f"__{_escape_emphasis(text)}__"
+
+
+def md_list(values: Iterable[Any], style=md_code) -> str:
+    """A comma-separated list of styled values, for 'supported values are ...'."""
+    return ", ".join(style(value) for value in values)
+
+
+_TERMINATORS = ".?!"
+
+
+def compose(*parts: Optional[str]) -> str:
+    """Join message fragments into whole sentences.
+
+    Every message is built through this rather than by concatenation, because the
+    defects concatenation produced were all in the joins: `Unknown column 'x' .`
+    (space before the period), `Unknown column 'x'  in 'y'.` (doubled space from a
+    fragment that already carried its own leading one), `Did you mean 'LENGTH'?.`
+    (terminator on top of a terminator), and one message that simply ended in a
+    comma. Empty and None fragments drop out, so a caller can pass an optional
+    clause without guarding it.
+
+    Runs of whitespace collapse, so callers may wrap fragments across source lines
+    freely. Messages that need real line structure (the parser error's snippet)
+    assemble themselves and do not come through here.
+    """
+    sentences = []
+    for part in parts:
+        if part is None:
+            continue
+        text = " ".join(str(part).split())
+        if not text:
+            continue
+        if text[-1] not in _TERMINATORS:
+            text += "."
+        sentences.append(text)
+    return " ".join(sentences)
+
+
+def did_you_mean(suggestion: Optional[Any]) -> str:
+    """The suggestion clause - always a sentence of its own, never a tail.
+
+    Two rules live here so they cannot drift across the call sites that offer
+    suggestions: the suggestion is a code span (the display surface makes those
+    copyable, which is the point of showing it), and it is its own sentence -
+    never appended after a comma, hyphen or colon. Returns "" when there is
+    nothing to suggest, so callers pass it to `compose` unguarded.
+    """
+    if suggestion is None:
+        return ""
+    return f"Did you mean {md_code(suggestion)}?"
+
+
+# ======================== End Message Markup ==========================
 
 
 # ======================== Begin Codebase Errors ========================
@@ -107,6 +252,35 @@ class ReadOnlyConnectorError(DatabaseError):
 # ======================== End PEP-0249 Exceptions ==========================
 
 
+class SourcePosition(NamedTuple):
+    """Where in the submitted SQL an error is, for an editor to underline.
+
+    A RANGE, not a point: the whole offending name gets marked, not one character of
+    it. Ranges are HALF-OPEN and follow the two conventions editors actually use, so
+    neither consumer has to do arithmetic that could be got wrong:
+
+    - `start_line` / `start_column` / `end_line` / `end_column` are 1-based, which is
+      what a person reads off a gutter and what Monaco's `IRange` wants.
+    - `start_offset` / `end_offset` are 0-based character offsets into the statement,
+      which is what CodeMirror's `from`/`to` wants and what `sql[start:end]` slices.
+
+    The two describe the same span. `end` is exclusive in both, so an empty range
+    (`start == end`) is a legitimate "here, between these characters" - it is what a
+    position with no known extent reduces to, and an editor draws it as a caret.
+
+    Coordinates index the SQL AS SUBMITTED - comments, line breaks and all - never the
+    rewritten text handed to the parser. Mapping between the two is the SQL rewriter's
+    job and it has already happened by the time this exists.
+    """
+
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+    start_offset: int
+    end_offset: int
+
+
 # ======================== Begin Opteryx Superclasses ========================
 # These should not be thrown directly
 class SqlError(ProgrammingError):
@@ -115,7 +289,37 @@ class SqlError(ProgrammingError):
 
     Where possible, SqlErrors in particular, should provide messages appropriate for
     end-users who may not know, or care, about the underlying SQL platform.
+
+    POINTING AT THE SQL
+    -------------------
+    Every one of these is about something the reader wrote, so every one of them can
+    say WHERE. `position` is that: a `SourcePosition` range over the statement as
+    submitted, for the editor to underline.
+
+    It is data, not drawing. The message never contains a caret, a snippet or any
+    other rendering of the position - this repo owns the TEXT and the renderer owns
+    the DRAWING, and a position printed into the message is the reader being asked to
+    line two things up by eye. `opteryx.utils.sql.underline` exists for terminals,
+    which have no editor to underline in, and is called by the surface that wants it.
+
+    Two attributes, split because the two halves are known in different places:
+
+    - `span` is set at the RAISE site, which knows which AST node went wrong but has
+      no idea what text the statement was. Flattened sqlparser coordinates,
+      `(start_line, start_column, end_line, end_column)`, indexing the text the PARSER
+      was given. Internal - consumers want `position`.
+    - `position` is set at the planner BOUNDARY, which has the statement and can map
+      those coordinates onto the text the reader submitted. See
+      `opteryx.planner.attach_source_position`.
+
+    Both stay None for anything the reader did not write at a place we can name - a
+    wildcard expansion, a predicate the optimizer moved, a plan built by an API rather
+    than parsed. No position is a normal outcome, not a defect.
     """
+
+    #: Class-level defaults, so no subclass has to remember to initialise them.
+    span = None
+    position = None
 
 
 class DataError(ProgrammingError):
@@ -147,24 +351,50 @@ class ColumnNotFoundError(SqlError):
         column: str = None,
         dataset: str = None,
         suggestion: str = None,
+        span=None,
     ):
         """
-        Return as helpful Column Not Found error as we can by being specific and offering
-        suggestions.
+        Return as helpful a Column Not Found error as we can, by being specific and
+        offering suggestions.
+
+        The advice is offered even when there IS a suggestion: the suggestion is a
+        typo detector's best guess and can be wrong, and a reader it guessed wrong
+        for still needs somewhere to go.
+
+        The advice used to open "Column names are case sensitive". They are not -
+        the binder resolves every identifier with `case_insensitive=True` (see
+        `locate_identifier_in_loaded_schemas`), so casing cannot be the cause of any
+        error this class reports. It sent readers off to audit the one thing that was
+        certainly not wrong. Do not reintroduce it: DATASET names can be case
+        sensitive, because they can resolve to a filesystem path, but column names
+        never are.
+
+        `span` is where the name was written - see `SqlError`, which turns it into a
+        caret at the planner boundary. None whenever the reference was not something
+        the reader wrote at that spot: a wildcard expansion, a predicate the optimizer
+        moved, a column named from a plan rather than from SQL.
         """
         self.column = column
         self.suggestion = suggestion
         self.dataset = dataset
+        self.span = span
 
-        dataset_message = (f" in '{dataset}'") if dataset else ""
         if column is not None:
-            message = f"Unknown column '{column}' {dataset_message}"
-            if suggestion is not None:
-                message += f"— did you mean '{suggestion}'?"
+            where = f" in {md_table(dataset)}" if dataset else ""
+            found = f"Column {md_column(column)} cannot be found{where}"
+            if dataset:
+                advice = (
+                    f"List the columns it does have with "
+                    f"{md_syntax('SHOW COLUMNS FROM')} {md_table(dataset)}"
+                )
             else:
-                message += "."
+                advice = (
+                    f"List a table's columns with {md_syntax('SHOW COLUMNS FROM')} "
+                    f"and the table name"
+                )
+            message = compose(found, did_you_mean(suggestion), advice)
         if message is None:  # pragma: no cover
-            message = "Query contained columns which could not be found."
+            message = compose("The query referenced columns that cannot be found")
         super().__init__(message)
 
 
@@ -175,8 +405,16 @@ class ColumnReferencedBeforeEvaluationError(SqlError):
 
     def __init__(self, column: str):
         self.column = column
-        message = f"Reference to '{column}' cannot be made here, it hasn't been evaluated yet due to the internal order of query evaluation."
-        super().__init__(message)
+        super().__init__(
+            compose(
+                f"Column {md_column(column)} cannot be referenced here - it has not been "
+                f"evaluated at this point in the query",
+                f"A column created in {md_syntax('SELECT')} is not available to "
+                f"{md_syntax('WHERE')} or {md_syntax('GROUP BY')} in the same query; "
+                f"repeat the expression, or wrap the query as a subquery and reference "
+                f"the column outside it",
+            )
+        )
 
 
 class DatasetNotFoundError(SqlError):
@@ -185,10 +423,21 @@ class DatasetNotFoundError(SqlError):
     def __init__(self, connector: str, dataset: str = None, suggestion: Optional[str] = None):
         self.dataset = dataset
         self.connector = connector
-        message = f"The requested dataset, '{dataset}', could not be found."
-        if suggestion is not None:
-            message += f" Did you mean '{suggestion}'?"
-        super().__init__(message)
+        self.suggestion = suggestion
+        super().__init__(
+            compose(
+                f"Dataset {md_table(dataset)} cannot be found",
+                did_you_mean(suggestion),
+                # Deliberately no "list them with ..." here: Opteryx has no
+                # dataset-listing statement (SHOW covers VARIABLES, USER, GRANTS,
+                # TRIGGERS FOR and MANIFEST FOR only), and sending the reader to a
+                # command that does not exist costs them a second error.
+                None
+                if suggestion
+                else "Dataset names are case sensitive, and may need qualifying with "
+                "their workspace and collection",
+            )
+        )
 
 
 class CollectionNotEmptyError(SqlError):
@@ -196,11 +445,12 @@ class CollectionNotEmptyError(SqlError):
 
     def __init__(self, collection: str):
         self.collection = collection
-        message = (
-            f"Collection '{collection}' is not empty. "
-            "Drop its datasets and views before dropping the collection."
+        super().__init__(
+            compose(
+                f"Collection {md_table(collection)} is not empty",
+                f"Drop its datasets and views first, then drop the collection",
+            )
         )
-        super().__init__(message)
 
 
 class FunctionNotFoundError(SqlError):
@@ -211,18 +461,23 @@ class FunctionNotFoundError(SqlError):
         message: str = None,
         function: str = None,
         suggestion: Optional[str] = None,
+        span=None,
     ):
         """
         Return as helpful Function Not Found error as we can by being specific and offering
         suggestions.
+
+        `span` is where the function name was written - see `SqlError`.
         """
         self.function = function
         self.suggestion = suggestion
+        self.span = span
 
         if message is None:
-            message = f"Function '{function}' does not exist."
-            if suggestion is not None:
-                message += f" Did you mean '{suggestion}'?."
+            message = compose(
+                f"Function {md_syntax(function)} cannot be found",
+                did_you_mean(suggestion),
+            )
         super().__init__(message)
 
 
@@ -230,16 +485,19 @@ class VariableNotFoundError(SqlError):
     """Exception raised when a variable is not found."""
 
     def __init__(self, variable: str, suggestion: Optional[str] = None):
-        if variable is not None:
-            self.variable = variable
-
-            message = f"Variable '{variable}' does not exist."
-            if suggestion is not None:
-                message += f" Did you mean '{suggestion}'?"
-
-            super().__init__(message)
-        else:
+        self.variable = variable
+        self.suggestion = suggestion
+        if variable is None:
             super().__init__()
+            return
+        super().__init__(
+            compose(
+                f"Variable {md_column(variable)} cannot be found",
+                did_you_mean(suggestion),
+                None if suggestion else f"{md_syntax('SHOW VARIABLES')} lists the "
+                f"variables that are set",
+            )
+        )
 
 
 class AmbiguousIdentifierError(SqlError):
@@ -248,7 +506,12 @@ class AmbiguousIdentifierError(SqlError):
     def __init__(self, identifier: Union[str, list, None] = None, message: Optional[str] = None):
         self.identifier = identifier
         if message is None:
-            message = f"Identifier reference '{identifier}' is ambiguous; Try adding the databaset name as a prefix e.g. 'dataset.{identifier}'."
+            message = compose(
+                f"Column {md_column(identifier)} is ambiguous - more than one relation "
+                f"in this query has a column with that name",
+                f"Qualify it with the relation it should come from, "
+                f"for example {md_code(f'dataset.{identifier}')}",
+            )
         super().__init__(message)
 
 
@@ -257,8 +520,14 @@ class AmbiguousDatasetError(SqlError):
 
     def __init__(self, dataset: str):
         self.dataset = dataset
-        message = f"Dataset reference '{dataset}' is ambiguous; Datasets referenced multiple times in the same query must be aliased."
-        super().__init__(message)
+        super().__init__(
+            compose(
+                f"Dataset {md_table(dataset)} is referenced more than once in this query, "
+                f"so a reference to it is ambiguous",
+                f"Give each reference its own alias with {md_syntax('AS')}, for example "
+                f"{md_code(f'{dataset} AS a')} and {md_code(f'{dataset} AS b')}",
+            )
+        )
 
 
 class UnexpectedDatasetReferenceError(SqlError):
@@ -267,7 +536,12 @@ class UnexpectedDatasetReferenceError(SqlError):
     def __init__(self, dataset: str, message: Optional[str] = None):
         self.dataset = dataset
         if not message:
-            message = f"Dataset '{dataset}' is referenced in query but it doesn't appear in a FROM or JOIN clause."
+            message = compose(
+                f"Dataset {md_table(dataset)} is referenced in the query, but it does not "
+                f"appear in a {md_syntax('FROM')} or {md_syntax('JOIN')} clause",
+                f"Add it to the query, or check whether the reference was meant to name "
+                f"one of the relations already there",
+            )
         super().__init__(message)
 
 
@@ -295,6 +569,65 @@ class UnsupportedSyntaxError(SqlError):
     """Exception raised for unsupported syntax."""
 
 
+class QueryParseError(SqlError):
+    """Raised when a statement is not valid SQL and cannot be parsed at all.
+
+    Distinct from UnsupportedSyntaxError, which means the statement parsed fine and
+    Opteryx will not run it. Here nothing was understood, so there is no clause to
+    name and the only orientation available is a position.
+
+    `position` is the range to underline, over the statement as submitted - the caller
+    has already mapped it off the text the parser was given. `line`/`column` remain as
+    the start of that range, for callers that only want a point. The message never
+    draws it: `opteryx.planner.parse_error` works out WHERE, this class says WHAT, and
+    the editor does the marking.
+    """
+
+    def __init__(
+        self,
+        *,
+        sql: Optional[str] = None,
+        line: Optional[int] = None,
+        column: Optional[int] = None,
+        cause: Optional[str] = None,
+        suggestion: Optional[str] = None,
+        hint: Optional[str] = None,
+        position: Optional[SourcePosition] = None,
+    ):
+        self.sql = sql
+        self.line = line
+        self.column = column
+        self.cause = cause
+        self.suggestion = suggestion
+        self.hint = hint
+        self.position = position
+
+        # Naming the position in the text as well as carrying it: a reader looking at a
+        # log, or an API response with no editor behind it, has nothing else to go on.
+        # On a single-line statement there is no line worth quoting.
+        if column is None:
+            headline = "The query could not be parsed"
+        elif sql and "\n" in sql and line is not None:
+            headline = f"The query could not be parsed at line {line}, column {column}"
+        else:
+            headline = f"The query could not be parsed at column {column}"
+
+        # Advice, in descending order of how much we actually know. A suggestion
+        # beats a shape-based guess, and a guess beats the generic fallback - but
+        # something is always said, because "could not be parsed" on its own leaves
+        # a reader with nowhere to go.
+        advice = did_you_mean(suggestion) or hint or (
+            "Check for a missing comma, an unclosed bracket or quote, or a keyword "
+            "that is not spelled the way SQL expects"
+        )
+
+        message = compose(headline, advice)
+        if cause:
+            message = f"{message}\n\nParser: {md_cause(cause)}"
+
+        super().__init__(message)
+
+
 class ResultTooLargeError(SqlError):
     """Raised when a query's result exceeds `sql_select_limit`.
 
@@ -317,9 +650,14 @@ class ResultTooLargeError(SqlError):
         self.estimated = estimated
         how = "is estimated to return" if estimated else "returned"
         super().__init__(
-            f"Query {how} {rows:,} rows, which exceeds the {limit:,} row limit "
-            f"(`sql_select_limit`). Add a LIMIT clause to your query to bound the "
-            f"result, e.g. `... LIMIT 1000`."
+            compose(
+                f"The query {how} {rows:,} rows, which is over the {limit:,} row limit "
+                f"set by {md_code('sql_select_limit')}",
+                # Not "or raise sql_select_limit": setting it needs a platform-admin
+                # entitlement, so for almost every reader that advice is a second error.
+                f"Add a {md_syntax('LIMIT')} clause to bound the result, for example "
+                f"{md_code('... LIMIT 1000')}",
+            )
         )
 
 
@@ -346,11 +684,86 @@ class VariantKeyError(IncorrectTypeError):
         self.what = what
         self.name = name
         super().__init__(
-            f"{what} on column '{name}' is not possible: the column is VARIANT "
-            "(a dynamic JSON value), which has no fixed type to key on. Cast it "
-            "to a concrete type first — e.g. use `->>` instead of `->` to extract "
-            "JSON text, or `CAST(... AS VARCHAR)`."
+            compose(
+                f"{md_syntax(what)} on column {md_column(name)} is not supported, because "
+                f"the column is {md_code('VARIANT')} - a dynamic JSON value, which has no "
+                f"fixed type to key on",
+                f"Cast it to a concrete type first: use {md_code('->>')} instead of "
+                f"{md_code('->')} to extract JSON text, or "
+                f"{md_code('CAST(... AS VARCHAR)')}",
+            )
         )
+
+
+class CidrAggTypeError(IncorrectTypeError):
+    """Raised when CIDR_AGG's operand is not an IPV4 column.
+
+    IPV4 refines UINT32, and that descriptor is the only thing separating an address
+    from any other 32-bit number — CIDR_AGG over an id or a count would fold plain
+    integers into well-formed, confident, entirely invented network ranges. The gate
+    is therefore on the descriptor rather than the width, and the refusal is
+    PERMANENT, not a coverage gap: hence IncorrectTypeError rather than
+    NotSupportedError, whose "not supported yet" wording told the reader to wait for
+    a feature that is never coming.
+
+    Raised from the native compiler's plan-time gate, which knows the column and its
+    type and so names both. The native sink refuses too, as a run-time backstop for a
+    vector that reaches it without the descriptor (cidr_operand_supported in
+    src/cpp/engine/native_group_sinks.hpp); that message is the no-name INTEGER form
+    of this one, word for word — keep the two in step.
+
+    ``operand_kind`` selects the two variable clauses, and the three values are the
+    three genuinely different things to tell the reader:
+
+      INTEGER — the case that needs explaining. An integer is bit-for-bit
+        indistinguishable from an address, so the refusal looks arbitrary until you
+        are told what it prevents. Gets the rationale AND the cast. The run-time
+        backstop is always this kind: reaching it means a UINT32 arrived without its
+        descriptor.
+      TEXT — nothing surprising about text not being an address, and the rationale
+        would be a non-sequitur ("a plain integer column is refused" about a
+        VARCHAR), so it gets the cast only.
+      OTHER — DECIMAL, FLOAT, TIMESTAMP and friends have NO cast to IPV4 at all
+        (see casts.pyx's IPV4 target: string family and integer widths only), so
+        suggesting `col::IPV4` would send the reader to a second error. Says the
+        column cannot hold addresses instead.
+    """
+
+    INTEGER = "integer"
+    TEXT = "text"
+    OTHER = "other"
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        type_name: Optional[str] = None,
+        operand_kind: str = INTEGER,
+    ):
+        self.name = name
+        self.type_name = type_name
+        self.operand_kind = operand_kind
+        column = md_code(f"{name}::IPV4" if name is not None else "<column>::IPV4")
+        if name is not None and type_name is not None:
+            requires = (
+                f"{md_syntax('CIDR_AGG')} requires an {md_code('IPV4')} column, but "
+                f"{md_column(name)} is {md_code(type_name)}"
+            )
+        else:
+            requires = f"{md_syntax('CIDR_AGG')} requires an {md_code('IPV4')} column"
+        if operand_kind == self.INTEGER:
+            rest = (
+                f"A plain integer column is refused because folding arbitrary integers "
+                f"into network ranges produces a well-formed, confident, wrong answer. "
+                f"Use {column} to cast"
+            )
+        elif operand_kind == self.TEXT:
+            rest = f"Use {column} to cast"
+        else:
+            rest = (
+                f"There is no cast from {md_code(type_name) if type_name else 'this type'} "
+                f"to {md_code('IPV4')} - only text and integer columns can hold addresses"
+            )
+        super().__init__(compose(requires, rest))
 
 
 class IncompatibleTypesError(Exception):
@@ -390,10 +803,10 @@ class IncompatibleTypesError(Exception):
     ):
         def _format_col(_type, _node, _name):
             if _node.node_type == 42:
-                return f"literal '{_node.value}' ({_type})"
+                return f"literal {md_code(_node.value)} ({md_code(_type)})"
             if _node.node_type == 38:
-                return f"column '{_name}' ({_type})"
-            return _name
+                return f"column {md_column(_name)} ({md_code(_type)})"
+            return md_column(_name)
 
         self.left_type = left_type
         self.right_type = right_type
@@ -404,14 +817,31 @@ class IncompatibleTypesError(Exception):
             super().__init__(message)
         elif self.column:
             super().__init__(
-                f"Incompatible types for column '{column}': {left_type} and {right_type}"
+                compose(
+                    f"Column {md_column(column)} has incompatible types on each side: "
+                    f"{md_code(left_type)} and {md_code(right_type)}",
+                    f"Cast one side to match the other with "
+                    f"{md_code('CAST(column AS type)')}",
+                )
             )
         elif self.left_column or self.right_column:
             super().__init__(
-                f"Incompatible types for {_format_col(left_type, left_node, left_column)} and {_format_col(right_type, right_node, right_column)}. Using `CAST(column AS type)` may help resolve."
+                compose(
+                    f"{_format_col(left_type, left_node, left_column)} and "
+                    f"{_format_col(right_type, right_node, right_column)} cannot be "
+                    f"compared, because their types do not match",
+                    f"Cast one side to match the other with "
+                    f"{md_code('CAST(column AS type)')}",
+                )
             )
         else:
-            super().__init__("Incompatible column types.")
+            super().__init__(
+                compose(
+                    "These column types cannot be compared",
+                    f"Cast one side to match the other with "
+                    f"{md_code('CAST(column AS type)')}",
+                )
+            )
 
 
 class ArrayWithMixedTypesError(SqlError):
@@ -420,6 +850,19 @@ class ArrayWithMixedTypesError(SqlError):
 
 class PermissionsError(SecurityError):
     """Exception raised for permissions errors."""
+
+
+class EgressRestrictedError(SecurityError):
+    """Raised when a write would copy a workspace's data into a different one
+    and the source workspace has `egress_protection` on.
+
+    Deliberately not a `PermissionsError`: the user may hold every permission
+    the statement needs. What is refused is the *destination* - the data may
+    not leave its workspace by this route - so reporting it as a missing grant
+    would send people to fix the wrong thing. Clearing it is an
+    `ALTER WORKSPACE <source> SET egress_protection TO OFF` by that workspace's
+    owner, and the message says so.
+    """
 
 
 # ======================== End SQL-Specific Exceptions ==========================
@@ -459,10 +902,14 @@ class EmptyDatasetError(DataError):
 
     def __init__(self, dataset: str):
         self.dataset = dataset
-        message = (
-            f"The requested dataset, '{dataset}', was found, but there was no valid partition."
+        super().__init__(
+            compose(
+                f"Dataset {md_table(dataset)} was found, but it has no valid partition to "
+                f"read",
+                f"If the query is time-travelling, the range may fall outside the data "
+                f"that has been committed",
+            )
         )
-        super().__init__(message)
 
 
 class UnnamedColumnError(SqlError):
@@ -493,10 +940,18 @@ class InvalidConfigurationError(DatabaseError):
         self.provided_value = provided_value
         self.valid_value_description = valid_value_description
 
-        message = f"Value of '{str(provided_value)[:DISPLAY_LIMIT]}{'...' if len(provided_value) > DISPLAY_LIMIT else ''}' for '{config_item}' is not valid."
-        if valid_value_description:
-            message += f" Value should be {valid_value_description}"
-        super().__init__(message)
+        shown = str(provided_value)[:DISPLAY_LIMIT]
+        if len(provided_value) > DISPLAY_LIMIT:
+            shown += "..."
+        super().__init__(
+            compose(
+                f"{md_code(shown)} cannot be used as the value of "
+                f"{md_column(config_item)}",
+                f"The value should be {valid_value_description}"
+                if valid_value_description
+                else None,
+            )
+        )
 
 
 class InvalidInternalStateError(DatabaseError):

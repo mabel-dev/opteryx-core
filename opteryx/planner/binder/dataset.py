@@ -12,6 +12,9 @@ from opteryx.exceptions import (
     AmbiguousDatasetError,
     InvalidFunctionParameterError,
     UnsupportedSyntaxError,
+    md_cause,
+    md_code,
+    md_syntax,
 )
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
@@ -196,6 +199,62 @@ def _resolve_glob_files(path: str, filesystem) -> list:
     return sorted(matched)
 
 
+# How each rejected argument shape is named back to the writer. Naming the shape
+# they wrote is the whole value of the message -- "was given a subquery" tells them
+# which of the two remedies below applies, "invalid argument" does not.
+_UNNEST_ARGUMENT_SHAPES = {
+    NodeType.SUBQUERY: "a subquery",
+    NodeType.IDENTIFIER: "a column reference",
+    NodeType.FUNCTION: "a function call",
+    NodeType.LITERAL: "a single value",
+}
+
+_UNNEST_REMEDY = (
+    f"Write the values out, {md_code('UNNEST((1, 2, 3)) AS x')}; to expand an array a query "
+    f"produces, join to it instead: "
+    f"{md_code('SELECT x FROM (SELECT ARRAY_AGG(c) AS a FROM t) AS s CROSS JOIN UNNEST(s.a) AS x')}."
+)
+
+
+def _validate_unnest_argument(node: Node) -> None:
+    """`FROM UNNEST(...)` builds a relation out of a literal array -- nothing else.
+
+    It is a SOURCE: there is no input stream here to resolve a column reference, a
+    function call or a subquery against, so the argument has to carry its own
+    values. `_unnest` (opteryx/operators/function_dataset/function_dataset.pyx)
+    reads `args[0].value` and iterates it as an array, and every other shape
+    reaches it as something it will iterate anyway -- a string splits into its
+    characters, an int raises a bare TypeError, and a subquery hands it a
+    LogicalPlan whose `Graph.__getitem__` returns None rather than raising, so
+    the legacy `__getitem__` iteration protocol walks it forever and the query
+    hangs allocating instead of failing.
+
+    Refused here because the binder is where the shape is already known -- by
+    read_morsels the plan is built and the only thing left to do is run it. This
+    mirrors the CROSS JOIN UNNEST route, which already refuses a source it cannot
+    resolve (opteryx/managers/execution/compiler.py::_compile_unnest).
+    """
+    if len(node.args) != 1:
+        raise InvalidFunctionParameterError(
+            f"{md_syntax('UNNEST')} in the {md_syntax('FROM')} clause takes exactly one array, "
+            f"{len(node.args)} arguments were given. {_UNNEST_REMEDY}"
+        )
+
+    argument = node.args[0]
+    # A parenthesised single value -- UNNEST((1)) -- is a one-row relation; _unnest
+    # wraps `centre.value` itself rather than iterating it.
+    if argument.node_type == NodeType.NESTED:
+        return
+    if argument.node_type == NodeType.LITERAL and isinstance(argument.value, (list, tuple)):
+        return
+
+    raise InvalidFunctionParameterError(
+        f"{md_syntax('UNNEST')} in the {md_syntax('FROM')} clause builds a relation from a "
+        f"literal array, and was given "
+        f"{_UNNEST_ARGUMENT_SHAPES.get(argument.node_type, 'an expression')}. {_UNNEST_REMEDY}"
+    )
+
+
 def visit_function_dataset(
     self, node: Node, context: BindingContext
 ) -> Tuple[Node, BindingContext]:
@@ -248,6 +307,7 @@ def visit_function_dataset(
         node.schema = schema
     elif node.function == "UNNEST":
         # this is strictly SELECT * FROM UNNEST(literal) AS alias(column)
+        _validate_unnest_argument(node)
         relation_name = node.alias
 
         columns = [
@@ -281,7 +341,7 @@ def visit_function_dataset(
                 element_type = _lt.FLOAT64
             else:
                 raise InvalidFunctionParameterError(
-                    "GENERATE_SERIES for numbers takes 1 (stop), 2 (start, stop) or 3 (start, stop, interval) parameters."
+                    "GENERATE_SERIES for numbers takes 1 (stop), 2 (start, stop) or 3 (start, stop, interval) parameters. Write `GENERATE_SERIES(10)`, `GENERATE_SERIES(1, 10)` or `GENERATE_SERIES(1, 10, 2)`."
                 )
         if first_arg_cat is not None and first_arg_cat in _TEMPORAL_TYPES:
             element_type = _lt.TIMESTAMP()
@@ -362,7 +422,7 @@ def visit_function_dataset(
             arg = _literal_value("ignore_errors")
             if arg.node_type != NodeType.LITERAL or not isinstance(arg.value, bool):
                 raise InvalidFunctionParameterError(
-                    "READ_JSONL option 'ignore_errors' must be a boolean literal."
+                    "READ_JSONL option 'ignore_errors' must be a boolean literal. It has to be a literal value, not a column or an expression."
                 )
             fail_on_error = not arg.value
         else:
@@ -372,7 +432,7 @@ def visit_function_dataset(
             arg = _literal_value("infer_schema")
             if arg.node_type != NodeType.LITERAL or not isinstance(arg.value, bool):
                 raise InvalidFunctionParameterError(
-                    "READ_JSONL option 'infer_schema' must be a boolean literal."
+                    "READ_JSONL option 'infer_schema' must be a boolean literal. It has to be a literal value, not a column or an expression."
                 )
             infer_schema = arg.value
         else:
@@ -392,7 +452,7 @@ def visit_function_dataset(
                 or not isinstance(arg.value, int)
             ):
                 raise InvalidFunctionParameterError(
-                    "READ_JSONL option 'infer_sample_size' must be an integer literal."
+                    "READ_JSONL option 'infer_sample_size' must be an integer literal. It has to be a literal value, not a column or an expression."
                 )
             # Rejected here rather than left to rugo's own guard so the error names the SQL
             # option the user actually wrote instead of the reader's parameter.
@@ -444,7 +504,7 @@ def visit_function_dataset(
         if protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
-                    f"READ_JSONL('{path}'): glob patterns are not supported for gs:// paths."
+                    f"READ_JSONL('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
                 )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,
@@ -542,7 +602,7 @@ def visit_function_dataset(
                     ) as reader:
                         candidate_morsel = next(iter(reader), None)
             except RuntimeError as err:
-                raise DatasetReadError(f"Cannot read JSONL file '{candidate_path}': {err}") from err
+                raise DatasetReadError(f"The JSONL file {md_code(candidate_path)} could not be read. {md_cause(err)}") from err
             finally:
                 file_obj.close()
 
@@ -576,7 +636,7 @@ def visit_function_dataset(
             raise NotSupportedError(
                 f"READ_JSONL('{path}') AS alias(...) is not supported -- only "
                 "AS alias (renaming the relation, not its columns) is. Use a "
-                "SELECT ... AS new_name wrapper to rename individual columns."
+                "**SELECT** ... AS new_name wrapper to rename individual columns."
             )
         external_names = physical_names
 
@@ -698,7 +758,7 @@ def visit_function_dataset(
         if protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
-                    f"READ_PARQUET('{path}'): glob patterns are not supported for gs:// paths."
+                    f"READ_PARQUET('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
                 )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,
@@ -733,7 +793,7 @@ def visit_function_dataset(
         try:
             rugo_metadata = read_metadata_from_memoryview(stream.memoryview)
         except RuntimeError as err:
-            raise DatasetReadError(f"Cannot read Parquet file '{schema_source_path}': {err}") from err
+            raise DatasetReadError(f"The Parquet file {md_code(schema_source_path)} could not be read. {md_cause(err)}") from err
         finally:
             stream.close()
 
@@ -748,7 +808,7 @@ def visit_function_dataset(
             raise NotSupportedError(
                 f"READ_PARQUET('{path}') AS alias(...) is not supported -- only "
                 "AS alias (renaming the relation, not its columns) is. Use a "
-                "SELECT ... AS new_name wrapper to rename individual columns."
+                "**SELECT** ... AS new_name wrapper to rename individual columns."
             )
         external_names = physical_names
 
@@ -848,7 +908,7 @@ def visit_function_dataset(
                 or len(arg.value) != 1
             ):
                 raise InvalidFunctionParameterError(
-                    "READ_CSV option 'separator' must be a single-character string literal."
+                    "READ_CSV option 'separator' must be a single-character string literal. It has to be a literal value, not a column or an expression."
                 )
             separator = arg.value
         else:
@@ -858,7 +918,7 @@ def visit_function_dataset(
             arg = _literal_value("has_header_row")
             if arg.node_type != NodeType.LITERAL or not isinstance(arg.value, bool):
                 raise InvalidFunctionParameterError(
-                    "READ_CSV option 'has_header_row' must be a boolean literal."
+                    "READ_CSV option 'has_header_row' must be a boolean literal. It has to be a literal value, not a column or an expression."
                 )
             has_header_row = arg.value
         else:
@@ -868,7 +928,7 @@ def visit_function_dataset(
             arg = _literal_value("ignore_errors")
             if arg.node_type != NodeType.LITERAL or not isinstance(arg.value, bool):
                 raise InvalidFunctionParameterError(
-                    "READ_CSV option 'ignore_errors' must be a boolean literal."
+                    "READ_CSV option 'ignore_errors' must be a boolean literal. It has to be a literal value, not a column or an expression."
                 )
             fail_on_error = not arg.value
         else:
@@ -883,7 +943,7 @@ def visit_function_dataset(
                 or arg.value <= 0
             ):
                 raise InvalidFunctionParameterError(
-                    "READ_CSV option 'infer_sample_size' must be a positive integer literal."
+                    "READ_CSV option 'infer_sample_size' must be a positive integer literal. It has to be a literal value, not a column or an expression."
                 )
             infer_sample_size = arg.value
         else:
@@ -908,7 +968,7 @@ def visit_function_dataset(
         if protocol == "gs":
             if is_glob:
                 raise NotSupportedError(
-                    f"READ_CSV('{path}'): glob patterns are not supported for gs:// paths."
+                    f"READ_CSV('{path}'): glob patterns are not supported for gs:// paths. Name the file exactly, or read the whole prefix without a wildcard."
                 )
             from opteryx.connectors.io_systems.anonymous_gcs_filesystem import (
                 anonymous_gcs_filesystem,
@@ -958,7 +1018,7 @@ def visit_function_dataset(
                     infer_sample_size=infer_sample_size,
                 )
             except RuntimeError as err:
-                raise DatasetReadError(f"Cannot read CSV file '{candidate_path}': {err}") from err
+                raise DatasetReadError(f"The CSV file {md_code(candidate_path)} could not be read. {md_cause(err)}") from err
             finally:
                 file_obj.close()
 
@@ -984,7 +1044,7 @@ def visit_function_dataset(
             raise NotSupportedError(
                 f"READ_CSV('{path}') AS alias(...) is not supported -- only "
                 "AS alias (renaming the relation, not its columns) is. Use a "
-                "SELECT ... AS new_name wrapper to rename individual columns."
+                "**SELECT** ... AS new_name wrapper to rename individual columns."
             )
         external_names = physical_names
 
@@ -1039,7 +1099,7 @@ def visit_function_dataset(
         # rugo predicate tuple can express; see CsvPredicatePushable.
         node.connector = CsvPredicatePushable()
     else:
-        raise UnsupportedSyntaxError(f"{node.function} cannot be used in place of a table.")
+        raise UnsupportedSyntaxError(f"{node.function} cannot be used in place of a table. It returns a value, not a set of rows, so it belongs in the **SELECT** list rather than the **FROM** clause.")
     return node, context
 
 
@@ -1170,5 +1230,26 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             context.telemetry.time_binding_metadata += (
                 _bind_time.monotonic_ns() - _bind_meta0
             )
+
+    # A bound Scan reads its whole schema until something proves otherwise. Narrowing
+    # that set is ProjectionPushdownStrategy's job and it overwrites this wholesale;
+    # supplying the full width HERE is what makes that strategy an optimization rather
+    # than a load-bearing planning stage. Without it, `Scan.columns` stayed None all the
+    # way to the physical planner whenever pushdown didn't run (its kill-switch set, per
+    # opteryx/config.py) and every query died — the pass that PRUNES columns was also
+    # the only pass that RESOLVED them.
+    #
+    # Every other node type the pushdown pass writes `.columns` onto (Subquery, Union,
+    # Join, the READ_* FunctionDatasets) already arrives here carrying a column list, so
+    # Scan was the only hole.
+    node.columns = [
+        LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=column.name,
+            source=(column.origin[0] if column.origin else None),
+            schema_column=column,
+        )
+        for column in node.schema.columns
+    ]
 
     return node, context

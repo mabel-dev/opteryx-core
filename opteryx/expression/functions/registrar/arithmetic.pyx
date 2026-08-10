@@ -168,7 +168,15 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
     _num = ParameterSpec(name="num", type_family="numeric")
     _date_value = ParameterSpec(name="value", type_family="date")
     _timestamp_value = ParameterSpec(name="value", type_family="timestamp")
-    _temporal_unit = ParameterSpec(name="unit", type_family="string", constant_only=True)
+    _temporal_unit = ParameterSpec(
+        name="unit",
+        type_family="string",
+        constant_only=True,
+        # The truncation boundaries draken_date_trunc implements. Narrower than
+        # DATEDIFF's part set (millisecond/microsecond are differences, not
+        # boundaries) — the two were previously both just "a unit string".
+        domain=("year", "quarter", "month", "week", "day", "hour", "minute", "second"),
+    )
 
     return [
         FunctionDefinition(

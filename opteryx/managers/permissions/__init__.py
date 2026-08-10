@@ -7,7 +7,7 @@ from fnmatch import fnmatch
 from typing import Iterable
 from typing import List
 
-from opteryx.exceptions import PermissionsError
+from opteryx.exceptions import PermissionsError, md_syntax, md_table
 from opteryx.models import ExecutionContext
 
 ACTION_MAP = {
@@ -17,6 +17,15 @@ ACTION_MAP = {
     "UPDATE": {"writer", "owner"},
     # Creating a brand-new relation risks nothing existing; a writer may do it.
     "CREATE": {"writer", "owner"},
+    # Rebuilding a materialized view from its own stored definition. Mechanically
+    # it is a CREATE OR REPLACE, but the decision to have this relation at all
+    # was taken - and authorized - when the view was created, and its contents
+    # are derived rather than authored. So a refresh is a writer-tier act, not
+    # the owner-tier one that replacing a hand-written table is. Without this
+    # tier a writer could create a materialized view that only an owner could
+    # ever keep fresh, which is exactly the trap REFRESH MATERIALIZED VIEW
+    # exists to avoid.
+    "REFRESH": {"writer", "owner"},
     # Dropping a relation destroys it and its history; a writer may change a
     # relation's contents but only an owner may remove the relation itself.
     # CREATE OR REPLACE on an existing relation reuses this tier: it has the
@@ -102,7 +111,10 @@ def can_perform_workspace_action(
         get_logger().error(
             f"Permission check failed for policies {policies} on workspace {workspace} with action {action}: {exc}"
         )
-        raise PermissionsError(f"Permission denied for action {action} on workspace {workspace}.")
+        raise PermissionsError(
+            f"This session is not permitted to {md_syntax(action)} the workspace "
+            f"{md_table(workspace)}."
+        )
 
 
 def can_perform_action(
@@ -154,4 +166,7 @@ def can_perform_action(
         get_logger().error(
             f"Permission check failed for policies {policies} on table {table} with action {action}: {exc}"
         )
-        raise PermissionsError(f"Permission denied for action {action} on table {table}.")
+        raise PermissionsError(
+            f"This session is not permitted to {md_syntax(action)} the table "
+            f"{md_table(table)}."
+        )

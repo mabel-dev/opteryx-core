@@ -1300,8 +1300,6 @@ static int __Pyx_init_co_variables(void) {
     extern "C" const CxxMorsel* cxx_morsel_raw_ptr(PyObject* handle);
     extern "C" CxxMorsel* cxx_take_c(const CxxMorsel*, const int32_t*, uint32_t);
     extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel*, uint32_t, uint32_t);
-    extern "C" CxxMorsel* cxx_align_c(const CxxMorsel*, const CxxMorsel*,
-                                      const int32_t*, const int32_t*, uint32_t);
     extern "C" CxxMorsel* cxx_cast_column_c(const CxxMorsel*, uint32_t, int);
     extern "C" CxxMorsel* cxx_mask_c(const CxxMorsel*, const DrakenVector*);
     extern "C" CxxMorsel* cxx_mask_with_consts_c(const CxxMorsel*, const DrakenVector*,

@@ -4,7 +4,18 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import pytest
-import jellyfish
+
+# jellyfish is the SOUNDEX reference oracle (declared in tests/requirements.txt).
+# A plain `import jellyfish` here failed COLLECTION, which pytest treats as fatal —
+# one absent dev dependency aborted the entire `pytest tests/unit` run rather than
+# skipping this module. Skip so a missing oracle cannot masquerade as a broken
+# suite. The skip is reported with its reason, so it is visible, not silent: there
+# is nothing to check the native implementation against without it.
+jellyfish = pytest.importorskip(
+    "jellyfish",
+    reason="jellyfish is the SOUNDEX reference oracle — `pip install jellyfish` "
+    "(tests/requirements.txt). Without it these tests verify nothing.",
+)
 
 import draken.draken_native as dn
 from opteryx.compiled.nanobind.vectors import vector_soundex

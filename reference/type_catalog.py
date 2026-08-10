@@ -218,7 +218,11 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "notes": (
             "All scales are stored as INT64. "
             "The 1677-09-21 to 2262-04-11 range applies only to `TIMESTAMP[ns]`; the default microsecond scale "
-            "covers a far wider range (tested from at least year 1500 to year 9999). "
+            "covers a far wider range. "
+            "EVERY scale is bounded by year 1..9999 — a value outside it cannot be materialised, and a "
+            "computed one (a large `TIME_BUCKET` magnitude, a `FROM_UNIXTIME` past the window) surfaces as "
+            "`ValueError: year must be in 1..9999`. In epoch seconds the inclusive endpoints are "
+            "-62135596800 and 253402300799. "
             "Timezone information is not stored — all timestamps are naive (no offset). "
             "A trailing timezone suffix (`Z`, `+01:00`) in a string literal is accepted and discarded — "
             "the wall-clock date/time as written is kept, only the offset is dropped. "
@@ -227,6 +231,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "limitations": [
             "`1::TIMESTAMP` is not valid — you must specify the scale: `1::TIMESTAMP[s]`.",
             "Timestamps outside 1677–2262 are not representable at `TIMESTAMP[ns]` scale (nanosecond storage overflows outside that range); the default microsecond scale does not have this restriction.",
+            "No scale represents a year outside 1..9999. This bounds the RESULT of temporal arithmetic too, not just literals and casts: an expression whose value falls outside the window raises rather than saturating.",
             "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST.",
         ],
     },
@@ -269,11 +274,12 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             {"type": "from BOOLEAN",   "example": "TRUE::VARCHAR",                  "note": "'true' or 'false'"},
             {"type": "from DATE",      "example": "date_col::VARCHAR",               "note": "'YYYY-MM-DD'"},
             {"type": "from TIMESTAMP", "example": "ts_col::VARCHAR",                 "note": "ISO 8601 string representation"},
+            {"type": "from VARBINARY", "example": "bin_col::VARCHAR",                "note": "Reinterprets the raw bytes as ASCII text. UTF-8 is NOT validated, so bytes that are not ASCII produce an undefined VARCHAR that a client may be unable to decode — cast to NVARCHAR instead, which validates and fails on invalid sequences"},
         ],
         "comparable_with": ["VARCHAR", "NVARCHAR", "VARBINARY"],
-        "notes": "Supports `LIKE` (case-sensitive), `ILIKE` (case-insensitive), and `RLIKE` (regular expression) pattern matching.",
+        "notes": "Supports `LIKE` (case-sensitive), `ILIKE` (case-insensitive), and `RLIKE` (regular expression) pattern matching. Every VARCHAR operation works on BYTES: LENGTH counts bytes, SUBSTRING/LEFT/RIGHT take byte offsets, and REVERSE reverses bytes. On ASCII content — the only content VARCHAR defines — bytes and characters are the same thing. Use NVARCHAR for anything else; its equivalents count code points.",
         "limitations": [
-            "Non-ASCII bytes stored in a VARCHAR column produce undefined behaviour — use NVARCHAR for Unicode.",
+            "Non-ASCII bytes stored in a VARCHAR column produce undefined behaviour — use NVARCHAR for Unicode. A byte-wise operation will happily split a multi-byte character: `REVERSE` over UTF-8 held in a VARCHAR returns an invalid sequence, and that is the type's contract, not a fault in the function.",
             "String values (VARCHAR/NVARCHAR/VARBINARY alike) are length-capped at just under 4 GiB per value (length is stored as uint32).",
         ],
     },

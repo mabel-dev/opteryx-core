@@ -77,7 +77,7 @@ def parameter_list_binder(node: Union[Dict, List], parameter_set: List[Any]) -> 
                 raise ParameterError("Parameter lists are only used with qmark (?) parameters.")
             if not parameter_set:
                 raise ParameterError(
-                    "Incorrect number of bindings supplied. More placeholders than parameters."
+                    "Incorrect number of bindings supplied. More placeholders than parameters. Supply one value for each placeholder in the statement."
                 )
             placeholder_value = parameter_set.pop(0)
             if "value" in dir(placeholder_value):
@@ -99,7 +99,7 @@ def parameter_dict_binder(node: Union[Dict, List], parameter_set: Dict[str, Any]
                 placeholder_name = placeholder_name.value
             placeholder_name = placeholder_name[1:]
             if placeholder_name not in parameter_set:
-                raise ParameterError(f"Parameter not defined - {placeholder_name}")
+                raise ParameterError(f"Parameter not defined - {placeholder_name}. Supply a value for it, or remove the placeholder from the statement.")
             placeholder_value = parameter_set[placeholder_name]
             return _build_literal_node(placeholder_value)
         return {k: parameter_dict_binder(v, parameter_set) for k, v in node.items()}
@@ -114,7 +114,7 @@ def do_ast_rewriter(asts: List[dict], parameters: Union[list, dict]):
         with_parameters_exchanged = parameter_list_binder(asts, parameter_set=parameters)
         if len(parameters) != 0:
             raise ParameterError(
-                "More parameters were provided than placeholders found in the query."
+                "More parameters were provided than placeholders found in the query. Supply one value for each placeholder in the statement."
             )
     elif isinstance(parameters, dict) and len(parameters) > 0:
         with_parameters_exchanged = parameter_dict_binder(asts, parameter_set=parameters or {})

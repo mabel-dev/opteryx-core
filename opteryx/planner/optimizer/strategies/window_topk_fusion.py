@@ -44,7 +44,7 @@ Scope of this first cut (deliberately narrow):
   or `rank <= 0` filter drops everything, which is not worth special-casing).
 """
 
-from opteryx.expression import NodeType
+from opteryx.expression import NodeType, binary_operands
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -90,7 +90,7 @@ def _match_topk_filter(condition, target_identity: str):
     if condition is None or condition.node_type != NodeType.COMPARISON_OPERATOR:
         return None
     op = condition.value
-    left, right = condition.left, condition.right
+    left, right = binary_operands(condition)
 
     left_identity, right_identity = _identity_of(left), _identity_of(right)
     left_literal, right_literal = _int_literal_of(left), _int_literal_of(right)

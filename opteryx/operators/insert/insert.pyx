@@ -51,6 +51,14 @@ class InsertNode(BasePlanNode):
         self.defining_query = parameters.get("defining_query")
         self.source_tables = parameters.get("source_tables")
 
+        # REFRESH MATERIALIZED VIEW desugars to a CoRTAS carrying this flag. It
+        # is what lets the operator stamp the view's refresh state on success:
+        # the worker only ever stamps trigger-fired refreshes, so without it a
+        # manual refresh - the documented recovery path after a failed one -
+        # would succeed while leaving `last-refreshed-at-ms` reading as though
+        # it had never run.
+        self.is_refresh = parameters.get("is_refresh", False)
+
         self._file_entries = []
         self._total_rows = 0
         self.result: Optional[NonTabularResult] = None
@@ -116,6 +124,14 @@ class InsertNode(BasePlanNode):
                     defining_sql,
                     self.source_tables,
                     author=self._author,
+                )
+            if self.is_refresh:
+                # The refresh landed. Stamping here rather than in the worker
+                # covers manual refreshes too - the worker only sees the
+                # trigger-fired ones, and it is the failure path that needs it
+                # (a refresh that dies cannot stamp its own state).
+                self.connector.mark_materialized_view_refreshed(
+                    self.relation_name, status="succeeded", author=self._author
                 )
             self.result = NonTabularResult(
                 record_count=self._total_rows,

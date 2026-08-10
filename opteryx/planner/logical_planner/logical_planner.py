@@ -14,7 +14,14 @@ import time
 from enum import Enum, auto
 from typing import List, Optional, Tuple
 
-from opteryx.exceptions import UnnamedColumnError, UnsupportedSyntaxError
+from opteryx.exceptions import (
+    UnnamedColumnError,
+    UnsupportedSyntaxError,
+    compose,
+    md_code,
+    md_column,
+    md_syntax,
+)
 from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner import build_literal_node
@@ -77,6 +84,7 @@ class LogicalPlanStepType(int, Enum):
     AlterWorkspace = auto()
 
     DropTrigger = auto()
+    AlterMaterializedViewOwner = auto()
 
 
 class LogicalPlan(Graph):
@@ -255,7 +263,7 @@ def _apply_column_aliases(column_aliases: list, columns: list, relation: str) ->
     if not columns or any(column.node_type == NodeType.WILDCARD for column in columns):
         raise UnsupportedSyntaxError(
             f"Relation '{relation}' declares column aliases over a wildcard projection. "
-            "Name the columns in the body instead of using SELECT *."
+            "Name the columns in the body instead of using `SELECT *`."
         )
 
     if len(column_aliases) != len(columns):
@@ -278,7 +286,7 @@ def extract_ctes(branch):
             # That does not exist yet. Until it does, say so: previously the self-
             # reference was re-expanded forever and hung the planner.
             raise UnsupportedSyntaxError(
-                "WITH RECURSIVE is not supported. Rewrite the query without recursion."
+                "**WITH RECURSIVE** is not supported. Rewrite the query without recursion."
             )
         for _ast in with_clause["cte_tables"]:
             alias = _ast.get("alias")["name"]["value"]
@@ -381,29 +389,46 @@ def _table_name(branch):
 
 
 def _validate_where_clause_expression(
-    node: Node, clause_label: str = "WHERE clause", example_prefix: str = "WHERE "
+    node: Node,
+    clause_label: str = "WHERE clause",
+    example_prefix: str = "WHERE ",
+    *,
+    under_not: bool = False,
 ) -> None:
-    """Validate that a WHERE clause (or JOIN ON condition) contains a valid boolean
-    expression.
+    """Validate that a WHERE clause (or JOIN ON condition) is a boolean VALUE
+    EXPRESSION.
 
-    WHERE/ON clauses must contain explicit comparisons or boolean operators, not bare
-    literals or identifiers. This prevents ambiguity and silent incorrect results — a
-    bare-literal conjunct (e.g. `ON a.x = b.y AND FALSE`) has no column to key a join
-    on and no column for a Filter step to reference, so it cannot be routed through
-    the optimizer's predicate-pushdown machinery and would otherwise be silently
-    dropped between planning and execution instead of failing loud.
+    RULING 2026-08-10 (architect). "Is this boolean?" is a TYPE question, and it is
+    NOT answered here — `binder/filter.py::visit_filter` answers it against real bound
+    types and names the offender ("condition `arr_int[0]` returns INTEGER instead of
+    BOOLEAN"). This function answers only the SHAPE question: is this the kind of
+    expression that can carry a predicate at all? Splitting it that way is what makes
+    the answer independent of which node kind produced the boolean — before the split,
+    `WHERE IIF(c, TRUE, FALSE)` was admitted and the identical `WHERE (CASE WHEN c THEN
+    TRUE ELSE FALSE END)` was refused, which is the one answer that cannot be explained
+    to a user.
 
-    Allowed expressions:
-    - COMPARISON_OPERATOR (=, <>, <, >, etc.)
-    - IS TRUE / IS FALSE / IS NULL
-    - AND, OR, XOR, NOT (applied to valid expressions)
-    - Function calls that return boolean
-    - Binary/unary operators that return boolean
+    Admitted: every VALUE EXPRESSION — comparisons, IS-forms, AND/OR/XOR/NOT,
+    functions, binary/unary operators, CASE, CAST, and `->`/`->>`/`[i]` extraction.
+    A CASE is admitted on its own merits: used as a switch it is a multi-branch form
+    with no comparison spelling, and the optimizer already treats single-branch CASE
+    and IIF as one expression (predicate_rewriter's CASE -> IIF rewrite).
 
-    Disallowed:
-    - Bare LITERAL (TRUE, FALSE, or numeric constants)
-    - Bare IDENTIFIER (column names without comparison)
-    - NOT applied to non-boolean expressions
+    Refused, each for its OWN reason and with its own message:
+
+    - Bare LITERAL — a bare-literal conjunct (`ON a.x = b.y AND FALSE`) has no column
+      to key a join on and no column for a Filter step to reference, so predicate
+      pushdown has nowhere to route it and would silently drop it between planning and
+      execution. Also very nearly always a typo.
+    - Bare IDENTIFIER — `WHERE some_column` is nearly always a typo for a comparison.
+      This is a deliberate dialect deviation from SQL's boolean-column rule, and it is
+      about TYPOS, not about booleans: it is why admitting CASE alongside it is
+      consistent rather than contradictory (a CASE is not a plausible slip).
+    - AGGREGATOR / SUBQUERY — not value expressions in this position. An aggregate
+      belongs in HAVING; a bare subquery needs an operator to say how to compare it.
+
+    `under_not` only picks the remedy shown for a bare column: under a NOT the clause
+    is not bare, so suggesting `WHERE col = value` would misdirect.
     """
     if node is None:
         return
@@ -436,12 +461,16 @@ def _validate_where_clause_expression(
 
     # NOT is allowed if applied to a valid boolean expression
     if node_type == NodeType.NOT:
-        _validate_where_clause_expression(node.centre, clause_label, example_prefix)
+        _validate_where_clause_expression(
+            node.centre, clause_label, example_prefix, under_not=True
+        )
         return
 
     # Allowed: nested expressions
     if node_type == NodeType.NESTED:
-        _validate_where_clause_expression(node.centre, clause_label, example_prefix)
+        _validate_where_clause_expression(
+            node.centre, clause_label, example_prefix, under_not=under_not
+        )
         return
 
     # Binary/unary operators that might return boolean (like LIKE)
@@ -452,26 +481,82 @@ def _validate_where_clause_expression(
         # Unary operators like NOT on columns (validated at evaluation)
         return
 
+    # Allowed: the remaining VALUE EXPRESSIONS. None of these is a plausible typo and
+    # each has a bound type, so the boolean question is the binder's to answer — see
+    # the RULING above. CASE reaches execution as a c-native draken_if_then_else chain
+    # (compiler._rewrite_case), whose BOOLEAN result is flagged BC_RESULT_WRAP_AS_BOOL
+    # and so satisfies the filter's bool-mask contract.
+    if node_type in (NodeType.CASE, NodeType.CAST, NodeType.EXTRACTION_OPERATOR):
+        return
+
     # Disallowed: bare literals
     if node_type == NodeType.LITERAL:
         raise UnsupportedSyntaxError(
-            f"{clause_label} cannot be a bare literal ({node.value!r}). "
-            f"Use a comparison (e.g., '{example_prefix}column = {{value}}') or IS operator "
-            f"(e.g., '{example_prefix}column IS TRUE')."
+            compose(
+                f"{clause_label} cannot be a bare literal ({md_code(node.value)})",
+                f"Compare something instead, for example "
+                f"{md_code(f'{example_prefix}column = value')} or "
+                f"{md_code(f'{example_prefix}column IS TRUE')}",
+            )
         )
 
     # Disallowed: bare identifiers (column names without comparison)
     if node_type == NodeType.IDENTIFIER:
+        # Under a NOT the clause is not bare, so `WHERE col = value` is not the
+        # remedy — it would misdirect the reader to a shape they did not write.
+        if under_not:
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"{clause_label} cannot filter on a bare column name "
+                    f"({md_column(node.value)}) — negating it does not make it a test",
+                    f"Test it explicitly, for example "
+                    f"{md_code(f'{example_prefix}{node.value} IS FALSE')} or "
+                    f"{md_code(f'{example_prefix}{node.value} != value')}",
+                )
+            )
         raise UnsupportedSyntaxError(
-            f"{clause_label} cannot be a bare column name ({node.value!r}). "
-            f"Use a comparison (e.g., '{example_prefix}{node.value} = value') or IS operator "
-            f"(e.g., '{example_prefix}{node.value} IS TRUE')."
+            compose(
+                f"{clause_label} cannot be a bare column name ({md_column(node.value)})",
+                f"Say what to compare it to, for example "
+                f"{md_code(f'{example_prefix}{node.value} = value')} or "
+                f"{md_code(f'{example_prefix}{node.value} IS TRUE')}",
+            )
         )
 
-    # Any other node type in WHERE/ON is unsupported
+    # Disallowed: an aggregate is not a row-level test — it belongs in HAVING.
+    if node_type == NodeType.AGGREGATOR:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{clause_label} cannot contain the aggregate {md_code(node.value)}",
+                f"{clause_label} tests one row at a time, so it cannot see a group. "
+                f"Filter groups with {md_code('HAVING')} instead",
+            )
+        )
+
+    # WILDCARD gets no arm here: the parser refuses `*` in a WHERE/ON position
+    # before this function is reached (every spelling — bare, qualified, under a
+    # NOT, inside an AND — is a QueryParseError), so an arm for it would be dead.
+
+    # Disallowed: a subquery in this position needs an operator to say how to compare.
+    if node_type == NodeType.SUBQUERY:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{clause_label} cannot be a bare subquery",
+                f"Say how to compare it, for example "
+                f"{md_code(f'{example_prefix}column IN (SELECT ...)')} or "
+                f"{md_code(f'{example_prefix}EXISTS (SELECT ...)')}",
+            )
+        )
+
+    # Any other node type in WHERE/ON is unsupported. Reaching here means a node kind
+    # that is not a value expression at all — name the rule, not the node.
     raise UnsupportedSyntaxError(
-        f"{clause_label} contains unsupported expression type: {node_type}. "
-        f"{clause_label} requires a boolean comparison or function."
+        compose(
+            f"{clause_label} must be an expression that is true or false for each row",
+            f"{md_code(format_expression(node))} is not a value that can be tested. Use "
+            f"a comparison, an {md_code('IS')} test, or an expression that returns a "
+            f"boolean",
+        )
     )
 
 
@@ -480,13 +565,49 @@ def _find_base_scan(plan: LogicalPlan) -> "LogicalPlanNode":
     scans = [node for _, node in plan.nodes(True) if node.node_type == LogicalPlanStepType.Scan]
     if not scans:
         raise UnsupportedSyntaxError(
-            "Window functions require a base table — cannot be used without a FROM clause."
+            "Window functions require a base table — cannot be used without a **FROM** clause. Add a **FROM** clause naming the relation the window should run over."
         )
     if len(scans) > 1:
         raise UnsupportedSyntaxError(
-            "Window functions over multiple joined tables are not yet supported."
+            "Window functions over multiple joined tables are not yet supported. Compute the window in a subquery over a single relation, then join to that result."
         )
     return scans[0]
+
+
+def _replace_node(tree, target, replacement):
+    """Swap `target` for `replacement` inside an expression tree, by IDENTITY.
+
+    Matching on identity rather than on value is deliberate: a query may filter on
+    two window functions that render identically, and a value-based match would
+    rewrite whichever came first for both. The walk mirrors
+    `get_all_nodes_of_type` — parameters, left/centre/right, and CASE's
+    conditions/results/else_result — so any shape that walker can reach, this one
+    can rewrite.
+    """
+    if tree is None:
+        return None
+    if tree is target:
+        return replacement
+
+    if tree.parameters:
+        tree.parameters = [
+            _replace_node(param, target, replacement)
+            if isinstance(param, (Node, LogicalColumn))
+            else param
+            for param in tree.parameters
+        ]
+    for _side in ("left", "centre", "right"):
+        _child = getattr(tree, _side, None)
+        if isinstance(_child, (Node, LogicalColumn)):
+            setattr(tree, _side, _replace_node(_child, target, replacement))
+    if tree.node_type == NodeType.CASE:
+        if tree.conditions:
+            tree.conditions = [_replace_node(c, target, replacement) for c in tree.conditions]
+        if tree.results:
+            tree.results = [_replace_node(r, target, replacement) for r in tree.results]
+        if isinstance(tree.else_result, (Node, LogicalColumn)):
+            tree.else_result = _replace_node(tree.else_result, target, replacement)
+    return tree
 
 
 def inner_query_planner(ast_branch: dict) -> LogicalPlan:
@@ -506,7 +627,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # TOP used?
     if ast_branch["Select"].get("top") is not None:
         raise UnsupportedSyntaxError(
-            "SELECT TOP to limit number of returned records not supported, use LIMIT instead."
+            "**SELECT** TOP to limit number of returned records not supported, use **LIMIT** instead."
         )
 
     # from
@@ -575,7 +696,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _selection = logical_planner_builders.build(ast_branch["Select"].get("selection"))
     if _selection:
         if len(_relations) == 0:
-            raise UnsupportedSyntaxError("Statement has a WHERE clause but no FROM clause.")
+            raise UnsupportedSyntaxError("Statement has a **WHERE** clause but no **FROM** clause.")
         _validate_where_clause_expression(_selection)
         selection_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
         selection_step.condition = _selection
@@ -591,13 +712,13 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     ):
         from opteryx.exceptions import SqlError
 
-        raise SqlError("SELECT * cannot coexist with additional columns.")
+        raise SqlError("`SELECT *` cannot coexist with additional columns. List the columns you want explicitly, or use `SELECT *` on its own.")
 
     if len(_projection) > 1 and any(p.node_type == NodeType.WILDCARD for p in _projection[1:]):
         from opteryx.exceptions import SqlError
 
         raise SqlError(
-            "Qualified wild cards (`table.*`) must be the first column when used with additional columns."
+            "Qualified wild cards (`table.*`) must be the first column when used with additional columns. Move it to the start of the projection."
         )
 
     # A subquery used as a SELECT-list value is not yet supported. Decorrelation
@@ -609,7 +730,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # "Known gaps" section of decorrelate_subquery.py.
     if get_all_nodes_of_type(_projection, select_nodes=(NodeType.SUBQUERY,)):
         raise UnsupportedSyntaxError(
-            "Scalar subqueries are supported in the WHERE clause but not yet in the SELECT list."
+            "Scalar subqueries are supported in the **WHERE** clause but not yet in the **SELECT** list."
         )
 
     # Detect window functions (AGGREGATOR nodes with an OVER clause) before aggregate extraction.
@@ -620,6 +741,41 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _window_specs: list = []  # aggregate windows: (index, agg_node, partition_by_nodes)
     # ranking windows: (kind, partition_by_nodes, order_by_pairs, win_alias)
     _ranking_specs: list = []
+
+    # QUALIFY is filtering on a window function's OUTPUT, so its window functions
+    # have to be computed before the filter can run. They ride into `_projection`
+    # here so the detection loop below treats them exactly like a window function
+    # the user selected — same alias minting, same Window node, same grouping by
+    # partition spec. The loop replaces each with an identifier reference, and
+    # `_qualify` is then re-pointed at those references so the Filter reads the
+    # computed column rather than re-evaluating the window.
+    #
+    # This mirrors HAVING (see `_having_passthrough` below): a clause may name
+    # something the SELECT list does not, the extra columns ride through the
+    # Project as pass-throughs, and the Exit node prunes them back to the SELECT
+    # list so they never reach the caller.
+    #
+    # Until this existed, `ast_branch["Select"]["qualify"]` was read by nothing:
+    # the clause parsed, bound, and then vanished, so QUALIFY silently returned
+    # the unfiltered relation.
+    _qualify = logical_planner_builders.build(ast_branch["Select"].get("qualify"))
+    _qualify_window_slots: list = []  # (index into _projection, original node)
+    if _qualify is not None:
+        _qualify_windows = [
+            _node
+            for _node in get_all_nodes_of_type(_qualify, select_nodes=(NodeType.AGGREGATOR,))
+            if getattr(_node, "over", None) is not None
+        ]
+        if not _qualify_windows:
+            raise UnsupportedSyntaxError(
+                "**QUALIFY** filters on a window function, but this one contains none. "
+                "Use **WHERE** to filter on plain columns, or **HAVING** to filter a grouped "
+                "result."
+            )
+        _projection_length_without_qualify = len(_projection)
+        for _window_function in _qualify_windows:
+            _qualify_window_slots.append((len(_projection), _window_function))
+            _projection.append(_window_function)
     for _i, proj_col in enumerate(_projection):
         _over = getattr(proj_col, "over", None)
         _is_ranking = (
@@ -628,15 +784,15 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if _is_ranking:
             if _over is None:
                 raise UnsupportedSyntaxError(
-                    f"{proj_col.value}() is a window function and requires an OVER (...) clause."
+                    f"{proj_col.value}() is a window function and requires an **OVER** (...) clause. Add one, for example `ROW_NUMBER() OVER (PARTITION BY column)`."
                 )
             if not _over.get("order_by"):
                 raise UnsupportedSyntaxError(
-                    f"{proj_col.value}() requires an ORDER BY in its OVER (...) clause."
+                    f"{proj_col.value}() requires an **ORDER BY** in its **OVER** (...) clause. Add one, for example `OVER (ORDER BY column)`."
                 )
             if _over.get("window_frame") is not None:
                 raise UnsupportedSyntaxError(
-                    "Window functions with frame specifications (ROWS/RANGE BETWEEN) are not supported."
+                    "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
                 )
             _partition_by = [
                 logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
@@ -662,11 +818,11 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if _over is not None and proj_col.node_type == NodeType.AGGREGATOR:
             if _over.get("order_by"):
                 raise UnsupportedSyntaxError(
-                    "Window functions with ORDER BY are not supported. Use PARTITION BY only."
+                    "Window functions with **ORDER BY** are not supported. Use **PARTITION BY** only."
                 )
             if _over.get("window_frame") is not None:
                 raise UnsupportedSyntaxError(
-                    "Window functions with frame specifications (ROWS/RANGE BETWEEN) are not supported."
+                    "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
                 )
             _partition_by = [
                 logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
@@ -722,11 +878,11 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             if expr.node_type == NodeType.LITERAL:
                 _expr_cat = expr.type.category if isinstance(expr.type, ColumnType) else expr.type
                 if _expr_cat != LogicalCategory.INTEGER:
-                    raise UnsupportedSyntaxError("Cannot ORDER BY constant values")
+                    raise UnsupportedSyntaxError("Cannot **ORDER BY** constant values. Order by a column, or by an expression over one.")
                 position = int(expr.value)
                 if position < 1 or position > len(_projection):
                     raise UnsupportedSyntaxError(
-                        f"ORDER BY position {position} is out of range — SELECT has {len(_projection)} column(s)."
+                        f"**ORDER BY** position {position} is out of range — **SELECT** has {len(_projection)} column(s). Positions count the **SELECT** columns and start at 1."
                     )
                 expr = _projection[position - 1]
             rewritten.append((expr, ascending))
@@ -839,13 +995,13 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                     _position = int(_group_expr.value)
                     if _position < 1 or _position > len(_projection):
                         raise UnsupportedSyntaxError(
-                            f"GROUP BY position {_position} is out of range — SELECT has {len(_projection)} column(s)."
+                            f"**GROUP BY** position {_position} is out of range — **SELECT** has {len(_projection)} column(s). Positions count the **SELECT** columns and start at 1."
                         )
                     _target = _projection[_position - 1]
                     if get_all_nodes_of_type(_target, select_nodes=(NodeType.AGGREGATOR,)):
                         raise UnsupportedSyntaxError(
-                            f"GROUP BY position {_position} refers to an aggregate in the SELECT "
-                            "list — aggregates cannot appear in GROUP BY."
+                            f"**GROUP BY** position {_position} refers to an aggregate in the **SELECT** "
+                            "list — aggregates cannot appear in **GROUP BY**."
                         )
                     _group_expr = _target
             elif _group_expr.node_type == NodeType.IDENTIFIER:
@@ -864,7 +1020,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     if _window_specs:
         if _groups is not None and _groups != []:
-            raise UnsupportedSyntaxError("Window functions cannot be combined with GROUP BY.")
+            raise UnsupportedSyntaxError("Window functions cannot be combined with **GROUP BY**.")
         _source_scan = _find_base_scan(inner_plan)
         # Group by distinct partition spec; same partition → one Window node (shared CTE).
         _by_partition: dict = {}
@@ -889,7 +1045,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     if _ranking_specs:
         if _groups is not None and _groups != []:
-            raise UnsupportedSyntaxError("Window functions cannot be combined with GROUP BY.")
+            raise UnsupportedSyntaxError("Window functions cannot be combined with **GROUP BY**.")
         from opteryx.types.schema import SchemaColumn, mint_column_identity
 
         # Group ranking functions that share the same PARTITION BY + ORDER BY into a
@@ -929,10 +1085,35 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             inner_plan.add_node(step_id, _win_step)
             inner_plan.add_edge(previous_step_id, step_id)
 
+    if _qualify is not None:
+        # The detection loop replaced each of QUALIFY's window functions with an
+        # identifier reference to the Window node's output. Point the predicate at
+        # those references, by object IDENTITY — the same node object sits in both
+        # `_projection` and the predicate tree, so a value-based match could
+        # rewrite the wrong one when a query filters on two windows that render
+        # identically.
+        for _slot, _original in _qualify_window_slots:
+            _qualify = _replace_node(_qualify, _original, _projection[_slot])
+
+        qualify_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+        qualify_step.condition = _qualify
+        previous_step_id, step_id = step_id, random_string()
+        inner_plan.add_node(step_id, qualify_step)
+        inner_plan.add_edge(previous_step_id, step_id)
+
+        # Drop the window columns QUALIFY borrowed. They were only ever in
+        # `_projection` to make the detection loop build a Window node for them;
+        # the Filter above reads the Window's output directly, and the Project is
+        # ABOVE the Filter, so removing them here keeps them out of the caller's
+        # result without keeping them out of the filter's input. Leaving them in
+        # returned an extra column nobody asked for — `SELECT name ... QUALIFY
+        # ROW_NUMBER() OVER (...) = 1` answered two columns.
+        del _projection[_projection_length_without_qualify:]
+
     if _groups is not None and _groups != []:
         if any(p.node_type == NodeType.WILDCARD for p in _projection):
             raise UnsupportedSyntaxError(
-                "SELECT * cannot be used with GROUP BY — did you mean `GROUP BY ALL`?"
+                "`SELECT *` cannot be used with **GROUP BY** — did you mean `GROUP BY ALL`?"
             )
         # WILDCARD is used to represent GROUP BY ALL, we group by all columns in the projection
         # which aren't aggregates
@@ -1007,15 +1188,15 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             ):
                 if ast_branch["Select"].get("distinct"):
                     raise UnsupportedSyntaxError(
-                        "A value list cannot be projected in the SELECT clause — did you mean DISTINCT ON(cols) cols FROM ?"
+                        "A value list cannot be projected in the **SELECT** clause — did you mean **DISTINCT ON**(cols) cols **FROM** ?"
                     )
                 # Names BOTH spellings: the message used to say "parenthesised"
                 # at a caller who had typed `SELECT ['a','b']`, sending them to
                 # look for parentheses they had not used.
                 raise UnsupportedSyntaxError(
-                    "A literal list cannot be projected in the SELECT clause, in either "
+                    "A literal list cannot be projected in the **SELECT** clause, in either "
                     "`['a', 'b']` or `('a', 'b')` form. Use `UNNEST(('a', 'b'))` in the "
-                    "FROM clause to build a relation from literals."
+                    "**FROM** clause to build a relation from literals."
                 )
 
         # ORDER BY needing to be able to order by columns not in the projection
@@ -1104,7 +1285,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             for col in project_step.passthrough_columns
         ):
             raise UnsupportedSyntaxError(
-                "Cannot ORDER BY columns excluded by the EXCEPT clause in the projection."
+                "Cannot **ORDER BY** columns excluded by the **EXCEPT** clause in the projection."
             )
         project_step.passthrough_columns = []
 
@@ -1146,7 +1327,10 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             # group - the column must appear in the SELECT list so the ordering
             # value is well-defined per output row.
             raise UnsupportedSyntaxError(
-                "for SELECT DISTINCT, ORDER BY expressions must appear in select list"
+                "With **SELECT DISTINCT**, everything in **ORDER BY** must also appear "
+                "in the **SELECT** list - otherwise the rows being ordered are not the "
+                "rows being returned. Add the expression to the **SELECT** list, or drop "
+                "**DISTINCT**."
             )
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, distinct_step)
@@ -1279,7 +1463,7 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
         both. `unnest_function` is what the binder and compiler branch on.
         """
         if join_step.type != "cross join":
-            raise UnsupportedSyntaxError(f"JOIN on {function} only supported for CROSS joins.")
+            raise UnsupportedSyntaxError(f"**JOIN** on {function} only supported for CROSS joins. Write it as a **CROSS JOIN**.")
         unnest_column = logical_planner_builders.build(join["relation"]["Table"]["args"]["args"][0])
         if join["relation"]["Table"].get("alias") is None:
             raise UnnamedColumnError(
@@ -1303,7 +1487,7 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
 
     if join_step.type in ("right semi", "right anti"):
         raise UnsupportedSyntaxError(
-            f"{join_step.type.upper()} JOIN not supported, use LEFT variations only."
+            f"{join_step.type.upper()} **JOIN** not supported, use LEFT variations only."
         )
 
     if join_step.type == "asof":
@@ -1319,7 +1503,7 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
 
     if not join_step.on and not join_step.using and join_step.type in ("left outer", "right outer"):
         raise UnsupportedSyntaxError(
-            f"{join_step.type.upper()} JOIN must have an ON or USING clause."
+            f"{join_step.type.upper()} **JOIN** must have an ON or **USING** clause. Add `ON left.key = right.key`, or `USING (key)` when both sides name the column the same way."
         )
 
     # JOIN UNNEST needs to be handled differently
@@ -1548,7 +1732,7 @@ def plan_query(statement: dict) -> LogicalPlan:
         elif op_type == "Except":
             set_op_node = LogicalPlanNode(node_type=LogicalPlanStepType.Except)
         else:
-            raise UnsupportedSyntaxError(f"Unsupported SET operator '{op_type}'")
+            raise UnsupportedSyntaxError(f"Unsupported SET operator '{op_type}'. **UNION**, **UNION ALL**, **EXCEPT** and **INTERSECT** are the supported forms.")
 
         set_op_node.modifier = (
             None if set_operation["set_quantifier"] == "None" else set_operation["set_quantifier"]
@@ -1685,7 +1869,14 @@ def plan_show_columns(statement, **kwargs):
         previous_step_id, step_id = step_id, random_string()
         plan.add_node(step_id, filter_node)
         plan.add_edge(previous_step_id, step_id)
-        raise UnsupportedSyntaxError("Unable to filter colmns in SHOW COLUMNS")
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{md_syntax('SHOW COLUMNS')} cannot be filtered with a "
+                f"{md_syntax('WHERE')} clause",
+                f"List the columns with {md_syntax('SHOW COLUMNS FROM')} and the table "
+                f"name, then filter the result by wrapping it as a subquery",
+            )
+        )
 
     return plan
 
@@ -1889,7 +2080,7 @@ def plan_show_create_query(statement, **kwargs):
         # stored CREATE statement to show (its schema is the catalog's, not a
         # statement we kept), so no amount of planning makes this answerable.
         raise UnsupportedSyntaxError(
-            f"Opteryx does not support 'SHOW CREATE {show_step.object_type}'; "
+            f"Opteryx does not support '**SHOW CREATE** {show_step.object_type}'; "
             "only `SHOW CREATE VIEW <view>` is supported."
         )
     show_step.object_name = extract_variable(statement[root_node]["obj_name"])
@@ -1932,13 +2123,13 @@ def plan_create_view(statement, **kwargs):
     if statement[root_node].get("materialized", False):
         if statement[root_node].get("if_not_exists", False):
             raise UnsupportedSyntaxError(
-                "CREATE MATERIALIZED VIEW does not support IF NOT EXISTS; "
-                "use CREATE OR REPLACE MATERIALIZED VIEW."
+                "**CREATE MATERIALIZED VIEW** does not support IF NOT **EXISTS**; "
+                "use **CREATE OR REPLACE** MATERIALIZED VIEW."
             )
         if statement[root_node].get("columns"):
             raise UnsupportedSyntaxError(
-                "CREATE MATERIALIZED VIEW cannot specify column definitions; "
-                "the columns come from the SELECT."
+                "**CREATE MATERIALIZED VIEW** cannot specify column definitions; "
+                "the columns come from the **SELECT**. Name them with **AS** in the **SELECT** instead."
             )
         return _plan_ctas(
             relation_name=create_view_node.view_name,
@@ -2073,7 +2264,7 @@ def plan_alter_table(statement, **kwargs):
     operations = alter_statement.get("operations") or []
     if len(operations) != 1:
         raise UnsupportedSyntaxError(
-            "Opteryx only supports a single ALTER TABLE operation per statement."
+            "Opteryx only supports a single **ALTER TABLE** operation per statement. Split the changes into one statement each."
         )
     operation = operations[0]
 
@@ -2082,7 +2273,7 @@ def plan_alter_table(statement, **kwargs):
         for expr in operation["ClusterBy"]["exprs"]:
             if "Identifier" not in expr:
                 raise UnsupportedSyntaxError(
-                    "CLUSTER BY only supports column names, not expressions."
+                    "CLUSTER BY only supports column names, not expressions. Cluster on a column; if you need the expression, store it as a column first."
                 )
             cluster_columns.append(expr["Identifier"]["value"])
 
@@ -2106,11 +2297,11 @@ def plan_alter_table(statement, **kwargs):
         if relation_name.split(".", 1)[0] != new_name.split(".", 1)[0]:
             raise UnsupportedSyntaxError(
                 f"RENAME TO cannot move a relation between workspaces "
-                f"({relation_name} -> {new_name}); the workspace must be unchanged."
+                f"({relation_name} -> {new_name}); the workspace must be unchanged. Rename it within its own workspace."
             )
         if relation_name == new_name:
             raise UnsupportedSyntaxError(
-                f"RENAME TO target is the same as the source ({relation_name})."
+                f"RENAME TO target is the same as the source ({relation_name}). Choose a different name for the target."
             )
 
         rename_relation_node = LogicalPlanNode(node_type=LogicalPlanStepType.RenameRelation)
@@ -2122,8 +2313,8 @@ def plan_alter_table(statement, **kwargs):
         return plan
 
     raise UnsupportedSyntaxError(
-        "Opteryx only supports 'ALTER TABLE ... CLUSTER BY (...)' and "
-        "'ALTER TABLE ... RENAME TO ...'."
+        "Opteryx only supports '**ALTER TABLE** ... CLUSTER BY (...)' and "
+        "'**ALTER TABLE** ... RENAME TO ...'."
     )
 
 
@@ -2150,7 +2341,14 @@ def _parse_boolean_workspace_property(name: str, value):
 # plan time - an unrecognised name must not be written through to the catalog,
 # where a typo would silently become a new, meaningless property.
 WORKSPACE_PROPERTIES = {
-    "delete_protection": _parse_boolean_workspace_property,
+    "deletion_protection": _parse_boolean_workspace_property,
+    # Refuses automated copies of this workspace's data INTO ANOTHER workspace
+    # (CTAS, materialized-view refresh). Like deletion_protection it is ON unless
+    # explicitly turned off, so this entry is what gives a workspace's owners
+    # any way to opt out at all: without it `ALTER WORKSPACE ... SET
+    # egress_protection` is rejected here as an unknown property, and the
+    # catalog's default stands with no route to clear it.
+    "egress_protection": _parse_boolean_workspace_property,
 }
 
 
@@ -2174,7 +2372,7 @@ def plan_alter_workspace(statement, **kwargs):
         workspace_name = ".".join(workspace_name)
     if "." in workspace_name:
         raise UnsupportedSyntaxError(
-            f"ALTER WORKSPACE names a workspace, not a relation within one (got '{workspace_name}')."
+            f"ALTER WORKSPACE names a workspace, not a relation within one (got '{workspace_name}'). Give the workspace name on its own."
         )
 
     operation = alter_statement.get("operation") or {}
@@ -2201,7 +2399,7 @@ def plan_alter_workspace(statement, **kwargs):
     values = action["value"].get("Values") or []
     if len(values) != 1:
         raise UnsupportedSyntaxError(
-            f"Workspace property '{property_name}' takes a single value."
+            f"Workspace property '{property_name}' takes a single value. Give exactly one value."
         )
 
     alter_workspace_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterWorkspace)
@@ -2234,7 +2432,7 @@ def plan_create_collection(statement, **kwargs):
     # The parser wraps the name; `Simple` is the only form a collection name can
     # take (an unqualified or dotted identifier).
     if not isinstance(schema_name, dict) or "Simple" not in schema_name:
-        raise UnsupportedSyntaxError("CREATE COLLECTION expects a collection name.")
+        raise UnsupportedSyntaxError("CREATE COLLECTION expects a collection name. Write `CREATE COLLECTION <workspace>.<collection>`.")
 
     collection_name = extract_variable(schema_name["Simple"])
     if isinstance(collection_name, list):
@@ -2280,7 +2478,7 @@ def plan_drop(statement, **kwargs):
     for modifier in ("cascade", "restrict", "purge", "temporary"):
         if drop_statement.get(modifier, False):
             raise UnsupportedSyntaxError(
-                f"Opteryx does not support `{modifier.upper()}` on DROP statements."
+                f"Opteryx does not support `{modifier.upper()}` on DROP statements. Drop the object without the modifier."
             )
 
     if object_type == "View":
@@ -2372,8 +2570,70 @@ def plan_drop(statement, **kwargs):
         raise UnsupportedSyntaxError(f"DROP {object_type} is not supported")
 
 
+def plan_refresh_materialized_view(statement, **kwargs):
+    """Plan REFRESH MATERIALIZED VIEW <name>.
+
+    Desugars to the view's own defining SELECT written back over its backing
+    table - which is exactly what a refresh is. Reusing `_plan_ctas` rather than
+    building a bespoke operator means a refresh inherits the CoRTAS write path
+    unchanged: files written durably first, then a single
+    `truncate_and_add_files` snapshot commit, so a refresh is atomic and a
+    failed one leaves the previous contents in place.
+
+    What changes versus the old arrangement is who says it. The refresh used to
+    BE a `CREATE OR REPLACE TABLE ... AS`, composed by whoever fired it; now
+    that statement is an internal detail of this one, and a user-written CTAS
+    is refused against a materialized view (see `_reject_materialized_view_target`).
+    The statement names the intent, and the intent is the only route in.
+
+    The definition is read here, at plan time, rather than carried on the
+    statement: a refresh runs the view's CURRENT definition, so redefining a
+    view takes effect on its next refresh rather than at some later moment
+    nobody can point to.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.third_party import sqloxide
+
+    relation_name = statement["RefreshMaterializedView"]["name"]
+
+    connector = connector_factory(relation_name, telemetry=None)
+    if not isinstance(connector, Writable) or not connector.is_materialized_view(relation_name):
+        raise UnsupportedSyntaxError(
+            f"{relation_name} is not a materialized view; **REFRESH MATERIALIZED VIEW** "
+            "only refreshes materialized views. A table's contents are changed with "
+            "**INSERT** or **CREATE OR REPLACE TABLE**."
+        )
+
+    try:
+        defining_sql = connector.materialized_view_definition(relation_name)
+    except ValueError as exc:
+        raise UnsupportedSyntaxError(str(exc)) from exc
+
+    parsed = sqloxide.parse_sql(defining_sql, _dialect="opteryx")
+    if len(parsed) != 1 or "Query" not in parsed[0]:
+        raise UnsupportedSyntaxError(
+            f"the recorded definition of materialized view {relation_name} is not a "
+            "single **SELECT**; it cannot be refreshed."
+        )
+
+    return _plan_ctas(
+        relation_name,
+        if_not_exists=False,
+        query_ast=parsed[0],
+        or_replace=True,
+        is_refresh=True,
+    )
+
+
 def _plan_ctas(
-    relation_name, if_not_exists, query_ast, or_replace=False, is_materialized_view=False
+    relation_name,
+    if_not_exists,
+    query_ast,
+    or_replace=False,
+    is_materialized_view=False,
+    is_refresh=False,
 ):
     """Plan CREATE TABLE ... AS SELECT.
 
@@ -2405,6 +2665,11 @@ def _plan_ctas(
     insert_step.if_not_exists = if_not_exists
     insert_step.or_replace = or_replace
     insert_step.is_materialized_view = is_materialized_view
+    # Marks the one write that is ALLOWED to target an existing materialized
+    # view. Every other route to writing one is refused at bind time, so this
+    # flag is the whole difference between a sanctioned refresh and a CTAS that
+    # would quietly turn a view into a table.
+    insert_step.is_refresh = is_refresh
     if is_materialized_view:
         # The defining query, kept as AST so the insert operator can re-render
         # it to SQL (sqloxide.ast_to_sql) for the catalog registration - the
@@ -2450,10 +2715,10 @@ def plan_create_table(statement, **kwargs):
         # Check for unsupported options (or_replace is handled below, CTAS-only)
         for option in ["external", "temporary", "transient", "volatile", "iceberg"]:
             if statement[root_node].get(option):
-                raise UnsupportedSyntaxError(f"CREATE TABLE option not supported: {option}")
+                raise UnsupportedSyntaxError(f"**CREATE TABLE** option not supported: {option}")
         column_defs = statement[root_node].get("columns", [])
         if column_defs:
-            raise UnsupportedSyntaxError("CREATE TABLE AS SELECT cannot specify column definitions")
+            raise UnsupportedSyntaxError("**CREATE TABLE** AS **SELECT** cannot specify column definitions. The column names and types come from the **SELECT**.")
         return _plan_ctas(
             relation_name=create_table_node.relation_name,
             if_not_exists=create_table_node.if_not_exists,
@@ -2464,13 +2729,13 @@ def plan_create_table(statement, **kwargs):
     # Check for unsupported options (plain CREATE TABLE form — or_replace not supported here)
     for option in ["or_replace", "external", "temporary", "transient", "volatile", "iceberg"]:
         if statement[root_node].get(option):
-            raise UnsupportedSyntaxError(f"CREATE TABLE option not supported: {option}")
+            raise UnsupportedSyntaxError(f"**CREATE TABLE** option not supported: {option}")
 
     # Parse columns
     columns = []
     column_defs = statement[root_node].get("columns", [])
     if not column_defs:
-        raise UnsupportedSyntaxError("CREATE TABLE requires at least one column")
+        raise UnsupportedSyntaxError("**CREATE TABLE** requires at least one column. List at least one column with its type.")
 
     for col_def in column_defs:
         col_name = col_def["name"]["value"]
@@ -2491,7 +2756,7 @@ def plan_create_table(statement, **kwargs):
             sql_type_ct = column_type_from_ast(col_def)
         except (_SqlError, ValueError) as err:
             raise UnsupportedSyntaxError(
-                f"unsupported column type in CREATE TABLE for '{col_name}': {err}"
+                f"unsupported column type in **CREATE TABLE** for '{col_name}': {err}"
             ) from err
 
         # Check for NOT NULL constraint
@@ -2534,11 +2799,11 @@ def plan_truncate(statement, **kwargs):
     truncate_stmt = statement[root]
 
     if not truncate_stmt.get("table"):
-        raise UnsupportedSyntaxError("TRUNCATE without TABLE keyword is not supported")
+        raise UnsupportedSyntaxError("**TRUNCATE** without TABLE keyword is not supported. Write `TRUNCATE TABLE <table>`.")
 
     table_names = truncate_stmt.get("table_names", [])
     if len(table_names) != 1:
-        raise UnsupportedSyntaxError("TRUNCATE supports a single table name")
+        raise UnsupportedSyntaxError("**TRUNCATE** supports a single table name. Truncate one table per statement.")
 
     # Extract table name
     name_parts = table_names[0].get("name", [])
@@ -2565,7 +2830,7 @@ def plan_insert(statement, **kwargs):
     insert_stmt = statement[root]
 
     if insert_stmt.get("overwrite"):
-        raise UnsupportedSyntaxError("INSERT OVERWRITE is not supported")
+        raise UnsupportedSyntaxError("**INSERT OVERWRITE** is not supported. **TRUNCATE** the table first, then **INSERT** into it.")
 
     body = insert_stmt["source"]["body"]
 
@@ -2587,7 +2852,7 @@ def plan_insert(statement, **kwargs):
             explicit_columns.append(col[0]["Identifier"]["value"])
         else:
             raise UnsupportedSyntaxError(
-                f"Unsupported column reference in INSERT column list: {col}"
+                f"Unsupported column reference in **INSERT** column list: {col}"
             )
     explicit_columns_tuple = tuple(explicit_columns) if explicit_columns else None
 
@@ -2651,7 +2916,7 @@ def plan_analyze_query(statement, **kwargs) -> LogicalPlan:
     root = "Analyze"
 
     if not statement[root]["has_table_keyword"]:
-        raise UnsupportedSyntaxError("ANALYZE without TABLE keyword is not supported")
+        raise UnsupportedSyntaxError("**ANALYZE** without TABLE keyword is not supported. Write `ANALYZE TABLE <table>`.")
 
     plan = LogicalPlan()
     analyze_node = LogicalPlanNode(node_type=LogicalPlanStepType.Analyze)
@@ -2698,6 +2963,24 @@ def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
     node.trigger_name = statement[root]["trigger_name"]
     node.table_name = statement[root]["table_name"]
     node.if_exists = statement[root].get("if_exists", False)
+
+    plan.add_node(random_string(), node)
+
+    return plan
+
+
+def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
+    """ALTER MATERIALIZED VIEW <name> OWNER TO <principal> — synthesized by the
+    planner's pre-parse interception.
+
+    Unlike REFRESH, this does not desugar into a CTAS: nothing is read and
+    nothing is written but one field on the view's record, so it gets its own
+    node, its own binder visitor, and its own permission check."""
+    root = "AlterMaterializedViewOwner"
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewOwner)
+    node.relation_name = statement[root]["name"]
+    node.new_owner = statement[root]["owner"]
 
     plan.add_node(random_string(), node)
 
@@ -2796,12 +3079,9 @@ def build_expression_tree(relation, dnf_list):
 
 def plan_comment(statement, **kwargs):
     """
-    Create a logical plan for COMMENT ON VIEW/TABLE/EXTENSION statement.
+    Create a logical plan for a COMMENT ON TABLE/VIEW statement.
 
-    COMMENT [ IF EXISTS ] ON EXTENSION object_name IS 'comment_text'
-
-    Note: The SQL rewriter converts TABLE and VIEW to EXTENSION so the parser
-    can accept them.
+    COMMENT [ IF EXISTS ] ON { TABLE | VIEW } object_name IS 'comment_text'
     """
     root_node = "Comment"
     plan = LogicalPlan()
@@ -2815,15 +3095,20 @@ def plan_comment(statement, **kwargs):
         object_name = ".".join(object_name)
     comment_node.object_name = object_name
 
-    # The SQL rewriter turns TABLE and VIEW into EXTENSION, which is the only
-    # object type the parser accepts for a dotted name. Anything else is a form
-    # the rewriter did not produce - COMMENT ON COLUMN in particular parses
-    # cleanly and reached the operator, where it failed as a missing *dataset*
-    # named `ws.collection.table.column`.
-    object_type = statement[root_node].get("object_type", "Extension")
-    if object_type != "Extension":
+    # TABLE and VIEW are the two object types Opteryx has anything to comment ON.
+    # The rest of sqlparser's CommentObject parses cleanly and has to be turned away
+    # by name here - COMMENT ON COLUMN in particular used to reach the operator, where
+    # it failed as a missing *dataset* named `ws.collection.table.column`.
+    #
+    # These arrive as themselves. An earlier sqlparser had no TABLE or VIEW branch in
+    # `parse_comment`, so the SQL rewriter rewrote both to EXTENSION on the way past and
+    # this checked for that; sqlparser gained CommentObject::Table and ::View, which made
+    # the rewrite a downgrade of a correct parse rather than a workaround for a missing
+    # one, and it has been deleted.
+    object_type = statement[root_node].get("object_type")
+    if object_type not in ("Table", "View"):
         raise UnsupportedSyntaxError(
-            f"Opteryx does not support 'COMMENT ON {object_type.upper()}'; "
+            f"Opteryx does not support '**COMMENT ON** {str(object_type).upper()}'; "
             "comments can be set on a TABLE or a VIEW."
         )
     comment_node.object_type = object_type
@@ -2842,6 +3127,8 @@ def plan_comment(statement, **kwargs):
 
 QUERY_BUILDERS = {
     "Analyze": plan_analyze_query,
+    # synthesized pre-parse, like DropTrigger and RefreshMaterializedView
+    "AlterMaterializedViewOwner": plan_alter_materialized_view_owner,
     "DropStatistics": plan_drop_statistics,
     "DropTrigger": plan_drop_trigger,
     "Comment": plan_comment,
@@ -2862,6 +3149,7 @@ QUERY_BUILDERS = {
     "CreateTable": plan_create_table,
     "Truncate": plan_truncate,
     "Insert": plan_insert,
+    "RefreshMaterializedView": plan_refresh_materialized_view,  # synthesized pre-parse
 }
 
 

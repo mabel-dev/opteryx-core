@@ -348,6 +348,11 @@ def render_drop_trigger(node: LogicalPlanNode) -> str:
     return f"DROP TRIGGER {if_exists}({node.trigger_name}) ON ({node.table_name})"
 
 
+@register_render(LogicalPlanStepType.AlterMaterializedViewOwner)
+def render_alter_materialized_view_owner(node: LogicalPlanNode) -> str:
+    return f"ALTER MATERIALIZED VIEW ({node.relation_name}) OWNER TO ({node.new_owner})"
+
+
 @register_render(LogicalPlanStepType.Window)
 def render_window(node: LogicalPlanNode) -> str:
     aggs = ", ".join(format_expression(a) for a in (node.aggregates or []))

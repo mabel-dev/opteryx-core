@@ -37,6 +37,7 @@
 #include "ops/int64_gather.h"       // copy_validity_range (used by interval_slice/take)
 #include "ops/temporal_arith.h"     // ta_days_to_ymd / ta_ymd_to_days / ta_floor_div
 #include "simd_hash.h"
+#include "ops/slice_shape.h"  // slice_keep_dict — the shared keep-or-flatten rule
 #include "ops/int64_predicates.h"   // CarcharSet (in_list)
 
 namespace draken { namespace ops {
@@ -510,6 +511,22 @@ static inline VecResult interval_slice(const DrakenVector& v, uint32_t start, ui
     const DrakenIntervalSlot* data = static_cast<const DrakenIntervalSlot*>(v.data);
     const uint8_t* src_null = v.validity;
 
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr && n > 0u) {
+        const uint32_t nb = (n + 7u) >> 3;
+        out_null = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!out_null) throw std::bad_alloc();
+        copy_validity_range(out_null, src_null, start, n);
+        out_null = iv_normalize_validity(out_null, n);
+    }
+
+    // Keep the source's dictionary when that copies strictly fewer bytes than
+    // flattening it. One rule for every fixed-width family (ops/slice_shape.h);
+    // the width arithmetic there makes this unreachable for types <= 4 bytes.
+    VecResult kept;
+    if (slice_keep_dict<DrakenIntervalSlot>(v, start, n, out_null, DRAKEN_INTERVAL, kept)) return kept;
+
+
     const size_t data_bytes = (n > 0u ? n : 1u) * sizeof(DrakenIntervalSlot);
     DrakenIntervalSlot* dst = static_cast<DrakenIntervalSlot*>(draken_malloc(data_bytes));
     if (!dst) throw std::bad_alloc();
@@ -523,14 +540,6 @@ static inline VecResult interval_slice(const DrakenVector& v, uint32_t start, ui
             dst[i] = data[v.selection[start + i]];
     }
 
-    uint8_t* out_null = nullptr;
-    if (src_null != nullptr && n > 0u) {
-        const uint32_t nb = (n + 7u) >> 3;
-        out_null = static_cast<uint8_t*>(draken_malloc(nb));
-        if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
-        copy_validity_range(out_null, src_null, start, n);
-        out_null = iv_normalize_validity(out_null, n);
-    }
 
     VecResult r;
     r.data           = dst;

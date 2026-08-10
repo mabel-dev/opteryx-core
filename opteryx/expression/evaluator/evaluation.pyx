@@ -48,7 +48,7 @@ from libc.stdint cimport uint8_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 from libc.stddef cimport size_t
-from draken.core.buffers cimport DrakenVector, DRAKEN_SEL_IDENTITY
+from draken.core.buffers cimport DrakenVector, DRAKEN_SEL_IDENTITY, DRAKEN_NULL
 from draken.vectors.bool_vector cimport (
     BoolVector,
     c_and_bitmap,
@@ -360,6 +360,12 @@ cdef BoolVector _is_null_from_dv(DrakenVector* dv, bint negate) noexcept:
     negate=1: IS NOT NULL — output bit = 1 where input is valid (validity bit = 1)
 
     Cases:
+      - dv.type == DRAKEN_NULL: EVERY row is null. The NULL type tag is
+        self-describing (draken carries no data and no validity buffer for it),
+        so absent validity here means all-null, not all-valid — the opposite of
+        the reading below. An untyped `NULL` literal materialises exactly this
+        vector, and reading its (absent) validity as all-valid made
+        `NULL IS NULL` answer False.
       - dv.validity == NULL: all rows valid
         - IS NULL: all zeros
         - IS NOT NULL: all ones (with tail masked)
@@ -369,6 +375,7 @@ cdef BoolVector _is_null_from_dv(DrakenVector* dv, bint negate) noexcept:
     cdef Py_ssize_t nbytes = (<Py_ssize_t>num_rows + 7) >> 3
     cdef uint8_t* out_data = <uint8_t*>malloc(<size_t>nbytes)
     cdef const uint8_t* validity = dv.validity
+    cdef bint all_null = dv.type == DRAKEN_NULL
     cdef object result_obj
     cdef Py_ssize_t k
     cdef uint8_t tail_mask
@@ -377,7 +384,13 @@ cdef BoolVector _is_null_from_dv(DrakenVector* dv, bint negate) noexcept:
         raise MemoryError("_is_null_from_dv: malloc failed")
 
     try:
-        if validity == NULL:
+        if all_null:
+            # IS NULL: all output bits = 1; IS NOT NULL: all output bits = 0.
+            if negate:
+                memset(out_data, 0x00, <size_t>nbytes)
+            else:
+                memset(out_data, 0xFF, <size_t>nbytes)
+        elif validity == NULL:
             # All rows are valid (no nulls in the input)
             if negate:
                 # IS NOT NULL: all output bits = 1
@@ -1353,7 +1366,13 @@ cdef inline int _dv_unary_null_c(
 ) noexcept nogil:
     """IS [NOT] NULL over ANY input type: a pure validity-bitmap read (the validity
     mask is indexed by LOGICAL row — no selection hop), producing a never-null
-    bit-packed BOOL result. Mirrors _dv_not_c's arena/result idiom."""
+    bit-packed BOOL result. Mirrors _dv_not_c's arena/result idiom.
+
+    DRAKEN_NULL is checked FIRST: that type tag is self-describing (every row is
+    null, with no data and no validity buffer allocated), so its absent validity
+    means all-null — the opposite of the all-valid reading an absent validity
+    buffer carries for every other type. An untyped `NULL` literal materialises
+    exactly this vector."""
     cdef Py_ssize_t sp = sp_io[0]
     cdef DrakenVector* dv
     cdef uint8_t* result
@@ -1367,7 +1386,11 @@ cdef inline int _dv_unary_null_c(
     if result == NULL:
         return 2
     memset(result, 0, <size_t>nbytes)
-    if dv.validity == NULL:
+    if dv.type == DRAKEN_NULL:
+        # All rows null: IS NULL = all true; IS NOT NULL = all false (already zeroed).
+        if uop == UOP_IS_NULL:
+            memset(result, 0xFF, <size_t>nbytes)
+    elif dv.validity == NULL:
         # All rows valid: IS NULL = all false (already zeroed); IS NOT NULL = all true.
         if uop == UOP_IS_NOT_NULL:
             memset(result, 0xFF, <size_t>nbytes)

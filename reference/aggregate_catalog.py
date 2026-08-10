@@ -9,6 +9,11 @@ from typing import Any
 
 from opteryx.operators.aggregate.helpers import AGGREGATORS
 
+# ARRAY_AGG is NOT here. visit_aggregate_and_group
+# (opteryx/planner/binder/aggregate.py) rejects it without a GROUP BY —
+# "ARRAY_AGG requires a **GROUP BY** clause" — exactly as it rejects ANY_VALUE,
+# which this catalog already models as grouped-only. Claiming global support was
+# a straight overstatement.
 _GLOBAL_SUPPORTED = frozenset(
     {
         "CORR",
@@ -22,12 +27,11 @@ _GLOBAL_SUPPORTED = frozenset(
         "COUNT_DISTINCT",
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
-        "ARRAY_AGG",
         "CIDR_AGG",
     }
 )
 
-_GROUPED_SUPPORTED = _GLOBAL_SUPPORTED | frozenset({"ANY_VALUE"})
+_GROUPED_SUPPORTED = _GLOBAL_SUPPORTED | frozenset({"ANY_VALUE", "ARRAY_AGG"})
 
 _STRICT_GROUPED_SUPPORTED = frozenset(
     {
@@ -139,8 +143,78 @@ _SQL_FORMS = {
 }
 
 
+# Aggregate input types.
+#
+# The catalog recorded `sql_forms` — the SHAPE of a call — and nothing about the
+# types each argument accepts, so a generator reading `reference/` had no way to
+# know that MEDIAN refuses DECIMAL or that CIDR_AGG only takes IPV4. Both are
+# real, deliberate engine rules; neither was machine-readable, and one of them
+# (MEDIAN) reads as a straight contradiction of types.json, which puts DECIMAL
+# in the numeric family.
+#
+# `type` uses the same vocabulary as function_signatures.json's parameter types
+# (`any`, `number`, `integer`, `varchar`, `temporal`, `boolean`, `array`) plus
+# `ipv4`. `excludes` names canonical types.json spellings that the `type` family
+# nominally covers but the implementation rejects — it exists precisely so a
+# narrowing like MEDIAN's is stated rather than implied.
+_INPUT_TYPES: dict[str, tuple[dict[str, Any], ...]] = {
+    # Counting aggregates take anything, ARRAY included.
+    "COUNT": ({"label": "value", "type": "any"},),
+    "COUNT_DISTINCT": ({"label": "value", "type": "any"},),
+    "APPROX_COUNT_DISTINCT": ({"label": "value", "type": "any"},),
+    # Ordering/selection aggregates take any SCALAR; ARRAY has no ordering and
+    # no equality in this engine (types.json records no `=` for it).
+    "MIN": ({"label": "value", "type": "any", "excludes": ["ARRAY"]},),
+    "MAX": ({"label": "value", "type": "any", "excludes": ["ARRAY"]},),
+    "ANY_VALUE": ({"label": "value", "type": "any", "excludes": ["ARRAY"]},),
+    "ARRAY_AGG": ({"label": "value", "type": "any", "excludes": ["ARRAY"]},),
+    # Arithmetic aggregates. SUM/AVG accumulate DECIMAL; the buffering and
+    # streaming-moment aggregates below do not, and say so.
+    "SUM": ({"label": "value", "type": "number"},),
+    "AVG": ({"label": "value", "type": "number"},),
+    "MEDIAN": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
+    "STDDEV": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
+    "CORR": (
+        {"label": "x", "type": "number", "excludes": ["DECIMAL"]},
+        {"label": "y", "type": "number", "excludes": ["DECIMAL"]},
+    ),
+    "APPROX_PERCENTILE": (
+        {"label": "value", "type": "number", "excludes": ["DECIMAL"]},
+        {
+            "label": "percentile",
+            "type": "number",
+            "constant_only": True,
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+    ),
+    "CIDR_AGG": ({"label": "address", "type": "ipv4"},),
+}
+
+# Aggregates whose result is not a function of the input MULTISET alone, so two
+# executions of the same statement may legitimately differ. ANY_VALUE returns an
+# arbitrary member of each group and nothing fixes which one; a differential
+# oracle that compares two runs has to know that before it asserts equality.
+_NON_DETERMINISTIC = frozenset({"ANY_VALUE"})
+
+
 def _friendly_name(aggregate: str) -> str:
     return _FRIENDLY_NAMES.get(aggregate, aggregate.replace("_", " ").title())
+
+
+def _aggregate_parameters(aggregate: str) -> list[dict[str, Any]]:
+    """Normalised parameter list — every key present on every parameter."""
+    return [
+        {
+            "label": spec["label"],
+            "type": spec["type"],
+            "excludes": list(spec.get("excludes", ())),
+            "constant_only": spec.get("constant_only", False),
+            "minimum": spec.get("minimum"),
+            "maximum": spec.get("maximum"),
+        }
+        for spec in _INPUT_TYPES.get(aggregate, ({"label": "value", "type": "any"},))
+    ]
 
 
 def _aggregate_support(aggregate: str) -> dict[str, bool]:
@@ -173,6 +247,8 @@ def export_aggregate_catalog() -> OrderedDict[str, dict[str, Any]]:
             "description": _SUMMARIES.get(aggregate, aggregate),
             "documentation": _DOCUMENTATION.get(aggregate, aggregate),
             "sql_forms": _SQL_FORMS.get(aggregate, [f"{aggregate}(expr)"]),
+            "parameters": _aggregate_parameters(aggregate),
+            "deterministic": aggregate not in _NON_DETERMINISTIC,
             "support": _aggregate_support(aggregate),
         }
 

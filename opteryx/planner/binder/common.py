@@ -30,6 +30,7 @@ from opteryx.planner.binder.view import (
     visit_show_manifest,
 )
 from opteryx.planner.binder.relation import (
+    visit_alter_materialized_view_owner,
     visit_alter_relation,
     visit_alter_workspace,
     visit_analyze,
@@ -231,6 +232,11 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_trigger(self, node, context)
 
+    def visit_alter_materialized_view_owner(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_materialized_view_owner(self, node, context)
+
     def visit_truncate_relation(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -269,8 +275,7 @@ class BinderVisitor:
     def visit_dependent_join(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
-        from opteryx.exceptions import UnsupportedSyntaxError
-        raise UnsupportedSyntaxError(
+        raise InvalidInternalStateError(
             "DependentJoin reached the Binder — correlated subquery was not decorrelated. "
             "This is a bug in the Plan Rewriter."
         )

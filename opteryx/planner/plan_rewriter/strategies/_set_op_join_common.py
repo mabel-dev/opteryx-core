@@ -48,6 +48,13 @@ def _consumed_below(plan: LogicalPlan, set_op_nid: str) -> set:
         is_semi_anti_join = node.node_type == LogicalPlanStepType.Join and node.type in (
             "left semi",
             "left anti",
+            # The set-op rewrites emit the not-distinct forms (NULL equals NULL, as
+            # INTERSECT/EXCEPT require). Omitting them here would stop a NESTED set op
+            # being recognised as having consumed its right side, so `live_relations`
+            # would keep a collapsed relation and the ON condition would be built over
+            # a relation that no longer exists at that node.
+            "left semi not-distinct",
+            "left anti not-distinct",
         )
         if (is_set_op or is_semi_anti_join) and node.right_relation_names:
             consumed.update(node.right_relation_names)

@@ -33,7 +33,10 @@ def split(arr, delimiter=",", limit=None):
     if limit is not None:
         limit = int(limit[0])
         if limit < 1:
-            raise InvalidFunctionParameterError("SPLIT limit must be a greater than 0")
+            raise InvalidFunctionParameterError(
+                "SPLIT's limit is the number of pieces to split into, so it must be "
+                "greater than 0. Leave the limit out to split on every delimiter."
+            )
 
     if len(delimiter) == 1 and limit is None:
         from opteryx.compiled.nanobind.vectors import vector_split

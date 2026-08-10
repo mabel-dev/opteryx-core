@@ -322,7 +322,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         if self.snapshot is None:
             self.snapshot = self.table.snapshot()
             if self.snapshot is None:
-                raise DatasetReadError("The dataset exists, but it no data has been committed.")
+                raise DatasetReadError(
+                    "The dataset exists, but no data has been committed to it yet."
+                )
             self.snapshot_id = self.snapshot.snapshot_id
 
         raw_schema = self.table.schema(self.snapshot.schema_id)
@@ -858,6 +860,67 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace_name)
         catalog.set_workspace_properties({property_name: value}, author=author)
 
+    def enforce_egress_policy(
+        self, target_relation: str, source_relations: "List[str]"
+    ) -> None:
+        """Refuse a write that would copy another workspace's data into this one.
+
+        The catalog owns the decision (`egress_protection` on the SOURCE
+        workspace, which is on unless explicitly turned off); this method's job
+        is to turn relation names into the workspaces they live in and ask.
+
+        Sources in the target's own workspace are dropped before asking: a copy
+        that stays inside one workspace is not egress, and it is by far the
+        common case, so it must not cost a Firestore read. When nothing
+        cross-workspace remains there is nothing to ask about at all.
+
+        Any workspace's `$properties` is readable through any handle in the same
+        Firestore database, so the target's catalog can answer for the sources
+        without constructing a handle per source workspace - which would re-run
+        the constructor's existence and soft-delete gates and raise for exactly
+        the workspaces the question is about.
+        """
+        from opteryx.exceptions import EgressRestrictedError
+
+        target_workspace, _ = self._parse_identifier(target_relation)
+
+        source_workspaces = []
+        for source in source_relations:
+            source_workspace, _ = self._parse_identifier(source)
+            if source_workspace == target_workspace:
+                continue
+            if source_workspace not in source_workspaces:
+                source_workspaces.append(source_workspace)
+        if not source_workspaces:
+            return
+
+        catalog = self._get_catalog(target_workspace)
+
+        # Fail closed on a catalog too old to hold the gate - both halves of it,
+        # the method and the exception it signals with. Silently skipping would
+        # turn a version skew into an unenforced security control, which is the
+        # one outcome worse than refusing a legitimate copy.
+        try:
+            from opteryx_catalog.exceptions import EgressRestricted
+        except ImportError:
+            EgressRestricted = None
+        enforce = getattr(catalog, "enforce_egress_policy", None)
+        if enforce is None or EgressRestricted is None:
+            raise EgressRestrictedError(
+                f"Cannot write {target_relation} from another workspace's data: this "
+                "deployment's opteryx-catalog is too old to evaluate egress protection. "
+                "Upgrade opteryx-catalog, or run the statement within one workspace."
+            )
+
+        try:
+            enforce(
+                source_workspaces,
+                target_workspace,
+                f"write {target_relation}",
+            )
+        except EgressRestricted as exc:
+            raise EgressRestrictedError(str(exc)) from exc
+
     def relation_exists(self, relation_name: str) -> bool:
         """Check whether a dataset exists in the catalog."""
         workspace, relative_id = self._parse_identifier(relation_name)
@@ -912,6 +975,51 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             return False
         return True
 
+    def materialized_view_definition(self, relation_name: str) -> str:
+        """The view's current defining SELECT, from the catalog's statement record."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        from opteryx_catalog.exceptions import DatasetNotFound
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        try:
+            record = catalog.get_materialized_view(relative_id)
+        except (DatasetNotFound, MaterializedViewError) as exc:
+            raise ValueError(f"{relation_name} is not a materialized view") from exc
+
+        sql = record.get("sql")
+        if not sql:
+            # Registered as a view but with no statement behind it - refuse
+            # rather than refresh it into an empty table.
+            raise ValueError(
+                f"materialized view {relation_name} has no defining SELECT recorded; "
+                "it cannot be refreshed. Recreate it with CREATE OR REPLACE "
+                "MATERIALIZED VIEW."
+            )
+        return sql
+
+    def set_materialized_view_owner(
+        self, relation_name: str, new_owner: str, author: str = None
+    ) -> None:
+        """Repoint the view's `runs-as` identity in the catalog."""
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        try:
+            catalog.set_materialized_view_owner(relative_id, new_owner, author=author)
+        except MaterializedViewError as exc:
+            raise ValueError(f"ALTER MATERIALIZED VIEW {relation_name} OWNER TO: {exc}") from exc
+
+    def mark_materialized_view_refreshed(
+        self, relation_name: str, status: str, author: str = None
+    ) -> None:
+        """Stamp the view's refresh state after a successful manual refresh."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        catalog.mark_materialized_view_refreshed(relative_id, status=status, author=author)
+
     def register_materialized_view(
         self,
         relation_name: str,
@@ -926,28 +1034,32 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         `update_if_exists=True` because this is the CoRTAS path's registration
         too - re-running the statement writes a new statement version and
         reconciles triggers against the new source list.
+
+        Names are handed over fully qualified, which is how the catalog stores
+        them. It accepts the workspace-relative form too, but stripping the
+        workspace here would only put the ambiguity back: `a.b.c` cannot be read
+        as a collection and a dotted dataset or as another workspace's table
+        once the prefix is gone.
         """
         from opteryx_catalog.exceptions import MaterializedViewError
 
-        workspace, relative_id = self._parse_identifier(relation_name)
+        workspace, _ = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
 
-        relative_sources = []
         for source in source_tables:
-            source_workspace, source_relative = self._parse_identifier(source)
+            source_workspace, _ = self._parse_identifier(source)
             if source_workspace != workspace:
                 raise ValueError(
                     f"materialized view {relation_name} cannot read across workspaces "
                     f"(source {source} is in workspace {source_workspace}); refresh "
                     "triggers only exist within the MV's own workspace"
                 )
-            relative_sources.append(source_relative)
 
         try:
             catalog.create_materialized_view(
-                relative_id,
+                relation_name,
                 sql,
-                relative_sources,
+                list(source_tables),
                 author=author,
                 update_if_exists=True,
             )

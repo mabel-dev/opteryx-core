@@ -27,7 +27,6 @@ import time
 from numbers import Integral
 from typing import Generator
 
-from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import QueryProperties
 from opteryx.utils import series
@@ -220,16 +219,9 @@ cdef class FunctionDatasetNode(ReaderNode):
 
     def read_morsels(self):
         """Source-side morsel iterator driven by the push pipeline engine."""
-        try:
-            start_time = time.time_ns()
-            result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type: ignore
-            self.readings["time_evaluate_dataset"] += time.time_ns() - start_time
-        except TypeError as err:  # pragma: no cover
-            if str(err).startswith("_unnest() takes 2"):
-                raise SqlError(
-                    "UNNEST expects a literal list in paranthesis, or a field name as a parameter."
-                )
-            raise err
+        start_time = time.time_ns()
+        result_morsel = DATASET_FUNCTIONS[self.function](**self.parameters)  # type: ignore
+        self.readings["time_evaluate_dataset"] += time.time_ns() - start_time
 
         self.readings["columns_read"] += len(result_morsel.column_names)
         self.readings["rows_read"] += result_morsel.num_rows

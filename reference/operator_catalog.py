@@ -30,6 +30,7 @@ def export_operator_catalog() -> OrderedDict[str, dict[str, Any]]:
             "category": metadata.category if metadata else None,
             "description": metadata.summary if metadata else operator,
             "documentation": metadata.documentation if metadata else operator,
+            "implemented": metadata.implemented if metadata else True,
         }
         if metadata and metadata.notes:
             entry["notes"] = metadata.notes

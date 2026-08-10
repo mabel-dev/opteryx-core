@@ -138,6 +138,13 @@ enum : int {
     // so the child needs the same unit-carrying retag the scalar case gets —
     // mirroring the trampoline's `_sp_array_ts_unit_map` / op kind 4.
     LC_ARRAY_TIMESTAMP = 5,
+    // IPV4 REFINES an already-complete physical type (UINT32) instead of
+    // completing a parameterized one, so the column decodes through the ordinary
+    // unsigned-int path and only the descriptor is attached — no width change, no
+    // conversion. Without it a catalog-declared IPv4 column arrives as bare
+    // UINT32: integer rendering instead of dotted-decimal, and a hard refusal from
+    // CIDR_AGG, which requires the descriptor.
+    LC_IPV4 = 6,
 };
 static inline int lc_kind(int packed)      { return packed & 0xF; }
 static inline int lc_unit(int packed)      { return (packed >> 4) & 0xF; }
@@ -492,7 +499,8 @@ struct NativeScanColumnBuilder {
         // DATE decodes at its physical int32 width (E33 exact-width integers) while
         // TIMESTAMP stays int64, so both carriers reach the temporal builder.
         if ((dk == rugo::DK_INT64 || dk == rugo::DK_INT64_DICT ||
-             dk == rugo::DK_INT32 || dk == rugo::DK_INT32_DICT) && lc_kind(packed) != LC_NONE)
+             dk == rugo::DK_INT32 || dk == rugo::DK_INT32_DICT) &&
+            lc_kind(packed) != LC_NONE && lc_kind(packed) != LC_IPV4)
             return build_temporal_column(result, i, dk, packed, out);
         if (!direct_kind_supported(dk)) return false;
         DrakenType dtype = draken_type_for(dk);
@@ -533,6 +541,11 @@ struct NativeScanColumnBuilder {
             lt.kind = LogicalKind::DECIMAL;
             lt.precision = result.columns[i].dec_precision;
             lt.scale = result.columns[i].dec_scale;
+            out.own->logical_type = logical_type_intern(lt);
+        }
+        if (lc_kind(packed) == LC_IPV4) {
+            LogicalType lt;
+            lt.kind = LogicalKind::IPV4;
             out.own->logical_type = logical_type_intern(lt);
         }
         out.view = out.own->vec;

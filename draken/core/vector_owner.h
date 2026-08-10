@@ -74,6 +74,21 @@ struct VectorOwner {
     const LogicalType*   logical_type = nullptr;  // borrowed; registry-interned
     std::unique_ptr<VectorOwner> child_owner;     // non-null only for DRAKEN_ARRAY
     OwnedBuffer<uint64_t> keyhash_buf;            // E37: non-null only when seed pre-computed
+    // data_source — non-null ONLY when `vec.data` is BORROWED from another
+    // VectorOwner's payload instead of owned here, in which case `data_buf` (and,
+    // for strings, `arena_buf`) stay null and this reference is what keeps those
+    // bytes alive. The one producer today is a join emitting its build half as a
+    // DICT over the consolidated build payload: many output morsels share one
+    // physical block, each owning only its own `codes_buf`.
+    //
+    // Sharing the payload also shares its LIFETIME: the block outlives the operator
+    // that produced it and dies with the last derived column, which is exactly why
+    // this is a shared_ptr and not a raw pointer into sink state that the pipeline
+    // may tear down first.
+    //
+    // NOT a second ownership path for the same bytes — data_buf and data_source are
+    // mutually exclusive. Setting both would double-free.
+    std::shared_ptr<VectorOwner> data_source;
 
     VectorOwner(DrakenVector v,
                 OwnedBuffer<void>    d,
@@ -101,7 +116,19 @@ struct VectorOwner {
 static inline size_t draken_vector_owner_nbytes(const VectorOwner* owner) noexcept {
     size_t total = 0u;
     while (owner != nullptr) {
-        total += draken_vector_nbytes(&owner->vec);
+        if (owner->data_source) {
+            // BORROWED payload (see data_source): the data/arena bytes belong to
+            // another owner and are counted THERE. Counting them here too would
+            // multiply one shared block by the number of morsels sharing it — for a
+            // fan-out join that is the whole build side counted once per output
+            // morsel, which is precisely the over-report this field exists to avoid.
+            // What IS owned here is the codes array and the per-row validity mask.
+            total += static_cast<size_t>(owner->vec.length) * sizeof(uint32_t);
+            if (owner->vec.validity != nullptr)
+                total += (static_cast<size_t>(owner->vec.length) + 7u) / 8u;
+        } else {
+            total += draken_vector_nbytes(&owner->vec);
+        }
         owner = owner->child_owner.get();
     }
     return total;

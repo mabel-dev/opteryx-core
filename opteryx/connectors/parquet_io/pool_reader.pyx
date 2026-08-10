@@ -880,7 +880,15 @@ cdef bint _bloom_excludes(str cpp_path, ColumnStats* col, object op, object valu
 cdef bint _rg_passes_predicates_native(RowGroupStats& rg, list predicates, str cpp_path):
     """Evaluate AND-combined predicates against RowGroupStats min/max (and bloom
     filters, for Eq/InList on local files) without materialising a Python dict.
-    `cpp_path` is the local file path for bloom probing, or None to skip it."""
+    `cpp_path` is the local file path for bloom probing, or None to skip it.
+
+    Every test below assumes the row group's values lie in [min_val, max_val].
+    That is FALSE for a float column holding a NaN — Parquet keeps NaN out of
+    min/max while draken ranks it above every value — so the (column, op) pairs
+    it would break are refused upstream by `predicates._nan_invisible_to_bounds`
+    and never appear in `predicates`. Do not "restore" the missing pruning here:
+    the rule lives at extraction precisely so this function and its Python twin
+    (`predicates._can_prune_rowgroup`) cannot drift apart."""
     cdef size_t i
     cdef string col_str
     cdef object min_val, max_val, value, col_name, op

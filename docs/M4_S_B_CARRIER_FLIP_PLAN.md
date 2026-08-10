@@ -158,8 +158,8 @@ and at cold Python operators — nowhere in a converted nogil body.
   (a) Header-ize/C-ABI-export the pure-C++ transform impls (`vector_take_impl`/
   `vector_mask_impl`/`vector_slice_impl`/`concat_owners`) so the morsel `.so` calls
   them at C level; `cxx_morsel.pxd` declares `shared_ptr[CxxMorsel]` + nogil free
-  functions (`cxx_take`/`cxx_mask`/`cxx_slice`/`cxx_combine`/`cxx_select`/`cxx_hash`/
-  `cxx_align` → `shared_ptr[CxxMorsel]`) + read accessors. (b) Add a `MorselState`
+  functions (`cxx_take`/`cxx_mask`/`cxx_slice`/`cxx_combine`/`cxx_select`/`cxx_hash`
+  → `shared_ptr[CxxMorsel]`) + read accessors. (b) Add a `MorselState`
   enum to `CxxMorsel` (`DATA`, `END_OF_STREAM`; extensible) — EOS becomes a valid
   morsel carrying a flag, representable nogil (replaces `_EOS_SENTINEL`-as-Morsel).
   Nothing calls the new surface yet. Gate: build + suite unaffected.

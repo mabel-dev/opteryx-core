@@ -332,17 +332,25 @@ SELECT UPPER ( 'foo' )
 statement ok
 SELECT TRIM ( 'foo' )
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM ( 'foo' FROM 'foo' )
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM ( BOTH 'foo' FROM 'foo' )
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM ( LEADING 'foo' FROM 'foo' )
 
-statement error IncompatibleTypesError
+statement ok
 SELECT TRIM ( TRAILING 'foo' FROM 'foo' )
+
+# Not SQL-92: the Postgres/DuckDB call spelling of the same thing. A direction
+# cannot be mixed into it -- see tests/compiled/test_trim_native.py.
+statement ok
+SELECT TRIM ( 'foo', 'o' )
+
+statement error QueryParseError
+SELECT TRIM ( LEADING 'foo', 'o' )
 
 
 # Feature E021-11

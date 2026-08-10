@@ -45,6 +45,7 @@ from opteryx.exceptions import (
     MissingSqlStatement,
     ParameterError,
     PermissionsError,
+    QueryParseError,
     SqlError,
     UnexpectedDatasetReferenceError,
     UnnamedColumnError,
@@ -115,7 +116,10 @@ STATEMENTS = [
         ("SELECT birth_date + (INTERVAL '1' MONTH + INTERVAL '10' DAY) FROM testdata.astronauts", 357, 1, None),
 
         # Does the error tester work
-        ("THIS IS NOT VALID SQL", None, None, SqlError),
+        # QueryParseError, not the general SqlError: nothing parsed, so there is no
+        # clause to name and the error carries a position instead. It is a SqlError
+        # subclass, but this battery pins the exact type.
+        ("THIS IS NOT VALID SQL", None, None, QueryParseError),
 
         # Unary minus on a column expression must not crash the planner [regression]
         ("SELECT -id FROM $planets", 9, 1, None),

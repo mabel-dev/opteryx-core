@@ -109,6 +109,104 @@ def test_trim_scalar_edges():
         assert _rows(sql)[0][0] == expected
 
 
+# ---------------------------------------------------------------------------
+# SQL-92 `TRIM([BOTH|LEADING|TRAILING] <chars> FROM <str>)` — the two-argument arm.
+# ---------------------------------------------------------------------------
+
+
+def test_trim_characters_is_a_set_not_a_substring():
+    """The argument is a SET of characters, matched in any order and repeated.
+
+    This is the whole semantic and it is the one a substring implementation would
+    silently get wrong: 'baXab' loses every leading b/a and every trailing a/b,
+    leaving 'X'. A substring match on 'ab' would strip neither end.
+    """
+    cases = [
+        ("SELECT TRIM(BOTH 'ab' FROM 'baXab') AS r", "X"),
+        ("SELECT TRIM(LEADING 'ab' FROM 'baXab') AS r", "Xab"),
+        ("SELECT TRIM(TRAILING 'ab' FROM 'baXab') AS r", "baX"),
+        # Every character consumed.
+        ("SELECT TRIM(BOTH 'ab' FROM 'abab') AS r", ""),
+        # An EMPTY set strips nothing — it is not "fall back to whitespace".
+        ("SELECT TRIM(BOTH '' FROM '  ab  ') AS r", "  ab  "),
+        # No direction keyword means BOTH.
+        ("SELECT TRIM('_' FROM '__init__') AS r", "init"),
+        # The comma spelling of the same thing, for all three functions.
+        ("SELECT TRIM('baXab', 'ab') AS r", "X"),
+        ("SELECT LTRIM('baXab', 'ab') AS r", "Xab"),
+        ("SELECT RTRIM('baXab', 'ab') AS r", "baX"),
+    ]
+    for sql, expected in cases:
+        assert _rows(sql)[0][0] == expected, sql
+
+
+def test_trim_comma_form_refuses_a_direction():
+    """`TRIM(LEADING str, 'x')` must not parse.
+
+    sqlparser's own comma branch drops the direction and returns `trim_where:
+    None`, which downstream is indistinguishable from `TRIM(str, 'x')` — so
+    accepting it would silently trim BOTH ends. src/opteryx_dialect.rs owns the
+    TRIM production to refuse the mixture instead.
+    """
+    from opteryx.exceptions import QueryParseError
+
+    for direction in ("BOTH", "LEADING", "TRAILING"):
+        with pytest.raises(QueryParseError):
+            _rows(f"SELECT TRIM({direction} name, 'M') AS r FROM $planets")
+
+
+def test_trim_comma_form_takes_one_character_set():
+    """A second characters argument is refused by arity, naming the function."""
+    from opteryx.exceptions import IncompatibleTypesError
+
+    with pytest.raises(IncompatibleTypesError):
+        _rows("SELECT TRIM(name, 'a', 'b') AS r FROM $planets")
+
+
+def test_trim_characters_over_nvarchar_scans_by_codepoint():
+    """A non-ASCII set over NVARCHAR must not split a multibyte character.
+
+    'é' is C3 A9 and '©' is C2 A9. A BYTE scan would see the trailing A9 of 'é' in
+    the set and strip it, leaving a dangling C3 — a truncated UTF-8 sequence and a
+    shorter string. The codepoint scan matches whole encoded characters, so the
+    value is returned untouched, all five bytes of it.
+    """
+    assert _rows("SELECT TRIM(BOTH '©' FROM CAST('éXé' AS NVARCHAR)) AS r")[0][0] == "éXé"
+    assert _rows("SELECT OCTET_LENGTH(TRIM(BOTH '©' FROM CAST('éXé' AS NVARCHAR))) AS r")[0][0] == 5
+    # The set's own characters still strip, and a multibyte set member works.
+    assert _rows("SELECT TRIM(BOTH 'é' FROM CAST('éXé' AS NVARCHAR)) AS r")[0][0] == "X"
+    assert _rows("SELECT TRIM(BOTH '中x' FROM CAST('中x好x中' AS NVARCHAR)) AS r")[0][0] == "好"
+
+
+def test_trim_characters_shape_is_preserved_over_a_compressed_column():
+    """Dict-shaped input, character-set trim: the answer must equal the per-row oracle.
+
+    The kernel computes the trimmed range once per PHYSICAL value and carries the
+    input's selection onto the result; if that were wrong for this arm the dict
+    column would disagree with the row-by-row answer.
+    """
+    raw = _rows(f"SELECT is_reply_to AS r FROM testdata.tweets LIMIT {_LIMIT}")
+    got = _rows(f"SELECT TRIM(BOTH '0123456789' FROM is_reply_to) AS r FROM testdata.tweets LIMIT {_LIMIT}")
+    assert len(raw) == len(got)
+    for (a,), (b,) in zip(raw, got):
+        assert b == (None if a is None else a.strip("0123456789"))
+
+
+def test_trim_characters_must_be_constant():
+    """A per-ROW character set is refused — it would break shape preservation."""
+    from opteryx.exceptions import InvalidFunctionParameterError
+
+    with pytest.raises(InvalidFunctionParameterError):
+        _rows("SELECT TRIM(BOTH name FROM name) AS r FROM $planets")
+
+
+def test_trim_null_character_set_is_null():
+    """A NULL set is NULL for every row, not an error and not a no-op."""
+    rows = _rows("SELECT TRIM(BOTH CAST(NULL AS VARCHAR) FROM name) AS r FROM $planets")
+    assert len(rows) > 0
+    assert all(value is None for (value,) in rows)
+
+
 if __name__ == "__main__":
     import pytest as _pt
 

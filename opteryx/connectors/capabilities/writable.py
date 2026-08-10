@@ -362,11 +362,99 @@ class Writable:
 
         Args:
             workspace_name: The workspace whose property is being set
-            property_name: The property to set, e.g. "delete_protection"
+            property_name: The property to set, e.g. "deletion_protection"
             value: The already-typed value to store
             author: session user this change is attributed to (see create_relation)
         """
         raise NotImplementedError
+
+    def materialized_view_definition(self, relation_name: str) -> str:
+        """The SELECT a materialized view is defined by, as executable text.
+
+        `REFRESH MATERIALIZED VIEW` is planned by re-running this SELECT into
+        the view's backing table, so the definition has to be readable at plan
+        time. Read fresh rather than carried on the statement: a refresh runs
+        the view's *current* definition, which is what makes redefining a view
+        take effect on its next refresh rather than at some later moment nobody
+        can name.
+
+        Args:
+            relation_name: Fully-qualified name of the materialized view
+
+        Raises:
+            ValueError: If the relation is not a materialized view, or is one
+                with no recorded defining SQL.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support REFRESH MATERIALIZED VIEW"
+        )
+
+    def set_materialized_view_owner(
+        self, relation_name: str, new_owner: str, author: str = None
+    ) -> None:
+        """Repoint the identity a materialized view's refresh runs as.
+
+        The only thing that moves a view's pinned owner - redefining a view
+        records a new statement author but deliberately leaves this alone, so
+        that editing someone's view does not silently make you responsible for
+        it (nor hand your authority to whoever edits next).
+
+        Args:
+            relation_name: Fully-qualified name of the materialized view
+            new_owner: The principal refreshes should run as
+            author: session user this change is attributed to
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support ALTER MATERIALIZED VIEW ... OWNER TO"
+        )
+
+    def mark_materialized_view_refreshed(
+        self, relation_name: str, status: str, author: str = None
+    ) -> None:
+        """Record that a materialized view's refresh completed.
+
+        Called by the INSERT operator once a `REFRESH MATERIALIZED VIEW` write
+        has committed, so a manual refresh stamps its own state. The failure
+        path cannot be recorded from here for the obvious reason - a refresh
+        that raised never reaches this call - so failures are stamped from
+        outside the query, by the worker that ran it.
+
+        Args:
+            relation_name: Fully-qualified name of the materialized view
+            status: The outcome to record, e.g. "succeeded"
+            author: session user this refresh is attributed to
+        """
+        raise NotImplementedError
+
+    def enforce_egress_policy(
+        self, target_relation: str, source_relations: "List[str]"
+    ) -> None:
+        """Refuse a write that would copy data out of a protected workspace.
+
+        Called at bind time by the INSERT/CTAS path, before anything is
+        written, with the relation being written and every catalog relation the
+        statement reads. A connector that recognises a workspace boundary
+        between them raises; one that does not, returns.
+
+        **No-op by default, and that is not a gap.** Egress protection is a
+        boundary between workspaces, and a connector with no workspace concept
+        - a filesystem, a single-store backend - has no boundary to cross. It
+        would be wrong to make this `NotImplementedError` like its neighbours
+        above: those describe capabilities a connector may genuinely lack,
+        whereas here "nothing to check" is the correct and complete answer.
+
+        Args:
+            target_relation: Fully-qualified relation being written
+            source_relations: Fully-qualified names of the catalog relations the
+                statement reads. Non-catalog sources ($planets,
+                information_schema, files) are filtered out before this call -
+                they belong to no workspace and so cannot leave one.
+
+        Raises:
+            EgressRestrictedError: If the write would copy data out of a
+                workspace whose `egress_protection` is on.
+        """
+        return None
 
     def relation_column_names(self, relation_name: str) -> "List[str]":
         """Return the relation's current column names only (not full type

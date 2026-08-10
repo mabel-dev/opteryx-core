@@ -53,6 +53,7 @@
 #include "core/string_slot.h"   // Stage 4b: build Draken string slots in the worker
 #include "ops/string_hash.h"    // E37: draken_build_string_slot_seed — slot + carried hash seed
 #include "core/buffers.h"       // DrakenVector / DrakenStringArena — worker-side pass-1 predicate view
+#include "ops/float_ops.h"      // fp_canon — ingestion canonicalisation of -0.0 / NaN
 #include "core/vector_alloc.h"  // draken_identity_sel — dense selection for the view
 // docs/EXECUTION_TRACING_DESIGN.md: rugo calls the extern "C" bridge
 // (trace_bridge_c.h), NEVER draken/core/trace.hpp directly — this file
@@ -417,6 +418,54 @@ static inline bool _fixed_eligible(size_t vsize, uint32_t n, bool nullable) {
 // Excludes dict/RLE/list (no plain positional buffer). int32 widens to INT64;
 // __int128 payload is DECIMAL128. The logical-type gate (date/timestamp and
 // int-backed decimal stay on the IPC path) is applied separately by the caller.
+// Apply draken's ingestion canonicalisation to every float buffer a decoded
+// column can hand onward: -0.0 -> +0.0, any NaN bit-pattern -> one canonical
+// quiet NaN (draken/ops/float_ops.h, architect-locked 2026-05-22).
+//
+// WHY IT LIVES HERE, and not in decode_column.cpp. This is the boundary where a
+// decoded chunk becomes a DrakenVector, and the canonicalisation is DRAKEN's
+// contract, not Parquet's. `DecodeColumnFromChunk` is also the standalone rugo
+// file-reader's entry point, where a caller converting Parquet to CSV is owed
+// the bytes that are in the file — a reader that silently rewrites -0.0 to 0.0
+// is lying about the file. Past this line the values belong to the engine, and
+// the engine's rule is that -0.0 does not exist.
+//
+// WHAT IT FIXES. `fp_total_eq` treats -0.0 and 0.0 as equal (IEEE `==` does),
+// but hashing, grouping and set operations key on RAW BITS — float_ops.h says
+// they may, precisely because canonicalisation is supposed to have happened
+// first. It had not, on this path: only the nanobind constructors in
+// draken_native.cpp canonicalised, so a float column read from Parquet kept its
+// -0.0 and `GROUP BY f` split one value into two groups while `f = 0.0` matched
+// both, and `X EXCEPT ALL X` returned rows.
+//
+// EVERY SHAPE IS COVERED BY THIS ONE CALL because all of them read these same
+// buffers: `build_direct_fixed` memcpys from float{32,64}_values,
+// `build_direct_float_dict` gathers from dict_float{32,64}_values, the RLE
+// expansion reads rle_float64_values, and `pass1_build_dv_view` views whatever
+// those produced.
+//
+// PRECONDITION — the zero-copy `ext_float32` / `ext_float64` buffers are NOT
+// handled, because on this path they are always null: all three
+// `DecodeColumnFromChunk` calls below use the mask-only overload, which passes
+// nullptr for every ext_* pointer, so decode always lands in the vectors above.
+// Wiring ext_* through here later (an obvious zero-copy win) would route float
+// values around this function and silently reintroduce the -0.0 split — extend
+// this function in the same commit, over `ext_written` elements, NOT over the
+// caller's capacity.
+static inline void canonicalise_decoded_floats(DecodedColumn& d) {
+    if (d.type != "float32" && d.type != "float64") return;
+
+    for (float& v : d.float32_values)       v = draken::ops::fp_canon(v);
+    for (float& v : d.dict_float32_values)  v = draken::ops::fp_canon(v);
+    for (double& v : d.float64_values)      v = draken::ops::fp_canon(v);
+    for (double& v : d.dict_float64_values) v = draken::ops::fp_canon(v);
+    // RLE runs are held as double for BOTH float32 and float64 dict columns
+    // (see DecodedColumn::rle_float64_values). Canonicalising as double is
+    // exact for either: every float32 widens without loss, and -0.0/NaN keep
+    // their class across the widening.
+    for (double& v : d.rle_float64_values)  v = draken::ops::fp_canon(v);
+}
+
 static inline DirectKind direct_kind_for(const DecodedColumn& d) {
     if (!d.rep_levels.empty()) return DK_POOL;           // list
     const std::string& t = d.type;
@@ -1789,6 +1838,14 @@ class ParquetIOPipeline {
                 // strings stay pool (direct_kind_for returns DK_POOL for them); a
                 // dense VARCHAR is concat/CASE-compatible with a pool dict VARCHAR
                 // (§11 uniform access — proven by test_string_dense_dict_concat_compat).
+
+                // Ingestion canonicalisation, before ANY vector shape is built
+                // from `decoded` — see `canonicalise_decoded_floats`. Placed
+                // ahead of the DK_POOL/direct split so both paths ingest the
+                // same values: a canon on one branch only would make a -0.0's
+                // survival depend on how its column happened to be encoded.
+                canonicalise_decoded_floats(decoded);
+
                 const std::string& lt = col_stats.logical_type;
                 const bool safe_logical =
                     lt.empty() || lt == "int64" || lt == "int32" ||

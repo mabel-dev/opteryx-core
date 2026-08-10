@@ -57,7 +57,7 @@ from opteryx.compiled.agg_budgets import array_agg_budget_bytes as _array_agg_bu
 from opteryx.compiled.agg_budgets import cidr_agg_emit_budget_bytes as _cidr_agg_emit_budget_bytes
 from opteryx.compiled.agg_budgets import cidr_agg_state_budget_bytes as _cidr_agg_state_budget_bytes
 from opteryx.compiled.agg_budgets import median_budget_bytes as _median_budget_bytes
-from opteryx.exceptions import PermissionsError, VariableNotFoundError
+from opteryx.exceptions import PermissionsError, VariableNotFoundError, md_code, md_column
 from opteryx.types.logical_type import BOOLEAN, FLOAT64, INT64, VARCHAR, ARRAY, VARIANT
 
 class VariableOwner(int, Enum):
@@ -371,7 +371,9 @@ class SystemVariablesContainer:
                 raise VariableNotFoundError(variable=key, suggestion=suggestion)
             variable_type, _, owner, visibility = self._variables[key]
             if owner > self._owner:
-                raise PermissionsError(f"User does not have permission to set variable `{key}`")
+                raise PermissionsError(
+                    f"This session is not permitted to set the variable {md_column(key)}."
+                )
             # A RESTRICTED variable requires `platform_admin` to WRITE, independent of
             # (and in addition to) the owner-rank check above. This is deliberately
             # separate from Visibility's read-side gate in variables_data.py: a
@@ -382,10 +384,16 @@ class SystemVariablesContainer:
             # specifically so it is NOT caught by this — see its comment above.
             if visibility == Visibility.RESTRICTED and not self._caller_is_platform_admin():
                 raise PermissionsError(
-                    f"Setting `{key}` requires the `{PLATFORM_ADMIN_ENTITLEMENT}` entitlement."
+                    f"Setting {md_column(key)} requires the "
+                    f"{md_code(PLATFORM_ADMIN_ENTITLEMENT)} entitlement, which this "
+                    f"session does not hold."
                 )
             if variable_type != value.type:
-                raise ValueError(f"Invalid type for `{key}`, {variable_type} expected.")
+                raise ValueError(
+                    f"The variable {md_column(key)} holds "
+                    f"{md_code(variable_type)} values, so {md_code(value.type)} "
+                    f"cannot be assigned to it."
+                )
 
         self._variables[key] = (variable_type, value.value, owner, visibility)
 
@@ -455,7 +463,9 @@ class SystemVariablesContainer:
             # reporting it as missing would be a lie that also hands out a
             # does-it-exist oracle via the "did you mean" suggestions.
             raise PermissionsError(
-                f"Reading `{key}` requires the `{PLATFORM_ADMIN_ENTITLEMENT}` entitlement."
+                f"Reading {md_column(key)} requires the "
+                f"{md_code(PLATFORM_ADMIN_ENTITLEMENT)} entitlement, which this session "
+                f"does not hold."
             )
         return ConstantColumn(name=key, column_type=variable[0], value=variable[1])
 

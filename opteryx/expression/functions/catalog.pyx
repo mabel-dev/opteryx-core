@@ -13,7 +13,24 @@ Node = Any  # AST node type (duck-typed; no import to avoid circular deps)
 
 @dataclass(frozen=True)
 class ParameterSpec:
-    """Specification for a single function parameter."""
+    """Specification for a single function parameter.
+
+    VALUE CONSTRAINTS (`domain`, `minimum`, `maximum`, `value_format`,
+    `element_of`, `excludes`) are DECLARATIVE ONLY. Nothing in overload
+    resolution, binding or execution reads them: they exist so that
+    `reference/function_signatures.json` states restrictions the `type_family`
+    cannot express, instead of leaving them in prose or in nothing at all.
+
+    They were added because a type-directed generator reading only the catalog
+    produced calls that satisfied every declared type and then died inside a
+    kernel with a raw Python exception — `TO_CHAR(-303083)`, `TIME_BUCKET(-125533.0, ...)`,
+    `JSONB_OBJECT_KEYS('delta')`, `ARRAY_CONTAINS(int_array, 'x')`. Each of
+    those is a real, deliberate engine rule; none of them was recorded. A rule
+    that the catalog does not carry is a rule every consumer has to rediscover.
+
+    Keeping them declarative is the point: the kernel is still the enforcer, so
+    a constraint stated here can be stale but can never make the engine wrong.
+    """
 
     name: str
     type_family: str  # exact, numeric, temporal, array<any>, any, etc.
@@ -22,6 +39,26 @@ class ParameterSpec:
     constant_only: bool = False
     null_handling: Literal["strict", "passthrough", "unknown"] = "strict"
     documentation: str = ""
+    #: The complete set of legal values, for a parameter whose domain is an
+    #: enumeration rather than a type — a date part, a format mode. Compared
+    #: case-insensitively, which is how the engine reads them.
+    domain: Tuple[str, ...] = ()
+    #: Inclusive bounds on the VALUE (not the width of its type). `minimum=1` on
+    #: TIME_BUCKET's magnitude, the year 1..9999 epoch window on FROM_UNIXTIME.
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    #: The value must be well formed in this format, which no type expresses:
+    #: "json", "base64", "base85", "hex", "dfa-regex".
+    value_format: Optional[str] = None
+    #: This parameter's type must be the ELEMENT type of the named sibling
+    #: parameter (ARRAY_CONTAINS's probe against its array). The engine exposes
+    #: no schema that records an array's element type, so without this the
+    #: relationship is invisible.
+    element_of: Optional[str] = None
+    #: Canonical types.json spellings that `type_family` nominally covers but
+    #: the implementation rejects. `excludes=("DECIMAL",)` on the null-conditional
+    #: family is the difference between "any type" and what draken can blend.
+    excludes: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,6 +133,13 @@ class FunctionOverload:
     parameters: Tuple[ParameterSpec, ...]
     return_spec: ReturnSpec
     kernel: KernelSpec
+    #: True when the `any`-typed parameters must all resolve to ONE shared type,
+    #: which a per-parameter type family cannot say. COALESCE/IFNULL/IFNOTNULL/
+    #: NULLIF/IIF each type their branches `any` and then reject a mix — see
+    #: `_check_blend_compatible` in the registrar package. Parameters with a
+    #: concrete family (IIF's BOOLEAN condition) are not part of the shared set.
+    #: Declarative only; that function is still the enforcer.
+    homogeneous: bool = False
 
 
 @dataclass(frozen=True)
@@ -255,6 +299,20 @@ class FunctionCatalog:
             # `any`-family parameters returned above and are unaffected, so
             # COALESCE/IFNULL and friends still take a bare NULL.
             if node_type == LogicalCategory.NULL:
+                # ...except for the three single-string-type families, where an
+                # untyped NULL is legal and must be TRANSPARENT to selection. The
+                # `||` these desugar into has a dedicated NULL-operand rule
+                # (operator_map.determine_type, binop_string_concat_null): `x ||
+                # NULL` is NULL of x's type. Scoring _INF here would have made
+                # `CONCAT(name, NULL)` unresolvable while `name || NULL` kept
+                # working — the two spellings disagreeing about NULL, which is
+                # exactly what one-overload-per-string-type was meant to end.
+                # Scoring 0.0 lets the NON-NULL operands pick the overload. When
+                # every operand is NULL all three tie and resolution reports an
+                # ambiguity naming the casts, which is the honest answer: an
+                # all-NULL concat has no string type to return.
+                if type_family in ("varchar", "nvarchar", "varbinary"):
+                    return 0.0
                 return _INF
 
             if type_family == "array":
@@ -271,6 +329,23 @@ class FunctionCatalog:
                 if node_type == LogicalCategory.VARCHAR or node_type == LogicalCategory.NVARCHAR:
                     return 0.0
                 return 1.0 if node_type == LogicalCategory.VARBINARY else _INF
+            # The three string types as SEPARATE families. `string` above is the
+            # permissive family — it takes any of them, which is right for a
+            # function that treats bytes as bytes (LENGTH, REVERSE). These are for
+            # a function whose operands must all be ONE string type and whose
+            # return type follows that type, which `string` cannot express because
+            # it collapses the three. CONCAT/CONCAT_WS are declared with one
+            # overload per family for exactly that reason; see
+            # RATIFIED/string-concatenation-requires-homogeneous-string-types.
+            # Exact-match only: a near-miss must score _INF so the overload is
+            # REJECTED rather than ranked, otherwise mixed operands would resolve
+            # to whichever overload happened to score lowest.
+            if type_family == "varchar":
+                return 0.0 if node_type == LogicalCategory.VARCHAR else _INF
+            if type_family == "nvarchar":
+                return 0.0 if node_type == LogicalCategory.NVARCHAR else _INF
+            if type_family == "varbinary":
+                return 0.0 if node_type == LogicalCategory.VARBINARY else _INF
             if type_family == "temporal":
                 return 0.0 if isinstance(node_type, LogicalCategory) and node_type in _TEMPORAL_TYPES else _INF
             if type_family == "date":
@@ -307,6 +382,9 @@ class FunctionCatalog:
             # Every candidate was rejected on type family — build per-argument details.
             _FAMILY_TO_CAST = {
                 "string": "VARCHAR",
+                "varchar": "VARCHAR",
+                "nvarchar": "NVARCHAR",
+                "varbinary": "VARBINARY",
                 "numeric": "DOUBLE",
                 "integer": "INTEGER",
                 "boolean": "BOOLEAN",

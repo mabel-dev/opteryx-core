@@ -18,6 +18,7 @@ from typing import Optional, Sequence
 
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
 from opteryx.types.logical_type import LogicalCategory
 from rugo.csv import read_csv as _rugo_read_csv
@@ -124,7 +125,7 @@ def read_csv_file(
     ) as reader:
         morsel = next(iter(reader), None)
     if morsel is None:
-        raise DatasetReadError(
+        raise InvalidInternalStateError(
             "rugo.csv.read_csv yielded no morsel; it is contracted to yield exactly "
             "one morsel for any input, including an empty buffer."
         )

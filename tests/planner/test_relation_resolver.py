@@ -177,7 +177,7 @@ def test_self_referencing_cte_fails_loud():
 
 def test_with_recursive_fails_loud():
     """Not supported — but it must SAY so, not hang. Needs a native fixpoint operator."""
-    with pytest.raises(UnsupportedSyntaxError, match="WITH RECURSIVE is not supported"):
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*WITH RECURSIVE\*\* is not supported"):
         _rows(
             "WITH RECURSIVE t(n) AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 5) "
             "SELECT * FROM t"
@@ -262,7 +262,7 @@ def test_explain_over_chained_ctes_resolves():
 
 def test_explain_still_rejects_recursive():
     """The recursion guard must fire through the wrapper too, not just on a bare query."""
-    with pytest.raises(UnsupportedSyntaxError, match="WITH RECURSIVE is not supported"):
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*WITH RECURSIVE\*\* is not supported"):
         _rows(
             "EXPLAIN WITH RECURSIVE t(n) AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM t) "
             "SELECT * FROM t"

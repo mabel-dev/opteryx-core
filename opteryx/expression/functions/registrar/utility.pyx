@@ -270,8 +270,26 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
 
     # Parameter short-hands
     _arr = ParameterSpec(name="arr", type_family="array")
-    _item = ParameterSpec(name="item", type_family="any")
-    _set = ParameterSpec(name="items", type_family="array")
+    # The probe must match the ARRAY's ELEMENT type — draken_array_contains
+    # rejects a mismatch at execution ("string item but array elements are
+    # type 4"). Typed `any`, that relationship was invisible, and no schema the
+    # engine exposes records an array's element type either (every list reports
+    # as DrakenType.ARRAY), so a caller had nothing to check against.
+    # `element_of` names the parameter whose element type this one must equal.
+    _item = ParameterSpec(
+        name="item",
+        type_family="any",
+        element_of="arr",
+        documentation="Must be of the array's element type.",
+    )
+    # Same rule one level up: every element of `items` must be of `arr`'s
+    # element type, so the two arrays must share an element type.
+    _set = ParameterSpec(
+        name="items",
+        type_family="array",
+        element_of="arr",
+        documentation="Must be an array with the same element type as `arr`.",
+    )
     _any = ParameterSpec(name="val", type_family="any")
 
     def _embed_return_type(_arg_nodes):
@@ -318,7 +336,20 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
             # a non-string never worked — it failed inside the native engine as
             # `ExprMultiProjectOperator: error code 1`, which names nothing the
             # caller can act on. JSON documents arrive as VARCHAR/VARBINARY.
-            (ParameterSpec(name="json", type_family="string"),),
+            (
+                ParameterSpec(
+                    name="json",
+                    type_family="string",
+                    # And it must PARSE as JSON. `string` alone made every VARCHAR
+                    # a legal argument, and most of them fail at execution with a
+                    # raw `jsonb_object_keys: invalid JSON`.
+                    value_format="json",
+                    documentation=(
+                        "Must be text that parses as a JSON object; other input is "
+                        "rejected at execution."
+                    ),
+                ),
+            ),
             cost=590.21,
             summary="Extract keys from JSON object.",
         ),
@@ -340,6 +371,10 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     type_family="string",
                     optional=True,
                     constant_only=True,
+                    domain=(
+                        "words", "compact", "bytes", "si",
+                        "time", "clock", "percent", "odds",
+                    ),
                     documentation=(
                         "Scale system to render into: 'words' (default), 'compact', "
                         "'bytes', 'si', 'time', 'clock', 'percent' or 'odds'."

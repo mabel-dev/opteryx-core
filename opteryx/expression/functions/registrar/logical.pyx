@@ -41,9 +41,36 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
     # VM arm gates on that flag before reading callable_ref. There is no Python
     # fallback (and never a silent one — an unsupported operand type fails loud in
     # the kernel), so callable_ref is None rather than a dead nanobind binding.
+    # The null-conditional family's branches are typed `any`, which overstates
+    # them twice over. `_check_blend_compatible` (registrar/__init__.pyx) mirrors
+    # nc_dispatch: the branches must be ALL BOOLEAN, ALL string, or a blendable
+    # fixed-width numeric/temporal mix — so they must agree with each other
+    # (`homogeneous=True` on every overload below), and DECIMAL is not in any of
+    # those families at all (`excludes`). types.json puts DECIMAL squarely in the
+    # numeric family, so "any" reads as a promise that
+    # `IFNULL(decimal_col, decimal_col)` works; it does not.
+    def _blend(name: str) -> ParameterSpec:
+        return ParameterSpec(
+            name=name,
+            type_family="any",
+            excludes=("DECIMAL",),
+            documentation=(
+                "A branch value. All branches must share one blendable family — all "
+                "BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not "
+                "blendable; CAST it to DOUBLE first."
+            ),
+        )
+
     _variadic_any = (
-        ParameterSpec(name="arg0", type_family="any"),
-        ParameterSpec(name="args", type_family="any", variadic=True, optional=True),
+        _blend("arg0"),
+        ParameterSpec(
+            name="args",
+            type_family="any",
+            variadic=True,
+            optional=True,
+            excludes=("DECIMAL",),
+            documentation="Further branch values, of the same blendable family as `arg0`.",
+        ),
     )
 
     return [
@@ -60,6 +87,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="COALESCE_variadic",
                     parameters=_variadic_any,
+                    homogeneous=True,
                     return_spec=ReturnSpec(mode="resolver", resolver=_coalesce_return_type),
                     kernel=KernelSpec(
                         engine="draken",
@@ -82,10 +110,8 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="IFNULL_1",
-                    parameters=(
-                        ParameterSpec(name="value", type_family="any"),
-                        ParameterSpec(name="default", type_family="any"),
-                    ),
+                    parameters=(_blend("value"), _blend("default")),
+                    homogeneous=True,
                     return_spec=ReturnSpec(mode="resolver", resolver=_ifnull_return_type),
                     kernel=KernelSpec(
                         engine="draken",
@@ -108,10 +134,8 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="IFNOTNULL_1",
-                    parameters=(
-                        ParameterSpec(name="value", type_family="any"),
-                        ParameterSpec(name="result", type_family="any"),
-                    ),
+                    parameters=(_blend("value"), _blend("result")),
+                    homogeneous=True,
                     return_spec=ReturnSpec(mode="resolver", resolver=_ifnotnull_return_type),
                     kernel=KernelSpec(
                         engine="draken",
@@ -134,10 +158,11 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
             overloads=(
                 FunctionOverload(
                     id="NULLIF_1",
-                    parameters=(
-                        ParameterSpec(name="value", type_family="any"),
-                        ParameterSpec(name="compare", type_family="any"),
-                    ),
+                    # NULLIF lowers to IIF(a = b, NULL, a) at plan-build time, so
+                    # it inherits IIF's blend rule on top of needing `a` and `b`
+                    # comparable. A DECIMAL operand fails at execution (err_op=15).
+                    parameters=(_blend("value"), _blend("compare")),
+                    homogeneous=True,
                     return_spec=ReturnSpec(mode="same_as_arg", arg_index=0),
                     kernel=KernelSpec(
                         engine="draken",
@@ -162,9 +187,10 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                     id="IIF_1",
                     parameters=(
                         ParameterSpec(name="condition", type_family="boolean"),
-                        ParameterSpec(name="true_value", type_family="any"),
-                        ParameterSpec(name="false_value", type_family="any"),
+                        _blend("true_value"),
+                        _blend("false_value"),
                     ),
+                    homogeneous=True,
                     return_spec=ReturnSpec(mode="resolver", resolver=_iif_return_type),
                     kernel=KernelSpec(
                         engine="draken",

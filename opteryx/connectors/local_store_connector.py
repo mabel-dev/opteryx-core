@@ -9,6 +9,7 @@ Local file-based storage connector implementing Writable interface.
 
 import json
 import os
+import time
 import re
 import shutil
 from datetime import datetime, timezone
@@ -315,6 +316,42 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         with open(mv_path) as f:
             return json.load(f)
 
+    def materialized_view_definition(self, relation_name: str) -> str:
+        record = self._read_mv_record(relation_name)
+        if record is None:
+            raise ValueError(f"{relation_name} is not a materialized view")
+        sql = record.get("sql")
+        if not sql:
+            raise ValueError(
+                f"materialized view {relation_name} has no defining SELECT recorded; "
+                "it cannot be refreshed."
+            )
+        return sql
+
+    def set_materialized_view_owner(
+        self, relation_name: str, new_owner: str, author: str = None
+    ) -> None:
+        """Repoint the sidecar's `runs-as`, mirroring the catalog's field."""
+        record = self._read_mv_record(relation_name)
+        if record is None:
+            raise ValueError(f"{relation_name} is not a materialized view")
+        record["runs-as"] = new_owner
+        with open(self._mv_path(relation_name), "w") as f:
+            json.dump(record, f)
+
+    def mark_materialized_view_refreshed(
+        self, relation_name: str, status: str, author: str = None
+    ) -> None:
+        """Stamp refresh state onto the sidecar, mirroring the catalog's fields."""
+        record = self._read_mv_record(relation_name)
+        if record is None:
+            raise ValueError(f"{relation_name} is not a materialized view")
+        record["last-refreshed-at-ms"] = int(time.time() * 1000)
+        record["last-refresh-status"] = status
+        record["last-refresh-author"] = author
+        with open(self._mv_path(relation_name), "w") as f:
+            json.dump(record, f)
+
     # Trigger records mirror the catalog's: one refresh trigger per (source,
     # MV) pair, held in a `triggers.json` sidecar next to the SOURCE table's
     # dataset.json - the trigger hangs off the table whose commits would fire
@@ -410,6 +447,10 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             "sql": sql,
             "source_tables": list(source_tables),
             "author": author,
+            # Pinned exactly as the catalog pins it: an existing owner survives
+            # re-registration, so editing a view never transfers whose
+            # authority refreshes it.
+            "runs-as": previous.get("runs-as") or author,
             "registered_at": _now_utc_iso(),
         }
         mv_path = self._mv_path(relation_name)

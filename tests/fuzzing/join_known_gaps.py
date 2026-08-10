@@ -202,7 +202,7 @@ REGISTER: List[RegisteredDefect] = [
             "testdata.satellites AS r1 ON r0.id = r1.planetId"
         ),
         error_type="UnsupportedSyntaxError",
-        signature="RIGHT SEMI JOIN not supported",
+        signature="RIGHT SEMI **JOIN** not supported",
         detail=(
             "NOT A DEFECT — a ratified refusal, pinned so the fuzzer asserts it.\n"
             "`RIGHT SEMI JOIN` and `RIGHT ANTI JOIN` are rejected by the planner with "

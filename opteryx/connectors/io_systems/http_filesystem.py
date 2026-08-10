@@ -15,6 +15,8 @@ from typing import Union
 from opteryx.connectors.parquet_io.thread_pool_manager import LazyPoolProxy
 from opteryx.connectors.parquet_io.thread_pool_manager import get_filesystem_pool
 from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import md_cause
+from opteryx.exceptions import md_code
 from opteryx.exceptions import MissingDependencyError
 
 
@@ -195,7 +197,7 @@ class OpteryxHttpFileSystem:
         try:
             return self.http_client.get_many(requests)
         except RuntimeError as err:
-            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
+            raise DatasetReadError(f"Unable to read {md_code(path)}. {md_cause(err)}") from err
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream HTTP resource into sink without intermediate buffer.
@@ -214,7 +216,7 @@ class OpteryxHttpFileSystem:
         try:
             data = self.http_client.get(url)
         except RuntimeError as err:
-            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
+            raise DatasetReadError(f"Unable to read {md_code(path)}. {md_cause(err)}") from err
 
         mv = memoryview(data)
         total = 0
@@ -244,7 +246,7 @@ class OpteryxHttpFileSystem:
         try:
             data = self.http_client.get(url)
         except RuntimeError as err:
-            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
+            raise DatasetReadError(f"Unable to read {md_code(path)}. {md_cause(err)}") from err
 
         return _FileBuffer(data)
 

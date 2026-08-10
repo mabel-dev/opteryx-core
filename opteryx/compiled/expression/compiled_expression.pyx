@@ -27,6 +27,7 @@ from libc.string cimport memset
 
 import draken.draken_native as _draken_native
 from opteryx.exceptions import IncorrectTypeError
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import InvalidFunctionParameterError
 
 import datetime as _datetime
@@ -170,7 +171,7 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
         return Vector(_draken_native.vector_null_from_length(1))
     if isinstance(value, bool):
         # Bools are handled upstream by BC_LOAD_LIT_BOOL; reaching here is a bug.
-        raise IncorrectTypeError(
+        raise InvalidInternalStateError(
             "_materialise_constant_literal: bool literal must use BC_LOAD_LIT_BOOL"
         )
     if isinstance(value, int):
@@ -274,7 +275,7 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
         return Vector(_draken_native.vector_timestamp_from_constant(value, 1))
     if isinstance(value, _datetime.time):
         return Vector(_draken_native.vector_time64_from_constant(value, 1))
-    raise IncorrectTypeError(
+    raise InvalidInternalStateError(
         f"_materialise_constant_literal: cannot materialise constant for literal "
         f"{value!r} (type {type(value).__name__})"
     )
@@ -1099,6 +1100,8 @@ cdef Py_ssize_t _linearize(
     cdef object bin_left_sc, bin_right_sc, bin_left_type, bin_right_type, bin_op_str
     cdef object unary_op_str
     cdef object func_val, func_ref_obj, func_py_node, func_ref_meta, callable_obj
+    cdef object _co_params
+    cdef Py_ssize_t _co_i
     cdef object extr_op_str, extr_key, extr_callable, extr_key_vec
     cdef bint right_is_inlist_literal
     cdef object inlist_set_obj
@@ -2008,6 +2011,36 @@ cdef Py_ssize_t _linearize(
             slot.arity = 3
             slot.bool_value = 0
             slot.flags = BC_INSTR_C_NATIVE
+            # A BOOLEAN-branched CASE IS a mask, so it can be a WHERE predicate —
+            # same flag, same reasoning as the IIF arm below. What earns the flag is
+            # the SHAPE of the result, not the declared type: draken_if_then_else's
+            # BOOL arm (function_kernels.cpp) allocates its own `(length+7)/8` bitmap
+            # and returns it with data_length == length and draken_identity_sel —
+            # dense by construction, never dict- or constant-shaped, which is what
+            # cxx_mask_c needs. The declared type is the bind-time PROOF that that
+            # arm is the one taken: the binder resolves a CASE's output type from its
+            # THEN/ELSE branches and has already refused a mixed-family blend, so
+            # BOOLEAN here means every branch is BOOLEAN or NULL. A NULL condition row
+            # takes the ELSE branch (fk_row_valid) and a null result row lands in the
+            # mask's validity, which cxx_mask_c drops — SQL's "not true, so not
+            # selected".
+            #
+            # Only the OUTERMOST node of the folded chain carries schema_column
+            # (compiler._rewrite_case sets `acc.schema_column = sc` on it alone), and
+            # that is precisely the instruction bytecode_is_bool_final reads. Inner
+            # links get no flag, which is correct — their result is a branch operand,
+            # not the program's mask.
+            #
+            # _ensure_sql_types() is NOT redundant: _LogicalCategory_BOOLEAN is None
+            # until it runs, and this arm returns before any other call site on the
+            # FUNCTION path. Without it the identity test compares a real category
+            # against None, never fires, and leaves the capability silently off.
+            _ensure_sql_types()
+            _ite_py_node = <object>node.source_node
+            _ite_sc = getattr(_ite_py_node, "schema_column", None)
+            _ite_ct = _ite_sc.column_type if _ite_sc is not None else None
+            if _ite_ct is not None and _ite_ct.category is _LogicalCategory_BOOLEAN:
+                slot.flags |= BC_RESULT_WRAP_AS_BOOL
             slot.kernel_fn = <void*>(<unsigned long long>_ite_fn)
             return sub_depth - 3 + 1
 
@@ -2027,6 +2060,39 @@ cdef Py_ssize_t _linearize(
         # them and silently takes the Python callable_ref. The catalog canonicalised the
         # name during resolution; take it from there.
         func_val = func_ref_meta.function_definition.name
+
+        # `constant_only` is ENFORCED, for every function that declares it.
+        #
+        # It was declaration-only: exported to reference/function_signatures.json,
+        # read by nothing. Most functions that declare it happen to reject a
+        # column anyway, because their lowering arm consumes the argument into a
+        # kernel context and declines when it is not a literal. LPAD and RPAD
+        # have no such arm — they take the generic C-native route, and
+        # draken_lpad/draken_rpad (draken/ops/kernels/string_pad.cpp) read width
+        # and fill as SCALARS from logical row 0. Handed a column they silently
+        # padded every row with row 0's value: `RPAD('eta', 8, s_null)` returned
+        # 153 identical rows and changed answer whenever the plan changed which
+        # row was first. A silent wrong answer, which is the one outcome this
+        # codebase will not take (.claude/CLAUDE.md §1). The Python
+        # left_pad/right_pad backstops do the same `width[0]` / `fill[0]` read.
+        #
+        # Checked HERE rather than at bind time because constant folding runs
+        # between the two: `LPAD(s, 4+4, '-')` is not a LITERAL node when the
+        # binder sees it, and is by the time this runs. Same point HUMANIZE's
+        # own mode check uses, so the two cannot disagree about what "constant"
+        # means.
+        _co_params = func_ref_meta.selected_overload.parameters
+        for _co_i in range(min(n, <Py_ssize_t>len(_co_params))):
+            if not _co_params[_co_i].constant_only:
+                continue
+            if node.parameters[_co_i] != NULL \
+                    and node.parameters[_co_i].node_type == _NT_LITERAL:
+                continue
+            raise InvalidFunctionParameterError(
+                f"**{func_val}** argument {_co_i + 1} (`{_co_params[_co_i].name}`) must be a "
+                "constant, but a column or an expression was given. It is consumed when the "
+                "query is compiled, once for the whole column, so it cannot vary per row."
+            )
 
         # SUBSTRING(str, start[, count]) / LEFT(str, n) / RIGHT(str, n) — all lower to
         # the one draken_substring kernel (LEFT = start 1 count n; RIGHT = start -n to
@@ -2235,7 +2301,7 @@ cdef Py_ssize_t _linearize(
             _hz_fn, _hz_ctx = _resolve_kernel_and_context(
                 "draken_humanize", _hz_alloc, (_hz_mode, _hz_scale, 0, 0, 0, 0, 0))
             if _hz_fn is None:
-                raise InvalidFunctionParameterError(
+                raise InvalidInternalStateError(
                     "HUMANIZE: the draken_humanize kernel is not registered in this build"
                 )
             sub_depth = _linearize(node.parameters[0], bc, depth)
@@ -2834,6 +2900,32 @@ cdef Py_ssize_t _linearize(
                     # bool-returning kernels are being worked on concurrently, and widening
                     # the gate for them is their change to make, not a side effect of this.
                     slot.flags |= BC_RESULT_WRAP_AS_BOOL
+                if func_name == "IIF" and _fn_rt is not None:
+                    # A boolean-branched IIF IS a mask, so it can be a WHERE
+                    # predicate — same flag, same reasoning as _MATCH_AGAINST above.
+                    # What earns the flag is the SHAPE of the result, not the
+                    # declared type: draken_iif routes two BOOL branches to
+                    # nc_blend_bool (function_null_conditional.cpp), which allocates
+                    # its own `length`-wide bitmap and returns it with an identity
+                    # selection — dense by construction, never dict- or
+                    # constant-shaped, which is what cxx_mask_c needs. The declared
+                    # type is the bind-time PROOF that that arm is the one taken:
+                    # _iif_return_type is BOOLEAN only when both value branches are
+                    # BOOLEAN (or NULL, which nc_dispatch skips when picking the
+                    # family), and _check_blend_compatible has already refused a
+                    # mixed-family blend. A NULL condition row selects the false
+                    # branch and a null result row lands in the mask's validity,
+                    # which cxx_mask_c drops — SQL's "not true, so not selected".
+                    #
+                    # _ensure_sql_types() is NOT redundant: _LogicalCategory_BOOLEAN
+                    # is None until it runs, and the only call on this path sits
+                    # inside the `is_nb_callable` branch above, which a c-native IIF
+                    # does not take. Without it the identity test compares a real
+                    # category against None, never fires, and leaves the capability
+                    # silently off.
+                    _ensure_sql_types()
+                    if _fn_rt.category is _LogicalCategory_BOOLEAN:
+                        slot.flags |= BC_RESULT_WRAP_AS_BOOL
                 if _reduce_child_eligible:
                     # VM resolves the child per morsel via the identity stored on
                     # THIS instruction (mirrors the ARRAY->VARCHAR cast) and
@@ -2914,7 +3006,12 @@ cdef Py_ssize_t _linearize(
                 safe=cast_is_try, source_is_ipv4=source_is_ipv4
             )
         except (NotImplementedError, ValueError) as e:
-            raise ValueError(f"Unsupported CAST: {source_phys_name} → {cast_target_type}: {e}")
+            # `resolve_cast`'s refusals already name the pair they refused, so this
+            # only normalises the exception type — prepending the pair a second time
+            # produced "Unsupported CAST: DECIMAL → DATE: No native CAST DECIMAL →
+            # DATE", which said the same thing twice and named an internal component
+            # in between.
+            raise ValueError(str(e))
 
         slot = bc._push_instr()
         slot.opcode = BC_CAST

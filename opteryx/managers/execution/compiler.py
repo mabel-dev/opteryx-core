@@ -29,8 +29,14 @@ import threading
 from draken.draken_native import DrakenType
 from draken.draken_native import LogicalKind
 from opteryx.constants import ResultType
+from opteryx.exceptions import CidrAggTypeError
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import VariantKeyError
+from opteryx.exceptions import compose
+from opteryx.exceptions import md_code
+from opteryx.exceptions import md_column
+from opteryx.exceptions import md_syntax
 from opteryx.expression import NodeType
 
 _MAX_WORKER_CAP = 16
@@ -137,10 +143,73 @@ def _and_conjuncts(node):
     return [node]
 
 
-def _unsupported(what: str):
+# Said by CORR, MEDIAN and APPROX_PERCENTILE, which share one restriction: the sinks
+# never descale DECIMAL's unscaled integer, so reading it as a raw double would
+# compute the wrong numbers' statistics. One constant so the three cannot drift.
+_NUMERIC_ONLY = (
+    "Only numeric columns are accepted here - cast a DECIMAL column to "
+    "`DOUBLE` first, for example `column::DOUBLE`"
+)
+
+
+def _type_name(schema_column, physical=None) -> str:
+    """The reader-facing spelling of a column's type.
+
+    `DrakenType.VARCHAR` is an internal enum's repr, and it was reaching people who
+    had asked a question about their SQL. A ColumnType knows the canonical spelling
+    INCLUDING any parameters (`DECIMAL(10, 2)`, `TIMESTAMP[ms]`), so it is preferred;
+    the physical tag's own name is the fallback when no ColumnType is in hand.
+    """
+    column_type = getattr(schema_column, "column_type", None)
+    if column_type is not None:
+        # ColumnType's __str__ IS the canonical SQL type name - it delegates to
+        # draken, which owns that mapping (see logical_type.py).
+        return str(column_type)
+    if physical is not None:
+        return physical.name
+    return "an unknown type"
+
+
+def _live_positions(layout, live):
+    """Positions of `layout` still wanted after the operator that owns `live`.
+
+    `live` is a node's `pre_update_columns` — projection_pushdown's record of the
+    active column set, snapshotted BEFORE the node's own columns are collected, so it
+    never contains that operator's own working columns (join keys, ORDER BY keys,
+    GROUP BY keys). That is the point: it is what survives once those columns' purpose
+    is spent.
+
+    Callers must not reach here with an empty `live`: empty means UNKNOWN, not
+    "nothing is wanted", and dropping every column on an absent set would be a silent
+    wrong answer. Asserted rather than defaulted, so a caller that forgets the guard
+    fails loudly at plan time instead of quietly emitting nothing."""
+    if not live:
+        raise InvalidInternalStateError(
+            "_live_positions called with an empty active-column set — empty means "
+            "UNKNOWN, and the caller must keep every column rather than ask here"
+        )
+    return [i for i, identity in enumerate(layout) if identity in live]
+
+
+def _unsupported(what: str, remedy: str = None):
+    """Refuse a query the engine cannot run, saying what and - where we know it - how.
+
+    Reached from more than fifty gates, which makes this the most-read refusal in
+    the system. It used to open with "native engine:" and close with "hard-cutover
+    posture; coverage is being burned down" - a component name and a note to
+    ourselves about the roadmap, neither of which is the reader's business or any
+    help to them.
+
+    `remedy` is separate from `what` so the advice is a sentence of its own rather
+    than being welded onto the end of the description with a dash.
+    """
     raise NotSupportedError(
-        f"native engine: {what} is not supported yet. This query cannot run — there "
-        "is no fallback engine (hard-cutover posture; coverage is being burned down)."
+        compose(
+            f"{what} is not supported",
+            remedy
+            or "This query cannot run as written - it will need rewriting to avoid "
+            "that construct",
+        )
     )
 
 
@@ -206,8 +275,31 @@ _LC_TIMESTAMP = 4
 # vector needs the same unit-carrying retag the scalar case gets. Mirrors the
 # trampoline scan's `_sp_array_ts_unit_map` (parquet_read.pyx coerce op kind 4).
 _LC_ARRAY_TIMESTAMP = 5
+# IPV4 refines UINT32 rather than completing a parameterized physical type, so the
+# wire carries a plain unsigned integer and nothing in the footer says "address".
+# Without this retag a catalog-declared IPV4 column reaches execution as bare
+# UINT32: it renders as an integer instead of dotted-decimal, and CIDR_AGG — which
+# requires the descriptor — refuses it. See logical_type.h on why IPV4 is
+# nonetheless carried rather than treated as droppable.
+_LC_IPV4 = 6
 # TimestampUnit enum-name → draken unit code (matches logical_type.h TimestampUnit).
 _TS_UNIT_TO_INT = {"SECONDS": 0, "MILLISECONDS": 1, "MICROSECONDS": 2, "NANOSECONDS": 3}
+
+
+def _ipv4_coerce(sc, pt):
+    """Packed IPV4 retag for an integer read-set column (0 = none).
+
+    Separate from `_wp11_logical_coerce` because an IPv4 column takes the ORDINARY
+    int decode path — its footer annotation is `uint32`, and the native scan gate
+    admits it as kind "int". Only the descriptor is added; the physical tag,
+    width and decode are untouched."""
+    if pt != DrakenType.UINT32:
+        return 0
+    ct = sc.column_type
+    lg = ct.logical if ct is not None else None
+    if lg is None or lg.kind != LogicalKind.IPV4:
+        return 0
+    return _LC_IPV4
 
 
 def _wp11_unit(sc):
@@ -448,15 +540,19 @@ class _Compiler:
                     if rescaled != q:
                         return r   # inexact — leave it, kernel fails loud
                     nl = Node(NodeType.LITERAL, value=rescaled)
-                    if phys == "DECIMAL128":
-                        # DECIMAL128 literals cannot materialize (int64 tier only);
-                        # pin to an int64-tier DECIMAL at the SAME SCALE — the blend
-                        # kernel widens {DECIMAL, DECIMAL128} raw-exactly.
-                        from opteryx.types.logical_type import DECIMAL as _mk_decimal
-
-                        nl.type = _mk_decimal(18, scale)
-                    else:
-                        nl.type = out_ct
+                    # The literal carries the CASE's own declared type, both tiers
+                    # alike. It used to be pinned to an int64-tier DECIMAL(18, scale)
+                    # for a DECIMAL128 target, on the grounds that a DECIMAL128
+                    # literal could not be materialised — no longer true, and the
+                    # pin was not merely redundant: precision 18 with scale 18 can
+                    # represent nothing but a fraction, so a CASE blending a DECIMAL
+                    # column with a literal (result DECIMAL(38,18), the ordinary
+                    # shape for `ELSE 1.5000`) rescaled 1.5 to 19 unscaled digits and
+                    # raised a raw OverflowError, "decimal: value exceeds declared
+                    # precision". _materialise_constant_literal routes on the tag and
+                    # on precision > 18, so a DECIMAL128-typed literal materialises
+                    # through vector_decimal128_from_constant.
+                    nl.type = out_ct
                     return nl
                 if phys in ("FLOAT64", "FLOAT32"):
                     nl = Node(NodeType.LITERAL, value=float(v))
@@ -659,13 +755,50 @@ class _Compiler:
             _unsupported(f"{what} outside the c-native kernel set")
         return bc
 
+    def _lower_scan_predicate(self, predicates):
+        """Lower a scan-PUSHED predicate — the ONE admission point for the three
+        plans that consume one (`_native_scan_plan`'s relocated ExprFilter, both
+        latmat pass-1 spans, and the trampoline scan's `compiled_predicate`).
+
+        Those three gate c-nativeness themselves and DECLINE to a broader path when
+        it fails — that is a routing decision, not a refusal. Bool-finalness is not
+        routable: every path that consumes a predicate needs a mask, so a program
+        that does not end in one is unrunnable everywhere and belongs to the user as
+        a refusal here. It used to reach `add_expr_filter`, which re-tested the same
+        thing and raised a raw ValueError saying the compiler should have rejected it
+        earlier — or, on the latmat path, reached `_ensure_dense_bitmap_c`, which
+        reads a non-mask result's bytes AS a bitmap and answers wrongly in silence.
+
+        What lands here is NOT a non-boolean WHERE clause — `visit_filter` already
+        refuses those by declared type, naming the expression. It is an expression
+        the binder typed BOOLEAN whose final opcode is not one of the recognised mask
+        producers, i.e. a bool-returning kernel not yet marked BC_RESULT_WRAP_AS_BOOL
+        (COALESCE/IFNULL over BOOLEAN branches, today). `IS TRUE` over the same
+        expression is a real remedy — it appends a BC_UNARY_OP, which IS a mask — so
+        the message offers it, but as an instruction rather than as a rewritten
+        query: `format_expression` renders the plan's spelling, not the user's (the
+        pushed predicate is post-rewrite, so a COALESCE comes back as an IFNULL), and
+        that is fine for locating the clause but not for pasting back in."""
+        from opteryx.expression import format_expression
+        from opteryx.operators._operators import bytecode_is_bool_final
+
+        root = self._compose_predicate_nodes(predicates)
+        bc = self._lower_bytecode(root)
+        if not bytecode_is_bool_final(bc):
+            _unsupported(
+                f"filtering on {md_code(format_expression(root))} directly",
+                "Make the condition explicit - compare the expression, or add "
+                f"{md_code('IS TRUE')} to it",
+            )
+        return bc
+
     def _compose_predicate_nodes(self, predicates):
         """AND-compose a list of pushed predicate nodes into one right-leaning tree.
 
         The SOLE composer for a pushed predicate: both the relocated native filter
         (`_native_scan_plan`) and the trampoline scan's `compiled_predicate` (bound
-        in `_compile_scan`) lower this same tree through `_lower_bytecode`, so the
-        two paths run identical bytecode. The scan used to re-compose and re-lower
+        in `_compile_scan`) lower this same tree through `_lower_scan_predicate`, so
+        the two paths run identical bytecode. The scan used to re-compose and re-lower
         the predicate itself at execute() time, skipping the rewrite chain — which
         silently returned wrong rows for off-scale decimal compares. `predicates`
         is non-empty (the caller guards)."""
@@ -900,7 +1033,8 @@ class _Compiler:
                 ctx_ptr = alloc_extraction_ctx(sub_op, nav, 0)
                 if ctx_ptr is None:
                     raise NotSupportedError(
-                        "native engine: could not allocate a JSON extraction context"
+                        "Memory could not be allocated to read this JSON path. "
+                        "Selecting fewer JSON fields in one query may let it run."
                     )
                 ctx_ptrs.append(ctx_ptr)
                 holders.append(_KernelContextWrapper(ctx_ptr))
@@ -1081,7 +1215,10 @@ class _Compiler:
             # this compiler ever run. This catches any plan-construction path that
             # bypasses normal binding; the message lives once, on the exception.
             raise VariantKeyError(what, name)
-        _unsupported(f"{what} on column '{name}' ({pt})")
+        _unsupported(
+            f"{md_syntax(what)} on {md_column(name)} (type "
+            f"{md_code(pt.name if pt is not None else 'unknown')})",
+        )
 
     @staticmethod
     def _array_agg_options(agg):
@@ -1205,7 +1342,7 @@ class _Compiler:
             if psc is None:
                 _unsupported(f"{func} over an unbound operand")
             if psc.identity not in layout:
-                _unsupported(f"{func} over a column the stream does not carry")
+                _unsupported(f"{func} over a column the engine could not resolve here")
             idx = layout.index(psc.identity)
             pt = _physical_type(psc)
             if func == "CIDR_AGG":
@@ -1222,12 +1359,29 @@ class _Compiler:
                 # answer. The native sink refuses too; rejecting here as well
                 # means the author gets a plan-time error naming the column
                 # instead of an engine error partway through the run.
+                #
+                # CidrAggTypeError, not _unsupported: this is a permanent type
+                # restriction, and NotSupportedError's "not supported yet ...
+                # coverage is being burned down" told the reader to wait for a
+                # feature that is never coming. The message lives on the exception
+                # so it cannot drift from the sink's backstop copy.
                 ct = psc.column_type
                 logical = ct.logical if ct is not None else None
                 if pt != DrakenType.UINT32 or logical is None or logical.kind != LogicalKind.IPV4:
-                    _unsupported(
-                        f"CIDR_AGG over a {pt} column — it requires an IPV4 operand; "
-                        "CAST the column to IPV4 first")
+                    # The operand kind picks the message's rationale and its fix —
+                    # only the text and integer families have a cast to IPV4 at all
+                    # (casts.pyx's IPV4 target), so anything else must not be told
+                    # to use one. See CidrAggTypeError.
+                    if pt in _INT_TYPES:
+                        kind = CidrAggTypeError.INTEGER
+                    elif pt in (DrakenType.VARCHAR, DrakenType.NVARCHAR,
+                                DrakenType.VARBINARY):
+                        kind = CidrAggTypeError.TEXT
+                    else:
+                        kind = CidrAggTypeError.OTHER
+                    raise CidrAggTypeError(psc.name,
+                                           str(ct) if ct is not None else None,
+                                           operand_kind=kind)
                 specs.append((sc.identity, "CidrAgg", idx))
                 continue
             if func == "ARRAY_AGG":
@@ -1237,7 +1391,10 @@ class _Compiler:
                 if not grouped:
                     _unsupported("ARRAY_AGG without a GROUP BY")
                 if pt not in self._ARRAY_AGG_OPERAND_TYPES:
-                    _unsupported(f"ARRAY_AGG over a {pt} column")
+                    _unsupported(
+                        f"{md_syntax('ARRAY_AGG')} over a column of type "
+                        f"{md_code(_type_name(psc, pt))}"
+                    )
                 specs.append((sc.identity, "ArrayAgg", idx, self._array_agg_options(agg)))
                 continue
             if func == "CORR":
@@ -1245,19 +1402,23 @@ class _Compiler:
                 # as MEDIAN: no DECIMAL descale, never a mis-scaled answer.
                 # Mirrors the sink's corr_capture_meta gate.
                 if pt not in self._MEDIAN_OPERAND_TYPES:
-                    _unsupported(f"CORR over a {pt} column — only numeric inputs "
-                                 "are accepted (CAST DECIMAL to DOUBLE first)")
+                    _unsupported(
+                        f"{md_syntax('CORR')} over a column of type {md_code(_type_name(psc, pt))}",
+                        _NUMERIC_ONLY,
+                    )
                 operand2 = params[1]
                 psc2 = getattr(operand2, "schema_column", None)
                 if psc2 is None:
                     _unsupported("CORR over an unbound operand")
                 if psc2.identity not in layout:
-                    _unsupported("CORR over a column the stream does not carry")
+                    _unsupported("CORR over a column the engine could not resolve here")
                 idx2 = layout.index(psc2.identity)
                 pt2 = _physical_type(psc2)
                 if pt2 not in self._MEDIAN_OPERAND_TYPES:
-                    _unsupported(f"CORR over a {pt2} column — only numeric inputs "
-                                 "are accepted (CAST DECIMAL to DOUBLE first)")
+                    _unsupported(
+                        f"{md_syntax('CORR')} over a column of type {md_code(_type_name(psc2, pt2))}",
+                        _NUMERIC_ONLY,
+                    )
                 specs.append((sc.identity, "Corr", idx, {"col_idx2": idx2}))
                 continue
             if func == "COUNT":
@@ -1276,9 +1437,11 @@ class _Compiler:
                 if pt not in self._MEDIAN_OPERAND_TYPES:
                     # Numeric-only, same restriction as MEDIAN (its exact sibling)
                     # — matches the legacy t-digest collector's contract.
-                    _unsupported(f"APPROX_PERCENTILE over a {pt} column — only "
-                                 "numeric inputs are accepted (CAST DECIMAL to "
-                                 "DOUBLE first)")
+                    _unsupported(
+                        f"{md_syntax('APPROX_PERCENTILE')} over a "
+                        f"{md_code(_type_name(psc, pt))} column",
+                        _NUMERIC_ONLY,
+                    )
                 specs.append((sc.identity, "ApproxPercentile", idx,
                              {"percentile": percentile}))
                 continue
@@ -1290,20 +1453,28 @@ class _Compiler:
                 _string_minmax = func in ("MIN", "MAX", "ANY_VALUE") and pt in (
                     DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY)
                 if not _string_minmax:
-                    _unsupported(f"{func} over a {pt} column")
+                    _unsupported(
+                        f"{md_syntax(func)} over a column of type {md_code(_type_name(psc, pt))}"
+                    )
             if func == "STDDEV" and pt in (DrakenType.DECIMAL, DrakenType.DECIMAL128):
                 # The sink never descales DECIMAL's unscaled integer for STDDEV —
                 # reading it as a raw double would compute the wrong numbers'
                 # variance. CAST to DOUBLE first (same posture as the sink's own
                 # fail-loud guard — this is just the friendlier plan-time version).
-                _unsupported(f"STDDEV over a {pt} column — CAST to DOUBLE first")
+                _unsupported(
+                    f"{md_syntax('STDDEV')} over a column of type {md_code(_type_name(psc, pt))}",
+                    f"Cast the column to {md_code('DOUBLE')} first, for example "
+                    f"{md_code('STDDEV(column::DOUBLE)')}",
+                )
             if func == "MEDIAN" and pt not in self._MEDIAN_OPERAND_TYPES:
                 # MEDIAN is numeric-only — narrower than the generic operand-type
                 # gate above (which already let DECIMAL/BOOL/temporal through for
                 # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median
                 # collectors' restriction exactly (see median_operand_supported).
-                _unsupported(f"MEDIAN over a {pt} column — only numeric inputs are "
-                             "accepted (CAST DECIMAL to DOUBLE first)")
+                _unsupported(
+                    f"{md_syntax('MEDIAN')} over a column of type {md_code(_type_name(psc, pt))}",
+                    _NUMERIC_ONLY,
+                )
             fn = {"SUM": "Sum", "AVG": "Avg", "MIN": "Min", "MAX": "Max",
                   "STDDEV": "Stddev", "MEDIAN": "Median", "ANY_VALUE": "AnyValue"}[func]
             specs.append((sc.identity, fn, idx))
@@ -1316,7 +1487,9 @@ class _Compiler:
         where layout is the identity list of the pipeline's stream, in column order."""
         node = self.plan[nid]
         if len(list(self.plan.outgoing_edges(nid))) > 1:
-            _unsupported("a plan node feeding more than one consumer (shared subplan)")
+            _unsupported(
+                "a query shape that feeds one intermediate result into more than one place"
+            )
         kind = type(node).__name__
 
         if getattr(node, "is_scan", False):
@@ -1380,7 +1553,7 @@ class _Compiler:
             out_ids = list(node.projection)
             for identity in out_ids:
                 if identity not in layout:
-                    _unsupported("projecting a column the stream does not carry")
+                    _unsupported("projecting a column the engine could not resolve here")
             indices = [layout.index(identity) for identity in out_ids]
             self.nplan.add_select(p, indices, out_ids)
             return p, out_ids
@@ -1426,7 +1599,7 @@ class _Compiler:
             key_idx = []
             for key_identity in group_cols:
                 if key_identity not in layout:
-                    _unsupported("a GROUP BY key the stream does not carry")
+                    _unsupported("a GROUP BY key the engine could not resolve here")
                 self._check_key_type(
                     "GROUP BY", group_key_names.get(key_identity) or key_identity,
                     self._layout_type(None, key_identity))
@@ -1448,16 +1621,18 @@ class _Compiler:
                 return p2, list(layout)
             layout = self._project_agg_operands(p, node, layout)
             specs = self._parse_aggregates(aggs, layout)
+            key_emit = self._group_key_emit(node, group_cols)
             buf = self.nplan.new_buffer()
             # Planner NDV estimate for the grouped keys (hash_map_variant strategy);
             # -1 = unknown. Gates the sink's per-partition parvi front maps.
             ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
             self.nplan.set_groupby_sink(
-                p, key_idx, group_cols, specs, buf,
+                p, key_idx, group_cols, key_emit, specs, buf,
                 -1 if ndv_estimate is None else int(ndv_estimate))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
-            out_layout = list(group_cols) + [spec[0] for spec in specs]
+            out_layout = [identity for identity, emit in zip(group_cols, key_emit) if emit]
+            out_layout += [spec[0] for spec in specs]
             self._apply_having(p2, node, out_layout)
             return p2, out_layout
 
@@ -1493,7 +1668,7 @@ class _Compiler:
             if on:
                 for identity in on:
                     if identity not in layout:
-                        _unsupported("a DISTINCT ON column the stream does not carry")
+                        _unsupported("a DISTINCT ON column the engine could not resolve here")
                     self._check_key_type(
                         "DISTINCT ON", on_key_names.get(identity) or self._layout_name(identity),
                         self._layout_type(None, identity))
@@ -1520,9 +1695,11 @@ class _Compiler:
 
         if kind == "SortNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
-            spec, layout = self._sort_spec(p, node.order_by, layout)
+            spec, sink_layout = self._sort_spec(p, node.order_by, layout)
+            emit, layout = self._emit_subset(node, sink_layout)
+            spec, emit = self._narrow_sink_input(p, sink_layout, spec, emit)
             buf = self.nplan.new_buffer()
-            self.nplan.set_sort_sink(p, spec, buf)
+            self.nplan.set_sort_sink(p, spec, buf, emit)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             # Order-sensitive from here to the queue: one worker preserves the
@@ -1535,9 +1712,11 @@ class _Compiler:
             limit = getattr(node, "limit", None)
             if limit is None or int(limit) < 0:
                 _unsupported("a HeapSort without a positive LIMIT")
-            spec, layout = self._sort_spec(p, node.order_by, layout)
+            spec, sink_layout = self._sort_spec(p, node.order_by, layout)
+            emit, layout = self._emit_subset(node, sink_layout)
+            spec, emit = self._narrow_sink_input(p, sink_layout, spec, emit)
             buf = self.nplan.new_buffer()
-            self.nplan.set_topn_sink(p, spec, int(limit), buf)
+            self.nplan.set_topn_sink(p, spec, int(limit), buf, emit)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)
@@ -1568,14 +1747,14 @@ class _Compiler:
             sort_spec = []
             for identity in part_cols:
                 if identity not in layout:
-                    _unsupported("a PARTITION BY column the stream does not carry")
+                    _unsupported("a PARTITION BY column the engine could not resolve here")
                 self._check_key_type(
                     "PARTITION BY", self._layout_name(identity),
                     self._layout_type(None, identity))
                 sort_spec.append((layout.index(identity), True))
             for identity, asc in zip(order_cols, order_asc):
                 if identity not in layout:
-                    _unsupported("a window ORDER BY column the stream does not carry")
+                    _unsupported("a window ORDER BY column the engine could not resolve here")
                 self._check_key_type(
                     "window ORDER BY", self._layout_name(identity),
                     self._layout_type(None, identity))
@@ -1609,10 +1788,18 @@ class _Compiler:
                 # stream the way WindowSink does (each partition is independently
                 # ranked), and ROW_NUMBER's OVER carries no outer ordering promise
                 # — nothing downstream relies on this pipeline's emit order.
+                # No emit subset: WindowTopKSink is a different sink with its own
+                # streaming materialization, untouched by this work.
                 return p2, list(layout) + list(fn_names)
 
+            # PARTITION BY / ORDER BY keys are spent once the ranks are assigned —
+            # drop any the plan above does not read, over the INPUT layout only (the
+            # rank columns are appended after the gather, so they are not in `emit`).
+            sink_layout = layout
+            emit, layout = self._emit_subset(node, sink_layout)
+            sort_spec, emit = self._narrow_sink_input(p, sink_layout, sort_spec, emit)
             self.nplan.set_window_sink(p, sort_spec, len(part_cols),
-                                       fn_kinds, fn_names, top_k, buf)
+                                       fn_kinds, fn_names, top_k, buf, emit)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order
@@ -1666,6 +1853,41 @@ class _Compiler:
 
         _unsupported(f"the {kind} operator")
 
+    def _group_key_emit(self, node, group_cols):
+        """One flag per GROUP BY key: does anything above the aggregate read its VALUES?
+
+        Grouping identity in the native sink is the 64-bit key hash — the same contract
+        DISTINCT uses — so a key nothing above reads still has to be HASHED to separate
+        the groups, but its values never have to be stored. A False here kills the
+        per-group key store's copy of that column (`GBPartition::keycols`), not merely
+        the output column: the store is what makes the extra key expensive, and the
+        extra key is precisely what drives the group count.
+
+        `pre_update_columns` is snapshotted BEFORE this node's own columns are
+        collected, so it is exactly "what is still wanted after the grouping" and never
+        contains the GROUP BY keys themselves. Empty means UNKNOWN — keep everything.
+
+        HAVING is the one thing that is live but not in that set: predicate_pushdown
+        folds it ONTO this node, so it is part of the node's own columns, and
+        `_apply_having` lowers it over the aggregate's OUTPUT layout. A key referenced
+        only there (`HAVING COUNT(*) > 1 OR l_orderkey > 5` — the AND form gets pushed
+        below the aggregate instead) is still live at that point and must be emitted.
+        """
+        from opteryx.expression import get_all_nodes_of_type
+
+        live = set(getattr(node, "pre_update_columns", None) or ())
+        if not live:
+            return [True] * len(group_cols)
+        having = getattr(node, "_having_condition", None)
+        if having is not None:
+            live.update(
+                reference.schema_column.identity
+                for reference in get_all_nodes_of_type(having, (NodeType.IDENTIFIER,))
+                if reference.schema_column is not None
+            )
+        emitted = set(_live_positions(group_cols, live))
+        return [position in emitted for position in range(len(group_cols))]
+
     def _apply_having(self, p, node, layout):
         """HAVING rides ON the aggregate plan node (`_having_condition` — the old
         operator applied it internally via `_apply_having_filter`; there is NO
@@ -1687,6 +1909,66 @@ class _Compiler:
             indices = [hoisted_layout.index(identity) for identity in layout]
             self.nplan.add_select(p, indices, list(layout))
 
+    def _emit_subset(self, node, layout):
+        """The EMIT set for a sort/window sink, plus the layout it produces.
+
+        Returns ``(emit, layout)`` where ``emit`` is ``None`` (emit every column) or
+        the list of `layout` positions still wanted above this node, in order.
+
+        These operators buffer their input, build keys from it, order it, and then
+        materialize the result with a row gather. The gather is the expensive half —
+        a two-pass arena rebuild per string column — so the ORDER BY / PARTITION BY
+        key has to be dropped HERE, the moment the permutation exists. A select above
+        the sink would only free a buffer that had already been built and paid for.
+
+        Reading the key and emitting it are separate questions: the sort spec still
+        indexes the full input layout, and the sink still reads the key off the
+        buffered input, so a key excluded here is sorted on exactly as before.
+
+        An empty `pre_update_columns` means UNKNOWN, not "nothing is wanted", so it
+        keeps every column. An empty RESULT is different and is honoured: a
+        `COUNT(*)` over an ordered subquery genuinely wants zero columns out."""
+        live = getattr(node, "pre_update_columns", None) or set()
+        if not live:
+            return None, layout
+        emit = _live_positions(layout, live)
+        if len(emit) == len(layout):
+            return None, layout      # nothing dead — stay on the untouched path
+        return emit, [layout[i] for i in emit]
+
+    def _narrow_sink_input(self, p, layout, spec, emit):
+        """Drop what a sort/window sink would BUFFER for nothing, before it buffers it.
+
+        `_emit_subset` above stops a spent column being MATERIALIZED into the output.
+        This stops a different column being HELD AT ALL. These sinks are breakers:
+        every input morsel is retained until finalize, so a column that is neither a
+        sort key (the READ set) nor in `emit` (the EMIT set) is kept alive for the
+        whole query and then dropped. The clearest case is a semi-join probe key —
+        the probe stream is not narrowed by the join, so the key rides into the sort
+        with no reader left.
+
+        A select AFTER the sink cannot fix this and a narrower emit set cannot
+        either: the memory is spent at sink time. ColumnSelectOperator can, and is
+        the right tool — it is zero-copy (it moves the column's shared owner), so
+        this costs one pointer copy per kept column per morsel and lets the dead
+        column's buffers go as each morsel passes through.
+
+        Returns the remapped ``(spec, emit)``, both indexing the NARROWED input. The
+        layout the sink PRODUCES is unchanged — `emit` still names the same
+        identities in the same order — so callers keep using `_emit_subset`'s layout.
+
+        ``emit is None`` means the live set is unknown, and unknown means keep
+        everything: with no EMIT set there is no column this can prove dead."""
+        if emit is None:
+            return spec, emit
+        keep = sorted({idx for idx, _ascending in spec} | set(emit))
+        if len(keep) == len(layout):
+            return spec, emit
+        self.nplan.add_select(p, keep, [layout[i] for i in keep])
+        position = {old: new for new, old in enumerate(keep)}
+        return ([(position[idx], ascending) for idx, ascending in spec],
+                [position[i] for i in emit])
+
     def _sort_spec(self, p, order_by, layout):
         if not order_by:
             _unsupported("an ORDER BY with no keys")
@@ -1698,7 +1980,7 @@ class _Compiler:
         for col, ascending in order_by:
             identity = col.schema_column.identity
             if identity not in layout:
-                _unsupported("an ORDER BY key the stream does not carry")
+                _unsupported("an ORDER BY key the engine could not resolve here")
             self._check_key_type(
                 "ORDER BY", getattr(col.schema_column, "name", None) or identity,
                 self._layout_type(None, identity))
@@ -1754,7 +2036,7 @@ class _Compiler:
                 kinds.append("int")
                 string_types.append(0)
                 decimal_columns.append(0)
-                logical_coerce.append(0)
+                logical_coerce.append(_ipv4_coerce(sc, pt))
             elif pt == DrakenType.FLOAT32:
                 kinds.append("float32")
                 string_types.append(0)
@@ -2001,7 +2283,7 @@ class _Compiler:
         # Pass 1 evaluates the predicate through opteryx_pass1_predicate_eval's C ABI
         # — the same entry the parquet latmat Source uses — which runs the c-native
         # bytecode VM and nothing else. Not lowerable → decline, single pass.
-        filter_bc = self._lower_bytecode(self._compose_predicate_nodes(predicates))
+        filter_bc = self._lower_scan_predicate(predicates)
         if not bytecode_is_all_c_native(filter_bc):
             return None
 
@@ -2194,10 +2476,12 @@ class _Compiler:
         # None → StreamingScanSource keeps the predicate. build_bytecode cannot
         # raise here — the trampoline already builds the identical bytecode
         # unconditionally at execute time — so `bytecode_is_all_c_native` is the
-        # only "not lowerable" signal and no try/except is needed.
+        # only "not lowerable" signal and no try/except is needed. (A non-bool-final
+        # predicate raises out of `_lower_scan_predicate` and never reaches this
+        # routing decision — there is no path it could be routed TO.)
         filter_bc = None
         if predicates:
-            filter_bc = self._lower_bytecode(self._compose_predicate_nodes(predicates))
+            filter_bc = self._lower_scan_predicate(predicates)
             if not bytecode_is_all_c_native(filter_bc):
                 # R4: pushed predicate does not lower to a c-native span
                 self.scan_residual_reasons[scan.identity] = "unlowerable_predicate"
@@ -2464,7 +2748,7 @@ class _Compiler:
         # entry rugo's decode workers already call), which runs the c-native bytecode
         # VM and nothing else. Not lowerable → None → `_native_scan_plan` records the
         # `unlowerable_predicate` (R4) residual on the ordinary path.
-        filter_bc = self._lower_bytecode(self._compose_predicate_nodes(predicates))
+        filter_bc = self._lower_scan_predicate(predicates)
         if not bytecode_is_all_c_native(filter_bc):
             return None
 
@@ -2757,9 +3041,7 @@ class _Compiler:
         # its same-type/same-scale contract and silently dropping rows
         # (`d > 1.49` lost `1.50`). One lowering, one rewrite chain.
         if getattr(scan, "predicates", None):
-            scan.compiled_predicate = self._lower_bytecode(
-                self._compose_predicate_nodes(scan.predicates)
-            )
+            scan.compiled_predicate = self._lower_scan_predicate(scan.predicates)
         p = self.nplan.new_pipeline()
         # A scan that is not concurrent-pull safe (two-pass latmat, fallback
         # generator) gets its pull mutex-serialised inside the Source; the rest of
@@ -2790,16 +3072,31 @@ class _Compiler:
         join_type = getattr(node, "join_type", None)
         if join_type == "asof":
             return self._compile_asof_join(node, in_edges)
-        # "left anti null-aware" (NOT IN) and "left anti" (NOT EXISTS / EXCEPT / a full
-        # outer's unmatched leg) are DIFFERENT modes — they disagree on NULLs. Mapping
-        # both to the null-aware mode made NOT EXISTS emit nothing at all whenever the
-        # inner key held a single NULL. See native_join2.hpp's JoinMode comment.
+        # THREE key rules live here and none of them is interchangeable with another;
+        # each disagrees with the others only on NULL, which is why substituting one
+        # for another is a silent wrong answer rather than an error.
+        #   "left anti null-aware" (NOT IN)   — one NULL on the build side makes every
+        #                                        comparison UNKNOWN, emptying the result.
+        #   "left anti" / "left semi"          — NOT EXISTS / EXISTS: a NULL key simply
+        #                                        matches nothing.
+        #   "* not-distinct"                   — INTERSECT / EXCEPT: NULL is a VALUE that
+        #                                        equals itself (IS NOT DISTINCT FROM).
+        # Mapping the first two onto each other made NOT EXISTS emit nothing whenever
+        # the inner key held a single NULL. Using either in place of the third made
+        # `A EXCEPT A` non-empty on any nullable column. See native_join2.hpp's JoinMode.
         modes = {"inner": 0, "left outer": 1, "left semi": 2,
                  "left anti null-aware": 3, "left anti": 4,
-                 "cross": 0, "nested_loop": 0, "full outer": 5}
+                 "cross": 0, "nested_loop": 0, "full outer": 5,
+                 "left semi not-distinct": 6, "left anti not-distinct": 7}
         if join_type not in modes:
             _unsupported(f"a {join_type} join")
         mode = modes[join_type]
+        # The EXISTENCE-FILTER family: every mode that emits probe rows rather than
+        # joined rows. Named once because five separate decisions below key off it
+        # (residual handling, build payload, emit narrowing, probe payload, return
+        # shape) and a mode missing from any ONE of them is silently compiled as an
+        # inner join — it would emit pair rows and the wrong cardinality.
+        semi_anti_modes = (2, 3, 4, 6, 7)
         is_cross = join_type == "cross"
         legs = {}
         for idx, (provider, _target, label) in enumerate(in_edges):
@@ -2837,7 +3134,7 @@ class _Compiler:
         # collapsed to existence, so the predicate has to gate the existence test
         # inside the probe. It therefore needs the build payload the plain SEMI/ANTI
         # path deliberately drops.
-        filter_residual = getattr(node, "residual", None) if mode in (2, 3, 4) else None
+        filter_residual = getattr(node, "residual", None) if mode in semi_anti_modes else None
 
         # Every conjunct of the ON clause must be evaluated by SOMETHING.
         #
@@ -2904,20 +3201,60 @@ class _Compiler:
         build_key_idx = []
         for identity in build_keys:
             if identity not in bkeyout:
-                _unsupported("a build-side join key the stream does not carry")
+                _unsupported("a build-side join key the engine could not resolve here")
             build_key_idx.append(bkeyout.index(identity))
         ref = self.nplan.new_join2_ref()
+        # A join KEY column's purpose is spent the moment it is hashed. The build sink
+        # reads its keys off the input morsel at sink time and retains only
+        # `payload_col_idx` (equality downstream is 64-bit hash identity, never a value
+        # comparison), so a key excluded from the payload is released with the morsel —
+        # the operator already implements "kill it when its purpose is spent". What
+        # defeated it was this compiler handing it EVERY column as payload, so the pair
+        # width was carried to the top of the plan and dropped by the Exit select: 235
+        # of the 498 columns joins emit across the 22 TPC-H queries were dead, and the
+        # gather is the expensive half (~4.7ns/row for a fixed-width column, ~122ns/row
+        # for a VARCHAR, at 15M output rows).
+        #
+        # `pre_update_columns` is snapshotted BEFORE this join's own columns are
+        # collected, so it holds exactly what is still wanted AFTER the join and never
+        # the keys the join itself needs — the two are separate sets and the key
+        # indices below are untouched (they address `bkeyout`/`pkeyout`, not payload).
+        #
+        # Two shapes keep the full width because their own consumers read the unpruned
+        # pair layout: a nested_loop residual (`add_expr_filter` over `out_layout`) and
+        # a SEMI/ANTI correlated residual (lowered against `blayout + playout` inside
+        # the probe).
+        live = getattr(node, "pre_update_columns", None) or set()
+        prune_payload = bool(live) and residual is None and filter_residual is None
         # SEMI/ANTI emit probe rows only — no build payload needed, UNLESS a
         # correlated residual has to read build-side columns to decide existence.
-        semi_no_payload = mode in (2, 3, 4) and filter_residual is None
-        build_payload = [] if semi_no_payload else list(range(len(blayout)))
+        semi_no_payload = mode in semi_anti_modes and filter_residual is None
         if semi_no_payload:
+            build_payload = []
             build_types, build_logical, build_element = [], [], []
         else:
-            build_types, build_logical, build_element = self._payload_types(build_id, blayout)
+            build_payload = _live_positions(blayout, live) if prune_payload \
+                else list(range(len(blayout)))
+            build_types, build_logical, build_element = self._payload_types(
+                build_id, [blayout[i] for i in build_payload])
+        # `join_output_rows_estimate` (JoinBuildShapeStrategy) is how many rows this
+        # join is expected to EMIT — the one number the build sink cannot measure for
+        # itself when it decides whether consolidating its retained payload beats
+        # re-copying it per output row. -1 means unknown, which keeps the sink on its
+        # existing gather; never fabricate a number here.
+        est_rows = getattr(node, "join_output_rows_estimate", None)
+        # The set-operation key rule has to be given to BOTH halves. The probe derives
+        # it from `mode`, but the build sink never sees the mode — and it is the build
+        # side that decides whether a NULL-keyed row enters the table at all. Passing
+        # it here (rather than letting the sink default) is what keeps the two in step:
+        # a build that drops NULL keys under a not-distinct probe would lose every NULL
+        # row silently, which is the original bug wearing a different hat.
+        null_equal = mode in (6, 7)
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
                                         build_types, build_logical, build_element,
-                                        mode == 5)   # FULL OUTER: track matches
+                                        mode == 5,   # FULL OUTER: track matches
+                                        -1 if est_rows is None else int(est_rows),
+                                        null_equal)
 
         pp, playout = self.compile_node(probe_id)
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
@@ -2926,9 +3263,30 @@ class _Compiler:
         probe_key_idx = []
         for identity in probe_keys:
             if identity not in pkeyout:
-                _unsupported("a probe-side join key the stream does not carry")
+                _unsupported("a probe-side join key the engine could not resolve here")
             probe_key_idx.append(pkeyout.index(identity))
-        probe_payload = list(range(len(playout)))
+        probe_payload = _live_positions(playout, live) if prune_payload \
+            else list(range(len(playout)))
+        # SEMI/ANTI EMIT set. An existence filter emits surviving PROBE rows, so its
+        # payload is not the question — what it re-gathers is. Its probe key is read
+        # on every row and, unless something above also selects it, is wanted by
+        # nothing once `survivors` exists: the join is where it dies, one operator
+        # earlier than the sort/window fix could kill it.
+        #
+        # This is deliberately NOT gated on `prune_payload`. That gate exists because
+        # a residual reads the unpruned PAIR layout — a different set, built by
+        # build_output from `probe_payload`, which stays full width below. Narrowing
+        # what the filter OUTPUTS cannot affect what the residual READS.
+        #
+        # None = emit everything (unknown live set, or nothing dead — the latter
+        # keeps the untouched path rather than paying for an identity subset).
+        semi_emit = None
+        if mode in semi_anti_modes and live:
+            semi_emit = _live_positions(playout, live)
+            if len(semi_emit) == len(playout):
+                semi_emit = None
+        semi_layout = list(playout) if semi_emit is None \
+            else [playout[i] for i in semi_emit]
         if filter_residual is not None:
             # The residual reads one column from each side, so the probe needs the
             # FULL probe payload as well as the build payload retained above. It is
@@ -2940,14 +3298,16 @@ class _Compiler:
                 filter_residual, "a correlated EXISTS residual condition"
             )
             self.nplan.add_join2_probe_residual(pp, ref, probe_key_idx, probe_payload,
-                                                mode, bc, pair_layout)
-            return pp, list(playout)          # existence filter — probe stream unchanged
+                                                mode, bc, pair_layout, semi_emit)
+            return pp, semi_layout            # existence filter — probe rows, narrowed
         self.nplan.add_join2_probe(pp, ref, probe_key_idx,
-                                   [] if mode in (2, 3, 4) else probe_payload, mode)
-        if mode in (2, 3, 4):
-            return pp, list(playout)          # existence filter — probe stream unchanged
-        # Join2ProbeOperator emits build payload columns first, then probe payload.
-        out_layout = list(blayout) + list(playout)
+                                   [] if mode in semi_anti_modes else probe_payload, mode,
+                                   semi_emit)
+        if mode in semi_anti_modes:
+            return pp, semi_layout            # existence filter — probe rows, narrowed
+        # Join2ProbeOperator emits build payload columns first, then probe payload — in
+        # payload-index order, so the output layout is the two RETAINED lists.
+        out_layout = [blayout[i] for i in build_payload] + [playout[j] for j in probe_payload]
         if residual is not None:
             # nested_loop residual `on` predicate over the combined layout. Lower
             # it (fails loud if not c-native), resolve column refs against the
@@ -2960,7 +3320,8 @@ class _Compiler:
             # created AFTER the probe pipeline — pipelines run in creation
             # order, so by the time UnmatchedBuildSource pulls, every probe
             # worker has finished and the matched[] flags are complete.
-            probe_types, probe_logical, probe_element = self._payload_types(probe_id, playout)
+            probe_types, probe_logical, probe_element = self._payload_types(
+                probe_id, [playout[j] for j in probe_payload])
             buf = self.nplan.new_buffer()
             self.nplan.set_buffer_append_sink(pp, buf)
             tail = self.nplan.new_pipeline()
@@ -3220,7 +3581,11 @@ class _Compiler:
         """CROSS JOIN UNNEST (single input): expand the source ARRAY column into one
         row per element via the native UnnestOperator, which repeats each parent row
         by its array length and appends the flattened element under the target
-        identity. NULL/empty array rows contribute no rows (INNER unnest semantics).
+        identity.
+
+        Row-count semantics (NULL/empty arrays, INNER vs OUTER) are draken's rule,
+        stated in full above cxx_unnest in draken/draken_native.cpp. This compiler
+        does not restate it and must not encode an assumption about it.
 
         A pushed value-filter (`WHERE unnested IN (...)`, folded to `node.filters` by
         predicate_pushdown) or pushed DISTINCT (`node.distinct`) are NOT yet folded
@@ -3265,7 +3630,7 @@ class _Compiler:
                 _unsupported("a CROSS JOIN UNNEST over a source that is not an array")
             layout = self._add_computed(p, [source], layout)
             if array_identity not in layout:
-                _unsupported("a CROSS JOIN UNNEST source array the stream does not carry")
+                _unsupported("a CROSS JOIN UNNEST source array the engine could not resolve here")
         array_idx = layout.index(array_identity)
 
         # Drop the consumed source array unless something ABOVE the unnest still
@@ -3307,7 +3672,7 @@ class _Compiler:
             # hoist the array form does one branch down.
             layout = self._add_computed(p, [source], layout)
             if cidr_identity not in layout:
-                _unsupported("a CROSS JOIN CIDR_UNNEST source the stream does not carry")
+                _unsupported("a CROSS JOIN CIDR_UNNEST source the engine could not resolve here")
         cidr_idx = layout.index(cidr_identity)
 
         # Same liveness rule as the array form: drop the consumed source only when
@@ -3378,7 +3743,7 @@ class _Compiler:
         build_key_idx = []
         for identity in right_cols:
             if identity not in blayout:
-                _unsupported("an ASOF build-side key the stream does not carry")
+                _unsupported("an ASOF build-side key the engine could not resolve here")
             build_key_idx.append(blayout.index(identity))
         if asof_right not in blayout:
             _unsupported("an ASOF match column the build stream does not carry")
@@ -3387,7 +3752,7 @@ class _Compiler:
         probe_key_idx = []
         for identity in left_cols:
             if identity not in playout:
-                _unsupported("an ASOF probe-side key the stream does not carry")
+                _unsupported("an ASOF probe-side key the engine could not resolve here")
             probe_key_idx.append(playout.index(identity))
         if asof_left not in playout:
             _unsupported("an ASOF match column the probe stream does not carry")
@@ -3420,10 +3785,12 @@ class _Compiler:
         asof_type = self._layout_type(self.plan[legs["right"]], asof_right)
         if asof_type is None:
             _unsupported("an ASOF match column whose type the compiler cannot resolve")
+        asof_est_rows = getattr(node, "join_output_rows_estimate", None)
         self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
                                        bmatchout.index(asof_right), ref,
                                        build_types, build_logical, build_element,
-                                       asof_type.value)
+                                       asof_type.value,
+                                       -1 if asof_est_rows is None else int(asof_est_rows))
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
         self.nplan.set_current_display_name(type(node).__name__)
         self.nplan.add_asof_probe(pp, ref, probe_key_idx, list(range(len(playout))),
@@ -3592,7 +3959,7 @@ def compile_to_native(plan, pool=None):
     indices = []
     for identity in exit_node.final_columns:
         if identity not in layout:
-            _unsupported("an output column the stream does not carry")
+            _unsupported("an output column the engine could not resolve here")
         indices.append(layout.index(identity))
     nplan.add_select(p, indices, list(exit_node.final_names))
 

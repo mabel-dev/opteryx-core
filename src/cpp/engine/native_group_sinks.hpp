@@ -14,14 +14,14 @@
 //     SUM/AVG — always double regardless of int or float operand). DECIMAL
 //     operands are rejected (CAST to DOUBLE first): reading the unscaled raw
 //     integer as a double would silently compute the wrong numbers' variance.
-//   - MEDIAN buffers every non-null value per group (MedianState, shared with
-//     the legacy Cython median accumulators — see _agg_kernels.hpp), bounded
-//     by a global 512MB byte budget across all groups (fails loud past the
-//     budget: use APPROX_PERCENTILE for larger inputs), and computes the
-//     exact median via std::nth_element at
+//   - MEDIAN buffers every non-null value per group (MedianState — see
+//     _agg_kernels.hpp), bounded by a global 512MB byte budget across all
+//     groups (fails loud past the budget: use APPROX_PERCENTILE for larger
+//     inputs), and computes the exact median via std::nth_element at
 //     finalize (even counts interpolate). Always FLOAT64, numeric-only
 //     (unlike STDDEV/SUM/AVG — no BOOL/DATE32/TIMESTAMP64/TIME32/TIME64/
-//     DECIMAL, matching the legacy contract exactly, not silently widened).
+//     DECIMAL; see median_operand_supported for why). NaN participates as a
+//     value ranked above everything else, per draken's total order.
 //   - MIN/MAX compare via the same normalized order keys the sort uses
 //     (native_sort.hpp): NULLs skipped, NaN highest, -0.0 == +0.0; the OUTPUT is
 //     the raw value at the operand's own type/width, logical descriptor carried.
@@ -67,9 +67,8 @@
 #include "native_cidr_emit.hpp"  // CIDR_AGG: Roaring32 address sets + minimal-cover emit
 #include "parvi.hpp"             // opteryx::parvi::ParviMap — 64-slot low-card front map
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
-#include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — shared with the legacy
-                                 // Cython median accumulators (opteryx/operators/aggregate/,
-                                 // grouped_aggregate_hashed/), same struct, not duplicated
+#include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — MEDIAN's per-group
+                                 // value buffer, and the global byte budget that bounds it
 #include "hllpp.h"               // HllppSketch — APPROX_COUNT_DISTINCT, global namespace
 #include "tdigest.h"             // td_histogram_t — APPROX_PERCENTILE, C API (third_party/tdigest-c)
 
@@ -386,13 +385,13 @@ inline bool agg2_operand_supported(DrakenType t) {
     }
 }
 
-// MEDIAN is numeric-only — NOT the general agg2_operand_supported set. Matches
-// the legacy Cython median collectors exactly: no DECIMAL/DECIMAL128 (no
-// descale — same "never a mis-scaled answer" reasoning as STDDEV), no
-// BOOL/DATE32/TIMESTAMP64/TIME32/TIME64 either (unlike SUM/AVG/STDDEV, which
-// treat those as meaningful numeric domains — the legacy MEDIAN never did,
-// and this port preserves that existing contract rather than silently
-// widening it).
+// MEDIAN is numeric-only — NOT the general agg2_operand_supported set. No
+// DECIMAL/DECIMAL128 (no descale — same "never a mis-scaled answer" reasoning
+// as STDDEV), and no BOOL/DATE32/TIMESTAMP64/TIME32/TIME64 either, unlike
+// SUM/AVG/STDDEV which treat those as meaningful numeric domains. Widening
+// this set is a design decision, not a gap to be quietly filled: MEDIAN
+// returns FLOAT64, so admitting a temporal or DECIMAL operand would answer in
+// a type the caller never asked for. Refuse loudly instead.
 // Single source of truth for the MEDIAN budget-overflow message — four call
 // sites (ungrouped accumulate/merge, grouped accumulate/merge) all fail loud
 // with the exact same text, never a silent approximate fallback (a query
@@ -406,7 +405,7 @@ inline bool agg2_operand_supported(DrakenType t) {
 // sending the reader to reason about a number nothing enforces. The variable is
 // the discoverable value, and it reads the native constant so it cannot drift.
 inline constexpr const char* kMedianCapExceededMsg =
-    "native engine: MEDIAN — buffered values exceeded the memory budget (see "
+    "MEDIAN — buffered values exceeded the memory budget (see "
     "@@median_memory_budget_bytes). Use APPROX_PERCENTILE(x, 0.5) for "
     "approximate median over large sets of values.";
 
@@ -449,21 +448,21 @@ inline bool corr_capture_meta(const AggSpec2& sp, const CxxMorsel& in,
                               DrakenType t_first, AggColMeta& m, ErrCtx& err) {
     if (!median_operand_supported(t_first)) {
         err.code = 1;
-        err.msg = "native engine: CORR over this column type is not supported — "
+        err.msg = "CORR over this column type is not supported — "
                   "only numeric inputs are accepted (CAST DECIMAL to DOUBLE first)";
         return false;
     }
     if (sp.col_idx2 < 0
             || static_cast<size_t>(sp.col_idx2) >= in.columns.size()) {
         err.code = 1;
-        err.msg = "native engine: CORR second operand column missing from input "
+        err.msg = "CORR second operand column missing from input "
                   "morsel — fail loud, never a silent wrong answer";
         return false;
     }
     DrakenType t2 = in.columns[static_cast<size_t>(sp.col_idx2)].view.type;
     if (!median_operand_supported(t2)) {
         err.code = 1;
-        err.msg = "native engine: CORR over this column type is not supported — "
+        err.msg = "CORR over this column type is not supported — "
                   "only numeric inputs are accepted (CAST DECIMAL to DOUBLE first)";
         return false;
     }
@@ -823,7 +822,7 @@ inline CxxColumn emit_fixed_column(const int64_t* raws, const uint8_t* valid_fla
         // aggregate lane resolves to a tag-width type), which is exactly why it had
         // to go: the next type added would have hit it silently.
         err.code = 1;
-        err.msg = "native engine: aggregate result type has no fixed width — fail "
+        err.msg = "aggregate result type has no fixed width — fail "
                   "loud, never silent corruption";
         return CxxColumn{};
     }
@@ -952,9 +951,10 @@ inline bool cidr_operand_supported(DrakenType t, const LogicalType* logical) noe
 // shape of a right one.
 //
 // The counter is a per-shared-object static (inline function local), matching
-// the MedianState convention: the one extension that actually executes
-// ARRAY_AGG (the native engine) accounts against a single instance, while the
-// legacy Cython spec-carrier module compiles this header but never appends.
+// the MedianState convention: the native engine is the only thing that
+// compiles this header, so there is exactly one instance and every ARRAY_AGG
+// buffer in the process accounts against it. A second .so including this
+// header would get its own counter and its own budget.
 // ---------------------------------------------------------------------------
 constexpr int64_t kArrayAggBudgetBytes = opteryx::agg_budgets::kArrayAggBytes;   // 512MB, all groups
 
@@ -1335,7 +1335,7 @@ inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& 
         // Names the budget, quotes no figure — see kMedianCapExceededMsg for why
         // a literal limit in the text is a copy that a differently-configured
         // build silently falsifies.
-        err.msg = "native engine: ARRAY_AGG — buffered elements exceeded the memory "
+        err.msg = "ARRAY_AGG — buffered elements exceeded the memory "
                   "budget (see @@array_agg_memory_budget_bytes). Filter the input or "
                   "narrow the groups so fewer rows reach the aggregate; ARRAY_AGG's "
                   "own LIMIT will not help, it truncates the finished list rather "
@@ -1430,7 +1430,7 @@ inline CxxColumn emit_cidr_lane_column(opteryx::roaring32::Roaring32* states,
         // — it is a second copy of the limit that a build with a different
         // constant silently falsifies, sending the reader to tune a number
         // nothing enforces. The variable IS the discoverable figure.
-        err.msg = "native engine: CIDR_AGG — the address sets exceeded the state "
+        err.msg = "CIDR_AGG — the address sets exceeded the state "
                   "memory budget (see @@cidr_agg_state_budget_bytes). Narrow the "
                   "groups or filter the input so fewer DISTINCT addresses reach the "
                   "aggregate; repeated addresses cost nothing, the set dedups on "
@@ -1468,7 +1468,7 @@ inline CxxColumn emit_cidr_lane_column(opteryx::roaring32::Roaring32* states,
     opteryx::cidr::emit_budget_give(charged);
     if (over) {
         err.code = 1;
-        err.msg = "native engine: CIDR_AGG — the emitted CIDR list exceeded the "
+        err.msg = "CIDR_AGG — the emitted CIDR list exceeded the "
                   "output budget (see @@cidr_agg_emit_budget_bytes). This is a "
                   "SEPARATE limit from the state budget and fitting in memory does "
                   "not imply fitting here: the worst case is half-density input "
@@ -1817,7 +1817,7 @@ struct UngroupedAggSink : Sink {
             if (specs[s].col_idx < 0) continue;
             if (static_cast<size_t>(specs[s].col_idx) >= in->columns.size()) {
                 err.code = 1;
-                err.msg = "native engine: aggregate operand column missing from "
+                err.msg = "aggregate operand column missing from "
                           "input morsel — fail loud, never a silent wrong answer";
                 return false;
             }
@@ -1832,7 +1832,7 @@ struct UngroupedAggSink : Sink {
             // ungrouped AggCell has no room for.
             if (specs[s].fn == AggFn::ArrayAgg) {
                 err.code = 1;
-                err.msg = "native engine: ARRAY_AGG without a GROUP BY reached the "
+                err.msg = "ARRAY_AGG without a GROUP BY reached the "
                           "ungrouped aggregate sink — fail loud, never a silent wrong "
                           "answer";
                 return false;
@@ -1845,11 +1845,10 @@ struct UngroupedAggSink : Sink {
             if (specs[s].fn == AggFn::CidrAgg
                     && !cidr_operand_supported(t, c.own ? c.own->logical_type : nullptr)) {
                 err.code = 1;
-                err.msg = "native engine: CIDR_AGG requires an IPV4 operand (UINT32 "
-                          "carrying the IPV4 descriptor). A plain integer column is "
-                          "refused because folding arbitrary 32-bit values into "
-                          "network ranges produces a well-formed, confident, wrong "
-                          "answer. CAST the column to IPV4 first.";
+                err.msg = "CIDR_AGG requires an IPV4 column. A plain integer column "
+                          "is refused because folding arbitrary integers into network "
+                          "ranges produces a well-formed, confident, wrong answer. "
+                          "Use `<column>::IPV4` to cast.";
                 return false;
             }
             // STDDEV never descales DECIMAL's fixed-point unscaled integer — reading
@@ -1857,7 +1856,7 @@ struct UngroupedAggSink : Sink {
             // a silent wrong answer, not an approximation. CAST to DOUBLE first.
             if (specs[s].fn == AggFn::Stddev && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
                 err.code = 1;
-                err.msg = "native engine: STDDEV does not support DECIMAL operands — "
+                err.msg = "STDDEV does not support DECIMAL operands — "
                           "CAST to DOUBLE first, never a silently mis-scaled variance";
                 return false;
             }
@@ -1866,7 +1865,7 @@ struct UngroupedAggSink : Sink {
             if ((specs[s].fn == AggFn::Median || specs[s].fn == AggFn::ApproxPercentile)
                     && !median_operand_supported(t)) {
                 err.code = 1;
-                err.msg = "native engine: MEDIAN/APPROX_PERCENTILE over this column "
+                err.msg = "MEDIAN/APPROX_PERCENTILE over this column "
                           "type is not supported — only numeric inputs are accepted "
                           "(CAST DECIMAL to DOUBLE first)";
                 return false;
@@ -1885,7 +1884,7 @@ struct UngroupedAggSink : Sink {
                     && !str_minmax
                     && !agg2_operand_supported(t)) {
                 err.code = 1;
-                err.msg = "native engine: unsupported aggregate operand type — fail "
+                err.msg = "unsupported aggregate operand type — fail "
                           "loud, never a silent wrong answer";
                 return false;
             }
@@ -2086,7 +2085,7 @@ struct UngroupedAggSink : Sink {
                 if (specs[s].fn == AggFn::ApproxCountDistinct) {
                     if (!g.hlls[s].merge(l.hlls[s])) {
                         err.code = 1;
-                        err.msg = "native engine: APPROX_COUNT_DISTINCT sketch merge "
+                        err.msg = "APPROX_COUNT_DISTINCT sketch merge "
                                   "failed (precision mismatch) — unreachable, every "
                                   "sketch shares one fixed precision";
                         return;
@@ -2508,23 +2507,44 @@ struct GroupByGlobal : GlobalSinkState {
 };
 
 struct GroupBySink : Sink {
-    std::vector<size_t> key_idx;
-    std::vector<std::string> key_names;   // identity per key_idx entry — CxxMorsel::names
-                                           // requires one entry per column (see cxx_morsel.h);
-                                           // this sink is the one output producer that didn't
-                                           // carry them, which stayed invisible until
-                                           // cxx_unnest's drop_source path indexed into it.
+    std::vector<size_t> key_idx;   // EVERY grouping key — all of them are hashed
+    // The EMIT subset of key_idx, in output order. A grouping key's purpose is spent
+    // the moment it has been hashed: group identity here is the 64-bit key hash
+    // (compute_row_hashes), never a value comparison, so a key that nothing above the
+    // aggregate reads still has to be HASHED to separate the groups but its VALUES
+    // never have to be stored. The compiler clears such a key's emit flag and the
+    // per-group key store then never allocates a column for it — that copy, not the
+    // output column, is the cost being killed. `keycols` is parallel to THESE, not to
+    // key_idx.
+    //
+    // store_names carries the identity per emitted column: CxxMorsel::names requires
+    // one entry per column (see cxx_morsel.h); this sink is the one output producer
+    // that didn't carry them, which stayed invisible until cxx_unnest's drop_source
+    // path indexed into it.
+    std::vector<size_t> store_col_idx;    // input morsel column index per stored key
+    std::vector<size_t> store_key_pos;    // position in key_idx of each stored key
+    std::vector<std::string> store_names;
     std::vector<AggSpec2> specs;
     MorselBuffer* out;
     size_t chunk_rows;
     bool low_card;   // planner NDV estimate <= kGBParviGateNDV → parvi front maps
 
+    // `kemit` has one entry per key (invariant enforced at the binding, which is the
+    // only construction site and can raise) — false = hash the key, never store it.
     GroupBySink(std::vector<size_t> keys, std::vector<std::string> knames,
+                std::vector<uint8_t> kemit,
                 std::vector<AggSpec2> s, MorselBuffer* b, int64_t ndv_estimate,
                 size_t chunk = 131072)
-        : key_idx(std::move(keys)), key_names(std::move(knames)), specs(std::move(s)),
+        : key_idx(std::move(keys)), specs(std::move(s)),
           out(b), chunk_rows(chunk),
-          low_card(ndv_estimate >= 0 && ndv_estimate <= kGBParviGateNDV) {}
+          low_card(ndv_estimate >= 0 && ndv_estimate <= kGBParviGateNDV) {
+        for (size_t k = 0; k < key_idx.size(); ++k) {
+            if (!kemit[k]) continue;
+            store_key_pos.push_back(k);
+            store_col_idx.push_back(key_idx[k]);
+            store_names.push_back(knames[k]);
+        }
+    }
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<GroupByGlobal>();
@@ -2540,13 +2560,15 @@ struct GroupBySink : Sink {
 
     // Type a partition's per-group key store from the captured key metadata. Called
     // in capture() for all 64 partitions and again after a partition is reset by an
-    // adaptive flush (GBPartition() clears the keycol types).
+    // adaptive flush (GBPartition() clears the keycol types). `km` is indexed by
+    // key_idx position; the store holds only the emitted keys, hence store_key_pos.
     void type_keycols(GBPartition& P, const std::vector<KeyColMeta>& km) {
-        P.keycols.resize(key_idx.size());
-        for (size_t k = 0; k < key_idx.size(); ++k) {
-            P.keycols[k].type = km[k].type;
-            P.keycols[k].elem_size = gb_key_elem_size(km[k].type, km[k].logical);
-            P.keycols[k].logical = km[k].logical;
+        P.keycols.resize(store_key_pos.size());
+        for (size_t j = 0; j < store_key_pos.size(); ++j) {
+            const KeyColMeta& m = km[store_key_pos[j]];
+            P.keycols[j].type = m.type;
+            P.keycols[j].elem_size = gb_key_elem_size(m.type, m.logical);
+            P.keycols[j].logical = m.logical;
         }
     }
 
@@ -2555,7 +2577,7 @@ struct GroupBySink : Sink {
         for (size_t k = 0; k < key_idx.size(); ++k) {
             if (key_idx[k] >= in->columns.size()) {
                 err.code = 1;
-                err.msg = "native engine: GROUP BY key column missing from input "
+                err.msg = "GROUP BY key column missing from input "
                           "morsel — fail loud, never a silent wrong grouping";
                 return false;
             }
@@ -2571,12 +2593,16 @@ struct GroupBySink : Sink {
             // MOVEABLE says nothing about being GROUPABLE.
             if (!sort_key_type_supported(t)) {
                 err.code = 1;
-                err.msg = "native engine: unsupported GROUP BY key column type";
+                err.msg = "unsupported GROUP BY key column type";
                 return false;
             }
+            // Checked for EVERY key, including hash-only ones whose values are never
+            // materialized. Deliberate: it mirrors the compiler's plan-time
+            // _check_key_type over the whole key list, so which keys the projection
+            // above happens to read cannot decide whether a query is accepted.
             if (gb_key_elem_size(t, lt) == 0) {
                 err.code = 1;
-                err.msg = "native engine: GROUP BY key column has no materializable "
+                err.msg = "GROUP BY key column has no materializable "
                           "width — fail loud, never silent corruption";
                 return false;
             }
@@ -2611,18 +2637,17 @@ struct GroupBySink : Sink {
             if (specs[s].fn == AggFn::ArrayAgg) {
                 if (!aa_operand_supported(t)) {
                     err.code = 1;
-                    err.msg = "native engine: unsupported ARRAY_AGG operand type — "
+                    err.msg = "unsupported ARRAY_AGG operand type — "
                               "fail loud, never a silent wrong answer";
                     return false;
                 }
             } else if (specs[s].fn == AggFn::CidrAgg) {
                 if (!cidr_operand_supported(t, c.own ? c.own->logical_type : nullptr)) {
                     err.code = 1;
-                    err.msg = "native engine: CIDR_AGG requires an IPV4 operand (UINT32 "
-                              "carrying the IPV4 descriptor). A plain integer column is "
-                              "refused because folding arbitrary 32-bit values into "
-                              "network ranges produces a well-formed, confident, wrong "
-                              "answer. CAST the column to IPV4 first.";
+                    err.msg = "CIDR_AGG requires an IPV4 column. A plain integer column "
+                              "is refused because folding arbitrary integers into network "
+                              "ranges produces a well-formed, confident, wrong answer. "
+                              "Use `<column>::IPV4` to cast.";
                     return false;
                 }
             } else if (specs[s].fn != AggFn::Count
@@ -2633,7 +2658,7 @@ struct GroupBySink : Sink {
                 // COUNT reads only validity; COUNT(DISTINCT) reads serialized value
                 // bytes (key_append fails loud on unsupported types at run time).
                 err.code = 1;
-                err.msg = "native engine: unsupported aggregate operand type — fail "
+                err.msg = "unsupported aggregate operand type — fail "
                           "loud, never a silent wrong answer";
                 return false;
             }
@@ -2642,7 +2667,7 @@ struct GroupBySink : Sink {
             // a silent wrong answer, not an approximation. CAST to DOUBLE first.
             if (specs[s].fn == AggFn::Stddev && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
                 err.code = 1;
-                err.msg = "native engine: STDDEV does not support DECIMAL operands — "
+                err.msg = "STDDEV does not support DECIMAL operands — "
                           "CAST to DOUBLE first, never a silently mis-scaled variance";
                 return false;
             }
@@ -2651,7 +2676,7 @@ struct GroupBySink : Sink {
             if ((specs[s].fn == AggFn::Median || specs[s].fn == AggFn::ApproxPercentile)
                     && !median_operand_supported(t)) {
                 err.code = 1;
-                err.msg = "native engine: MEDIAN/APPROX_PERCENTILE over this column "
+                err.msg = "MEDIAN/APPROX_PERCENTILE over this column "
                           "type is not supported — only numeric inputs are accepted "
                           "(CAST DECIMAL to DOUBLE first)";
                 return false;
@@ -2719,9 +2744,11 @@ struct GroupBySink : Sink {
 
         // Pass B: find-or-insert each row's group into its partition (partition =
         // hash >> kGBPartShift; group id from CarcharIndex, equality by 64-bit hash
-        // identity). A NEW group appends its key VALUES (this representative row) to
-        // the partition's per-column key store — NULL keys collapse to one group via
-        // the NULL_HASH sentinel, exactly as SQL GROUP BY requires.
+        // identity). A NEW group appends the key VALUES nothing above has finished
+        // with (this representative row) to the partition's per-column key store —
+        // NULL keys collapse to one group via the NULL_HASH sentinel, exactly as SQL
+        // GROUP BY requires. A hash-only key stores nothing: it separated the groups
+        // in pass A and its purpose is spent.
         GROUPBY_TEL_START(_gbB_t0);
         l.mk_ent.resize(rows);
         for (uint32_t i = 0; i < rows; ++i) {
@@ -2732,8 +2759,8 @@ struct GroupBySink : Sink {
                 h, static_cast<int64_t>(P.hashes.size()), gid);
             if (is_new) {
                 P.hashes.push_back(h);
-                for (size_t k = 0; k < key_idx.size(); ++k) {
-                    P.keycols[k].append_row(in->columns[key_idx[k]].view, i, err,
+                for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                    P.keycols[j].append_row(in->columns[store_col_idx[j]].view, i, err,
                                             "GROUP BY key value");
                     if (err.code != 0) return SinkResult::CONTINUE;
                 }
@@ -3287,7 +3314,7 @@ struct GroupBySink : Sink {
                         for (uint32_t e = 0; e < sn; ++e) {
                             if (!D.hll[ge[e]].merge(S.hll[e])) {
                                 err.code = 1;
-                                err.msg = "native engine: APPROX_COUNT_DISTINCT sketch "
+                                err.msg = "APPROX_COUNT_DISTINCT sketch "
                                           "merge failed (precision mismatch) — "
                                           "unreachable, every sketch shares one fixed "
                                           "precision";
@@ -3329,11 +3356,12 @@ struct GroupBySink : Sink {
             auto m = std::make_shared<CxxMorsel>();
             m->zero_col_rows = n;
             // Group-key columns: materialize a contiguous [start, start+n) slice of
-            // each per-group key store (GroupKeyColumn) into the output morsel.
+            // each per-group key store (GroupKeyColumn) into the output morsel. Only
+            // the emitted keys have a store — a hash-only key has no column here.
             for (size_t k = 0; k < merged.keycols.size(); ++k) {
                 m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
                 if (err.code != 0) return;
-                m->names.push_back(key_names[k]);
+                m->names.push_back(store_names[k]);
             }
             for (size_t s = 0; s < nspecs; ++s) {
                 GBKind kind = g.kinds[s];

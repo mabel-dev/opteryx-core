@@ -39,7 +39,7 @@ old calibrated window showed no measurable difference) — so the heuristic
 was removed rather than re-tuned.
 """
 
-from opteryx.expression import NodeType
+from opteryx.expression import NodeType, binary_operands
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -67,9 +67,8 @@ def _contains_non_equi_comparator(condition) -> bool:
     with the residual filter) is the only correct strategy — not a cost-based
     choice, so this must never be gated by row-count."""
     if getattr(condition, "node_type", None) == NodeType.AND:
-        return _contains_non_equi_comparator(condition.left) or _contains_non_equi_comparator(
-            condition.right
-        )
+        left, right = binary_operands(condition)
+        return _contains_non_equi_comparator(left) or _contains_non_equi_comparator(right)
     return _col_value(condition) in _NON_EQUI_COMPARATORS
 
 

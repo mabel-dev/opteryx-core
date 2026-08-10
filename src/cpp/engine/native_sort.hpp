@@ -62,13 +62,21 @@ using ::kGatherNullRow;
 
 // Sort `ms` and append the fully sorted rows, chunked, into `out`. The engine's
 // MorselBuffer hand-off around draken's engine-agnostic sort_morsels().
+//
+// `emit_cols` (nullptr = every column) is the sink's EMIT set — the columns still
+// wanted ABOVE the sort. It is disjoint in purpose from `spec`, the READ set: the
+// ORDER BY key is read here and, unless something above also selects it, is never
+// copied into an output row. Only ever valid on a TERMINAL sort: an intermediate
+// one (TopNSink::compact) must keep the key, because the next round sorts on it
+// again.
 inline void sort_and_emit(const std::vector<MorselPtr>& ms,
                           const std::vector<SortKeySpec>& spec,
                           size_t take_first,          // SIZE_MAX = all rows
                           size_t chunk_rows,
-                          MorselBuffer* out, ErrCtx& err) {
+                          MorselBuffer* out, ErrCtx& err,
+                          const std::vector<uint32_t>* emit_cols = nullptr) {
     std::vector<MorselPtr> sorted;
-    if (!sort_morsels(ms, spec, take_first, chunk_rows, sorted, err)) return;
+    if (!sort_morsels(ms, spec, take_first, chunk_rows, sorted, err, emit_cols)) return;
     for (MorselPtr& m : sorted) out->morsels.push_back(std::move(m));
 }
 
@@ -80,13 +88,31 @@ struct SortGlobal : GlobalSinkState {
     std::vector<MorselPtr> morsels;
 };
 
-struct SortSink : Sink {
+// An emit subset is a genuine three-state: "no subset given" (emit everything) is
+// NOT the same as "the subset is empty" (emit a zero-column morsel — what a
+// COUNT(*) over an ordered subquery legitimately wants). An empty vector cannot
+// carry both, so the two are separated: `emit_prune` is the switch, `emit_cols` the
+// value. `emit_ptr()` folds them back into the nullptr-or-subset argument draken's
+// sort_morsels/gather_rows take.
+struct EmitSubset {
+    bool emit_prune = false;
+    std::vector<uint32_t> emit_cols;
+    const std::vector<uint32_t>* emit_ptr() const {
+        return emit_prune ? &emit_cols : nullptr;
+    }
+};
+
+struct SortSink : Sink, EmitSubset {
     std::vector<SortKeySpec> spec;
     MorselBuffer* out;
     size_t chunk_rows;
 
-    SortSink(std::vector<SortKeySpec> s, MorselBuffer* b, size_t chunk = 131072)
-        : spec(std::move(s)), out(b), chunk_rows(chunk) {}
+    SortSink(std::vector<SortKeySpec> s, MorselBuffer* b, size_t chunk = 131072,
+             bool prune = false, std::vector<uint32_t> emit = {})
+        : spec(std::move(s)), out(b), chunk_rows(chunk) {
+        emit_prune = prune;
+        emit_cols = std::move(emit);
+    }
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<SortGlobal>();
@@ -107,7 +133,7 @@ struct SortSink : Sink {
     }
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<SortGlobal&>(gs);
-        sort_and_emit(g.morsels, spec, SIZE_MAX, chunk_rows, out, err);
+        sort_and_emit(g.morsels, spec, SIZE_MAX, chunk_rows, out, err, emit_ptr());
     }
 };
 
@@ -122,15 +148,19 @@ struct TopNGlobal : GlobalSinkState {
     std::vector<MorselPtr> candidates;
 };
 
-struct TopNSink : Sink {
+struct TopNSink : Sink, EmitSubset {
     std::vector<SortKeySpec> spec;
     size_t n_limit;
     MorselBuffer* out;
     size_t compact_threshold;
 
-    TopNSink(std::vector<SortKeySpec> s, size_t n, MorselBuffer* b)
+    TopNSink(std::vector<SortKeySpec> s, size_t n, MorselBuffer* b,
+             bool prune = false, std::vector<uint32_t> emit = {})
         : spec(std::move(s)), n_limit(n), out(b),
-          compact_threshold(std::max<size_t>(4 * n, 65536)) {}
+          compact_threshold(std::max<size_t>(4 * n, 65536)) {
+        emit_prune = prune;
+        emit_cols = std::move(emit);
+    }
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<TopNGlobal>();
@@ -140,6 +170,9 @@ struct TopNSink : Sink {
     }
 
     // Reduce the worker's candidate set to its top N (bounds memory to O(N)).
+    // NO emit subset here, deliberately: this is an INTERMEDIATE sort whose output
+    // is sorted again on the next round and once more in finalize. Dropping the
+    // ORDER BY key here would leave nothing to sort by.
     void compact(TopNLocal& l, ErrCtx& err) {
         MorselBuffer tmp;
         sort_and_emit(l.morsels, spec, n_limit, n_limit == 0 ? 1 : n_limit, &tmp, err);
@@ -168,7 +201,8 @@ struct TopNSink : Sink {
     }
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<TopNGlobal&>(gs);
-        sort_and_emit(g.candidates, spec, n_limit, n_limit == 0 ? 1 : n_limit, out, err);
+        sort_and_emit(g.candidates, spec, n_limit, n_limit == 0 ? 1 : n_limit, out, err,
+                      emit_ptr());
     }
 };
 
@@ -205,7 +239,7 @@ inline bool win_keys_equal(const std::vector<SortKeyColumn>& keys, uint32_t a,
     return true;
 }
 
-struct WindowSink : Sink {
+struct WindowSink : Sink, EmitSubset {
     std::vector<SortKeySpec> sort_spec;   // [partition keys asc..., order keys...]
     size_t n_part;                        // # partition keys at the front of sort_spec
     std::vector<WindowFnSpec> funcs;
@@ -214,9 +248,13 @@ struct WindowSink : Sink {
     size_t chunk_rows;
 
     WindowSink(std::vector<SortKeySpec> s, size_t np, std::vector<WindowFnSpec> f,
-               MorselBuffer* b, int64_t topk = -1, size_t chunk = 131072)
+               MorselBuffer* b, int64_t topk = -1, size_t chunk = 131072,
+               bool prune = false, std::vector<uint32_t> emit = {})
         : sort_spec(std::move(s)), n_part(np), funcs(std::move(f)), out(b),
-          top_k(topk), chunk_rows(chunk) {}
+          top_k(topk), chunk_rows(chunk) {
+        emit_prune = prune;
+        emit_cols = std::move(emit);
+    }
 
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<WindowGlobal>();
@@ -327,8 +365,12 @@ struct WindowSink : Sink {
                 if (ci >= num_chunks) break;
                 size_t start = ci * chunk_rows;
                 size_t count = std::min(chunk_rows, total - start);
+                // The PARTITION BY / ORDER BY keys were consumed by build_sort_keys
+                // and win_keys_equal above — the ranks are already computed — so a
+                // key nothing above this window reads dies here rather than being
+                // gathered into every output row.
                 MorselPtr m = gather_rows(src, *gather_order, start, count, row_m, row_r,
-                                          names, errs[tid]);
+                                          names, errs[tid], emit_ptr());
                 if (errs[tid].code != 0) return;
                 uint32_t cn = static_cast<uint32_t>(count);
                 for (size_t f = 0; f < nf; ++f) {

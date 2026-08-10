@@ -23,6 +23,21 @@ class JoinVertex:
     name: str
     row_count: int
     payload: Any = None
+    # PRE-filter row count, mirroring ``RelationStatistics.base_row_count``.
+    # ``row_count`` is post-filter and is what the join's OUTPUT is scaled
+    # from; a key DOMAIN, however, is a property of the relation before any
+    # filter narrowed it, so the two are not interchangeable. ``None`` means
+    # "same as row_count" — read it through ``domain_row_count`` below, never
+    # directly.
+    base_row_count: Optional[int] = None
+
+    @property
+    def domain_row_count(self) -> int:
+        """Base (pre-filter) row count, falling back to the live row count.
+
+        Same contract as ``RelationStatistics.domain_row_count``.
+        """
+        return self.row_count if self.base_row_count is None else self.base_row_count
 
 
 @dataclass(frozen=True)

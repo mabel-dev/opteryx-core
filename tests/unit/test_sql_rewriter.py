@@ -61,8 +61,47 @@ def test_escaped_tab_in_function_argument_survives():
     assert "'\\t'" in out
 
 
-def test_real_whitespace_outside_quotes_is_still_normalized():
-    out = do_sql_rewrite("SELECT\n\t1,\n\t2")
-    assert "\n" not in out
-    assert "\t" not in out
-    assert out == "SELECT 1 , 2"
+def test_real_whitespace_outside_quotes_is_preserved():
+    """Line structure survives the rewriter.
+
+    It used to be collapsed - the whole statement arrived at the parser on one line
+    with single spaces between tokens - which made every line and column the parser
+    reported index a text the reader never wrote. The parser tokenises whitespace
+    perfectly well itself, so there was nothing to gain for the cost.
+    """
+    statement = "SELECT\n\t1,\n\t2"
+    out = do_sql_rewrite(statement)
+    assert out == statement
+
+
+def test_escaped_line_breaks_outside_quotes_become_spaces():
+    """A backslash-n is two characters, not a newline, and the parser has no use for it.
+
+    This one is still rewritten because a caller that carried the statement through JSON
+    or a shell can deliver it, and a bare backslash is a parse error.
+    """
+    out = do_sql_rewrite("SELECT 1\\nFROM t")
+    assert out == "SELECT 1 FROM t"
+
+
+def test_a_statement_with_nothing_to_rewrite_is_returned_verbatim():
+    statement = "SELECT name, gravity / 2 AS half FROM $planets WHERE id > 1"
+    assert do_sql_rewrite(statement) == statement
+
+
+def test_positions_map_back_through_a_length_changing_rewrite():
+    """The point of the whole exercise: a position in the parser's text is answerable
+    in the reader's text, even when a rewrite either side of it changed length."""
+    source = "SELECT\n  CAST(g AS TIMESTAMP[d]),\n  name\nFROM $planets"
+    out = do_sql_rewrite(source)
+    assert str(out) != source  # TIMESTAMP[d] -> _TIMESTAMP_DAYS is 3 characters longer
+
+    # `name` sits AFTER the rewrite, so a naive offset would be off by three.
+    line, column = out.to_source_position(3, 3)
+    assert (line, column) == (3, 3)
+    assert source.split("\n")[line - 1][column - 1 :].startswith("name")
+
+
+def test_a_literal_that_looks_like_syntax_is_left_alone():
+    """Rewrites skip quoted spans - a string is a value, not syntax to be normalised."""
+    assert do_sql_rewrite("SELECT 'TIMESTAMP[ns]' AS lit") == "SELECT 'TIMESTAMP[ns]' AS lit"

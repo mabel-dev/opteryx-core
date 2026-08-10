@@ -339,7 +339,9 @@ public:
                               std::vector<int> lt_precision, std::vector<int> lt_scale,
                               std::vector<int> lt_dimension,
                               std::vector<std::vector<int>> elem_chain,
-                              bool track_matches = false) {
+                              bool track_matches = false,
+                              int64_t est_output_rows = -1,
+                              bool null_equal = false) {
         auto payload_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
                                                    lt_scale, lt_dimension);
         auto payload_element = decode_elem_chains(elem_chain, payload_types.size());
@@ -347,14 +349,22 @@ public:
             std::move(key_idx), std::move(payload_idx),
             std::move(payload_types), std::move(payload_logical),
             std::move(payload_element),
-            /*asof=*/-1, /*asof_type=*/0, track_matches));
+            /*asof=*/-1, /*asof_type=*/0, track_matches, null_equal,
+            est_output_rows));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
+    // `emit_prune`/`emit_cols` apply to SEMI/ANTI modes only — the probe columns an
+    // existence filter still emits, which is normally not its own probe key. Every
+    // other mode emits `payload_idx` and ignores these. emit_prune=false means
+    // "unknown, emit everything"; an EMPTY emit_cols with emit_prune=true means
+    // "emit no columns" (a real plan — `COUNT(*) ... WHERE x IN (...)`).
     void add_join2_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
-                         std::vector<size_t> payload_idx, int mode) {
+                         std::vector<size_t> payload_idx, int mode,
+                         bool emit_prune, std::vector<uint32_t> emit_cols) {
         add_op_(p, std::make_unique<DeferredJoin2Probe>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
-            static_cast<JoinMode>(mode)));
+            static_cast<JoinMode>(mode), -1, 0, ExprProgram(), nullptr,
+            emit_prune, std::move(emit_cols)));
     }
     // FULL OUTER tail pipeline source (see UnmatchedBuildSource): emits the build
     // rows no probe matched, NULL-padded on the probe half. probe_types/lt_* are
@@ -385,10 +395,14 @@ public:
     // (build,probe) pair INSIDE the existence test — see SemiAntiProbeOperator — so
     // it needs the build payload the plain SEMI/ANTI path never retains. Column
     // indices are resolved against the pair layout: build payload, then probe payload.
+    // `payload_idx` here is the PAIR layout the residual is lowered against and stays
+    // full width; `emit_prune`/`emit_cols` are the separate question of what the
+    // existence filter emits. See SemiAntiProbeOperator.
     void add_join2_probe_residual(size_t p, size_t ref, std::vector<size_t> key_idx,
                                   std::vector<size_t> payload_idx, int mode,
                                   void* instrs, int count, std::vector<int> col_idx,
-                                  std::vector<void*> lit_dv, ExprEvalFn fn) {
+                                  std::vector<void*> lit_dv, ExprEvalFn fn,
+                                  bool emit_prune, std::vector<uint32_t> emit_cols) {
         ExprProgram prog;
         prog.instrs = instrs;
         prog.count = count;
@@ -396,7 +410,8 @@ public:
         prog.lit_dv = std::move(lit_dv);
         add_op_(p, std::make_unique<DeferredJoin2Probe>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
-            static_cast<JoinMode>(mode), -1, 0, std::move(prog), fn));
+            static_cast<JoinMode>(mode), -1, 0, std::move(prog), fn,
+            emit_prune, std::move(emit_cols)));
     }
     // ASOF: build side = Join2BuildSink capturing the asof column's order key;
     // probe side = nearest-match per MATCH_CONDITION op (0 GtEq / 1 Gt / 2 LtEq / 3 Lt).
@@ -407,7 +422,7 @@ public:
                              std::vector<int> lt_precision, std::vector<int> lt_scale,
                              std::vector<int> lt_dimension,
                              std::vector<std::vector<int>> elem_chain,
-                             int asof_type) {
+                             int asof_type, int64_t est_output_rows = -1) {
         auto payload_logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
                                                    lt_scale, lt_dimension);
         auto payload_element = decode_elem_chains(elem_chain, payload_types.size());
@@ -415,7 +430,8 @@ public:
             std::move(key_idx), std::move(payload_idx),
             std::move(payload_types), std::move(payload_logical),
             std::move(payload_element),
-            static_cast<int>(asof_idx), asof_type));
+            static_cast<int>(asof_idx), asof_type, /*track=*/false,
+            /*null_eq=*/false, est_output_rows));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
     }
     void add_asof_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
@@ -696,24 +712,36 @@ public:
     void set_pipeline_dop(size_t p, int dop) {
         pipelines[p]->dop_override = dop;
     }
-    void set_sort_sink(size_t p, std::vector<SortKeySpec> spec, size_t buf) {
-        set_sink_(p, std::make_unique<SortSink>(std::move(spec), buffers[buf].get()));
+    // `emit_prune`/`emit_cols`: the compiler's EMIT set for the sort — the input
+    // column positions still wanted above it, which is never the ORDER BY key unless
+    // something above also selects it. emit_prune=false means "unknown, keep every
+    // column"; an EMPTY emit_cols with emit_prune=true means "emit no columns", which
+    // is a real plan (COUNT(*) over an ordered subquery), not a mistake.
+    void set_sort_sink(size_t p, std::vector<SortKeySpec> spec, size_t buf,
+                       bool emit_prune, std::vector<uint32_t> emit_cols) {
+        set_sink_(p, std::make_unique<SortSink>(std::move(spec), buffers[buf].get(),
+                                                131072, emit_prune,
+                                                std::move(emit_cols)));
     }
-    void set_topn_sink(size_t p, std::vector<SortKeySpec> spec, size_t n, size_t buf) {
-        set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, buffers[buf].get()));
+    void set_topn_sink(size_t p, std::vector<SortKeySpec> spec, size_t n, size_t buf,
+                       bool emit_prune, std::vector<uint32_t> emit_cols) {
+        set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, buffers[buf].get(),
+                                                emit_prune, std::move(emit_cols)));
     }
     // Window ranking: sort_spec = [partition keys asc..., order keys...]; n_part =
     // count of leading partition keys; fn_kinds[i] pairs with fn_names[i]. top_k =
     // WindowTopKFusionStrategy's fused `rank <= K` hint, or -1 if none.
     void set_window_sink(size_t p, std::vector<SortKeySpec> sort_spec, size_t n_part,
                          std::vector<int> fn_kinds, std::vector<std::string> fn_names,
-                         int64_t top_k, size_t buf) {
+                         int64_t top_k, size_t buf,
+                         bool emit_prune, std::vector<uint32_t> emit_cols) {
         std::vector<WindowFnSpec> funcs;
         funcs.reserve(fn_kinds.size());
         for (size_t i = 0; i < fn_kinds.size(); ++i)
             funcs.push_back({static_cast<WinFn>(fn_kinds[i]), fn_names[i]});
         set_sink_(p, std::make_unique<WindowSink>(
-            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get(), top_k));
+            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get(), top_k,
+            131072, emit_prune, std::move(emit_cols)));
     }
     // Streaming ROW_NUMBER top-K per partition (WindowTopKFusionStrategy) — no full
     // sort. See native_group_sinks.hpp's WindowTopKSink for the eligibility scope
@@ -736,12 +764,15 @@ public:
         set_sink_(p,
             std::make_unique<UngroupedAggSink>(std::move(specs), buffers[buf].get()));
     }
+    // `key_emit` has one entry per key_idx entry: false = the key is hashed to
+    // separate the groups but its values are never stored or emitted.
     void set_groupby_sink(size_t p, std::vector<size_t> key_idx,
                           std::vector<std::string> key_names,
+                          std::vector<uint8_t> key_emit,
                           std::vector<AggSpec2> specs, size_t buf, int64_t ndv_estimate) {
         set_sink_(p, std::make_unique<GroupBySink>(
-            std::move(key_idx), std::move(key_names), std::move(specs), buffers[buf].get(),
-            ndv_estimate));
+            std::move(key_idx), std::move(key_names), std::move(key_emit),
+            std::move(specs), buffers[buf].get(), ndv_estimate));
     }
     void set_distinct_sink(size_t p, std::vector<size_t> on_idx, size_t buf,
                            int64_t ndv_estimate) {

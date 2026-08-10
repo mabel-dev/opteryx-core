@@ -645,8 +645,8 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             # Only VARIANT and VARCHAR (holding JSON array text) may cast to ARRAY.
             # A scalar is NOT wrapped into a 1-element array — refuse at plan time.
             raise NotImplementedError(
-                f"No CAST {source_physical} → ARRAY: only VARIANT and VARCHAR "
-                "(containing JSON array text) can be cast to ARRAY"
+                f"CAST {source_physical} → ARRAY is not supported: only VARIANT "
+                "and VARCHAR (containing JSON array text) can be cast to ARRAY"
             )
         # Native-only (draken_cast_to_array). No Python row-loop exists any more.
         return _array_cast_native_only, False, True
@@ -660,7 +660,16 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return (lambda nb: vector_cast_string_to_nvarchar(nb, safe)), True, True
         # The IPv4 discriminant must ride along, or IPV4 → NVARCHAR would stringify
         # the raw uint32 while IPV4 → VARCHAR renders the address.
-        vfn, _vni, _vrr = resolve_cast(s, "VARCHAR", (), None, source_is_ipv4=source_is_ipv4)
+        # The VARCHAR leg is an implementation detail of this arm: a source that
+        # cannot reach VARCHAR is refused as the NVARCHAR cast the caller actually
+        # wrote, not as the intermediate step they never asked for.
+        try:
+            vfn, _vni, _vrr = resolve_cast(s, "VARCHAR", (), None,
+                                           source_is_ipv4=source_is_ipv4)
+        except NotImplementedError:
+            raise NotImplementedError(
+                f"CAST {source_physical} → NVARCHAR is not supported"
+            )
         return (lambda nb: vector_cast_string_to_nvarchar(vfn(nb), safe)), True, True
 
     # ---- TIMESTAMP target (parametrized unit for integer sources) ----
@@ -685,7 +694,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
                     nb = vector_cast_integer_to_int64(nb)
                 return vector_cast_int64_to_timestamp(nb, unit=unit)
             return _int_to_timestamp_with_unit, True, True
-        raise NotImplementedError(f"No native CAST {source_physical} → TIMESTAMP")
+        raise NotImplementedError(f"CAST {source_physical} → TIMESTAMP is not supported")
 
     # ---- DATE target ----
     if t in ("DATE", "DATE32"):
@@ -701,7 +710,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         # a second, driftable implementation of it (§2).
         if s in _CAST_NARROW_INT or s == "INT64" or s in _CAST_UNSIGNED_INT:
             return _native_only_cast(source_physical, "DATE"), False, False
-        raise NotImplementedError(f"No native CAST {source_physical} → DATE")
+        raise NotImplementedError(f"CAST {source_physical} → DATE is not supported")
 
     # ---- IPV4 target ----
     # UINT32 -> IPV4 is a pure retag (identical bits, identical physical tag); the
@@ -716,7 +725,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
         # descriptor attached from the bound result type by the projection.
         if s in _CAST_NARROW_INT or s == "INT64" or s in _CAST_UNSIGNED_INT:
             return _int_to_ipv4_native_only, False, False
-        raise NotImplementedError(f"No native CAST {source_physical} -> IPV4")
+        raise NotImplementedError(f"CAST {source_physical} → IPV4 is not supported")
 
     # ---- TIME target (string parse; only TIME64/microseconds is reachable
     # from SQL — TIME() always resolves to TIME64, see logical_type.TIME()) ----
@@ -725,7 +734,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return (lambda arr: arr), False, False
         if s in _CAST_STRINGS:
             return vector_cast_string_to_time64, True, True
-        raise NotImplementedError(f"No native CAST {source_physical} → TIME")
+        raise NotImplementedError(f"CAST {source_physical} → TIME is not supported")
 
     # ---- FLOAT32 target ----
     # Native-only: the representability check that separates "lost precision"
@@ -735,7 +744,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
                 or s in ("FLOAT64", "FLOAT32") or s == "BOOL" or s in _CAST_STRINGS
                 or s in ("DECIMAL", "DECIMAL128")):
             return _native_only_cast(source_physical, "FLOAT32"), False, False
-        raise NotImplementedError(f"No native CAST {source_physical} → FLOAT32")
+        raise NotImplementedError(f"CAST {source_physical} → FLOAT32 is not supported")
 
     # ---- DOUBLE / FLOAT target (→ float64) ----
     if t in ("DOUBLE", "FLOAT", "FLOAT64"):
@@ -756,7 +765,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return _decimal_numeric_native_only, False, False
         if s in _CAST_UNSIGNED_INT:
             return _native_only_cast(source_physical, "DOUBLE"), False, False
-        raise NotImplementedError(f"No native CAST {source_physical} → DOUBLE")
+        raise NotImplementedError(f"CAST {source_physical} → DOUBLE is not supported")
 
     # ---- Narrow signed target (INT8/INT16/INT32) ----
     # Native-only: the range check is the kernel's, and a Python row-loop
@@ -767,7 +776,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
                 or s in ("FLOAT64", "FLOAT32") or s == "BOOL" or s in _CAST_STRINGS
                 or s in ("DECIMAL", "DECIMAL128")):
             return _native_only_cast(source_physical, t), False, False
-        raise NotImplementedError(f"No native CAST {source_physical} → {t}")
+        raise NotImplementedError(f"CAST {source_physical} → {t} is not supported")
 
     # ---- INTEGER target (→ int64) ----
     if t in ("INTEGER", "BIGINT", "INT64"):
@@ -796,7 +805,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return _uint_to_int64_cast, False, True
         if s in ("DECIMAL", "DECIMAL128"):
             return _decimal_numeric_native_only, False, False
-        raise NotImplementedError(f"No native CAST {source_physical} → INTEGER")
+        raise NotImplementedError(f"CAST {source_physical} → INTEGER is not supported")
 
     # ---- UINT8/16/32/64 target (E33) ----
     # The SOURCE set is enumerated, exactly as every other target arm here does,
@@ -807,7 +816,8 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
     # at the compiler's c-native admission gate with the generic "a computed
     # expression outside the c-native kernel set" — naming neither the cast nor
     # the types. Failing here instead gives the same loud, specific
-    # "No native CAST DECIMAL → UINT32" the INTEGER/DOUBLE/BOOLEAN targets give.
+    # "CAST DECIMAL → UINT32 is not supported" the INTEGER/DOUBLE/BOOLEAN
+    # targets give.
     if t in ("UINT8", "UINT16", "UINT32", "UINT64"):
         # Same width in and out — a pure retag, no conversion to run. This is how
         # IPV4 → UINT32 arrives (an IPv4 column IS a UINT32 carrying a
@@ -823,7 +833,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return _native_only_cast(source_physical, t), False, False
         if not (s in _CAST_NARROW_INT or s == "INT64" or s in ("FLOAT64", "FLOAT32")
                 or s == "BOOL" or s in _CAST_STRINGS):
-            raise NotImplementedError(f"No native CAST {source_physical} → {t}")
+            raise NotImplementedError(f"CAST {source_physical} → {t} is not supported")
 
         def _uint_cast(arr):
             caster = parser_for(LogicalCategory.INTEGER)
@@ -847,7 +857,7 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             return vector_cast_float64_to_bool, True, True
         if s in _CAST_STRINGS:
             return vector_cast_string_to_bool, True, True
-        raise NotImplementedError(f"No native CAST {source_physical} → BOOLEAN")
+        raise NotImplementedError(f"CAST {source_physical} → BOOLEAN is not supported")
 
     # ---- VARCHAR / BLOB target (→ string) ----
     if t in ("VARCHAR", "BLOB"):
@@ -887,11 +897,11 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             # FORMAT (when present) only compiles through the C-native ctx path —
             # this closure covers the no-FORMAT, default-ISO-8601-duration case.
             if t == "BLOB":
-                raise NotImplementedError("No native CAST INTERVAL → VARBINARY")
+                raise NotImplementedError("CAST INTERVAL → VARBINARY is not supported")
             return vector_cast_interval_to_string, True, True
         if s == "TIME64":
             if t == "BLOB":
-                raise NotImplementedError("No native CAST TIME64 → VARBINARY")
+                raise NotImplementedError("CAST TIME64 → VARBINARY is not supported")
             return vector_cast_time_to_string, True, True
         if s == "ARRAY":
             return _build_array_to_json, False, True
@@ -904,10 +914,10 @@ def resolve_cast(source_physical, target_type, args=(), unit=None, bint safe=Fal
             # fails loud rather than silently emit an unscaled integer if the
             # native kernel is ever absent.
             return _decimal_to_string_native_only, False, False
-        raise NotImplementedError(f"No native CAST {source_physical} → VARCHAR")
+        raise NotImplementedError(f"CAST {source_physical} → VARCHAR is not supported")
 
     raise NotImplementedError(
-        f"No native CAST kernel for {source_physical} → {target_type}"
+        f"CAST {source_physical} → {target_type} is not supported"
     )
 
 

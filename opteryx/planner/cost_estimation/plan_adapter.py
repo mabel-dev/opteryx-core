@@ -131,6 +131,25 @@ def _leaf_row_count(
     return max(1, total)
 
 
+def _leaf_domain_row_count(leaf_rel_to_scan: Dict[str, Any]) -> Optional[int]:
+    """PRE-filter row count for a leaf — the ``_leaf_row_count`` counterpart.
+
+    Reads ``RelationStatistics.domain_row_count`` (the base count refresh
+    recorded before any selectivity was folded in) rather than ``row_count``.
+    Returns None on the same terms as ``_leaf_row_count`` so the caller's
+    existing "no statistics → no graph" refusal is unchanged.
+    """
+    if not leaf_rel_to_scan:
+        return None
+    total = 0
+    for _rel, scan in leaf_rel_to_scan.items():
+        stats = getattr(scan, "statistics", None)
+        if stats is None:
+            return None
+        total += stats.domain_row_count
+    return max(1, total)
+
+
 def _classify_predicate(
     pred: Node, rel_to_leaf: Dict[str, int]
 ) -> Tuple[Optional[int], Optional[int], bool]:
@@ -204,12 +223,27 @@ def _build_equiv_tdoms(
     """Compute tdom for each join column using equivalence sets (Ebergen 2022 §3.2).
 
     tdom for a set = max(known NDVs in set) if any NDV is available,
-                     min(row_count of leaves in set) otherwise.
+                     min(domain_row_count of leaves in set) otherwise.
 
-    The fallback (min row_count) assumes the smallest table is the PK/dimension
-    side, so its cardinality upper-bounds the number of distinct join-key values.
-    This is strictly better than a magic constant because it uses actual table
-    sizes from the manifest.
+    The fallback assumes the smallest table is the PK/dimension side, so its
+    cardinality upper-bounds the number of distinct join-key values. This is
+    strictly better than a magic constant because it uses actual table sizes
+    from the manifest.
+
+    ⚠️ That fallback reads the PRE-filter (``domain_row_count``) size, never the
+    post-filter ``row_count``. A key domain is a property of the relation as
+    stored; a filter removes ROWS, not the values the key column could hold.
+    Dividing by the post-filter count instead charges the filter's selectivity
+    a second time inside the divisor, and the error is not small: TPC-H Q09's
+    ``p_name LIKE '%plum%'`` takes part 2,000,000 → 200,000, and the partkey
+    class then priced ``part ⋈ lineitem`` at the full 59,986,052 instead of
+    ~6M — the one join that had to happen first looked no cheaper than any
+    other, so DPccp applied the query's only selective filter LAST and drove
+    60M rows through four joins (1688ms; 567ms once this and the occupancy
+    bound in ``dpccp._combine`` are both in). This mirrors the identical
+    fallback in ``statistics_refresh._equi_key_classes``; the two paths must
+    agree, or the tree-picker and the build-side chooser cost the same join
+    differently.
 
     Returns a dict mapping (leaf_idx, col_name) → tdom for every column seen in
     a join predicate. Columns not present in the returned dict had no join
@@ -229,7 +263,11 @@ def _build_equiv_tdoms(
                 if col_stat is not None and col_stat.distinct_count is not None:
                     known_ndvs.append(col_stat.distinct_count)
 
-        tdom = max(known_ndvs) if known_ndvs else min(vertices[li].row_count for li in leaf_set)
+        tdom = (
+            max(known_ndvs)
+            if known_ndvs
+            else min(vertices[li].domain_row_count for li in leaf_set)
+        )
         tdom = max(1, tdom)
         for member in members:
             result[member] = tdom
@@ -289,12 +327,21 @@ def build_join_graph(
         if rows is None:
             return None
         name = leaf.rel_names[0] if leaf.rel_names else f"leaf_{i}"
-        vertices.append(JoinVertex(id=i, name=name, row_count=rows, payload=leaf))
+        vertices.append(
+            JoinVertex(
+                id=i,
+                name=name,
+                row_count=rows,
+                payload=leaf,
+                base_row_count=_leaf_domain_row_count(per_leaf_scans[i]),
+            )
+        )
 
     # Compute equivalence-set tdoms from all cross-equi predicates. When NDV is
     # absent from scan statistics (common with Parquet files) the tdom falls
-    # back to min(row_count of leaves in the set), which is far better than the
-    # flat 0.1 constant used by _key_selectivity. See Ebergen (2022) §3.2.
+    # back to min(domain_row_count of leaves in the set), which is far better
+    # than the flat 0.1 constant used by _key_selectivity. See Ebergen (2022)
+    # §3.2, and _build_equiv_tdoms on why that is the PRE-filter count.
     equivalence_classes = _group_equivalence_classes(cross_equi)
     equiv_tdoms = _build_equiv_tdoms(equivalence_classes, per_leaf_scans, vertices)
     # Reverse lookup so edges can be tagged with the class they belong to —

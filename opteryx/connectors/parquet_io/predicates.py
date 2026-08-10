@@ -17,6 +17,13 @@ Design contract
   for any value in [col_min, col_max] to satisfy the predicate.  In the
   presence of null values this is still safe because null comparisons are
   false in SQL, so a row that would have matched is never a null row.
+- **[col_min, col_max] does not contain NaN.**  Parquet excludes NaN from
+  min/max by spec (rugo's own writer skips it —
+  ``rugo/src/parquet/_parquet_writer.hpp``) while draken ranks NaN ABOVE every
+  value (architect-locked 2026-05-22, ``draken/ops/float_ops.h``).  A NaN is
+  therefore a real, matchable value of a FLOAT column that the bounds cannot
+  see, and the operators whose prune test rests on the upper bound are declined
+  for float columns — see :func:`_nan_invisible_to_bounds`.
 - Type errors or unsupported operators silently suppress pruning for that
   predicate — correctness over performance.
 - Column-op-literal comparisons, ``BETWEEN`` and ``IN (literal, ...)`` (all
@@ -42,6 +49,26 @@ _PRUNABLE_OPS = frozenset({"Eq", "NotEq", "Gt", "GtEq", "Lt", "LtEq"})
 # order-comparable when they share both the physical type and (where applicable)
 # the unit.
 _TEMPORAL_PHYSICALS = None  # lazily populated from DrakenType on first use
+
+# Physical types that can hold a NaN. NaN is a VALUE (validity bit set), ranked
+# above every finite and ±inf by draken's total order, but Parquet deliberately
+# leaves it out of min/max — so for these columns [col_min, col_max] is not the
+# column's value range and the ops below cannot be decided from it.
+_FLOAT_PHYSICALS = None  # lazily populated from DrakenType on first use
+
+# Ops whose prune test asserts something about values ABOVE col_max, or asserts
+# that the group is a single value. A NaN row satisfies every one of them while
+# sitting outside the bounds:
+#   Gt/GtEq    NaN > v and NaN >= v are TRUE for every non-NaN v, so
+#              `col_max <= v` does not prove "nothing matches".
+#   NotEq      `col_min == col_max == v` proves every NON-NaN value is v; a NaN
+#              in the same group still satisfies `NaN != v`.
+#   NotInList  same shape as NotEq.
+# The remaining ops are sound on a float column: a NaN row never satisfies
+# `< v`, `<= v`, `= v` or `IN (...)` for non-NaN v, so pruning them by the
+# bounds over the non-NaN values is exactly right. A NaN *literal* is refused
+# separately (`_nan_literal`) — the bounds say nothing about it in any direction.
+_NAN_UNSOUND_OPS = frozenset({"Gt", "GtEq", "NotEq", "NotInList"})
 
 
 def _temporal_domain_mismatch(col_node, literal_node) -> bool:
@@ -90,6 +117,53 @@ def _temporal_domain_mismatch(col_node, literal_node) -> bool:
     col_unit = col_logical.unit if col_logical is not None else None
     lit_unit = lit_logical.unit if lit_logical is not None else None
     return col_unit != lit_unit
+
+def _nan_invisible_to_bounds(col_node, op: str) -> bool:
+    """True when *op* cannot be decided from *col*'s min/max because the column
+    may hold a NaN that those bounds do not cover.
+
+    Only FLOAT32/FLOAT64 can hold a NaN, so only they are affected — every other
+    column's min/max really does bound its values. When the column's type cannot
+    be read we answer True: "correctness over performance" means an unprovable
+    column is treated as possibly-float rather than assumed safe.
+
+    This is why `WHERE f > c` no longer prunes row groups on a float column. It
+    is not a heuristic that can be tuned away — a Parquet footer written to spec
+    does not record whether the chunk held a NaN, so there is nothing to consult.
+    Recording a NaN count at write time is what would give the pruning back.
+    """
+    if op not in _NAN_UNSOUND_OPS:
+        return False
+
+    global _FLOAT_PHYSICALS
+    if _FLOAT_PHYSICALS is None:
+        from opteryx.types.logical_type import DrakenType
+
+        _FLOAT_PHYSICALS = frozenset({DrakenType.FLOAT32, DrakenType.FLOAT64})
+
+    col_sc = getattr(col_node, "schema_column", None)
+    col_ct = getattr(col_sc, "column_type", None)
+    if col_ct is None:
+        return True  # type unreadable — cannot prove the column is NaN-free
+    return col_ct.physical in _FLOAT_PHYSICALS
+
+
+def _nan_literal(value: Any) -> bool:
+    """True when *value* is a NaN, or is a list/tuple/set containing one.
+
+    A NaN literal is outside [col_min, col_max] in the same way a NaN value is,
+    so no bound test can decide a predicate against it — in EITHER direction.
+    `col = NaN` matches only the NaN rows the bounds cannot see, and `col <= NaN`
+    matches EVERY row because NaN is the top of the order. Refusing the whole
+    triple keeps that reasoning in one place rather than resting on Python's IEEE
+    comparisons happening to return False and so happening to fail open.
+    """
+    if isinstance(value, float):
+        return value != value  # only NaN is not equal to itself
+    if isinstance(value, (list, tuple, set)):
+        return any(isinstance(v, float) and v != v for v in value)
+    return False
+
 
 _INVERT_OP = {
     "Gt": "Lt",
@@ -208,8 +282,15 @@ def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:
     if _temporal_domain_mismatch(left, right):
         return None
 
+    # NotInList on a float column, or any IN list carrying a NaN, cannot be
+    # decided by the bounds — see `_nan_invisible_to_bounds`.
+    if _nan_invisible_to_bounds(left, op):
+        return None
+
     values = right.value
     if not isinstance(values, (list, tuple, set)):
+        return None
+    if _nan_literal(values):
         return None
 
     normalized = []
@@ -263,7 +344,20 @@ def _try_extract_between(node) -> List[Tuple[str, str, Any]]:
     if isinstance(upper_val, datetime.date) and not isinstance(upper_val, datetime.datetime):
         upper_val = datetime.datetime.combine(upper_val, datetime.time.min)
 
-    return [(col_name, lower_op, lower_val), (col_name, upper_op, upper_val)]
+    if _nan_literal(lower_val) or _nan_literal(upper_val):
+        return []
+
+    # The arms are independent conjuncts, so they are declined independently. On
+    # a float column the lower arm (Gt/GtEq) is the unsound one — a NaN row is
+    # >= every bound — while the upper arm still prunes correctly, because a NaN
+    # is never <= a non-NaN bound. BETWEEN therefore keeps half its pruning on
+    # floats rather than losing all of it.
+    stats = []
+    if not _nan_invisible_to_bounds(node.left, lower_op):
+        stats.append((col_name, lower_op, lower_val))
+    if not _nan_invisible_to_bounds(node.left, upper_op):
+        stats.append((col_name, upper_op, upper_val))
+    return stats
 
 
 def _try_extract(node) -> Optional[Tuple[str, str, Any]]:
@@ -314,6 +408,11 @@ def _try_extract(node) -> Optional[Tuple[str, str, Any]]:
     if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
         value = datetime.datetime.combine(value, datetime.time.min)
 
+    # A NaN the bounds cannot see would satisfy this op, or the literal is itself
+    # a NaN — either way min/max cannot disprove the predicate.
+    if _nan_invisible_to_bounds(left, op) or _nan_literal(value):
+        return None
+
     return (col_name, op, value)
 
 
@@ -336,6 +435,14 @@ def _can_prune_rowgroup(op: str, value: Any, col_min: Any, col_max: Any) -> bool
     +--------+-----------------------------------------+
 
     For ``InList``/``NotInList`` ``value`` is the list of candidate literals.
+
+    Every row of this table assumes the row group's values all lie in
+    ``[col_min, col_max]``. That assumption is FALSE for a float column holding a
+    NaN, and it is not restored here — the unsound ``(column, op)`` pairs never
+    reach this function because :func:`_nan_invisible_to_bounds` refuses to emit
+    a triple for them at extraction. The rule is stated once, there, so that this
+    evaluator and its Cython twin (``_rg_passes_predicates_native`` in
+    ``pool_reader.pyx``) cannot disagree about it.
     """
     if col_min is None or col_max is None:
         return False

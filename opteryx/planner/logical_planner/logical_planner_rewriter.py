@@ -14,6 +14,38 @@ from opteryx.expression import NodeType
 from opteryx.models import Node
 
 
+def _dedup_key(aggregate):
+    """The identity of an aggregate over a plain column, for de-duplication.
+
+    Two aggregates collapse into one computation only when they compute the same
+    thing, so every modifier that changes the VALUE has to be in the key. The
+    function name and the operand alone are not enough: `COUNT_DISTINCT` is
+    rewritten to `COUNT` + `duplicate_treatment="Distinct"` before this runs (see
+    logical_planner_builders), so `SELECT COUNT(x), COUNT_DISTINCT(x)` produced
+    the same key twice and the DISTINCT one was dropped without a word — the
+    projection then asked for a column nothing computed and the query died at
+    compile time with "projecting a column the engine could not resolve".
+
+    FILTER, ORDER BY and LIMIT ride in the key for the same reason. They cannot
+    reach here today with distinct results — `format_expression` renders
+    `COUNT(x) FILTER (WHERE ...)` identically to `COUNT(x)`, so such a pair is
+    rejected upstream as an ambiguous output name — but keying on them costs
+    nothing and means a dedup here can never be the thing that silently loses an
+    aggregate.
+    """
+    from opteryx.expression import format_expression
+
+    return (
+        aggregate.value.upper(),
+        aggregate.parameters[0].qualified_name,
+        aggregate.duplicate_treatment,
+        aggregate.null_treatment,
+        None if aggregate.condition is None else format_expression(aggregate.condition),
+        tuple((item[0].value, item[1]) for item in (aggregate.order or [])),
+        aggregate.limit,
+    )
+
+
 def decompose_aggregates(aggregates, projection):
     """
     decompose aggregates into parts:
@@ -26,7 +58,7 @@ def decompose_aggregates(aggregates, projection):
     for aggregate in aggregates:
         if aggregate.parameters[0].node_type != NodeType.BINARY_OPERATOR:
             if aggregate.parameters[0].node_type == NodeType.IDENTIFIER:
-                key = f"{aggregate.value.upper()}_{aggregate.parameters[0].qualified_name}"
+                key = _dedup_key(aggregate)
                 if key in aggregate_set:
                     continue
                 result_aggregates.append(aggregate)

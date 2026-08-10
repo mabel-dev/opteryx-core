@@ -12,6 +12,8 @@ from typing import Tuple
 from typing import Union
 
 from opteryx.exceptions import DatasetReadError
+from opteryx.exceptions import md_cause
+from opteryx.exceptions import md_code
 from opteryx.exceptions import MissingDependencyError
 
 _GCP_AUTH_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
@@ -65,7 +67,7 @@ class GcsFile:
                 headers={"Authorization": f"Bearer {access_token}", "Accept-Encoding": "identity"},
             )
         except RuntimeError as err:
-            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
+            raise DatasetReadError(f"Unable to read {md_code(path)}. {md_cause(err)}") from err
 
     @property
     def memoryview(self):
@@ -308,7 +310,7 @@ class OpteryxGcsFileSystem:
         try:
             return self.http_client.get_many(requests)
         except RuntimeError as err:
-            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
+            raise DatasetReadError(f"Unable to read {md_code(path)}. {md_cause(err)}") from err
 
     def stream_to(self, path: str, sink, chunk_size: int = 1 << 20) -> int:
         """Stream a GCS object directly into *sink* without an intermediate buffer.
@@ -344,7 +346,7 @@ class OpteryxGcsFileSystem:
                 headers={"Authorization": self._bearer, "Accept-Encoding": "identity"},
             )
         except RuntimeError as err:
-            raise DatasetReadError(f"Unable to read '{path}' - {err}") from err
+            raise DatasetReadError(f"Unable to read {md_code(path)}. {md_cause(err)}") from err
 
         mv = memoryview(data)
         total = 0

@@ -300,13 +300,39 @@ def test_alter_workspace_unknown_property_rejected(tmp_path):
 
 
 def test_alter_workspace_non_boolean_value_rejected(tmp_path):
-    """delete_protection is boolean; a non-boolean value is rejected rather than
+    """deletion_protection is boolean; a non-boolean value is rejected rather than
     coerced into something arbitrary."""
     _setup_workspace(tmp_path)
     session = opteryx.session()
 
     with pytest.raises(UnsupportedSyntaxError, match="is a boolean"):
-        list(session.execute_to_morsels("ALTER WORKSPACE ws SET delete_protection TO 7"))
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET deletion_protection TO 7"))
+
+
+@pytest.mark.parametrize("value", ["ON", "OFF", "TRUE", "FALSE"])
+def test_alter_workspace_egress_protection_is_settable(tmp_path, value):
+    """egress_protection is in WORKSPACE_PROPERTIES, so it plans exactly like
+    deletion_protection. It defaults to ON in the catalog, which makes the OFF
+    form the only way a workspace's owners can opt out of the restriction - it
+    has to reach the planner at all.
+
+    LocalStoreConnector has no catalog to store properties in, so reaching its
+    NotImplementedError is what shows the statement planned and bound.
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
+
+    with pytest.raises(NotImplementedError):
+        list(session.execute_to_morsels(f"ALTER WORKSPACE ws SET egress_protection TO {value}"))
+
+
+def test_alter_workspace_egress_protection_non_boolean_rejected(tmp_path):
+    """Same boolean discipline as deletion_protection."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="is a boolean"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET egress_protection TO 7"))
 
 
 def test_alter_workspace_rejects_qualified_name(tmp_path):
@@ -315,7 +341,7 @@ def test_alter_workspace_rejects_qualified_name(tmp_path):
     session = opteryx.session()
 
     with pytest.raises(UnsupportedSyntaxError, match="not a relation within one"):
-        list(session.execute_to_morsels("ALTER WORKSPACE ws.collection SET delete_protection TO OFF"))
+        list(session.execute_to_morsels("ALTER WORKSPACE ws.collection SET deletion_protection TO OFF"))
 
 
 def test_alter_workspace_not_implemented_on_local_store(tmp_path):
@@ -325,7 +351,7 @@ def test_alter_workspace_not_implemented_on_local_store(tmp_path):
     session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
 
     with pytest.raises(NotImplementedError):
-        list(session.execute_to_morsels("ALTER WORKSPACE ws SET delete_protection TO OFF"))
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET deletion_protection TO OFF"))
 
 
 def test_create_view_basic(tmp_path):

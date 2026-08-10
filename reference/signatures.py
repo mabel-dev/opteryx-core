@@ -22,6 +22,14 @@ _TYPE_LABELS = {
     "numeric_vector": "vector",
     "string": "varchar",
     "temporal": "temporal",
+    # The three string types as separate families (CONCAT/CONCAT_WS). `varchar`
+    # deliberately shares the label the permissive `string` family already
+    # exports — a consumer reading "varchar" gets the same answer either way.
+    # `nvarchar` and `varbinary` are new labels, and they are the only way the
+    # catalog can say that an overload takes ONE string type.
+    "varchar": "varchar",
+    "nvarchar": "nvarchar",
+    "varbinary": "varbinary",
 }
 
 _DOCUMENTATION_CATEGORIES = OrderedDict(
@@ -425,7 +433,7 @@ _FUNCTION_NOTES = {
     "RANDOM": "This function is volatile. The integer argument controls how many values are generated, not a seed.",
     "RANDOM_STRING": "This function is volatile. It returns `n` random bytes as `VARBINARY` for each row; the integer argument is the byte length, not a seed.",
     "SUBSTRING": "Canonical SQL-92 form is `SUBSTRING(str FROM start FOR length)`. Opteryx also accepts `SUBSTRING(str[, start[, length]])`.",
-    "TRIM": "Canonical SQL-92 form is `TRIM([BOTH|LEADING|TRAILING] [chars] FROM str)`. Opteryx also accepts `TRIM(str[, chars])` as well as `LTRIM` and `RTRIM`.",
+    "TRIM": "Canonical SQL-92 form is `TRIM([BOTH|LEADING|TRAILING] chars FROM str)`. Opteryx also accepts `TRIM(str[, chars])` as well as `LTRIM` and `RTRIM`. `chars` is a SET of characters, matched in any order and repeated: `TRIM(BOTH 'ab' FROM 'baXab')` is `X`. It must be constant, and over an `NVARCHAR` operand it is matched by codepoint, so a multibyte character is never split. Omit it (`TRIM(str)`) to strip ASCII whitespace; the direction-only spelling `TRIM(BOTH FROM str)` is not accepted.",
     "TRY_ARRAY": "The `type_name` argument must be a constant expression naming the target element type.",
 }
 
@@ -640,7 +648,11 @@ def _signature_label(name: str, overload: FunctionOverload) -> str:
             return "SUBSTRING(str FROM start FOR length)"
 
     if name == "TRIM":
-        return "TRIM([BOTH|LEADING|TRAILING] [chars] FROM str)"
+        # `chars` is NOT bracketed: the direction-only spelling `TRIM(BOTH FROM str)`
+        # does not parse, so an optional-looking `[chars]` here would advertise a
+        # form the dialect refuses. Omitting the characters means the plain
+        # `TRIM(str)` call, which the `notes` entry spells out.
+        return "TRIM([BOTH|LEADING|TRAILING] chars FROM str)"
 
     if not overload.parameters:
         return f"{name}()"
@@ -847,6 +859,7 @@ def _export_overload(
             "documentation": return_documentation,
         },
         "arity": _arity_export(overload),
+        "homogeneous": overload.homogeneous,
         "execution": {
             "kernel_id": overload.kernel.id,
             "engine": overload.kernel.engine,
@@ -861,6 +874,15 @@ def _export_overload(
                 "variadic": parameter.variadic,
                 "constant_only": parameter.constant_only,
                 "null_handling": parameter.null_handling,
+                # Declarative value constraints — see ParameterSpec's docstring.
+                # Always emitted, so a consumer reads "no constraint" from the
+                # empty value rather than from a missing key.
+                "domain": list(parameter.domain),
+                "minimum": parameter.minimum,
+                "maximum": parameter.maximum,
+                "value_format": parameter.value_format,
+                "element_of": parameter.element_of,
+                "excludes": list(parameter.excludes),
             }
             for parameter in overload.parameters
         ],
@@ -868,7 +890,15 @@ def _export_overload(
 
     notes = _FUNCTION_NOTES.get(function.name)
     if function.name == "TRUNC":
-        if overload.id in ("TRUNC_date", "TRUNC_timestamp"):
+        if overload.id == "TRUNC_date":
+            notes = (
+                "Truncates to the start of the specified unit. The `unit` argument must be a "
+                "constant expression. This overload is reachable only for a DATE LITERAL, which "
+                "is constant-folded at plan time: over a DATE COLUMN there is no native kernel "
+                "and the call is refused with \"outside the c-native kernel set\". Cast the "
+                "column to TIMESTAMP to truncate it."
+            )
+        elif overload.id == "TRUNC_timestamp":
             notes = "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
         else:
             notes = "Truncation is performed toward zero rather than toward negative infinity."

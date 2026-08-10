@@ -31,6 +31,7 @@
 #include "core/vector_alloc.h"
 #include "ops/vec_result.h"
 #include "ops/dict_take.h"
+#include "ops/slice_shape.h"  // slice_keep_dict — the shared keep-or-flatten rule
 
 namespace draken { namespace ops {
 
@@ -145,6 +146,22 @@ static inline VecResult i64_slice(const DrakenVector& v, uint32_t start, uint32_
     const int64_t* data     = static_cast<const int64_t*>(v.data);
     const uint8_t* src_null = v.validity;
 
+    uint8_t* out_null = nullptr;
+    if (src_null != nullptr && n > 0u) {
+        const uint32_t nb = (n + 7u) >> 3;
+        out_null = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!out_null) throw std::bad_alloc();
+        copy_validity_range(out_null, src_null, start, n);
+        out_null = normalize_validity(out_null, n);
+    }
+
+    // Keep the source's dictionary when that copies strictly fewer bytes than
+    // flattening it. One rule for every fixed-width family (ops/slice_shape.h);
+    // the width arithmetic there makes this unreachable for types <= 4 bytes.
+    VecResult kept;
+    if (slice_keep_dict<int64_t>(v, start, n, out_null, DRAKEN_INT64, kept)) return kept;
+
+
     int64_t* dst = static_cast<int64_t*>(draken_malloc((n > 0u ? n : 1u) * sizeof(int64_t)));
     if (!dst) throw std::bad_alloc();
 
@@ -159,14 +176,6 @@ static inline VecResult i64_slice(const DrakenVector& v, uint32_t start, uint32_
             dst[i] = data[v.selection[start + i]];
     }
 
-    uint8_t* out_null = nullptr;
-    if (src_null != nullptr && n > 0u) {
-        const uint32_t nb = (n + 7u) >> 3;
-        out_null = static_cast<uint8_t*>(draken_malloc(nb));
-        if (!out_null) { draken_free(dst); throw std::bad_alloc(); }
-        copy_validity_range(out_null, src_null, start, n);
-        out_null = normalize_validity(out_null, n);
-    }
 
     VecResult r;
     r.data           = dst;

@@ -78,7 +78,7 @@ cdef class WindowNode(BasePlanNode):
         self._functions = []
         for kind, output_identity in functions:
             if kind not in _KIND_CODES:
-                raise UnsupportedSyntaxError(f"Unsupported window function '{kind}'.")
+                raise UnsupportedSyntaxError(f"Unsupported window function '{kind}'. **ROW_NUMBER**, **RANK** and **DENSE_RANK** are the supported window functions.")
             self._functions.append((_KIND_CODES[kind], output_identity))
 
         self._blocking = len(self._order_columns) > 0
@@ -95,11 +95,11 @@ cdef class WindowNode(BasePlanNode):
             # Streaming path only handles a single ROW_NUMBER over a partition.
             if not self._partition_columns:
                 raise UnsupportedSyntaxError(
-                    "ROW_NUMBER without ORDER BY requires a PARTITION BY."
+                    "ROW_NUMBER without **ORDER BY** requires a **PARTITION BY**. Add one, or give the window an **ORDER BY**."
                 )
             if len(self._functions) != 1 or self._functions[0][0] != _RANK_ROW_NUMBER:
                 raise UnsupportedSyntaxError(
-                    "Only ROW_NUMBER() OVER (PARTITION BY ...) is supported without ORDER BY."
+                    "Only ROW_NUMBER() **OVER** (**PARTITION BY** ...) is supported without **ORDER BY**."
                 )
 
     @property

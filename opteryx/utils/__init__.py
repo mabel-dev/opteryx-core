@@ -89,6 +89,20 @@ def suggest_alternative(value: str, candidates: Iterable[str]) -> Optional[str]:
         Optional[str]: The best match found, or None if no match is found.
     """
     name = "".join(char for char in value if char.isalnum())
+
+    # A value with no alphanumeric content at all - ',' '*' '->' - normalizes to the
+    # empty string, and the empty string sits two edits from any two-character
+    # candidate, which is inside mbleven's cap. That made every short column name
+    # ('id', 'gm') the confident suggestion for any punctuation token: `SELECT
+    # SPLIT(name, ",", 0)` answered "Unknown column ',' - did you mean 'id'?".
+    # There is no name here to have mistyped, so decline rather than guess - unless a
+    # candidate is character-for-character the same value, which is not a guess.
+    if not name:
+        for candidate in candidates:
+            if value and candidate.lower() == value.lower():
+                return candidate
+        return None
+
     best_match_column = None
     best_match_score = 100  # Large number indicates no match found yet.
 
@@ -96,10 +110,21 @@ def suggest_alternative(value: str, candidates: Iterable[str]) -> Optional[str]:
     def find_best_match(name: str):
         nonlocal best_match_column, best_match_score
         for raw, candidate in ((ca, "".join(ch for ch in ca if ch.isalnum())) for ca in candidates):
+            # Mirror of the guard above: a candidate with no alphanumeric content is
+            # near every short name once normalized, so it can only ever be an
+            # exact-identity match, never a fuzzy one.
+            if not candidate:
+                continue
             my_dist = compare(candidate.lower(), name.lower())
             if my_dist == 0:  # if we find an exact match, return that immediately
                 return raw
-            if 0 <= my_dist < best_match_score:
+            # A suggestion may not require changing more characters than the value
+            # actually has: 'x' is two edits from 'id', which would make any
+            # two-character column the answer for any one-character name. This
+            # NARROWS the match - mbleven's cap (distance < 3) is untouched, in
+            # keeping with the ruling that this is a typo detector and not an
+            # intent guesser.
+            if 0 <= my_dist <= len(name) and my_dist < best_match_score:
                 best_match_score = my_dist
                 best_match_column = raw
 

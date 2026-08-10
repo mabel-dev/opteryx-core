@@ -247,7 +247,11 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
           "writer", "owner", or "denied" for a statement none of them permits
 
     Raises:
-        ValueError: If the SQL cannot be parsed
+        QueryParseError: If the SQL cannot be parsed. This used to be a bare
+            ValueError carrying the parser's own text; it is now the same error
+            the query planner raises for the same statement, so a caller sees one
+            parse failure rather than two spellings of it. QueryParseError is a
+            SqlError (and so a PEP-249 ProgrammingError), NOT a ValueError.
 
     Example:
         >>> info = parse_query_info("SELECT * FROM users WHERE id = 1")
@@ -262,17 +266,18 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
     """
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
-    from opteryx.utils.sql import remove_comments
 
-    # Clean the SQL using the same rewriter as the main query planner
-    decommented_sql = remove_comments(sql)
-    clean_sql = do_sql_rewrite(decommented_sql)
+    # The same rewriter the query planner uses, so a statement that parses here
+    # parses there. Comments are left in - the parser tokenizes them.
+    clean_sql = do_sql_rewrite(sql)
 
     # Parse the SQL to get the AST
     try:
         parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
     except ValueError as e:
-        raise ValueError(f"Failed to parse SQL query: {e}") from e
+        from opteryx.planner.parse_error import raise_parse_error
+
+        raise_parse_error(clean_sql, e)
 
     if not parsed_statements or len(parsed_statements) == 0:
         raise ValueError("No statements found in SQL query")

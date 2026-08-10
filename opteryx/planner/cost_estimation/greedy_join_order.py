@@ -28,7 +28,11 @@ from opteryx.planner.cost_estimation.join_graph import _bits
 
 def _leaf(graph: JoinGraph, vertex_id: int) -> JoinTreeLeaf:
     v = graph.vertices[vertex_id]
-    return JoinTreeLeaf(vertex_id=vertex_id, estimated_rows=v.row_count)
+    return JoinTreeLeaf(
+        vertex_id=vertex_id,
+        estimated_rows=v.row_count,
+        domain_rows=v.domain_row_count,
+    )
 
 
 def _best_join_into(

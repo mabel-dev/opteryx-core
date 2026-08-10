@@ -30,7 +30,7 @@ Key benefits:
 - Catalog-aware (leverages Iceberg/PyIceberg statistics)
 """
 
-from opteryx.expression import NodeType
+from opteryx.expression import NodeType, binary_operands
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -158,20 +158,18 @@ class ManifestPruningStrategy(OptimizationStrategy):
         """
         if condition.node_type == NodeType.COMPARISON_OPERATOR:
             # Simple comparison: column op literal
+            left, right = binary_operands(condition)
             has_column = (
-                condition.left.node_type == NodeType.IDENTIFIER
-                or condition.right.node_type == NodeType.IDENTIFIER
+                left.node_type == NodeType.IDENTIFIER or right.node_type == NodeType.IDENTIFIER
             )
-            has_literal = (
-                condition.left.node_type == NodeType.LITERAL
-                or condition.right.node_type == NodeType.LITERAL
-            )
+            has_literal = left.node_type == NodeType.LITERAL or right.node_type == NodeType.LITERAL
             return has_column and has_literal
 
         elif condition.node_type in (NodeType.AND, NodeType.OR):
             # Logical combination: recurse on both sides
-            left_ok = self._is_prunable_predicate(condition.left)
-            right_ok = self._is_prunable_predicate(condition.right)
+            left, right = binary_operands(condition)
+            left_ok = self._is_prunable_predicate(left)
+            right_ok = self._is_prunable_predicate(right)
             return left_ok and right_ok
 
         return False

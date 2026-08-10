@@ -1,42 +1,67 @@
 """
-Unit tests for SQL rewriter - COMMENT ON TABLE/VIEW rewriting
+COMMENT ON TABLE / VIEW reaches the planner as itself.
+
+These used to assert that the SQL rewriter turned both into COMMENT ON EXTENSION,
+because sqlparser's `parse_comment` had no TABLE or VIEW branch. It has both now
+(CommentObject::Table, CommentObject::View), so the rewrite was downgrading a correct
+parse and has been deleted. What matters is no longer the intermediate text - it is that
+the statement is not rewritten at all, and that the object type survives to the plan.
 """
 
+import pytest
+
+from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.planner.logical_planner import do_logical_planning_phase
 from opteryx.planner.sql_rewriter import do_sql_rewrite
+from opteryx.third_party import sqloxide
 
 
-def test_rewrite_comment_on_table_to_extension():
-    """Test that COMMENT ON TABLE is rewritten to COMMENT ON EXTENSION"""
-    result = do_sql_rewrite("COMMENT ON TABLE workspace.collection.table IS 'test comment'")
-    assert "COMMENT ON EXTENSION" in result
-    assert "COMMENT ON TABLE" not in result
+def _plan(sql: str):
+    rewritten = do_sql_rewrite(sql)
+    # The rewriter has no business touching a COMMENT statement at all.
+    assert str(rewritten) == sql
+    parsed = sqloxide.parse_sql(str(rewritten), _dialect="opteryx")
+    return do_logical_planning_phase(parsed[0])[0]
 
 
-def test_rewrite_comment_on_view_to_extension():
-    """Test that COMMENT ON VIEW is rewritten to COMMENT ON EXTENSION"""
-    result = do_sql_rewrite("COMMENT ON VIEW workspace.collection.view IS 'test comment'")
-    assert "COMMENT ON EXTENSION" in result
-    assert "COMMENT ON VIEW" not in result
+def _comment_node(plan):
+    return [plan[nid] for nid in plan.nodes()][0]
 
 
-def test_rewrite_comment_on_extension_unchanged():
-    """Test that COMMENT ON EXTENSION is left unchanged"""
-    result = do_sql_rewrite("COMMENT ON EXTENSION workspace.collection.view IS 'test comment'")
-    assert "COMMENT ON EXTENSION" in result
+def test_comment_on_table_plans_as_table():
+    node = _comment_node(_plan("COMMENT ON TABLE workspace.collection.table IS 'test comment'"))
+    assert node.object_type == "Table"
+    assert node.object_name == "workspace.collection.table"
+    assert node.comment == "test comment"
 
 
-def test_rewrite_comment_with_if_exists():
-    """Test that IF EXISTS is preserved in the rewrite"""
-    result = do_sql_rewrite("COMMENT IF EXISTS ON TABLE test.table IS 'comment'")
-    assert "COMMENT" in result
-    assert "IF EXISTS" in result
-    assert "EXTENSION" in result
+def test_comment_on_view_plans_as_view():
+    node = _comment_node(_plan("COMMENT ON VIEW workspace.collection.view IS 'test comment'"))
+    assert node.object_type == "View"
+    assert node.object_name == "workspace.collection.view"
 
 
-def test_rewrite_comment_case_insensitive():
-    """Test that rewriter works with different case"""
-    result = do_sql_rewrite("comment on table test.table is 'comment'")
-    assert "EXTENSION" in result.upper()
+def test_comment_if_exists_is_carried():
+    node = _comment_node(_plan("COMMENT IF EXISTS ON TABLE test.table IS 'comment'"))
+    assert node.object_type == "Table"
+    assert node.if_exists is True
+
+
+def test_comment_is_case_insensitive():
+    node = _comment_node(_plan("comment on table test.table is 'comment'"))
+    assert node.object_type == "Table"
+
+
+@pytest.mark.parametrize("object_type", ["COLUMN", "EXTENSION", "SCHEMA"])
+def test_comment_on_other_object_types_is_refused(object_type):
+    """Everything sqlparser can parse but Opteryx has no comment store for.
+
+    EXTENSION is in this list on purpose: it was only ever the rewriter's internal
+    target, never syntax anyone was meant to write, and it now fails by name rather
+    than reaching the operator as a comment on a table that does not exist.
+    """
+    with pytest.raises(UnsupportedSyntaxError):
+        _plan(f"COMMENT ON {object_type} test.thing IS 'comment'")
 
 
 if __name__ == "__main__":  # pragma: no cover

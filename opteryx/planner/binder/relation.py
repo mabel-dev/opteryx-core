@@ -5,8 +5,10 @@
 
 from typing import Tuple
 
+from opteryx.exceptions import ColumnNotFoundError
 from opteryx.models import Node
 from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.utils import suggest_alternative
 
 
 def visit_create_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -154,6 +156,8 @@ def visit_alter_relation(self, node: Node, context: BindingContext) -> Tuple[Nod
             f"User does not have permission to alter table {node.relation_name}"
         )
 
+    _reject_materialized_view_target(node, "**ALTER TABLE ... CLUSTER BY**")
+
     node.columns = []
     return node, context
 
@@ -189,6 +193,8 @@ def visit_rename_relation(self, node: Node, context: BindingContext) -> Tuple[No
             f"User does not have permission to rename table to {node.new_relation_name}"
         )
 
+    _reject_materialized_view_target(node, "**ALTER TABLE ... RENAME TO**")
+
     node.columns = []
     return node, context
 
@@ -216,6 +222,44 @@ def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
         raise PermissionError(f"User does not have permission to {verb} table {node.table_name}")
 
     node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_materialized_view_owner(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind ALTER MATERIALIZED VIEW ... OWNER TO ...
+
+    Gated on WORKSPACE owner, deliberately stricter than the view itself.
+
+    At creation a view's `runs-as` is necessarily an identity that held every
+    grant its definition needed, because it was the identity that ran it. This
+    statement is the one thing that breaks that invariant: it can point a
+    view's refresh at a principal with broader grants than the caller's own,
+    and nothing here can check another principal's grants to stop it. A
+    workspace owner can already grant themselves anything in the workspace, so
+    requiring that tier escalates nothing; a mere relation owner could
+    otherwise borrow authority they do not have.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_workspace_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER MATERIALIZED VIEW"
+        )
+
+    workspace = node.relation_name.split(".", 1)[0]
+    if not can_perform_workspace_action(context.execution_context, workspace, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to change the owner of {node.relation_name} "
+            f"(owner of workspace {workspace} required)"
+        )
 
     node.columns = []
     return node, context
@@ -302,6 +346,8 @@ def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[
             f"User does not have permission to truncate table {node.relation_name}"
         )
 
+    _reject_materialized_view_target(node, "**TRUNCATE TABLE**")
+
     node.columns = []
     return node, context
 
@@ -328,6 +374,103 @@ def _types_compatible(src, tgt) -> bool:
     if src_lc == LogicalCategory.INTEGER and tgt_lc == LogicalCategory.FLOAT:
         return True
     return False
+
+
+def _reject_materialized_view_target(node, statement: str) -> None:
+    """Refuse a table modifier aimed at a materialized view.
+
+    A materialized view is not a table. Its contents are not something anyone
+    writes - they are derived, by definition, from its SELECT. A statement that
+    wrote to one directly would either be silently discarded by the next
+    refresh or, worse, survive and leave the view disagreeing with its own
+    definition, which is the state the whole construct exists to prevent.
+
+    So every table modifier is refused here and the error names the statement
+    that does mean something: change the definition, refresh it, or drop it.
+    `DROP TABLE` is refused in the same spirit, one layer down in
+    relation_management, where the drop path already had the type guard.
+
+    The two writes NOT routed through here are the ones that are legitimately
+    allowed to land on a view: creating it (`CREATE MATERIALIZED VIEW`, which
+    carries `is_materialized_view`) and refreshing it (`REFRESH MATERIALIZED
+    VIEW`, which carries `is_refresh`). Both are checked by their callers
+    before reaching this point.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not node.connector.is_materialized_view(node.relation_name):
+        return
+    raise UnsupportedSyntaxError(
+        f"{node.relation_name} is a materialized view, not a table - {statement} "
+        "cannot write to one. Its contents come from its defining **SELECT**: "
+        "change them with **CREATE OR REPLACE MATERIALIZED VIEW**, rebuild them "
+        "with **REFRESH MATERIALIZED VIEW**, or remove it with "
+        "**DROP MATERIALIZED VIEW**."
+    )
+
+
+def _scanned_relations(visitor, context) -> list:
+    """Every relation the statement's bound SELECT subtree reads, first-seen order.
+
+    Taken off the plan rather than re-parsed out of the SQL: each Scan node
+    already names the relation it reads, and by bind time views and CTEs have
+    been resolved to what is actually scanned - so this sees through an
+    indirection that text matching would miss.
+    """
+    from opteryx.planner.logical_planner import LogicalPlanStepType
+
+    relations: list = []
+    graph = getattr(visitor, "graph", None)
+    if graph is None:
+        return relations
+    for _, plan_node in graph.nodes(True):
+        if plan_node.node_type != LogicalPlanStepType.Scan:
+            continue
+        relation = plan_node.relation
+        if relation not in relations:
+            relations.append(relation)
+    return relations
+
+
+def _enforce_egress(visitor, node, context) -> None:
+    """Refuse a write that would copy a protected workspace's data elsewhere.
+
+    Applied to **every** write that reads catalog relations - CTAS, CREATE OR
+    REPLACE, CREATE MATERIALIZED VIEW, and plain INSERT ... SELECT - not only
+    to CTAS. Covering CTAS alone would not be a control: the same copy is two
+    statements away (`CREATE TABLE mine.x AS SELECT ... LIMIT 0`, then
+    `INSERT INTO mine.x SELECT ...`), and a boundary with a two-statement
+    bypass teaches people to route around it rather than respect it.
+
+    A materialized view's refresh is covered by the same call, because a
+    refresh is not a statement of its own: `trigger_firing._fire_refresh`
+    submits `CREATE OR REPLACE TABLE <view> AS <sql>`, which arrives here as an
+    ordinary CTAS. The catalog checks the same boundary again at fire time,
+    before the refresh job is written - two independent checks on the same
+    setting, which is deliberate for a protection that can be switched on long
+    after the view was created.
+
+    Called after the target's permission check in both paths, so a caller who
+    may not write the target learns that first and cannot use this to probe
+    another workspace's protection state.
+
+    Non-catalog sources are dropped: `$planets`, `information_schema`, and
+    anything behind a non-Writable connector belong to no workspace, so they
+    cannot leave one.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+
+    sources = []
+    for relation in _scanned_relations(visitor, context):
+        if relation.startswith("$") or "information_schema" in relation.split("."):
+            continue
+        gateway = connector_factory(relation, telemetry=context.telemetry)
+        if isinstance(gateway, Writable):
+            sources.append(relation)
+
+    if sources:
+        node.connector.enforce_egress_policy(node.relation_name, sources)
 
 
 def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -368,14 +511,16 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     is_materialized_view = getattr(node, "is_materialized_view", False)
 
     if is_materialized_view:
-        # The MV target: owner tier (the DROP action), whether or not the
-        # target exists yet - stricter than plain CTAS's CREATE tier for fresh
-        # targets. The refresh CoRTAS re-runs under the same check, so a
-        # non-owner may not create something only others could keep fresh.
-        if not can_perform_action(context.execution_context, node.relation_name, action="DROP"):
+        # The MV target: writer tier. Creating a view is authoring derived data
+        # in a place you may already write - it does nothing you could not do by
+        # hand with a CTAS, so it needs no more authority than that. Note this
+        # makes CREATE OR REPLACE MATERIALIZED VIEW writer-tier where CREATE OR
+        # REPLACE TABLE stays owner-tier; a view's contents are rebuildable from
+        # its definition, so the blast radius genuinely is lower.
+        if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
             raise PermissionError(
                 f"User does not have permission to create materialized view "
-                f"{node.relation_name} (owner required)"
+                f"{node.relation_name} (write required)"
             )
 
         # Source-table extraction: the bound SELECT subtree already knows every
@@ -383,13 +528,8 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         # re-parsing the SQL. Every scanned relation must be catalog-resident:
         # a virtual dataset ($planets), information_schema, or a non-catalog
         # source could never fire the MV's refresh.
-        from opteryx.planner.logical_planner import LogicalPlanStepType
-
         source_tables = []
-        for _, plan_node in self.graph.nodes(True):
-            if plan_node.node_type != LogicalPlanStepType.Scan:
-                continue
-            relation = plan_node.relation
+        for relation in _scanned_relations(self, context):
             gateway = connector_factory(relation, telemetry=context.telemetry)
             if (
                 relation.startswith("$")
@@ -401,8 +541,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                     "an MV can only read catalog tables - commits to them are what "
                     "fire its refresh."
                 )
-            if relation not in source_tables:
-                source_tables.append(relation)
+            source_tables.append(relation)
 
         if not source_tables:
             raise UnsupportedSyntaxError(
@@ -410,15 +549,33 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 "nothing could ever fire its refresh."
             )
 
-        # Creating a refresh trigger is an update to each source table.
+        # Sources need only READ: if you can read a table you may derive from
+        # it, provided you can write where the result lands. Requiring write
+        # here would mean no view could ever be built over data you are only
+        # permitted to read, which is most of what views are for.
+        #
+        # This check runs on EVERY registration, not just the first, and it runs
+        # against whoever is executing - so an editor can never repoint a view
+        # at sources they could not have read themselves. That is what keeps a
+        # pinned `runs-as` owner from turning edits into a confused deputy.
         for source in source_tables:
-            if not can_perform_action(context.execution_context, source, action="WRITE"):
+            if not can_perform_action(context.execution_context, source, action="READ"):
                 raise PermissionError(
-                    f"User does not have permission to create a refresh trigger on "
-                    f"materialized view source {source} (write required)"
+                    f"User does not have permission to read materialized view "
+                    f"source {source} (read required)"
                 )
 
         node.source_tables = source_tables
+
+    # The write is aimed at an existing materialized view. Allowed only for the
+    # two statements that own one: CREATE (OR REPLACE) MATERIALIZED VIEW, and
+    # REFRESH MATERIALIZED VIEW, which reaches the binder as a CTAS carrying
+    # `is_refresh`. Everything else - plain CTAS, CREATE OR REPLACE TABLE,
+    # INSERT - is refused, whether or not the target exists yet.
+    if not is_materialized_view and not getattr(node, "is_refresh", False):
+        _reject_materialized_view_target(
+            node, "**CREATE TABLE ... AS SELECT**" if create_target else "**INSERT**"
+        )
 
     if create_target:
         node.is_replace = False
@@ -439,7 +596,24 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             # CREATE OR REPLACE on an existing relation has the same blast
             # radius as DROP (the old relation's data/history is gone) - reuse
             # that tier rather than inventing a new one.
-            if not can_perform_action(context.execution_context, node.relation_name, action="DROP"):
+            #
+            # Materialized views are the exception, because their contents are
+            # derived and rebuildable rather than authored. Both statements that
+            # legitimately replace one land at a lower tier: CREATE OR REPLACE
+            # MATERIALIZED VIEW was already authorized at WRITE by the
+            # `is_materialized_view` branch above, and REFRESH MATERIALIZED VIEW
+            # arrives here carrying `is_refresh` and takes the REFRESH tier.
+            if getattr(node, "is_refresh", False):
+                if not can_perform_action(
+                    context.execution_context, node.relation_name, action="REFRESH"
+                ):
+                    raise PermissionError(
+                        f"User does not have permission to refresh materialized view "
+                        f"{node.relation_name}"
+                    )
+            elif not is_materialized_view and not can_perform_action(
+                context.execution_context, node.relation_name, action="DROP"
+            ):
                 raise PermissionError(
                     f"User does not have permission to replace table {node.relation_name}"
                 )
@@ -450,6 +624,11 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 raise PermissionError(
                     f"User does not have permission to create table {node.relation_name}"
                 )
+
+        # After the target's permission check, before any schema work: the
+        # source workspaces have to agree to the copy as well as the caller
+        # being allowed to write the target.
+        _enforce_egress(self, node, context)
 
         if getattr(self, "graph", None) is None or node.source_tail_id is None:
             raise InvalidInternalStateError(
@@ -483,7 +662,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             if sc.category is None or sc.category == LogicalCategory.NULL:
                 raise UnsupportedSyntaxError(
                     f"CTAS column '{target_name}' has unresolved type; "
-                    "specify the SELECT's column types explicitly"
+                    "specify the **SELECT**'s column types explicitly"
                 )
             from opteryx.types.schema import mint_column_identity
             flat = SchemaColumn(
@@ -510,7 +689,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 existing_column_names
             ):
                 raise UnsupportedSyntaxError(
-                    f"CREATE OR REPLACE {node.relation_name}: the SELECT's columns "
+                    f"**CREATE OR REPLACE** {node.relation_name}: the **SELECT**'s columns "
                     f"({new_names}) differ from the existing relation's columns "
                     f"({existing_column_names}) - schema-changing REPLACE is not yet supported"
                 )
@@ -534,6 +713,11 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             f"User does not have permission to insert into {node.relation_name}"
         )
 
+    # INSERT ... SELECT copies just as durably as CTAS does - see _enforce_egress
+    # on why covering only the CREATE path would not be a boundary. A VALUES
+    # insert scans nothing and drops straight through.
+    _enforce_egress(self, node, context)
+
     # Read the existing relation's schema through the connector-agnostic table
     # engine - the same mechanism the SELECT binder uses (see dataset.py) -
     # not _relation_dir/_read_dataset_json, which are LocalStoreConnector-only
@@ -554,7 +738,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     values_node = node.values_feeder  # set for VALUES path; None for SELECT
     if values_node is not None:
         if not values_node.values:
-            raise UnsupportedSyntaxError("INSERT VALUES requires at least one row")
+            raise UnsupportedSyntaxError("**INSERT** **VALUES** requires at least one row")
         source_column_count = len(values_node.values[0])
         # Probe types from the first row (parser-resolved literal types).
         source_types = [values_node.values[0][i].type for i in range(source_column_count)]
@@ -562,7 +746,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         for row in values_node.values:
             if len(row) != source_column_count:
                 raise UnsupportedSyntaxError(
-                    f"INSERT row has {len(row)} values, expected {source_column_count}"
+                    f"**INSERT** row has {len(row)} values, expected {source_column_count}"
                 )
     else:
         if getattr(self, "graph", None) is None or node.source_tail_id is None:
@@ -586,13 +770,15 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         target_columns_in_order = []
         for cname in explicit_columns:
             if cname not in schema_by_name:
-                raise UnsupportedSyntaxError(
-                    f"INSERT column '{cname}' does not exist in {node.relation_name}"
+                raise ColumnNotFoundError(
+                    column=cname,
+                    dataset=node.relation_name,
+                    suggestion=suggest_alternative(cname, list(schema_by_name)),
                 )
             target_columns_in_order.append(schema_by_name[cname])
         if len(target_columns_in_order) != len(target_schema.columns):
             raise UnsupportedSyntaxError(
-                f"INSERT explicit column list must list all target columns "
+                f"**INSERT** explicit column list must list all target columns "
                 f"(target has {len(target_schema.columns)}, got {len(target_columns_in_order)}). "
                 "Partial column inserts are not yet supported."
             )
@@ -600,7 +786,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # ---- 3. Validate count and per-column types ----
     if source_column_count != len(target_columns_in_order):
         raise UnsupportedSyntaxError(
-            f"INSERT row has {source_column_count} values, "
+            f"**INSERT** row has {source_column_count} values, "
             f"expected {len(target_columns_in_order)} (target table: {node.relation_name})"
         )
 
@@ -608,7 +794,7 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         src_type = source_types[src_idx]
         if not _types_compatible(src_type, target_col.category):
             raise UnsupportedSyntaxError(
-                f"INSERT type mismatch on column '{target_col.name}': "
+                f"**INSERT** type mismatch on column '{target_col.name}': "
                 f"source {src_type} is not compatible with target {target_col.category}"
             )
 

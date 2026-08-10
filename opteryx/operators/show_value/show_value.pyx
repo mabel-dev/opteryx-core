@@ -37,7 +37,7 @@ class ShowValueNode(ReaderNode):
 
         if self.kind == "PARAMETER":
             if self.value[0] == "@":
-                raise SqlError("PARAMETERS cannot start with '@'")
+                raise SqlError("PARAMETERS cannot start with '@'. Name the parameter without the sigil.")
             self.key = self.value
             self.value = properties.variables[self.value]
 

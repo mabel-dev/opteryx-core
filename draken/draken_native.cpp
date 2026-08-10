@@ -6078,42 +6078,27 @@ static CxxMorsel cxx_take(const CxxMorsel& m, const int32_t* idx, uint32_t n) {
     return out;
 }
 
-// WP-07: two-sided inner-join align (nogil). Materialise a join result by
-// gathering left columns at lidx and right columns at ridx, then concatenating
-// the two column lists (all left columns, then all right columns) — the exact
-// column order and naming the Cython `align_tables` produces. Both index arrays
-// are assumed NON-NEGATIVE (inner join has no unmatched rows; RIGHT/FULL outer,
-// which use -1 sentinels, is out of scope here). Output row count == n. Pure
-// C++/nogil (reuses vector_take_impl), so the converted inner-join push body can
-// build its result off the carrier with no PyObject / no GIL.
-static CxxMorsel cxx_align(const CxxMorsel& l, const CxxMorsel& r,
-                           const int32_t* lidx, const int32_t* ridx, uint32_t n) {
-    CxxMorsel out;
-    out.names.reserve(l.names.size() + r.names.size());
-    for (const std::string& nm : l.names) out.names.push_back(nm);
-    for (const std::string& nm : r.names) out.names.push_back(nm);
-    out.columns.reserve(l.columns.size() + r.columns.size());
-    for (const CxxColumn& col : l.columns) {
-        CxxColumn nc;
-        nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, lidx, n));
-        nc.view = nc.own->vec;
-        out.columns.push_back(std::move(nc));
-    }
-    for (const CxxColumn& col : r.columns) {
-        CxxColumn nc;
-        nc.own  = std::make_shared<VectorOwner>(vector_take_impl(*col.own, ridx, n));
-        nc.view = nc.own->vec;
-        out.columns.push_back(std::move(nc));
-    }
-    // A zero-column align (both sides projected away) still carries the row count.
-    if (out.columns.empty()) out.zero_col_rows = n;
-    return out;
-}
-
 // CROSS JOIN UNNEST (nogil). Expand ARRAY column `array_idx` into one output row
 // per element: every parent row is repeated by its array length and gains the
-// flattened element under `target_name`. NULL/empty array rows contribute zero
-// rows (INNER unnest semantics — matches the legacy UnnestJoinNode). All parent
+// flattened element under `target_name`.
+//
+// ─── THE UNNEST ROW-COUNT RULE — DRAKEN OWNS IT, THIS IS THE STATEMENT ───────
+// A parent row contributes exactly as many output rows as its array has
+// elements. A NULL array and an empty array both have zero elements, so both
+// contribute ZERO output rows — the parent row does not survive the unnest.
+// That is INNER semantics: unnest is a fan-out keyed on element count, and a
+// count of zero is not a special case to be rescued with a NULL-padded row.
+// An OUTER variant (parent survives with a NULL element) is a DIFFERENT
+// operator and does not exist here; do not smuggle one in behind a flag.
+//
+// This is draken's rule to state because draken is where the expansion happens
+// and draken must be correct without opteryx. Callers restate it only by
+// reference — see src/cpp/engine/native_unnest.hpp and the compiler's
+// _compile_unnest. If this paragraph and a caller disagree, this one is right
+// and the caller is stale.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// All parent
 // columns (INCLUDING the source ARRAY, which downstream may still reference) are
 // replicated via cxx_take; the flattened element column is built by take_child
 // over the owner's child subtree. A parent row's array span is read through the
@@ -6162,20 +6147,47 @@ static CxxMorsel cxx_unnest(const CxxMorsel& m, uint32_t array_idx,
     }
     tc.view = tc.own->vec;
 
-    // Replicate every parent column (ARRAY-aware) by the expanded parent index, then
+    // Replicate the parent columns (ARRAY-aware) by the expanded parent index, then
     // either replace the consumed source array in place or append alongside it. The
     // compiler's _compile_unnest tracks the identical column layout either way.
-    CxxMorsel out = cxx_take(m, parent_idx.data(), out_n);
+    //
+    // UNDER drop_source THE SOURCE ARRAY IS NEVER REPLICATED. It used to go through
+    // the take with everything else and be overwritten on the very next line, which
+    // made the operator QUADRATIC in the array length: a parent row holding an
+    // N-element array expands to out_n == N rows, and replicating the array column
+    // to N rows materialises N copies of the N elements — N² elements built and
+    // immediately discarded. Measured on a 635K-block CIDR_AGG result that is a
+    // 35 GB peak RSS and a SIGKILL where the un-unnested query needs 319 MB.
+    // Skipping the column is not an optimisation of the old path; it is the same
+    // answer with the discarded work never done — `tc` lands in exactly the slot
+    // the overwrite used to fill, in the same position, under the same name.
+    CxxMorsel out;
+    out.names = m.names;
+    out.columns.reserve(m.columns.size() + (drop_source ? 0u : 1u));
+    for (uint32_t ci = 0u; ci < static_cast<uint32_t>(m.columns.size()); ++ci) {
+        if (drop_source && ci == array_idx) {
+            out.columns.push_back(std::move(tc));   // consumed source: target in place
+            continue;
+        }
+        CxxColumn nc;
+        nc.own  = std::make_shared<VectorOwner>(
+            vector_take_impl(*m.columns[ci].own, parent_idx.data(), out_n));
+        nc.view = nc.own->vec;
+        out.columns.push_back(std::move(nc));
+    }
+    // A zero-column parent cannot reach here (the operator rejects an out-of-range
+    // array_idx first), so `columns` is never empty and num_rows() reads a real
+    // column — but keep parity with cxx_take's row-count carry regardless.
+    if (out.columns.empty()) out.zero_col_rows = out_n;
     // `names` is decorative mid-pipeline: the native engine addresses columns
     // POSITIONALLY and several producers leave the vector empty (the join2 probe
-    // builds its output by pushing columns only; the sink stamps final_names).
-    // cxx_take copies whatever it was handed, so it can arrive short of — or
-    // empty against — the column list. Restore the one-name-per-column invariant
-    // cxx_morsel.h declares BEFORE indexing it, or `names[array_idx]` writes off
-    // the end of an empty vector.
+    // builds its output by pushing columns only; the sink stamps final_names). It
+    // is copied from the input, so it can arrive short of — or empty against — the
+    // column list. Restore the one-name-per-column invariant cxx_morsel.h declares
+    // BEFORE indexing it, or `names[array_idx]` writes off the end of an empty
+    // vector.
     if (out.names.size() != out.columns.size()) out.names.resize(out.columns.size());
     if (drop_source) {
-        out.columns[array_idx] = std::move(tc);
         out.names[array_idx] = target_name;
     } else {
         out.columns.push_back(std::move(tc));
@@ -6449,12 +6461,6 @@ extern "C" CxxMorsel* cxx_unnest_literal_c(const CxxMorsel* m, const CxxMorsel* 
 }
 extern "C" CxxMorsel* cxx_slice_c(const CxxMorsel* m, uint32_t start, uint32_t length) {
     return new CxxMorsel(cxx_slice(*m, start, length));
-}
-// WP-07: two-sided inner-join align (see cxx_align). lidx/ridx are non-negative
-// int32 index buffers of length n. Caller owns the result (cxx_morsel_delete).
-extern "C" CxxMorsel* cxx_align_c(const CxxMorsel* l, const CxxMorsel* r,
-                                  const int32_t* lidx, const int32_t* ridx, uint32_t n) {
-    return new CxxMorsel(cxx_align(*l, *r, lidx, ridx, n));
 }
 // WP-07: nogil join-key cast (see cxx_cast_column). target 0=FLOAT64, 1=INT64.
 // Returns nullptr on cast error / out-of-range col_idx. Caller owns the result.

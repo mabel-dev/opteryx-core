@@ -29,8 +29,6 @@ if True:
     from opteryx.utils.display import format_jsonl
     from opteryx.utils.display import format_markdown
     from opteryx.utils.display import format_table
-    from opteryx.utils.sql import clean_statement
-    from opteryx.utils.sql import remove_comments
 
 # Define ANSI color codes
 ANSI_RED = "\u001b[31m"
@@ -46,6 +44,20 @@ class QueryResult(NamedTuple):
     tabular: bool
     rowcount: int
 
+
+def report_error(error, sql: str) -> str:
+    """The error, plus an underline of the SQL it is about.
+
+    A terminal has no editor to mark up, so the drawing has to happen here. Everywhere
+    else - the web query surface above all - reads `error.position` and underlines in
+    place, which is why the position is data on the exception and not text inside the
+    message. This is the one surface that has to render it itself.
+    """
+    from opteryx.utils.sql import underline
+
+    text = f"{ANSI_RED}Error{ANSI_RESET}: {error}"
+    marked = underline(sql, getattr(error, "position", None))
+    return f"{text}\n\n{marked}" if marked else text
 
 def print_dots(stop_event):
     """
@@ -175,7 +187,7 @@ def repl(args):  # pragma: no cover
         except MissingSqlStatement:
             print(f"{ANSI_RED}Error{ANSI_RESET}: Expected SQL statement or dot command missing.")
         except Exception as e:
-            print(f"{ANSI_RED}Error{ANSI_RESET}: {e}")
+            print(report_error(e, statement))
         finally:
             stop_event.set()
             dot_thread.join()
@@ -240,7 +252,7 @@ def main():
     try:
         run(args)
     except Exception as e:
-        print(f"{ANSI_RED}Error{ANSI_RESET}: {e}")
+        print(report_error(e, args.sql or ""))
         sys.exit(1)
 
 
@@ -254,7 +266,7 @@ def run(args):
         return
 
     # Process the SQL query
-    sql = clean_statement(remove_comments(args.sql))
+    sql = args.sql
 
     if args.cycles > 1:  # Benchmarking mode
         print("[", end="")

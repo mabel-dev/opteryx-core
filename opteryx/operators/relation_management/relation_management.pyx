@@ -63,6 +63,9 @@ class RelationManagementNode(BasePlanNode):
         self.trigger_name: Optional[str] = parameters.get("trigger_name")
         self.table_name: Optional[str] = parameters.get("table_name")
 
+        # ALTER MATERIALIZED VIEW ... OWNER TO
+        self.new_owner: Optional[str] = parameters.get("new_owner")
+
         # ALTER WORKSPACE ... SET
         self.workspace_name: Optional[str] = parameters.get("workspace_name")
         self.property_name: Optional[str] = parameters.get("property_name")
@@ -91,6 +94,8 @@ class RelationManagementNode(BasePlanNode):
             return f"alter workspace {self.workspace_name} set {self.property_name} = {self.property_value}"
         if self.action == "drop_trigger":
             return f"drop trigger {self.trigger_name} on {self.table_name}"
+        if self.action == "alter_materialized_view_owner":
+            return f"alter materialized view {self.relation_name} owner to {self.new_owner}"
         return f"{self.action} {self.relation_name}"
 
     @property
@@ -213,6 +218,12 @@ class RelationManagementNode(BasePlanNode):
                 self.trigger_name,
                 author=self._author,
                 missing_ok=self.if_exists,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "alter_materialized_view_owner":
+            self.connector.set_materialized_view_owner(
+                self.relation_name, self.new_owner, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 

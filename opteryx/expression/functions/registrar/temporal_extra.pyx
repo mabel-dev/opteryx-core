@@ -35,7 +35,26 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                 FunctionOverload(
                     id="EXTRACT_2",
                     parameters=(
-                        ParameterSpec(name="part", type_family="string", constant_only=True),
+                        ParameterSpec(
+                            name="part",
+                            type_family="string",
+                            constant_only=True,
+                            # The parts draken_date_part actually implements —
+                            # narrower than the "year, month, day, epoch, etc."
+                            # the documentation implies. `week`, `epoch`, `dow`
+                            # and `doy` are NOT among them; each is refused as
+                            # "outside the c-native kernel set".
+                            domain=(
+                                "year", "quarter", "month", "day",
+                                "hour", "minute", "second",
+                            ),
+                            documentation=(
+                                "The part to extract. Sub-day parts (hour, minute, second) "
+                                "require a TIMESTAMP operand — over a DATE the kernel refuses "
+                                "them ('sub-day part of a DATE'), so a DATE operand accepts "
+                                "only year, quarter, month and day."
+                            ),
+                        ),
                         ParameterSpec(name="date", type_family="temporal"),
                     ),
                     return_spec=ReturnSpec(mode="resolver", resolver=_datepart_return_type),

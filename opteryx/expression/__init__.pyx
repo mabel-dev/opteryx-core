@@ -25,6 +25,7 @@ import draken.draken_native as _draken_native_expr
 from opteryx.exceptions import (
     ColumnReferencedBeforeEvaluationError,
     IncorrectTypeError,
+    InvalidInternalStateError,
     UnsupportedSyntaxError,
 )
 from opteryx.expression.operations import filter_operations
@@ -275,6 +276,67 @@ def prioritize_evaluation(expressions):
     # we can return them in the desired order of evaluation.
     return non_dependent_expressions + dependent_expressions
 
+
+
+# Node types whose tree shape is BINARY: `.left` and `.right` are both operands and
+# NEITHER may be None. This is the invariant every unguarded `condition.left` /
+# `condition.right` read in the planner depends on -- see `binary_operands`.
+#
+# Deliberately EXCLUDED, though they also always carry both sides:
+#   BETWEEN             -- three operands (left/right/centre), not two.
+#   EXTRACTION_OPERATOR -- binary in shape but never treated as a comparison by the
+#                          callers here; admitting it would widen the contract for
+#                          no caller.
+# Everything else in NodeType is one-sided somewhere: FUNCTION (an anchored LIKE
+# lowered to _STARTS_WITH/_ENDS_WITH), NOT and UNARY_OPERATOR (operand on `.centre`),
+# DNF, CNF, NESTED, IDENTIFIER, LITERAL, CAST, CASE, AGGREGATOR, SUBQUERY, WILDCARD.
+BINARY_NODE_TYPES: frozenset = frozenset(
+    (
+        NodeType.AND,
+        NodeType.OR,
+        NodeType.XOR,
+        NodeType.COMPARISON_OPERATOR,
+        NodeType.BINARY_OPERATOR,
+    )
+)
+
+
+def binary_operands(condition):
+    """
+    Return ``(left, right)`` for a node whose type is structurally binary.
+
+    THE POINT OF THIS FUNCTION IS THE RAISE. Reading `.left`/`.right` directly is
+    what made `WHERE col LIKE '%x'` over a CROSS JOIN UNNEST die with
+    `AttributeError: 'NoneType' object has no attribute 'schema_column'` from deep
+    inside predicate pushdown: `PredicateRewriteStrategy` rewrites an ANCHORED
+    LIKE/ILIKE into a bare FUNCTION node whose left/right/centre are ALL None, and
+    that branch gated on `.centre` alone. Callers that reach a side unguarded were
+    safe only because a COMPARISON_OPERATOR happens to always carry both -- an
+    invariant nothing enforced.
+
+    Callers must establish the node type first (``node.node_type in
+    BINARY_NODE_TYPES``, or an explicit ``== NodeType.AND`` style check); this
+    function then guarantees the operands exist. A malformed tree fails HERE, named,
+    rather than as an AttributeError three frames down in whichever strategy touched
+    it first.
+    """
+    node_type = condition.node_type
+    if node_type not in BINARY_NODE_TYPES:
+        raise InvalidInternalStateError(
+            f"binary_operands() called on a {node_type} node, which is not binary. "
+            "Check the node type before asking for two operands -- a FUNCTION "
+            "(an anchored LIKE lowers to one), NOT, or UNARY_OPERATOR has no "
+            "left/right pair."
+        )
+    left = condition.left
+    right = condition.right
+    if left is None or right is None:
+        raise InvalidInternalStateError(
+            f"a {node_type} node is missing its "
+            f"{'left' if left is None else 'right'} operand; binary nodes must "
+            "carry both."
+        )
+    return left, right
 
 
 def get_all_nodes_of_type(root, select_nodes: tuple) -> list:

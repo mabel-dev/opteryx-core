@@ -1,6 +1,6 @@
 # Source: test_shapes_joins_subqueries.py
 
-statement error SqlError
+statement error QueryParseError
 SELECT * FROM testdata.satellites INNER HASH JOIN $planets USING (id)
 
 query shape 9 1
@@ -105,7 +105,10 @@ SELECT * FROM $planets CROSS JOIN UNNEST(('Earth', 'Moon')) AS n
 query shape 1 21
 SELECT * FROM $planets INNER JOIN (SELECT * FROM UNNEST(('Earth', 'Moon')) AS n) AS S ON name = n
 
-query shape 0
+# `FROM UNNEST(col)` has no relation in scope to resolve `col` against. This used
+# to record `shape 0`, which was not zero matches — the source split the literal
+# string 'missions' into its eight characters and the join threw all eight away.
+statement error InvalidFunctionParameterError
 SELECT name, mission FROM testdata.astronauts INNER JOIN (SELECT * FROM UNNEST(missions) as mission) AS S ON mission = name
 
 query shape 6 20
@@ -120,10 +123,10 @@ SELECT * FROM (SELECT ARRAY_AGG(name) as n FROM testdata.astronauts WHERE status
 query shape 1785 1
 SELECT number FROM testdata.astronauts CROSS JOIN UNNEST((1, 2, 3, 4, 5)) AS number
 
-query error sql failed IncompatibleTypesError: Incompatible types for column 'testdata\.astronauts\.birth_date' \(DATE\) and literal '1960\-01\-01' \(VARCHAR\)\. Using `CAST\(column AS type\)` may help resolve\.
+query error sql failed IncompatibleTypesError: column\ \*testdata\.astronauts\.birth_date\*\ \(`DATE`\)\ and\ literal\ `1960\-01\-01`\ \(`VARCHAR`\)\ cannot\ be\ compared,\ because\ their\ types\ do\ not\ match\.\ Cast\ one\ side\ to\ match\ the\ other\ with\ `CAST\(column\ AS\ type\)`\.
 SELECT * FROM (SELECT ARRAY_AGG(name) as n FROM testdata.astronauts WHERE birth_date < '1960-01-01' GROUP BY group) AS alma CROSS JOIN UNNEST(n) AS nn
 
-query error sql failed IncompatibleTypesError: Incompatible types for column 'testdata\.astronauts\.birth_date' \(DATE\) and literal '1970\-01\-01' \(VARCHAR\)\. Using `CAST\(column AS type\)` may help resolve\.
+query error sql failed IncompatibleTypesError: column\ \*testdata\.astronauts\.birth_date\*\ \(`DATE`\)\ and\ literal\ `1970\-01\-01`\ \(`VARCHAR`\)\ cannot\ be\ compared,\ because\ their\ types\ do\ not\ match\.\ Cast\ one\ side\ to\ match\ the\ other\ with\ `CAST\(column\ AS\ type\)`\.
 SELECT * FROM (SELECT ARRAY_AGG(name) as n FROM testdata.astronauts WHERE status = 'Active' AND birth_date > '1970-01-01' GROUP BY group) AS alma CROSS JOIN UNNEST(n) AS nn
 
 query shape 357 2
@@ -150,14 +153,11 @@ SELECT p.name, s.name FROM $planets p, testdata.satellites s WHERE p.id = s.plan
 query shape 5 2
 SELECT p.name, COUNT(s.id) FROM $planets p JOIN testdata.satellites s ON p.id = s.planetId GROUP BY p.name HAVING COUNT(s.id) > 3
 
-query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(True\)\. Use a comparison \(e\.g\., 'WHERE column = \{value\}'\) or IS operator \(e\.g\., 'WHERE column IS TRUE'\)\.
+query error sql failed UnsupportedSyntaxError: WHERE clause cannot be a bare literal \(`True`\)\. Compare something instead, for example `WHERE column = value` or `WHERE column IS TRUE`\.
 SELECT COUNT(*) FROM $planets WHERE TRUE AND 3 = 2 AND 3 > 2
 
-query error
+query error sql failed QueryParseError: The query could not be parsed at column 1\.(?s).*A statement has to start with a keyword.*
 missions[0] as m FROM testdata.astronauts order by m
-----
-sql failed SqlError: Query parsing failed.
-	sql parser error: Expected: an SQL statement, found: missions at Line: 1, Column: 1
 
 
 statement error UnsupportedSyntaxError

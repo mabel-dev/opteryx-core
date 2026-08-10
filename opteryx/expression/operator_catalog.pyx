@@ -13,6 +13,13 @@ class OperatorDefinition:
     friendly_name: str | None = None
     sql_symbol: str | None = None
     notes: str | None = None
+    #: False for an operator the DIALECT accepts but the execution engine cannot
+    #: run. Every entry here was previously indistinguishable from a working
+    #: operator in `reference/operators.json`, so the catalog claimed support the
+    #: engine did not have. An unsupported operator parses and binds, then fails
+    #: at plan-to-native lowering; `implemented` is how that is stated up front.
+    #: Set it to False WITH a `notes` line saying what is missing.
+    implemented: bool = True
 
 
 cpdef str default_operator_friendly_name(str operator):
@@ -303,6 +310,11 @@ OPERATOR_DEFINITIONS = {
         category="bitwise",
         node_kind="binary",
         friendly_name="Left shift",
+        notes=(
+            "The shift count must be 0..63 - the operands are 64-bit integers, and a "
+            "count outside that range fails loud ('bitwise_shl: shift count out of range') "
+            "rather than wrapping or saturating."
+        ),
     ),
     "ShiftRight": OperatorDefinition(
         summary="Right shift operator.",
@@ -311,6 +323,11 @@ OPERATOR_DEFINITIONS = {
         category="bitwise",
         node_kind="binary",
         friendly_name="Right shift",
+        notes=(
+            "The shift count must be 0..63 - the operands are 64-bit integers, and a "
+            "count outside that range fails loud ('bitwise_shr: shift count out of range') "
+            "rather than wrapping or saturating."
+        ),
     ),
     "StringConcat": OperatorDefinition(
         summary="String concatenation operator.",
@@ -353,6 +370,13 @@ OPERATOR_DEFINITIONS = {
         category="comparison",
         node_kind="comparison",
         friendly_name="JSON path exists",
+        implemented=False,
+        notes=(
+            "NOT EXECUTABLE. The dialect parses `@?` and the binder types it (operator_map "
+            "carries the VARCHAR/NVARCHAR/VARBINARY/VARIANT pairs), but the native engine has "
+            "no kernel for it, in a filter or in a projection — both fail at lowering with "
+            "\"outside the c-native kernel set\". Use `doc->'key' IS NOT NULL` instead."
+        ),
     ),
     "AtArrow": OperatorDefinition(
         summary="Array containment operator.",

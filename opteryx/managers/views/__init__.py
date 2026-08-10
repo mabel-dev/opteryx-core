@@ -103,11 +103,19 @@ def _view_as_plan(view_sql: str) -> tuple:
     resolves the view body against.
     """
     from opteryx.planner.logical_planner import do_logical_planning_phase
+    from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
-    from opteryx.utils.sql import clean_statement, remove_comments
 
-    clean_sql = clean_statement(remove_comments(view_sql))
-    parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
+    # The same rewriter the query planner runs. This used only to strip comments and
+    # collapse whitespace, which meant a view body could not use any of the syntax the
+    # rewriter exists to translate; it now goes through the one path.
+    clean_sql = do_sql_rewrite(view_sql)
+    try:
+        parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
+    except ValueError as parser_error:
+        from opteryx.planner.parse_error import raise_parse_error
+
+        raise_parse_error(clean_sql, parser_error)
     logical_plan, _, view_ctes = do_logical_planning_phase(parsed_statements[0])
 
     # views don't have an exit node

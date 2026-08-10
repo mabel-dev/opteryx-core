@@ -54,10 +54,10 @@ def test_string_key_arrow_access_uses_arrow_operator():
 
 
 def test_get_integer_key_is_rejected_as_unknown_function():
-    with pytest.raises(FunctionNotFoundError, match="Unknown function 'GET'"):
+    with pytest.raises(FunctionNotFoundError, match=r"Function \*\*GET\*\* cannot be found"):
         _plan("SELECT GET(SPLIT(name, ' '), 0) AS v FROM $planets")
 
 
 def test_get_string_key_is_rejected_as_unknown_function():
-    with pytest.raises(FunctionNotFoundError, match="Unknown function 'GET'"):
+    with pytest.raises(FunctionNotFoundError, match=r"Function \*\*GET\*\* cannot be found"):
         _plan("SELECT GET(birth_place, 'town') AS v FROM $planets")

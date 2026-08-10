@@ -11,6 +11,19 @@
         "sql_forms": [
             "ANY_VALUE(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [
+                    "ARRAY"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": false,
         "support": {
             "global": false,
             "grouped": true,
@@ -29,6 +42,17 @@
         "sql_forms": [
             "APPROX_COUNT_DISTINCT(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -47,6 +71,27 @@
         "sql_forms": [
             "APPROX_PERCENTILE(expr, percentile)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            },
+            {
+                "label": "percentile",
+                "type": "number",
+                "excludes": [],
+                "constant_only": true,
+                "minimum": 0.0,
+                "maximum": 1.0
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -68,8 +113,21 @@
             "ARRAY_AGG(expr LIMIT n)",
             "ARRAY_AGG(expr ORDER BY expr [ASC|DESC] LIMIT n)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [
+                    "ARRAY"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
-            "global": true,
+            "global": false,
             "grouped": true,
             "strict_grouped": true
         }
@@ -86,6 +144,17 @@
         "sql_forms": [
             "AVG(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -104,6 +173,17 @@
         "sql_forms": [
             "CIDR_AGG(ipv4_expr)"
         ],
+        "parameters": [
+            {
+                "label": "address",
+                "type": "ipv4",
+                "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -122,6 +202,29 @@
         "sql_forms": [
             "CORR(x, y)"
         ],
+        "parameters": [
+            {
+                "label": "x",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            },
+            {
+                "label": "y",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -142,6 +245,17 @@
             "COUNT(expr)",
             "COUNT(DISTINCT expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -161,6 +275,17 @@
             "COUNT_DISTINCT(expr)",
             "COUNT(DISTINCT expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -179,6 +304,19 @@
         "sql_forms": [
             "MAX(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [
+                    "ARRAY"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -197,6 +335,19 @@
         "sql_forms": [
             "MEDIAN(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -215,6 +366,19 @@
         "sql_forms": [
             "MIN(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "any",
+                "excludes": [
+                    "ARRAY"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -233,6 +397,19 @@
         "sql_forms": [
             "STDDEV(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,
@@ -251,6 +428,17 @@
         "sql_forms": [
             "SUM(expr)"
         ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
         "support": {
             "global": true,
             "grouped": true,

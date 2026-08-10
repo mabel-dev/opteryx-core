@@ -1,6 +1,12 @@
 from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
-from opteryx.exceptions import IncorrectTypeError, UnsupportedSyntaxError
+from opteryx.exceptions import (
+    IncorrectTypeError,
+    InvalidInternalStateError,
+    UnsupportedSyntaxError,
+    compose,
+    md_code,
+)
 from opteryx.expression import NodeType
 from opteryx.expression.operator_catalog import is_known_operator
 from opteryx.types.logical_type import LogicalCategory as OT
@@ -14,10 +20,23 @@ from opteryx.types.logical_type import (
 )
 from opteryx.utils.sql import convert_camel_to_sql_case
 
+def _category_name(category) -> str:
+    """The reader-facing spelling of a category.
+
+    A LogicalCategory stringifies as `LogicalCategory.INTEGER`, which names an
+    internal enum at someone who asked about their SQL. `.name` is the SQL spelling.
+    """
+    return category.name if isinstance(category, LC) else str(category)
+
+
 # Phase 3: OPERATOR_MAP is now authored directly on LogicalCategory (LC) keys.
 # Integer widths collapse to LC.INTEGER, floats to LC.FLOAT, JSONB/STRUCT to
-# LC.NVARCHAR — the map carries 330 entries (vs the LogicalCategory-keyed 348 that had
-# 18 duplicate-collapse entries). The derivation step (old _CATEGORY_OPERATOR_MAP)
+# LC.NVARCHAR — the map carries 317 entries. The count is asserted by
+# test_operator_map_entry_count_is_accurate (tests/planner/test_operator_map.py)
+# rather than maintained by hand: it had drifted through at least three changes
+# (330 was stale before the ILIKE VARBINARY rows were added, and stale again by 13
+# after the six mixed StringConcat rows were removed), and a comment nobody can
+# trust is worse than no comment. The derivation step (old _CATEGORY_OPERATOR_MAP)
 # is deleted; this IS the map. The human-authorable source is now stable since
 # logical categories don't change with Draken enum churn.
 #
@@ -224,7 +243,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.NVARCHAR    , LC.VARBINARY   , 'NotLike'                 ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARBINARY   , 'NotRLike'                ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARBINARY   , 'RLike'                   ): OMT(_B, None, 100.0),
-    (LC.NVARCHAR    , LC.VARBINARY   , 'StringConcat'            ): OMT(_V, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'AtQuestion'              ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'Eq'                      ): OMT(_B, None, 100.0),
@@ -240,7 +258,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.NVARCHAR    , LC.VARCHAR     , 'NotLike'                 ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'NotRLike'                ): OMT(_B, None, 100.0),
     (LC.NVARCHAR    , LC.VARCHAR     , 'RLike'                   ): OMT(_B, None, 100.0),
-    (LC.NVARCHAR    , LC.VARCHAR     , 'StringConcat'            ): OMT(_N, None, 100.0),
     (LC.TIMESTAMP   , LC.ARRAY       , 'InList'                  ): OMT(_B, None, 100.0),
     (LC.TIMESTAMP   , LC.ARRAY       , 'NotInList'               ): OMT(_B, None, 100.0),
     (LC.TIMESTAMP   , LC.DATE        , 'Eq'                      ): OMT(_B, None, 100.0),
@@ -277,7 +294,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARBINARY   , LC.NVARCHAR    , 'NotLike'                 ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.NVARCHAR    , 'NotRLike'                ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.NVARCHAR    , 'RLike'                   ): OMT(_B, None, 100.0),
-    (LC.VARBINARY   , LC.NVARCHAR    , 'StringConcat'            ): OMT(_V, None, 100.0),
     (LC.VARBINARY   , LC.VARBINARY   , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARBINARY   , LC.VARBINARY   , 'AtQuestion'              ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.VARBINARY   , 'Eq'                      ): OMT(_B, None, 100.0),
@@ -309,7 +325,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARBINARY   , LC.VARCHAR     , 'NotLike'                 ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.VARCHAR     , 'NotRLike'                ): OMT(_B, None, 100.0),
     (LC.VARBINARY   , LC.VARCHAR     , 'RLike'                   ): OMT(_B, None, 100.0),
-    (LC.VARBINARY   , LC.VARCHAR     , 'StringConcat'            ): OMT(_V, None, 100.0),
     (LC.VARCHAR     , LC.ARRAY       , 'InList'                  ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.ARRAY       , 'NotInList'               ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.INTEGER     , 'MapAccess'               ): OMT(_S, None, 100.0),
@@ -328,7 +343,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARCHAR     , LC.NVARCHAR    , 'NotLike'                 ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.NVARCHAR    , 'NotRLike'                ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.NVARCHAR    , 'RLike'                   ): OMT(_B, None, 100.0),
-    (LC.VARCHAR     , LC.NVARCHAR    , 'StringConcat'            ): OMT(_N, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'AtQuestion'              ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'Eq'                      ): OMT(_B, None, 100.0),
@@ -344,7 +358,6 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
     (LC.VARCHAR     , LC.VARBINARY   , 'NotLike'                 ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'NotRLike'                ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARBINARY   , 'RLike'                   ): OMT(_B, None, 100.0),
-    (LC.VARCHAR     , LC.VARBINARY   , 'StringConcat'            ): OMT(_V, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'Arrow'                   ): OMT(_A, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'AtQuestion'              ): OMT(_B, None, 100.0),
     (LC.VARCHAR     , LC.VARCHAR     , 'Eq'                      ): OMT(_B, None, 100.0),
@@ -373,7 +386,9 @@ OPERATOR_MAP: Dict[Tuple[LC, LC, str], OperatorMapType] = {
 
 for _, _, _operator_name in OPERATOR_MAP:
     if not is_known_operator(_operator_name):
-        raise UnsupportedSyntaxError(f"Operator map contains unknown operator \'{_operator_name}\'.")
+        raise InvalidInternalStateError(
+            f"Operator map contains unknown operator \'{_operator_name}\'."
+        )
 
 
 # Static LogicalCategory → LogicalCategory projection for operator-map dispatch.
@@ -398,6 +413,24 @@ _SQL_TO_LC: Dict[OT, LC] = {
 }
 
 # The string family, for the StringConcat NULL-operand rule in determine_type.
+#
+# StringConcat is HOMOGENEOUS-ONLY: both operands must be the SAME member of this
+# family. Only the three matching pairs (VARCHAR||VARCHAR, NVARCHAR||NVARCHAR,
+# VARBINARY||VARBINARY) are in OPERATOR_MAP above; the six mixed pairs are
+# deliberately absent, so determine_type's map-miss raises IncorrectTypeError —
+# the same class `id || ''` gets. Ruled by the architect 2026-08-09; recorded as
+# RATIFIED/string-concatenation-requires-homogeneous-string-types in
+# tests/fuzzing/single_table_known_gaps.py.
+#
+# The six mixed pairs were present and typed (VARBINARY dominant, else NVARCHAR),
+# which made the binder promise a result the engine could not produce: the kernel
+# gate is `lt_is_string && lt == rt` (draken/ops/kernels/binop_dispatch.cpp), so a
+# mixed pair had no kernel. A mixed COLUMN pair reached the plan compiler and was
+# refused as "outside the c-native kernel set" — "not built yet" for something we
+# had decided not to build. A mixed pair of LITERALS was worse: constant folding
+# ran it through the Python coercion closure in expression/evaluator/arithmetic.pyx,
+# which stringified a VARBINARY Vector's Python repr into the answer, leaking a
+# heap address into user data. Removing these rows closes both at the binder.
 _STRING_CATEGORIES = frozenset({LC.VARCHAR, LC.NVARCHAR, LC.VARBINARY})
 
 
@@ -488,6 +521,27 @@ def determine_type(node):
             return right_ct
         if right_lc == OT.NULL and left_lc in _STRING_CATEGORIES:
             return left_ct
+        if left_lc == OT.NULL and right_lc == OT.NULL:
+            # `NULL || NULL` has NO string operand whose type the result could
+            # adopt, and the native kernel refuses it for that reason
+            # (binop_dispatch.cpp: "NULL || NULL falls through to the loud error").
+            # It only ever "worked" because constant folding evaluated it through
+            # the Python concat closure, which picked VARCHAR out of the air — the
+            # same invented-answer path that leaked a Vector repr for VARBINARY.
+            # With that closure deleted the refusal is correct, but it surfaced as
+            # an internal NotImplementedError wrapped in "the query could not be
+            # planned". Refuse it HERE instead, at the binder, in the same class
+            # and shape as every other untypable concat.
+            from opteryx.expression import format_expression
+
+            raise IncorrectTypeError(
+                compose(
+                    f"{md_code(format_expression(node))} cannot be evaluated, because "
+                    f"neither side has a string type to give the result",
+                    f"Give one side a type, for example "
+                    f"{md_code('NULL::VARCHAR || NULL')}",
+                )
+            )
 
     if left_lc is None or left_lc == OT.NULL:
         return None
@@ -530,7 +584,14 @@ def determine_type(node):
         from opteryx.expression import format_expression
 
         raise IncorrectTypeError(
-            f"Unable to perform `{format_expression(node)}` because the values are not acceptable types for this operation. {left_lc} and {right_lc} were provided, you may need to cast one or both values to acceptable types."
+            compose(
+                f"{md_code(format_expression(node))} cannot be evaluated, because "
+                f"{md_code(_category_name(left_lc))} and "
+                f"{md_code(_category_name(right_lc))} do not work together with this "
+                f"operator",
+                f"Casting one side to match the other with "
+                f"{md_code('CAST(column AS type)')} usually resolves it",
+            )
         )
 
     result_ct = result.result_type  # ColumnType | None

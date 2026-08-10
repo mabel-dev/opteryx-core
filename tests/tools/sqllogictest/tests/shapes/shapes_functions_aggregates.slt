@@ -60,10 +60,10 @@ SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ('Apoll%'
 query shape 297 2
 SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ('Apoll%', 'Gemini%', 'Mercury%')
 
-statement error SqlError
+statement error QueryParseError
 SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ()
 
-statement error SqlError
+statement error QueryParseError
 SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ()
 
 query shape 34 2
@@ -150,10 +150,10 @@ SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ('%Armstrong%
 query shape 353 2
 SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ('%Armstrong%', '%Aldrin%', '%Collins%')
 
-statement error SqlError
+statement error QueryParseError
 SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ()
 
-statement error SqlError
+statement error QueryParseError
 SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ()
 
 query shape 1 2

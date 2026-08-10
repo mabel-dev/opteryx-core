@@ -140,15 +140,51 @@ def test_non_ipv4_operand_is_refused():
     The IPV4 descriptor is the only thing separating an address from any other
     32-bit unsigned value; without it CIDR_AGG would emit well-formed, confident,
     entirely invented network ranges.
+
+    CidrAggTypeError (an IncorrectTypeError), NOT NotSupportedError: the refusal is
+    a permanent type rule, and the old class's "not supported yet" wording told the
+    reader to wait for a feature that is never coming. The message names the column,
+    its actual type, and the cast that fixes it.
     """
-    from opteryx.exceptions import NotSupportedError
+    from opteryx.exceptions import CidrAggTypeError
 
     try:
         _rows("SELECT CIDR_AGG(id) FROM $planets")
-    except NotSupportedError as err:
-        assert "IPV4" in str(err), str(err)
+    except CidrAggTypeError as err:
+        message = str(err)
+        assert "IPV4" in message, message
+        assert "*id*" in message, message          # names the offending column, in italic
+        assert "`id::IPV4`" in message, message    # and the fix, in one copyable form
+        assert "not supported yet" not in message, message
         return
     raise AssertionError("CIDR_AGG accepted a non-IPV4 operand")
+
+
+def test_refusal_only_suggests_a_cast_that_exists():
+    """The message's fix must be runnable, so it tracks what CAST actually supports.
+
+    Text and integer columns have a cast to IPV4 and are told to use it; DECIMAL,
+    FLOAT and friends have none (casts.pyx's IPV4 target takes the string family and
+    the integer widths only), so suggesting `col::IPV4` would just send the reader to
+    a second error — those are told the column cannot hold addresses instead.
+    """
+    from opteryx.exceptions import CidrAggTypeError
+
+    def _message(sql):
+        try:
+            _rows(sql)
+        except CidrAggTypeError as err:
+            return str(err)
+        raise AssertionError(f"CIDR_AGG accepted a non-IPV4 operand: {sql}")
+
+    text = _message("SELECT CIDR_AGG(name) FROM $planets")
+    assert "`name::IPV4`" in text, text
+    # the integer-only rationale must not be aimed at a VARCHAR column
+    assert "plain integer column" not in text, text
+
+    uncastable = _message("SELECT CIDR_AGG(mass) FROM $planets")
+    assert "::IPV4" not in uncastable, uncastable
+    assert "no cast from `FLOAT64` to `IPV4`" in uncastable, uncastable
 
 
 def test_budgets_are_discoverable():

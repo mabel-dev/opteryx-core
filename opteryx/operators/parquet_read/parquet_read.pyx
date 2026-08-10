@@ -785,19 +785,39 @@ cdef class ParquetReadNode(ReaderNode):
         return base
 
     @staticmethod
-    def _extract_filter_column_names(predicates) -> set:
-        """Extract the physical column names referenced in pushed-down predicates."""
-        if not predicates:
-            return set()
+    def _extract_filter_references(predicates):
+        """What the pushed-down predicates read, as (identities, names).
+
+        A predicate operand is resolved to a physical column by IDENTITY where it
+        has one, and only by name where it does not. The two can disagree: an
+        aliased projection keeps the source column's identity but takes the ALIAS as
+        its name, so `SELECT ts AS e1 ...` gives a predicate operand named `e1`
+        carrying `ts`'s identity. Reading by name then looked for a physical column
+        called `e1`, found none, and decoded nothing — while the compiled predicate,
+        which resolves its operands by identity, asked the morsel for `ts` and got
+        `KeyError: 'CxxMorsel.column: not found'`. Any filter on a subquery column
+        the outer query does not project reproduces it:
+        `SELECT flag FROM (SELECT ts AS e1, flag FROM t) AS sub WHERE e1 IS NOT NULL`.
+
+        The caller matches the identities against the scan's own schema, which is
+        where the physical name and the planner identity are both known and agree.
+        """
+        identities = set()
         names = set()
+        if not predicates:
+            return identities, names
         for predicate in predicates:
             identifiers = get_all_nodes_of_type(predicate, select_nodes=(NodeType.IDENTIFIER,))
             for identifier in identifiers:
                 schema_column = getattr(identifier, "schema_column", None)
+                identity = getattr(schema_column, "identity", None)
+                if identity is not None:
+                    identities.add(identity)
+                    continue
                 name = getattr(schema_column, "name", None) or getattr(identifier, "source_column", None)
                 if name:
                     names.add(name)
-        return names
+        return identities, names
 
     cdef shared_ptr[CxxMorsel] _cxx_apply_predicate(self, shared_ptr[CxxMorsel] m):
         """S-B.2 prereq #2: apply the compiled predicate to a CxxMorsel, returning the
@@ -1237,9 +1257,23 @@ cdef class ParquetReadNode(ReaderNode):
         self._sp_planner_identity = _planner_name_to_identity
 
         if self._filter_column_names_cached is None:
-            self._filter_column_names_cached = self._extract_filter_column_names(self.predicates)
-        filter_column_names = self._filter_column_names_cached
-        required_names = set(_planner_name_to_identity.keys()) | filter_column_names
+            _pred_identities, _pred_names = self._extract_filter_references(self.predicates)
+            # Resolve each predicate operand against THIS scan's schema, where the
+            # physical name and the planner identity sit on the same column.
+            self._filter_column_names_cached = {
+                col.name: col.identity
+                for col in base_schema.columns
+                if col.identity in _pred_identities or col.name in _pred_names
+            }
+        _filter_name_to_identity = self._filter_column_names_cached
+        required_names = set(_planner_name_to_identity.keys()) | set(_filter_name_to_identity.keys())
+        # Predicate-only columns are read but NOT emitted, so they never appear in
+        # `_planner_name_to_identity` (which is built from the projection). They
+        # still have to be LABELLED with the identity the compiled predicate will
+        # ask for. A column that is both projected and a predicate input keeps the
+        # projection's identity — the two agree there anyway.
+        _read_name_to_identity = dict(_filter_name_to_identity)
+        _read_name_to_identity.update(_planner_name_to_identity)
 
         # Select physical columns to read by NAME, not by identity.
         read_schema = deepcopy(base_schema)
@@ -1325,7 +1359,7 @@ cdef class ParquetReadNode(ReaderNode):
             )
 
         # ── Two-pass late-materialization eligibility ─────────────────────────
-        _filter_names = filter_column_names
+        _filter_names = set(_filter_name_to_identity.keys())
         _projected_names = {col.schema_column.name for col in (self.columns or [])}
         topn_active = (
             self._topn_sort_name is not None
@@ -1435,7 +1469,7 @@ cdef class ParquetReadNode(ReaderNode):
         column_names = [col.name for col in read_schema.columns]
         self._sp_column_names = column_names
         self._sp_name_to_identity = {
-            col.name: _planner_name_to_identity.get(col.name, col.identity)
+            col.name: _read_name_to_identity.get(col.name, col.identity)
             for col in read_schema.columns
         }
         # Identity order is invariant across row groups (positional pairing with

@@ -8,7 +8,20 @@ def get_builtin_temporal_functions() -> list:
     """Full temporal function set (registrar entries)."""
 
     # Parameter shortcuts
-    _part = ParameterSpec(name="part", type_family="string", constant_only=True)
+    _part = ParameterSpec(
+        name="part",
+        type_family="string",
+        constant_only=True,
+        # DATEDIFF's unit set — verified against the engine, not copied from the
+        # prose. It is WIDER than TRUNC's and TIME_BUCKET's (millisecond and
+        # microsecond are differences, not truncation boundaries), which is
+        # exactly why the domain belongs on the parameter and not in a shared
+        # "date parts" paragraph.
+        domain=(
+            "year", "quarter", "month", "week", "day",
+            "hour", "minute", "second", "millisecond", "microsecond",
+        ),
+    )
     _date = ParameterSpec(name="date", type_family="temporal")
 
     # Implementations are provided by the temporal implementation module.
@@ -20,8 +33,29 @@ def get_builtin_temporal_functions() -> list:
             date_functions.date_floor,
             _CT_TIMESTAMP(),
             (
-                ParameterSpec(name="magnitude", type_family="numeric"),
-                ParameterSpec(name="units", type_family="string", constant_only=True),
+                ParameterSpec(
+                    name="magnitude",
+                    type_family="numeric",
+                    # A bucket WIDTH: a whole number of `units`, at least one.
+                    # `numeric` alone made -125533.0000 a legal argument, and the
+                    # engine then answered with a raw
+                    # `TypeError: Failed to extract integer scalar from constant
+                    # vector` for the DECIMAL and a bare "outside the c-native
+                    # kernel set" refusal for the negative. A FLOAT magnitude IS
+                    # accepted (2.0 buckets by 2), so the exclusion is DECIMAL
+                    # specifically, not "non-integer".
+                    minimum=1,
+                    excludes=("DECIMAL",),
+                ),
+                ParameterSpec(
+                    name="units",
+                    type_family="string",
+                    constant_only=True,
+                    domain=(
+                        "year", "quarter", "month", "week",
+                        "day", "hour", "minute", "second",
+                    ),
+                ),
                 _date,
             ),
             summary="Bucket date into fixed-width intervals.",
@@ -61,7 +95,20 @@ def get_builtin_temporal_functions() -> list:
             "FROM_UNIXTIME",
             date_functions.from_unixtimestamp,
             _CT_TIMESTAMP(),
-            (ParameterSpec(name="ts", type_family="numeric"),),
+            (
+                ParameterSpec(
+                    name="ts",
+                    type_family="numeric",
+                    # Epoch SECONDS. The kernel's own limit is far wider (~year
+                    # 294247, where the microsecond tick stops fitting int64),
+                    # but a TIMESTAMP outside year 1..9999 cannot be materialised
+                    # at all — it surfaced as a raw
+                    # `ValueError: year must be in 1..9999`. These are the exact
+                    # inclusive endpoints of that window.
+                    minimum=-62135596800,
+                    maximum=253402300799,
+                ),
+            ),
             cost=3.17,
             summary="Convert Unix timestamp to TIMESTAMP.",
         ),

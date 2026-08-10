@@ -15,6 +15,9 @@ from opteryx.exceptions import (
     InvalidInternalStateError,
     UnexpectedDatasetReferenceError,
     UnsupportedSyntaxError,
+    compose,
+    md_code,
+    md_syntax,
 )
 from opteryx.expression import NodeType
 from opteryx.expression.functions import get_catalog as _get_function_catalog
@@ -97,6 +100,21 @@ _CASE_BLEND_FAMILIES = (
     frozenset((LogicalCategory.DATE, LogicalCategory.TIME, LogicalCategory.TIMESTAMP)),
 )
 
+# Categories draken_if_then_else can blend AT ALL, independent of what it is
+# paired with. This is a strictly WIDER question than _CASE_BLEND_FAMILIES above,
+# which only answers "can these two share one type" — INTERVAL is blendable by the
+# kernel (draken_type_fixed_itemsize == 16) yet belongs to no pair-family, so it
+# must be listed here or `CASE WHEN c THEN NULL ELSE <interval> END`, which works
+# today, would start being refused.
+#
+# The kernel's real surface is: BOOL, fk_is_string (VARCHAR/NVARCHAR/VARBINARY),
+# and every type with a non-zero draken_type_fixed_itemsize. What is left out —
+# ARRAY, VARIANT, VECTOR — hits `fk_fixed_elem_size(out_t) == 0` and dies with a
+# bare "unsupported branch type" mid-execution.
+_CASE_BLENDABLE_CATEGORIES = frozenset(
+    cat for family in _CASE_BLEND_FAMILIES for cat in family
+) | frozenset((LogicalCategory.INTERVAL,))
+
 
 def _describe_case_branch(node) -> str:
     if node.node_type == 42:  # NodeType.LITERAL
@@ -114,6 +132,23 @@ def _check_case_branches_compatible(typed_branches, case_column) -> None:
     ever align them; every other combination within one family in
     _CASE_BLEND_FAMILIES is CAST-aligned by the caller, not rejected here.
     """
+    # Blendability is a per-branch property, so it is checked BEFORE the pairwise
+    # family test and regardless of how many branches survived NULL-filtering.
+    # `typed_branches` is what is left after the caller drops typed-NULL literals,
+    # so `CASE WHEN c THEN NULL ELSE <array> END` — and the implicit-NULL-ELSE form
+    # `CASE WHEN c THEN <array> END` — arrive here with ONE entry. Returning early
+    # on len < 2 sent both straight to the kernel, which failed mid-execution with
+    # a bare "draken_if_then_else: unsupported branch type" and no SQL to name.
+    for node_i, ct_i in typed_branches:
+        if ct_i.category not in _CASE_BLENDABLE_CATEGORIES:
+            raise IncompatibleTypesError(
+                message=(
+                    f"CASE: {_describe_case_branch(node_i)} is {ct_i}, which CASE "
+                    "cannot blend — only BOOLEAN, string, and numeric/temporal "
+                    f"scalar branches are supported. (column '{case_column}')"
+                )
+            )
+
     if len(typed_branches) < 2:
         return
     node0, ct0 = typed_branches[0]
@@ -167,8 +202,8 @@ def _bound_cast_node(source, target):
     passes `value` to `resolve_cast` and `p.value for p in parameters` to the ctx
     allocator. Writing the parametrized DISPLAY form (`str(ColumnType)` →
     "DECIMAL(24, 4)") into `value` instead builds a CAST no resolver can match, and
-    the query dies at compile time with "No native CAST kernel for DECIMAL →
-    DECIMAL(24, 4)".
+    the query dies at compile time with "CAST DECIMAL → DECIMAL(24, 4) is not
+    supported".
     """
     from opteryx.expression import ExpressionColumn
 
@@ -297,6 +332,34 @@ def _aggregate_return_type(node: Node) -> Optional[_ColumnType]:
                 return _CT_INT64
             return param_type  # ColumnType
     return None
+
+
+def _bind_function_reference(node: Node, context: Any):
+    """Resolve a FUNCTION node against the catalog and attach what execution needs.
+
+    The catalog owns type reasoning, so this is also where the overload — and with
+    it the kernel the expression compiler will call — is chosen. Both binding paths
+    for a FUNCTION go through here so they cannot drift: the one that mints a new
+    derived column, and the one that adopts a derived column an earlier occurrence
+    of the same expression already registered. Returns the resolution (None when
+    the catalog does not know the name, e.g. an AGGREGATOR).
+    """
+    try:
+        resolved = _get_function_catalog().resolve(node.value, list(node.parameters))
+    except TypeError as type_err:
+        raise IncompatibleTypesError(message=str(type_err)) from type_err
+    if resolved is None:
+        return None
+    node.function_ref = resolved
+    # MATCH is `cosine_similarity(a, b) >= threshold`. The threshold is a
+    # session variable, but the kernel is handed it in a ctx at BIND time
+    # (the same channel EMBED's width uses): a compiled plan must keep
+    # answering the question it was compiled for, so a later SET cannot
+    # reach back and change it. Resolved here because this is where the
+    # session's variables are in scope.
+    if resolved.function_definition.name == "_MATCH_AGAINST":
+        node.match_threshold = context.execution_context.variables["match_threshold"]
+    return resolved
 
 
 def _copy_relation_schema(schema: RelationSchema) -> RelationSchema:
@@ -553,7 +616,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
                 if column_name is not None
             ],
         )
-        raise ColumnNotFoundError(column=node.value, suggestion=suggestion)
+        raise ColumnNotFoundError(column=node.value, suggestion=suggestion, span=node.span)
     elif node.source_column[0] == "@":
         # A second reference to a variable already bound in this query — it was
         # appended to `$derived` above, so the lookup found it. Same rule as the
@@ -725,6 +788,33 @@ def inner_binder(
                 node.value = found_column.value
                 node.type = found_column.column_type
 
+            # Sharing the schema column is not the same as not needing to be bound.
+            # This node keeps its FUNCTION shape, and the expression compiler reads
+            # `function_ref` off the NODE (compiled_expression's NT_FUNCTION arm) to
+            # find the kernel — a second occurrence that only inherited an identity
+            # reached the compiler with function_ref None and raised
+            # "FUNCTION 'UPPER' has no function_ref - not bound". Visible wherever
+            # two occurrences of one call are compiled as separate expressions
+            # rather than one being an identifier reference to the other, which is
+            # exactly what the CASE -> IF_THEN_ELSE rewrite does with
+            # `CASE WHEN ... THEN UPPER(name) ELSE UPPER(name) END`.
+            #
+            # Read the node's CURRENT type, not the `node_type` local captured
+            # before this block ran. The ConstantColumn arm above REWRITES the node
+            # into a LITERAL (a nullary constant function — PI(), E() — folds to its
+            # value), which leaves the local stale and node.value holding a float.
+            # Binding a function reference off that called the catalog's
+            # `resolve(name: str)` with 3.14159..., and Cython's argument coercion
+            # raised `Argument 'name' has incorrect type (expected str, got float)`
+            # from inside _bind_function_reference — surfacing as an
+            # IncompatibleTypesError that named neither the function nor the query.
+            # `SELECT PI() AS a, PI() AS b` was unrunnable, and so was any second
+            # mention of one nullary constant function in a projection, while
+            # `SELECT PI() AS a` alone was fine: it takes the mint-a-new-column path
+            # and never reaches here.
+            if node.node_type == NodeType.FUNCTION and node.function_ref is None:
+                _bind_function_reference(node, context)
+
             return node, context
 
     schemas = context.schemas
@@ -776,24 +866,10 @@ def inner_binder(
                     scale = node.parameters[2].value if len(node.parameters) > 2 else scale
 
                 # Ask the catalog for the return type (catalog owns type reasoning)
-                try:
-                    _resolved = _get_function_catalog().resolve(node.value, list(node.parameters))
-                except TypeError as _type_err:
-                    raise IncompatibleTypesError(message=str(_type_err)) from _type_err
+                _resolved = _bind_function_reference(node, context)
                 if _resolved is not None:
                     result_type = _resolved.inferred_return_type
                     element_type = _resolved.inferred_element_type
-                    node.function_ref = _resolved
-                    # MATCH is `cosine_similarity(a, b) >= threshold`. The threshold is a
-                    # session variable, but the kernel is handed it in a ctx at BIND time
-                    # (the same channel EMBED's width uses): a compiled plan must keep
-                    # answering the question it was compiled for, so a later SET cannot
-                    # reach back and change it. Resolved here because this is where the
-                    # session's variables are in scope.
-                    if _resolved.function_definition.name == "_MATCH_AGAINST":
-                        node.match_threshold = context.execution_context.variables[
-                            "match_threshold"
-                        ]
                 elif node_type == NodeType.AGGREGATOR:
                     # Aggregates are not in the function catalog (dispatched at
                     # runtime by the aggregate operators). The binder still needs
@@ -1041,12 +1117,26 @@ def inner_binder(
             # was silently dropped (column_type=None) until the D-4 invariant made it
             # fail loud. The runtime cast reads the params independently, so this only
             # corrects the schema-column metadata.
-            if target_type_name == "DECIMAL" and len(node.parameters) >= 1:
-                if node.parameters[0].node_type == NodeType.LITERAL:
-                    precision = int(node.parameters[0].value)
-                scale = 0
-                if len(node.parameters) > 1 and node.parameters[1].node_type == NodeType.LITERAL:
-                    scale = int(node.parameters[1].value)
+            if target_type_name == "DECIMAL":
+                # Both parameters are required. There is no default precision and
+                # scale to fall back on — a DECIMAL's descriptor IS its type, and
+                # picking one on the caller's behalf would silently decide how their
+                # numbers round. The cast lowering has always required the pair; it
+                # said so from inside the expression compiler as a raw Python
+                # ValueError, which named no clause and offered no spelling.
+                if len(node.parameters) != 2 or any(
+                    parameter.node_type != NodeType.LITERAL for parameter in node.parameters
+                ):
+                    raise UnsupportedSyntaxError(
+                        compose(
+                            f"{md_syntax('CAST')} to {md_code('DECIMAL')} needs a precision "
+                            "and a scale",
+                            f"Write the target type as {md_code('DECIMAL(precision, scale)')}, "
+                            f"for example {md_code('DECIMAL(18, 4)')}",
+                        )
+                    )
+                precision = int(node.parameters[0].value)
+                scale = int(node.parameters[1].value)
 
             if (
                 target_type_name == "ARRAY"
@@ -1076,7 +1166,7 @@ def inner_binder(
                     _vec_dim = node.parameters[0].value
                 if _vec_dim is None:
                     raise UnsupportedSyntaxError(
-                        "CAST to VECTOR requires a dimension, e.g. CAST(x AS VECTOR(384)) — "
+                        "**CAST** to VECTOR requires a dimension, e.g. **CAST**(x AS VECTOR(384)) — "
                         "a vector's width cannot be inferred from an array column."
                     )
                 _ct = _lt.VECTOR(int(_vec_dim))

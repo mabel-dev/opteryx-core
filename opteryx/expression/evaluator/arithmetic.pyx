@@ -27,41 +27,6 @@ from opteryx.compiled.expression.compiled_expression cimport (
 )
 
 
-cdef _to_string_vec(v, n):
-    """Ensure v is a NANOBIND string Vector of length n for vector_concat.
-
-    For already-string vectors (Cython or nanobind), returns the unwrapped
-    nanobind handle. For scalar inputs produces a constant-shape Vector
-    (O(1) allocation, data_length==1) via vector_varchar_from_constant.
-    """
-    _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
-    # Unwrap Cython shim → nanobind so the downstream nanobind kernels
-    # (vector_concat / draken_vector_unwrap) get the type they expect.
-    cdef object v_nb = getattr(v, "_nb", None)
-    if v_nb is not None:
-        v = v_nb
-    cdef object _vt = getattr(v, "type", None)
-    if _vt in _str_types:
-        return v  # already a string Vector (now guaranteed nanobind)
-    # A DRAKEN_NULL vector (untyped NULL literal, e.g. `x || NULL`) is all-null by
-    # definition. It is NOT a string vector, so it must become a typed null VARCHAR
-    # constant — never str()'d (the `else` below would otherwise stringify the
-    # Vector's Python repr into the concat output).
-    if _vt == _draken_native.NULL:
-        return _draken_native.vector_varchar_from_constant(None, n)
-    # Normalize scalar to bytes or None — the VARCHAR edge is bytes-only, so a
-    # Python str must not reach it (encode here once).
-    if isinstance(v, bytes):
-        pass
-    elif isinstance(v, str):
-        v = v.encode("utf-8")
-    elif v is None:
-        pass
-    else:
-        v = str(v).encode("utf-8")
-    return _draken_native.vector_varchar_from_constant(v, n)
-
-
 cdef _unwrap_nb(v):
     """Extract nanobind Vector from Cython shim or return as-is if already nanobind."""
     nb = getattr(v, "_nb", None)
@@ -168,17 +133,39 @@ cdef object _build_arithmetic_closure(int op_code):
     return kernel
 
 
-cdef object _build_string_concat_closure():
-    """Build closure for StringConcat: coerce both operands to VARCHAR, then concat."""
-    _str_types = (_draken_native.VARCHAR, _draken_native.NVARCHAR)
+cdef object _build_string_concat_refusal():
+    """StringConcat has NO Python kernel. This returns one that refuses.
 
+    The Python concat closure that used to live here was a SECOND, COERCING
+    implementation of `||`: it stringified whatever it was handed, so it accepted
+    operand pairs the native kernel refuses and answered differently from it. That
+    divergence was the root of two defects — with a VARBINARY operand it had no
+    arm at all and fell through to `str(v)`, putting a Vector's Python repr, heap
+    address and all, into user-visible data. Deleted 2026-08-09; see
+    RATIFIED/string-concatenation-requires-homogeneous-string-types.
+
+    It is unreachable by construction now: every StringConcat that survives
+    binding is homogeneous or NULL-paired, and `_c_native_binop` admits exactly
+    those, so the executor always takes the C-native branch. Measured, not
+    assumed — wrapping the kernel this function returns recorded ZERO invocations
+    across `make q`, tests/sql and 639 fuzz cases.
+
+    A refusing kernel rather than nothing, because callers still ASK for one:
+    compiled_expression.pyx resolves a kernel for every binop before it knows
+    whether the slot is C-native, and the executor's C-native branch is guarded on
+    both operands being real DrakenVector pointers — a NULL there falls through to
+    `callable_ref`. Returning None would put a NULL in that slot and segfault the
+    fallthrough. So the slot holds something that fails loudly instead: if that
+    path is ever reached, it is a bug in the plan, and the one thing it must not
+    do is quietly compute a different answer in Python.
+    """
     def kernel(left, right):
-        from opteryx.compiled.nanobind.vectors import vector_concat as _vc
-        # Determine row count from string operand or default to 1.
-        n = len(left) if getattr(left, "type", None) in _str_types else (
-            len(right) if getattr(right, "type", None) in _str_types else 1
+        raise NotImplementedError(
+            "StringConcat has no Python kernel: `||` is C-native for every operand "
+            "pair the binder admits (same-type VARCHAR, NVARCHAR or VARBINARY, or a "
+            "NULL operand). Reaching this means a StringConcat slot bypassed the "
+            "C-native path — a plan bug, not an operand the engine should coerce."
         )
-        return _vc(_to_string_vec(left, n), _to_string_vec(right, n))
     return kernel
 
 
@@ -270,9 +257,9 @@ def resolve_binary_op(int op_code, left_sql, right_sql):
         # All numeric type combinations supported — deferred type checking to kernel
         return _build_arithmetic_closure(op_code)
 
-    # String concatenation
+    # String concatenation — C-native only; this kernel exists to refuse.
     if op_code == BOP_STRING_CONCAT:
-        return _build_string_concat_closure()
+        return _build_string_concat_refusal()
 
     # Bitwise ops on INTEGER
     if op_code in (BOP_BITWISE_OR, BOP_BITWISE_AND, BOP_BITWISE_XOR, BOP_SHIFT_LEFT, BOP_SHIFT_RIGHT):

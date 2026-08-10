@@ -177,7 +177,12 @@ class IntersectExceptAllToWindowJoinStrategy(PlanRewriteStrategy):
             conditions.append(_eq(left_rn_rel, _ROW_NUMBER_NAME, right_rn_rel, _ROW_NUMBER_NAME))
 
             join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
-            join.type = "left anti" if is_except else "left semi"
+            # not-distinct on BOTH the value columns and $row_number: the ALL forms
+            # compare rows the same way the DISTINCT forms do, they just count
+            # occurrences as well. $row_number is never NULL, so the rule only ever
+            # bites on the value columns — which is exactly where it is needed.
+            join.type = ("left anti not-distinct" if is_except
+                         else "left semi not-distinct")
             join.on = _and(conditions)
             join.using = None
             join.left_relation_names = list(live_left) + [left_rn_rel]

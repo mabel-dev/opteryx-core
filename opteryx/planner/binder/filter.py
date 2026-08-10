@@ -37,7 +37,7 @@ def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
 
         expr = format_expression(node.condition)
         raise UnsupportedSyntaxError(
-            f"WHERE condition `{expr}` returns {_condition_type} instead of BOOLEAN. "
+            f"**WHERE** condition `{expr}` returns {_condition_type} instead of BOOLEAN. "
             f"To filter on this value, compare it explicitly (e.g. `{expr} != 0`)."
         )
 

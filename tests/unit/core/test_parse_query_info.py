@@ -200,8 +200,15 @@ def test_parse_mixed_system_and_user_tables():
 
 
 def test_parse_invalid_sql():
-    """Test that invalid SQL raises an error"""
-    with pytest.raises(ValueError, match="Failed to parse SQL query"):
+    """Invalid SQL raises the same parse error the planner raises.
+
+    This entry point used to raise a bare ValueError wrapping the parser's own
+    text, so the same statement produced two different errors depending on which
+    door it came through. QueryParseError is a SqlError, not a ValueError.
+    """
+    from opteryx.exceptions import QueryParseError
+
+    with pytest.raises(QueryParseError, match="could not be parsed"):
         opteryx.analyze_query("SELECT * FROM users WHERE")
 
 

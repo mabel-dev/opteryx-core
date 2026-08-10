@@ -55,6 +55,18 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
     _n = ParameterSpec(name="n", type_family="integer")
     _b = ParameterSpec(name="blob", type_family="string")
 
+    # The decoders are strict about their input encoding: anything that is not
+    # well formed in that encoding raises. `string` alone said nothing about it,
+    # so every VARCHAR was a legal argument by the signature and most of them
+    # fail. `value_format` states the real constraint.
+    def _encoded(fmt: str) -> ParameterSpec:
+        return ParameterSpec(
+            name="blob",
+            type_family="string",
+            value_format=fmt,
+            documentation=f"Must be well-formed {fmt} text; other input is rejected at execution.",
+        )
+
     # Return types follow what the kernels ACTUALLY produce, which is also what the
     # value semantically IS:
     #   digests + *_ENCODE -> hex/base64/base85 TEXT      -> VARCHAR
@@ -238,7 +250,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             "BASE64_DECODE",
             vector_base64_decode,
             _CT_VARBINARY,
-            (_b,),
+            (_encoded("base64"),),
             engine="draken",
             summary="Base64 decode.",
             cost=2.60,
@@ -256,7 +268,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             "BASE85_DECODE",
             vector_base85_decode,
             _CT_VARBINARY,
-            (_b,),
+            (_encoded("base85"),),
             engine="draken",
             summary="Base85 decode.",
             cost=9180.68,
@@ -270,7 +282,7 @@ def get_builtin_hash_encoding_functions() -> list[FunctionDefinition]:
             cost=9353.05,
         ),
         _make(
-            "HEX_DECODE", vector_hex_decode, _CT_VARBINARY, (_b,), summary="Hex decode.", cost=3.87
+            "HEX_DECODE", vector_hex_decode, _CT_VARBINARY, (_encoded("hex"),), summary="Hex decode.", cost=3.87
         ),
     ]
 

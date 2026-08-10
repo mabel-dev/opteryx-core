@@ -336,7 +336,7 @@ def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -
     shape the lowering reads: BARE type name in `.value` plus LITERAL parameters.
     `str(target)` was used here, and its parametrized display form ("DECIMAL(22, 2)")
     matches no resolver arm — a UNION coercing any leg to DECIMAL died with
-    "No native CAST kernel for INT64 → DECIMAL(22, 2)".
+    "CAST INT64 → DECIMAL(22, 2) is not supported".
 
     A NULL-typed LITERAL is retyped in place instead of CAST-wrapped: there is
     no NULL-to-anything native cast kernel (a NULL literal carries no value to
@@ -481,7 +481,8 @@ def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
     # exclusion) — it falls through unchanged and still fails loud at physical
     # planning, exactly as before this fix, by design, not a regression.
     if is_wildcard and node.modifier != "All":
-        return _rewrite_wildcard_setop_to_join(self, node, context, "left semi")
+        return _rewrite_wildcard_setop_to_join(self, node, context,
+                                              "left semi not-distinct")
 
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)
@@ -517,7 +518,8 @@ def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # instead of "left semi". EXCEPT ALL falls through unchanged for the same
     # multiset-semantics reason.
     if is_wildcard and node.modifier != "All":
-        return _rewrite_wildcard_setop_to_join(self, node, context, "left anti")
+        return _rewrite_wildcard_setop_to_join(self, node, context,
+                                              "left anti not-distinct")
 
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)
@@ -594,7 +596,7 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         if category not in (None, LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR,
                             LogicalCategory.NULL):
             raise IncorrectTypeError(
-                "CROSS JOIN CIDR_UNNEST requires a text CIDR block such as "
+                "**CROSS JOIN CIDR_UNNEST** requires a text CIDR block such as "
                 f"'10.0.0.0/24', not {category}."
             )
         node.columns += [node.unnest_column]
@@ -662,7 +664,7 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             from opteryx.exceptions import IncorrectTypeError
 
             raise IncorrectTypeError(
-                f"CROSS JOIN UNNEST requires an ARRAY or VECTOR type column, not {node.unnest_column.schema_column.category}."
+                f"**CROSS JOIN UNNEST** requires an ARRAY or VECTOR type column, not {node.unnest_column.schema_column.category}."
             )
 
         # Phase 2: resolve UNNEST element type from column_type (ARRAY carries element).

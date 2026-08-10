@@ -299,5 +299,90 @@ def test_large_integer_to_blob_does_not_allocate_by_value():
     assert len(result[0]) == 10, len(result[0])
 
 
+# ---------------------------------------------------------------------------
+# 4. A typed-NULL branch must not smuggle an unblendable type past the binder.
+#
+# Same shape as the three above — a rule that existed but was skipped. Both
+# branch checkers (`_check_blend_compatible` for IIF/COALESCE/IFNULL/IFNOTNULL,
+# `_check_case_branches_compatible` for CASE) run over the branches that survive
+# NULL-filtering, and both returned early when fewer than two survived. So the
+# family check — "can this kernel blend this type AT ALL" — never ran for
+# IIF(c, NULL, x): one branch, no partner, no check. Every unblendable family
+# then reached the kernel and died mid-execution naming an opcode and a raw
+# DrakenType integer ("draken_iif: unsupported branch type 80"), which is exactly
+# what the mirrored bind-time rules exist to prevent.
+#
+# The pair form of each was ALREADY refused; these pin that the NULL-partnered
+# form agrees with it. ARRAY is the reported case, but the hole was per-family,
+# so DECIMAL and INTERVAL (both rejected by nc_dispatch — scale and unit are
+# out-of-band, so a raw blend would be silently wrong) are pinned with it.
+# ---------------------------------------------------------------------------
+
+_ARRAY_BRANCH = "SPLIT(name,'a')"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # ARRAY — the reported repro's inner projection. The kernel cannot even
+        # READ an ARRAY operand: the elements hang off VectorOwner::child_owner,
+        # unreachable from the DrakenVector a kernel is handed.
+        f"SELECT IIF(id > 2, NULL, {_ARRAY_BRANCH}) AS v FROM $planets",
+        f"SELECT IIF(id > 2, {_ARRAY_BRANCH}, NULL) AS v FROM $planets",
+        f"SELECT COALESCE(NULL, {_ARRAY_BRANCH}) AS v FROM $planets",
+        f"SELECT IFNULL(NULL, {_ARRAY_BRANCH}) AS v FROM $planets",
+        f"SELECT IFNOTNULL(NULL, {_ARRAY_BRANCH}) AS v FROM $planets",
+        # DECIMAL and INTERVAL — same hole, different family.
+        "SELECT IIF(id > 2, NULL, CAST(id AS DECIMAL(10,2))) AS v FROM $planets",
+        "SELECT COALESCE(NULL, CAST(id AS DECIMAL(10,2))) AS v FROM $planets",
+        "SELECT IIF(id > 2, NULL, INTERVAL '1' DAY) AS v FROM $planets",
+    ],
+)
+def test_null_partnered_unblendable_branch_is_refused_at_bind(sql):
+    with pytest.raises(IncompatibleTypesError):
+        _values(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        f"SELECT CASE WHEN id > 2 THEN NULL ELSE {_ARRAY_BRANCH} END AS v FROM $planets",
+        # No ELSE at all — the implicit NULL branch is the same hole.
+        f"SELECT CASE WHEN id > 2 THEN {_ARRAY_BRANCH} END AS v FROM $planets",
+    ],
+)
+def test_case_null_partnered_array_branch_is_refused_at_bind(sql):
+    with pytest.raises(IncompatibleTypesError):
+        _values(sql)
+
+
+def test_case_still_accepts_what_its_own_kernel_supports():
+    """CASE's supported set is WIDER than its pairwise-family table.
+
+    draken_if_then_else blends anything with a non-zero
+    draken_type_fixed_itemsize, which includes DECIMAL and INTERVAL — neither of
+    which appears in `_CASE_BLEND_FAMILIES` (a "can these two share a type"
+    table, a different question). Checking blendability against that table would
+    have silently started refusing these, which work. This is the guard against
+    the fix over-reaching, and the reason CASE cannot share the IIF/COALESCE set.
+    """
+    assert len(_values("SELECT CASE WHEN id > 2 THEN NULL ELSE CAST(id AS DECIMAL(10,2)) END AS v FROM $planets")) == 9
+    assert len(_values("SELECT CASE WHEN id > 2 THEN NULL ELSE INTERVAL '1' DAY END AS v FROM $planets")) == 9
+
+
+def test_null_partnered_blendable_branches_still_work():
+    """The blendable families must be untouched — the check widened, not tightened."""
+    assert len(_values("SELECT IIF(id > 2, NULL, name) AS v FROM $planets")) == 9
+    assert len(_values("SELECT IIF(id > 2, NULL, id) AS v FROM $planets")) == 9
+    assert len(_values("SELECT IIF(id > 2, NULL, CAST(id AS UINT32)) AS v FROM $planets")) == 9
+    assert len(_values("SELECT IIF(id > 2, NULL, CAST(name AS VARBINARY)) AS v FROM $planets")) == 9
+    assert len(_values("SELECT COALESCE(NULL, NULL, name) AS v FROM $planets")) == 9
+    assert len(_values("SELECT CASE WHEN id > 2 THEN NULL ELSE name END AS v FROM $planets")) == 9
+    # NULLIF lowers to IIF(a = b, NULL, a), so it is the single-branch path by
+    # construction — the most likely thing a too-eager refusal would break.
+    assert len(_values("SELECT NULLIF(name, 'Earth') AS v FROM $planets")) == 9
+    assert len(_values("SELECT NULLIF(id, 3) AS v FROM $planets")) == 9
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

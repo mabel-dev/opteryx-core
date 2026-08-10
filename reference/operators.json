@@ -6,7 +6,8 @@
         "node_kind": "logical",
         "category": "logical",
         "description": "Logical conjunction.",
-        "documentation": "Returns true only when both boolean operands evaluate to true."
+        "documentation": "Returns true only when both boolean operands evaluate to true.",
+        "implemented": true
     },
     "ArrayContainsAll": {
         "ast_symbol": "ArrayContainsAll",
@@ -15,7 +16,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Array contains-all operator.",
-        "documentation": "Returns true when the left array contains all values from the right array."
+        "documentation": "Returns true when the left array contains all values from the right array.",
+        "implemented": true
     },
     "Arrow": {
         "ast_symbol": "Arrow",
@@ -25,6 +27,7 @@
         "category": "extraction",
         "description": "JSON extraction operator.",
         "documentation": "Returns the selected JSON value from a document or JSON-like value.",
+        "implemented": true,
         "notes": "The result type is dynamic because the selected JSON value may be scalar, object, array, or null."
     },
     "AtArrow": {
@@ -34,7 +37,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Array containment operator.",
-        "documentation": "Returns true when the left array contains any of the values provided by the right array."
+        "documentation": "Returns true when the left array contains any of the values provided by the right array.",
+        "implemented": true
     },
     "AtQuestion": {
         "ast_symbol": "AtQuestion",
@@ -43,7 +47,9 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "JSON path existence operator.",
-        "documentation": "Returns true when the supplied JSON path expression matches within the left document."
+        "documentation": "Returns true when the supplied JSON path expression matches within the left document.",
+        "implemented": false,
+        "notes": "NOT EXECUTABLE. The dialect parses `@?` and the binder types it (operator_map carries the VARCHAR/NVARCHAR/VARBINARY/VARIANT pairs), but the native engine has no kernel for it, in a filter or in a projection \u2014 both fail at lowering with \"outside the c-native kernel set\". Use `doc->'key' IS NOT NULL` instead."
     },
     "BitwiseAnd": {
         "ast_symbol": "BitwiseAnd",
@@ -52,7 +58,8 @@
         "node_kind": "binary",
         "category": "bitwise",
         "description": "Bitwise AND operator.",
-        "documentation": "Combines integer operands using a bitwise AND operation."
+        "documentation": "Combines integer operands using a bitwise AND operation.",
+        "implemented": true
     },
     "BitwiseOr": {
         "ast_symbol": "BitwiseOr",
@@ -61,7 +68,8 @@
         "node_kind": "binary",
         "category": "bitwise",
         "description": "Bitwise OR operator.",
-        "documentation": "Combines integer operands using a bitwise OR operation."
+        "documentation": "Combines integer operands using a bitwise OR operation.",
+        "implemented": true
     },
     "BitwiseXor": {
         "ast_symbol": "BitwiseXor",
@@ -70,7 +78,8 @@
         "node_kind": "binary",
         "category": "bitwise",
         "description": "Bitwise XOR operator.",
-        "documentation": "Combines integer operands using a bitwise exclusive OR operation."
+        "documentation": "Combines integer operands using a bitwise exclusive OR operation.",
+        "implemented": true
     },
     "Divide": {
         "ast_symbol": "Divide",
@@ -79,7 +88,8 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Division operator.",
-        "documentation": "Returns the quotient of two numeric operands."
+        "documentation": "Returns the quotient of two numeric operands.",
+        "implemented": true
     },
     "Eq": {
         "ast_symbol": "Eq",
@@ -88,7 +98,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Equality comparison.",
-        "documentation": "Returns true when both operands compare equal."
+        "documentation": "Returns true when both operands compare equal.",
+        "implemented": true
     },
     "Gt": {
         "ast_symbol": "Gt",
@@ -97,7 +108,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Greater-than comparison.",
-        "documentation": "Returns true when the left operand is greater than the right operand."
+        "documentation": "Returns true when the left operand is greater than the right operand.",
+        "implemented": true
     },
     "GtEq": {
         "ast_symbol": "GtEq",
@@ -106,7 +118,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Greater-than-or-equal comparison.",
-        "documentation": "Returns true when the left operand is greater than or equal to the right operand."
+        "documentation": "Returns true when the left operand is greater than or equal to the right operand.",
+        "implemented": true
     },
     "ILike": {
         "ast_symbol": "ILike",
@@ -115,7 +128,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Case-insensitive pattern match comparison.",
-        "documentation": "Returns true when the left string matches the SQL ILIKE pattern on the right without case sensitivity."
+        "documentation": "Returns true when the left string matches the SQL ILIKE pattern on the right without case sensitivity.",
+        "implemented": true
     },
     "IPContainedBy": {
         "ast_symbol": "IPContainedBy",
@@ -125,6 +139,7 @@
         "category": "comparison",
         "description": "IPv4 CIDR containment operator.",
         "documentation": "Returns true when the left IPv4 address falls inside the network given on the right in CIDR notation, for example `ip <<= '10.0.0.0/8'`. Comparison is on the underlying 32-bit address, so it is a single mask-and-compare per row with no text parsing.",
+        "implemented": true,
         "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension. A NULL address is not contained by any network and yields false. An invalid or prefix-less CIDR raises rather than matching nothing."
     },
     "IPContains": {
@@ -135,6 +150,7 @@
         "category": "comparison",
         "description": "IPv4 CIDR containment operator, reversed.",
         "documentation": "Returns true when the network on the left, in CIDR notation, contains the IPv4 address on the right, for example `'10.0.0.0/8' >>= ip`. The mirror of `<<=`.",
+        "implemented": true,
         "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension."
     },
     "InList": {
@@ -144,7 +160,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Membership comparison.",
-        "documentation": "Returns true when the left operand matches any element in the right-hand list or array."
+        "documentation": "Returns true when the left operand matches any element in the right-hand list or array.",
+        "implemented": true
     },
     "Like": {
         "ast_symbol": "Like",
@@ -153,7 +170,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Pattern match comparison.",
-        "documentation": "Returns true when the left string matches the SQL LIKE pattern on the right."
+        "documentation": "Returns true when the left string matches the SQL LIKE pattern on the right.",
+        "implemented": true
     },
     "LongArrow": {
         "ast_symbol": "LongArrow",
@@ -162,7 +180,8 @@
         "node_kind": "extraction",
         "category": "extraction",
         "description": "JSON text extraction operator.",
-        "documentation": "Returns the selected JSON value encoded as a blob or text-like binary value."
+        "documentation": "Returns the selected JSON value encoded as a blob or text-like binary value.",
+        "implemented": true
     },
     "Lt": {
         "ast_symbol": "Lt",
@@ -171,7 +190,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Less-than comparison.",
-        "documentation": "Returns true when the left operand is less than the right operand."
+        "documentation": "Returns true when the left operand is less than the right operand.",
+        "implemented": true
     },
     "LtEq": {
         "ast_symbol": "LtEq",
@@ -180,7 +200,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Less-than-or-equal comparison.",
-        "documentation": "Returns true when the left operand is less than or equal to the right operand."
+        "documentation": "Returns true when the left operand is less than or equal to the right operand.",
+        "implemented": true
     },
     "MapAccess": {
         "ast_symbol": "MapAccess",
@@ -190,6 +211,7 @@
         "category": "extraction",
         "description": "Subscript access operator.",
         "documentation": "Returns the element at the requested index from an array, string, or blob-like value.",
+        "implemented": true,
         "notes": "Subcript access is zero-based, the first element is at index 0. For arrays the result type depends on the array element type, so the exported result type may be dynamic."
     },
     "Minus": {
@@ -199,7 +221,8 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Subtraction operator.",
-        "documentation": "Returns the difference between two numeric, date, timestamp, or interval-compatible operands."
+        "documentation": "Returns the difference between two numeric, date, timestamp, or interval-compatible operands.",
+        "implemented": true
     },
     "Modulo": {
         "ast_symbol": "Modulo",
@@ -208,7 +231,8 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Modulo operator.",
-        "documentation": "Returns the remainder after division of the left numeric operand by the right numeric operand."
+        "documentation": "Returns the remainder after division of the left numeric operand by the right numeric operand.",
+        "implemented": true
     },
     "Multiply": {
         "ast_symbol": "Multiply",
@@ -217,7 +241,8 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Multiplication operator.",
-        "documentation": "Returns the product of two numeric operands."
+        "documentation": "Returns the product of two numeric operands.",
+        "implemented": true
     },
     "MyIntegerDivide": {
         "ast_symbol": "MyIntegerDivide",
@@ -226,7 +251,8 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Integer division operator.",
-        "documentation": "Divides two integers and truncates the result toward zero."
+        "documentation": "Divides two integers and truncates the result toward zero.",
+        "implemented": true
     },
     "NotEq": {
         "ast_symbol": "NotEq",
@@ -235,7 +261,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Inequality comparison.",
-        "documentation": "Returns true when the operands do not compare equal."
+        "documentation": "Returns true when the operands do not compare equal.",
+        "implemented": true
     },
     "NotILike": {
         "ast_symbol": "NotILike",
@@ -244,7 +271,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Negated case-insensitive pattern match comparison.",
-        "documentation": "Returns true when the left string does not match the SQL ILIKE pattern on the right."
+        "documentation": "Returns true when the left string does not match the SQL ILIKE pattern on the right.",
+        "implemented": true
     },
     "NotInList": {
         "ast_symbol": "NotInList",
@@ -253,7 +281,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Negated membership comparison.",
-        "documentation": "Returns true when the left operand does not match any element in the right-hand list or array."
+        "documentation": "Returns true when the left operand does not match any element in the right-hand list or array.",
+        "implemented": true
     },
     "NotLike": {
         "ast_symbol": "NotLike",
@@ -262,7 +291,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Negated pattern match comparison.",
-        "documentation": "Returns true when the left string does not match the SQL LIKE pattern on the right."
+        "documentation": "Returns true when the left string does not match the SQL LIKE pattern on the right.",
+        "implemented": true
     },
     "NotRLike": {
         "ast_symbol": "NotRLike",
@@ -271,7 +301,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Negated regular expression match comparison.",
-        "documentation": "Returns true when the left string does not match the regular expression on the right."
+        "documentation": "Returns true when the left string does not match the regular expression on the right.",
+        "implemented": true
     },
     "Or": {
         "ast_symbol": "Or",
@@ -280,7 +311,8 @@
         "node_kind": "logical",
         "category": "logical",
         "description": "Logical disjunction.",
-        "documentation": "Returns true when either boolean operand evaluates to true."
+        "documentation": "Returns true when either boolean operand evaluates to true.",
+        "implemented": true
     },
     "Plus": {
         "ast_symbol": "Plus",
@@ -289,7 +321,8 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "Addition operator.",
-        "documentation": "Returns the sum of two numeric or interval-compatible operands."
+        "documentation": "Returns the sum of two numeric or interval-compatible operands.",
+        "implemented": true
     },
     "RLike": {
         "ast_symbol": "RLike",
@@ -298,7 +331,8 @@
         "node_kind": "comparison",
         "category": "comparison",
         "description": "Regular expression match comparison.",
-        "documentation": "Returns true when the left string matches the regular expression on the right."
+        "documentation": "Returns true when the left string matches the regular expression on the right.",
+        "implemented": true
     },
     "ShiftLeft": {
         "ast_symbol": "ShiftLeft",
@@ -307,7 +341,9 @@
         "node_kind": "binary",
         "category": "bitwise",
         "description": "Left shift operator.",
-        "documentation": "Shifts the bits of the left integer operand left by the number of positions in the right operand."
+        "documentation": "Shifts the bits of the left integer operand left by the number of positions in the right operand.",
+        "implemented": true,
+        "notes": "The shift count must be 0..63 - the operands are 64-bit integers, and a count outside that range fails loud ('bitwise_shl: shift count out of range') rather than wrapping or saturating."
     },
     "ShiftRight": {
         "ast_symbol": "ShiftRight",
@@ -316,7 +352,9 @@
         "node_kind": "binary",
         "category": "bitwise",
         "description": "Right shift operator.",
-        "documentation": "Shifts the bits of the left integer operand right by the number of positions in the right operand."
+        "documentation": "Shifts the bits of the left integer operand right by the number of positions in the right operand.",
+        "implemented": true,
+        "notes": "The shift count must be 0..63 - the operands are 64-bit integers, and a count outside that range fails loud ('bitwise_shr: shift count out of range') rather than wrapping or saturating."
     },
     "StringConcat": {
         "ast_symbol": "StringConcat",
@@ -325,7 +363,8 @@
         "node_kind": "binary",
         "category": "binary",
         "description": "String concatenation operator.",
-        "documentation": "Concatenates the left and right string or blob operands."
+        "documentation": "Concatenates the left and right string or blob operands.",
+        "implemented": true
     },
     "Xor": {
         "ast_symbol": "Xor",
@@ -334,6 +373,7 @@
         "node_kind": "logical",
         "category": "logical",
         "description": "Logical exclusive OR.",
-        "documentation": "Returns true when exactly one boolean operand evaluates to true."
+        "documentation": "Returns true when exactly one boolean operand evaluates to true.",
+        "implemented": true
     }
 }

@@ -8,6 +8,27 @@ from pathlib import Path
 from typing import Any
 
 CLAUSE_DEFINITIONS = {
+    "alter_table": {
+        "canonical_name": "ALTER TABLE",
+        "planner_entry": "plan_alter_table",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column, ...)",
+            "ALTER TABLE [IF EXISTS] table_name RENAME TO new_table_name",
+        ],
+        "summary": "Change a table's clustering columns or its name.",
+        "documentation": (
+            "CLUSTER BY records the columns a catalog-backed table is sorted by, in "
+            "priority order. RENAME TO renames the relation and may move it between "
+            "collections."
+        ),
+        "notes": (
+            "One operation per statement. CLUSTER BY takes column names, not "
+            "expressions. RENAME TO cannot cross workspaces. Every other ALTER TABLE "
+            "operation (ADD COLUMN, DROP COLUMN, ...) is rejected at plan time."
+        ),
+    },
     "alter_view": {
         "canonical_name": "ALTER VIEW",
         "planner_entry": "plan_alter_view",
@@ -17,6 +38,44 @@ CLAUSE_DEFINITIONS = {
         "summary": "Alter a view definition.",
         "documentation": "The logical planner stores the replacement query and view metadata.",
         "notes": "Supports optional column lists.",
+    },
+    "alter_workspace": {
+        "canonical_name": "ALTER WORKSPACE",
+        "planner_entry": "plan_alter_workspace",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["ALTER WORKSPACE workspace SET property TO value"],
+        "summary": "Set a protection property on a workspace itself.",
+        "documentation": (
+            "Sets one of the properties in WORKSPACE_PROPERTIES on the workspace's catalog "
+            "entry. Both are protections and both default to ON: deletion_protection refuses "
+            "deletion of the workspace, egress_protection refuses automated copies of its "
+            "data into another workspace. Values are ON/OFF (TRUE/FALSE accepted)."
+        ),
+        "notes": (
+            "Names a workspace, never a relation within one; a qualified name is rejected. "
+            "An unrecognised property name is rejected at plan time. Requires a connector "
+            "with a catalog to store the property in."
+        ),
+    },
+    "refresh_materialized_view": {
+        "canonical_name": "REFRESH MATERIALIZED VIEW",
+        "planner_entry": "plan_refresh_materialized_view",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["REFRESH MATERIALIZED VIEW view_name"],
+        "summary": "Rebuild a materialized view from its defining SELECT.",
+        "documentation": (
+            "Re-runs the view's current definition and replaces its contents, reusing the "
+            "CREATE OR REPLACE TABLE AS write path so the swap is atomic. Views also refresh "
+            "automatically when a source table takes a user write; this statement is for "
+            "rebuilding after a failed refresh or a redefinition."
+        ),
+        "notes": (
+            "Takes no options. Refused if the target is not a materialized view. A "
+            "materialized view is not a table: CTAS, INSERT, TRUNCATE and ALTER TABLE are "
+            "all refused against one."
+        ),
     },
     "analyze_table": {
         "canonical_name": "ANALYZE TABLE",
@@ -42,6 +101,60 @@ CLAUSE_DEFINITIONS = {
         "documentation": "The SQL rewriter normalizes TABLE and VIEW to EXTENSION before parsing.",
         "notes": "Supports IF EXISTS.",
     },
+    "create_collection": {
+        "canonical_name": "CREATE COLLECTION",
+        "planner_entry": "plan_create_collection",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["CREATE COLLECTION [IF NOT EXISTS] workspace.collection"],
+        "summary": "Create a collection inside a workspace.",
+        "documentation": (
+            "The SQL rewriter turns this into CREATE SCHEMA, which the parser has a "
+            "grammar for; CREATE SCHEMA spelled directly lands on the same builder."
+        ),
+        "notes": (
+            "The name is always two parts, workspace.collection; a bare or three-part "
+            "name is rejected at plan time. Creating a collection is optional - one "
+            "comes into existence with the first relation placed in it."
+        ),
+    },
+    "create_materialized_view": {
+        "canonical_name": "CREATE MATERIALIZED VIEW",
+        "planner_entry": "plan_create_view",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["CREATE [OR REPLACE] MATERIALIZED VIEW view_name AS query"],
+        "summary": "Create a self-refreshing materialized view.",
+        "documentation": (
+            "Planned as CTAS plus registration: the query runs now and its result is "
+            "written as a backing table, and refresh triggers are registered on every "
+            "source table so commits to them re-run the query."
+        ),
+        "notes": (
+            "IF NOT EXISTS and explicit column lists are rejected; use CREATE OR "
+            "REPLACE, and name columns with AS in the SELECT."
+        ),
+    },
+    "create_table": {
+        "canonical_name": "CREATE TABLE",
+        "planner_entry": "plan_create_table",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "CREATE TABLE [IF NOT EXISTS] table_name (column_name column_type [NOT NULL], ...)",
+            "CREATE [OR REPLACE] TABLE table_name AS query",
+        ],
+        "summary": "Create a table, optionally from a query result.",
+        "documentation": (
+            "The explicit-column form builds a RelationSchema, resolving each declared "
+            "type exactly as a CAST target resolves. The AS query form (CTAS) plans the "
+            "SELECT and attaches an Insert sink, deriving the target schema at bind time."
+        ),
+        "notes": (
+            "OR REPLACE applies to the CTAS form only. EXTERNAL, TEMPORARY, TRANSIENT, "
+            "VOLATILE and ICEBERG are rejected, as is a column list on a CTAS."
+        ),
+    },
     "create_view": {
         "canonical_name": "CREATE VIEW",
         "planner_entry": "plan_create_view",
@@ -61,6 +174,68 @@ CLAUSE_DEFINITIONS = {
         "summary": "Deduplicate result rows.",
         "documentation": "Distinct can be pushed down in some planner paths and appears as a logical plan node.",
         "notes": "DISTINCT ON is rendered but may be planner-specific.",
+    },
+    "drop_collection": {
+        "canonical_name": "DROP COLLECTION",
+        "planner_entry": "plan_drop",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["DROP COLLECTION [IF EXISTS] workspace.collection"],
+        "summary": "Drop an empty collection.",
+        "documentation": (
+            "The SQL rewriter turns this into DROP SCHEMA; plan_drop routes the Schema "
+            "object type to a DropCollection node."
+        ),
+        "notes": (
+            "The collection must already be empty - the drop never cascades. CASCADE, "
+            "RESTRICT and PURGE are rejected rather than accepted and ignored."
+        ),
+    },
+    "drop_materialized_view": {
+        "canonical_name": "DROP MATERIALIZED VIEW",
+        "planner_entry": "plan_drop",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["DROP MATERIALIZED VIEW [IF EXISTS] view_name"],
+        "summary": "Drop a materialized view.",
+        "documentation": (
+            "Builds the same DropRelation node as DROP TABLE, flagged so execution "
+            "routes to the connector's materialized-view drop, which also removes the "
+            "refresh triggers from every source table."
+        ),
+        "notes": (
+            "DROP TABLE against a materialized view is rejected, and this statement "
+            "against a plain table is rejected, each pointing at the other."
+        ),
+    },
+    "drop_table": {
+        "canonical_name": "DROP TABLE",
+        "planner_entry": "plan_drop",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["DROP TABLE [IF EXISTS] table_name"],
+        "summary": "Drop a table.",
+        "documentation": "Supports dropping one or more tables with optional IF EXISTS.",
+        "notes": (
+            "CASCADE, RESTRICT and PURGE are rejected rather than accepted and ignored."
+        ),
+    },
+    "drop_trigger": {
+        "canonical_name": "DROP TRIGGER",
+        "planner_entry": "plan_drop_trigger",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["DROP TRIGGER [IF EXISTS] trigger_name ON table_name"],
+        "summary": "Remove a refresh trigger from a table.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception; the dialect has no "
+            "native sqlparser grammar for trigger statements."
+        ),
+        "notes": (
+            "The table is required: trigger names are unique only per dataset, and the "
+            "table is the permission target. The materialized view stays queryable but "
+            "stops refreshing."
+        ),
     },
     "drop_view": {
         "canonical_name": "DROP VIEW",
@@ -111,6 +286,25 @@ CLAUSE_DEFINITIONS = {
         "summary": "Filter grouped results.",
         "documentation": "HAVING predicates are preserved in the logical plan and later optimized.",
         "notes": "Aggregate references in HAVING are handled by planner rewrite paths.",
+    },
+    "insert": {
+        "canonical_name": "INSERT",
+        "planner_entry": "plan_insert",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "INSERT INTO table_name [(column, ...)] VALUES (value, ...)",
+            "INSERT INTO table_name [(column, ...)] SELECT ...",
+        ],
+        "summary": "Add rows to a table.",
+        "documentation": (
+            "The VALUES form feeds a VALUES function dataset into an Insert sink; the "
+            "SELECT form plans the query and attaches the sink to its Exit node."
+        ),
+        "notes": (
+            "INSERT OVERWRITE is rejected; TRUNCATE the table first. An explicit column "
+            "list must name every column in the target relation."
+        ),
     },
     "limit": {
         "canonical_name": "LIMIT",
@@ -182,6 +376,22 @@ CLAUSE_DEFINITIONS = {
         "documentation": "Handled as a SHOW node with object metadata.",
         "notes": "Currently used for view-style objects.",
     },
+    "show_triggers": {
+        "canonical_name": "SHOW TRIGGERS",
+        "planner_entry": "plan_show_variables",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SHOW TRIGGERS FOR table_name"],
+        "summary": "List the refresh triggers attached to a table.",
+        "documentation": (
+            "Reached through the parser's generic SHOW catch-all and planned as a "
+            "filtered scan of the workspace's information_schema.triggers."
+        ),
+        "notes": (
+            "Bare SHOW TRIGGERS is rejected - there is no session default workspace to "
+            "enumerate; name the table with FOR, or query information_schema.triggers."
+        ),
+    },
     "top": {
         "canonical_name": "TOP",
         "planner_entry": "plan_query",
@@ -191,6 +401,19 @@ CLAUSE_DEFINITIONS = {
         "summary": "Legacy limit syntax.",
         "documentation": "Rejected by the planner; use LIMIT instead.",
         "notes": "The logical planner emits an UnsupportedSyntaxError.",
+    },
+    "truncate_table": {
+        "canonical_name": "TRUNCATE TABLE",
+        "planner_entry": "plan_truncate",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["TRUNCATE TABLE [IF EXISTS] table_name"],
+        "summary": "Remove every row from a table, keeping the table and its schema.",
+        "documentation": "Builds a TruncateRelation node carrying the relation name.",
+        "notes": (
+            "The TABLE keyword is required, and a single table name is accepted per "
+            "statement."
+        ),
     },
     "union": {
         "canonical_name": "UNION",

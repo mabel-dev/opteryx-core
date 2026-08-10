@@ -6,6 +6,7 @@
 #include <system_error>
 
 #include "fast_float/fast_float.h"
+#include "ops/float_ops.h"   // fp_canon — ingestion canonicalisation of -0.0 / NaN
 
 namespace rugo::_jsonl {
 
@@ -36,7 +37,19 @@ inline bool fast_parse_float64(const uint8_t* data, uint32_t start, uint32_t end
         return false;
     }
 
-    out = value;
+    // Ingestion canonicalisation: -0.0 -> +0.0, any NaN bit-pattern -> one
+    // canonical quiet NaN (draken/ops/float_ops.h, architect-locked 2026-05-22).
+    // Every caller of this parser is an ingestion point — JSONL and CSV value
+    // decode, CSV type sniffing, and the CSV pushed-predicate literal — so one
+    // canon here is the whole text-format story.
+    //
+    // Unlike the Parquet reader, there is no fidelity argument for keeping the
+    // sign here: `-0.0` in a CSV cell is a LITERAL, and the SQL literal path
+    // already canonicalises it (`CAST(-0.0 AS FLOAT64)` is `0.0`). Leaving it
+    // signed made the same text mean different things depending on whether it
+    // arrived through a file or through the query, and split `GROUP BY f` into
+    // two groups for a value `f = 0.0` matched twice.
+    out = draken::ops::fp_canon(value);
     return true;
 }
 

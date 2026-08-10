@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
-from opteryx.planner.sql_rewriter import sql_parts
+from opteryx.planner.sql_rewriter import do_sql_rewrite
 
 # Define the test cases as a list of (input, expected_output) tuples
 # fmt:off
@@ -67,7 +67,7 @@ test_cases = [
 
 @pytest.mark.parametrize("input_text, expected_output", test_cases)
 def test_replace_b_strings(input_text, expected_output):
-    assert " ".join(sql_parts(input_text)).replace(" ", "") == expected_output.replace(" ", "")
+    assert str(do_sql_rewrite(input_text)).replace(" ", "") == expected_output.replace(" ", "")
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -88,11 +88,11 @@ if __name__ == "__main__":  # pragma: no cover
             f"\033[0;36m{(index + 1):04}\033[0m {case[0:width - 1].ljust(width)}",
             end="",
         )
-        if " ".join(sql_parts(case)).replace(" ", "") == expected.replace(" ", ""):
+        if str(do_sql_rewrite(case)).replace(" ", "") == expected.replace(" ", ""):
             print(f"\033[0;32m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms\033[0m ✅")
         else:
             print(f"\033[0;31m{str(int((time.monotonic_ns() - start)/1e6)).rjust(4)}ms\033[0m ❌")
             print("Expected:", expected)
-            print("Recieved:", " ".join(sql_parts(case)))
+            print("Recieved:", str(do_sql_rewrite(case)))
 
     print("--- ✅ \033[0;32mdone\033[0m")

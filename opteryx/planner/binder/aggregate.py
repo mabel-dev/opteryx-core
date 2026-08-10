@@ -129,18 +129,18 @@ def visit_aggregate_and_group(
     for array_agg in [agg for agg in tmp_aggregates if agg.value == "ARRAY_AGG"]:
         if not node.groups:
             raise UnsupportedSyntaxError(
-                "ARRAY_AGG requires a GROUP BY clause, and cannot GROUP BY a literal value."
+                "ARRAY_AGG requires a **GROUP BY** clause, and cannot **GROUP BY** a literal value."
             )
         if array_agg.order:
             if len(array_agg.order) > 1:
-                raise UnsupportedSyntaxError("ARRAY_AGG can only ORDER BY the aggregated column.")
+                raise UnsupportedSyntaxError("ARRAY_AGG can only **ORDER BY** the aggregated column.")
             if array_agg.order[0][0].current_name != array_agg.parameters[0].current_name:
-                raise UnsupportedSyntaxError("ARRAY_AGG can only ORDER BY the aggregated column.")
+                raise UnsupportedSyntaxError("ARRAY_AGG can only **ORDER BY** the aggregated column.")
 
     for any_value in [agg for agg in tmp_aggregates if agg.value == "ANY_VALUE"]:
         if not node.groups:
             raise UnsupportedSyntaxError(
-                "ANY_VALUE requires a GROUP BY clause, and cannot GROUP BY a literal value."
+                "ANY_VALUE requires a **GROUP BY** clause, and cannot **GROUP BY** a literal value."
             )
 
     # we should always have a derived schema

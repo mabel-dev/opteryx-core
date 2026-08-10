@@ -74,6 +74,14 @@ class OperatorFusionStrategy(OptimizationStrategy):
                     new_node = LogicalPlanNode(node_type=LogicalPlanStepType.HeapSort)
                     new_node.limit = next_node.limit
                     new_node.order_by = node.order_by
+                    # This strategy runs AFTER projection pushdown, so the fused node
+                    # is the only place the Order's active-column set can come from —
+                    # a fresh LogicalPlanNode has none, and without it the HeapSort
+                    # would gather every column including an ORDER BY key nothing
+                    # above it reads. The ORDER's set, not the LIMIT's: the fused node
+                    # emits what the Order emitted, and a LIMIT adds no columns of its
+                    # own so the two sets are the same set anyway.
+                    new_node.pre_update_columns = getattr(node, "pre_update_columns", None)
                     new_node.vector_topk_candidate = self._is_vector_topk_candidate(node.order_by)
                     context.optimized_plan[next_node_id] = new_node
                     context.optimized_plan.remove_node(context.node_id, heal=True)

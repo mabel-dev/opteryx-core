@@ -158,7 +158,9 @@ class IntersectToSemiJoinStrategy(PlanRewriteStrategy):
             )
 
             join_node = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
-            join_node.type = "left semi"
+            # not-distinct: see the matching comment in except_to_anti_join. Plain
+            # "left semi" dropped every NULL-bearing row from an INTERSECT.
+            join_node.type = "left semi not-distinct"
             join_node.on = on_condition
             join_node.using = None
             join_node.left_relation_names = live_left

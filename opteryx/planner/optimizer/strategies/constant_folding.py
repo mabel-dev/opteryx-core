@@ -34,6 +34,56 @@ from opteryx.types.logical_type import LogicalCategory as LC
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 
 
+def _is_rewrite_only(node) -> bool:
+    """True for a FUNCTION that has no implementation of its own to call.
+
+    CONCAT, CONCAT_WS and the null-conditional family are DESUGARED
+    (PredicateRewriteStrategy / FunctionRewriteStrategy turn CONCAT into a
+    StringConcat chain, IIF into IF_THEN_ELSE, ...) rather than executed, so their
+    catalog overload carries no `callable_ref`. Asking the expression VM to run one
+    undesugared reaches `callable_obj(...)` with None and raises
+    "'NoneType' object is not callable" — a bare Python TypeError, from an ordinary
+    all-literal predicate.
+
+    Read off the resolved overload rather than a name list, so a function that
+    later gains or loses a kernel does not leave a stale name behind. There are
+    seven of these and they are exactly the desugared family.
+    """
+    if node.node_type != NodeType.FUNCTION or node.function_ref is None:
+        return False
+    kernel = node.function_ref.selected_overload.kernel
+    return kernel is None or kernel.callable_ref is None
+
+
+def _desugar_rewrite_only(node, telemetry: QueryTelemetry):
+    """Desugar every rewrite-only FUNCTION in `node`'s subtree, bottom up.
+
+    Constant folding runs BEFORE the strategies that do this desugaring (see the
+    strategy order in optimizer/__init__), so an all-literal call arrives here in a
+    form nothing can execute. The folder already handled the case where such a call
+    is the whole expression; a call NESTED inside one was missed, which is why
+    `WHERE (CONCAT(647310.0000, b'item') < 'zeta')` raised while
+    `SELECT CONCAT('a', 'b')` folded. Depth is the only difference between them.
+
+    Children first: `_rewrite_function` inspects its own parameters, so it has to
+    see them in their final form.
+    """
+    from .predicate_rewriter import _rewrite_function
+
+    for attr in ("left", "centre", "right"):
+        child = getattr(node, attr, None)
+        if isinstance(child, Node):
+            setattr(node, attr, _desugar_rewrite_only(child, telemetry))
+    if node.parameters:
+        node.parameters = [
+            _desugar_rewrite_only(param, telemetry) if isinstance(param, Node) else param
+            for param in node.parameters
+        ]
+    if _is_rewrite_only(node):
+        return _rewrite_function(node, telemetry)
+    return node
+
+
 def _build_if_not_null_node(root, value, value_if_not_null) -> Node:
     from opteryx.expression.functions import get_catalog
 
@@ -448,21 +498,18 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         # real VECTOR(n) it always was.)
         and _root_cat != LC.VECTOR
     ):
-        if root.node_type == NodeType.FUNCTION:
-            # Some functions (CONCAT, CONCAT_WS, ...) are rewrite-only: they have
-            # no kernel/callable_ref of their own and are only ever meant to reach
-            # execution after PredicateRewriteStrategy/FunctionRewriteStrategy
-            # desugar them (e.g. CONCAT -> StringConcat chains). Those strategies
-            # run AFTER ConstantFoldingStrategy, so an all-literal call such as
-            # CONCAT('a', 'b') arrived here undesugared and its callable_ref was
-            # None -- 'NoneType' object is not callable. Apply the same rewrite
-            # here first so folding evaluates the canonical executable form.
-            from .predicate_rewriter import _rewrite_function
-
-            rewritten = _rewrite_function(root, telemetry)
-            if rewritten is not root or rewritten.node_type != NodeType.FUNCTION:
-                return fold_constants(rewritten, telemetry)
-            root = rewritten
+        # Some functions (CONCAT, CONCAT_WS, ...) are rewrite-only: they have no
+        # kernel/callable_ref of their own and are only ever meant to reach
+        # execution after PredicateRewriteStrategy/FunctionRewriteStrategy desugar
+        # them (e.g. CONCAT -> StringConcat chains). Those strategies run AFTER
+        # ConstantFoldingStrategy, so an all-literal call such as CONCAT('a', 'b')
+        # arrives here undesugared and its callable_ref is None -- 'NoneType'
+        # object is not callable. Apply the same rewrite here first, ANYWHERE in
+        # the subtree about to be evaluated, so folding sees the canonical
+        # executable form (see _desugar_rewrite_only).
+        rewritten = _desugar_rewrite_only(root, telemetry)
+        if rewritten is not root:
+            return fold_constants(rewritten, telemetry)
 
         table = no_table_data.read()
         bc = build_bytecode(lower(root))

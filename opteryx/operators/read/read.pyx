@@ -218,7 +218,7 @@ cdef class ReaderNode(BasePlanNode):
         Yields raw morsels; the engine pushes each one into the chain and
         sends a terminal EOS after the iterator exhausts."""
         if not self.connector:
-            raise UnsupportedSyntaxError(
+            raise InvalidInternalStateError(
                 "ReaderNode is restricted to internal virtual datasets. "
                 "Use ParquetReadNode for external table scans."
             )

@@ -26,7 +26,13 @@ from draken.draken_native import TimestampUnit
 
 from opteryx.connectors.capabilities import PredicatePushable
 from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
+from opteryx.expression import (
+    BINARY_NODE_TYPES,
+    NodeType,
+    binary_operands,
+    format_expression,
+    get_all_nodes_of_type,
+)
 from opteryx.expression.formatter import ExpressionColumn
 from opteryx.models import Node
 from opteryx.planner.binder.common import extract_join_fields
@@ -88,6 +94,46 @@ def _predicate_column_ids(predicate):
         if sc is not None and sc.identity is not None:
             out.add(sc.identity)
     return out
+
+
+def _stamp_inlined_predicate(node, condition, identifiers, target) -> None:
+    """Rewrite a Filter's condition in terms of an alias's defining expression,
+    keeping the original so the rewrite can be UNDONE.
+
+    An inlined condition is only valid at `target` — it reads raw columns the
+    alias-defining Project does not emit. `complete()` places it there, but its
+    placement is conditional (the target must still exist and still carry every
+    column), and its fallback is to restore the predicate to where it came from.
+    That position is, by construction, one where the rewritten condition is
+    invalid: the plan then fails to compile with "expression references column ...
+    which the stream does not carry".
+
+    So the original travels with the node and `_revert_inlined_predicate` puts it
+    back. An optimisation that cannot land is reverted rather than left half
+    applied — the answer is identical either way, which is the only reason a
+    rewrite of a user's predicate is allowed at all.
+    """
+    node.pre_inline_condition = node.condition
+    node.pre_inline_columns = node.columns
+    node.pre_inline_relations = node.relations
+    node.condition = condition
+    node.columns = identifiers
+    node.relations = {
+        identifier.source for identifier in identifiers if getattr(identifier, "source", None)
+    }
+    node.deep_restore_target = target
+
+
+def _revert_inlined_predicate(node) -> bool:
+    """Undo `_stamp_inlined_predicate`. True if there was a rewrite to undo."""
+    if node.pre_inline_condition is None:
+        return False
+    node.condition = node.pre_inline_condition
+    node.columns = node.pre_inline_columns
+    node.relations = node.pre_inline_relations
+    node.pre_inline_condition = None
+    node.deep_restore_target = None
+    return True
 
 
 def _deep_pushdown_target(plan, start_nid, predicate_ids, group_key_identity, emit_memo):
@@ -313,7 +359,7 @@ def _try_normalize_cast_predicate(condition: Node):
         return None
 
     op = condition.value
-    left, right = condition.left, condition.right
+    left, right = binary_operands(condition)
 
     if left.node_type == NodeType.CAST and right.node_type == NodeType.LITERAL:
         cast_node, literal_node = left, right
@@ -483,6 +529,17 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             _emit_memo = {}
             emitted = _emitted_identities(context.optimized_plan, context.node_id, _emit_memo)
             for predicate in context.collected_predicates:
+                # A deep-restore target is always BELOW the point the predicate was
+                # collected, and this node is a barrier a filter must not cross, so
+                # the target is now unreachable — the inlined condition cannot be
+                # honoured and has to come off. Reverting first also makes the
+                # predicate placeable again: the alias it was written in terms of IS
+                # carried by the barrier's output stream, whereas the raw columns the
+                # rewrite reached for are not, so the same predicate goes from
+                # "unplaced, strand it above its defining Project" to "declined, park
+                # it here" — which is what it would have been without the rewrite.
+                if _revert_inlined_predicate(predicate):
+                    self.telemetry.optimization_predicate_pushdown_inline_reverted += 1
                 if _predicate_column_ids(predicate) <= emitted:
                     # DECLINED: a filter must not cross a Limit/Union, so the
                     # predicate is put back above this node rather than pushed.
@@ -548,6 +605,15 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 context.collected_predicates.append(node)
                 context.optimized_plan.remove_node(context.node_id, heal=True)
             else:
+                # Staying put. An inlined condition is only valid at its deep
+                # target, so a predicate that is not going anywhere must not keep
+                # one — leaving it here is how the rewrite ended up above the
+                # Project that defines the alias, reading raw columns projection
+                # pushdown had already pruned. `_inline_project_alias_predicates`
+                # rewrites before pushability is decided, and this is the branch
+                # where that decision comes back "no".
+                if _revert_inlined_predicate(node):
+                    self.telemetry.optimization_predicate_pushdown_inline_reverted += 1
                 context.optimized_plan[context.node_id] = node
 
         elif node.node_type == LogicalPlanStepType.Project:
@@ -605,10 +671,27 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     remaining_predicates.append(predicate)
                     continue
                 known_columns = set(col.schema_column.identity for col in predicate.columns)
-                query_columns = {
-                    predicate.condition.left.schema_column.identity,
-                    predicate.condition.right.schema_column.identity,
-                }
+                # `query_columns` is the pair of DIRECT operands, used for exactly one
+                # test below: `query_columns == known_columns` identifies a
+                # column-vs-column predicate. A condition that is not a binary
+                # comparator has no such pair. That is not hypothetical:
+                # PredicateRewriteStrategy runs BEFORE this strategy and rewrites an
+                # ANCHORED LIKE/ILIKE ("x LIKE '%foo'") into a bare FUNCTION node
+                # (`_STARTS_WITH`/`_ENDS_WITH`/`_CI_*`), which carries `parameters` and
+                # leaves left/right/centre all None -- reading `.left.schema_column`
+                # raised AttributeError on every `UNNEST(...) ... WHERE col LIKE '%x'`.
+                # None (not an empty set) so the equality test simply cannot fire: an
+                # empty `known_columns` would otherwise compare equal and place a
+                # column-less predicate above the unnest for the wrong reason.
+                # Placement still works for these: `known_columns` is derived
+                # generically from `predicate.columns`, so a FUNCTION predicate on the
+                # unnest target is caught by the first disjunct below, and one on the
+                # feeding relation is pushed below the unnest by the clause above it.
+                if predicate.condition.node_type in BINARY_NODE_TYPES:
+                    left, right = binary_operands(predicate.condition)
+                    query_columns = {left.schema_column.identity, right.schema_column.identity}
+                else:
+                    query_columns = None
 
                 # If the predicate only references columns from the relation feeding the UNNEST,
                 # move the filter before the UNNEST so we reduce the number of rows expanded.
@@ -1032,7 +1115,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
             if node.on is None and node.type == ("inner"):
                 raise UnsupportedSyntaxError(
-                    "INNER JOIN has no valid conditions, did you mean CROSS JOIN?"
+                    "**INNER JOIN** has no valid conditions, did you mean **CROSS JOIN**?"
                 )
 
         return context
@@ -1060,6 +1143,14 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 self.telemetry.optimization_predicate_pushdown_deep_restore += 1
                 context.optimized_plan.insert_node_after(predicate.nid, predicate, target)
                 continue
+
+            # The target was refused (gone, or no longer emitting what the
+            # predicate reads — a target that was itself a collected Filter is
+            # detached from the plan at exactly this moment). The predicate is
+            # about to go back where it came from, so the rewrite that was only
+            # valid at the target has to come off with it.
+            if _revert_inlined_predicate(predicate):
+                self.telemetry.optimization_predicate_pushdown_inline_reverted += 1
 
             if predicate.plan_path is not None:
                 for nid in predicate.plan_path:
@@ -1332,14 +1423,46 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 else:
                     new_condition = expression
 
-                node.condition = new_condition
                 identifiers = get_all_nodes_of_type(new_condition, (NodeType.IDENTIFIER,))
-                node.columns = identifiers
-                node.relations = {
-                    identifier.source
-                    for identifier in identifiers
-                    if getattr(identifier, "source", None)
+                # This rewrite only pays off if the predicate can then MOVE. The
+                # alias it replaced was emitted by the Project above the descent
+                # start; the expression it replaced it with reads raw columns that
+                # Project does not emit, so a predicate left sitting where it is
+                # now references columns that are not in its input stream —
+                # projection pushdown prunes them, and the plan fails to compile
+                # with "expression references column ... which the stream does not
+                # carry". That is the stranding the TRUNC-alias path takes a
+                # deep_restore_target to avoid; this path had neither the target
+                # nor the check, and reached it whenever the rewrite produced a
+                # shape visit()'s `is_simple_comparison` gate does not recognise —
+                # a NOT, which is exactly what `WHERE NOT (bool_alias = TRUE)`
+                # produces.
+                #
+                # group_key_identity is None deliberately: unlike the TRUNC range,
+                # nothing here makes the predicate group-invariant, so
+                # _deep_pushdown_target must refuse to cross an aggregate.
+                rewritten_ids = {
+                    sc.identity
+                    for ident in identifiers
+                    for sc in (getattr(ident, "schema_column", None),)
+                    if sc is not None and sc.identity is not None
                 }
+                target = (
+                    _deep_pushdown_target(
+                        context.pre_optimized_tree,
+                        descent_start_nid,
+                        rewritten_ids,
+                        None,
+                        _emit_memo,
+                    )
+                    if rewritten_ids
+                    else None
+                )
+                if target is None:
+                    self.telemetry.optimization_predicate_pushdown_inline_project_declined += 1
+                    continue
+
+                _stamp_inlined_predicate(node, new_condition, identifiers, target)
 
                 self.telemetry.optimization_predicate_pushdown_inline_project += 1
                 return
@@ -1453,12 +1576,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
             return False
 
-        node.condition = combined
-        node.columns = identifiers
-        node.relations = {
-            identifier.source for identifier in identifiers if getattr(identifier, "source", None)
-        }
-        node.deep_restore_target = target
+        _stamp_inlined_predicate(node, combined, identifiers, target)
 
         self.telemetry.optimization_predicate_pushdown_trunc_alias_inline += 1
         return True
@@ -1598,12 +1716,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                 self.telemetry.optimization_predicate_pushdown_trunc_alias_inline_declined += 1
                 continue
 
-            node.condition = rewritten
-            node.columns = identifiers
-            node.relations = {
-                identifier.source for identifier in identifiers if getattr(identifier, "source", None)
-            }
-            node.deep_restore_target = target
+            _stamp_inlined_predicate(node, rewritten, identifiers, target)
 
             self.telemetry.optimization_predicate_pushdown_trunc_alias_inline += 1
             return True

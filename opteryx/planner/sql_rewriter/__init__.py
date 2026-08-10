@@ -8,405 +8,378 @@ The SQL Rewriter is the first transformation in the planning pipeline. It operat
 the raw SQL string before it reaches the parser.
 
 Input:  raw SQL string (bytes or str) as supplied by the caller
-Output: a cleaned SQL string safe to hand to the parser
+Output: a `RewrittenStatement` - the text the parser will see, carrying enough
+        provenance to map any position in it back to a position in the caller's text
 
 Responsibilities:
-- Decodes escape sequences (\\n, \\t, etc.) to their real characters and normalises
-  whitespace
 - Rewrites TIMESTAMP[ns/ms/s/us/d] bracketed syntax to internal type names the parser
-  accepts (e.g. TIMESTAMP[ns] → _TIMESTAMP_NS)
-- Tokenises the statement and rewrites b-string literals (b'...' → CAST(... AS VARBINARY))
-  and r-string literals (r'...' → BASE64_DECODE(...))
+  accepts (e.g. TIMESTAMP[ns] -> _TIMESTAMP_NS)
+- Rewrites b-string literals (b'...' -> CAST(... AS VARBINARY)) and r-string literals
+  (r'...' -> BASE64_DECODE(...)), which the parser's tokenizer will not produce for
+  this dialect
 - Normalises EXPLAIN FORMAT MERMAID to FORMAT GRAPHVIZ so the parser accepts it;
   rejects FORMAT GRAPHVIZ and FORMAT JSON explicitly
-- Rewrites COMMENT ON TABLE / COMMENT ON VIEW to COMMENT ON EXTENSION so the parser
-  accepts the statement
-- Rewrites CREATE/DROP COLLECTION to CREATE/DROP SCHEMA so the parser accepts the
-  statement (sqlparser-rs has no COLLECTION object type)
+- Rewrites CREATE/DROP COLLECTION to CREATE/DROP SCHEMA, and ALTER WORKSPACE to
+  ALTER FUNCTION, so the parser accepts statements whose object types it has no
+  grammar for
 
 The rewriter does NOT parse SQL into an AST; it only manipulates the text.
+
+EVERY REWRITE IS AN EDIT, NOT A REFORMAT
+----------------------------------------
+sqlparser reports a line and column for a parse failure, and hangs a `span` off every
+identifier in the AST it returns. Both index the text the PARSER was given. This module
+used to tokenise the whole statement on a keyword regex and rejoin it with single spaces
+(`SELECT name, gravity` came back as `SELECT name , gravity`), which moved every
+character to the right of the first comma and made those positions unusable for pointing
+at anything the reader actually typed.
+
+So the rewriter now only ever substitutes the spans it is actually changing, and records
+each substitution as `(out_start, out_length, src_start, src_length)`. Text the rewriter
+does not care about is passed through byte-for-byte. `RewrittenStatement.to_source_*`
+walks those records - one list per pass, applied in reverse - to turn a position in the
+parser's text back into a position in the reader's. A statement with no rewrites in it
+at all (the overwhelming majority) maps one-to-one.
+
+Comments and line structure are NOT stripped here, and must not be: the parser tokenises
+comments itself, and the line breaks are what make a caret worth printing.
 """
 
 import re
+from typing import Callable
+from typing import List
+from typing import Optional
+from typing import Sequence
+from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.utils.sql import offset_of
+from opteryx.utils.sql import position_of
 
-SQL_PARTS = {
-    r"ANALYZE\sTABLE",
-    r"ANTI\sJOIN",
-    r"ALTER\sVIEW",
-    r"COMMENT\sON",
-    r"CREATE\sTABLE",
-    r"CREATE\sVIEW",
-    r"DROP\sVIEW",
-    r"EXPLAIN\sANALYZE",
-    r"FORMAT\sMERMAID",
-    r"FORMAT\sTEXT",
-    r"REPLACE",
-    r"CROSS\sJOIN",
-    r"FROM",
-    r"FULL\sJOIN",
-    r"FULL\sOUTER\sJOIN",
-    r"INNER\sJOIN",
-    r"JOIN",
-    r"LEFT\sANTI\sJOIN",
-    r"LEFT\sJOIN",
-    r"LEFT\sOUTER\sJOIN",
-    r"LEFT\sSEMI\sJOIN",
-    r"NATURAL\sJOIN",
-    r"RIGHT\sANTI\sJOIN",
-    r"RIGHT\sJOIN",
-    r"RIGHT\sOUTER\sJOIN",
-    r"RIGHT\sSEMI\sJOIN",
-    r"SEMI\sJOIN",
-    r"GROUP\sBY",
-    r"HAVING",
-    r"LIKE",
-    r"LIMIT",
-    r"OFFSET",
-    r"ON",
-    r"ORDER\sBY",
-    r"SHOW",
-    r"SELECT",
-    r"WHERE",
-    r"WITH",
-    r"USING",
-    r";",
-    r",",
-    r"UNION",
-    r"AS",
-    r"AND",
-    r"OR",
-    r"NOT",
-}
+# One edit: where the replacement landed in the output, and what it replaced in the input.
+Edit = Tuple[int, int, int, int]
+
+# A quoted span - a string literal or a quoted identifier. Every pattern in this module
+# alternates this FIRST and declines to rewrite when it matches, so that a rewrite never
+# reaches inside a literal. SQL escapes a quote by doubling it ('don''t' is one literal,
+# not two), which `'[^']*'` cannot express - it ends the literal at the first inner quote
+# and everything after it is read as bare SQL. `(?:[^']|'')*` consumes a doubled quote as
+# one unit instead. The two alternatives are disjoint (the first cannot match a quote, the
+# second only matches a pair), so there is nothing for the engine to backtrack over.
+_QUOTED_SPAN = r'"(?:[^"]|"")*"' r"|'(?:[^']|'')*'" r"|`[^`]*`"
 
 
-# Matches either a quoted span (captured, left untouched) or a literal/escaped
-# newline, tab, or carriage return outside quotes (captured, collapsed to a
-# single space). Quoted spans use the same doubled-quote escaping as
-# _QUOTED_STRINGS_REGEX below ('don''t' is one literal, not two).
-_WHITESPACE_NORMALIZE_REGEX = re.compile(
-    r'("(?:[^"]|"")*"'
-    r"|'(?:[^']|'')*'"
-    r"|`[^`]*`)"
-    r"|(\\r\\n|\\n|\\t|\\r|\r\n|\n|\t|\r)"
-)
+class RewrittenStatement(str):
+    """The SQL handed to the parser, plus the provenance to get back from it.
 
+    It IS the rewritten text - it is a `str` and every caller that just wants to parse
+    it can keep treating it as one. The extra state is for the callers that need to say
+    where something is: the parse-error formatter, and the binder reporting on a column.
 
-def _normalize_whitespace(statement: str) -> str:
-    """
-    Collapse literal newlines/tabs/CRs, and their backslash-escaped text forms
-    (\\n, \\t, \\r), to a single space -- everywhere except inside quoted
-    string literals, whose contents must reach the parser unchanged so it can
-    apply standard SQL string-escape decoding itself.
+    `source` is the caller's whole original statement (or batch); `source_offset` is
+    where the text this rewriter was given starts inside it, so a statement pulled out
+    of a semicolon-separated batch still reports positions in the text the reader wrote.
     """
 
-    def _replacer(match):
-        if match.group(2) is not None:
-            return " "
-        return match.group(1)  # captured quoted-span, unchanged
+    __slots__ = ("source", "source_offset", "_passes")
 
-    return _WHITESPACE_NORMALIZE_REGEX.sub(_replacer, statement)
+    def __new__(
+        cls,
+        text: str,
+        source: str,
+        source_offset: int = 0,
+        passes: Sequence[Sequence[Edit]] = (),
+    ) -> "RewrittenStatement":
+        obj = super().__new__(cls, text)
+        obj.source = source
+        obj.source_offset = source_offset
+        # Passes ran in order, each against the previous one's output, so mapping a
+        # position backwards applies them in reverse. Empty passes are dropped - the
+        # common case is that none of them fired and this is an empty tuple.
+        obj._passes = tuple(tuple(edits) for edits in passes if edits)
+        return obj
+
+    def to_source_offset(self, offset: int) -> int:
+        """Map a character offset in the parser's text to one in `source`."""
+        for edits in reversed(self._passes):
+            offset = _unmap_offset(offset, edits)
+        return offset + self.source_offset
+
+    def to_source_point(self, line: Optional[int], column: Optional[int]):
+        """Map a 1-based (line, column) in the parser's text into `source`.
+
+        Returns `(line, column, offset)` - both conventions, because the callers want
+        different ones and computing an offset from a line and column is exactly the
+        arithmetic worth doing once. `None` when there is no position to map, so a
+        caller can pass a parser result straight through without testing it first.
+        """
+        if line is None or column is None:
+            return None
+        offset = offset_of(str(self), line, column)
+        if offset is None:
+            return None
+        source_offset = self.to_source_offset(offset)
+        line, column = position_of(self.source, source_offset)
+        return (line, column, source_offset)
+
+    def to_source_position(self, line: Optional[int], column: Optional[int]):
+        """As `to_source_point`, without the offset. Returns `(None, None)` if unmappable."""
+        point = self.to_source_point(line, column)
+        return (None, None) if point is None else point[:2]
 
 
-# Precompile regex patterns at module level for performance
-#
-# `(?<![@$])` guards the leading `\b`: `@` and `$` are identifier-START characters
-# in the Opteryx dialect (see `is_identifier_start` in src/opteryx_dialect.rs), but
-# they are not word characters, so `\b` happily matches BETWEEN the sigil and the
-# name. Without the guard a variable whose name is a keyword — `@OR`, `@WHERE`,
-# `@SELECT` — was split into `@` + the keyword and rejoined as `@ OR`, which the
-# parser then rejected with "Expected: identifier, found: @". Only the 17
-# single-word SQL_PARTS entries could collide, which is why `@ORDER` (ORDER BY is
-# two words) and `@my_or` (preceded by a word char, so `\b` never matched) worked.
-_KEYWORDS_REGEX = re.compile(
-    r"(\,|\(|\)|;|\t|\n|\->>|\->|@>|@>>|\&\&|@\?|"
-    + r"|".join([r"(?<![@$])\b" + i.replace(r" ", r"\s") + r"\b" for i in SQL_PARTS])
-    + r")",
+def _unmap_offset(offset: int, edits: Sequence[Edit]) -> int:
+    """Map an offset in one pass's output back to an offset in its input.
+
+    An offset that lands INSIDE a replacement maps to the start of what was replaced:
+    the interior of `CAST('abc' AS VARBINARY)` has no counterpart in the `b'abc'` the
+    reader wrote, and the start of that literal is the only honest thing to point at.
+    """
+    source_offset = offset
+    for out_start, out_length, src_start, src_length in edits:
+        if offset < out_start:
+            break
+        if offset < out_start + out_length:
+            return src_start
+        source_offset = offset - (out_start + out_length) + (src_start + src_length)
+    return source_offset
+
+
+def _substitute(text: str, pattern, replacer: Callable) -> Tuple[str, List[Edit]]:
+    """`re.sub`, but recording where every replacement landed.
+
+    `replacer` returns the replacement text, or None to leave the match alone - which is
+    how each pattern's leading quoted-span alternative opts out without the caller having
+    to strip literals out of the statement first.
+    """
+    pieces: List[str] = []
+    edits: List[Edit] = []
+    read_from = 0
+    shift = 0
+
+    for match in pattern.finditer(text):
+        replacement = replacer(match)
+        if replacement is None:
+            continue
+        start, end = match.start(), match.end()
+        pieces.append(text[read_from:start])
+        pieces.append(replacement)
+        edits.append((start + shift, len(replacement), start, end - start))
+        shift += len(replacement) - (end - start)
+        read_from = end
+
+    if not edits:
+        return text, []
+    pieces.append(text[read_from:])
+    return "".join(pieces), edits
+
+
+# --------------------------------------------------------------------------------------
+# The rewrites
+# --------------------------------------------------------------------------------------
+
+# Backslash-escaped line breaks OUTSIDE a literal - the two characters `\` and `n`, not a
+# newline. A caller that carried the statement through JSON or a shell can deliver them,
+# and the parser has no meaning for a bare backslash. Real newlines and tabs are left
+# exactly where they are: they are the statement's line structure, and destroying it was
+# what made positions unusable.
+_ESCAPED_BREAKS = re.compile(rf"(?P<quoted>{_QUOTED_SPAN})|(?P<escape>\\r\\n|\\n|\\t|\\r)")
+
+# TIMESTAMP[ns] and friends. The parser has no grammar for a bracketed type argument, so
+# the unit is folded into the type name. Note the lengths: `TIMESTAMP[ns]` and
+# `_TIMESTAMP_NS` are both 13 characters, as are the `ms` and `us` forms, and `[s]` and
+# `_TIMESTAMP_S` are both 12 - only the `[d]` form changes length, so in practice this
+# rewrite moves nothing.
+_TEMPORAL_UNITS = re.compile(
+    rf"(?P<quoted>{_QUOTED_SPAN})"
+    r"|(?P<empty>\bTIMESTAMP\s*\[\s*\])"
+    r"|(?P<unit>\bTIMESTAMP\s*\[\s*(?P<name>ns|ms|us|s|d)\s*\])",
     re.IGNORECASE,
 )
+_TEMPORAL_INTERNAL = {
+    "ns": "_TIMESTAMP_NS",
+    "ms": "_TIMESTAMP_MS",
+    "us": "_TIMESTAMP_US",
+    "s": "_TIMESTAMP_S",
+    "d": "_TIMESTAMP_DAYS",
+}
 
-# Match ", ', b", b', `
-# We match b prefixes separately after the non-prefix versions
-#
-# A literal ends at the first quote that is NOT doubled: SQL escapes a quote by
-# doubling it ('don''t'), so `'[^']*'` cannot express one — it ended the literal at the
-# first inner quote, and `SELECT 'don''t'` tokenised as 'don' + 't', which the parts are
-# then rejoined with a space between ('a''b''c' -> 'a' 'b' 'c'). The statement never
-# reached the parser intact, so this looked like missing parser support for standard SQL
-# escaping. `(?:[^']|'')*` consumes a doubled quote as one unit instead. The two
-# alternatives are disjoint (the first cannot match a quote, the second only matches a
-# pair), so there is no ambiguity for the engine to backtrack over.
-_QUOTED_STRINGS_REGEX = re.compile(
-    r'("(?:[^"]|"")*"'
-    r'|\'(?:[^\']|\'\')*\''
-    r'|\b[bB]"(?:[^"]|"")*"'
-    r'|\b[bB]\'(?:[^\']|\'\')*\''
-    r'|\b[rR]"(?:[^"]|"")*"'
-    r'|\b[rR]\'(?:[^\']|\'\')*\''
-    r"|`[^`]*`)"
+# b'...' and r'...'. The parser's tokenizer DOES have both, but it gates them on a
+# hardcoded dialect list (`dialect_of!(self is BigQuery | Postgres | MySQL | Generic)` in
+# sqlparser's tokenizer.rs) rather than a dialect flag, so OpteryxDialect cannot opt in.
+# This rewrite is load-bearing for CORRECTNESS, not convenience: without it `SELECT b'abc'`
+# does not fail, it parses as `SELECT b AS "abc"` - a column reference with an alias, and a
+# silently wrong query. It cannot move to the AST rewriter for the same reason: that parse
+# is indistinguishable from one a reader could legitimately have meant. The fix belongs in
+# the tokenizer, upstream, behind a `supports_byte_string_literal()` dialect method.
+_PREFIXED_STRINGS = re.compile(
+    rf"(?P<quoted>{_QUOTED_SPAN})"
+    r"|(?P<bytes>\b[bB](?:\"(?:[^\"]|\"\")*\"|'(?:[^']|'')*'))"
+    r"|(?P<raw>\b[rR](?:\"(?:[^\"]|\"\")*\"|'(?:[^']|'')*'))"
 )
 
+# A projection with no alias, immediately before FROM or JOIN. The rewrite above replaces
+# the literal the reader wrote with a function call, and the output column would otherwise
+# be named after the call rather than after the literal.
+_UNALIASED = re.compile(r"\s*(?:FROM|JOIN)\s", re.IGNORECASE)
 
-def sql_parts(string):
+_EXPLAIN_FORMAT = re.compile(
+    rf"(?P<quoted>{_QUOTED_SPAN})|\bFORMAT\s+(?P<format>[A-Za-z_]+)", re.IGNORECASE
+)
+# Where the statement's head ends. Everything before the first SELECT or WITH is the
+# EXPLAIN preamble; `FORMAT` after that point belongs to the query, not to us.
+_QUERY_BODY = re.compile(rf"(?P<quoted>{_QUOTED_SPAN})|\b(?:SELECT|WITH)\b", re.IGNORECASE)
+
+_CREATE_COLLECTION = re.compile(r"^(\s*CREATE\s+)COLLECTION\b", re.IGNORECASE)
+_DROP_COLLECTION = re.compile(r"^(\s*DROP\s+)COLLECTION\b", re.IGNORECASE)
+_ALTER_WORKSPACE = re.compile(r"^(\s*ALTER\s+)WORKSPACE\b", re.IGNORECASE)
+
+
+def _rewrite_escaped_breaks(text: str) -> Tuple[str, List[Edit]]:
+    def replace(match):
+        if match.group("quoted") is not None:
+            return None
+        return " "
+
+    return _substitute(text, _ESCAPED_BREAKS, replace)
+
+
+def _rewrite_temporal_units(text: str) -> Tuple[str, List[Edit]]:
+    """TIMESTAMP[ns] -> _TIMESTAMP_NS, and friends.
+
+    An unrecognised unit is left alone deliberately - the parser rejects it by name, and
+    inventing an error here would just be a worse version of the one it already gives.
     """
-    Split a SQL statement into clauses
-    """
 
-    parts = []
-    quoted_strings = _QUOTED_STRINGS_REGEX.split(string)
-    for i, part in enumerate(quoted_strings):
-        if part and part[-1] in ("'", '"', "`"):
-            if part[0] in ("b", "B"):
-                parts.append(f"CAST({part[1:]} AS VARBINARY)")
-                # if there's no alias, we should add one to preserve the input
-                if len(quoted_strings) > i + 1:
-                    next_token = quoted_strings[i + 1]
-                    if next_token.upper().strip().startswith(("FROM ", "JOIN ")):
-                        parts.append("AS ")
-                        parts.append(f"{part[2:-1]} ")
-            elif part[0] in ("r", "R"):
-                # We take the raw string and encode it, pass it into the
-                # plan as the encoded string and let the engine decode it
-                from opteryx.third_party.mabel import base64
+    def replace(match):
+        if match.group("quoted") is not None:
+            return None
+        if match.group("empty") is not None:
+            raise UnsupportedSyntaxError(
+                "TIMESTAMP[] with empty brackets is not supported. "
+                "Use `TIMESTAMP[ns]`, `TIMESTAMP[ms]`, `TIMESTAMP[s]`, `TIMESTAMP[us]`, or `TIMESTAMP[d]`."
+            )
+        return _TEMPORAL_INTERNAL[match.group("name").lower()]
 
-                # part[2:-1] is the literal's VALUE, not SQL text — the parser never
-                # sees it to un-escape, so undouble here. (A b-string's payload goes
-                # back out as SQL, so its escapes stay doubled for the parser.)
-                encoded_part = base64.encode(part[2:-1].replace("''", "'").encode()).decode()
-                # if there's no alias, we should add one to preserve the input
-                parts.append(f"BASE64_DECODE('{encoded_part}')")
-                if len(quoted_strings) > i + 1:
-                    next_token = quoted_strings[i + 1]
-                    if next_token.upper().strip().startswith(("FROM ", "JOIN ")):
-                        parts.append("AS ")
-                        parts.append(f"{part[2:-1]} ")
-            else:
-                parts.append(part)
+    return _substitute(text, _TEMPORAL_UNITS, replace)
+
+
+def _rewrite_prefixed_strings(text: str) -> Tuple[str, List[Edit]]:
+    """b'...' -> CAST('...' AS VARBINARY), r'...' -> BASE64_DECODE('...')."""
+    from opteryx.third_party.mabel import base64
+
+    def replace(match):
+        if match.group("quoted") is not None:
+            return None
+
+        literal = match.group("bytes") or match.group("raw")
+        payload = literal[2:-1]
+
+        if match.group("bytes") is not None:
+            # The payload goes back out as SQL for the parser to re-read, so its doubled
+            # quotes stay doubled.
+            rewritten = f"CAST({literal[1:]} AS VARBINARY)"
         else:
-            for subpart in _KEYWORDS_REGEX.split(part):
-                subpart = subpart.strip()
-                if subpart:
-                    parts.append(subpart)
+            # This one does NOT go back out as SQL - it is the literal's VALUE, encoded
+            # for the engine to decode. The parser never sees it to un-escape, so the
+            # doubling has to come off here.
+            encoded = base64.encode(payload.replace("''", "'").encode()).decode()
+            rewritten = f"BASE64_DECODE('{encoded}')"
 
-    return parts
+        if _UNALIASED.match(match.string, match.end()):
+            rewritten = f"{rewritten} AS {payload}"
+        return rewritten
+
+    return _substitute(text, _PREFIXED_STRINGS, replace)
 
 
-def rewrite_explain(parts: list) -> list:
+def _rewrite_explain_format(text: str) -> Tuple[str, List[Edit]]:
+    """Normalize EXPLAIN FORMAT handling.
+
+    The parser's grammar accepts FORMAT GRAPHVIZ and FORMAT JSON but not FORMAT MERMAID.
+    Readers may write any of these, so:
+      - explicit FORMAT GRAPHVIZ or FORMAT JSON are unsupported and raise
+      - FORMAT MERMAID is rewritten to GRAPHVIZ so the parser will accept it (the logical
+        planner converts GRAPHVIZ -> MERMAID)
+
+    Only the statement's head is scanned, and only its SYNTAX: for
+    `SET @a = 'FORMAT JSON'; SELECT @a;` the literal sits in the head, and reading it as
+    a directive rejected a statement whose author was merely storing the value.
     """
-    Normalize EXPLAIN FORMAT handling.
-
-    The parser's grammar accepts FORMAT GRAPHVIZ and FORMAT JSON but not
-    FORMAT MERMAID. Users may write any of these forms; we need to:
-      - Treat explicit FORMAT GRAPHVIZ or FORMAT JSON as unsupported and raise
-      - Allow FORMAT MERMAID by rewriting it to GRAPHVIZ so the parser will
-        accept it (the logical planner will convert GRAPHVIZ -> MERMAID)
-
-    The tokenizer (sql_parts) may split things in different ways, so we
-    check both the combined head token and separated tokens.
-    """
-    # Build a head string from the tokens up to the main body (e.g., SELECT)
-    select_idx = None
-    for i, token in enumerate(parts):
-        if token.upper().startswith("SELECT") or token.upper().startswith("WITH"):
-            select_idx = i
-            break
-    head_tokens = parts[:select_idx] if select_idx is not None else parts
-    # Scan SYNTAX only, never string CONTENT. The head runs up to the first
-    # SELECT/WITH, so for `SET @a = 'FORMAT JSON'; SELECT @a;` the literal sits
-    # inside it, and matching on the raw text rejected the statement with
-    # "JSON format is not supported" — a value the user is merely storing read
-    # as a directive. Blanking quoted spans (rather than dropping whole tokens)
-    # also covers a literal embedded in a larger token, e.g. the
-    # `CAST('...' AS VARBINARY)` that sql_parts builds for a b-string.
-    head = _QUOTED_STRINGS_REGEX.sub(" ", " ".join(head_tokens)).upper()
-
-    # If the head explicitly requests GRAPHVIZ or JSON, they are unsupported
-    if "FORMAT GRAPHVIZ" in head:
-        raise UnsupportedSyntaxError("GRAPHVIZ format is not supported")
-    if "FORMAT JSON" in head:
-        raise UnsupportedSyntaxError("JSON format is not supported")
-
-    # If the head requests MERMAID, rewrite it to GRAPHVIZ so the parser accepts it
-    if "FORMAT MERMAID" in head:
-        # replace the first occurrence in the token list
-        for i, token in enumerate(parts):
-            if token.upper().startswith("FORMAT MERMAID"):
-                parts[i] = token.upper().replace("FORMAT MERMAID", "FORMAT GRAPHVIZ")
-                return parts
-
-    # Otherwise look for separate 'FORMAT' and value tokens (e.g., ['FORMAT', 'MERMAID'])
-    for i, token in enumerate(parts):
-        if token.upper() == "FORMAT":
-            # ensure there's a following token for the format value
-            if i + 1 < len(parts):
-                fmt = parts[i + 1].upper().rstrip(";")
-                if fmt == "GRAPHVIZ":
-                    raise UnsupportedSyntaxError("GRAPHVIZ format is not supported")
-                if fmt == "JSON":
-                    raise UnsupportedSyntaxError("JSON format is not supported")
-                if fmt == "MERMAID":
-                    # rewrite to GRAPHVIZ so parser accepts it
-                    parts[i + 1] = "GRAPHVIZ"
+    body_at = len(text)
+    for match in _QUERY_BODY.finditer(text):
+        if match.group("quoted") is None:
+            body_at = match.start()
             break
 
-    return parts
+    def replace(match):
+        if match.group("quoted") is not None or match.start() >= body_at:
+            return None
+        requested = match.group("format").upper()
+        if requested == "GRAPHVIZ":
+            raise UnsupportedSyntaxError("GRAPHVIZ format is not supported")
+        if requested == "JSON":
+            raise UnsupportedSyntaxError("JSON format is not supported")
+        if requested == "MERMAID":
+            return f"{match.group(0)[: -len(match.group('format'))]}GRAPHVIZ"
+        return None
+
+    return _substitute(text, _EXPLAIN_FORMAT, replace)
 
 
-def rewrite_comment(parts: list) -> list:
+def _rewrite_object_types(text: str) -> Tuple[str, List[Edit]]:
+    """COLLECTION -> SCHEMA, WORKSPACE -> FUNCTION.
+
+    sqlparser has no COLLECTION object type and no WORKSPACE statement, and both are
+    Opteryx concepts rather than syntax any other engine would recognise, so there is
+    nothing to send upstream. SCHEMA and ALTER FUNCTION accept the same shapes and are
+    otherwise unused by opteryx, so the statements reach the planner as AST nodes that
+    plan_create_collection / plan_drop / plan_alter_workspace map onward.
+
+    All three anchor at the start of the statement, so nothing inside a literal, an
+    identifier or a subquery is at risk.
     """
-    Rewrite COMMENT ON TABLE to COMMENT ON EXTENSION.
+    edits: List[Edit] = []
+    for pattern, replacement in (
+        (_CREATE_COLLECTION, "SCHEMA"),
+        (_DROP_COLLECTION, "SCHEMA"),
+        (_ALTER_WORKSPACE, "FUNCTION"),
+    ):
+        match = pattern.match(text)
+        if match is None:
+            continue
+        start, end = match.end(1), match.end()
+        text = text[:start] + replacement + text[end:]
+        edits.append((start, len(replacement), start, end - start))
+        # The three are mutually exclusive - a statement cannot start with all of
+        # CREATE, DROP and ALTER - so the first hit is the only hit.
+        break
+    return text, edits
 
-    The parser supports COMMENT ON EXTENSION but not COMMENT ON TABLE.
-    This transformation allows users to write COMMENT ON TABLE and have it
-    work seamlessly.
 
-    Example:
-        COMMENT ON TABLE workspace.collection.table IS 'description'
-        -> COMMENT ON EXTENSION workspace.collection.table IS 'description'
+def do_sql_rewrite(
+    statement, source: Optional[str] = None, source_offset: int = 0
+) -> RewrittenStatement:
+    """Rewrite `statement` into the text the parser will be given.
+
+    `source` and `source_offset` describe where `statement` came from, for callers that
+    pulled it out of a larger body of text (a semicolon-separated batch). They default to
+    the statement itself, at offset zero.
     """
-    # The tokenizer may produce patterns like:
-    # ['COMMENT ON', 'TABLE workspace...'] or
-    # ['COMMENT IF EXISTS', 'ON', 'TABLE workspace...'] or
-    # ['COMMENT ON', 'TABLE', '"schema"', ...]
-
-    for i in range(len(parts)):
-        part = parts[i]
-        part_upper = part.upper()
-
-        # Check if this token starts with TABLE or VIEW (with a space after)
-        if part_upper.startswith("TABLE "):
-            parts[i] = "EXTENSION " + part[6:]  # Replace "TABLE " with "EXTENSION "
-            break
-        elif part_upper.startswith("VIEW "):
-            parts[i] = "EXTENSION " + part[5:]  # Replace "VIEW " with "EXTENSION "
-            break
-        # Check if this token is exactly TABLE or VIEW (standalone token)
-        elif part_upper == "TABLE" or part_upper == "VIEW":
-            parts[i] = "EXTENSION"
-            break
-
-    return parts
-
-
-def rewrite_drop_collection(statement: str) -> str:
-    """
-    Rewrite DROP COLLECTION to DROP SCHEMA.
-
-    The parser (sqlparser-rs) has no COLLECTION object type, so DROP COLLECTION
-    cannot be parsed natively. DROP SCHEMA is accepted and otherwise unused by
-    opteryx, so rewriting to it lets DROP COLLECTION reach the planner as a
-    Statement::Drop AST node with object_type == "Schema", which plan_drop()
-    maps to a DropCollection logical plan node.
-
-    Example:
-        DROP COLLECTION workspace.collection -> DROP SCHEMA workspace.collection
-        DROP COLLECTION IF EXISTS workspace.collection -> DROP SCHEMA IF EXISTS workspace.collection
-    """
-    return re.sub(r"^(\s*DROP\s+)COLLECTION\b", r"\1SCHEMA", statement, count=1, flags=re.IGNORECASE)
-
-
-def rewrite_create_collection(statement: str) -> str:
-    """
-    Rewrite CREATE COLLECTION to CREATE SCHEMA.
-
-    The mirror of rewrite_drop_collection, for the same reason: the parser has no
-    COLLECTION object type, and CREATE SCHEMA is accepted and otherwise unused by
-    opteryx, so rewriting to it lets CREATE COLLECTION reach the planner as a
-    Statement::CreateSchema AST node, which plan_create_collection() maps to a
-    CreateCollection logical plan node.
-
-    Example:
-        CREATE COLLECTION workspace.collection -> CREATE SCHEMA workspace.collection
-        CREATE COLLECTION IF NOT EXISTS ws.col -> CREATE SCHEMA IF NOT EXISTS ws.col
-    """
-    return re.sub(
-        r"^(\s*CREATE\s+)COLLECTION\b", r"\1SCHEMA", statement, count=1, flags=re.IGNORECASE
-    )
-
-
-def rewrite_alter_workspace(statement: str) -> str:
-    """
-    Rewrite ALTER WORKSPACE to ALTER FUNCTION.
-
-    The parser (sqlparser-rs) has no WORKSPACE object type, so ALTER WORKSPACE
-    cannot be parsed natively. ALTER FUNCTION accepts the same
-    `<name> SET <property> TO <value>` shape and is otherwise unused by opteryx,
-    so rewriting to it lets ALTER WORKSPACE reach the planner as a
-    Statement::AlterFunction AST node, which plan_alter_workspace() maps to an
-    AlterWorkspace logical plan node.
-
-    Example:
-        ALTER WORKSPACE ws SET delete_protection TO OFF
-        -> ALTER FUNCTION ws SET delete_protection TO OFF
-    """
-    return re.sub(
-        r"^(\s*ALTER\s+)WORKSPACE\b", r"\1FUNCTION", statement, count=1, flags=re.IGNORECASE
-    )
-
-
-def rewrite_temporal_units(statement: str) -> str:
-    """
-    Rewrite temporal unit syntax to internal form for parser compatibility.
-
-    User-facing syntax:  TIMESTAMP[ns], TIMESTAMP[ms], TIMESTAMP[s], TIMESTAMP[us], TIMESTAMP[d]
-    Internal form:       _TIMESTAMP_NS, _TIMESTAMP_MS, _TIMESTAMP_S, _TIMESTAMP_US, _TIMESTAMP_DAYS
-
-    This allows users to write familiar syntax that the parser doesn't natively
-    support, while using internal forms that the parser accepts as custom types.
-
-    Example:
-        CAST(x AS TIMESTAMP[ns]) -> CAST(x AS _TIMESTAMP_NS)
-        CAST(x AS TIMESTAMP[ms]) -> CAST(x AS _TIMESTAMP_MS)
-        CAST(x AS TIMESTAMP[s])  -> CAST(x AS _TIMESTAMP_S)
-        CAST(x AS TIMESTAMP[us]) -> CAST(x AS _TIMESTAMP_US)
-        CAST(x AS TIMESTAMP[d])  -> CAST(x AS _TIMESTAMP_DAYS)
-    """
-    # Check for invalid forms (empty brackets)
-    if re.search(r"\bTIMESTAMP\s*\[\s*\]", statement, re.IGNORECASE):
-        raise UnsupportedSyntaxError(
-            "TIMESTAMP[] with empty brackets is not supported. "
-            "Use `TIMESTAMP[ns]`, `TIMESTAMP[ms]`, `TIMESTAMP[s]`, `TIMESTAMP[us]`, or `TIMESTAMP[d]`."
-        )
-
-    # Map user-facing forms to internal forms
-    replacements = [
-        (r"\bTIMESTAMP\s*\[\s*ns\s*\]", "_TIMESTAMP_NS", re.IGNORECASE),
-        (r"\bTIMESTAMP\s*\[\s*ms\s*\]", "_TIMESTAMP_MS", re.IGNORECASE),
-        (r"\bTIMESTAMP\s*\[\s*s\s*\]", "_TIMESTAMP_S", re.IGNORECASE),
-        (r"\bTIMESTAMP\s*\[\s*us\s*\]", "_TIMESTAMP_US", re.IGNORECASE),
-        (r"\bTIMESTAMP\s*\[\s*d\s*\]", "_TIMESTAMP_DAYS", re.IGNORECASE),
-    ]
-
-    for pattern, replacement, flags in replacements:
-        statement = re.sub(pattern, replacement, statement, flags=flags)
-
-    return statement
-
-
-def do_sql_rewrite(statement):
-    # Collapse structural newlines/tabs/CRs (and their backslash-escaped text
-    # forms) to spaces so the rest of the rewriter -- sql_parts, and the
-    # text-based rewrite_temporal_units/rewrite_explain/rewrite_comment that
-    # run on it -- see a single-line statement. Quoted string literals are
-    # left untouched so their escape sequences reach the parser intact.
     if isinstance(statement, bytes):
         statement = statement.decode("utf-8")
+    if source is None:
+        source = statement
 
-    statement = _normalize_whitespace(statement)
+    passes: List[List[Edit]] = []
+    for rewrite in (
+        _rewrite_escaped_breaks,
+        _rewrite_temporal_units,
+        _rewrite_object_types,
+        _rewrite_prefixed_strings,
+        _rewrite_explain_format,
+    ):
+        statement, edits = rewrite(statement)
+        passes.append(edits)
 
-    # Rewrite temporal unit syntax before parsing
-    statement = rewrite_temporal_units(statement)
-
-    # Rewrite CREATE/DROP COLLECTION before parsing (parser has no COLLECTION object type)
-    statement = rewrite_create_collection(statement)
-    statement = rewrite_drop_collection(statement)
-
-    # Rewrite ALTER WORKSPACE before parsing (parser has no WORKSPACE object type)
-    statement = rewrite_alter_workspace(statement)
-
-    parts = sql_parts(statement)
-    parts = rewrite_explain(parts)
-    if statement.lstrip().upper().startswith("COMMENT"):
-        parts = rewrite_comment(parts)
-    return " ".join(parts)
+    return RewrittenStatement(statement, source=source, source_offset=source_offset, passes=passes)

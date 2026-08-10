@@ -101,7 +101,9 @@ class _RunLedger:
             "oracle invocations by kind:",
         ]
         for name in sorted(_ALL_ORACLE_NAMES):
-            lines.append(f"  {self.oracle_runs.get(name, 0):6d}  {name}")
+            blocked = _ORACLES_BLOCKED_BY_REGISTER.get(name)
+            suffix = f"  [blocked by {blocked}]" if blocked else ""
+            lines.append(f"  {self.oracle_runs.get(name, 0):6d}  {name}{suffix}")
         if self.known_gap_hits:
             lines += ["", "registered defects hit (see single_table_known_gaps.py):"]
             for gap_id, count in self.known_gap_hits.most_common():
@@ -111,6 +113,7 @@ class _RunLedger:
 
 
 _ALL_ORACLE_NAMES = {
+    "aggregate_filter_matches_where",
     "count_star_matches_materialised_rows",
     "predicate_partition",
     "tautology_is_neutral",
@@ -126,6 +129,18 @@ _ALL_ORACLE_NAMES = {
     "group_counts_sum_to_the_total",
     "optimizer_strategy_differential",
 }
+
+# Oracle -> the register entry that stops it running. An oracle here is expected
+# to be silent, and `test_zz_fuzzing_actually_ran` exempts it from the
+# "asserting nothing" check — but only while its defect is REGISTERED. When the
+# defect is fixed the register entry goes, the id here dangles, and this file
+# fails until the oracle is put back into applicable_oracles().
+#
+# This is not a second allowlist. A blocked oracle is silent because a WRONG
+# ANSWER is already pinned by an explicit test_wrong_answer_* test, which is what
+# the register's contract requires of a WrongAnswer entry; the map exists so the
+# silence is DECLARED and self-expiring rather than a hole in the ledger.
+_ORACLES_BLOCKED_BY_REGISTER: dict = {}
 
 LEDGER = _RunLedger()
 
@@ -204,6 +219,7 @@ def _classify(error: Exception) -> None:
 
 
 @pytest.mark.parametrize("defect", known_gaps.REGISTER, ids=lambda d: d.id)
+
 def test_registered_defect_still_reproduces(defect):
     """Every registered defect must still be broken.
 
@@ -212,6 +228,8 @@ def test_registered_defect_still_reproduces(defect):
     make it green is to delete the entry — which puts the construct back into
     ordinary fuzzing.
     """
+    from contextlib import contextmanager
+
     from tests.fuzzing.harness import rows
 
     def drain(sql):
@@ -225,15 +243,29 @@ def test_registered_defect_still_reproduces(defect):
             for value in row:
                 repr(value)
 
+    # A defect the optimizer differential oracle found needs its strategy turned
+    # off to appear at all. Without honouring this the entry could carry no repro
+    # that reproduces, and the register's one real gate — "every entry must still
+    # be broken" — would silently not apply to it.
+    @contextmanager
+    def _as_registered():
+        if defect.disabled_strategy is None:
+            yield
+        else:
+            with oracles._strategy_disabled(defect.disabled_strategy):
+                yield
+
     if defect.error_type == "WrongAnswer":
         # A wrong-answer entry has no exception to match; each is pinned by its
         # own test_wrong_answer_* test. Assert only that the repro still
         # executes, so one that has rotted into a syntax error is caught.
-        drain(defect.repro)
+        with _as_registered():
+            drain(defect.repro)
         return
 
     with pytest.raises(Exception) as raised:  # noqa: PT011 - the type IS the assertion
-        drain(defect.repro)
+        with _as_registered():
+            drain(defect.repro)
 
     actual = type(raised.value).__name__
     assert actual == defect.error_type, (
@@ -244,6 +276,145 @@ def test_registered_defect_still_reproduces(defect):
         f"registered defect `{defect.id}` no longer matches its signature "
         f"{defect.signature!r}; the register would stop absorbing it.\n  {raised.value}"
     )
+
+
+def test_nan_withholding_cites_a_live_register_entry():
+    """An aggregate withheld from NaN columns must point at an open defect.
+
+    Same contract as test_pending_exclusion_cites_a_live_register_entry: the
+    narrowing costs reach, so it expires with the entry that justifies it rather
+    than being inherited by whoever reads the code next.
+    """
+    from tests.fuzzing.single_table_grammar import _AGGREGATES_WITHHELD_FROM_NAN
+
+    registered = {defect.id for defect in known_gaps.REGISTER}
+    dangling = sorted(
+        f"{aggregate} (cites `{gap_id}`)"
+        for aggregate, gap_id in _AGGREGATES_WITHHELD_FROM_NAN.items()
+        if gap_id not in registered
+    )
+    assert not dangling, (
+        f"these aggregates are withheld from NaN-bearing columns by a register entry that no "
+        f"longer exists: {dangling}. The defect is fixed, so the withholding must go."
+    )
+
+
+def test_string_concatenation_requires_homogeneous_string_types():
+    """Pins RATIFIED/string-concatenation-requires-homogeneous-string-types.
+
+    Replaces test_wrong_answer_concat_of_a_varbinary_literal_still_leaks, which
+    asserted the leak this ruling removed. Three things are checked, because the
+    ruling is not "VARBINARY is refused" and a test that only checked the
+    refusals would let the useful half rot:
+
+      * homogeneous concat WORKS, for every string type and through both
+        spellings — this is what the deleted register entries wrongly claimed
+        had no kernel;
+      * mixed concat is refused in ONE class, IncorrectTypeError, whether the
+        operands are columns or literals and whether it is written `||` or
+        CONCAT. The literal/column split is exactly what used to make a
+        difference, so both are asserted;
+      * no answer anywhere contains a Python object repr. Asserted directly
+        rather than inferred from the refusals: constant folding was the path
+        that leaked, and a future fold that answers instead of refusing must not
+        be able to reintroduce it quietly.
+    """
+    import pytest
+
+    from opteryx.exceptions import IncompatibleTypesError, IncorrectTypeError
+    from tests.fuzzing.harness import rows
+
+    def value(sql):
+        """First value, decoded. A VARBINARY result comes back as `bytes`, and
+        comparing `str(b'ab')` would assert on the repr rather than the content —
+        which is the exact confusion this ruling exists to remove."""
+        answer = list(rows(sql))[0][0]
+        return answer.decode("ascii") if isinstance(answer, bytes) else str(answer)
+
+    def _type_of(sql):
+        """The DECLARED type of the first column, read from the morsel schema."""
+        import opteryx
+
+        for morsel in opteryx.session().execute_to_morsels(sql):
+            return morsel.column_types[0].name
+        raise AssertionError(f"no morsel produced for {sql!r}")
+
+    # Homogeneous — every string type, literal and column, `||` and CONCAT.
+    assert value("SELECT b'a' || b'b' AS x") == "ab"
+    assert value("SELECT CONCAT(b'a', b'b') AS x") == "ab"
+    assert value("SELECT CONCAT(b'a', b'b', b'c') AS x") == "abc"
+    assert value("SELECT CONCAT_WS(b'-', b'a') AS x") == "a"
+    assert value("SELECT 'a' || 'b' AS x") == "ab"
+    assert value(
+        "SELECT name::VARBINARY || name::VARBINARY AS x FROM testdata.planets LIMIT 1"
+    ) == "MercuryMercury"
+
+    # The return type FOLLOWS the operand type — CONCAT and `||` must agree, since
+    # one desugars into the other. This was the visible tell that CONCAT's catalog
+    # return type was a hardcoded VARCHAR: `b'a' || b'b'` said VARBINARY while
+    # `CONCAT(b'a', b'b')` said VARCHAR for the very same bytes.
+    assert _type_of("SELECT b'a' || b'b' AS x") == "VARBINARY"
+    assert _type_of("SELECT CONCAT(b'a', b'b') AS x") == "VARBINARY"
+    assert _type_of("SELECT CONCAT_WS(b'-', b'a', b'b') AS x") == "VARBINARY"
+    assert _type_of("SELECT CONCAT('a', 'b') AS x") == "VARCHAR"
+
+    # A non-string operand is NOT coerced. CONCAT used to cast it to VARCHAR;
+    # that is gone, and the cast is the caller's to write.
+    with pytest.raises(Exception, match="VARCHAR"):
+        list(rows("SELECT CONCAT(-327484, 'a') AS x FROM testdata.planets LIMIT 1"))
+    assert value("SELECT CONCAT(CAST(-327484 AS VARCHAR), 'a') AS x FROM testdata.planets LIMIT 1") == "-327484a"
+    assert value("SELECT CONCAT(CAST(id AS VARCHAR), name) AS x FROM testdata.planets LIMIT 1") == "1Mercury"
+
+    # A NULL operand stays legal and stays TRANSPARENT to overload selection — it
+    # is `||`'s dedicated NULL rule, and CONCAT must not disagree with it.
+    assert value("SELECT CONCAT(name, NULL) AS x FROM testdata.planets LIMIT 1") == "None"
+    assert value("SELECT name || NULL AS x FROM testdata.planets LIMIT 1") == "None"
+
+    # Mixed operands are refused for every spelling and both operand kinds. The
+    # CLASS tracks function-vs-operator, which is the engine's existing split:
+    # CONCAT is refused by overload resolution like any other function whose
+    # argument is the wrong type (binder.py -> IncompatibleTypesError, the same
+    # error `UPPER(id)` gets), `||` by the operator map (IncorrectTypeError, the
+    # same error `id || ''` gets). Both name the cast that fixes it. What must
+    # NOT come back is NotSupportedError — "we have not built it yet" for
+    # something ruled out on purpose was half the original defect.
+    mixed_function_calls = [
+        "SELECT CONCAT('p', b'a') AS x",
+        "SELECT CONCAT(b'a', 'p') AS x",
+        "SELECT CONCAT(-327484, b'a') AS x",
+        "SELECT CONCAT_WS('-', 'p', b'a') AS x",
+        "SELECT CONCAT_WS('-', b'a', b'b') AS x",
+        "SELECT CONCAT(name, b'a') AS x FROM testdata.planets",
+    ]
+    for sql in mixed_function_calls:
+        with pytest.raises(IncompatibleTypesError):
+            list(rows(sql))
+
+    mixed_operators = [
+        "SELECT 'p' || b'a' AS x",
+        "SELECT name || b'a' AS x FROM testdata.planets",
+        "SELECT HASH(name) || '' AS x FROM testdata.planets",
+        "SELECT name::NVARCHAR || name AS x FROM testdata.planets",
+        # No string operand at all: nothing gives the result a type. This one
+        # only ever "worked" by being folded through the deleted Python closure,
+        # which picked VARCHAR out of the air.
+        "SELECT NULL || NULL AS x",
+    ]
+    for sql in mixed_operators:
+        with pytest.raises(IncorrectTypeError):
+            list(rows(sql))
+
+    # No repr may reach a result, by any route.
+    for sql in (
+        "SELECT CONCAT(b'a', b'b') AS x",
+        "SELECT b'a' || b'b' AS x",
+        "SELECT CONCAT(CAST(-327484 AS VARCHAR), 'a') AS x",
+    ):
+        answer = value(sql)
+        assert "draken_native" not in answer and "object at 0x" not in answer, (
+            f"{sql} put a Python object repr in the answer: {answer!r}"
+        )
+
 
 
 def test_cte_body_limit_is_honoured():
@@ -359,34 +530,60 @@ def test_not_over_a_boolean_tautology_disjunction_partitions_cleanly():
         assert buckets == total, f"{predicate} covers {buckets} of {total} rows"
 
 
-def test_wrong_answer_nan_row_still_falls_outside_every_bucket():
-    """Pins single_table_known_gaps/nan-rows-fall-outside-every-predicate-bucket.
+def test_nan_row_is_visible_to_a_pushed_predicate():
+    """Regression for the fixed nan-rows-fall-outside-every-predicate-bucket defect.
 
-    Asserts that the NaN row is in NO bucket. Whichever semantics the architect
-    settles on, the fix makes the three counts sum to 177 and this goes red —
-    along with the register entry and the `predicate_touches_nan` exclusion in
-    `applicable_oracles`.
+    testdata.satellites has one NaN density (row 176). Under the locked float
+    semantics (draken/ops/float_ops.h, NaN ranks above every value, NaN is a
+    VALUE and not a NULL) that row satisfies `density > <anything finite>`.
+
+    It did not, and the reason was never the comparison — it was row-group
+    pruning. Parquet keeps NaN out of min/max to spec, so `col_max <= 72971.56`
+    "proved" no row could match and the whole row group went, taking the NaN
+    with it. The tell is that blocking the pushdown changed the answer, so that
+    is what this asserts: the same predicate over a derived table the pruning
+    cannot reach must agree with the pushed form, and the three buckets must
+    partition the relation.
     """
     from tests.fuzzing.harness import scalar
 
-    def matching(where):
+    predicate = "density > 72971.564572"
+
+    def pushed(where):
         return scalar(f"SELECT COUNT(*) AS n FROM testdata.satellites WHERE {where}")
+
+    def unpushed(where):
+        # `density + 0.0` makes the predicate reference a computed column, so it
+        # cannot be pushed into the scan and no bound is ever consulted.
+        return scalar(
+            "SELECT COUNT(*) AS n FROM (SELECT density + 0.0 AS density "
+            f"FROM testdata.satellites) AS t WHERE {where}"
+        )
 
     total = scalar("SELECT COUNT(*) AS n FROM testdata.satellites")
     assert total == 177, f"testdata.satellites has {total} rows, not 177; the corpus has changed"
-    assert matching("density IS NULL") == 0, "satellites.density has acquired a NULL"
+    assert pushed("density IS NULL") == 0, "satellites.density has acquired a NULL"
 
-    predicate = "density > 72971.564572"
+    # The NaN row is the one and only match — NaN outranks every finite value.
+    assert pushed(predicate) == 1, "the NaN row is not being selected by `> <finite>`"
+    # Pruning must not be able to change an answer.
+    assert pushed(predicate) == unpushed(predicate)
+    assert pushed(f"NOT ({predicate})") == unpushed(f"NOT ({predicate})")
+
     buckets = (
-        matching(predicate)
-        + matching(f"NOT ({predicate})")
-        + matching(f"({predicate}) IS NULL")
+        pushed(predicate)
+        + pushed(f"NOT ({predicate})")
+        + pushed(f"({predicate}) IS NULL")
     )
-    assert buckets == 176, (
-        f"the three predicate buckets now cover {buckets} of 177 rows. If that is 177 the defect "
-        f"is FIXED — delete this test, the register entry, and the predicate_touches_nan "
-        f"exclusion in applicable_oracles()."
-    )
+    assert buckets == total, f"{predicate} covers {buckets} of {total} rows"
+
+    # A NaN-valued LITERAL used to kill the query in the planner: the selectivity
+    # estimator returned NaN and `int(row_count * selectivity)` raised
+    # `ValueError: cannot convert float NaN to integer`. Nothing is >= NaN except
+    # a NaN, and no planet has one.
+    assert scalar(
+        "SELECT COUNT(*) AS n FROM testdata.planets WHERE orbital_period >= SQRT(-390664.0)"
+    ) == 0
 
 
 def test_is_null_over_a_mixed_type_comparison_reports_unknown():
@@ -491,16 +688,49 @@ def test_is_null_over_temporal_and_empty_string_predicates_reports_unknown():
         )
 
 
+def test_pending_exclusion_cites_a_live_register_entry():
+    """A locally-withheld parameter type must point at an open defect.
+
+    `_PENDING_EXCLUSIONS` narrows what the generator will pass to a function
+    where the CATALOG says the type is allowed. That is a real reduction in
+    reach, so it has to expire: when the cited register entry goes, this fails
+    and the narrowing has to be either removed or moved into the registrar as a
+    proper `excludes`, which is a decision someone has to make rather than
+    inherit.
+    """
+    from tests.fuzzing.single_table_grammar import _PENDING_EXCLUSIONS
+
+    registered = {defect.id for defect in known_gaps.REGISTER}
+    dangling = sorted(
+        f"{function} (cites `{gap_id}`)"
+        for function, (_, gap_id) in _PENDING_EXCLUSIONS.items()
+        if gap_id not in registered
+    )
+    assert not dangling, (
+        f"these generator narrowings cite a register entry that no longer exists: {dangling}. "
+        f"The defect is resolved, so either delete the _PENDING_EXCLUSIONS entry or record the "
+        f"restriction as an `excludes` in the registrar and regenerate reference/."
+    )
+
+
 def test_catalog_coverage_is_accounted_for():
-    """Every catalog function is either generated or explicitly excluded.
+    """Every catalog function is generated, declined by the catalog, or excluded.
 
     Without this, `reference/` gaining a function silently adds something the
     fuzzer does not test, and nobody finds out. A new function fails here until
     someone either makes it generatable or writes down why not.
+
+    Three ways to be accounted for, in descending order of how much they are
+    worth: GENERATED; declined by a fact the CATALOG states (a `value_format`
+    this generator cannot mint, an `element_of` link, a parameter type nothing
+    in the corpus satisfies) — recorded in `CATALOG_DECLINED`, which needs no
+    argument from anybody because `reference/` already carries the reason; or
+    argued for by hand in `EXCLUSIONS`.
     """
     import json
     from pathlib import Path
 
+    from tests.fuzzing.single_table_grammar import CATALOG_DECLINED
     from tests.fuzzing.single_table_grammar import FUNCTION_OVERLOADS
 
     catalog_path = Path(__file__).resolve().parents[2] / "reference" / "function_signatures.json"
@@ -508,10 +738,19 @@ def test_catalog_coverage_is_accounted_for():
         catalog = json.load(handle)
 
     generated = {overload.name for overload in FUNCTION_OVERLOADS}
-    unaccounted = sorted(set(catalog) - generated - set(EXCLUSIONS))
+    unaccounted = sorted(set(catalog) - generated - set(EXCLUSIONS) - set(CATALOG_DECLINED))
     assert not unaccounted, (
-        "these reference/ functions are neither generated nor explained in "
-        f"single_table_grammar.EXCLUSIONS: {unaccounted}"
+        "these reference/ functions are neither generated, nor declined by a constraint "
+        "reference/ records, nor explained in single_table_grammar.EXCLUSIONS: "
+        f"{unaccounted}"
+    )
+
+    # An EXCLUSIONS entry for something the catalog already declines is dead
+    # weight — two reasons for one omission, and the hand-written one rots.
+    redundant = sorted(set(EXCLUSIONS) & set(CATALOG_DECLINED))
+    assert not redundant, (
+        "these are excluded by hand AND declined by reference/; drop the EXCLUSIONS "
+        f"entry and let the catalog speak: {redundant}"
     )
 
 
@@ -531,10 +770,26 @@ def test_zz_fuzzing_actually_ran():
         f"registered defect. The fuzzer tested nothing.\n{LEDGER.report()}"
     )
 
+    registered = {defect.id for defect in known_gaps.REGISTER}
+    expired = sorted(
+        f"{oracle} (cites `{gap_id}`)"
+        for oracle, gap_id in _ORACLES_BLOCKED_BY_REGISTER.items()
+        if gap_id not in registered
+    )
+    assert not expired, (
+        f"these oracles are blocked by a register entry that no longer exists: {expired}. "
+        f"The defect is fixed, so the oracle must go back into applicable_oracles() and its "
+        f"entry here must be deleted."
+    )
+
     if LEDGER.cases < _COVERAGE_FLOOR:
         return
 
-    silent = sorted(name for name in _ALL_ORACLE_NAMES if not LEDGER.oracle_runs.get(name))
+    silent = sorted(
+        name
+        for name in _ALL_ORACLE_NAMES - set(_ORACLES_BLOCKED_BY_REGISTER)
+        if not LEDGER.oracle_runs.get(name)
+    )
     assert not silent, (
         f"these oracles never fired across {LEDGER.cases} cases, so they are asserting nothing: "
         f"{silent}. Either the generator no longer produces the shapes they need, or their "
@@ -547,6 +802,8 @@ if __name__ == "__main__":  # pragma: no cover
         test_sql_fuzzing_single_table(_seed)
     for _defect in known_gaps.REGISTER:
         test_registered_defect_still_reproduces(_defect)
+    test_wrong_answer_qualify_is_ignored()
+    test_wrong_answer_aggregate_filter_is_ignored()
     test_catalog_coverage_is_accounted_for()
     test_zz_fuzzing_actually_ran()
     print("\n✅ okay")

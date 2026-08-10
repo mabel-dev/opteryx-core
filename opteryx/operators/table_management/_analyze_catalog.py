@@ -46,8 +46,8 @@ def analyze_table_catalog(
         # every file — so honouring FOR COLUMNS here would mean silently doing
         # something other than what the SQL asked for.
         raise UnsupportedSyntaxError(
-            "ANALYZE TABLE ... FOR COLUMNS is not supported for this dataset; "
-            "ANALYZE TABLE <table> (without FOR COLUMNS) refreshes statistics "
+            "**ANALYZE TABLE** ... FOR COLUMNS is not supported for this dataset; "
+            "**ANALYZE TABLE** <table> (without FOR COLUMNS) refreshes statistics "
             "for all columns."
         )
 

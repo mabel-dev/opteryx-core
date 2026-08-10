@@ -290,6 +290,53 @@ static inline VecResult str_materialize(const DrakenVector& v) {
 }
 
 // ---------------------------------------------------------------------------
+// code -> output-arena-offset lookup for str_slice's compact path.
+//
+// The keys are DICTIONARY INDICES, i.e. already dense in [0, k) — so hashing
+// them is pure overhead. `SgDirectOffsets` is a flat array indexed by the code
+// itself: one load, no hash, no probe, no rehash. `SgHashOffsets` keeps the
+// original map for the case a flat array would be the wrong shape (a huge
+// dictionary sampled by a small slice), chosen by the k/n test at the call site.
+//
+// MEASURED: slicing a 100k-entry dictionary into 65,536-row chunks (a join
+// emitting dict-encoded string columns through the cursor's output-boundary
+// split) spent ~1.75ms per column-chunk in `unordered_map` — ~27ns per row, and
+// 263ms across one 2.5M-row query, which was more than the entire rest of that
+// query. The keys were dense the whole time.
+//
+// A separate `seen` byte is required: STR_ELIDED_PAYLOAD_OFFSET is 0xFFFFFFFF
+// and is stored as a legitimate VALUE here, so no offset sentinel can also mean
+// "absent".
+struct SgDirectOffsets {
+    std::vector<uint32_t> off;
+    std::vector<uint8_t>  seen;
+    explicit SgDirectOffsets(uint32_t k)
+        : off(k > 0u ? k : 1u), seen(k > 0u ? k : 1u, 0u) {}
+    inline bool has(uint32_t code) const { return seen[code] != 0u; }
+    inline void set(uint32_t code, uint32_t value) { off[code] = value; seen[code] = 1u; }
+    inline uint32_t get(uint32_t code) const { return off[code]; }
+};
+
+struct SgHashOffsets {
+    std::unordered_map<uint32_t, uint32_t> m;
+    explicit SgHashOffsets(uint32_t n) { m.reserve(n); }
+    inline bool has(uint32_t code) const { return m.find(code) != m.end(); }
+    inline void set(uint32_t code, uint32_t value) { m[code] = value; }
+    inline uint32_t get(uint32_t code) const { return m.find(code)->second; }
+};
+
+// Flat-array scratch is O(k) to allocate and clear but O(1) unhashed per row;
+// the map is O(n) hashed operations and independent of k. Clearing 4k+k bytes
+// costs on the order of k cycles, while n map operations cost on the order of
+// 75n — so the array wins for any k up to roughly 75n. 32 leaves margin and
+// keeps the scratch bounded at ~160 bytes per sliced row in the worst case.
+static constexpr uint32_t kSgDirectOffsetsMaxKPerRow = 32u;
+
+template <typename Offsets>
+static inline VecResult str_slice_compact(const DrakenVector& v, uint32_t start,
+                                          uint32_t n, Offsets& new_off);
+
+// ---------------------------------------------------------------------------
 // SLICE — contiguous range [start, start+length). Same logic as take but
 // source indices are start, start+1, ..., start+length-1 — no index array.
 // ---------------------------------------------------------------------------
@@ -412,10 +459,28 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
     }
 
     // ── Compact path (k > n): build exactly n output slots ────────────────
+    // Dispatched on the shape of the lookup, not on the data: dictionary codes
+    // are dense in [0, k), so unless the dictionary dwarfs the slice a flat array
+    // beats hashing them. Both arms run the SAME body below and produce the same
+    // bytes — this chooses a data structure, never an answer.
+    if (n > 0u && k <= kSgDirectOffsetsMaxKPerRow * n) {
+        SgDirectOffsets new_off(k);
+        return str_slice_compact(v, start, n, new_off);
+    }
+    SgHashOffsets new_off_hash(n);
+    return str_slice_compact(v, start, n, new_off_hash);
+}
+
+template <typename Offsets>
+static inline VecResult str_slice_compact(const DrakenVector& v, uint32_t start,
+                                          uint32_t n, Offsets& new_off) {
+    const DrakenStringArena* sa    = static_cast<const DrakenStringArena*>(v.data);
+    const DrakenStringSlot*  src_s = sa->slots;
+    const uint8_t*           src_a = sa->arena;
+    const uint8_t*           src_v = v.validity;
+
     // Scan [start, start+n) to find referenced unique long slots and their
     // output arena offsets.
-    std::unordered_map<uint32_t, uint32_t> new_off;
-    new_off.reserve(n);
     std::vector<uint32_t> seen_codes;
     seen_codes.reserve(n);
     size_t total_arena = 0u;
@@ -424,11 +489,11 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
         const uint32_t src_log = start + i;
         if (!sg_val_row(src_v, src_log)) continue;
         const uint32_t code = v.selection[src_log];
-        if (!str_is_inline(&src_s[code]) && new_off.find(code) == new_off.end()) {
+        if (!str_is_inline(&src_s[code]) && !new_off.has(code)) {
             if (src_s[code].ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
-                new_off[code] = STR_ELIDED_PAYLOAD_OFFSET;
+                new_off.set(code, STR_ELIDED_PAYLOAD_OFFSET);
             } else {
-                new_off[code] = static_cast<uint32_t>(total_arena);
+                new_off.set(code, static_cast<uint32_t>(total_arena));
                 total_arena  += src_s[code].ext.length;
             }
             seen_codes.push_back(code);
@@ -442,8 +507,8 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
 
     if (sb.arena_bytes != nullptr) {
         for (uint32_t code : seen_codes)
-            if (new_off[code] != STR_ELIDED_PAYLOAD_OFFSET)
-                std::memcpy(sb.arena_bytes + new_off[code],
+            if (new_off.get(code) != STR_ELIDED_PAYLOAD_OFFSET)
+                std::memcpy(sb.arena_bytes + new_off.get(code),
                             src_a + src_s[code].ext.arena_offset,
                             src_s[code].ext.length);
     }
@@ -466,7 +531,7 @@ static inline VecResult str_slice(const DrakenVector& v, uint32_t start, uint32_
                 sb.slots[i].ext.length       = src->ext.length;
                 sb.slots[i].ext.prefix       = src->ext.prefix;
                 sb.slots[i].ext.hash32       = src->ext.hash32;
-                sb.slots[i].ext.arena_offset = new_off[code];
+                sb.slots[i].ext.arena_offset = new_off.get(code);
             }
             if (out_v != nullptr)
                 out_v[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));

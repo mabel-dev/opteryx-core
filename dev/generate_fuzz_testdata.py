@@ -32,11 +32,32 @@ the rest:
                             against it crosses morsel boundaries. Narrower, and
                             the fuzzer picks it a minority of the time.
 
-DELIBERATE OMISSION: no NaN or ±Inf in the float columns. Draken's sort places
-NaN divergently from other engines and that is a known-open question, not a
-settled contract — seeding NaN here would make the ORDER BY oracles fail every
-run on a bug that is already recorded, drowning out everything else. Adding NaN
-coverage is a separate, deliberate piece of work.
+FLOAT SPECIAL VALUES live in their own columns — `f_special` / `f_special_null`
+here and `val_special` in `wide` — NOT scattered through `f_value` and `val`.
+Two reasons, both deliberate:
+
+  * Poisoning the ordinary float columns would make SUM/AVG/MAX over them NaN
+    on EVERY case, since IEEE arithmetic propagates. The aggregate oracles would
+    then compare NaN against NaN forever and the relation would stop testing
+    ordinary float arithmetic at all. Specials belong where a query can choose
+    to touch them.
+  * The specials are built from the row index and consume NO rng draws, so every
+    pre-existing column keeps its exact prior values. Adding this coverage moved
+    no other byte.
+
+This corpus carried no NaN or ±Inf until 2026-08-09, on the stated grounds that
+NaN ordering was "a known-open question, not a settled contract". That was never
+true: draken/ops/float_ops.h has carried an architect lock since 2026-05-22 —
+total order, NaN ranks above every value and ±inf, NaN == NaN, -0.0 == 0.0
+canonicalised at ingestion, NaN is a VALUE (validity bit set) and not a NULL.
+The wrong answer that made NaN look unsettled (`NOT (density > ...)` losing a
+row) was row-group pruning on Parquet bounds that legitimately exclude NaN, not
+the comparison semantics.
+
+The oracles are safe against this because `harness.result_multiset` compares
+`repr(row)` strings, not floats: `repr(nan)` is `'nan'`, so two NaNs compare
+equal where `nan == nan` in Python would not. An oracle that ever starts
+comparing raw float values has to solve that problem before it can run here.
 
 PyArrow is the writer only. It is banned inside `opteryx/`, `draken/` and
 `rugo/`, and sanctioned in `dev/` for test-data generation (CLAUDE.md §4), the
@@ -75,18 +96,129 @@ _CATEGORIES = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "the
 #   ''            empty is not NULL, and the two must not collapse
 #   '  padded  '  TRIM/LTRIM/RTRIM have something to remove
 #   '100%'/'a_b'  LIKE metacharacters as literal data
-#   'ÅΩ漢字'      multi-byte UTF-8, so LENGTH != OCTET_LENGTH
+#   'MiXeD CaSe'  UPPER/LOWER/INITCAP/ILIKE have something to change
 #   long string   longer than the 12-byte inline threshold, so it lands in the arena
+#
+# ASCII ONLY, and not for want of ambition. These land in `s_awkward`/`s_null`,
+# parquet `string` columns, which the engine reads as VARCHAR — and VARCHAR is
+# ASCII BYTES, so non-ASCII content in one is undefined behaviour
+# (single_table_known_gaps/RATIFIED/
+# varchar-is-ascii-bytes-and-non-ascii-content-is-undefined). 'ÅΩ漢字' used to sit
+# in this list to make LENGTH != OCTET_LENGTH. What it actually did was seed every
+# byte-wise string function in the corpus with input the engine makes no promise
+# about: `SUBSTRING(s_awkward, 1) || RIGHT(s_null, 2)` sliced a codepoint in half
+# and the fuzzer read back an undecodable VARCHAR — a finding the contract already
+# disclaims. Unicode belongs in a corpus of NVARCHAR columns, where the promise
+# exists.
+#
+# The list LENGTH is load-bearing: the draw below is `randrange(len(...))`, and
+# `random.randrange` consumes a different number of underlying bits for a
+# different range, so shortening this list re-rolls every column generated after
+# it. Replacing an entry keeps the corpus byte-identical apart from that one
+# string; removing one moved `ts_null`'s null count from 411 to 394 and tripped
+# the corpus tripwire in test_is_null_over_temporal_and_empty_string_predicates_
+# reports_unknown. Swap entries here, do not delete them.
 _AWKWARD_STRINGS = [
     "",
     "  padded  ",
     "100%",
     "a_b",
-    "ÅΩ漢字",
+    "MiXeD CaSe",
     "a string comfortably longer than twelve bytes",
     "NULL",
     "0",
 ]
+
+
+# The float values that are IN a column but OUT of its Parquet min/max bounds,
+# or that the ingestion canonicaliser is contracted to fold together. Cycled
+# positionally rather than drawn randomly, so they consume no rng and land at
+# known, evenly spread rows.
+#
+#   NaN         ranks ABOVE every value including +inf; `NaN = NaN` is TRUE and
+#               `NaN IS NULL` is FALSE. Parquet omits it from min/max, which is
+#               what made `WHERE f > <big>` lose rows until the bound-pruning fix.
+#   ±inf        ordinary values at the ends of the order — they ARE in min/max,
+#               so they separate "NaN is special" from "extreme is special".
+#   -0.0 / 0.0  contracted to compare equal and to hash together; float_ops.h
+#               canonicalises -0.0 to +0.0 at ingestion, so a query that ever
+#               returns `-0.0` has found a gap in that canonicalisation.
+_FLOAT_SPECIALS = [
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    -0.0,
+    0.0,
+]
+
+# One special every Nth row. Coprime with the row counts and the row-group size
+# so the specials do not align to a boundary, and frequent enough that a random
+# predicate has a real chance of straddling one (2,000 rows -> ~118 specials,
+# ~24 of them NaN).
+_SPECIAL_STRIDE = 17
+
+
+def _float_special_column(rows: int, offset: int = 0) -> list:
+    """A float column carrying `_FLOAT_SPECIALS` at a fixed stride, ordinary
+    finite values elsewhere. Deterministic in the row index — no rng, so adding
+    or changing this column cannot shift any other column's values.
+
+    The finite fill repeats (`i % 401`), which keeps the column groupable and
+    gives min/max bounds a real interior to be an interval over.
+    """
+    out = []
+    for i in range(rows):
+        position = i + offset
+        if position % _SPECIAL_STRIDE == 0:
+            out.append(_FLOAT_SPECIALS[(position // _SPECIAL_STRIDE) % len(_FLOAT_SPECIALS)])
+        else:
+            out.append(float((position % 401) - 200) / 4.0)
+    return out
+
+
+def _wide_special_column(rows: int, row_group_size: int = 50_000) -> list:
+    """`wide`'s float specials, deliberately NOT spread evenly: NaN appears only
+    in row groups 1 and 3, ±inf only in row group 2, and row group 0 is entirely
+    ordinary finite values.
+
+    Even spreading would hide the bug this column exists to catch. Row-group
+    pruning decides per row group, from that group's own min/max, so a corpus
+    where every group looks alike can never show a prune that keeps one group and
+    wrongly drops another. Here `WHERE val_special > 1e6` must return exactly the
+    NaN rows of groups 1 and 3 — group 0 has no special at all and group 2's
+    +inf is inside its own bounds, so all three outcomes are different and a
+    pruner that treats them alike is visibly wrong.
+
+    Group 0 being clean also leaves a float column whose bounds ARE a true
+    bound, so the pruning that must still happen has somewhere to happen.
+    """
+    out = []
+    for i in range(rows):
+        group = i // row_group_size
+        finite = float((i % 401) - 200) / 4.0
+        if group in (1, 3) and i % _SPECIAL_STRIDE == 0:
+            out.append(float("nan"))
+        elif group == 2 and i % _SPECIAL_STRIDE == 0:
+            out.append(float("inf") if (i // _SPECIAL_STRIDE) % 2 == 0 else float("-inf"))
+        else:
+            out.append(finite)
+    return out
+
+
+def _special_null_mask(values: list) -> list:
+    """NULL positions for a specials column, chosen so a NULL NEVER lands on a
+    special value.
+
+    If NULL and NaN could share a row the column could not distinguish them: a
+    query returning the wrong count would leave you unable to say whether the
+    NULL handling or the NaN handling was at fault, which is the exact confusion
+    this whole area suffers from. Row 0 stays non-null for the same reason
+    `_null_mask` keeps it — `LIMIT 1` should return something.
+    """
+    return [
+        index != 0 and index % 11 == 5 and value == value and value not in (float("inf"), float("-inf"))
+        for index, value in enumerate(values)
+    ]
 
 
 def _null_mask(rng: random.Random, count: int, rate: float) -> list:
@@ -173,6 +305,12 @@ def build_mixed(rows: int = 2_000) -> pa.Table:
     n50 = _null_mask(rng, rows, 0.50)
     n05 = _null_mask(rng, rows, 0.05)
 
+    # Float specials. Built from the row index and placed AFTER every rng draw
+    # above so that adding them left `f_value` and friends bit-identical.
+    f_special = _float_special_column(rows)
+    f_special_offset = _float_special_column(rows, offset=3)
+    special_nulls = _special_null_mask(f_special_offset)
+
     columns = {
         # Never NULL — the identity column. Unique, dense, ordered.
         "row_id": pa.array(row_id, pa.int64()),
@@ -180,6 +318,11 @@ def build_mixed(rows: int = 2_000) -> pa.Table:
         "i_group": pa.array(i_group, pa.int64()),
         "i_value": pa.array(i_value, pa.int64()),
         "f_value": pa.array(f_value, pa.float64()),
+        # NaN / ±inf / ±0.0 with NO NULLs. This is the column that makes the
+        # three predicate buckets (`p`, `NOT p`, `p IS NULL`) a real test of NaN
+        # rather than of null handling: the third bucket here is provably empty,
+        # so a NaN row falling out of the partition can only be a NaN bug.
+        "f_special": pa.array(f_special, pa.float64()),
         "d_value": pa.array(d_value, pa.decimal128(18, 4)),
         "b_value": pa.array(b_value, pa.bool_()),
         "s_low": pa.array(s_low, pa.string()),
@@ -193,6 +336,12 @@ def build_mixed(rows: int = 2_000) -> pa.Table:
         # two nullable columns does not see the same null positions twice.
         "i_null": pa.array(_apply(i_value, n20), pa.int64()),
         "f_null": pa.array(_apply(f_value, n50), pa.float64()),
+        # The same specials WITH NULLs, and the two never share a row (see
+        # `_special_null_mask`). NULL and NaN are different things — one is an
+        # absent value, the other a present one that ranks highest — and a column
+        # where they overlapped could not tell the two apart when a query
+        # returned the wrong count.
+        "f_special_null": pa.array(_apply(f_special_offset, special_nulls), pa.float64()),
         "d_null": pa.array(_apply(d_value, n20), pa.decimal128(18, 4)),
         "b_null": pa.array(_apply(b_value, n50), pa.bool_()),
         "s_null": pa.array(_apply(s_awkward, n20), pa.string()),
@@ -239,6 +388,10 @@ def build_wide(rows: int = 200_000) -> pa.Table:
                 ),
                 pa.string(),
             ),
+            # NaN in SOME row groups only — see `_wide_special_column`. This is
+            # the one column in the corpus where min/max row-group pruning and
+            # NaN meet at scale, which is precisely where the pruning bug lived.
+            "val_special": pa.array(_wide_special_column(rows), pa.float64()),
         }
     )
 

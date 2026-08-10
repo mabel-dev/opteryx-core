@@ -276,6 +276,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf)
         void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
                               cppvector[string] key_names,
+                              cppvector[uint8_t] key_emit,
                               cppvector[AggSpec2] specs, size_t buf,
                               int64_t ndv_estimate)
         void set_distinct_sink(size_t p, cppvector[size_t] on_idx, size_t buf,
@@ -289,7 +290,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                   cppvector[int] lt_precision, cppvector[int] lt_scale,
                                   cppvector[int] lt_dimension,
                                   cppvector[cppvector[int]] elem_chain,
-                                  bint track_matches)
+                                  bint track_matches, int64_t est_output_rows,
+                                  bint null_equal)
         void set_unmatched_build_source(size_t p, size_t ref,
                                         cppvector[DrakenType] probe_types,
                                         cppvector[int] lt_kind, cppvector[int] lt_unit,
@@ -300,9 +302,11 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void add_join2_probe_residual(size_t p, size_t ref, cppvector[size_t] key_idx,
                                       cppvector[size_t] payload_idx, int mode,
                                       void* instrs, int count, cppvector[int] col_idx,
-                                      cppvector[void*] lit_dv, ExprEvalFn fn)
+                                      cppvector[void*] lit_dv, ExprEvalFn fn,
+                                      bint emit_prune, cppvector[uint32_t] emit_cols)
         void add_join2_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
-                             cppvector[size_t] payload_idx, int mode)
+                             cppvector[size_t] payload_idx, int mode,
+                             bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_asof_build_sink(size_t p, cppvector[size_t] key_idx,
                                  cppvector[size_t] payload_idx, size_t asof_idx,
                                  size_t ref, cppvector[DrakenType] payload_types,
@@ -310,14 +314,17 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                  cppvector[int] lt_precision, cppvector[int] lt_scale,
                                  cppvector[int] lt_dimension,
                                  cppvector[cppvector[int]] elem_chain,
-                                 int asof_type)
+                                 int asof_type, int64_t est_output_rows)
         void add_asof_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                             cppvector[size_t] payload_idx, size_t asof_idx, int op)
-        void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf)
-        void set_topn_sink(size_t p, cppvector[SortKeySpec] spec, size_t n, size_t buf)
+        void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf,
+                           bint emit_prune, cppvector[uint32_t] emit_cols)
+        void set_topn_sink(size_t p, cppvector[SortKeySpec] spec, size_t n, size_t buf,
+                           bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_window_sink(size_t p, cppvector[SortKeySpec] sort_spec, size_t n_part,
                              cppvector[int] fn_kinds, cppvector[string] fn_names,
-                             long long top_k, size_t buf)
+                             long long top_k, size_t buf,
+                             bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_window_topk_sink(size_t p, cppvector[size_t] part_idx, size_t order_idx,
                                   bint ascending, size_t k, string out_name, size_t buf)
         void set_final_schema(cppvector[string] names, cppvector[DrakenType] types,
@@ -737,6 +744,14 @@ cdef class BasePlanNode:
     cdef public object telemetry
     cdef public dict parameters
     cdef public list columns
+    # The ACTIVE COLUMN SET at this node — every identity something above it still
+    # reads. projection_pushdown records it on every logical node (its `visit` writes
+    # it before the node's own columns are collected, so at a Sort/GroupBy/Join it is
+    # the set NOT including that operator's own keys — exactly "what is still wanted
+    # after this operator's work is done"). It is what lets an operator kill a column
+    # the moment its purpose is spent instead of carrying it to the top of the plan.
+    # Empty means UNKNOWN, never "nothing is live" — consumers must keep everything.
+    cdef public object pre_update_columns
     cdef public str identity
     cdef public object _empty_morsel_cache
     cdef public str _time_stat_key
@@ -790,6 +805,7 @@ cdef class BasePlanNode:
         self.records_out = 0
         self.bytes_out = 0
         self.columns = parameters.get("columns") or []
+        self.pre_update_columns = parameters.get("pre_update_columns") or set()
 
         self._time_stat_key = f"time_{self.name.lower().replace(' ', '_')}"
         self._empty_morsel_cache = None
@@ -1179,6 +1195,12 @@ cdef class JoinNode(BasePlanNode):
     cdef public object on
     cdef public object _join_key_cast_plan
     cdef public bint _build_complete
+    # Estimated rows this join will EMIT, from JoinBuildShapeStrategy (None =
+    # unknown). Read by the compiler and handed to the native Join2BuildSink,
+    # which weighs it against the REAL size of its retained build payload to
+    # decide whether consolidating that payload costs less than re-copying it
+    # once per output row. Unknown keeps today's behaviour — never fabricated.
+    cdef public object join_output_rows_estimate
 
     def __init__(self, properties=None, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -1188,6 +1210,7 @@ cdef class JoinNode(BasePlanNode):
         self.left_relation_names = parameters.get("left_relation_names") or []
         self.right_relation_names = parameters.get("right_relation_names") or []
         self.on = parameters.get("on")
+        self.join_output_rows_estimate = parameters.get("join_output_rows_estimate")
         self._join_key_cast_plan = None
         self._build_complete = False
 
@@ -1746,7 +1769,7 @@ cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
                 ci = <int>layout.index(ident)
             except ValueError:
                 raise KeyError(
-                    f"native engine: expression references column {ident!r} which the "
+                    f"expression references column {ident!r} which the "
                     f"stream does not carry (layout: {layout!r})")
         elif slot.opcode == BC_LOAD_LIT_CONST:
             scalar_obj = <object>slot.literal_obj
@@ -1762,11 +1785,19 @@ def bytecode_is_all_c_native(CompiledBytecode bc):
     return bool(bc.is_all_c_native)
 
 
-def bytecode_is_c_native_predicate(CompiledBytecode bc):
-    """PLAN-TIME filter admission: every instruction c-native (DESC results
-    included — intermediates fold raw) AND the FINAL op produces a boolean mask
-    (compare / bool algebra / IS NULL) — cxx_mask_c's contract."""
-    if not bytecode_ops_all_c_native(bc):
+def bytecode_is_bool_final(CompiledBytecode bc):
+    """PLAN-TIME: does the program's FINAL op produce a boolean MASK — cxx_mask_c's
+    contract?
+
+    Deliberately independent of c-nativeness, because the two are independent
+    obligations on different paths. The trampoline scan runs a NON-c-native pushed
+    predicate on the GIL VM and still hands the result to `filter_mask`, which needs
+    a mask just the same; the latmat pass-1 span reads the result as a raw bitmap
+    (`_ensure_dense_bitmap_c`), which does not check the type at all and would read a
+    value vector's bytes AS bits — a silent wrong answer, not an error. So every
+    predicate consumer needs this test, and only some of them additionally need
+    `bytecode_ops_all_c_native`. `bytecode_is_c_native_predicate` is exactly both."""
+    if bc.count == 0:
         return False
     cdef int last = bc.instrs[bc.count - 1].opcode
     if last in (BC_AND, BC_OR, BC_XOR, BC_NOT, BC_DNF, BC_CNF,
@@ -1784,10 +1815,21 @@ def bytecode_is_c_native_predicate(CompiledBytecode bc):
     # so before this the FALSE half of the same fold was simply unrunnable.
     if last == BC_LOAD_LIT_BOOL:
         return True
-    # Bool-returning C-ABI function kernels (LIKE family) — marked at bind time
-    # with BC_RESULT_WRAP_AS_BOOL (0x20, compiled_expression.pyx flag contract).
+    # Bool-returning C-ABI function kernels (LIKE family, boolean-branched IIF) —
+    # marked at bind time with BC_RESULT_WRAP_AS_BOOL (0x20, compiled_expression.pyx
+    # flag contract). The flag asserts the kernel returns a DENSE `num_rows`-wide
+    # DRAKEN_BOOL result, which is what makes it a mask.
     return (last == BC_FUNCTION
             and (bc.instrs[bc.count - 1].flags & 0x20) != 0)
+
+
+def bytecode_is_c_native_predicate(CompiledBytecode bc):
+    """PLAN-TIME filter admission: every instruction c-native (DESC results
+    included — intermediates fold raw) AND the FINAL op produces a boolean mask —
+    cxx_mask_c's contract. The two halves are `bytecode_ops_all_c_native` and
+    `bytecode_is_bool_final`; nothing else is tested here, so a caller that only
+    owes one of the two obligations calls that half directly."""
+    return bytecode_ops_all_c_native(bc) and bytecode_is_bool_final(bc)
 
 
 def bytecode_ops_all_c_native(CompiledBytecode bc):
@@ -2255,19 +2297,33 @@ cdef class NativePlan:
         operand col_idx | -1), ...] in output-column order."""
         self._e.set_agg_sink(p, _agg_spec_from_list(specs), buf)
 
-    def set_groupby_sink(self, size_t p, list key_idx, list key_names, list specs, size_t buf,
-                         int64_t ndv_estimate):
-        """``ndv_estimate`` is the planner's distinct-group-count estimate for the
+    def set_groupby_sink(self, size_t p, list key_idx, list key_names, list key_emit,
+                         list specs, size_t buf, int64_t ndv_estimate):
+        """``key_emit`` is one flag per key: False means hash the key to separate the
+        groups but never store or emit its values (the sink's group identity is the
+        64-bit key hash, so a key nothing above reads costs only its hash).
+
+        ``ndv_estimate`` is the planner's distinct-group-count estimate for the
         GROUP BY keys (-1 = unknown). At or below the native gate the sink fronts
         each hash partition with a 16-slot parvi map (native_group_sinks.hpp,
         kGBParviGateNDV)."""
+        if len(key_emit) != len(key_idx) or len(key_names) != len(key_idx):
+            from opteryx.exceptions import InvalidInternalStateError
+            raise InvalidInternalStateError(
+                "set_groupby_sink needs one name and one emit flag per GROUP BY key — "
+                f"{len(key_idx)} keys, {len(key_names)} names, {len(key_emit)} flags"
+            )
         cdef cppvector[size_t] keys
         cdef cppvector[string] knames
+        cdef cppvector[uint8_t] kemit
         for i in key_idx:
             keys.push_back(<size_t>i)
         for n in key_names:
             knames.push_back(<string>(n if isinstance(n, bytes) else (<str>n).encode("utf-8")))
-        self._e.set_groupby_sink(p, keys, knames, _agg_spec_from_list(specs), buf, ndv_estimate)
+        for e in key_emit:
+            kemit.push_back(<uint8_t>(1 if e else 0))
+        self._e.set_groupby_sink(p, keys, knames, kemit, _agg_spec_from_list(specs), buf,
+                                 ndv_estimate)
 
     def set_distinct_sink(self, size_t p, list on_idx, size_t buf, int64_t ndv_estimate):
         """``on_idx`` = dedup key column indices; empty list = every column.
@@ -2289,14 +2345,23 @@ cdef class NativePlan:
     def set_join2_build_sink(self, size_t p, list key_idx, list payload_idx, size_t ref,
                              list payload_types, list payload_logical=None,
                              list payload_element=None,
-                             bint track_matches=False):
+                             bint track_matches=False,
+                             int64_t est_output_rows=-1,
+                             bint null_equal=False):
         """``payload_types``/``payload_logical``/``payload_element`` are the build-side
         payload columns' PLAN-KNOWN physical (DrakenType ints), logical ((kind, unit,
         precision, scale, dimension) tuples or None) and ARRAY element-chain types —
         so the native build sink can size+type its row-store up front instead of
         learning it from the first morsel, which never arrives when the build side
         streams zero rows (a filtered-to-empty subquery). ``payload_element`` is
-        described on ``_fill_payload_types``."""
+        described on ``_fill_payload_types``.
+
+        ``null_equal`` selects the SET-OPERATION key rule: NULL is an ordinary value
+        that equals itself (SQL's IS NOT DISTINCT FROM), which is how INTERSECT and
+        EXCEPT compare rows. It must be set for exactly the probe modes 6/7 and left
+        false for every other join — see native_join2.hpp's JoinMode. The two halves
+        have to agree: a build that excludes NULL keys under a probe that admits them
+        drops every NULL row instead of matching it."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         cdef cppvector[DrakenType] ts
@@ -2310,7 +2375,7 @@ cdef class NativePlan:
         _fill_payload_types(payload_types, payload_logical, payload_element,
                             ts, lk, lu, lp, lsc, ld, ec)
         self._e.set_join2_build_sink(p, keys, pay, ref, ts, lk, lu, lp, lsc, ld, ec,
-                                     track_matches)
+                                     track_matches, est_output_rows, null_equal)
 
     def set_unmatched_build_source(self, size_t p, size_t ref, list probe_types,
                                    list probe_logical=None, list probe_element=None):
@@ -2329,25 +2394,41 @@ cdef class NativePlan:
         self._e.set_unmatched_build_source(p, ref, ts, lk, lu, lp, lsc, ld, ec)
 
     def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
-                        int mode):
+                        int mode, list emit=None):
         """mode: 0=inner, 1=left outer (probe side preserved), 2=semi,
-        3=null-aware anti (NOT IN), 4=plain anti (NOT EXISTS / EXCEPT).
-        3 and 4 differ on NULL handling — see native_join2.hpp's JoinMode."""
+        3=null-aware anti (NOT IN), 4=plain anti (NOT EXISTS),
+        6=semi not-distinct, 7=anti not-distinct (INTERSECT / EXCEPT).
+        These disagree on NULL and are not interchangeable — see native_join2.hpp's
+        JoinMode. 2/4 make a NULL key unmatchable; 3 propagates NOT IN's UNKNOWN (one
+        NULL on the build side empties the result); 6/7 compare with IS NOT DISTINCT
+        FROM, so NULL matches NULL. A set operation needs 6/7 and is a wrong answer
+        under any of the others. Modes 6/7 additionally require the build sink to be
+        given ``null_equal=True`` — both halves must agree.
+
+        ``emit`` applies to modes 2/3/4 ONLY — the probe columns an existence filter
+        still emits, in output order. Its probe key is read on every row and normally
+        wanted by nothing above, so this is what drops it. ``None`` = emit every probe
+        column; ``[]`` = emit none, a real plan for `COUNT(*) ... WHERE x IN (...)`."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         for i in key_idx:
             keys.push_back(<size_t>i)
         for i in payload_idx:
             pay.push_back(<size_t>i)
-        self._e.add_join2_probe(p, ref, keys, pay, mode)
+        self._e.add_join2_probe(p, ref, keys, pay, mode,
+                                emit is not None, _emit_cols_from_list(emit))
 
     def add_join2_probe_residual(self, size_t p, size_t ref, list key_idx,
                                  list payload_idx, int mode, CompiledBytecode bc,
-                                 list layout):
+                                 list layout, list emit=None):
         """SEMI/ANTI (mode 2/3/4) whose EXISTENCE test is gated by a correlated
         non-equality residual — TPC-H Q21's `l2.l_suppkey <> l1.l_suppkey`. ``bc`` is
         resolved against ``layout``, the PAIR layout (build payload then probe
-        payload), because the predicate reads a column from each side."""
+        payload), because the predicate reads a column from each side.
+
+        ``payload_idx`` therefore stays FULL WIDTH here — the residual reads it.
+        ``emit`` is the separate question of what the filter outputs, exactly as in
+        :meth:`add_join2_probe`; narrowing it does not touch the pair layout."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         cdef cppvector[int] col_idx
@@ -2360,12 +2441,13 @@ cdef class NativePlan:
         self.held.append(bc)
         self._e.add_join2_probe_residual(p, ref, keys, pay, mode,
                                          <void*>bc.instrs, <int>bc.count,
-                                         col_idx, lit_dv, _expr_eval_tramp)
+                                         col_idx, lit_dv, _expr_eval_tramp,
+                                         emit is not None, _emit_cols_from_list(emit))
 
     def set_asof_build_sink(self, size_t p, list key_idx, list payload_idx,
                             size_t asof_idx, size_t ref, list payload_types,
                             list payload_logical=None, list payload_element=None,
-                            int asof_type=0):
+                            int asof_type=0, int64_t est_output_rows=-1):
         """``payload_types``/``payload_logical``/``payload_element``: see
         set_join2_build_sink — same plan-known-type wiring, shared build sink
         implementation.
@@ -2387,7 +2469,7 @@ cdef class NativePlan:
         _fill_payload_types(payload_types, payload_logical, payload_element,
                             ts, lk, lu, lp, lsc, ld, ec)
         self._e.set_asof_build_sink(p, keys, pay, asof_idx, ref, ts, lk, lu, lp, lsc,
-                                    ld, ec, asof_type)
+                                    ld, ec, asof_type, est_output_rows)
 
     def add_asof_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                        size_t asof_idx, int op):
@@ -2411,7 +2493,7 @@ cdef class NativePlan:
         elements are length-1 Vectors; `held` keeps them (and their underlying
         DrakenVector*) alive for the Engine's whole run, same as `bc`."""
         if not bytecode_is_c_native_predicate(bc):
-            raise ValueError("native engine: add_expr_filter requires a c-native "
+            raise ValueError("add_expr_filter requires a c-native "
                              "bool-final program — the compiler must reject earlier")
         cdef cppvector[int] col_idx
         cdef cppvector[void*] lit_dv
@@ -2442,7 +2524,7 @@ cdef class NativePlan:
         key); it selects a distinct trampoline, which also prevents fusion with dense
         ExprProject columns in the engine's ExprMultiProjectOperator."""
         if not bytecode_ops_all_c_native(bc):
-            raise ValueError("native engine: add_expr_project requires a c-native "
+            raise ValueError("add_expr_project requires a c-native "
                              "program — the compiler must reject this shape earlier")
         cdef cppvector[int] col_idx
         cdef cppvector[void*] lit_dv
@@ -2477,10 +2559,10 @@ cdef class NativePlan:
         the plan; parsing dominates extraction, so N paths cost barely more than one.
         """
         if len(ctx_ptrs) != len(names):
-            raise ValueError("native engine: add_json_extract_multi needs one name "
+            raise ValueError("add_json_extract_multi needs one name "
                              "per ctx")
         if len(ctx_ptrs) < 2:
-            raise ValueError("native engine: add_json_extract_multi is for 2+ paths — "
+            raise ValueError("add_json_extract_multi is for 2+ paths — "
                              "a single extraction belongs in its own expression program")
         cdef cppvector[void*] ctxs
         cdef cppvector[string] nms
@@ -2542,20 +2624,34 @@ cdef class NativePlan:
         buffer run at 1). DOP is a number, never a code-path selector."""
         self._e.set_pipeline_dop(p, dop)
 
-    def set_sort_sink(self, size_t p, list spec, size_t buf):
-        """``spec`` = [(col_idx:int, ascending:bool), ...] most significant first."""
-        self._e.set_sort_sink(p, _sort_spec_from_list(spec), buf)
+    def set_sort_sink(self, size_t p, list spec, size_t buf, list emit=None):
+        """``spec`` = [(col_idx:int, ascending:bool), ...] most significant first.
 
-    def set_topn_sink(self, size_t p, list spec, size_t n, size_t buf):
-        self._e.set_topn_sink(p, _sort_spec_from_list(spec), n, buf)
+        ``emit`` = the input column positions the sort must still materialize, in
+        output order — its EMIT set, which is disjoint from ``spec``'s READ set, so an
+        ORDER BY key nothing above the sort reads is sorted on but never gathered.
+        ``None`` means the set is unknown and every column is emitted; ``[]`` means
+        emit none, which is a real plan (COUNT(*) over an ordered subquery)."""
+        self._e.set_sort_sink(p, _sort_spec_from_list(spec), buf,
+                              emit is not None, _emit_cols_from_list(emit))
+
+    def set_topn_sink(self, size_t p, list spec, size_t n, size_t buf, list emit=None):
+        """``emit`` as in :meth:`set_sort_sink`. It applies to the TERMINAL sort only —
+        TopNSink's per-worker compaction rounds re-sort their own output and keep the
+        full width."""
+        self._e.set_topn_sink(p, _sort_spec_from_list(spec), n, buf,
+                              emit is not None, _emit_cols_from_list(emit))
 
     def set_window_sink(self, size_t p, list sort_spec, size_t n_part,
-                        list fn_kinds, list fn_names, long long top_k, size_t buf):
+                        list fn_kinds, list fn_names, long long top_k, size_t buf,
+                        list emit=None):
         """``sort_spec`` = [(col_idx, ascending), ...] = partition keys (all asc) then
         order keys; ``n_part`` leading entries are the partition keys. ``fn_kinds`` =
         int codes (0 ROW_NUMBER, 1 RANK, 2 DENSE_RANK); ``fn_names`` the output names.
         ``top_k`` = WindowTopKFusionStrategy's fused `rank <= K` hint, or -1 if none —
-        keep only rows whose rank is <= top_k, computed after ranking every row."""
+        keep only rows whose rank is <= top_k, computed after ranking every row.
+        ``emit`` as in :meth:`set_sort_sink`, over the INPUT columns only — the rank
+        columns are appended to whatever survives it."""
         cdef cppvector[int] kinds
         cdef cppvector[string] names
         for k in fn_kinds:
@@ -2563,7 +2659,8 @@ cdef class NativePlan:
         for nm in fn_names:
             names.push_back(<string>(nm if isinstance(nm, bytes) else (<str>nm).encode("utf-8")))
         self._e.set_window_sink(p, _sort_spec_from_list(sort_spec), n_part,
-                                kinds, names, top_k, buf)
+                                kinds, names, top_k, buf,
+                                emit is not None, _emit_cols_from_list(emit))
 
     def set_window_topk_sink(self, size_t p, list part_idx, size_t order_idx,
                              bint ascending, size_t k, out_name, size_t buf):
@@ -2612,6 +2709,20 @@ cdef cppvector[SortKeySpec] _sort_spec_from_list(list spec) except *:
         s.col_idx = <size_t>col_idx
         s.ascending = bool(ascending)
         out.push_back(s)
+    return out
+
+
+cdef cppvector[uint32_t] _emit_cols_from_list(list emit) except *:
+    """Input column positions a sort/window sink still materializes, in output order.
+
+    ``None`` and ``[]`` both produce an EMPTY vector here — they are told apart by
+    the separate ``emit_prune`` flag at the call site, not by this vector's length,
+    because "no subset known" and "the subset is empty" are different plans."""
+    cdef cppvector[uint32_t] out
+    if emit is None:
+        return out
+    for idx in emit:
+        out.push_back(<uint32_t>idx)
     return out
 
 
@@ -2664,7 +2775,7 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
         elif fn == "CidrAgg":
             s.fn = AggFn.CidrAgg
         else:
-            raise ValueError(f"native engine: unknown aggregate function {fn!r}")
+            raise ValueError(f"unknown aggregate function {fn!r}")
         s.col_idx = <int>col_idx
         s.name = <string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8"))
         # `s` is reused across iterations — every field is assigned unconditionally
@@ -2713,7 +2824,13 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
     exception (rich traceback, e.g. a decode error), else synthesize a RuntimeError
     from the native code + message. Called by execute_native AFTER the output queue is
     finished (every worker joined), so reading the scans' stashed exceptions is
-    race-free. Returns None when there is no terminal error."""
+    race-free. Returns None when there is no terminal error.
+
+    Rendered as ``[<code>]: <message>``. The code is kept — it is the only machine
+    handle on which gate fired — but "native engine" is not repeated in front of it:
+    the reader is looking at an engine error already (the class and the bracketed
+    code say so), and leading with the internals pushed the part they can act on,
+    the message, to the far right of the line."""
     cdef object exc
     cdef object scan_obj
     if errslot.code == 0:
@@ -2723,7 +2840,7 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
         if exc is not None:
             return exc
     return RuntimeError(
-        "native engine: error code %d: %s" % (errslot.code, errslot.message() or "unknown")
+        "[%d]: %s" % (errslot.code, errslot.message() or "unknown")
     )
 
 

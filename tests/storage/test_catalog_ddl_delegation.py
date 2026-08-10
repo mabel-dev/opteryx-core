@@ -241,38 +241,38 @@ def test_rename_requires_grant_on_target(catalog_workspace):
 def test_alter_workspace_delegates_to_catalog_with_user(catalog_workspace):
     """ALTER WORKSPACE reaches the catalog with the property already typed."""
     session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
 
     assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"delete_protection": False}, "alice")
+        ("set_workspace_properties", {"deletion_protection": False}, "alice")
     ]
 
 
 def test_alter_workspace_on_maps_to_true(catalog_workspace):
     session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO ON"))
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO ON"))
 
     assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"delete_protection": True}, "alice")
+        ("set_workspace_properties", {"deletion_protection": True}, "alice")
     ]
 
 
 def test_alter_workspace_accepts_boolean_literals(catalog_workspace):
     session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO TRUE"))
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO TRUE"))
 
     assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"delete_protection": True}, "alice")
+        ("set_workspace_properties", {"deletion_protection": True}, "alice")
     ]
 
 
 def test_alter_workspace_unauthenticated_passes_none(catalog_workspace):
     """No session user means no author - not an invented one."""
     session = opteryx.session(access_policies=_OWNER_POLICY)
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
 
     assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"delete_protection": False}, None)
+        ("set_workspace_properties", {"deletion_protection": False}, None)
     ]
 
 
@@ -281,7 +281,7 @@ def test_alter_workspace_requires_owner(catalog_workspace):
     writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
 
     with pytest.raises(PermissionError, match="permission to alter workspace cat"):
-        list(writer.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+        list(writer.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
 
     assert catalog_workspace.calls == []
 
@@ -292,20 +292,20 @@ def test_alter_workspace_whole_workspace_owner_grant_is_enough(catalog_workspace
     session = opteryx.session(
         user="alice", access_policies=[{"pattern": "cat.*", "role": "owner"}]
     )
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
 
     assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"delete_protection": False}, "alice")
+        ("set_workspace_properties", {"deletion_protection": False}, "alice")
     ]
 
 
 def test_alter_workspace_named_owner_grant_is_enough(catalog_workspace):
     """A grant matching the bare workspace name also unlocks it."""
     session = opteryx.session(user="alice", access_policies=[{"pattern": "cat", "role": "owner"}])
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
 
     assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"delete_protection": False}, "alice")
+        ("set_workspace_properties", {"deletion_protection": False}, "alice")
     ]
 
 
@@ -317,7 +317,7 @@ def test_alter_workspace_partial_grant_is_not_enough(catalog_workspace):
     )
 
     with pytest.raises(PermissionError, match="permission to alter workspace cat"):
-        list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+        list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
 
     assert catalog_workspace.calls == []
 
@@ -329,7 +329,7 @@ def test_alter_workspace_owner_of_another_workspace_is_not_enough(catalog_worksp
     )
 
     with pytest.raises(PermissionError, match="permission to alter workspace cat"):
-        list(session.execute_to_morsels("ALTER WORKSPACE cat SET delete_protection TO OFF"))
+        list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
 
     assert catalog_workspace.calls == []
 

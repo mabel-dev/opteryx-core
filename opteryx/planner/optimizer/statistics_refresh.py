@@ -645,16 +645,20 @@ def _equi_key_classes(
     composite key (``a.x = b.x AND a.y = b.y``) shares no endpoint, stays two
     classes, and still has both selectivities multiplied in.
 
-    Per class, tdom is the largest known NDV across every member endpoint
-    (Ebergen 2022 3.2) and is applied to BOTH sides -- so a class where only one
-    side knows its NDV uses that NDV rather than ``_key_selectivity``'s flat 0.1
-    equality fallback. When no member knows an NDV (common with Parquet files
-    that omit distinct-count statistics), tdom falls back to the smaller side's
-    ``domain_row_count`` -- its PRE-filter size: under FK-PK structure the
-    smaller relation upper-bounds the distinct key count, and dividing by the
-    post-filter count instead yields exactly ``max(rows)``, erasing every
-    dimension filter. Null fractions take the worst case per side, matching
-    ``JoinOrderingStrategy._key_null_fraction``.
+    Per class, tdom is estimated SEPARATELY for each side and the two combined
+    with ``max`` (Ebergen 2022 3.2) -- so a class where only one side knows its
+    NDV still uses a real domain size rather than ``_key_selectivity``'s flat
+    0.1 equality fallback. A side's own estimate is the largest NDV known across
+    its endpoints, capped by the narrowest value-range span across those same
+    endpoints. Keeping the sides apart is what makes tdom a domain size instead
+    of an intersection size; see the comment at the computation for the
+    cross-product blow-up that pooling them caused. When a side knows no NDV
+    (common with Parquet files that omit distinct-count statistics), it falls
+    back to the smaller side's ``domain_row_count`` -- its PRE-filter size:
+    under FK-PK structure the smaller relation upper-bounds the distinct key
+    count, and dividing by the post-filter count instead yields exactly
+    ``max(rows)``, erasing every dimension filter. Null fractions take the worst
+    case per side, matching ``JoinOrderingStrategy._key_null_fraction``.
 
     This mirrors ``plan_adapter._build_equiv_tdoms``, which already groups the
     identical way for the edges DPccp enumerates. The two paths must agree, or
@@ -687,40 +691,53 @@ def _equi_key_classes(
 
     equi_keys: List[Tuple[KeyStats, KeyStats]] = []
     for members in classes.values():
-        known_ndvs: List[int] = []
-        spans: List[int] = []
+        known_ndvs: Dict[str, List[int]] = {"left": [], "right": []}
+        spans: Dict[str, List[int]] = {"left": [], "right": []}
         left_nulls: List[float] = []
         right_nulls: List[float] = []
         for left_key, right_key in members:
             left_col = left.get_column(left_key)
             right_col = right.get_column(right_key)
-            for col in (left_col, right_col):
+            for side, col in (("left", left_col), ("right", right_col)):
                 if col is None:
                     continue
                 if col.distinct_count is not None:
-                    known_ndvs.append(col.distinct_count)
+                    known_ndvs[side].append(col.distinct_count)
                 span = _value_range_span(col)
                 if span is not None:
-                    spans.append(span)
+                    spans[side].append(span)
             if left_col is not None and left_col.null_fraction is not None:
                 left_nulls.append(left_col.null_fraction)
             if right_col is not None and right_col.null_fraction is not None:
                 right_nulls.append(right_col.null_fraction)
 
-        tdom = (
-            max(known_ndvs)
-            if known_ndvs
-            else min(left.domain_row_count, right.domain_row_count)
-        )
-        # An equi-join only matches values present on BOTH sides, so the key
-        # domain cannot exceed the narrowest member's value range. Applied as a
-        # cap, never as the estimate itself: a range span is an upper bound on
-        # NDV (see _value_range_span), so adopting it outright would overstate
-        # the domain for a sparse key and shrink the join estimate to nothing.
-        # Capping only ever tightens tdom, which raises the estimate.
-        if spans:
-            tdom = min(tdom, min(spans))
-        tdom = max(1, tdom)
+        # tdom stands in for max(ndv_left, ndv_right) -- the divisor in
+        # |L| x |R| / tdom -- so every input to it must describe ONE side's own
+        # key column. Pooling the two sides' NDVs and ranges and then taking a
+        # minimum across the pool does not: it produces the size of the
+        # INTERSECTED domain while the row counts stay un-intersected, and the
+        # two halves of the ratio then disagree. That is a one-way error --
+        # the intersection can only shrink, so the estimate can only grow --
+        # and it grows precisely when a filter narrows one side, which is the
+        # opposite of what a filter does. `WHERE grp_wide = 5` left one side
+        # with ndv 1 spanning [5, 5]; pooled, that pinned tdom to 1 and turned
+        # a 20,000-row equi-join into the full 2,000,000,000-row cross product,
+        # over the `sql_select_limit` guard, so an ordinary query was refused
+        # outright. Estimated per side and combined with max(), the same query
+        # divides by the OTHER side's real domain and lands on 20,000.
+        fallback = min(left.domain_row_count, right.domain_row_count)
+        side_tdoms: List[int] = []
+        for side in ("left", "right"):
+            # A side that reports no NDV falls back to the domain bound -- the
+            # smaller relation's PRE-filter size, per this function's docstring.
+            side_tdom = max(known_ndvs[side]) if known_ndvs[side] else fallback
+            # A range span is an upper bound on the NDV of the column it came
+            # from (see _value_range_span) -- never a substitute for a real
+            # distinct_count, and never a bound on the other side's column.
+            if spans[side]:
+                side_tdom = min(side_tdom, min(spans[side]))
+            side_tdoms.append(side_tdom)
+        tdom = max(1, max(side_tdoms))
         equi_keys.append((
             KeyStats(ndv=tdom, null_fraction=max(left_nulls) if left_nulls else None),
             KeyStats(ndv=tdom, null_fraction=max(right_nulls) if right_nulls else None),
@@ -811,7 +828,13 @@ def _join_stats(
         estimator_type = "right"
     elif join_type in ("full outer", "outer"):
         estimator_type = "outer"
-    elif join_type in ("left semi", "left anti", "left anti null-aware"):
+    elif join_type in (
+        "left semi",
+        "left anti",
+        "left anti null-aware",
+        "left semi not-distinct",
+        "left anti not-distinct",
+    ):
         # Semi/anti emit only left-side columns; right contributes nothing.
         if join_notes is not None:
             join_notes.append(
@@ -924,12 +947,34 @@ def _aggregate_stats(
     # so a single key's distinct_count is bounded above by the output row count.
     # Histograms drop because the group-by output's value distribution differs
     # from the input's (each group reduced to one row regardless of frequency).
+    #
+    # With exactly ONE group key that bound is an EQUALITY, not a cap: the
+    # output holds one row per distinct value of that key, so its NDV *is* the
+    # output row count. Leaving it None when the input never reported a
+    # distinct_count throws away the one NDV a group-by always knows, and
+    # downstream that omission is not neutral -- `_equi_key_classes` takes
+    # `max(known_ndvs)` across a join class, so joining this aggregate to a
+    # filtered relation whose key NDV *is* known (say 1, after `flag = TRUE`)
+    # set tdom to 1 and estimated the join as a full cross product. That is how
+    # a window function -- planned as a self-join against a grouped aggregate --
+    # came to be estimated at 2,000,000,000 rows over a 200,000-row relation
+    # the moment any filter was added, and refused by the `sql_select_limit`
+    # guard.
+    #
+    # With several group keys nothing equivalent holds: out_rows counts distinct
+    # COMBINATIONS, and an individual key's NDV is only capped by it (applied
+    # below by _cap_ndvs), so the input's own estimate stands.
+    single_key_ndv = out_rows if len(group_keys) == 1 else None
     out_cols: Dict[bytes, ColumnStatistics] = {}
     for key in group_keys:
         col = base.columns.get(key)
         if col is None:
             continue
-        out_cols[key] = replace(col, histogram=None)
+        out_cols[key] = replace(
+            col,
+            histogram=None,
+            distinct_count=single_key_ndv if single_key_ndv is not None else col.distinct_count,
+        )
     out_cols = _scale_total_bytes(out_cols, _ratio(out_rows, base.row_count))
     return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(out_cols, out_rows))
 
@@ -1280,8 +1325,8 @@ def _collect_range_constraints(
         # BETWEEN ranges live on .right (lower) / .right.right? — manifest does
         # ``a = node.right; b = ...``; we read whichever attributes carry the
         # literals.
-        a = _literal_value(getattr(node, "right", None))
-        b = _literal_value(getattr(node, "centre", None))
+        a = _orderable_bound(_literal_value(getattr(node, "right", None)))
+        b = _orderable_bound(_literal_value(getattr(node, "centre", None)))
         if a is None or b is None:
             return
         lo, hi = (a, b) if a <= b else (b, a)
@@ -1301,24 +1346,30 @@ def _collect_range_constraints(
         lit_value = _literal_value(literal)
         if lit_value is None:
             return
-        if op == "Eq":
-            _merge_constraint(sink, identity, lower=lit_value, upper=lit_value, eq_card=1)
-        elif op == "Lt":
-            _merge_constraint(sink, identity, upper=lit_value)
-        elif op == "LtEq":
-            _merge_constraint(sink, identity, upper=lit_value)
-        elif op == "Gt":
-            _merge_constraint(sink, identity, lower=lit_value)
-        elif op == "GtEq":
-            _merge_constraint(sink, identity, lower=lit_value)
-        elif op == "InList":
+        if op == "InList":
             values = _in_list_values(literal)
-            if values:
-                try:
-                    lo, hi = min(values), max(values)
-                except TypeError:
-                    return
-                _merge_constraint(sink, identity, lower=lo, upper=hi, eq_card=len(values))
+            if not values:
+                return
+            # An IN-list caps NDV whatever the member type; only the RANGE it
+            # implies needs members that can be ordered against a stored bound.
+            bounds = [b for b in (_orderable_bound(v) for v in values) if b is not None]
+            _merge_constraint(
+                sink,
+                identity,
+                lower=min(bounds) if len(bounds) == len(values) else None,
+                upper=max(bounds) if len(bounds) == len(values) else None,
+                eq_card=len(values),
+            )
+            return
+        bound = _orderable_bound(lit_value)
+        if op == "Eq":
+            _merge_constraint(sink, identity, lower=bound, upper=bound, eq_card=1)
+        elif bound is None:
+            return
+        elif op in ("Lt", "LtEq"):
+            _merge_constraint(sink, identity, upper=bound)
+        elif op in ("Gt", "GtEq"):
+            _merge_constraint(sink, identity, lower=bound)
         return
 
 
@@ -1330,6 +1381,33 @@ _SWAPPED_COMPARISON = {
     "Eq": "Eq",
     "NotEq": "NotEq",
 }
+
+
+def _orderable_bound(value):
+    """`value` if it can be ordered against a stored `value_range` bound, else None.
+
+    `value_range` holds NUMBERS and nothing else. `_scan_stats` enforces that on
+    the way in — it records a manifest bound only when both ends are int or float,
+    because the manifest returns strings and decimals as RAW SERIALIZED BYTES and
+    feeding those to the unguarded `max`/`min` in `_narrow_filter_columns` would
+    raise. This is the same gate on the other inlet: a bound harvested from a
+    PREDICATE lands in the same field and is intersected by the same bare
+    comparison on a later pass.
+
+    It was not gated, and the two spellings a VARCHAR literal has in this engine
+    then met in that comparison — a parsed IN-list literal is `bytes`, a
+    constant-folded `INITCAP('item')` is `str` — as
+    `min('Item', b'zeta')`: TypeError, from an ordinary two-predicate query. The
+    representation split is real and lives upstream of the cost model; this keeps
+    the cost model out of it rather than adopting a side in passing.
+
+    Dropping a bound only widens an estimate, so nothing here can make a plan
+    wrong. `bool` is excluded the way `_value_range_span` excludes it: True is an
+    int to `isinstance` and a range over it means nothing. Equality CARDINALITY is
+    unaffected — it counts values rather than ordering them, so `=` and `IN` still
+    cap NDV for every type.
+    """
+    return value if type(value) in (int, float) else None
 
 
 def _identifier_identity(node) -> Optional[bytes]:

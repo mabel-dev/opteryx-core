@@ -43,6 +43,7 @@ addr <<= '1.2.3.4/32'                       → addr = 16909060 (a /32 is one ho
 a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 """
 
+import datetime
 import math
 import re
 from typing import Callable, Dict
@@ -145,7 +146,7 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
 
     if predicate.right.node_type != NodeType.LITERAL:
         raise NotSupportedError(
-            "RLIKE/REGEXP_LIKE requires a constant pattern — "
+            "**RLIKE**/REGEXP_LIKE requires a constant pattern — "
             f"got a non-literal expression for {predicate.value}."
         )
 
@@ -154,7 +155,7 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
         pattern_value = pattern_value.encode("utf8")
     elif not isinstance(pattern_value, bytes):
         raise NotSupportedError(
-            f"RLIKE/REGEXP_LIKE pattern must be a string constant, got {type(pattern_value)!r}."
+            f"**RLIKE**/REGEXP_LIKE pattern must be a string constant, got {type(pattern_value)!r}."
         )
 
     from opteryx.compiled import vector_ops as compiled_vector_ops
@@ -178,7 +179,7 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
     compiled_blob = compiled_vector_ops.compile_rlike_dfa(pattern_value)
     if compiled_blob is None:
         raise NotSupportedError(
-            "RLIKE/REGEXP_LIKE pattern is outside the supported regex dialect "
+            "**RLIKE**/REGEXP_LIKE pattern is outside the supported regex dialect "
             "(no lookaround/backreferences/case-fold, ASCII pattern content only, "
             "anchors only at the outermost start/end, and the compiled automaton "
             f"must stay within the state-count cap): {pattern_value!r}"
@@ -748,6 +749,40 @@ def rewrite_string_empty_compare(predicate, telemetry):
     return _build_emptiness_node(inner, op_name)
 
 
+_EPOCH = datetime.datetime(1970, 1, 1)
+#: Ticks per second for each TimestampUnit, indexed by the unit's own enum value.
+_TICKS_PER_SECOND = (1, 10**3, 10**6, 10**9)
+
+
+def _canonical_temporal_literal_value(dt: datetime.datetime, column_ct: ColumnType):
+    """A temporal literal's value in the representation the engine stores it in.
+
+    A TIMESTAMP literal is an epoch INTEGER in the column's own unit and a DATE
+    literal is days since the epoch — the form every other producer of one emits,
+    and the form this same function's own parsing step (above) goes out of its way
+    to read. Handing back a `datetime` instead is a value/type-tag divergence: the
+    node claims TIMESTAMP but carries something no consumer of a TIMESTAMP literal
+    expects. It reached the cost model as
+    `min(datetime.datetime(...), 946693884000000)` and killed
+    `WHERE TRUNC(ts, 'hour') <= <literal>` with a bare Python TypeError, while the
+    un-rewritten `WHERE ts <= <literal>` — whose literal is an int — was fine.
+
+    Anything that is not TIMESTAMP or DATE is returned unchanged: the caller falls
+    back to VARCHAR when the column has no schema_column, and inventing an integer
+    for a type that does not store one would be a second divergence, not a fix.
+    """
+    category = column_ct.category
+    if category == LogicalCategory.TIMESTAMP:
+        unit = column_ct.logical.unit.value if column_ct.logical is not None else 2
+        delta = dt - _EPOCH
+        return (delta.days * 86400 + delta.seconds) * _TICKS_PER_SECOND[unit] + (
+            delta.microseconds * _TICKS_PER_SECOND[unit] // 10**6
+        )
+    if category == LogicalCategory.DATE:
+        return (dt - _EPOCH).days
+    return dt
+
+
 def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     """
     Rewrite temporal TRUNC comparisons to range comparisons for better pushdown eligibility.
@@ -852,7 +887,7 @@ def rewrite_date_trunc_to_range(predicate, telemetry: QueryTelemetry):
     def make_timestamp_literal(dt):
         lit = Node(
             node_type=NodeType.LITERAL,
-            value=dt,
+            value=_canonical_temporal_literal_value(dt, column_ct),
             type=column_ct,
         )
         lit.schema_column = ExpressionColumn(name="", column_type=column_ct)
@@ -1631,14 +1666,17 @@ def _stringify_for_concat(node):
     """Coerce a CONCAT/CONCAT_WS operand to VARCHAR, unless it is already
     string-family (VARCHAR/NVARCHAR/VARBINARY) or NULL-typed.
 
-    CONCAT/CONCAT_WS are rewritten to `||` (StringConcat) chains, and
-    StringConcat is string-only natively (binop_string_concat,
-    function_string_extra.cpp header) — every arity of the family refused a
-    non-string operand (`CONCAT(id, name)`, `CONCAT_WS('-', id, name)`, ...)
-    with an opaque "outside the c-native kernel set" error, even though
-    `CAST(id AS VARCHAR)` already works. This wraps each non-string operand in
-    the SAME cast a caller would have to write explicitly, closing the gap
-    uniformly for every CONCAT/CONCAT_WS arity rather than one arm at a time.
+    CONCAT/CONCAT_WS are rewritten to `||` (StringConcat) chains, and StringConcat
+    is string-only natively (binop_string_concat, function_string_extra.cpp
+    header), so an operand with no string type cannot be handed to it.
+
+    The cast is now a BACKSTOP, not the main path. CONCAT/CONCAT_WS declare one
+    overload per string type, so a genuinely non-string operand (`CONCAT(id,
+    name)`) is refused by overload resolution at BIND and never reaches here —
+    that coercion was deliberately removed (architect, 2026-08-09; see
+    RATIFIED/string-concatenation-requires-homogeneous-string-types). What still
+    arrives untyped is a node the binder could not type at all (determine_type
+    returns None), and VARCHAR is the only thing to do with one.
 
     A NULL-typed operand is passed through unwrapped: StringConcat already
     short-circuits `x || NULL` to NULL via the dedicated NULL-operand rule in
@@ -1663,6 +1701,68 @@ def _stringify_for_concat(node):
         alias=None,
         schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
     )
+
+
+def _concat_chain_type(function):
+    """Validate CONCAT/CONCAT_WS operand homogeneity; return the chain's ColumnType.
+
+    CONCAT/CONCAT_WS require HOMOGENEOUS string operands.
+
+    Architect ruling 2026-08-09: string concatenation takes one string type, and
+    mixing VARCHAR/NVARCHAR/VARBINARY is an IncorrectTypeError the caller resolves
+    with an explicit cast. `||` gets this from OPERATOR_MAP, which holds only the
+    three matching pairs (see operator_map._STRING_CATEGORIES). CONCAT cannot: it
+    binds through the catalog with `any` parameters and is desugared to a
+    StringConcat chain HERE, post-bind, so the operator map never sees its operands
+    until the chain is already built. Checking up front also lets the error name
+    `CONCAT(...)` — the thing the caller actually wrote — rather than a `||` that
+    never appeared in the query.
+
+    This is the SECOND line of defence, and it is worth keeping. CONCAT/CONCAT_WS
+    declare one overload per string type, so overload resolution already rejects a
+    mixed call at bind with a message naming the offending argument — that is the
+    error a caller normally sees. Resolution scores an argument the binder could
+    not type as compatible with everything, though, so an untyped node can still
+    reach the desugaring; this catches it there rather than letting it build a
+    mixed `||` chain the plan compiler would refuse with "outside the c-native
+    kernel set" — the opaque message this ruling exists to remove.
+
+    NULL-typed operands carry no string type to disagree with and are skipped —
+    `CONCAT(name, NULL)` stays legal, matching the StringConcat NULL-operand rule.
+
+    The returned ColumnType types EVERY node of the desugared chain. The
+    intermediate StringConcat nodes used to be hardcoded VARCHAR, which was
+    invisible for a VARCHAR chain and wrong for any other: a three-operand
+    VARBINARY concat declared `b'a' || b'b'` VARCHAR, so the next link read VARCHAR
+    against VARBINARY and the plan compiler refused a chain whose operands were
+    perfectly homogeneous. One resolved type for the whole chain removes that.
+    """
+    categories = set()
+    for param in function.parameters:
+        ct = determine_type(param)
+        if ct is None or ct.category == LogicalCategory.NULL:
+            continue
+        categories.add(ct.category if ct.category in _STRING_CATEGORIES else LogicalCategory.VARCHAR)
+    if len(categories) > 1:
+        from opteryx.exceptions import IncorrectTypeError, compose, md_code
+
+        names = sorted(category.name for category in categories)
+        raise IncorrectTypeError(
+            compose(
+                f"{md_code(format_expression(function))} cannot be evaluated, because "
+                f"{md_code(function.value)} concatenates one string type at a time and "
+                f"{', '.join(md_code(name) for name in names)} were provided",
+                f"Casting the operands to match with {md_code('CAST(column AS type)')} "
+                f"usually resolves it",
+            )
+        )
+    # All-NULL operands leave `categories` empty — VARCHAR is the type the
+    # StringConcat NULL-operand rule already gives that shape.
+    if categories == {LogicalCategory.VARBINARY}:
+        return _lt.VARBINARY
+    if categories == {LogicalCategory.NVARCHAR}:
+        return _lt.NVARCHAR
+    return _lt.VARCHAR
 
 
 def _rewrite_function(function, telemetry: QueryTelemetry):
@@ -1745,8 +1845,14 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
             function.value = "IFNULL"
             _rebind_function_ref()
             return function
-    # SUBSTRING(x, 1, n) → LEFT(x, n)
-    if function.value == "SUBSTRING" and function.parameters[1].value == 1:
+    # SUBSTRING(x, 1, n) → LEFT(x, n). Arity-guarded: the two-argument form
+    # SUBSTRING(x, 1) has no length to hand LEFT (it means "the whole string"),
+    # and reading parameters[2] there is an IndexError.
+    if (
+        function.value == "SUBSTRING"
+        and len(function.parameters) == 3
+        and function.parameters[1].value == 1
+    ):
         telemetry.optimization_predicate_rewriter_substring_to_left += 1
         function.value = "LEFT"
         function.parameters = [function.parameters[0], function.parameters[2]]
@@ -1757,6 +1863,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # non-string operand (CONCAT(id, name)) was refused family-wide before this.
     if function.value == "CONCAT" and len(function.parameters) > 1:
         telemetry.optimization_predicate_rewriter_concat_to_double_pipe += 1
+        _chain_ct = _concat_chain_type(function)
         left_node = _stringify_for_concat(function.parameters[0])
         for param in function.parameters[1:]:
             left_node = Node(
@@ -1764,7 +1871,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 value="StringConcat",
                 left=left_node,
                 right=_stringify_for_concat(param),
-                schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
+                schema_column=ExpressionColumn(name="", column_type=_chain_ct),
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
@@ -1773,6 +1880,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # as CONCAT above, applied to the separator and every value.
     if function.value == "CONCAT_WS" and len(function.parameters) > 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
+        _chain_ct = _concat_chain_type(function)
         separator = _stringify_for_concat(function.parameters[0])
         left_node = _stringify_for_concat(function.parameters[1])
         for param in function.parameters[2:]:
@@ -1781,14 +1889,14 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
                 value="StringConcat",
                 left=left_node,
                 right=separator,
-                schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
+                schema_column=ExpressionColumn(name="", column_type=_chain_ct),
             )
             left_node = Node(
                 node_type=NodeType.BINARY_OPERATOR,
                 value="StringConcat",
                 left=separator_node,
                 right=_stringify_for_concat(param),
-                schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
+                schema_column=ExpressionColumn(name="", column_type=_chain_ct),
             )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column
@@ -1806,13 +1914,24 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # dependency (the architect's choice) rather than removing it with a kernel.
     if function.value == "CONCAT_WS" and len(function.parameters) == 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
+        _chain_ct = _concat_chain_type(function)
         value_node = _stringify_for_concat(function.parameters[1])
+        # The empty literal must carry the CHAIN's string type, not a hardcoded
+        # VARCHAR. StringConcat is homogeneous-only, so pairing a VARBINARY value
+        # with a VARCHAR '' would build the very mixed node this ruling forbids —
+        # `CONCAT_WS(b'-', b'a')` would be refused by its own desugaring.
+        if _chain_ct is _lt.VARBINARY:
+            _empty = build_literal_node(b"", suggested_type=_lt.VARBINARY)
+        elif _chain_ct is _lt.NVARCHAR:
+            _empty = build_literal_node("", suggested_type=_lt.NVARCHAR)
+        else:
+            _empty = build_literal_node("", suggested_type=_lt.VARCHAR)
         left_node = Node(
             node_type=NodeType.BINARY_OPERATOR,
             value="StringConcat",
             left=value_node,
-            right=build_literal_node("", suggested_type=_lt.VARCHAR),
-            schema_column=ExpressionColumn(name="", column_type=_lt.VARCHAR),
+            right=_empty,
+            schema_column=ExpressionColumn(name="", column_type=_chain_ct),
         )
         left_node.alias = function.alias
         left_node.schema_column = function.schema_column

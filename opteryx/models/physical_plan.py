@@ -58,7 +58,13 @@ class PhysicalPlan(Graph):
         )
 
         # left semi and anti joins we hash the right side first, usually we want the left side first
-        if self[node].is_join and self[node].join_type in ("left anti", "left semi", "left anti null-aware"):
+        if self[node].is_join and self[node].join_type in (
+            "left anti",
+            "left semi",
+            "left anti null-aware",
+            "left semi not-distinct",
+            "left anti not-distinct",
+        ):
             neighbors.reverse()
 
         # Traverse each child, prioritizing left, then right, then unlabelled

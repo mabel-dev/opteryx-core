@@ -1295,8 +1295,8 @@ def test_regression_full_outer_array_probe_payload():
     half still emits a typed, empty child — and the schema morsel carried no child,
     so the query was unrunnable:
 
-        RuntimeError: native engine: error code 1: FULL OUTER: ARRAY probe payload
-        has no child vector to emit NULLs against
+        RuntimeError: [1]: FULL OUTER: ARRAY probe payload has no child vector to
+        emit NULLs against
 
     Reversing the operands worked, because then the ARRAY landed on the build side,
     which gathers against real retained morsels.

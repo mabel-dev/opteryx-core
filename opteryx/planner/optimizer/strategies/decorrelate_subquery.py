@@ -109,7 +109,7 @@ The first two predate this strategy.
 """
 
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
-from opteryx.expression import NodeType
+from opteryx.expression import NodeType, binary_operands
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
@@ -250,7 +250,8 @@ def _match_null_safe_eq(condition):
     if condition is None or condition.node_type != NodeType.OR:
         return None
 
-    equality, null_test = _unwrap(condition.left), _unwrap(condition.right)
+    or_left, or_right = binary_operands(condition)
+    equality, null_test = _unwrap(or_left), _unwrap(or_right)
     if equality is None or null_test is None:
         return None
     if equality.node_type != NodeType.COMPARISON_OPERATOR or equality.value != "Eq":
@@ -302,8 +303,9 @@ def _split_correlations(condition):
         return [null_safe], None
 
     if condition.node_type == NodeType.AND:
-        left_corr, left_rest = _split_correlations(_unwrap(condition.left))
-        right_corr, right_rest = _split_correlations(_unwrap(condition.right))
+        and_left, and_right = binary_operands(condition)
+        left_corr, left_rest = _split_correlations(_unwrap(and_left))
+        right_corr, right_rest = _split_correlations(_unwrap(and_right))
         if left_rest is None:
             remaining = right_rest
         elif right_rest is None:
@@ -314,12 +316,10 @@ def _split_correlations(condition):
             remaining.right = right_rest
         return left_corr + right_corr, remaining
 
-    if (
-        condition.node_type == NodeType.COMPARISON_OPERATOR
-        and condition.value == "Eq"
-        and _is_outer(condition.left) != _is_outer(condition.right)
-    ):
-        return [condition], None
+    if condition.node_type == NodeType.COMPARISON_OPERATOR and condition.value == "Eq":
+        eq_left, eq_right = binary_operands(condition)
+        if _is_outer(eq_left) != _is_outer(eq_right):
+            return [condition], None
 
     return [], condition
 
@@ -358,8 +358,9 @@ def _split_outer_referencing(condition):
         return None, None
 
     if condition.node_type == NodeType.AND:
-        left_corr, left_local = _split_outer_referencing(_unwrap(condition.left))
-        right_corr, right_local = _split_outer_referencing(_unwrap(condition.right))
+        and_left, and_right = binary_operands(condition)
+        left_corr, left_local = _split_outer_referencing(_unwrap(and_left))
+        right_corr, right_local = _split_outer_referencing(_unwrap(and_right))
 
         def _conjoin(left, right):
             if left is None:
@@ -421,7 +422,7 @@ def _expose_key(plan: LogicalPlan, key_column) -> None:
     if aggregate is None:
         raise UnsupportedSyntaxError(
             "Correlated scalar subquery could not be decorrelated: it has no aggregate "
-            "and is not `ORDER BY ... LIMIT 1`. Rewrite using EXISTS or IN."
+            "and is not `ORDER BY ... LIMIT 1`. Rewrite using **EXISTS** or IN."
         )
 
     if aggregate.node_type == LogicalPlanStepType.Aggregate:
@@ -1056,9 +1057,9 @@ def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry) -> Logica
 
     if not key_pairs:
         raise UnsupportedSyntaxError(
-            "EXISTS requires a correlated equality predicate linking the subquery to the "
-            "outer query (e.g. EXISTS (SELECT 1 FROM T WHERE T.k = outer.k)). "
-            "Uncorrelated EXISTS is not supported."
+            "**EXISTS** requires a correlated equality predicate linking the subquery to the "
+            "outer query (e.g. **EXISTS** (**SELECT** 1 **FROM** T **WHERE** T.k = outer.k)). "
+            "Uncorrelated **EXISTS** is not supported."
         )
 
     return _build_filter_join(
@@ -1094,6 +1095,36 @@ def _build_filter_join(
     join type carries the semantics.
     """
     filter_node = plan[filter_nid]
+
+    # The existence test BECOMES the join, so it has to come out of the predicate
+    # — and `_split_out` can only take it out of a top-level AND chain. Refuse
+    # here, before any graph surgery, when it cannot.
+    #
+    # This is not a nicety. `_rewrite_filters` drives this rewrite with
+    # `while finder(condition) is not None`, so a target that survives the
+    # removal is found again on the next turn: the planner looped forever,
+    # inserting another join node each time, with no error and no result. That
+    # is what this guard replaces.
+    if not _is_removable_conjunct(filter_node.condition, remove):
+        if _is_in_subquery(remove):
+            keyword = "**IN**"
+            example = (
+                "**WHERE** x **NOT IN** (**SELECT** ...) rather than "
+                "**WHERE** **NOT** (x **IN** (**SELECT** ...))"
+            )
+        else:
+            keyword = "**EXISTS**"
+            example = (
+                "**WHERE** **NOT EXISTS** (**SELECT** ...) rather than "
+                "**WHERE** **NOT** (**EXISTS** (**SELECT** ...))"
+            )
+        raise UnsupportedSyntaxError(
+            f"An {keyword} subquery is only supported as a top-level condition of the "
+            f"**WHERE** clause, alone or **AND**ed with other conditions. Here it sits inside "
+            f"another expression - under **NOT**, **OR**, **IS NULL**, or a comparison - and "
+            f"decorrelation turns the test into a join, which cannot express that. "
+            f"Write it at the top level instead ({example})."
+        )
 
     # The subquery must emit the join keys, and anything the residual reads (it is
     # evaluated per candidate pair). Target the node that defines the projection,
@@ -1187,7 +1218,7 @@ def _build_filter_join(
     for column in _all_columns_of(residual):
         if _is_outer(column) and column.source not in outer_relations:
             raise UnsupportedSyntaxError(
-                f"A correlated EXISTS/IN subquery correlates on `{column.source_column}` "
+                f"A correlated **EXISTS**/IN subquery correlates on `{column.source_column}` "
                 "through a non-equality predicate, and that column belongs to a scope "
                 "further out than the subquery enclosing it. This is not supported."
             )
@@ -1258,8 +1289,16 @@ def _build_filter_join(
     # SemiAntiProbeOperator in native_join2.hpp.
     join.residual = _clear_outer_markers(residual) if residual is not None else None
 
-    # The existence test IS the join now, so drop it from the predicate.
-    _, remaining = _split_out(filter_node.condition, remove)
+    # The existence test IS the join now, so drop it from the predicate. The
+    # guard at the top of this function already established that this succeeds;
+    # the flag is read rather than discarded because a silently-not-removed
+    # target is precisely what made the driving loop non-terminating.
+    removed, remaining = _split_out(filter_node.condition, remove)
+    if not removed:
+        raise InvalidInternalStateError(
+            "decorrelation could not remove the subquery from the predicate it had already "
+            "converted into a join"
+        )
 
     if remaining is None:
         # Nothing left to filter: the Filter node BECOMES the join, in place.
@@ -1343,20 +1382,49 @@ def _clear_outer_markers(node):
     return node
 
 
+def _is_removable_conjunct(condition, target) -> bool:
+    """
+    Can `_split_out` take `target` out of `condition`?
+
+    Mirrors `_split_out`'s search exactly, but does not mutate — so it can be
+    asked BEFORE any of the rewrite's graph surgery has happened. `_split_out`
+    edits the conjunction in place as it removes, and cannot be used twice as a
+    look-before-you-leap.
+
+    Only the whole condition, or a conjunct of a top-level AND chain, qualifies.
+    A subquery nested under NOT / OR / IS NULL / a comparison does not, because
+    the rewrite it feeds turns the test into a JOIN, and a join cannot express a
+    disjunct or a negation of a row-level test.
+    """
+    if condition is None:
+        return False
+    if condition is target:
+        return True
+    if condition.node_type == NodeType.AND:
+        and_left, and_right = binary_operands(condition)
+        return _is_removable_conjunct(and_left, target) or _is_removable_conjunct(
+            and_right, target
+        )
+    return False
+
+
 def _split_out(condition, target):
     """
     Remove `target` from a conjunction.
 
     Returns (found, remaining); remaining is None when `target` was the whole
-    predicate.
+    predicate. `_is_removable_conjunct` answers the `found` question without
+    mutating, and `_build_filter_join` asks it up front — a caller that ignores
+    `found` and loops until the target is gone will never terminate.
     """
     if condition is None:
         return False, None
     if condition is target:
         return True, None
     if condition.node_type == NodeType.AND:
-        found_left, left = _split_out(condition.left, target)
-        found_right, right = _split_out(condition.right, target)
+        and_left, and_right = binary_operands(condition)
+        found_left, left = _split_out(and_left, target)
+        found_right, right = _split_out(and_right, target)
         if not (found_left or found_right):
             return False, condition
         if left is None:

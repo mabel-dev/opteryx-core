@@ -357,6 +357,22 @@ def _selectivity_is_null(identity: bytes, stats: RelationStatistics) -> float:
 
 
 def _clamp01(value: float) -> float:
+    # NaN first: it compares False against BOTH bounds, so a bare pair of `<`/`>`
+    # tests waves it through and `estimate_selectivity` silently breaks the
+    # "returns a value in [0.0, 1.0]" contract in its own docstring. A NaN
+    # literal is enough to produce one — `col >= SQRT(-390664.0)` makes every
+    # interval-arithmetic tier evaluate to NaN — and it then survives every
+    # multiplication in the callers and reaches `int(row_count * selectivity)`,
+    # which raises `ValueError: cannot convert float NaN to integer` and kills a
+    # query the engine can execute perfectly well.
+    #
+    # It clamps to 1.0, not to 0.0: NaN here means the estimator could not
+    # compute a fraction, which is an absence of information, and the whole
+    # module's fallback posture for that is "assume no reduction". Clamping to
+    # 0.0 would instead assert that nothing matches — a confident wrong answer
+    # feeding row-count estimates and join ordering.
+    if value != value:
+        return 1.0
     if value < 0.0:
         return 0.0
     if value > 1.0:

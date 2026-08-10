@@ -45,7 +45,30 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
         Returns:
             The updated context, including updated node information.
         """
-        node.pre_update_columns = set(context.collected_identities)
+        # Everything BELOW an unclosed Distinct is read by that Distinct, so nothing
+        # below it is dead. A Distinct with no ON dedups on EVERY column that reaches
+        # it (compiler.py's DistinctNode branch: "empty on_idx == all columns"), and a
+        # DISTINCT ON's key expressions are not in `node.columns`, so neither shape's
+        # demand is visible in `collected_identities`. Recording the outer demand here
+        # would understate it, and an operator that prunes on `pre_update_columns`
+        # then deletes the dedup key: `SELECT COUNT(*) FROM (A EXCEPT B)` reduced the
+        # anti-join's EMIT set to zero columns, leaving the Distinct to dedup on
+        # nothing and collapse the whole set operation to a single row — 1 where the
+        # answer was 6. Empty is the established UNKNOWN sentinel every consumer reads
+        # as "keep every column" (see _live_positions in compiler.py), which is
+        # exactly the claim being made.
+        #
+        # The region closes at the next Project, where `seen_distincts` resets below:
+        # a Project fixes its own output width (and is itself protected from pruning
+        # by the same counter), so operators beneath it can prune normally. Plain
+        # `SELECT DISTINCT` sits directly on its Project and so closes the region
+        # immediately — this costs nothing there. It stays open only where there is no
+        # Project between the Distinct and the operator, which is the set-operation
+        # shape: Distinct straight onto the semi/anti join the set op was rewritten to.
+        if context.seen_distincts:
+            node.pre_update_columns = set()
+        else:
+            node.pre_update_columns = set(context.collected_identities)
 
         # If we're at a union, it changes what we think we know about the columns.
         if node.node_type == LogicalPlanStepType.Union:
@@ -69,8 +92,18 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                 context.seen_projections += 1
             context.seen_distincts = 0
 
-        # Subqueries act like all columns are referenced
-        if node.node_type != LogicalPlanStepType.Subquery:
+        # Subqueries act like all columns are referenced.
+        #
+        # Scans are excluded for a different reason: this pass ASSIGNS a Scan's
+        # `.columns`, so reading it back as evidence of demand is circular. The binder
+        # seeds every Scan with its full schema (see binder/dataset.py::visit_scan, so
+        # the plan is runnable when this strategy's kill-switch is set), and collecting
+        # that seed would put every column of the table into `collected_identities` —
+        # the "push all the projections" block below would then match the full width
+        # and prune nothing, silently turning this optimization into a no-op. The
+        # identities that keep a scan's columns alive come from the Project/Filter/Join
+        # nodes ABOVE it, which are visited first (traversal is top-down).
+        if node.node_type not in (LogicalPlanStepType.Subquery, LogicalPlanStepType.Scan):
             if node.columns:  # Assumes node.columns is an iterable or None
                 collected_columns = self.collect_columns(node)
                 context.collected_identities.update(collected_columns)
@@ -238,7 +271,18 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             A set of column identities.
         """
         identities = set()
-        for column in node.columns or []:  # Ensuring that node.columns is iterable
+        columns = list(node.columns or [])  # Ensuring that node.columns is iterable
+        # A Project emits `columns ∪ passthrough_columns` (see redundant_operators and
+        # predicate_pushdown, which both union them): ORDER BY / HAVING expressions
+        # absent from the SELECT list ride through the Project so the node ABOVE it can
+        # read them. Collecting only from node.columns under-counts, and an
+        # under-count is the one real hazard here — every node BELOW the Project then
+        # records a `pre_update_columns` missing a column the Project will demand, and
+        # an operator that prunes on that set (join payload, GROUP BY key store) drops
+        # a live column.
+        if node.node_type == LogicalPlanStepType.Project:
+            columns += list(node.passthrough_columns or [])
+        for column in columns:
             if column.node_type == NodeType.IDENTIFIER and column.schema_column:
                 identities.add(column.schema_column.identity)
             else:

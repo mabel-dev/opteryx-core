@@ -154,7 +154,11 @@ class ExceptToAntiJoinStrategy(PlanRewriteStrategy):
             )
 
             join_node = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
-            join_node.type = "left anti"
+            # not-distinct: EXCEPT compares rows with IS NOT DISTINCT FROM, so NULL
+            # equals NULL. Plain "left anti" makes a NULL key unmatchable, which let
+            # every NULL-bearing left row survive an EXCEPT it should have been
+            # removed by — `A EXCEPT A` was non-empty on any nullable column.
+            join_node.type = "left anti not-distinct"
             join_node.on = on_condition
             join_node.using = None
             join_node.left_relation_names = live_left

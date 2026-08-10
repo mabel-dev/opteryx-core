@@ -24,6 +24,17 @@ class LogicalColumn:
             decorrelation to orient the correlation predicate.
         outer_relation:
             The schema this reference resolved against when `is_outer_reference`.
+        span: Optional[Tuple[int, int, int, int]]
+            Where this name was written, as (start_line, start_column, end_line,
+            end_column), 1-based, indexing the statement the PARSER was given.
+            sqlparser hangs one off every identifier; it is captured here so an error
+            about this column can point at it instead of describing it. None when the
+            column was synthesized rather than written (a wildcard expansion, a
+            rewritten predicate, a plan the optimizer built).
+
+            It is a plain tuple, not the parser's nested dict, because this is carried
+            on every column in every plan and copied with them - the dict is four
+            allocations to say the same thing.
 
     NOTE: `__getattr__` returns None for anything unset, so an ad-hoc attribute
     assigned from outside LOOKS like it works — but `copy()` rebuilds from the
@@ -42,6 +53,7 @@ class LogicalColumn:
         query_column: Optional[str] = None,
         is_outer_reference: bool = False,
         outer_relation=None,
+        span=None,
     ):
         self.node_type = node_type
         self.source_column = source_column
@@ -52,6 +64,7 @@ class LogicalColumn:
         self.query_column = query_column
         self.is_outer_reference = is_outer_reference
         self.outer_relation = outer_relation
+        self.span = span
 
     @property
     def qualified_name(self) -> str:
@@ -96,6 +109,7 @@ class LogicalColumn:
             query_column=self.query_column,
             is_outer_reference=self.is_outer_reference,
             outer_relation=self.outer_relation,
+            span=self.span,
         )
 
     def __repr__(self) -> str:

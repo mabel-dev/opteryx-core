@@ -169,7 +169,7 @@ def extract_join_fields(
                 condition_node.right.node_type not in (NodeType.IDENTIFIER, NodeType.LITERAL),
             ]
         ):
-            raise UnsupportedSyntaxError("JOIN conditions only support column comparisons.")
+            raise UnsupportedSyntaxError("**JOIN** conditions only support column comparisons.")
         if (
             condition_node.left.source in left_relation_names
             and condition_node.right.source in right_relation_names

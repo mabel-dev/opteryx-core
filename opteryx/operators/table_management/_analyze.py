@@ -75,8 +75,8 @@ def _is_catalog_backed(table_engine) -> bool:
 def _require_local(table_engine) -> None:
     if not isinstance(getattr(table_engine, "filesystem", None), OpteryxLocalFileSystem):
         raise UnsupportedSyntaxError(
-            "ANALYZE / DROP STATISTICS is not supported for this dataset's "
-            "storage backend."
+            "**ANALYZE** / DROP STATISTICS is not supported for this dataset's "
+            "storage backend. Statistics can only be dropped for datasets held in the catalog."
         )
 
 

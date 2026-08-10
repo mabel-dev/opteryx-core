@@ -3,9 +3,13 @@
 //
 // Single input, fan-out shape: expand ARRAY column `array_idx`, repeating every
 // parent row by its element count and appending the flattened element under
-// `target_name`. A NULL or empty array row contributes ZERO output rows (INNER
-// unnest semantics — matches the legacy Cython UnnestJoinNode), so a batch can
-// expand to zero rows; such a morsel is dropped like any fully-filtered one.
+// `target_name`.
+//
+// Row-count semantics (NULL/empty arrays, INNER vs OUTER) are DRAKEN's rule,
+// stated in full above cxx_unnest in draken/draken_native.cpp. Not restated
+// here — a second statement is a second thing to drift. The consequence this
+// operator must handle: a batch can expand to zero rows, and such a morsel is
+// dropped like any fully-filtered one.
 //
 // The array-aware work (replicate all parent columns incl. the source ARRAY, then
 // flatten the child subtree by a raw index array) lives in draken's cxx_unnest_c,

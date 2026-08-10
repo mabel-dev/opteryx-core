@@ -369,6 +369,45 @@ class Manifest:
             _temporal_domain_mismatch(column_type, literal_type) for literal_type in literal_types
         )
 
+    def _bounds_may_omit_nan(self, column_name: str) -> bool:
+        """True when a NaN row of *column_name* could sit OUTSIDE this manifest's
+        recorded bounds — a property of the column and of where the bounds came
+        from, independent of any predicate.
+
+        The two provenances differ — measured, not assumed:
+
+        * `bounds_are_ordinal` (ANALYZE / skene): bounds are
+          `Vector.ordinalize()` int64 keys, and ordinalize maps a canonical quiet
+          NaN to 9221120237041090560 — strictly above +inf's 9218868437227405312
+          (draken/ops/ordinalize.h says so, and it checks out at the boundary).
+          The max ordinal therefore DOES cover a NaN row, the bounds are a real
+          bound, and every op stays prunable.
+        * otherwise (CTAS via `write_parquet_with_bounds`): bounds are rugo's
+          parquet min/max, which skips NaN to spec
+          (rugo/src/parquet/_parquet_writer.hpp). Same hole as the row-group
+          footer path — see `connectors/parquet_io/predicates.py`, which states
+          the op list `_nan_invisible_to_bounds` shares.
+
+        A column whose type cannot be resolved is treated as possibly-float.
+        """
+        if self.bounds_are_ordinal:
+            return False
+        column_type = self._column_type(column_name)
+        return column_type is None or column_type.category == LogicalCategory.FLOAT
+
+    def _nan_invisible_to_bounds(self, column_name: str, op: str) -> bool:
+        """True when *op* on *column_name* cannot be decided from this manifest's
+        bounds, because a NaN outside them would satisfy it.
+
+        The op list is imported rather than restated: which prune tests rest on
+        the upper bound is the same question for a file bound as for a row-group
+        bound, and two copies would be two things to keep in step. Lazy, to keep
+        this model layer free of a module-level connector import.
+        """
+        from opteryx.connectors.parquet_io.predicates import _NAN_UNSOUND_OPS
+
+        return op in _NAN_UNSOUND_OPS and self._bounds_may_omit_nan(column_name)
+
     def prune_files(self, predicates: List) -> None:
         """
         Filter files based on predicates using min/max bounds.
@@ -445,6 +484,11 @@ class Manifest:
                     # Get column name and literal value
                     column_name = predicate.left.source_column
                     literal_value = predicate.right.value
+
+                    # A NaN this file's bounds cannot see would satisfy the
+                    # predicate, so the bounds cannot disprove it.
+                    if self._nan_invisible_to_bounds(column_name, predicate.value):
+                        continue
 
                     # Normalize literal value
                     if getattr(literal_value, "item", None) is not None:
@@ -547,7 +591,16 @@ class Manifest:
                         comparable_upper = _comparable_literal(compare_upper, min_value)
                         if comparable_lower is None or comparable_upper is None:
                             continue
-                        if max_value < comparable_lower or min_value > comparable_upper:
+                        # BETWEEN is two conjuncts and they fail differently. The
+                        # `max_value < lower` half is the GtEq test — a NaN is
+                        # >= every bound, so it goes when the bounds can't see a
+                        # NaN. The `min_value > upper` half is the LtEq test and
+                        # stays sound, because a NaN is never <= a non-NaN bound.
+                        if not self._bounds_may_omit_nan(column_name):
+                            if max_value < comparable_lower:
+                                skip_file = True
+                                break
+                        if min_value > comparable_upper:
                             skip_file = True
                             break
 
@@ -592,6 +645,22 @@ class Manifest:
         """
         field_id = self._resolve_field_id(column_name)
         if field_id is None or limit is None or limit <= 0:
+            return
+
+        # NaN breaks this in BOTH directions when the bounds cannot see it (the
+        # non-ordinal, rugo-min/max provenance — see `_nan_invisible_to_bounds`),
+        # and the zero-NULL precondition above does NOT cover it: a NaN is a
+        # value with its validity bit set, so it is counted in `record_count` and
+        # contributes no null.
+        #   DESC — NaN ranks ABOVE every value, so the NaN rows ARE the top-n,
+        #          but they are missing from every file's `hi`. A file holding
+        #          them ranks low and is dropped as provably-outside.
+        #   ASC  — NaN rows can never be in the top-n, yet `record_count` counts
+        #          them toward `limit`, so accumulation reaches the limit on rows
+        #          that do not qualify and sets a threshold that is too tight.
+        # Neither is recoverable from bounds that omit the value, so the whole
+        # prune stands down for such a column.
+        if self._bounds_may_omit_nan(column_name):
             return
 
         # position in self.files -> (lower_bound, upper_bound)

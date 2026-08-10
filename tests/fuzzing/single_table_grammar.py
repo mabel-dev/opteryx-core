@@ -124,6 +124,12 @@ _PARAM_TO_TYPES: Dict[str, Tuple[Ty, ...]] = {
     "integer": (Ty.INTEGER,),
     "number": NUMERIC,
     "varchar": (Ty.VARCHAR,),
+    # CONCAT/CONCAT_WS declare one overload per string type, so these two labels
+    # appear alongside `varchar`. `nvarchar` has no satisfying value — Ty has no
+    # NVARCHAR member and no relation in the corpus carries one — so overloads
+    # using it are skipped, exactly like `vector` below.
+    "nvarchar": (),
+    "varbinary": (Ty.VARBINARY,),
     "boolean": (Ty.BOOLEAN,),
     "temporal": TEMPORAL,
     "array": (Ty.ARRAY,),
@@ -196,23 +202,12 @@ EXCLUSIONS: Dict[str, str] = {
     "EMBED": "returns VECTOR and needs an embedding model; no VECTOR value is constructible here",
     "COSINE_SIMILARITY": "VECTOR parameters; no VECTOR column or literal exists in the corpus",
     "COSINE_DISTANCE": "VECTOR parameters; no VECTOR column or literal exists in the corpus",
-    "ARRAY_CONTAINS": (
-        "the catalog types the probe as `any`, but it must match the ARRAY's ELEMENT type, which "
-        "no schema the engine exposes records. Generated instead by _array_predicate, which "
-        "knows the element types of the corpus's array columns"
-    ),
-    "ARRAY_CONTAINS_ANY": "same element-type constraint as ARRAY_CONTAINS; see _array_predicate",
-    "ARRAY_CONTAINS_ALL": "same element-type constraint as ARRAY_CONTAINS; see _array_predicate",
-    "JSONB_OBJECT_KEYS": (
-        "needs a JSON DOCUMENT, but the catalog types its parameter as a plain `varchar`, so a "
-        "type-directed generator feeds it any string and the kernel raises a raw ValueError "
-        "(see single_table_known_gaps/json-function-on-non-json-text-raises-valueerror). The "
-        "corpus's JSON columns are VARBINARY, which the signature does not accept"
-    ),
     # ── Operators declared in operators.json but not emitted ─────────────────
-    "ShiftLeft": "engine defect: the parser has no infix handler for `<<` (see single_table_known_gaps)",
-    "ShiftRight": "engine defect: the parser has no infix handler for `>>` (see single_table_known_gaps)",
-    "AtQuestion": "engine defect: `@?` has no native filter kernel (see single_table_known_gaps)",
+    # `AtQuestion` is NOT listed here any more: operators.json now records
+    # `implemented: false` for it, so the reason it is not generated is a fact
+    # about the engine that the catalog states, not a private note in this file.
+    # `ShiftLeft`/`ShiftRight` are gone because they now WORK — the dialect
+    # gained the infix parse and _bitwise emits them.
     "IPContains": "no IPV4 column in the corpus; the operator needs an IPV4 operand",
     "IPContainedBy": "no IPV4 column in the corpus; the operator needs an IPV4 operand",
     "MapAccess": "STRUCT subscript; no STRUCT-typed column in the fuzzed relations",
@@ -222,27 +217,40 @@ EXCLUSIONS: Dict[str, str] = {
     "APPROX_PERCENTILE": "approximate: no exact identity to assert it against",
     "CORR": "two-column aggregate whose float result is not stable enough for multiset equality",
     "STDDEV": "float accumulation order is not fixed, so multiset equality across plans is not sound",
-    "ANY_VALUE": (
-        "returns an arbitrary member of each group, so two executions of the same query may "
-        "legitimately differ — every oracle here compares two executions. reference/"
-        "aggregates.json does not flag it as non-deterministic; that is a catalog gap"
-    ),
+    # ANY_VALUE is not listed: aggregates.json now records `deterministic: false`
+    # for it, and _load_aggregates drops non-deterministic aggregates on that
+    # flag. Every oracle here compares two executions, so a value that may
+    # legitimately differ between them is not fuzzable — but that is now the
+    # catalog's statement about the engine, not this file's.
     "ARRAY_AGG": (
         "excluded when the per-group element cap (ARRAY_AGG_MAX_VALUES_PER_GROUP=1000) made it "
         "trip on the corpus's skewed relations. That cap is gone — the guard is now a 512MB "
         "global byte budget, which this corpus cannot reach — so the original reason no longer "
         "holds. Re-enabling it is a fuzz-scope decision for the architect, not a silent flip"
     ),
-    # ── Decoders reachable only through their encoder ────────────────────────
-    # BASE64_DECODE/BASE85_DECODE/HEX_DECODE raise on input that is not valid in
-    # that encoding, and no column holds valid base85. They are generated as the
-    # outer half of a DECODE(ENCODE(x)) round trip instead — which is a stronger
-    # test than a random string anyway — so they are not chosen as standalone
-    # calls.
-    "BASE64_DECODE": "generated only as the outer half of a DECODE(ENCODE(x)) round trip",
-    "BASE85_DECODE": "generated only as the outer half of a DECODE(ENCODE(x)) round trip",
-    "HEX_DECODE": "generated only as the outer half of a DECODE(ENCODE(x)) round trip",
 }
+
+# Entries that used to live in EXCLUSIONS and are now read from `reference/`
+# instead, because the catalog gained a field that can state them:
+#
+#   ARRAY_CONTAINS / _ANY / _ALL   parameter `element_of` — the probe must be of
+#                                  the array's element type. Still generated only
+#                                  by _array_predicate, which knows the corpus's
+#                                  element types; the RULE is now in the catalog.
+#   JSONB_OBJECT_KEYS              parameter `value_format: "json"`.
+#   BASE64/BASE85/HEX_DECODE       parameter `value_format`, ditto. Still emitted
+#                                  as the outer half of a DECODE(ENCODE(x)) round
+#                                  trip, which asserts the identity.
+#   REGEXP_REPLACE                 parameter `value_format: "dfa-regex"` on the
+#                                  pattern and `domain: ["\\1"]` on the
+#                                  replacement — only whole-match capture
+#                                  extraction is implemented.
+#   ANY_VALUE                      aggregate `deterministic: false`.
+#   AtQuestion                     operator `implemented: false`.
+#
+# A `value_format` this generator cannot mint drops the overload in
+# `_load_function_overloads`; `element_of` does the same, because a probe whose
+# type must match an array's element type cannot be built type-directed.
 
 # Constructs the engine rejects today are recorded in
 # `single_table_known_gaps.REGISTER`, with a minimal repro that a test requires
@@ -257,6 +265,12 @@ EXCLUSIONS: Dict[str, str] = {
 class Param:
     accepts: Tuple[Ty, ...]
     constant_only: bool
+    #: The complete set of legal values, from the catalog's `domain`. Empty means
+    #: the parameter is not an enumeration.
+    domain: Tuple[str, ...] = ()
+    #: Inclusive value bounds, from the catalog's `minimum` / `maximum`.
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -267,42 +281,46 @@ class Overload:
     params: Tuple[Param, ...]
     returns: Optional[Ty]  # None = resolve from argument 0
     minimum_arity: int
+    #: The catalog's `homogeneous`: every `any`-typed parameter must resolve to
+    #: one shared type. Replaces a hardcoded list of COALESCE/IFNULL/IFNOTNULL/
+    #: NULLIF — the rule was always real, it just was not in `reference/`.
+    homogeneous: bool = False
 
 
-# Functions whose arguments must all share one type, which the catalog does not
-# record: it types every parameter of COALESCE/NULLIF/IFNULL as `any`, so a
-# type-directed generator reading only the catalog happily emits
-# `NULLIF(CAST('beta' AS VARBINARY), TRUE)` and the binder rejects it. The
-# constraint is real — `IFNOTNULL: expression is VARBINARY but expression is
-# FLOAT64 — IFNOTNULL branches must share a type` — it is just not in
-# `reference/`. Recorded as a catalog gap.
-_HOMOGENEOUS_FUNCTIONS = frozenset(
-    {"COALESCE", "IFNULL", "IFNOTNULL", "NULLIF", "GREATEST", "LEAST"}
-)
+# Parameter-type exclusions the CATALOG should carry but does not yet, because
+# whether the function accepts the type is an open question rather than a
+# settled no. Each must name a live register entry; `test_pending_exclusion_
+# cites_a_live_register_entry` fails when the entry goes, which forces the
+# decision back into the open instead of leaving a silent narrowing behind.
+#
+#: function name -> (types withheld, id of the register entry that justifies it)
+_PENDING_EXCLUSIONS: Dict[str, Tuple[Tuple["Ty", ...], str]] = {}
 
-# Minimum arities the catalog understates. COALESCE declares minimum = 1 and the
-# binder accepts one argument, but the kernel then raises
-# `draken_coalesce: expected at least 2 arguments` — registered in
-# single_table_known_gaps; here the generator emits the arity that actually works.
-_ARITY_OVERRIDES: Dict[str, int] = {"COALESCE": 2}
 
-# Types a function's `any`-typed parameters cannot actually take. The catalog
-# types IFNULL/IFNOTNULL as `any`, but the engine rejects DECIMAL outright:
-# "IFNULL: expression is DECIMAL(19, 6), which IFNULL cannot blend — only
-# BOOLEAN, string, and numeric types". Another catalog-accuracy gap.
-_FORBIDDEN_ARGUMENT_TYPES: Dict[str, Tuple[Ty, ...]] = {
-    "IFNULL": (Ty.DECIMAL,),
-    "IFNOTNULL": (Ty.DECIMAL,),
-    "COALESCE": (Ty.DECIMAL,),
-    # `NULLIF(decimal_col, decimal_literal)` fails at execution with err_op=15.
-    "NULLIF": (Ty.DECIMAL,),
+# Canonical types.json spellings (the vocabulary of a parameter's `excludes`)
+# mapped to the generator types they rule out.
+_EXCLUDED_SPELLING_TO_TYPES: Dict[str, Tuple[Ty, ...]] = {
+    "ARRAY": (Ty.ARRAY,),
+    "BOOLEAN": (Ty.BOOLEAN,),
+    "DATE": (Ty.DATE,),
+    "DECIMAL": (Ty.DECIMAL,),
+    "FLOAT": (Ty.FLOAT,),
+    "INTEGER": (Ty.INTEGER,),
+    "NVARCHAR": (Ty.VARCHAR,),
+    "TIMESTAMP": (Ty.TIMESTAMP,),
+    "VARBINARY": (Ty.VARBINARY,),
+    "VARCHAR": (Ty.VARCHAR,),
 }
 
-# Overload ids the catalog declares but the binder cannot bind. SUBSTRING_2 is
-# declared with two parameters, and the binder then complains about a third
-# argument it injected itself — see
-# single_table_known_gaps/two-argument-substring-is-unbindable.
-_UNUSABLE_OVERLOAD_IDS = frozenset({"SUBSTRING_2"})
+# `value_format`s this generator cannot mint a satisfying value for. An overload
+# with one of these on any parameter is not emitted as a standalone call: a
+# type-directed generator would hand it an arbitrary string, which is exactly the
+# call that binds and then dies inside the kernel.
+#
+# "base64"/"base85"/"hex" are still reached through _CODEC_ROUND_TRIPS, which
+# feeds each decoder its own encoder's output — a stronger test than a random
+# string. "json" and "dfa-regex" have no such round trip.
+_UNSATISFIABLE_VALUE_FORMATS = frozenset({"base64", "base85", "hex", "json", "dfa-regex"})
 
 # DECODE(ENCODE(x)) round trips. Emitted as a pair because the decoders raise on
 # anything that is not valid in their encoding, and this shape asserts something
@@ -312,6 +330,30 @@ _CODEC_ROUND_TRIPS: Tuple[Tuple[str, str], ...] = (
     ("BASE85_ENCODE", "BASE85_DECODE"),
     ("HEX_ENCODE", "HEX_DECODE"),
 )
+
+# The character SET for SQL-92's `TRIM([BOTH|LEADING|TRAILING] <chars> FROM str)`.
+#
+# A SET, not a substring — `TRIM(BOTH 'ab' FROM 'baXab')` is 'X' — so the
+# multi-character entries are the ones carrying the semantic, and the single
+# characters are the degenerate case that must not regress.
+#
+# ASCII only, and deliberately: VARCHAR is ASCII bytes and non-ASCII content in
+# one is undefined (RATIFIED/varchar-is-ascii-bytes-and-non-ascii-content-is-
+# undefined), so a non-ASCII set over a VARCHAR corpus would be asking a question
+# the type does not answer. The kernel's codepoint scan is the NVARCHAR path, and
+# this generator has no NVARCHAR relation to point it at.
+#
+# No quote and no backslash: these are interpolated straight into a SQL literal.
+_TRIM_CHARACTER_SETS: Tuple[str, ...] = ("a", "e", " ", "0", "-", "ab", "aeiou", "xyz", " -0")
+
+
+# Functions the CATALOG itself rules out, name -> the catalog fact that did it.
+# Populated by `_load_function_overloads`. Distinct from `EXCLUSIONS` on purpose:
+# an entry here needs no argument from anybody, because `reference/` already says
+# why. `test_catalog_coverage_is_accounted_for` counts both, so a function that
+# is neither generated, nor declined by the catalog, nor argued for in EXCLUSIONS
+# is still drift.
+CATALOG_DECLINED: Dict[str, str] = {}
 
 
 def _load_json(name: str) -> dict:
@@ -323,8 +365,10 @@ def _load_function_overloads() -> List[Overload]:
     """Every scalar function overload this generator is willing to emit.
 
     Drops, in order: catalog names in `EXCLUSIONS`; non-immutable or
-    non-deterministic entries (the catalog's own flags, not a private list); and
-    overloads with a parameter no value in the corpus can satisfy.
+    non-deterministic entries; overloads with a parameter no value in the corpus
+    can satisfy; overloads whose parameters carry a `value_format` or an
+    `element_of` link this generator cannot honour. Every one of those is the
+    catalog's own statement — there is no private list of "functions we skip".
     """
     catalog = _load_json("function_signatures.json")
     overloads: List[Overload] = []
@@ -332,15 +376,59 @@ def _load_function_overloads() -> List[Overload]:
         if name in EXCLUSIONS:
             continue
         if entry["volatility"] != "immutable" or not entry["deterministic"]:
+            CATALOG_DECLINED.setdefault(
+                name,
+                f"catalog volatility={entry['volatility']}, deterministic={entry['deterministic']}",
+            )
             continue
         for overload in entry["overloads"]:
-            if overload["id"] in _UNUSABLE_OVERLOAD_IDS:
-                continue
             params: List[Param] = []
             usable = True
             for spec in overload["parameters"]:
+                if spec["value_format"] in _UNSATISFIABLE_VALUE_FORMATS:
+                    # A value this generator cannot mint: JSON text, base85, a
+                    # DFA-compilable regex. Emitting the call anyway is how
+                    # `JSONB_OBJECT_KEYS('delta')` got generated.
+                    CATALOG_DECLINED.setdefault(
+                        name,
+                        f"parameter `{spec['label']}` declares value_format="
+                        f"'{spec['value_format']}', which this generator cannot mint",
+                    )
+                    usable = False
+                    break
+                if spec["element_of"] is not None:
+                    # The parameter's type is pinned to another parameter's ARRAY
+                    # ELEMENT type, and no schema the engine exposes records that.
+                    # ARRAY_CONTAINS and friends are generated by _array_predicate,
+                    # which knows the corpus's element types.
+                    CATALOG_DECLINED.setdefault(
+                        name,
+                        f"parameter `{spec['label']}` must be of `{spec['element_of']}`'s ARRAY "
+                        "ELEMENT type, which no schema the engine exposes records; generated by "
+                        "_array_predicate instead",
+                    )
+                    usable = False
+                    break
                 accepts = _PARAM_TO_TYPES.get(spec["type"])
                 if not accepts:
+                    CATALOG_DECLINED.setdefault(
+                        name,
+                        f"parameter `{spec['label']}` is `{spec['type']}`, which no value in "
+                        "the corpus satisfies",
+                    )
+                    usable = False
+                    break
+                for spelling in spec["excludes"]:
+                    barred = _EXCLUDED_SPELLING_TO_TYPES.get(spelling, ())
+                    accepts = tuple(ty for ty in accepts if ty not in barred)
+                pending, _ = _PENDING_EXCLUSIONS.get(name, ((), ""))
+                for barred in pending:
+                    accepts = tuple(ty for ty in accepts if ty is not barred)
+                if not accepts:
+                    CATALOG_DECLINED.setdefault(
+                        name,
+                        f"parameter `{spec['label']}` excludes every type its family admits",
+                    )
                     usable = False
                     break
                 # A variadic tail is emitted at the overload's minimum arity and
@@ -349,14 +437,20 @@ def _load_function_overloads() -> List[Overload]:
                 # binder's arity check.
                 if spec["variadic"] or spec["optional"]:
                     continue
-                params.append(Param(accepts=accepts, constant_only=spec["constant_only"]))
+                params.append(
+                    Param(
+                        accepts=accepts,
+                        constant_only=spec["constant_only"],
+                        domain=tuple(spec["domain"]),
+                        minimum=spec["minimum"],
+                        maximum=spec["maximum"],
+                    )
+                )
             if not usable:
                 continue
-            minimum = max(overload["arity"]["minimum"], _ARITY_OVERRIDES.get(name, 0))
-            # `COALESCE(x)` binds and then dies inside the kernel
-            # ("draken_coalesce: expected at least 2 arguments"), because the
-            # catalog's fixed-parameter list is shorter than the declared
-            # minimum arity. Pad from the last fixed parameter so the call is
+            minimum = overload["arity"]["minimum"]
+            # A declared minimum can exceed the fixed-parameter list when the
+            # tail is variadic. Pad from the last fixed parameter so the call is
             # emitted at its real minimum.
             while len(params) < minimum and params:
                 params.append(params[-1])
@@ -366,6 +460,7 @@ def _load_function_overloads() -> List[Overload]:
                     params=tuple(params),
                     returns=_RETURN_TO_TY[overload["return_type"]],
                     minimum_arity=minimum,
+                    homogeneous=overload["homogeneous"],
                 )
             )
     if not overloads:
@@ -381,11 +476,12 @@ def _load_aggregates() -> Tuple[List[str], List[str]]:
     for name, entry in catalog.items():
         if name in EXCLUSIONS:
             continue
-        # The catalog says ARRAY_AGG works globally; the planner says otherwise
-        # (see single_table_known_gaps/array-agg-global-claimed-but-rejected).
-        # Believe the engine and generate it only under a GROUP BY — the
-        # disagreement itself is registered, so it is not being hidden.
-        if entry["support"]["global"] and name != "ARRAY_AGG":
+        # Every oracle here compares two executions of the same logical query, so
+        # an aggregate whose answer may legitimately differ between them cannot
+        # be asserted against. The catalog now says which those are.
+        if not entry["deterministic"]:
+            continue
+        if entry["support"]["global"]:
             global_ok.append(name)
         elif entry["support"]["grouped"]:
             grouped_only.append(name)
@@ -394,8 +490,45 @@ def _load_aggregates() -> Tuple[List[str], List[str]]:
     return global_ok, grouped_only
 
 
+def _load_aggregate_input_types() -> Dict[str, Tuple[Ty, ...]]:
+    """Aggregate name -> the generator types its first parameter accepts.
+
+    Was a hardcoded table here, with a comment saying the catalog recorded SQL
+    forms and no parameter types. It does now: `parameters[].type` plus
+    `excludes`, the same vocabulary function_signatures.json uses.
+    """
+    catalog = _load_json("aggregates.json")
+    accepted: Dict[str, Tuple[Ty, ...]] = {}
+    for name, entry in catalog.items():
+        parameters = entry["parameters"]
+        if not parameters:
+            continue
+        spec = parameters[0]
+        types = _PARAM_TO_TYPES.get(spec["type"], ())
+        for spelling in spec["excludes"]:
+            barred = _EXCLUDED_SPELLING_TO_TYPES.get(spelling, ())
+            types = tuple(ty for ty in types if ty not in barred)
+        accepted[name] = types
+    return accepted
+
+
+def _load_unimplemented_operators() -> Dict[str, str]:
+    """Operators the dialect parses but the engine cannot execute."""
+    catalog = _load_json("operators.json")
+    return {
+        name: entry.get("notes") or entry["documentation"]
+        for name, entry in catalog.items()
+        if not entry["implemented"]
+    }
+
+
+
 FUNCTION_OVERLOADS: List[Overload] = _load_function_overloads()
 GLOBAL_AGGREGATES, GROUPED_ONLY_AGGREGATES = _load_aggregates()
+# Operators the catalog itself marks unrunnable (`implemented: false`). Read so
+# that nothing here has to know WHICH operators those are — a new one appears in
+# this dict the moment operators.json declares it.
+UNIMPLEMENTED_OPERATORS: Dict[str, str] = _load_unimplemented_operators()
 
 # Overloads indexed by the type they return, so "build me a VARCHAR" is a
 # lookup rather than a rejection loop.
@@ -411,29 +544,24 @@ for _overload in FUNCTION_OVERLOADS:
         _OVERLOADS_BY_RETURN.setdefault(_target, []).append(_overload)
 
 
-# Aggregates restricted by input type. The catalog does not record aggregate
-# parameter types (it records SQL forms), so this is the one place a type rule
-# is stated here rather than read from `reference/` — recorded as a catalog gap.
-_AGGREGATE_INPUT_TYPES: Dict[str, Tuple[Ty, ...]] = {
-    "SUM": NUMERIC,
-    "AVG": NUMERIC,
-    # DECIMAL is excluded deliberately: the native engine rejects it with
-    # "MEDIAN over a DrakenType.DECIMAL column — only numeric inputs are
-    # accepted", which contradicts DECIMAL being a numeric family in types.json.
-    # Narrowing here rather than registering a defect because MEDIAN's supported
-    # input set is a design question for the architect, not an obvious bug.
-    "MEDIAN": (Ty.INTEGER, Ty.FLOAT),
-    "MIN": SCALAR,
-    "MAX": SCALAR,
-    "COUNT": SCALAR,
-    "COUNT_DISTINCT": SCALAR,
-    "ANY_VALUE": SCALAR,
-    "ARRAY_AGG": SCALAR,
-}
+# Aggregates restricted by input type — read from aggregates.json's `parameters`,
+# which now records them (MEDIAN's DECIMAL exclusion included, as an explicit
+# `excludes`, rather than as a contradiction of types.json's numeric family left
+# for the reader to find).
+_AGGREGATE_INPUT_TYPES: Dict[str, Tuple[Ty, ...]] = _load_aggregate_input_types()
 
 # `COUNT(DISTINCT x)` is supported; `SUM(DISTINCT x)` is not
 # ("native engine: SUM(DISTINCT ...) is not supported yet").
 _DISTINCT_CAPABLE_AGGREGATES = frozenset({"COUNT"})
+# Columns of the corpus that carry NaN. `dev/generate_fuzz_testdata.py` keeps the
+# float specials in dedicated columns precisely so a query can choose whether to
+# touch them; this is the reader's side of that arrangement.
+NAN_BEARING_COLUMNS = frozenset({"f_special", "f_special_null", "val_special"})
+
+#: aggregate -> the register entry that stops it being generated over NaN.
+#: test_nan_withholding_cites_a_live_register_entry fails when the entry goes.
+_AGGREGATES_WITHHELD_FROM_NAN: Dict[str, str] = {}
+
 _AGGREGATE_RETURNS: Dict[str, Optional[Ty]] = {
     "SUM": None,  # same as input
     "AVG": Ty.FLOAT,
@@ -456,15 +584,16 @@ CAST_TARGETS: Dict[Ty, Tuple[str, ...]] = {
     Ty.FLOAT: ("VARCHAR", "INTEGER", "BOOLEAN"),
     Ty.DECIMAL: ("VARCHAR", "FLOAT", "INTEGER"),
     Ty.VARCHAR: ("VARBINARY",),
-    # VARBINARY -> VARCHAR is omitted: the corpus's binary columns hold arbitrary
-    # bytes, and casting those to VARCHAR yields a string that cannot be decoded
-    # (single_table_known_gaps/cast-binary-to-varchar-yields-undecodable-text).
-    # The reverse direction, VARCHAR -> VARBINARY, is always well defined.
+    # VARBINARY -> VARCHAR is omitted, and permanently: VARCHAR is ASCII bytes and
+    # non-ASCII content in one is undefined behaviour, so casting the corpus's
+    # arbitrary binary columns to VARCHAR produces a string this generator has no
+    # grounds to assert anything about (single_table_known_gaps/RATIFIED/
+    # varchar-is-ascii-bytes-and-non-ascii-content-is-undefined). The reverse
+    # direction, VARCHAR -> VARBINARY, is always well defined.
     Ty.VARBINARY: (),
     Ty.BOOLEAN: ("VARCHAR", "INTEGER"),
     Ty.DATE: ("TIMESTAMP", "VARCHAR"),
-    # TIMESTAMP -> DATE is in single_table_known_gaps.
-    Ty.TIMESTAMP: ("VARCHAR",),
+    Ty.TIMESTAMP: ("VARCHAR", "DATE"),
 }
 _CAST_TARGET_TY: Dict[str, Ty] = {
     "VARCHAR": Ty.VARCHAR,
@@ -517,14 +646,29 @@ class Expr:
 # Interval units accepted by the temporal arithmetic path.
 _INTERVAL_UNITS = ("DAY", "HOUR", "MINUTE", "SECOND", "MONTH", "YEAR")
 
-# Parts accepted by EXTRACT / DATEDIFF / TRUNC's temporal overload. Sourced from
-# the function documentation in `function_signatures.json`; kept literal here
-# because the catalog records them as prose, not as an enumerated domain —
-# another catalog gap worth closing.
-_DATE_PARTS = ("year", "month", "day", "hour", "minute", "second", "week", "quarter")
+# Date parts are no longer listed here: every part-taking parameter carries its
+# own `domain` in function_signatures.json, and they are NOT the same set —
+# DATEDIFF takes millisecond and microsecond, TRUNC and TIME_BUCKET do not, and
+# EXTRACT takes neither those nor `week`.
+#
+# The one coupling a per-parameter domain cannot express: EXTRACT's sub-day parts
+# need a TIMESTAMP operand (draken_date_part refuses "sub-day part of a DATE").
+# The catalog states it in that parameter's documentation; _narrow_for_drawn_constants
+# applies it.
+_SUB_DAY_PARTS = frozenset({"hour", "minute", "second", "millisecond", "microsecond"})
 
 _COMPARISONS = ("=", "!=", "<>", "<", "<=", ">", ">=")
 _EQUALITY = ("=", "!=", "<>")
+
+# EXTRACT's part domain, read from the catalog rather than restated: the four
+# date-part-taking functions accept four DIFFERENT sets, and EXTRACT's is the
+# narrowest (no week, no millisecond, no microsecond). Read once at import so the
+# SQL-92 infix spelling below cannot drift from the call spelling above.
+_EXTRACT_PARTS: Tuple[str, ...] = tuple(
+    _load_json("function_signatures.json")["EXTRACT"]["overloads"][0]["parameters"][0]["domain"]
+)
+if not _EXTRACT_PARTS:
+    raise AssertionError("reference/ records no `part` domain for EXTRACT")
 
 # Functions whose trailing integer arguments are precision/scale/length/position
 # rather than data. An unbounded literal there is legal and useless.
@@ -532,21 +676,20 @@ _SMALL_INTEGER_ARGUMENT_FUNCTIONS = frozenset(
     {"ROUND", "TRUNC", "LEFT", "RIGHT", "LPAD", "RPAD", "SUBSTRING", "SPLIT", "IP_TRUNC"}
 )
 
+# TIME_BUCKET's `magnitude` is a bucket WIDTH. The catalog bounds it below (>= 1)
+# but not above, and correctly so — there is no constant ceiling, because what
+# overflows depends on the unit and on the data. What DOES bound it is the
+# TIMESTAMP type: `TIME_BUCKET(999999999, 'year', ts)` computes year 173949 and
+# raises `year must be in 1..9999` (types.json records that window on the type).
+# A width of up to 12 units is what a caller writes; the overflow itself is
+# registered as from-unixtime-out-of-range, which shares the message.
+_BUCKET_WIDTH_FUNCTIONS = frozenset({"TIME_BUCKET"})
+
 # Element types of the ARRAY columns in the corpus. The schema the engine
 # reports collapses every list to `DrakenType.ARRAY`, so the element type is not
 # discoverable from it — this is knowledge about the test data, stated where it
 # can be checked, not a claim about the engine. A column absent here simply does
 # not get an ARRAY predicate generated against it.
-# Columns known to contain a NaN. A NaN row is selected by neither `p`, nor
-# `NOT p`, nor `p IS NULL`, so it breaks the predicate-partition invariant — see
-# single_table_known_gaps/nan-rows-fall-outside-every-predicate-bucket. Stated
-# here because it is a fact about the DATA, not about the engine; the
-# purpose-built corpus deliberately contains no NaN, and this is the one
-# pre-existing relation that does.
-NAN_BEARING_COLUMNS: Dict[str, str] = {
-    "density": "testdata.satellites row 176",
-}
-
 ARRAY_ELEMENT_TYPES: Dict[str, Ty] = {
     "arr_int": Ty.INTEGER,  # testdata.fuzzing.mixed
     "arr_str": Ty.VARCHAR,  # testdata.fuzzing.mixed
@@ -594,8 +737,6 @@ class Generator:
         # WHERE predicate and as a bare projection, but fails inside CASE — see
         # single_table_known_gaps/rlike-outside-top-level-predicate-position.
         self._predicate_is_an_operand = False
-        #: True once a predicate has referenced a column that may hold a NaN.
-        self.predicate_touches_nan = False
 
     # ── literals ─────────────────────────────────────────────────────────────
 
@@ -704,6 +845,10 @@ class Generator:
             builders.append(self._function_call)
         if ty is Ty.VARBINARY:
             builders.append(self._codec_round_trip)
+        if ty in (Ty.VARCHAR, Ty.INTEGER):
+            builders.append(self._sql92_spelling)
+        if ty is Ty.VARCHAR:
+            builders.append(self._overlay)
         builders.append(self._cast)
         builders.append(self._case)
 
@@ -742,10 +887,14 @@ class Generator:
         return Expr(f"({left.sql} {operator} {right.sql})", ty)
 
     def _bitwise(self, ty: Ty, depth: int) -> Optional[Expr]:
-        operator = self.rng.choice(("&", "|", "^"))
+        operator = self.rng.choice(("&", "|", "^", "<<", ">>"))
         left = self.expression(Ty.INTEGER, depth + 1)
         self.tags.add(f"bitwise{operator}")
-        return Expr(f"({left.sql} {operator} {self.rng.randint(0, 255)})", Ty.INTEGER)
+        # A shift COUNT must be 0..63, which operators.json records in the
+        # ShiftLeft/ShiftRight notes — the operands are 64-bit and a count
+        # outside that range fails loud rather than wrapping.
+        right = self.rng.randint(0, 63) if operator in ("<<", ">>") else self.rng.randint(0, 255)
+        return Expr(f"({left.sql} {operator} {right})", Ty.INTEGER)
 
     def _string_concat(self, ty: Ty, depth: int) -> Optional[Expr]:
         left = self.expression(Ty.VARCHAR, depth + 1)
@@ -779,14 +928,15 @@ class Generator:
         if not satisfiable:
             return None
         overload = self.rng.choice(satisfiable)
-        homogeneous = overload.name in _HOMOGENEOUS_FUNCTIONS
-        forbidden = _FORBIDDEN_ARGUMENT_TYPES.get(overload.name, ())
+        # `homogeneous` and the per-parameter `accepts` narrowing both come from
+        # the catalog now — `overload["homogeneous"]` and `parameters[].excludes`
+        # respectively, applied in _load_function_overloads.
         shared_ty: Optional[Ty] = None
         arguments: List[str] = []
+        drawn_constants: Dict[int, str] = {}
         for index, param in enumerate(overload.params):
-            allowed = tuple(
-                t for t in param.accepts if t not in forbidden and self.can_produce(t)
-            )
+            allowed = tuple(t for t in param.accepts if self.can_produce(t))
+            allowed = self._narrow_for_drawn_constants(overload, index, allowed, drawn_constants)
             if not allowed:
                 return None
             # A polymorphic return ("same as `num`") is pinned by argument 0:
@@ -795,7 +945,7 @@ class Generator:
                 if ty not in allowed:
                     return None
                 argument_ty = ty
-            elif homogeneous and shared_ty is not None:
+            elif overload.homogeneous and shared_ty is not None:
                 if shared_ty not in allowed:
                     return None
                 argument_ty = shared_ty
@@ -804,7 +954,9 @@ class Generator:
             if shared_ty is None:
                 shared_ty = argument_ty
             if param.constant_only:
-                arguments.append(self._constant_argument(overload.name, argument_ty))
+                constant = self._constant_argument(overload.name, param, argument_ty)
+                drawn_constants[index] = constant
+                arguments.append(constant)
             elif argument_ty is Ty.BOOLEAN:
                 # A BOOLEAN function argument is a predicate in operand
                 # position (IIF's condition), which is where RLIKE breaks.
@@ -815,54 +967,112 @@ class Generator:
                 finally:
                     self._predicate_is_an_operand = was_operand
             else:
-                arguments.append(self._function_argument(overload.name, index, argument_ty, depth))
+                arguments.append(
+                    self._function_argument(overload.name, param, index, argument_ty, depth)
+                )
         self.tags.add(f"fn:{overload.name}")
         return Expr(f"{overload.name}({', '.join(arguments)})", ty)
 
-    def _function_argument(self, function: str, index: int, ty: Ty, depth: int) -> str:
+    def _narrow_for_drawn_constants(
+        self,
+        overload: Overload,
+        index: int,
+        allowed: Tuple[Ty, ...],
+        drawn: Dict[int, str],
+    ) -> Tuple[Ty, ...]:
+        """Narrow a parameter's types given the constants already drawn.
+
+        One case, and it is stated in the catalog rather than discovered here:
+        EXTRACT's `part` parameter documents that "sub-day parts (hour, minute,
+        second) require a TIMESTAMP operand - over a DATE the kernel refuses
+        them". The domain is machine-readable; the coupling between the drawn
+        part and the operand's type is not expressible as a per-parameter type,
+        so it is applied here, against the same seven-part domain the catalog
+        publishes.
+        """
+        if overload.name != "EXTRACT" or index == 0:
+            return allowed
+        part = drawn.get(0, "").strip("'").lower()
+        if part not in _SUB_DAY_PARTS:
+            return allowed
+        return tuple(t for t in allowed if t is Ty.TIMESTAMP)
+
+    def _function_argument(
+        self, function: str, param: Param, index: int, ty: Ty, depth: int
+    ) -> str:
         """One non-constant argument.
 
-        Precision, scale, length and position arguments are integers, and the
-        catalog types them as plain `integer` — so an unconstrained integer
-        literal produces `ROUND(x, -321178)`. That binds and executes, but it
-        spends the case on an argument no caller would write instead of on the
-        function's actual behaviour.
+        A parameter carrying catalog `minimum`/`maximum` bounds gets a literal
+        drawn from inside them. Those bounds were four hardcoded special cases
+        here (FROM_UNIXTIME's year-9999 ceiling, TO_CHAR's codepoint range,
+        TIME_BUCKET's positive magnitude) written from the exceptions the engine
+        raised; `reference/` records them now, so the rule is one branch instead
+        of a list of function names.
         """
+        if function in _BUCKET_WIDTH_FUNCTIONS and index == 0:
+            return str(self.rng.randint(1, 12))
+        if param.minimum is not None or param.maximum is not None:
+            return self._bounded_literal(function, param, ty)
+        # Precision, scale, length and position arguments are integers, and the
+        # catalog types them as plain `integer` — so an unconstrained integer
+        # literal produces `ROUND(x, -321178)`. That binds and executes, but it
+        # spends the case on an argument no caller would write instead of on the
+        # function's actual behaviour. Not a correctness rule, so not a catalog
+        # constraint: a taste rule about where to spend a fuzz case.
         if ty is Ty.INTEGER and index > 0 and function in _SMALL_INTEGER_ARGUMENT_FUNCTIONS:
             return str(self.rng.randint(0, 12))
-        if function == "FROM_UNIXTIME":
-            # An epoch SECONDS value. The catalog types it as an unbounded
-            # `number`, and anything past year 9999 raises a raw ValueError —
-            # see single_table_known_gaps/from-unixtime-out-of-range.
-            return str(self.rng.randint(0, 2_000_000_000))
-        if function == "TO_CHAR":
-            # TO_CHAR's `num` is a Unicode CODEPOINT. The catalog types it as a
-            # plain `integer`, so a negative or out-of-range value satisfies the
-            # signature and the kernel then raises a raw ValueError — see
-            # single_table_known_gaps/to-char-out-of-range-codepoint.
-            return str(self.rng.randint(32, 126))
-        if function == "TIME_BUCKET" and index == 0:
-            # `magnitude` is a bucket WIDTH. The catalog types it as `number`,
-            # so a DECIMAL or negative value is legal by the signature, and the
-            # engine then raises a raw TypeError — see
-            # single_table_known_gaps/time-bucket-non-integer-magnitude.
-            return str(self.rng.randint(1, 12))
         return self.expression(ty, depth + 1).sql
 
-    def _constant_argument(self, function: str, ty: Ty) -> str:
+    def _bounded_literal(self, function: str, param: Param, ty: Ty) -> str:
+        """A literal inside the catalog's declared bounds for this parameter.
+
+        Kept well inside them rather than at the endpoints: the bounds say where
+        the engine stops accepting values, and a generator that only ever emits
+        boundary values is testing the bound, not the function. The endpoints
+        themselves are covered by the type-and-literal tests.
+        """
+        low = -1_000_000_000 if param.minimum is None else int(param.minimum)
+        high = 1_000_000_000 if param.maximum is None else int(param.maximum)
+        # Clamp a huge declared range to a plausible window. FROM_UNIXTIME's is
+        # ~316 billion seconds wide; drawing uniformly across it puts almost
+        # every value in a year nobody stores data for, and clamping from the
+        # LOW end instead pins every draw near year 1. Centre on zero when zero
+        # is admissible — for an epoch parameter that is 1906..2033.
+        if low <= 0 <= high:
+            low, high = max(low, -2_000_000_000), min(high, 2_000_000_000)
+        else:
+            high = min(high, low + 2_000_000_000)
+        value = self.rng.randint(low, high)
+        # TO_CHAR returns a VARCHAR, and VARCHAR is ASCII bytes — non-ASCII content
+        # in one is undefined behaviour, not a supported case
+        # (single_table_known_gaps/RATIFIED/
+        # varchar-is-ascii-bytes-and-non-ascii-content-is-undefined). A codepoint
+        # above 127 manufactures exactly that: `LEFT(TO_CHAR(952883), 1)` encodes a
+        # 4-byte sequence and then takes the first BYTE of it, and reading the
+        # result raises UnicodeDecodeError. The engine is behaving to contract
+        # there, so the generator stays inside the range where the contract holds.
+        # This also subsumes the surrogate hole (U+D800..U+DFFF) the catalog
+        # documents but cannot express as a bound — it is far above 127.
+        if function == "TO_CHAR":
+            value = self.rng.randint(0, 127)
+        return str(float(value)) if ty in (Ty.FLOAT, Ty.DECIMAL) else str(value)
+
+    def _constant_argument(self, function: str, param: Param, ty: Ty) -> str:
         """A literal for a `constant_only` parameter.
 
-        Several of these are enumerated domains (a date part, a format pattern)
-        the catalog describes only in prose. A random VARCHAR there binds fine
-        and then fails at execution, so the known domains are spelled out. That
-        the domains are not machine-readable in `reference/` is a catalog gap.
+        A parameter with an enumerated `domain` draws from it. The date-part
+        domains used to be one tuple in this file covering EXTRACT, DATEDIFF,
+        TRUNC and TIME_BUCKET at once — which was wrong for all four, since the
+        four accept different sets. Each parameter now carries its own.
         """
-        if function in ("EXTRACT", "DATEDIFF", "TRUNC", "TIME_BUCKET") and ty is Ty.VARCHAR:
-            return "'" + self.rng.choice(_DATE_PARTS) + "'"
+        if param.domain:
+            return "'" + self.rng.choice(param.domain) + "'"
+        if param.minimum is not None or param.maximum is not None:
+            return self._bounded_literal(function, param, ty)
         if function == "FORMAT_TIMESTAMP":
+            # A strftime pattern is not a closed set, so there is no domain to
+            # record; these are three patterns worth exercising.
             return "'" + self.rng.choice(("%Y-%m-%d", "%Y", "%H:%M:%S")) + "'"
-        if function == "REGEXP_REPLACE" and ty is Ty.VARCHAR:
-            return "'" + self.rng.choice(("[aeiou]", "^a", "[0-9]+", "x")) + "'"
         return self.literal(ty)
 
     def _temporal_branch(self, ty: Ty) -> str:
@@ -886,6 +1096,29 @@ class Generator:
         self.tags.add(keyword.lower())
         return Expr(f"{keyword}({operand.sql} AS {target})", ty)
 
+    def _overlay(self, ty: Ty, depth: int) -> Optional[Expr]:
+        """`OVERLAY(s PLACING r FROM start [FOR length])` — SQL-92 string splice.
+
+        Its own production in the dialect, like the SUBSTRING/POSITION/EXTRACT
+        infix forms, and lowered in the planner to
+        `SUBSTRING(s,1,start-1) || r || SUBSTRING(s,start+len,LENGTH(s))`. Both
+        the optional and the explicit FOR form are emitted, because they take
+        different paths through that lowering — the optional one synthesises
+        LENGTH(r) as the length.
+        """
+        rng = self.rng
+        source = self.expression(Ty.VARCHAR, depth + 1)
+        replacement = self.expression(Ty.VARCHAR, depth + 1)
+        start = rng.randint(1, 8)
+        if rng.random() < 0.5:
+            self.tags.add("sql92:OVERLAY")
+            return Expr(f"OVERLAY({source.sql} PLACING {replacement.sql} FROM {start})", Ty.VARCHAR)
+        self.tags.add("sql92:OVERLAY/FOR")
+        return Expr(
+            f"OVERLAY({source.sql} PLACING {replacement.sql} FROM {start} FOR {rng.randint(0, 8)})",
+            Ty.VARCHAR,
+        )
+
     def _codec_round_trip(self, ty: Ty, depth: int) -> Optional[Expr]:
         """DECODE(ENCODE(x)) — an identity the engine has to preserve.
 
@@ -900,6 +1133,82 @@ class Generator:
         inner = self.expression(Ty.VARBINARY, depth + 1)
         self.tags.add(f"codec:{encode}")
         return Expr(f"{decode}({encode}({inner.sql}))", Ty.VARBINARY)
+
+    def _sql92_spelling(self, ty: Ty, depth: int) -> Optional[Expr]:
+        """A function reached by its SQL-92 spelling rather than its call form.
+
+        THIS IS A DIFFERENT PARSER PATH, which is the entire reason it is here.
+        Everything else in this generator renders `NAME(arg, arg)` off the
+        catalog's `catalog_name`, so three things were never exercised at all:
+
+          * the infix argument syntax the catalog itself publishes in `label` —
+            `SUBSTRING(str FROM start FOR length)`, `POSITION(needle IN
+            haystack)`, `EXTRACT(part FROM date)` — which the dialect parses into
+            the same function node by a separate production;
+          * the catalog's `aliases`, since generation keys on the canonical name.
+            `CHARACTER_LENGTH`/`CHAR_LENGTH` are LENGTH's aliases and had zero
+            coverage;
+          * EXTRACT in any form. Its `return_type` is `integer | double | date`,
+            which resolves to Ty.UNKNOWN, and UNKNOWN is never a REQUESTED type —
+            so the catalog path loaded EXTRACT, counted it as generated, and
+            could never emit it. The infix form pins the part instead, and every
+            part in the catalog's domain measurably returns INT64.
+
+        The spellings the engine does NOT accept are registered rather than
+        quietly skipped: single_table_known_gaps/trim-with-no-trim-character-is-
+        unparseable, /is-distinct-from-is-unhandled and /overlay-is-unhandled.
+        """
+        rng = self.rng
+        if ty is Ty.VARCHAR:
+            # TRIM's three directions are tagged separately because they are three
+            # different functions below the parser — logical_planner_builders
+            # .trim_string maps BOTH/LEADING/TRAILING onto TRIM/LTRIM/RTRIM — so
+            # one tag would report coverage the run did not necessarily have.
+            form = rng.choice(("substring", "substring_for", "trim"))
+            operand = self.expression(Ty.VARCHAR, depth + 1)
+            if form == "trim":
+                where = rng.choice(("BOTH", "LEADING", "TRAILING"))
+                characters = rng.choice(_TRIM_CHARACTER_SETS)
+                self.tags.add(f"sql92:TRIM/{where}")
+                return Expr(f"TRIM({where} '{characters}' FROM {operand.sql})", Ty.VARCHAR)
+            start = rng.randint(0, 12)
+            if form == "substring":
+                self.tags.add("sql92:SUBSTRING/FROM")
+                return Expr(f"SUBSTRING({operand.sql} FROM {start})", Ty.VARCHAR)
+            self.tags.add("sql92:SUBSTRING/FROM-FOR")
+            return Expr(
+                f"SUBSTRING({operand.sql} FROM {start} FOR {rng.randint(0, 12)})", Ty.VARCHAR
+            )
+
+        if ty is not Ty.INTEGER:
+            return None
+
+        forms = ["position", "length_alias"]
+        if self.relation.of(*TEMPORAL):
+            forms.append("extract")
+        form = rng.choice(forms)
+
+        if form == "position":
+            needle = self.expression(Ty.VARCHAR, depth + 1)
+            haystack = self.expression(Ty.VARCHAR, depth + 1)
+            self.tags.add("sql92:POSITION/IN")
+            return Expr(f"POSITION({needle.sql} IN {haystack.sql})", Ty.INTEGER)
+
+        if form == "length_alias":
+            alias = rng.choice(("CHARACTER_LENGTH", "CHAR_LENGTH"))
+            self.tags.add(f"sql92:{alias}")
+            return Expr(f"{alias}({self.expression(Ty.VARCHAR, depth + 1).sql})", Ty.INTEGER)
+
+        # EXTRACT carries the same part/operand coupling the call form does, and
+        # for the same reason: draken_date_part refuses a sub-day part of a DATE
+        # ("expression evaluation failed (err_op=15): draken_date_part: sub-day
+        # part of a DATE"). _narrow_for_drawn_constants applies it on the call
+        # side; here the part is drawn first, so the operand type follows it.
+        part = rng.choice(_EXTRACT_PARTS)
+        operand_types = (Ty.TIMESTAMP,) if part in _SUB_DAY_PARTS else TEMPORAL
+        self.tags.add("sql92:EXTRACT/FROM")
+        operand = self.expression(rng.choice(operand_types), depth + 1)
+        return Expr(f"EXTRACT({part.upper()} FROM {operand.sql})", Ty.INTEGER)
 
     def _case(self, ty: Ty, depth: int) -> Optional[Expr]:
         # DECIMAL branches are omitted: a CASE blending a DECIMAL column with a
@@ -937,7 +1246,9 @@ class Generator:
 
         Never a bare column or a bare literal: the planner rejects both
         (`WHERE clause cannot be a bare column name`), so a BOOLEAN column is
-        always spelled with an explicit `= TRUE` / `IS TRUE`.
+        always spelled with an explicit `= TRUE` / `IS TRUE`. A bare CASE IS
+        generated — it is a value expression, not a bare reference, and the planner
+        admits it; see `_case_predicate`.
 
         `negated_forms_allowed=False` suppresses the NOT LIKE / NOT IN / NOT
         BETWEEN spellings. It is set when this predicate is about to be wrapped
@@ -976,8 +1287,10 @@ class Generator:
             self._in_list_predicate,
             self._like_predicate,
             self._boolean_column_predicate,
+            self._distinct_from_predicate,
             self._array_predicate,
             self._json_predicate,
+            self._case_predicate,
         ]
         for builder in rng.sample(builders, len(builders)):
             built = builder(depth, negated_forms_allowed)
@@ -994,8 +1307,6 @@ class Generator:
         if not candidates:
             return None
         ty = rng.choice(candidates).ty
-        if any(c.name in NAN_BEARING_COLUMNS for c in candidates if c.ty is ty):
-            self.predicate_touches_nan = True
         left = self.expression(ty, depth + 1)
         right = self.expression(ty, depth + 1)
         # BOOLEAN has no ordering: types.json lists BOOLEAN as comparable only
@@ -1004,14 +1315,31 @@ class Generator:
         self.tags.add("comparison")
         return f"({left.sql} {rng.choice(operators)} {right.sql})"
 
+    def _distinct_from_predicate(self, depth: int, negated: bool) -> Optional[str]:
+        """`a IS [NOT] DISTINCT FROM b` — null-safe, and never UNKNOWN.
+
+        Worth generating precisely because it is TOTAL: the predicate-partition
+        oracle asserts |p| + |NOT p| + |p IS NULL| == |R|, and for this operator
+        the third bucket must always be empty. A lowering that leaked UNKNOWN
+        would show up there immediately.
+        """
+        rng = self.rng
+        candidates = [c for c in self.relation.columns if c.ty in SCALAR]
+        if not candidates:
+            return None
+        ty = rng.choice(candidates).ty
+        left = self.expression(ty, depth + 1)
+        right = self.expression(ty, depth + 1)
+        form = "IS NOT DISTINCT FROM" if negated and rng.random() < 0.5 else "IS DISTINCT FROM"
+        self.tags.add("distinct_from")
+        return f"({left.sql} {form} {right.sql})"
+
     def _null_predicate(self, depth: int, negated: bool) -> Optional[str]:
         rng = self.rng
         candidates = [c for c in self.relation.columns if c.ty in SCALAR]
         if not candidates:
             return None
         column = rng.choice(candidates)
-        if column.name in NAN_BEARING_COLUMNS:
-            self.predicate_touches_nan = True
         self.tags.add("is_null")
         return f"({column.quoted} {rng.choice(('IS NULL', 'IS NOT NULL') if negated else ('IS NULL',))})"
 
@@ -1021,8 +1349,6 @@ class Generator:
         if not candidates:
             return None
         column = rng.choice(candidates)
-        if column.name in NAN_BEARING_COLUMNS:
-            self.predicate_touches_nan = True
         low = self.literal(column.ty)
         high = self.literal(column.ty)
         negate = "NOT " if negated and rng.random() < 0.3 else ""
@@ -1041,8 +1367,6 @@ class Generator:
         if not candidates:
             return None
         column = rng.choice(candidates)
-        if column.name in NAN_BEARING_COLUMNS:
-            self.predicate_touches_nan = True
         members = ", ".join(self.literal(column.ty) for _ in range(rng.randint(1, 4)))
         negate = "NOT " if negated and rng.random() < 0.3 else ""
         self.tags.add("in_list")
@@ -1092,6 +1416,71 @@ class Generator:
         self.tags.add("boolean_predicate")
         return f"({column.quoted} {form})"
 
+    def _case_predicate(self, depth: int, negated: bool) -> Optional[str]:
+        """A bare CASE used directly as a WHERE predicate.
+
+        Admitted by the RULING recorded on
+        `logical_planner._validate_where_clause_expression` (architect, 2026-08-10):
+        a WHERE clause must be a boolean VALUE EXPRESSION, and a CASE is one.
+
+        The MULTI-branch form is the load-bearing coverage. The optimizer's
+        `CASE -> IIF` rewrite only ever collapses a SINGLE-branch CASE, so a switch
+        can never reach the filter as an IIF — it arrives as the folded
+        `draken_if_then_else` chain that `BC_RESULT_WRAP_AS_BOOL` makes bool-final,
+        and no other generated shape exercises that path.
+
+        Conditions come from the three narrow builders rather than from
+        `predicate()`: a CASE condition is not a top-level filter predicate, so
+        routing the full grammar through here would nest shapes that are only
+        supported at top level (a FLOAT IN-list — see
+        single_table_known_gaps/float-in-list-only-works-at-top-level) and report
+        registered defects instead of testing CASE.
+        """
+        rng = self.rng
+        if depth >= 2:
+            return None
+        condition_builders = [
+            self._comparison_predicate,
+            self._null_predicate,
+            self._boolean_column_predicate,
+        ]
+        # These three cannot emit RLIKE today, but a CASE condition IS operand
+        # position, so it carries the same flag every other CASE/IIF condition
+        # carries — the guard belongs to the position, not to today's builders.
+        conditions: List[str] = []
+        was_operand = self._predicate_is_an_operand
+        self._predicate_is_an_operand = True
+        try:
+            for builder in rng.sample(condition_builders, len(condition_builders)):
+                built = builder(depth + 1, negated)
+                if built is not None:
+                    conditions.append(built)
+                if len(conditions) == rng.randint(1, 3):
+                    break
+        finally:
+            self._predicate_is_an_operand = was_operand
+        if not conditions:
+            return None
+        self.tags.add("case_predicate")
+        if len(conditions) > 1:
+            self.tags.add("case_switch_predicate")
+        # The first arm is always TRUE and the ELSE is never TRUE, so the CASE can
+        # never fold to a constant — a constant predicate would test constant
+        # folding rather than the CASE, and `WHERE <constant>` is refused as a bare
+        # literal in the spelling this builder is here to cover.
+        arms = " ".join(
+            f"WHEN {condition} THEN {'TRUE' if index % 2 == 0 else 'FALSE'}"
+            for index, condition in enumerate(conditions)
+        )
+        # No ELSE and `ELSE NULL` are the 3VL shapes: an unmatched row evaluates to
+        # NULL, which a WHERE drops exactly as it drops FALSE.
+        tail = rng.choice(("ELSE FALSE", "ELSE NULL", ""))
+        if tail:
+            self.tags.add(f"case_{tail.split()[1].lower()}_branch")
+            return f"(CASE {arms} {tail} END)"
+        self.tags.add("case_no_else_branch")
+        return f"(CASE {arms} END)"
+
     def _array_predicate(self, depth: int, negated: bool) -> Optional[str]:
         rng = self.rng
         candidates = [c for c in self.relation.of(Ty.ARRAY) if c.name in ARRAY_ELEMENT_TYPES]
@@ -1132,6 +1521,16 @@ _REFERENCE_DATE = datetime.datetime(2005, 6, 15, 12, 0, 0)
 # Literal strings drawn from what the corpus actually contains, so LIKE and
 # equality predicates select non-empty subsets rather than always matching zero
 # rows. A predicate that never matches exercises only the filter's empty path.
+#
+# ASCII-ONLY, and deliberately so rather than for want of imagination. A quoted
+# string literal binds VARCHAR, VARCHAR is ASCII bytes, and non-ASCII content in
+# one is undefined behaviour — so a non-ASCII literal here would generate input
+# the engine makes no promise about, and every oracle downstream would be
+# asserting on an answer that was never specified. `REVERSE('ÅΩ漢字')` returning
+# an undecodable byte sequence is the contract, not a finding
+# (single_table_known_gaps/RATIFIED/
+# varchar-is-ascii-bytes-and-non-ascii-content-is-undefined). Unicode belongs in
+# a fuzzer over NVARCHAR, where the promise exists.
 _STRING_LITERALS = (
     "alpha",
     "beta",
@@ -1179,14 +1578,19 @@ class SelectQuery:
     where: Optional[str] = None
     group_by: List[str] = field(default_factory=list)
     having: Optional[str] = None
+    #: The whole QUALIFY clause, without the keyword. Held structurally like every
+    #: other clause so the oracles' re-renders carry it.
+    qualify: Optional[str] = None
+    #: The predicate of an aggregate `FILTER (WHERE ...)` in the projection, if
+    #: one was emitted. Read by the aggregate_filter_matches_where oracle, which
+    #: needs the predicate itself rather than the rendered call.
+    aggregate_filter: Optional[str] = None
     order_by: List[str] = field(default_factory=list)
     limit: Optional[int] = None
     offset: Optional[int] = None
     has_aggregate: bool = False
     has_ranking_window: bool = False
     tags: Set[str] = field(default_factory=set)
-    #: Whether the WHERE clause touches a column that may hold a NaN.
-    predicate_touches_nan: bool = False
 
     def render(
         self,
@@ -1211,6 +1615,10 @@ class SelectQuery:
             parts.append("GROUP BY " + ", ".join(self.group_by))
         if self.having is not None:
             parts.append(f"HAVING {self.having}")
+        # QUALIFY sits between HAVING and ORDER BY: it filters on window values,
+        # which are computed after grouping and before ordering.
+        if self.qualify is not None:
+            parts.append(f"QUALIFY {self.qualify}")
         if self.order_by and not drop_order:
             parts.append("ORDER BY " + ", ".join(self.order_by))
         if not drop_limit:
@@ -1262,7 +1670,6 @@ def build_select(
     # emitting a tautology, so the caller has to check first.
     if _scalar_columns(relation) and rng.random() < 0.7:
         query.where = generator.predicate()
-        query.predicate_touches_nan = generator.predicate_touches_nan
 
     _apply_order_limit(rng, generator, query)
     query.tags |= generator.tags
@@ -1359,6 +1766,13 @@ def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
             continue
         accepted = _AGGREGATE_INPUT_TYPES.get(name, SCALAR)
         candidates = [c for c in relation.columns if c.ty in accepted]
+        if name in _AGGREGATES_WITHHELD_FROM_NAN:
+            # An aggregate whose answer over a NaN-bearing column is unstable
+            # disarms every oracle that compares two runs, so it is withheld
+            # from the specials columns only — it still runs over every other
+            # column. The narrowing expires with the register entry that
+            # justifies it (test_nan_withholding_cites_a_live_register_entry).
+            candidates = [c for c in candidates if c.name not in NAN_BEARING_COLUMNS]
         if not candidates:
             continue
         column = rng.choice(candidates)
@@ -1379,11 +1793,40 @@ def _build_aggregate(generator: Generator, relation: Relation) -> SelectQuery:
         outputs.append(Column(alias, Ty.INTEGER))
         generator.tags.add("agg:COUNT(*)")
 
+    # `COUNT(*) FILTER (WHERE p)`. COUNT is the only aggregate that accepts a
+    # FILTER at all — every other one is refused at plan-build time ("Filters are
+    # not supported with aggregate function 'SUM'"), and so is COUNT(DISTINCT x)
+    # — so this is the whole of the construct's reachable surface, not a sample
+    # of it. Emitted at a high rate on purpose: it is the only shape the
+    # aggregate_filter_matches_where oracle can run against.
+    #
+    # `"COUNT(*)"` is put into `emitted` because the FILTER'd count and a plain
+    # one COLLIDE: the filter is dropped from the aggregate's identity, so
+    # `COUNT(*) FILTER (WHERE p) AS n, COUNT(*) AS m` raises
+    # AmbiguousIdentifierError on `m`. Same root as
+    # single_table_known_gaps/aggregate-filter-is-silently-ignored, and it goes
+    # away when that does.
+    aggregate_filter: Optional[str] = None
+    if _scalar_columns(relation) and "COUNT(*)" not in emitted and rng.random() < 0.55:
+        # depth=1, not the default 0. A FILTER predicate is lowered to the
+        # condition of an IIF, so it is NESTED by construction — and an IN-list
+        # on a FLOAT column only has a native kernel as the WHOLE predicate
+        # (single_table_known_gaps/float-in-list-only-works-at-top-level).
+        # Generating at depth 1 applies that rule, the same way a predicate under
+        # a connective gets it.
+        aggregate_filter = generator.predicate(depth=1)
+        emitted.add("COUNT(*)")
+        alias = generator.names.next("a")
+        projection.append(f"COUNT(*) FILTER (WHERE {aggregate_filter}) AS {alias}")
+        outputs.append(Column(alias, Ty.INTEGER))
+        generator.tags.add("agg:COUNT(*)/FILTER")
+
     query = SelectQuery(
         source=relation.sql,
         projection=projection,
         output_columns=tuple(outputs),
         group_by=group_by,
+        aggregate_filter=aggregate_filter,
         has_aggregate=True,
         tags={"aggregate"},
     )
@@ -1443,14 +1886,31 @@ def _build_window(
     # Ranking windows are unaffected.
     aggregate_window_ok = allow_aggregate_window and not relation.derived
     ranking = True if not aggregate_window_ok else rng.random() < 0.6
+    qualify: Optional[str] = None
     if ranking:
         function = rng.choice(("ROW_NUMBER", "RANK", "DENSE_RANK"))
         direction = rng.choice(("ASC", "DESC"))
-        projection.append(
-            f"{function}() OVER ({partition}ORDER BY {order_column.quoted} {direction}) AS {alias}"
-        )
-        outputs.append(Column(alias, Ty.INTEGER))
-        generator.tags.add(f"window:{function}")
+        window = f"{function}() OVER ({partition}ORDER BY {order_column.quoted} {direction})"
+        # QUALIFY filters on the window's value instead of projecting it. Same
+        # ORDER-BY-required rule as any ranking window — the planner rejects a
+        # ranking OVER () with no ORDER BY — so the clause is built from the same
+        # window text either way.
+        #
+        # NOTE FOR WHEN single_table_known_gaps/qualify-is-silently-ignored IS
+        # FIXED: `ROW_NUMBER() = 1` over a ties-bearing ORDER BY picks an
+        # ARBITRARY row of each tied set, so which rows survive may differ
+        # between the two executions every oracle compares. That is the same
+        # exposure the already-generated ROW_NUMBER PROJECTION carries (a tied
+        # ordering assigns the numbers arbitrarily too), not a new one — but it
+        # only starts biting when the clause does something. RANK and DENSE_RANK
+        # are tie-stable in both positions.
+        if rng.random() < 0.5:
+            qualify = f"{window} {rng.choice(('=', '<=', '<'))} {rng.randint(1, 4)}"
+            generator.tags.add(f"qualify:{function}")
+        else:
+            projection.append(f"{window} AS {alias}")
+            outputs.append(Column(alias, Ty.INTEGER))
+            generator.tags.add(f"window:{function}")
     else:
         numeric = [c for c in relation.columns if c.ty in NUMERIC]
         if not numeric:
@@ -1466,6 +1926,7 @@ def _build_window(
         source=relation.sql,
         projection=projection,
         output_columns=tuple(outputs),
+        qualify=qualify,
         has_ranking_window=ranking,
         tags={"window"},
     )

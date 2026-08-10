@@ -137,12 +137,12 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         comparisons = get_all_nodes_of_type(node.asof_condition, (NodeType.COMPARISON_OPERATOR,))
         if len(comparisons) != 1:
             raise UnsupportedSyntaxError(
-                "ASOF MATCH_CONDITION must contain exactly one comparison."
+                "ASOF **MATCH_CONDITION** must contain exactly one comparison."
             )
         asof_cmp = comparisons[0]
         if asof_cmp.value not in ("Lt", "LtEq", "Gt", "GtEq"):
             raise UnsupportedSyntaxError(
-                "ASOF MATCH_CONDITION must use <, <=, >, or >= (not = or !=)."
+                "ASOF **MATCH_CONDITION** must use <, <=, >, or >= (not = or !=)."
             )
         node.asof_left_column = asof_cmp.left.schema_column.identity
         node.asof_right_column = asof_cmp.right.schema_column.identity
@@ -169,7 +169,7 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     if node.type == "cross join" and node.implied_join:
         # 1438 - Check only if readers is set (not set for sequential binary joins)
         if node.readers and len(node.readers) > 2:
-            raise UnsupportedSyntaxError("Cannot CROSS JOIN more than two relations.")
+            raise UnsupportedSyntaxError("Cannot **CROSS JOIN** more than two relations.")
         # Extract from readers only if it's set (backward compat for old-style implicit joins)
         # For new sequential binary joins, left/right are already set in logical planner
         if node.readers:
@@ -322,7 +322,13 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         )
 
     # SEMI and ANTI joins only return columns from one table
-    if node.type in ("left anti", "left semi", "left anti null-aware"):
+    if node.type in (
+        "left anti",
+        "left semi",
+        "left anti null-aware",
+        "left semi not-distinct",
+        "left anti not-distinct",
+    ):
         for schema in node.right_relation_names:
             context.schemas.pop(schema, None)
 
@@ -362,9 +368,17 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     )
 
     if node.type == "inner" and node.on is None:
-        from opteryx.exceptions import SqlError
+        from opteryx.exceptions import SqlError, compose, md_syntax
 
-        raise SqlError("INNER and NATURAL joins must have a either an ON or USING condition.")
+        raise SqlError(
+            compose(
+                f"An {md_syntax('INNER JOIN')} or {md_syntax('NATURAL JOIN')} needs "
+                f"either an {md_syntax('ON')} or a {md_syntax('USING')} condition to "
+                f"say how the two relations line up",
+                f"To combine every row with every other row, "
+                f"{md_syntax('CROSS JOIN')} says so explicitly",
+            )
+        )
 
     node.schemas = context.schemas
 

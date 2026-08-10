@@ -9,6 +9,7 @@ from .disjunction_simplification import DisjunctionSimplificationStrategy
 from .disjunctive_domain_pushdown import DisjunctiveDomainPushdownStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
 from .hash_map_variant import HashMapVariantStrategy
+from .join_build_shape import JoinBuildShapeStrategy
 from .join_elimination import JoinEliminationStrategy
 from .join_ordering import JoinOrderingStrategy
 from .join_planning import JoinPlanningStrategy
@@ -49,6 +50,7 @@ __all__ = [
     "DisjunctiveDomainPushdownStrategy",
     "DistinctPushdownStrategy",
     "HashMapVariantStrategy",
+    "JoinBuildShapeStrategy",
     "JoinEliminationStrategy",
     "JoinOrderingStrategy",
     "JoinPlanningStrategy",

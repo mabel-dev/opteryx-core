@@ -37,6 +37,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -50,7 +51,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -94,6 +101,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -107,16 +115,28 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "item",
                         "type": "any",
-                        "documentation": "Single value to compare against the array.",
+                        "documentation": "Must be of the array's element type.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": "arr",
+                        "excludes": []
                     }
                 ]
             }
@@ -160,6 +180,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -173,16 +194,28 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "items",
                         "type": "array",
-                        "documentation": "Collection of values to compare against the array.",
+                        "documentation": "Must be an array with the same element type as `arr`.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": "arr",
+                        "excludes": []
                     }
                 ]
             }
@@ -226,6 +259,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -239,16 +273,28 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "items",
                         "type": "array",
-                        "documentation": "Collection of values to compare against the array.",
+                        "documentation": "Must be an array with the same element type as `arr`.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": "arr",
+                        "excludes": []
                     }
                 ]
             }
@@ -292,6 +338,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -301,11 +348,17 @@
                     {
                         "label": "blob",
                         "type": "varchar",
-                        "documentation": "Binary or text value to encode, decode, or transform.",
+                        "documentation": "Must be well-formed base64 text; other input is rejected at execution.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": "base64",
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -349,6 +402,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -362,7 +416,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -406,6 +466,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -415,11 +476,17 @@
                     {
                         "label": "blob",
                         "type": "varchar",
-                        "documentation": "Binary or text value to encode, decode, or transform.",
+                        "documentation": "Must be well-formed base85 text; other input is rejected at execution.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": "base85",
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -463,6 +530,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -476,7 +544,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -522,6 +596,7 @@
                     "maximum": null,
                     "variadic": true
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -535,7 +610,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "scale",
@@ -544,7 +625,13 @@
                         "optional": true,
                         "variadic": true,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "When `scale` is provided, positive values affect digits to the right of the decimal point and negative values affect tens, hundreds, and larger positions."
@@ -589,6 +676,7 @@
                     "maximum": null,
                     "variadic": true
                 },
+                "homogeneous": true,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -598,20 +686,36 @@
                     {
                         "label": "arg0",
                         "type": "any",
-                        "documentation": "First input value.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     },
                     {
                         "label": "args",
                         "type": "any",
-                        "documentation": "Additional input values. Optional. Can be repeated.",
+                        "documentation": "Further branch values, of the same blendable family as `arg0`. Optional. Can be repeated.",
                         "optional": true,
                         "variadic": true,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     }
                 ]
             }
@@ -634,7 +738,7 @@
         },
         "overloads": [
             {
-                "id": "CONCAT_variadic",
+                "id": "CONCAT_varchar",
                 "label": "CONCAT(str1, str2, [strs...])",
                 "category": "String Functions",
                 "documentation": "Concatenates multiple string arguments into a single string.",
@@ -655,6 +759,7 @@
                     "maximum": null,
                     "variadic": true
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -663,30 +768,200 @@
                 "parameters": [
                     {
                         "label": "str1",
-                        "type": "any",
+                        "type": "varchar",
                         "documentation": "First input string value.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "str2",
-                        "type": "any",
-                        "documentation": "Input value of type `any`.",
+                        "type": "varchar",
+                        "documentation": "String input value.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "strs",
-                        "type": "any",
-                        "documentation": "Input value of type `any`. Optional. Can be repeated.",
+                        "type": "varchar",
+                        "documentation": "String input value. Optional. Can be repeated.",
                         "optional": true,
                         "variadic": true,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            },
+            {
+                "id": "CONCAT_nvarchar",
+                "label": "CONCAT(str1, str2, [strs...])",
+                "category": "String Functions",
+                "documentation": "Concatenates multiple string arguments into a single string.",
+                "related_functions": [
+                    "CONCAT_WS",
+                    "LEFT",
+                    "RIGHT",
+                    "LENGTH",
+                    "UPPER"
+                ],
+                "return_type": "NVARCHAR",
+                "returns": {
+                    "type": "NVARCHAR",
+                    "documentation": "Returns the computed result as `NVARCHAR`."
+                },
+                "arity": {
+                    "minimum": 2,
+                    "maximum": null,
+                    "variadic": true
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 523.0
+                },
+                "parameters": [
+                    {
+                        "label": "str1",
+                        "type": "nvarchar",
+                        "documentation": "First input string value.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "str2",
+                        "type": "nvarchar",
+                        "documentation": "Input value of type `nvarchar`.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "strs",
+                        "type": "nvarchar",
+                        "documentation": "Input value of type `nvarchar`. Optional. Can be repeated.",
+                        "optional": true,
+                        "variadic": true,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            },
+            {
+                "id": "CONCAT_varbinary",
+                "label": "CONCAT(str1, str2, [strs...])",
+                "category": "String Functions",
+                "documentation": "Concatenates multiple string arguments into a single string.",
+                "related_functions": [
+                    "CONCAT_WS",
+                    "LEFT",
+                    "RIGHT",
+                    "LENGTH",
+                    "UPPER"
+                ],
+                "return_type": "VARBINARY",
+                "returns": {
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
+                },
+                "arity": {
+                    "minimum": 2,
+                    "maximum": null,
+                    "variadic": true
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 523.0
+                },
+                "parameters": [
+                    {
+                        "label": "str1",
+                        "type": "varbinary",
+                        "documentation": "First input string value.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "str2",
+                        "type": "varbinary",
+                        "documentation": "Input value of type `varbinary`.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "strs",
+                        "type": "varbinary",
+                        "documentation": "Input value of type `varbinary`. Optional. Can be repeated.",
+                        "optional": true,
+                        "variadic": true,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -709,7 +984,7 @@
         },
         "overloads": [
             {
-                "id": "CONCAT_WS_variadic",
+                "id": "CONCAT_WS_varchar",
                 "label": "CONCAT_WS(separator, str1, [strs...])",
                 "category": "String Functions",
                 "documentation": "Concatenates strings with specified separator, skipping nulls.",
@@ -730,6 +1005,7 @@
                     "maximum": null,
                     "variadic": true
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -743,25 +1019,195 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "str1",
-                        "type": "any",
+                        "type": "varchar",
                         "documentation": "First string value to concatenate.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "strs",
-                        "type": "any",
-                        "documentation": "Input value of type `any`. Optional. Can be repeated.",
+                        "type": "varchar",
+                        "documentation": "String input value. Optional. Can be repeated.",
                         "optional": true,
                         "variadic": true,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            },
+            {
+                "id": "CONCAT_WS_nvarchar",
+                "label": "CONCAT_WS(separator, str1, [strs...])",
+                "category": "String Functions",
+                "documentation": "Concatenates strings with specified separator, skipping nulls.",
+                "related_functions": [
+                    "CONCAT",
+                    "TRIM",
+                    "SUBSTRING",
+                    "LENGTH",
+                    "UPPER"
+                ],
+                "return_type": "NVARCHAR",
+                "returns": {
+                    "type": "NVARCHAR",
+                    "documentation": "Returns the computed result as `NVARCHAR`."
+                },
+                "arity": {
+                    "minimum": 2,
+                    "maximum": null,
+                    "variadic": true
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 587.0
+                },
+                "parameters": [
+                    {
+                        "label": "separator",
+                        "type": "nvarchar",
+                        "documentation": "Input value of type `nvarchar`.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "str1",
+                        "type": "nvarchar",
+                        "documentation": "First string value to concatenate.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "strs",
+                        "type": "nvarchar",
+                        "documentation": "Input value of type `nvarchar`. Optional. Can be repeated.",
+                        "optional": true,
+                        "variadic": true,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            },
+            {
+                "id": "CONCAT_WS_varbinary",
+                "label": "CONCAT_WS(separator, str1, [strs...])",
+                "category": "String Functions",
+                "documentation": "Concatenates strings with specified separator, skipping nulls.",
+                "related_functions": [
+                    "CONCAT",
+                    "TRIM",
+                    "SUBSTRING",
+                    "LENGTH",
+                    "UPPER"
+                ],
+                "return_type": "VARBINARY",
+                "returns": {
+                    "type": "VARBINARY",
+                    "documentation": "Returns the computed result as `VARBINARY`."
+                },
+                "arity": {
+                    "minimum": 2,
+                    "maximum": null,
+                    "variadic": true
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 587.0
+                },
+                "parameters": [
+                    {
+                        "label": "separator",
+                        "type": "varbinary",
+                        "documentation": "Input value of type `varbinary`.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "str1",
+                        "type": "varbinary",
+                        "documentation": "First string value to concatenate.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "strs",
+                        "type": "varbinary",
+                        "documentation": "Input value of type `varbinary`. Optional. Can be repeated.",
+                        "optional": true,
+                        "variadic": true,
+                        "constant_only": false,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -805,6 +1251,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -849,6 +1296,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -862,7 +1310,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "vec",
@@ -871,7 +1325,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             },
@@ -894,6 +1354,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -907,7 +1368,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "vec",
@@ -916,7 +1383,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -957,6 +1430,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -970,7 +1444,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "vec",
@@ -979,7 +1459,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             },
@@ -1002,6 +1488,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1015,7 +1502,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "vec",
@@ -1024,7 +1517,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1068,6 +1567,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1116,6 +1616,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1166,6 +1667,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1214,6 +1716,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1263,6 +1766,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1276,7 +1780,24 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [
+                            "year",
+                            "quarter",
+                            "month",
+                            "week",
+                            "day",
+                            "hour",
+                            "minute",
+                            "second",
+                            "millisecond",
+                            "microsecond"
+                        ],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "date",
@@ -1285,7 +1806,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "end",
@@ -1294,7 +1821,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1338,6 +1871,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1382,6 +1916,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1395,7 +1930,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "This function depends on the configured embedding provider and returns a numeric `vector`."
@@ -1440,6 +1981,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1453,7 +1995,21 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [
+                            "year",
+                            "quarter",
+                            "month",
+                            "day",
+                            "hour",
+                            "minute",
+                            "second"
+                        ],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "date",
@@ -1462,7 +2018,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. Return type depends on `part`: `epoch` and `julian` produce `double`, `date` produces `date`, and most other parts produce `integer`."
@@ -1489,6 +2051,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1502,7 +2065,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "date",
@@ -1511,7 +2080,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. Return type depends on `part`: `epoch` and `julian` produce `double`, `date` produces `date`, and most other parts produce `integer`."
@@ -1556,6 +2131,7 @@
                     "maximum": null,
                     "variadic": true
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1569,7 +2145,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "scale",
@@ -1578,7 +2160,13 @@
                         "optional": true,
                         "variadic": true,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "When `scale` is provided, positive values affect digits to the right of the decimal point and negative values affect tens, hundreds, and larger positions."
@@ -1625,6 +2213,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1638,7 +2227,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "date",
@@ -1647,7 +2242,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1691,6 +2292,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1704,7 +2306,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": -62135596800,
+                        "maximum": 253402300799,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1748,6 +2356,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1761,7 +2370,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1805,6 +2420,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1818,7 +2434,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1862,6 +2484,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1871,11 +2494,17 @@
                     {
                         "label": "blob",
                         "type": "varchar",
-                        "documentation": "Binary or text value to encode, decode, or transform.",
+                        "documentation": "Must be well-formed hex text; other input is rejected at execution.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": "hex",
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1919,6 +2548,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1932,7 +2562,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -1976,6 +2612,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -1989,7 +2626,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "mode",
@@ -1998,7 +2641,22 @@
                         "optional": true,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [
+                            "words",
+                            "compact",
+                            "bytes",
+                            "si",
+                            "time",
+                            "clock",
+                            "percent",
+                            "odds"
+                        ],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2042,6 +2700,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": true,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2051,20 +2710,36 @@
                     {
                         "label": "value",
                         "type": "any",
-                        "documentation": "Primary input value.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     },
                     {
                         "label": "result",
                         "type": "any",
-                        "documentation": "Value returned when the condition or null check succeeds.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     }
                 ]
             }
@@ -2108,6 +2783,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": true,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2117,20 +2793,36 @@
                     {
                         "label": "value",
                         "type": "any",
-                        "documentation": "Primary input value.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     },
                     {
                         "label": "default",
                         "type": "any",
-                        "documentation": "Fallback value returned when the primary value is null.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     }
                 ]
             }
@@ -2174,6 +2866,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": true,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2187,25 +2880,47 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "true_value",
                         "type": "any",
-                        "documentation": "Value returned when `condition` evaluates to true.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     },
                     {
                         "label": "false_value",
                         "type": "any",
-                        "documentation": "Value returned when `condition` evaluates to false.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     }
                 ]
             }
@@ -2251,6 +2966,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2264,7 +2980,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2308,6 +3030,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2321,7 +3044,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "prefix",
@@ -2330,7 +3059,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2368,6 +3103,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2377,11 +3113,17 @@
                     {
                         "label": "json",
                         "type": "varchar",
-                        "documentation": "JSON object or document value to inspect.",
+                        "documentation": "Must be text that parses as a JSON object; other input is rejected at execution.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": "json",
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2425,6 +3167,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2438,7 +3181,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2482,6 +3231,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2495,7 +3245,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "length",
@@ -2504,7 +3260,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2551,6 +3313,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2564,7 +3327,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             },
@@ -2590,6 +3359,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2603,7 +3373,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2647,6 +3423,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2660,7 +3437,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "str2",
@@ -2669,7 +3452,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2713,6 +3502,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2726,7 +3516,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "base",
@@ -2735,7 +3531,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2781,6 +3583,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2794,7 +3597,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2838,6 +3647,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2851,25 +3661,43 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "width",
                         "type": "integer",
-                        "documentation": "Target width for the output.",
+                        "documentation": "Target width for the output. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict"
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "fill",
                         "type": "varchar",
-                        "documentation": "Padding text used when the input is shorter than the target width.",
+                        "documentation": "Padding text used when the input is shorter than the target width. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict"
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2893,7 +3721,7 @@
         "overloads": [
             {
                 "id": "LTRIM_1",
-                "label": "LTRIM(string)",
+                "label": "LTRIM(string, [characters])",
                 "category": "String Functions",
                 "documentation": "Removes leading whitespace from string.",
                 "related_functions": [
@@ -2910,9 +3738,10 @@
                 },
                 "arity": {
                     "minimum": 1,
-                    "maximum": 1,
+                    "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2926,7 +3755,28 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "characters",
+                        "type": "varchar",
+                        "documentation": "The SET of characters to strip, not a substring to match: `TRIM(BOTH 'ab' FROM 'baXab')` is `X`. Must be constant. Omitted, ASCII whitespace is stripped. Over an NVARCHAR operand the set is matched by codepoint, so a multibyte character can never be split. Must be a constant expression. Optional.",
+                        "optional": true,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -2970,6 +3820,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -2983,7 +3834,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "query",
@@ -2992,7 +3849,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Canonical form is `MATCH(str) AGAINST(pattern)`. Opteryx normalizes this syntax to an internal helper."
@@ -3037,6 +3900,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3050,7 +3914,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -3094,6 +3964,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3107,7 +3978,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "This function is volatile. The integer argument controls how many values are generated, not a seed."
@@ -3134,6 +4011,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "zero_arg",
                     "engine": "draken",
@@ -3182,6 +4060,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": true,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3191,20 +4070,36 @@
                     {
                         "label": "value",
                         "type": "any",
-                        "documentation": "Primary input value.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     },
                     {
                         "label": "compare",
                         "type": "any",
-                        "documentation": "Value to compare against the primary input.",
+                        "documentation": "A branch value. All branches must share one blendable family \u2014 all BOOLEAN, all string, or a numeric/temporal scalar mix. DECIMAL is not blendable; CAST it to DOUBLE first.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     }
                 ]
             }
@@ -3250,6 +4145,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3263,7 +4159,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -3307,6 +4209,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3354,6 +4257,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3401,6 +4305,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3414,7 +4319,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "string",
@@ -3423,7 +4334,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Canonical SQL-92 form is `POSITION(needle IN haystack)`. Opteryx also accepts `POSITION(needle, haystack)`."
@@ -3468,6 +4385,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3481,7 +4399,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "exp",
@@ -3490,7 +4414,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -3536,6 +4466,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3549,7 +4480,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "This function is volatile. The integer argument controls how many values are generated, not a seed."
@@ -3576,6 +4513,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "zero_arg",
                     "engine": "draken",
@@ -3624,6 +4562,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3637,7 +4576,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "This function is volatile. It returns `n` random bytes as `VARBINARY` for each row; the integer argument is the byte length, not a seed."
@@ -3684,6 +4629,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3697,7 +4643,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "pattern",
@@ -3706,16 +4658,30 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": "dfa-regex",
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "replacement",
                         "type": "varchar",
-                        "documentation": "Replacement text used for matched content. Must be a constant expression.",
+                        "documentation": "Only the whole-match capture reference `'\\1'` is supported. An arbitrary replacement template is refused. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [
+                            "\\1"
+                        ],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -3759,6 +4725,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3772,7 +4739,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "search",
@@ -3781,7 +4754,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "replace_val",
@@ -3790,7 +4769,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -3834,6 +4819,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3847,7 +4833,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -3891,6 +4883,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3904,7 +4897,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "length",
@@ -3913,7 +4912,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -3957,6 +4962,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -3970,7 +4976,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Uses PyArrow's default half-to-even rule to break ties when a value falls exactly between two candidates."
@@ -3997,6 +5009,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4010,7 +5023,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "precision",
@@ -4019,7 +5038,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Uses PyArrow's default half-to-even rule to break ties when a value falls exactly between two candidates."
@@ -4064,6 +5089,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4077,25 +5103,43 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "width",
                         "type": "integer",
-                        "documentation": "Target width for the output.",
+                        "documentation": "Target width for the output. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict"
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "fill",
                         "type": "varchar",
-                        "documentation": "Padding text used when the input is shorter than the target width.",
+                        "documentation": "Padding text used when the input is shorter than the target width. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict"
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4119,7 +5163,7 @@
         "overloads": [
             {
                 "id": "RTRIM_1",
-                "label": "RTRIM(string)",
+                "label": "RTRIM(string, [characters])",
                 "category": "String Functions",
                 "documentation": "Removes trailing whitespace from string.",
                 "related_functions": [
@@ -4136,9 +5180,10 @@
                 },
                 "arity": {
                     "minimum": 1,
-                    "maximum": 1,
+                    "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4152,7 +5197,28 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "characters",
+                        "type": "varchar",
+                        "documentation": "The SET of characters to strip, not a substring to match: `TRIM(BOTH 'ab' FROM 'baXab')` is `X`. Must be constant. Omitted, ASCII whitespace is stripped. Over an NVARCHAR operand the set is matched by codepoint, so a multibyte character can never be split. Must be a constant expression. Optional.",
+                        "optional": true,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4196,6 +5262,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4209,7 +5276,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4253,6 +5326,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4266,7 +5340,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4310,6 +5390,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4323,7 +5404,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4367,6 +5454,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4380,7 +5468,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4424,6 +5518,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4437,7 +5532,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4481,6 +5582,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4494,7 +5596,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4538,6 +5646,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4551,7 +5660,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4595,6 +5710,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4608,7 +5724,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4652,6 +5774,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4665,7 +5788,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "delimiter",
@@ -4674,7 +5803,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             },
@@ -4700,6 +5835,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4713,7 +5849,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "delimiter",
@@ -4722,7 +5864,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "limit",
@@ -4731,7 +5879,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4775,6 +5929,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4788,7 +5943,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -4834,6 +5995,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4847,7 +6009,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "from_pos",
@@ -4856,7 +6024,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Canonical SQL-92 form is `SUBSTRING(str FROM start FOR length)`. Opteryx also accepts `SUBSTRING(str[, start[, length]])`."
@@ -4883,6 +6057,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4896,7 +6071,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "from_pos",
@@ -4905,7 +6086,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "count",
@@ -4914,7 +6101,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Canonical SQL-92 form is `SUBSTRING(str FROM start FOR length)`. Opteryx also accepts `SUBSTRING(str[, start[, length]])`."
@@ -4961,6 +6154,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -4974,7 +6168,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "time2",
@@ -4983,7 +6183,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -5027,6 +6233,7 @@
                     "maximum": 3,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -5040,7 +6247,15 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": 1,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": [
+                            "DECIMAL"
+                        ]
                     },
                     {
                         "label": "units",
@@ -5049,7 +6264,22 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [
+                            "year",
+                            "quarter",
+                            "month",
+                            "week",
+                            "day",
+                            "hour",
+                            "minute",
+                            "second"
+                        ],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "date",
@@ -5058,7 +6288,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -5105,6 +6341,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -5118,7 +6355,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -5164,6 +6407,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -5173,11 +6417,17 @@
                     {
                         "label": "num",
                         "type": "integer",
-                        "documentation": "Numeric input value.",
+                        "documentation": "A Unicode codepoint in 0..1114111 (U+10FFFF). The surrogate range 55296..57343 (U+D800..U+DFFF) is excluded as well \u2014 those are not Unicode scalar values.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": 0,
+                        "maximum": 1114111,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -5201,7 +6451,7 @@
         "overloads": [
             {
                 "id": "TRIM_1",
-                "label": "TRIM([BOTH|LEADING|TRAILING] [chars] FROM str)",
+                "label": "TRIM([BOTH|LEADING|TRAILING] chars FROM str)",
                 "category": "String Functions",
                 "documentation": "Removes leading and trailing whitespace from string.",
                 "related_functions": [
@@ -5218,9 +6468,10 @@
                 },
                 "arity": {
                     "minimum": 1,
-                    "maximum": 1,
+                    "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -5234,10 +6485,31 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "characters",
+                        "type": "varchar",
+                        "documentation": "The SET of characters to strip, not a substring to match: `TRIM(BOTH 'ab' FROM 'baXab')` is `X`. Must be constant. Omitted, ASCII whitespace is stripped. Over an NVARCHAR operand the set is matched by codepoint, so a multibyte character can never be split. Must be a constant expression. Optional.",
+                        "optional": true,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
-                "notes": "Canonical SQL-92 form is `TRIM([BOTH|LEADING|TRAILING] [chars] FROM str)`. Opteryx also accepts `TRIM(str[, chars])` as well as `LTRIM` and `RTRIM`."
+                "notes": "Canonical SQL-92 form is `TRIM([BOTH|LEADING|TRAILING] chars FROM str)`. Opteryx also accepts `TRIM(str[, chars])` as well as `LTRIM` and `RTRIM`. `chars` is a SET of characters, matched in any order and repeated: `TRIM(BOTH 'ab' FROM 'baXab')` is `X`. It must be constant, and over an `NVARCHAR` operand it is matched by codepoint, so a multibyte character is never split. Omit it (`TRIM(str)`) to strip ASCII whitespace; the direction-only spelling `TRIM(BOTH FROM str)` is not accepted."
             }
         ]
     },
@@ -5281,6 +6553,7 @@
                     "maximum": null,
                     "variadic": true
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "numeric",
                     "engine": "draken",
@@ -5294,7 +6567,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "scale",
@@ -5303,7 +6582,13 @@
                         "optional": true,
                         "variadic": true,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Truncation is performed toward zero rather than toward negative infinity."
@@ -5330,6 +6615,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "date",
                     "engine": "draken",
@@ -5343,7 +6629,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "unit",
@@ -5352,10 +6644,25 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [
+                            "year",
+                            "quarter",
+                            "month",
+                            "week",
+                            "day",
+                            "hour",
+                            "minute",
+                            "second"
+                        ],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
-                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
+                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression. This overload is reachable only for a DATE LITERAL, which is constant-folded at plan time: over a DATE COLUMN there is no native kernel and the call is refused with \"outside the c-native kernel set\". Cast the column to TIMESTAMP to truncate it."
             },
             {
                 "id": "TRUNC_timestamp",
@@ -5379,6 +6686,7 @@
                     "maximum": 2,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "timestamp",
                     "engine": "draken",
@@ -5392,7 +6700,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     },
                     {
                         "label": "unit",
@@ -5401,7 +6715,22 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [
+                            "year",
+                            "quarter",
+                            "month",
+                            "week",
+                            "day",
+                            "hour",
+                            "minute",
+                            "second"
+                        ],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ],
                 "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
@@ -5448,6 +6777,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -5461,7 +6791,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -5507,6 +6843,7 @@
                     "maximum": 1,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -5520,7 +6857,13 @@
                         "optional": false,
                         "variadic": false,
                         "constant_only": false,
-                        "null_handling": "strict"
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
                     }
                 ]
             }
@@ -5564,6 +6907,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
@@ -5605,6 +6949,7 @@
                     "maximum": 0,
                     "variadic": false
                 },
+                "homogeneous": false,
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",

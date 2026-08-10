@@ -396,7 +396,7 @@ def _resolve(
             if len(path) >= MAX_EXPANSION_DEPTH:
                 trail = " -> ".join((*path, relation))
                 raise UnsupportedSyntaxError(
-                    f"Relations are nested more than {MAX_EXPANSION_DEPTH} deep: {trail}."
+                    f"Relations are nested more than {MAX_EXPANSION_DEPTH} deep: {trail}. Flatten some of the views or **WITH** clauses feeding this query."
                 )
 
             child_path = path + (relation,)
