@@ -352,7 +352,14 @@ tpch-skene: ## Run TPC-H benchmark on the skene mirror of the dataset (generates
 	@# with different names, and the converter refuses to write over it. A
 	@# missing stamp with a populated directory therefore means "regenerate",
 	@# which is what the rm does.
-	@test -f testdata/tpch_10_skene.rg16 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene && touch testdata/tpch_10_skene.rg16; }
+	@#
+	@# The `zstd 7` arguments are NOT optional, for the same reason they are not
+	@# optional on clickbench-skene: they ARE the reference storage posture
+	@# (WriteOptions::for_storage, architect 2026-08-11). This target passed NO
+	@# codec until then, so the mirror was written uncompressed — 8.2 GB from
+	@# 2.8 GB of parquet — and the TPC-H skene number was quoted against a
+	@# dataset in the spill posture rather than the stored one.
+	@test -f testdata/tpch_10_skene.rg16 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene zstd 7 && touch testdata/tpch_10_skene.rg16; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --variant skene
 
@@ -374,7 +381,7 @@ clickbench:
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
-clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, LZ4, from scratch/hits_rugo_262k on first run)
+clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, zstd-7, from scratch/hits_rugo_262k on first run)
 	$(call print_blue,"Running ClickBench benchmark on skene...")
 	@# Gate on a completion stamp, not on the directory: an interrupted conversion
 	@# leaves a partial tree that `test -d` would accept, silently benchmarking a
@@ -382,18 +389,26 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@# never trip the single-format manifest check. Re-running the converter over
 	@# an existing tree is idempotent (deterministic output filenames).
 	@#
-	@# The `lz4` argument is NOT optional. LZ4 is the reference storage posture
-	@# (architect, 2026-08-08), so the mirror this rebuilds must be the mirror the
-	@# benchmark is quoted against. Dropping it rebuilds an UNCOMPRESSED mirror
-	@# into the same path, and nothing downstream would say so — the suite would
-	@# simply report a different number for a dataset nobody knew had changed.
+	@# The `zstd 7` arguments are NOT optional. zstd-7 is the reference storage
+	@# posture (architect, 2026-08-11 — WriteOptions::for_storage), so the mirror
+	@# this rebuilds must be the mirror the benchmark is quoted against. Dropping
+	@# them rebuilds an UNCOMPRESSED mirror into the same path, and nothing
+	@# downstream would say so — the suite would simply report a different number
+	@# for a dataset nobody knew had changed.
+	@#
+	@# This was `lz4` until 2026-08-11. LZ4 lost on the axis that decides: the
+	@# REMOTE path. At the ~64 MB/s production GCS ceiling zstd wins every
+	@# compressible shape by 1.3-5.0x on total time, and LZ4 cannot use spare
+	@# cores to close the gap — measured at 0.93-1.03x scaling across 6 x86 cores
+	@# against zstd's 2.4-4.6x, because LZ4 is already at the memory bandwidth
+	@# ceiling on one thread (dev/codec_parallel_scaling.cpp).
 	@#
 	@# The stamp is named for the LAYOUT (rg16 = 16 row groups per file), not
 	@# just for "converted". A mirror written before row groups were packed into
 	@# files is a different set of objects under different names, so the old
 	@# stamp must not satisfy this gate and the old tree must go — otherwise the
 	@# converter refuses and the benchmark never runs.
-	@test -f scratch/hits_skene.rg16 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.rg16; }
+	@test -f scratch/hits_skene.rg16 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene zstd 7 && touch scratch/hits_skene.rg16; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene

@@ -1,14 +1,21 @@
 """`execute_logical_plan` must run the same planning stages as `query_planner`.
 
 `execute_logical_plan` is the entry point for callers that build a LogicalPlan directly
-instead of submitting SQL text (the OData service). It skipped `do_plan_rewrite`, on the
+instead of submitting SQL text (the OData service). It skipped the lowering stages, on the
 reasoning that an externally-built plan has no SQL constructs to lower.
 
 That reasoning breaks the moment the relation resolver expands a VIEW into the plan: the
-view body is arbitrary SQL, so it can carry `IN (<subquery>)`, INTERSECT, EXCEPT. The
-rewriter is what *lowers* those into semi/anti joins — there is no physical operator for
-an InSubQuery — so skipping it doesn't forfeit an optimisation, it makes any view
-containing one fail at execution.
+view body is arbitrary SQL, so it can carry `IN (<subquery>)`, INTERSECT, EXCEPT. There is
+no physical operator for an InSubQuery, so skipping those stages doesn't forfeit an
+optimisation, it makes any view containing one fail at execution.
+
+These tests deliberately assert on OUTCOME (does it execute, does it agree with the SQL
+path) rather than on which stage does the lowering. That split is not stable: INTERSECT and
+EXCEPT are lowered by `do_plan_rewrite`, while `IN`/`EXISTS`/scalar subqueries moved to the
+OPTIMIZER when decorrelation went post-bind (2026-07-26) and the rewriter's decorrelation
+strategy was deleted. A test pinning `do_plan_rewrite` to emitting the semi join outlived
+that move and was removed rather than updated — `test_execute_logical_plan_runs_an_in_subquery`
+below is the regression it was really protecting.
 """
 
 import opteryx
@@ -16,9 +23,7 @@ import pytest
 
 from opteryx.planner import execute_logical_plan
 from opteryx.planner.logical_planner import do_logical_planning_phase
-from opteryx.planner.plan_rewriter import do_plan_rewrite
 from opteryx.planner.sql_rewriter import do_sql_rewrite
-from opteryx.models import QueryTelemetry
 from opteryx.third_party import sqloxide
 
 # Self-referencing IN-subquery: the shape a view body expands to once the resolver
@@ -36,30 +41,12 @@ def _raw_logical_plan(sql):
     return result[0] if isinstance(result, tuple) else next(iter(result))
 
 
-def _node_types(plan):
-    return [str(plan[nid].node_type).split(".")[-1] for nid in plan.nodes()]
-
-
 def _names(morsels):
     out = []
     for morsel in morsels:
         morsel.materialize()
         out += morsel.column("name").to_pylist()
     return sorted(out)
-
-
-def test_in_subquery_is_lowered_to_a_semi_join():
-    # An un-lowered plan carries the InSubQuery inside the Filter's condition and has no
-    # Join node at all. Nothing downstream can execute that.
-    before = _raw_logical_plan(IN_SUBQUERY_SQL)
-    assert "Join" not in _node_types(before)
-
-    after = do_plan_rewrite(_raw_logical_plan(IN_SUBQUERY_SQL), QueryTelemetry("test"))
-
-    join_types = [
-        str(after[nid].type) for nid in after.nodes() if "Join" in str(after[nid].node_type)
-    ]
-    assert join_types == ["left semi"], f"expected a left semi join, got {join_types}"
 
 
 def test_execute_logical_plan_runs_an_in_subquery():

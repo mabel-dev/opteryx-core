@@ -41,6 +41,7 @@ from opteryx.planner.optimizer.strategies import (
     CastSimplificationStrategy,
     ConstantFoldingStrategy,
     CorrelatedFiltersStrategy,
+    SemiJoinReducerStrategy,
     CrossJoinChainReorderStrategy,
     DecorrelateSubqueryStrategy,
     CrossJoinFilterPushdownStrategy,
@@ -95,6 +96,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "CastSimplificationStrategy": "disable_cast_simplification",
     "ConstantFoldingStrategy": "disable_constant_folding",
     "CorrelatedFiltersStrategy": "disable_correlated_filters",
+    "SemiJoinReducerStrategy": "disable_semi_join_reducer",
     "DecorrelateSubqueryStrategy": "disable_decorrelate_subquery",
     "CrossJoinFilterPushdownStrategy": "disable_cross_join_filter_pushdown",
     "DisjunctionSimplificationStrategy": "disable_disjunction_simplification",
@@ -212,6 +214,10 @@ class OptimizerVisitor:
             # Runs after pushdown so join-key ranges (from scan predicates) are
             # propagated; pushes the realized range onto the opposite scan.
             CorrelatedFiltersStrategy(telemetry),
+            # Narrow a decorrelated subquery's leg to the keys the join can
+            # consume. After pushdown, which is what makes the opposite leg
+            # narrow enough to be worth copying.
+            SemiJoinReducerStrategy(telemetry),
             ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
             FilterImpliedGroupKeyReductionStrategy(telemetry),
             ProjectionPushdownStrategy(telemetry),

@@ -35,6 +35,15 @@ def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node
     from opteryx.exceptions import UnsupportedSyntaxError
     from opteryx.models.manifest_io import manifest_output_schema
 
+    if context.schema_only:
+        # The Manifest IS this statement's result, and a schema-only bind deliberately
+        # did not read one. Falling through would report "no manifest support" for a
+        # relation that has one - a true-sounding sentence about the wrong thing.
+        raise UnsupportedSyntaxError(
+            f"**SHOW MANIFEST FOR** {node.relation} cannot be checked without reading "
+            "the manifest, which is the statement's own result. Run it to see it."
+        )
+
     manifest = context.manifests.get(node.relation)
     if manifest is None:
         raise UnsupportedSyntaxError(

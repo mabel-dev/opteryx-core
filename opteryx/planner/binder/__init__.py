@@ -43,6 +43,7 @@ def do_bind_phase(
     query_id: str = None,
     visibility_filters: dict = None,
     telemetry=None,
+    schema_only: bool = False,
 ) -> LogicalPlan:
     """
     Execute the bind phase of the query engine.
@@ -52,6 +53,11 @@ def do_bind_phase(
             The logical plan.
         context: BindingContext
             The context needed for the binding phase.
+        schema_only: bool
+            Resolve names and types without reading each relation's Manifest.
+            Only for callers that stop at the end of binding - the plan this
+            produces carries no file lists or statistics and cannot be optimized
+            or executed. See BindingContext.
 
     Returns:
         Modified logical plan after the binding phase.
@@ -64,7 +70,9 @@ def do_bind_phase(
 
     binder_visitor = BinderVisitor()
     root_node = plan.get_exit_points()
-    context = BindingContext.initialize(query_id=query_id, execution_context=execution_context)
+    context = BindingContext.initialize(
+        query_id=query_id, execution_context=execution_context, schema_only=schema_only
+    )
 
     if len(root_node) > 1:
         raise InvalidInternalStateError(

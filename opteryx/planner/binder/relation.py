@@ -265,6 +265,37 @@ def visit_alter_materialized_view_owner(
     return node, context
 
 
+def visit_alter_materialized_view_suspended(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind ALTER MATERIALIZED VIEW ... SUSPEND | RESUME.
+
+    WRITE on the view, not the workspace-owner tier ALTER ... OWNER TO needs.
+    Suspending borrows nobody's authority - it only stops the view refreshing, and
+    anyone who may replace its contents may certainly stop them being replaced
+    automatically.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER MATERIALIZED VIEW"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to suspend or resume {node.relation_name} "
+            "(write required)"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the DROP TRIGGER node to determine which connector should handle

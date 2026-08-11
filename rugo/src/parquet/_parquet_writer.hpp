@@ -90,6 +90,36 @@ enum PType : int32_t {
 // Encoding / codec / page / repetition / converted-type enum values.
 enum { ENC_PLAIN = 0, ENC_PLAIN_DICTIONARY = 2, ENC_RLE = 3, ENC_RLE_DICTIONARY = 8 };
 enum { CODEC_UNCOMPRESSED = 0, CODEC_ZSTD = 6 };
+
+// ---- keep-compressed floor ----
+//
+// A column chunk is stored compressed only when the compressed form is below
+// this fraction of the raw bytes; otherwise the raw pages are stored and the
+// chunk records CODEC_UNCOMPRESSED. Compression that barely works is the worst
+// of both: it costs a full decompression pass on every read for a rounding
+// error in bytes, and decompression is 80.5% of parquet read CPU (measured,
+// make clickbench-profile 2026-08-11).
+//
+// 0.95, NOT the 0.85 first proposed. The deciding case is the REMOTE path
+// (architect ruling, 2026-08-11), and there the exchange rate is set by the
+// ~64 MB/s production GCS ceiling against the decompressor:
+//
+//     C/64 + R/decomp_rate  <  R/64
+//
+// which solves to C < 0.96R single-threaded (zstd's worst measured decode,
+// 1590 MB/s) and C < 0.998R with parallel decode (40,501 MB/s aggregate at 18
+// threads). An 0.85 floor would give away the entire 0.85-0.95 band, where
+// compression is still comfortably net-positive remotely. 0.95 keeps that band
+// and still rejects the "barely worth it" tail the floor exists for.
+//
+// Measurements: dev/codec_matrix_bench.cpp, dev/codec_parallel_scaling.cpp
+// (both ARM and x86 — ratios are bit-identical across architectures).
+inline constexpr double kKeepCompressedFloor = 0.95;
+
+inline bool compressed_clears_floor(size_t compressed_bytes, size_t raw_bytes) {
+  return static_cast<double>(compressed_bytes)
+       < kKeepCompressedFloor * static_cast<double>(raw_bytes);
+}
 enum { PAGE_DATA = 0, PAGE_DICTIONARY = 2 };
 enum { REP_REQUIRED = 0, REP_OPTIONAL = 1, REP_REPEATED = 2 };
 // ConvertedType values (parquet.thrift enum ConvertedType).
@@ -1762,16 +1792,20 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
   meta.bloom_length.assign(ncols, 0);
   meta.codecs.assign(ncols, codec);
 
-  // Keep whichever is smaller. zstd emits a frame header even when it finds
-  // nothing to compress, so an incompressible chunk comes back LARGER than the
-  // bytes that went in — 17 of ClickBench hits' 105 columns land at 0.847x.
-  // Storing the raw pages and recording CODEC_UNCOMPRESSED for that chunk is
-  // exact and costs no bytes; the wasted compress work is bounded because the
-  // chunks that fail this test are precisely the ones zstd bails out of at
-  // near-memcpy speed.
-  auto keep_smaller = [&](PageBuild &pb, size_t i) {
+  // Keep the compressed chunk only when it clears kKeepCompressedFloor. NOT
+  // "whichever is smaller" — a chunk compressing to 96-100% of raw costs a full
+  // decompression pass on every read to save a rounding error in bytes, and
+  // decompression is 80.5% of parquet read CPU (make clickbench-profile,
+  // 2026-08-11). The floor buys those reads back at a bounded byte cost.
+  //
+  // zstd emits a frame header even when it finds nothing to compress, so an
+  // incompressible chunk comes back LARGER than the bytes that went in — 17 of
+  // ClickBench hits' 105 columns land at 0.847x. The floor subsumes that case;
+  // the wasted compress work is bounded because the chunks that fail it are
+  // precisely the ones zstd bails out of at near-memcpy speed.
+  auto keep_compressed = [&](PageBuild &pb, size_t i) {
     if (codec != CODEC_ZSTD) return;
-    if (pb.bytes.size() < pb.plain_bytes.size()) return;
+    if (compressed_clears_floor(pb.bytes.size(), pb.plain_bytes.size())) return;
     pb.bytes = std::move(pb.plain_bytes);
     meta.codecs[i] = CODEC_UNCOMPRESSED;
   };
@@ -1782,7 +1816,7 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
       int64_t page_start = base_offset + (int64_t)out.size();
       PageBuild pb = build_array_data_pages(rg_cols[i], codec, level,
                                             rg_rows, max_page_bytes);
-      keep_smaller(pb, i);
+      keep_compressed(pb, i);
       meta.data_offsets[i] = page_start;
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;
@@ -1865,7 +1899,8 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
       // Both the bytes and the dictionary-page length move together — the
       // plain dictionary page is a different size, and data_page_offset is
       // derived from it.
-      if (codec == CODEC_ZSTD && dcb.bytes.size() >= dcb.plain_bytes.size()) {
+      if (codec == CODEC_ZSTD &&
+          !compressed_clears_floor(dcb.bytes.size(), dcb.plain_bytes.size())) {
         dcb.bytes = std::move(dcb.plain_bytes);
         dcb.dict_page_len = dcb.plain_dict_page_len;
         meta.codecs[i] = CODEC_UNCOMPRESSED;
@@ -1878,7 +1913,7 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
     } else {
       PageBuild pb = build_data_pages(rg_cols[i], rg_rows, codec, level,
                                       max_page_bytes);
-      keep_smaller(pb, i);
+      keep_compressed(pb, i);
       meta.data_offsets[i] = page_start;
       meta.sizes[i]        = pb.bytes.size();
       meta.uncompressed[i] = pb.uncompressed_total;

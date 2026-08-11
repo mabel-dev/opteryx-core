@@ -13,9 +13,19 @@ Two rules, both decided by the writer rather than the caller:
      (defragmenter); they never pass a level. Only BYTE_ARRAY columns respond
      to the profile — numerics are byte-identical across both.
 
-  2. Keep whichever is smaller. A column chunk whose compressed form is not
-     smaller than its raw form is stored raw and records CODEC_UNCOMPRESSED in
-     its own ColumnMetaData. The codec is therefore PER CHUNK, not per file.
+  2. A 95% KEEP FLOOR. A column chunk is stored compressed only when its
+     compressed form is below 95% of its raw bytes; otherwise the raw pages are
+     stored and the chunk records CODEC_UNCOMPRESSED in its own ColumnMetaData.
+     The codec is therefore PER CHUNK, not per file.
+
+     This was "keep whichever is smaller" until 2026-08-11. Compression that
+     barely works is the worst of both — a full decompression pass on every read
+     to save a rounding error in bytes, and decompression is 80.5% of parquet
+     read CPU (make clickbench-profile). The floor is 95% rather than the 85%
+     first proposed because the REMOTE path decides (architect ruling): at the
+     ~64 MB/s production GCS ceiling the break-even is ~96% single-threaded and
+     ~99.8% with parallel decode, so 85% would give away the 85-95% band where
+     compression is still comfortably worth it.
 
 PyArrow is the read-side oracle only (tests may use pyarrow).
 """
@@ -114,11 +124,62 @@ def test_tiny_chunk_is_stored_raw():
 
 
 def test_compressible_chunk_still_compresses():
-    """The keep-smaller rule must not disable compression generally."""
+    """The keep floor must not disable compression generally."""
     morsel = _morsel(STRINGY)
     compressed = write_parquet(morsel, compression="zstd")
     assert _codecs(compressed)["s"] == {"ZSTD"}
     assert len(compressed) < len(write_parquet(morsel, compression="none"))
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        STRINGY,
+        "SELECT id, name, gravity, orbitalPeriod FROM $planets",
+        "SELECT CAST(RANDOM() * 9007199254740992 AS INTEGER)"
+        " ^ (CAST(RANDOM() * 9007199254740992 AS INTEGER) * 2048) AS r"
+        " FROM GENERATE_SERIES(5000) AS g",
+        "SELECT g % 10 AS low_ndv, g AS seq FROM GENERATE_SERIES(20000) AS g",
+    ],
+)
+def test_every_chunk_obeys_the_keep_floor(sql):
+    """The floor as an INVARIANT over whatever the codec happened to do, rather
+    than a fixture engineered to land at a particular ratio.
+
+    Constructing data that compresses to exactly 95-100% is both fiddly and
+    fragile across zstd releases (see the notes on incompressible fixtures
+    above). Asserting the rule against each chunk's own recorded sizes tests the
+    same thing and cannot drift: whatever ratio the codec achieves, a chunk is
+    stored ZSTD only if it cleared the floor, and stored raw otherwise.
+    """
+    import io
+
+    import pyarrow.parquet as pq
+
+    buf = write_parquet(_morsel(sql), compression="zstd")
+    md = pq.ParquetFile(io.BytesIO(buf)).metadata
+
+    checked = 0
+    for r in range(md.num_row_groups):
+        rg = md.row_group(r)
+        for c in range(md.num_columns):
+            col = rg.column(c)
+            comp, raw = col.total_compressed_size, col.total_uncompressed_size
+            if raw == 0:
+                continue
+            checked += 1
+            if col.compression == "ZSTD":
+                assert comp < 0.95 * raw, (
+                    f"{col.path_in_schema}: stored ZSTD at {comp / raw:.3f} of raw, "
+                    "which does not clear the 95% floor"
+                )
+            else:
+                assert col.compression == "UNCOMPRESSED"
+                assert comp == raw, (
+                    f"{col.path_in_schema}: marked UNCOMPRESSED but "
+                    f"{comp} != {raw} raw bytes"
+                )
+    assert checked > 0, "no column chunks were examined"
 
 
 def test_mixed_codecs_in_one_file_are_readable():

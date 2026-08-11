@@ -23,7 +23,10 @@ What the session reports about a result - `rowcount`, `column_names`,
 import logging
 import re
 import time
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:  # pragma: no cover - the planner is imported lazily at call time
+    from opteryx.planner.query_check import QueryCheck
 
 from opteryx.utils import random_string
 
@@ -280,6 +283,81 @@ class Session(DataFrame):
         from opteryx import planner
 
         return planner.execute_logical_plan(logical_plan, **kwargs)
+
+    def check(
+        self,
+        operation: str,
+        params: Optional[Iterable] = None,
+        visibility_filters: Optional[Dict[str, Any]] = None,
+        catalog_cache=None,
+    ) -> "QueryCheck":
+        """Check a statement without running it, for an editor to draw on.
+
+        Plans as far as the end of binding - so every name is resolved and every type
+        settled - and returns what that found: a positioned error to underline, the
+        result shape, and the relations and columns in scope for completion. Reads the
+        catalog and nothing else. Cheap enough to call as the statement is typed.
+
+        It is a superset of `opteryx.analyze_query`: everything that reports about the
+        statement itself - type, relations named, parameters needed, permission tier -
+        comes back too, from the same single parse, and survives a failed bind.
+
+        The check runs AS THIS SESSION'S USER. Permission gates are evaluated live on
+        every call, so completion offers only relations this user may read, and a
+        statement they may not run reports that rather than checking out clean.
+
+        Errors are returned, not raised: a statement being wrong is the expected case
+        while it is being written. Only errors ABOUT THE STATEMENT come back that way
+        (a `SqlError`, or the permission refusal); a catalog that is unreachable still
+        raises, because that is not something the reader can fix by typing.
+
+        Parameters:
+            operation: one SQL statement. Not a batch - a batch's later statements can
+                depend on what its earlier ones create, and this runs none of them.
+            params: parameters, if the statement is parameterized. Binding needs them:
+                an unsupplied `:name` is itself a reportable error.
+            visibility_filters: row-level filters, as `execute` takes them.
+            catalog_cache: an optional `opteryx.CatalogCache`. Holds each relation's
+                catalog lookup for its TTL so a burst of keystrokes costs one round
+                trip per relation rather than one per call. Entries can be up to that
+                stale; see CatalogCache for why that is fine here and nowhere else.
+
+        Returns:
+            QueryCheck
+
+        Example:
+            session = opteryx.session(user="alice", memberships=["finance"])
+            cache = opteryx.CatalogCache(ttl=60)
+            result = session.check("SELECT nam FROM $planets", catalog_cache=cache)
+            result.ok             # False
+            result.position       # SourcePosition(1, 8, 1, 11, 7, 10)
+            result.query_type     # 'Query' - known even though it did not bind
+        """
+        self._ensure_open()
+
+        from opteryx.planner.query_check import check_statement
+
+        if not operation:
+            raise MissingSqlStatement("SQL provided was empty. Provide a statement to check.")
+
+        # Its own timing window, for the same reason plan() takes one: the readings
+        # are per-operation, and a check must not report the previous statement's.
+        self._telemetry.reset()
+        start = time.time_ns()
+        self._telemetry.start_time = start
+        try:
+            return check_statement(
+                operation=operation,
+                execution_context=self.context,
+                query_id=self.query_id,
+                telemetry=self._telemetry,
+                parameters=params,
+                visibility_filters=visibility_filters,
+                catalog_cache=catalog_cache,
+            )
+        finally:
+            self._telemetry.time_planning += time.time_ns() - start
+            self._telemetry.end_time = time.time_ns()
 
     def plan(
         self,

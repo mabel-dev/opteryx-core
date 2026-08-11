@@ -59,6 +59,14 @@ __all__ = ["do_resolve_relations", "rename_relations", "join_leg_preprocess"]
 # handful deep; anything beyond this is a runaway and is failed rather than followed.
 MAX_EXPANSION_DEPTH = 16
 
+# Alias prefixes the planner MINTS when it splices a sub-plan in, to keep two copies of
+# one relation apart. They name nothing the reader wrote and nothing they can type, so
+# a surface reporting relations back to a person (see opteryx/planner/query_check.py)
+# must not offer them. Named here so that side and the minting side cannot drift.
+VIEW_ALIAS_PREFIX = "$view-"
+UNION_ALIAS_PREFIX = "$union-"
+SYNTHETIC_ALIAS_PREFIXES = (VIEW_ALIAS_PREFIX, UNION_ALIAS_PREFIX)
+
 
 def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
     """
@@ -116,7 +124,7 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
     return new_plan
 
 
-def rename_relations(plan: LogicalPlan, prefix: str = "$view-"):
+def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
     """
     When we include VIEWs and CTEs in a plan, we randomize the name of the
     relations to avoid conflicts.
@@ -338,6 +346,7 @@ def _resolve(
     root_scope: Dict[str, LogicalPlan],
     root_path: Tuple[str, ...],
     telemetry,
+    catalog_cache=None,
 ) -> LogicalPlan:
     """
     Expand every CTE and view reference in one plan, then recurse into the sub-plans of
@@ -378,7 +387,7 @@ def _resolve(
                 # a CTE body may reference CTEs declared alongside it
                 child_scope = scope
             else:
-                kind, resolved = resolve_relation(relation, telemetry)
+                kind, resolved = resolve_relation(relation, telemetry, catalog_cache)
                 if kind == "view":
                     if relation in path:
                         raise _cycle_error(relation, path)
@@ -416,7 +425,7 @@ def _resolve(
     for nid, node in list(plan.nodes(True)):
         scope, path = scopes.get(nid, (root_scope, root_path))
         for subquery in _expression_subqueries(node):
-            subquery.value = _resolve(subquery.value, scope, path, telemetry)
+            subquery.value = _resolve(subquery.value, scope, path, telemetry, catalog_cache)
 
     return plan
 
@@ -425,10 +434,15 @@ def do_resolve_relations(
     plan: LogicalPlan,
     common_table_expressions: Optional[Dict[str, LogicalPlan]],
     telemetry,
+    catalog_cache=None,
 ) -> LogicalPlan:
     """
     Expand every CTE and view reference in the plan until only real datasets remain.
 
     Returns the expanded plan. Fails loud on relation cycles and on runaway nesting.
+
+    `catalog_cache` is passed by the edit-time check path ONLY - it makes catalog
+    lookups up to a minute stale, which a statement that reads rows must not be. The
+    query planner does not accept one; see `opteryx.CatalogCache`.
     """
-    return _resolve(plan, common_table_expressions or {}, (), telemetry)
+    return _resolve(plan, common_table_expressions or {}, (), telemetry, catalog_cache)

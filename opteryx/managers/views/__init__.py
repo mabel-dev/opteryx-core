@@ -37,7 +37,7 @@ def _view_plan_from_definition(definition) -> Optional[Tuple[object, Dict[str, o
     return _bind_row_count_estimate(view_plan, definition.last_row_count), view_ctes
 
 
-def resolve_relation(relation: str, telemetry):
+def resolve_relation(relation: str, telemetry, catalog_cache=None):
     """Catalog resolution step: resolve a relation in a single catalog round
     trip, returning one of:
 
@@ -49,6 +49,17 @@ def resolve_relation(relation: str, telemetry):
     ``get_all``; others fall back to a view-only probe so behaviour is
     unchanged. Non-eidetic connectors (e.g. local filesystem) never look up
     views, so they return (None, None) and bind on the normal path.
+
+    `catalog_cache` is an OPT-IN, caller-owned `CatalogCache`. It caches the round
+    trip above and nothing else: what goes in it is the raw `(kind, object)` the
+    connector answered with, BEFORE a view is turned into a plan. Caching the plan
+    instead would hand the same plan object to every caller and the resolver splices
+    (and so mutates) what it is given.
+
+    Only the check path passes one. The dataset document is the version pointer and
+    the catalog re-reads it every call for that reason, so an entry held for a minute
+    is a plan built against a possibly superseded snapshot - see `opteryx.CatalogCache`
+    for why that is fine for a check and wrong for anything that reads rows.
     """
     import time as _cat_time
 
@@ -61,7 +72,12 @@ def resolve_relation(relation: str, telemetry):
         if resolver is None:
             definition = _get_view_definition(relation, telemetry)
             return ("view", _view_plan_from_definition(definition)) if definition else (None, None)
-        kind, obj = resolver(relation)
+        cached = None if catalog_cache is None else catalog_cache.get(relation)
+        if cached is None:
+            cached = resolver(relation)
+            if catalog_cache is not None:
+                catalog_cache.put(relation, cached)
+        kind, obj = cached
         if kind == "view":
             return "view", _view_plan_from_definition(obj)
         if kind == "dataset":

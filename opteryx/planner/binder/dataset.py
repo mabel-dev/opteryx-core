@@ -1201,7 +1201,17 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     try:
         # Get dataset schema and build manifest (if supported by connector)
         # For Opteryx catalog connectors, this creates a Manifest with file-level stats
-        if getattr(node.connector, "get_dataset_metadata", None) is not None:
+        #
+        # A schema-only bind takes the first branch instead, when the connector has one:
+        # the Manifest is the file list and per-column statistics for the WHOLE relation
+        # and it is the larger of binding's two cloud reads. Nothing before the optimizer
+        # reads it, so a caller that stops at the end of binding pays for it and throws
+        # it away. `node.manifest` stays None and every later stage that needs one is
+        # unreachable from here - see BindingContext.schema_only.
+        if context.schema_only and getattr(node.connector, "get_dataset_schema", None) is not None:
+            node.schema = node.connector.get_dataset_schema()
+            node.manifest = None
+        elif getattr(node.connector, "get_dataset_metadata", None) is not None:
             node.schema, node.manifest = node.connector.get_dataset_metadata()
             # Propagate dataset commit timestamp from the connector to the
             # logical node so it becomes available to physical nodes
@@ -1216,6 +1226,22 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         context.schemas[node.alias] = node.schema
         for column in node.schema.columns:
             column.origin = [node.alias]
+
+        if context.schema_only:
+            # What the relation HAS, recorded before anything narrows it.
+            #
+            # `node.schema` is the same object as `context.schemas[alias]`, and
+            # binding an aggregate or a projection replaces its `columns` with just
+            # the ones that survive (visit_aggregate_and_group, visit_project). So by
+            # the time binding returns, a Scan's schema describes what the statement
+            # USED, not what the relation offers - `SELECT COUNT(*) FROM t GROUP BY a`
+            # leaves a one-column `t` behind.
+            #
+            # For the reader being offered completions that is the wrong set, and
+            # wrong in the direction that hides the columns they have not typed yet.
+            # The list is rebound rather than mutated, so holding this one keeps the
+            # full width.
+            node.unpruned_columns = list(node.schema.columns)
 
         context.manifests[node.alias] = node.manifest
         context.relations[node.alias] = node.connector.__mode__

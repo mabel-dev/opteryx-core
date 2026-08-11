@@ -190,8 +190,13 @@ except Exception as err:
     # Prewarm failures should not block module import, but log for visibility.
     logger.debug(f"KVSTORE memory pool prewarm failed (non-blocking): {err}")
 
+from opteryx.catalog_cache import CatalogCache
+
 __all__ = [
     "analyze_query",
+    # The cache `Session.check()` optionally takes. Imported eagerly: it holds no
+    # planner state and is a plain TTL map, so it costs nothing to import.
+    "CatalogCache",
     # `session()` is the way in - the Session class itself is deliberately not
     # exported here, so importing opteryx does not pull in the planner.
     "session",

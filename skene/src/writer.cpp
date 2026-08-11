@@ -566,7 +566,14 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
 
     // Bloom filter, over the DATA array rather than the rows: on an ordered
     // column that is the deduplicated dictionary, so the filter costs NDV
-    // insertions and data_length gives its sizing an exact count.
+    // insertions rather than one per row.
+    //
+    // That substitution is an OPTIMIZATION and nothing downstream may assume it
+    // happened. It applies only when value ordering was APPLIED, so a column that
+    // declined it arrives here with data_length == its row count — which is why
+    // bloom_build establishes the distinct count itself rather than trusting
+    // data_length to be one. Sizing on data_length was the bug: every repetitive
+    // column that declined ordering got a filter sized for its rows.
     //
     // Built for EVERY eligible column by default. `bloom_columns` narrows that
     // when a caller knows better; empty means all of them, which is the posture

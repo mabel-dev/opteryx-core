@@ -34,8 +34,15 @@ inline constexpr double kDefaultFalsePositiveRate = 0.05;
 
 // Built over the `data` array — on a value-ordered column that is the
 // deduplicated dictionary, so the filter costs NDV insertions rather than
-// row-count insertions and is exactly as accurate. `data_length` is then the
-// EXACT distinct count, so the sizing gets a true count rather than an estimate.
+// row-count insertions and is exactly as accurate.
+//
+// ⚠ `data_length` is NOT the distinct count in general. It is the PHYSICAL value
+// count, which is only the distinct count when the column was value-ordered; a
+// column that declined ordering arrives dense, with data_length equal to its ROW
+// count. So this establishes the distinct count itself, exactly, rather than
+// taking data_length for it — sizing on data_length gave every repetitive
+// declined column a filter sized for its rows and loaded with a fraction of
+// that, which is bytes spent to say nothing.
 //
 // Returns false when the column's type has no defined byte representation to
 // hash (ARRAY, NULL, FP16); that is a normal outcome, not an error.

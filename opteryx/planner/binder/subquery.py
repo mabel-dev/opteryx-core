@@ -152,5 +152,13 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     context.schemas = {"$derived": derived.schema(), node.alias: schema}
     context.relations[node.alias] = "subquery"
     node.schema = schema
+    if context.schema_only:
+        # What this boundary EXPOSES, before an enclosing projection narrows it. The
+        # schema object above is the one that goes into `context.schemas`, so the
+        # outer visit_project rebinds its `columns` in place exactly as it does for a
+        # Scan's - see the same snapshot in dataset.visit_scan. For a CTE this is the
+        # only place the name the reader wrote (`c`, not the spliced `$view-XXXX`)
+        # meets the columns it offers.
+        node.unpruned_columns = list(schema.columns)
     node.source_relations = set(source_relations)
     return node, context

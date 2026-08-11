@@ -129,18 +129,36 @@ struct WriteOptions {
     // and compression both pay. Without compression skene is 1.9-3.8x larger
     // than the equivalent ZSTD Parquet on TPC-H; with it, 0.92-1.09x.
     //
-    // zstd at level 9, not level 1. This posture previously pinned level 1,
-    // which measurement showed to be the WORST available zstd setting on both
-    // axes a stored file is read for: zstd decodes at the same rate whatever
-    // level produced the bytes (2882 MB/s at level 1, 3078 at level 9 — level 9
-    // measured FASTER, within noise of flat), so level 1 gave up 12% of the
-    // ratio and bought nothing. 9 is the knee of the ratio-vs-compress-time
-    // curve; past it the writer pays multiples for single-digit percentages.
+    // zstd at level 7, not 1 and not 9.
+    //
+    // Level 1 was ruled out first: zstd decodes at the same rate whatever level
+    // produced the bytes (2882 MB/s at level 1, 3078 at level 9 — flat within
+    // noise), so a low level gives up ratio and buys nothing on the read side.
+    //
+    // 9 was the answer while the comparison was only 1-vs-9. Sweeping the whole
+    // operational band (dev/codec_matrix_bench.cpp, 2026-08-11) shows the ratio
+    // curve is NOT monotonic in level, so a level has to be judged on its WORST
+    // shape rather than its average. Ranked against the best ratio available per
+    // shape, the worst case of each level is:
+    //
+    //     L1  0.1%   (int64 1..10: 11.83x where 10296x was available)
+    //     L3  0.2%   (str8 compressible: 18.19x vs 10217x)
+    //     L4  0.2%   (same cliff)
+    //     L7  86%    (no catastrophic shape)
+    //     L9  47%    (str8 sequential: 14.29x vs 30.70x)
+    //
+    // 7 is the only level in the band with no cliff, and it costs about HALF
+    // L9's compress time. L9 is dominated on both axes — worse worst case and
+    // slower to write. Ratios are bit-identical on ARM and x86, so this ranking
+    // is architecture-independent.
+    //
+    // ⛔ L5/L6 are UNMEASURED. The L4→L7 cliff is zstd's dfast→lazy strategy
+    // change, and greedy at 5-6 may capture most of it more cheaply.
     static WriteOptions for_storage() {
         WriteOptions options;
         options.read_acceleration = true;
         options.codec = SectionCodec::kZstd;
-        options.zstd_level = 9;
+        options.zstd_level = 7;
         return options;
     }
 

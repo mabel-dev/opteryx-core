@@ -31,6 +31,7 @@ from opteryx.planner.binder.view import (
 )
 from opteryx.planner.binder.relation import (
     visit_alter_materialized_view_owner,
+    visit_alter_materialized_view_suspended,
     visit_alter_relation,
     visit_alter_workspace,
     visit_analyze,
@@ -236,6 +237,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_alter_materialized_view_owner(self, node, context)
+
+    def visit_alter_materialized_view_suspended(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_materialized_view_suspended(self, node, context)
 
     def visit_truncate_relation(
         self, node: Node, context: BindingContext

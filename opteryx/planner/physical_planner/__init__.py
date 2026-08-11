@@ -521,6 +521,10 @@ def _create_alter_materialized_view_owner_node(logical_node, query_properties, r
     return registry.create("Relation Management", query_properties, action="alter_materialized_view_owner", **logical_node.properties)
 
 
+def _create_alter_materialized_view_suspended_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="alter_materialized_view_suspended", **logical_node.properties)
+
+
 _DISPATCH = {
     LogicalPlanStepType.Aggregate:        _create_aggregate_node,
     LogicalPlanStepType.AggregateAndGroup: _create_aggregate_and_group_node,
@@ -558,6 +562,7 @@ _DISPATCH = {
     LogicalPlanStepType.Insert:           _create_insert_node,
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
     LogicalPlanStepType.AlterMaterializedViewOwner: _create_alter_materialized_view_owner_node,
+    LogicalPlanStepType.AlterMaterializedViewSuspended: _create_alter_materialized_view_suspended_node,
 }
 
 

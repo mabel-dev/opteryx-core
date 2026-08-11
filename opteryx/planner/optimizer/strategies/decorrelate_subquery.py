@@ -412,6 +412,190 @@ def _aggregate_node(plan: LogicalPlan):
     return None, None
 
 
+def _subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
+    """
+    Extract the subtree feeding `root_nid` (inclusive) as a standalone plan.
+
+    The nodes are the SAME objects as in `plan` — `copy_sub_plan` deep-copies them
+    on the way out, so nothing here may be mutated before that happens.
+    """
+    sub = LogicalPlan()
+    seen: set = set()
+    stack = [root_nid]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        sub.add_node(nid, plan[nid])
+        for child, _target, _relation in plan.ingoing_edges(nid):
+            stack.append(child)
+    for nid in seen:
+        for child, _target, relation in plan.ingoing_edges(nid):
+            if child in seen:
+                sub.add_edge(child, nid, relation)
+    return sub
+
+
+def _is_restricted(plan: LogicalPlan) -> bool:
+    """
+    Is this subtree provably NARROWER than the relations it reads?
+
+    The reducer's whole value is that the outer leg emits FEWER keys than the inner
+    relation holds. With nothing narrowing it the key set is the full domain and the
+    reducer is pure added cost — a scan, a hash build and a probe, to eliminate
+    nothing.
+
+    ⛔ A CROSS JOIN anywhere disqualifies the leg outright, and that is the load-bearing
+    half of this test. This strategy runs FIRST (position 1): JoinPlanning is 15 and
+    PredicatePushdown is 16, so at this point a multi-relation FROM is still a chain of
+    unrestricted cross joins with every predicate sitting in the Filter node above.
+    Copying that as a reducer duplicates a cartesian product to avoid a scan. TPC-H Q21
+    is exactly this shape — nation × orders × lineitem × supplier, no predicates below
+    the Filter at all — and it reached here with a `left semi` already grafted by an
+    earlier round, so "contains a semi join" alone said yes to a cross-join tree.
+
+    The restriction therefore has to be STRUCTURAL (a filter already below the join, or
+    an existence test), because no statistics exist yet to measure a cost with.
+    """
+    narrowed = False
+    for _nid, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Join:
+            if node.type == "cross join":
+                return False
+            if node.type in ("left semi", "left anti", "right semi", "right anti"):
+                narrowed = True
+        elif node.node_type == LogicalPlanStepType.Filter:
+            narrowed = True
+    return narrowed
+
+
+def _graft_key_reducer(plan: LogicalPlan, filter_nid, inner_plan, local_pairs, target_nid) -> bool:
+    """
+    Restrict a decorrelated subquery's input to keys the outer query can consume.
+
+    Decorrelation WIDENS a correlated subquery. The original is evaluated once per
+    outer binding, so it only ever sees keys the outer query holds; the rewrite reads
+    the whole inner relation instead and lets the join above throw the excess away.
+    On TPC-H Q20 that is 5,441,669 groups built to serve 58,782; on Q21 it is two full
+    60M-row scans of `lineitem` hashed to answer EXISTS over 698,530 orderkeys.
+
+    This grafts a SEMI join below `target_nid` against a fresh copy of the outer leg,
+    so only reachable keys survive. The copy is what makes it possible: the outer leg
+    is consumed by the join above and plans here are trees, not DAGs, so there is
+    nothing to share.
+
+    Sound for every join type this is called for. The reducer keeps exactly the inner
+    rows whose key appears on the outer side, and an inner row whose key appears on
+    neither side can match no outer row — so it can change no SEMI result, no ANTI
+    result and no group the join above reads. It is a NECESSARY condition only; the
+    join above still does the exact matching, including any residual.
+
+    Returns True if a reducer was grafted.
+    """
+    from opteryx.planner.relation_resolver import copy_sub_plan
+    from opteryx.planner.relation_resolver import rename_relations
+
+    providers = list(inner_plan.ingoing_edges(target_nid))
+    if len(providers) != 1:
+        return False
+
+    outer_roots = [provider for provider, _t, _r in plan.ingoing_edges(filter_nid)]
+    if len(outer_roots) != 1:
+        return False
+
+    outer_subplan = _subplan_rooted_at(plan, outer_roots[0])
+    if not _is_restricted(outer_subplan):
+        return False
+
+    # Fresh node ids AND fresh relation aliases/uuids. Without the rename both copies
+    # claim the same relation names, and the join above — whose legs are resolved BY
+    # NAME — can no longer tell which side a key belongs to.
+    reducer_source = copy_sub_plan(outer_subplan)
+    scans_before = {
+        nid: node.alias
+        for nid, node in reducer_source.nodes(True)
+        if node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset)
+        and node.alias
+    }
+    rename_relations(reducer_source)
+    alias_map = {
+        old: reducer_source[nid].alias for nid, old in scans_before.items()
+    }
+
+    # Node ids survive the rename, so the pre/post alias pairing above is exact.
+    # Column IDENTITIES are deliberately NOT re-minted: they are what lets the
+    # copied key be located, and a LEFT SEMI join emits its LEFT side only, so no
+    # copied column is ever visible above this join to collide with its original.
+    on_condition = None
+    join_columns: list = []
+    for inner_key, outer_key in local_pairs:
+        copied_key = _local_copy(outer_key)
+        copied_key.source = alias_map.get(outer_key.source, outer_key.source)
+        equals = Node(
+            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        )
+        equals.left = _local_copy(inner_key)
+        equals.right = copied_key
+        join_columns.extend((_local_copy(inner_key), copied_key))
+        if on_condition is None:
+            on_condition = equals
+        else:
+            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction.left = on_condition
+            conjunction.right = equals
+            on_condition = conjunction
+
+    if on_condition is None:
+        return False
+
+    left_relations, left_schemas = _collect_relations(inner_plan, providers[0][0])
+    reducer_exit = reducer_source.get_exit_points()[0]
+    inner_plan += reducer_source
+    right_relations, right_schemas = _collect_relations(inner_plan, reducer_exit)
+
+    reducer = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    reducer.type = "left semi"
+    reducer.on = on_condition
+    reducer.using = None
+    reducer.columns = join_columns
+    reducer.left_relation_names = sorted(left_relations)
+    reducer.right_relation_names = sorted(right_relations)
+    reducer.all_relations = left_relations | right_relations
+    reducer.schemas = {**left_schemas, **right_schemas}
+    reducer.left_columns, reducer.right_columns = extract_join_fields(
+        on_condition, reducer.left_relation_names, reducer.right_relation_names
+    )
+    # Same guard as the decorrelating joins: a key naming neither leg is the
+    # silent-wrong-answer case, not something to push on through.
+    if len(reducer.left_columns) != len(local_pairs) or len(reducer.right_columns) != len(
+        local_pairs
+    ):
+        return False
+
+    reducer_nid = random_string()
+    inner_plan.insert_node_before(reducer_nid, reducer, target_nid)
+    inner_plan.add_edge(reducer_exit, reducer_nid)
+    return True
+
+
+def _reduce_aggregate_input(plan: LogicalPlan, filter_nid, inner_plan, local_pairs) -> bool:
+    """Reduce a decorrelated scalar subquery — the aggregate is the thing to protect."""
+    aggregate_nid, aggregate = _aggregate_node(inner_plan)
+    if aggregate_nid is None or aggregate.node_type != LogicalPlanStepType.AggregateAndGroup:
+        return False
+    return _graft_key_reducer(plan, filter_nid, inner_plan, local_pairs, aggregate_nid)
+
+
+# NOTE: there is deliberately no reducer for the EXISTS / IN (SEMI/ANTI) path here.
+# Their build side is the expensive one — TPC-H Q21 hashes 60M `lineitem` rows twice to
+# answer a question about 698,530 orderkeys — but the reducer cannot be BUILT at this
+# position: the outer leg of an EXISTS is still an unrestricted chain of cross joins,
+# with every predicate in the Filter node above (see `_is_restricted`). Reducing those
+# needs a strategy that runs after PredicatePushdown (position 16), where the leg is
+# actually narrow. Not attempted here rather than shipped as a path that cannot fire.
+
+
 def _expose_key(plan: LogicalPlan, key_column) -> None:
     """
     Group the subquery's aggregate by `key_column` and project it, so the
@@ -1165,16 +1349,6 @@ def _build_filter_join(
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
 
-    inner_exit = inner_plan.get_exit_points()[0]
-    plan += inner_plan
-    inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
-    # Any relation named by a key that this leg supplies must be known as one of
-    # its names, or the key resolves to neither side (see the `$in-` stamp above).
-    for inner_key, _outer_key in key_pairs:
-        origin = getattr(inner_key.schema_column, "origin", None)
-        if origin:
-            inner_relations.update(origin)
-
     # A correlation reaching past the immediate enclosing scope names a relation
     # that is on neither leg here, so it cannot be a key of THIS join. It is
     # bound on the ancestor SEMI/ANTI join that owns the relation instead —
@@ -1192,6 +1366,16 @@ def _build_filter_join(
             local_pairs.append((inner_key, outer_key))
         else:
             deferred_pairs.append((inner_key, outer_key))
+
+    inner_exit = inner_plan.get_exit_points()[0]
+    plan += inner_plan
+    inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
+    # Any relation named by a key that this leg supplies must be known as one of
+    # its names, or the key resolves to neither side (see the `$in-` stamp above).
+    for inner_key, _outer_key in key_pairs:
+        origin = getattr(inner_key.schema_column, "origin", None)
+        if origin:
+            inner_relations.update(origin)
 
     def _skip_level_refusal(reason: str):
         names = ", ".join(f"`{outer_key.source_column}`" for _, outer_key in deferred_pairs)
@@ -1521,13 +1705,6 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
 
-    inner_exit = inner_plan.get_exit_points()[0]
-    plan += inner_plan
-    inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
-    # The alias stamped onto the value column above has to be a known name of this
-    # leg, or a reference carrying it still resolves to neither side.
-    inner_relations.add(scalar_alias)
-
     # A correlation whose outer column belongs to THIS join's left leg can be a key
     # here. One reaching further out — to a grandparent scope — cannot: that
     # relation is not below this join, so the equality names a leg that does not
@@ -1540,6 +1717,24 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
             local_pairs.append((inner_key, outer_key))
         else:
             deferred_pairs.append((inner_key, outer_key))
+
+    # Narrow the aggregate to the keys the join above can actually consume. Must run
+    # while `inner_plan` is still separate — after the merge below there is no inner
+    # plan left to graft into — and after `_expose_key`, which is what makes the
+    # aggregate grouped in the first place.
+    if local_pairs and _reduce_aggregate_input(plan, filter_nid, inner_plan, local_pairs):
+        setattr(
+            telemetry,
+            "optimization_decorrelate_aggregate_reduced",
+            getattr(telemetry, "optimization_decorrelate_aggregate_reduced", 0) + 1,
+        )
+
+    inner_exit = inner_plan.get_exit_points()[0]
+    plan += inner_plan
+    inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
+    # The alias stamped onto the value column above has to be a known name of this
+    # leg, or a reference carrying it still resolves to neither side.
+    inner_relations.add(scalar_alias)
 
     on_condition = None
     for inner_key, outer_key in local_pairs:

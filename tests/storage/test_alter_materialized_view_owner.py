@@ -136,3 +136,62 @@ def test_alter_owner_rejects_a_plain_table(tmp_path):
 
     with pytest.raises(ValueError, match="not a materialized view"):
         list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.src OWNER TO svc_etl"))
+
+
+def test_owner_to_current_user_assigns_the_caller(tmp_path):
+    """The safest form of the statement: it can only ever point a view at the
+    person running it, so no authority can be borrowed."""
+    session = _setup(tmp_path)
+    _seed_view(session)
+    assert _record(tmp_path)["runs-as"] == "alice"
+
+    bob = opteryx.session(user="bob", access_policies=_OWNER_POLICY)
+    list(bob.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO CURRENT_USER"))
+    assert _record(tmp_path)["runs-as"] == "bob"
+
+
+def test_quoted_current_user_is_a_literal_principal(tmp_path):
+    """Quoting asks for a principal literally named CURRENT_USER - the usual
+    SQL distinction, and the only way to name one if it ever exists."""
+    session = _setup(tmp_path)
+    _seed_view(session)
+
+    list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO 'CURRENT_USER'"))
+    assert _record(tmp_path)["runs-as"] == "CURRENT_USER"
+
+
+def test_suspend_and_resume(tmp_path):
+    """SUSPEND stops the view refreshing without dismantling the machinery that
+    does it. Dropping its triggers was the only way before, and left no way to
+    tell "deliberately off" from "quietly broken"."""
+    session = _setup(tmp_path)
+    _seed_view(session)
+    assert _record(tmp_path).get("suspended-at-ms") is None
+
+    list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv SUSPEND"))
+    record = _record(tmp_path)
+    assert isinstance(record["suspended-at-ms"], int)
+    assert record["suspended-by"] == "alice"
+
+    list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv RESUME"))
+    record = _record(tmp_path)
+    assert record["suspended-at-ms"] is None
+    assert record["suspended-by"] is None
+
+
+def test_suspend_needs_only_write(tmp_path):
+    """Unlike OWNER TO, suspending borrows nobody's authority - anyone who may
+    replace the view's contents may stop them being replaced automatically."""
+    register_workspace("ws", LocalStoreConnector, store_root=str(tmp_path))
+    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
+    _seed_view(writer)
+
+    list(writer.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv SUSPEND"))
+    assert _record(tmp_path)["suspended-by"] == "wendy"
+
+
+def test_pause_is_not_the_keyword(tmp_path):
+    session = _setup(tmp_path)
+    _seed_view(session)
+    with pytest.raises(UnsupportedSyntaxError, match="SUSPEND"):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv PAUSE"))

@@ -183,164 +183,6 @@ def build_literal_node(value: Any, root: Optional[Node] = None, suggested_type=N
     return root
 
 
-import re as _re
-
-# DROP STATISTICS ON <table> [FOR COLUMNS <c1>, <c2>, ...]
-_DROP_STATS_RE = _re.compile(
-    r"^\s*DROP\s+STATISTICS\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)"
-    r"(?:\s+FOR\s+COLUMNS\s+(?P<cols>.+?))?\s*;?\s*$",
-    _re.IGNORECASE | _re.DOTALL,
-)
-_DROP_STATS_LEAD = _re.compile(r"^\s*DROP\s+STATISTICS\b", _re.IGNORECASE)
-
-
-def _intercept_drop_statistics(clean_sql: str):
-    """Recognize `DROP STATISTICS ON t [FOR COLUMNS …]` before the SQL parser.
-
-    Returns a synthesized single-statement AST list, or None if the statement is
-    not a DROP STATISTICS. A statement that begins with DROP STATISTICS but does
-    not match the full grammar fails loudly rather than falling through to the
-    parser (which would emit a confusing error or, worse, mis-parse it)."""
-    if not _DROP_STATS_LEAD.match(clean_sql):
-        return None
-    match = _DROP_STATS_RE.match(clean_sql)
-    if match is None:
-        from opteryx.exceptions import UnsupportedSyntaxError
-
-        raise UnsupportedSyntaxError(
-            "Expected: DROP STATISTICS ON <table> [FOR COLUMNS <col>, ...]"
-        )
-    cols_raw = match.group("cols")
-    columns = []
-    if cols_raw:
-        for part in cols_raw.split(","):
-            name = part.strip().strip('"').strip("`")
-            if name:
-                columns.append(name)
-    return [{"DropStatistics": {"table_name": match.group("table"), "columns": columns}}]
-
-
-# DROP TRIGGER [IF EXISTS] <name> ON <table>
-# The table is REQUIRED: trigger names are only unique per dataset, and naming
-# the table makes the permission target (WRITE on that table) explicit.
-_DROP_TRIGGER_RE = _re.compile(
-    r"^\s*DROP\s+TRIGGER\s+(?P<if_exists>IF\s+EXISTS\s+)?"
-    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)\s*;?\s*$",
-    _re.IGNORECASE | _re.DOTALL,
-)
-_DROP_TRIGGER_LEAD = _re.compile(r"^\s*DROP\s+TRIGGER\b", _re.IGNORECASE)
-_CREATE_TRIGGER_LEAD = _re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b", _re.IGNORECASE)
-
-# REFRESH MATERIALIZED VIEW <name>. sqlparser has no REFRESH statement in the
-# Opteryx dialect, so it takes the same pre-parse route DROP TRIGGER does.
-_REFRESH_MV_RE = _re.compile(
-    r"^\s*REFRESH\s+MATERIALIZED\s+VIEW\s+(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
-    _re.IGNORECASE | _re.DOTALL,
-)
-_REFRESH_LEAD = _re.compile(r"^\s*REFRESH\b", _re.IGNORECASE)
-
-
-def _intercept_refresh_statements(clean_sql: str):
-    """Recognize `REFRESH MATERIALIZED VIEW <name>` before the SQL parser.
-
-    Returns a synthesized single-statement AST list, or None when the statement
-    does not begin with REFRESH.
-
-    Anything else beginning with REFRESH is rejected here by name rather than
-    left to the parser, which would report it as a generic syntax error several
-    layers away from the word that caused it.
-    """
-    from opteryx.exceptions import UnsupportedSyntaxError
-
-    if not _REFRESH_LEAD.match(clean_sql):
-        return None
-    match = _REFRESH_MV_RE.match(clean_sql)
-    if match is None:
-        raise UnsupportedSyntaxError(
-            "Expected: **REFRESH MATERIALIZED VIEW** <name>. It is the only "
-            "**REFRESH** statement, and it takes no options."
-        )
-    return [{"RefreshMaterializedView": {"name": match.group("name")}}]
-
-
-# ALTER MATERIALIZED VIEW <name> OWNER TO <principal>. Same pre-parse route as
-# REFRESH, but narrower: ALTER has other legitimate forms (ALTER TABLE, ALTER
-# WORKSPACE), so anything not aimed at a materialized view falls through to the
-# parser untouched.
-_ALTER_MV_LEAD = _re.compile(r"^\s*ALTER\s+MATERIALIZED\s+VIEW\b", _re.IGNORECASE)
-_ALTER_MV_OWNER_RE = _re.compile(
-    r"^\s*ALTER\s+MATERIALIZED\s+VIEW\s+(?P<name>[A-Za-z_][\w.$]*)\s+"
-    r"OWNER\s+TO\s+(?P<owner>'[^']+'|\"[^\"]+\"|[\w.@:+-]+)\s*;?\s*$",
-    _re.IGNORECASE | _re.DOTALL,
-)
-
-
-def _intercept_alter_materialized_view(clean_sql: str):
-    """Recognize `ALTER MATERIALIZED VIEW <name> OWNER TO <principal>`.
-
-    Returns a synthesized single-statement AST list, or None when the statement
-    is not aimed at a materialized view - every other ALTER goes to the parser.
-
-    A statement that IS aimed at one but does not match is rejected here by
-    name: ownership is the only alterable property of a view, because
-    everything else about it follows from its defining SELECT and changes by
-    redefining that.
-    """
-    from opteryx.exceptions import UnsupportedSyntaxError
-
-    if not _ALTER_MV_LEAD.match(clean_sql):
-        return None
-    match = _ALTER_MV_OWNER_RE.match(clean_sql)
-    if match is None:
-        raise UnsupportedSyntaxError(
-            "Expected: **ALTER MATERIALIZED VIEW** <name> **OWNER TO** <principal>. "
-            "Ownership is the only alterable property of a materialized view - "
-            "everything else follows from its defining SELECT, so change it with "
-            "**CREATE OR REPLACE MATERIALIZED VIEW**."
-        )
-    owner = match.group("owner")
-    if owner[0] in "'\"":
-        owner = owner[1:-1]
-    return [{"AlterMaterializedViewOwner": {"name": match.group("name"), "owner": owner}}]
-
-
-def _intercept_trigger_statements(clean_sql: str):
-    """Recognize `DROP TRIGGER [IF EXISTS] <name> ON <table>` before the SQL
-    parser (OpteryxDialect is not in sqlparser's allowlist for trigger
-    statements, so they would otherwise fail to parse with an unhelpful error).
-
-    Returns a synthesized single-statement AST list, or None if the statement
-    is not a trigger statement. `CREATE TRIGGER` is rejected here by name -
-    triggers exist only as the automatic artifact of CREATE MATERIALIZED VIEW.
-    """
-    from opteryx.exceptions import UnsupportedSyntaxError
-
-    if _CREATE_TRIGGER_LEAD.match(clean_sql):
-        raise UnsupportedSyntaxError(
-            "CREATE TRIGGER is not supported; triggers are created automatically "
-            "by **CREATE MATERIALIZED VIEW**. A materialized view gets its trigger when it is created."
-        )
-    if not _DROP_TRIGGER_LEAD.match(clean_sql):
-        return None
-    match = _DROP_TRIGGER_RE.match(clean_sql)
-    if match is None:
-        # CASCADE/RESTRICT (or any other trailing modifier) lands here: the
-        # grammar above accepts nothing after the table name.
-        raise UnsupportedSyntaxError(
-            "Expected: DROP TRIGGER [IF **EXISTS**] <name> ON <table> "
-            "(no CASCADE/RESTRICT; the table name is required)"
-        )
-    return [
-        {
-            "DropTrigger": {
-                "trigger_name": match.group("name"),
-                "table_name": match.group("table"),
-                "if_exists": match.group("if_exists") is not None,
-            }
-        }
-    ]
-
-
 def attach_source_position(error, statement) -> None:
     """Give `error` a `SourcePosition` over the SQL its `span` came from.
 
@@ -382,62 +224,45 @@ def attach_source_position(error, statement) -> None:
     error.position = SourcePosition(start[0], start[1], end[0], end[1], start[2], end[2])
 
 
-def query_planner(
+def parse_statement(
     operation: str,
-    parameters: Union[Iterable, Dict, None],
-    visibility_filters: Optional[Dict[str, Any]],
-    execution_context,
-    query_id: str,
-    telemetry,
-    output_format: str = "physical",
     source: Optional[str] = None,
     source_offset: int = 0,
-) -> Union[Generator[Any, Any, Any], Dict[str, Any]]:
+    telemetry=None,
+):
     """
-    Plan `operation`.
+    Rewrite and parse `operation`. No catalog, no binding - syntax only.
 
-    `source` and `source_offset` say where `operation` came from - the whole text the
-    caller submitted, and where this statement starts inside it. They exist so that a
-    position reported by the parser, or a span carried on an AST node, can be quoted
-    back against the text the reader wrote rather than the text the rewriter produced.
-    A caller that has only one statement and no rewriting to account for can leave them
-    alone; `operation` is then its own source.
+    Split out from `bind_statement` because two callers need the parsed statement
+    WITHOUT paying for a bind, and both must see exactly what the planner sees:
+    `analyze_query`, which reports what a statement is and touches before anything
+    runs it, and `Session.check`, which reports the same alongside its diagnostics
+    and must not parse the statement a second time to do so.
+
+    Returns:
+        (clean_sql, parsed_statements) - `clean_sql` is the RewrittenStatement the
+        parser was given, which also maps a reported position back onto the text the
+        reader wrote. `parsed_statements` is PRE-rewrite: the AST rewriter substitutes
+        placeholders, so this is the only form that still knows a `:name` was written.
+
+    Raises:
+        QueryParseError, positioned against the submitted text.
     """
-    from opteryx.models import QueryProperties
-    from opteryx.planner.ast_rewriter import do_ast_rewriter
-    from opteryx.planner.binder import do_bind_phase
-    from opteryx.planner.logical_planner import do_logical_planning_phase
-    from opteryx.planner.optimizer import do_optimizer
-    from opteryx.planner.physical_planner import create_physical_plan
-    from opteryx.planner.plan_rewriter import do_plan_rewrite
-    from opteryx.planner.relation_resolver import do_resolve_relations
+    from opteryx.planner.pre_parse import pre_parse
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
     # SQL Rewriter
     start = time.monotonic_ns()
     clean_sql = do_sql_rewrite(operation, source=source, source_offset=source_offset)
-    telemetry.time_planning_sql_rewriter += time.monotonic_ns() - start
-
-    params: Union[list, dict, None] = None
-    if parameters is None:
-        params = []
-    elif isinstance(parameters, dict):
-        params = parameters.copy()
-    else:
-        params = [p for p in parameters or []]
+    if telemetry is not None:
+        telemetry.time_planning_sql_rewriter += time.monotonic_ns() - start
 
     # Parser converts the SQL command into an AST.
-    # DROP STATISTICS has no native sqlparser grammar (and `ALTER TABLE … DROP
-    # STATISTICS` mis-parses STATISTICS as a column name), so it is recognized
-    # here in the pre-parse layer and synthesized into an AST directly.
-    parsed_statements = _intercept_drop_statistics(clean_sql)
-    if parsed_statements is None:
-        parsed_statements = _intercept_trigger_statements(clean_sql)
-    if parsed_statements is None:
-        parsed_statements = _intercept_refresh_statements(clean_sql)
-    if parsed_statements is None:
-        parsed_statements = _intercept_alter_materialized_view(clean_sql)
+    # Statements sqlparser has no grammar for (DROP STATISTICS, trigger statements,
+    # REFRESH/ALTER MATERIALIZED VIEW) are recognized in the pre-parse layer and
+    # synthesized into an AST directly - see opteryx.planner.pre_parse.
+    parsed_statements = pre_parse(clean_sql)
     if parsed_statements is None:
         try:
             parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
@@ -448,6 +273,91 @@ def query_planner(
             # reported line/column index, and the one the reader wrote, which is what
             # the caret gets printed against. It maps between them.
             raise_parse_error(clean_sql, parser_error)
+
+    return clean_sql, parsed_statements
+
+
+def bind_statement(
+    operation: str,
+    parameters: Union[Iterable, Dict, None],
+    visibility_filters: Optional[Dict[str, Any]],
+    execution_context,
+    query_id: str,
+    telemetry,
+    source: Optional[str] = None,
+    source_offset: int = 0,
+    catalog_cache=None,
+    schema_only: bool = False,
+):
+    """
+    Plan `operation` as far as the end of binding, and return the bound plan.
+
+    This is the whole front half of `query_planner`, factored out rather than copied,
+    because the edit-time check (`Session.check`) stops here and the two MUST agree:
+    a statement that binds clean when checked has to be the same statement that binds
+    clean when run, resolved through the same rewriter, the same parser and the same
+    binder. A second implementation of "parse and bind" would drift, and it would
+    drift in the direction of telling the reader their query is fine when it is not.
+
+    Everything past this point - optimizer, result-size guard, physical planner - is
+    cost and shape, and needs statistics the check deliberately does not read.
+
+    Returns:
+        (bound_plan, clean_sql, ast) - see `parse_statement` for `clean_sql`; `ast` is
+        the rewritten statement.
+
+    Parameters:
+        catalog_cache: opt-in, check-path only. See `opteryx.CatalogCache`.
+        schema_only: bind without reading each relation's Manifest. Check-path only -
+            the resulting plan cannot be optimized or executed.
+    """
+    clean_sql, parsed_statements = parse_statement(
+        operation, source=source, source_offset=source_offset, telemetry=telemetry
+    )
+    return bind_parsed_statement(
+        parsed_statements=parsed_statements,
+        clean_sql=clean_sql,
+        parameters=parameters,
+        visibility_filters=visibility_filters,
+        execution_context=execution_context,
+        query_id=query_id,
+        telemetry=telemetry,
+        catalog_cache=catalog_cache,
+        schema_only=schema_only,
+    )
+
+
+def build_logical_plan(
+    parsed_statements,
+    clean_sql,
+    parameters: Union[Iterable, Dict, None],
+    telemetry,
+    catalog_cache=None,
+):
+    """
+    Rewrite the AST, plan it, expand its relations and rewrite the plan - everything
+    between parsing and binding. Returns `(logical_plan, ast)`, unbound.
+
+    Split from the bind so a caller can hold the plan object ACROSS a failed bind.
+    `do_bind_phase` binds bottom-up and mutates the plan in place, so a statement that
+    fails in its SELECT list has already resolved its FROM, and the relations it
+    resolved are still readable on this object. That is what lets `Session.check`
+    offer completions for a query that is, right now, wrong - which is every query
+    while it is being typed.
+    """
+    from opteryx.planner.ast_rewriter import do_ast_rewriter
+    from opteryx.planner.logical_planner import do_logical_planning_phase
+    from opteryx.planner.plan_rewriter import do_plan_rewrite
+    from opteryx.planner.relation_resolver import do_resolve_relations
+
+    params: Union[list, dict, None] = None
+    if parameters is None:
+        params = []
+    elif isinstance(parameters, dict):
+        params = parameters.copy()
+    else:
+        params = [p for p in parameters or []]
+
     # AST Rewriter adds temporal filters and parameters to the AST
     start = time.monotonic_ns()
     parsed_statement = do_ast_rewriter(parsed_statements, parameters=params)[0]
@@ -470,7 +380,7 @@ def query_planner(
     # rewriter so the rewriter sees one fully-expanded plan — a subquery inside a view or
     # CTE body is eliminated by the same pass that handles the main query.
     start = time.monotonic_ns()
-    logical_plan = do_resolve_relations(logical_plan, ctes, telemetry)
+    logical_plan = do_resolve_relations(logical_plan, ctes, telemetry, catalog_cache)
     telemetry.time_planning_relation_resolver += time.monotonic_ns() - start
 
     # Plan Rewriter: structural rewrites on the unbound, fully-expanded logical plan
@@ -486,7 +396,26 @@ def query_planner(
         if ast["Drop"].get("object_type") == "View":
             query_type = "DropView"
 
-    # The Binder adds schema information to the logical plan
+    return logical_plan, ast
+
+
+def bind_logical_plan(
+    logical_plan,
+    clean_sql,
+    visibility_filters: Optional[Dict[str, Any]],
+    execution_context,
+    query_id: str,
+    telemetry,
+    schema_only: bool = False,
+):
+    """
+    The Binder adds schema information to the logical plan.
+
+    Mutates `logical_plan` in place and returns it, so a caller that kept a reference
+    can read how far binding got even when this raises - see `build_logical_plan`.
+    """
+    from opteryx.planner.binder import do_bind_phase
+
     start = time.monotonic_ns()
     try:
         bound_plan = do_bind_phase(
@@ -495,11 +424,91 @@ def query_planner(
             query_id=query_id,
             visibility_filters=visibility_filters,
             telemetry=telemetry,
+            schema_only=schema_only,
         )
     except SqlError as error:
         attach_source_position(error, clean_sql)
         raise
-    telemetry.time_planning_binder += time.monotonic_ns() - start
+    finally:
+        telemetry.time_planning_binder += time.monotonic_ns() - start
+
+    return bound_plan
+
+
+def bind_parsed_statement(
+    parsed_statements,
+    clean_sql,
+    parameters: Union[Iterable, Dict, None],
+    visibility_filters: Optional[Dict[str, Any]],
+    execution_context,
+    query_id: str,
+    telemetry,
+    catalog_cache=None,
+    schema_only: bool = False,
+):
+    """
+    Everything from the AST rewriter to the end of binding, on an already-parsed
+    statement. Callers that have not parsed yet want `bind_statement`.
+    """
+    logical_plan, ast = build_logical_plan(
+        parsed_statements=parsed_statements,
+        clean_sql=clean_sql,
+        parameters=parameters,
+        telemetry=telemetry,
+        catalog_cache=catalog_cache,
+    )
+    bound_plan = bind_logical_plan(
+        logical_plan=logical_plan,
+        clean_sql=clean_sql,
+        visibility_filters=visibility_filters,
+        execution_context=execution_context,
+        query_id=query_id,
+        telemetry=telemetry,
+        schema_only=schema_only,
+    )
+    return bound_plan, clean_sql, ast
+
+
+def query_planner(
+    operation: str,
+    parameters: Union[Iterable, Dict, None],
+    visibility_filters: Optional[Dict[str, Any]],
+    execution_context,
+    query_id: str,
+    telemetry,
+    output_format: str = "physical",
+    source: Optional[str] = None,
+    source_offset: int = 0,
+) -> Union[Generator[Any, Any, Any], Dict[str, Any]]:
+    """
+    Plan `operation`.
+
+    `source` and `source_offset` say where `operation` came from - the whole text the
+    caller submitted, and where this statement starts inside it. They exist so that a
+    position reported by the parser, or a span carried on an AST node, can be quoted
+    back against the text the reader wrote rather than the text the rewriter produced.
+    A caller that has only one statement and no rewriting to account for can leave them
+    alone; `operation` is then its own source.
+
+    Takes no catalog cache, on purpose: a plan that reads rows is built against the
+    catalog as it is now, not as it was up to a minute ago.
+    """
+    from opteryx.models import QueryProperties
+    from opteryx.planner.optimizer import do_optimizer
+    from opteryx.planner.physical_planner import create_physical_plan
+
+    # Parse, resolve, rewrite and bind - the same path `Session.check` stops at the
+    # end of.
+    bound_plan, _clean_sql, _ast = bind_statement(
+        operation=operation,
+        parameters=parameters,
+        visibility_filters=visibility_filters,
+        execution_context=execution_context,
+        query_id=query_id,
+        telemetry=telemetry,
+        source=source,
+        source_offset=source_offset,
+    )
 
     start = time.monotonic_ns()
     optimized_plan = do_optimizer(bound_plan, telemetry)

@@ -85,6 +85,7 @@ class LogicalPlanStepType(int, Enum):
 
     DropTrigger = auto()
     AlterMaterializedViewOwner = auto()
+    AlterMaterializedViewSuspended = auto()
 
 
 class LogicalPlan(Graph):
@@ -1743,9 +1744,10 @@ def plan_query(statement: dict) -> LogicalPlan:
         head_nid = step_id
 
         left_plan = inner_query_planner(set_operation["left"])
+        from opteryx.planner.relation_resolver import UNION_ALIAS_PREFIX
         from opteryx.planner.relation_resolver import rename_relations
 
-        left_plan = rename_relations(left_plan, prefix="$union-")
+        left_plan = rename_relations(left_plan, prefix=UNION_ALIAS_PREFIX)
         plan += left_plan
         subquery_entry_id = left_plan.get_exit_points()[0]
         plan.add_edge(subquery_entry_id, step_id)
@@ -1753,7 +1755,7 @@ def plan_query(statement: dict) -> LogicalPlan:
         plan.remove_node(subquery_entry_id, heal=True)
 
         right_plan = inner_query_planner(set_operation["right"])
-        right_plan = rename_relations(right_plan, prefix="$union-")
+        right_plan = rename_relations(right_plan, prefix=UNION_ALIAS_PREFIX)
         plan += right_plan
         subquery_entry_id = right_plan.get_exit_points()[0]
         plan.add_edge(subquery_entry_id, step_id)
@@ -2981,6 +2983,25 @@ def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewOwner)
     node.relation_name = statement[root]["name"]
     node.new_owner = statement[root]["owner"]
+    node.owner_is_current_user = statement[root].get("current_user", False)
+
+    plan.add_node(random_string(), node)
+
+    return plan
+
+
+def plan_alter_materialized_view_suspended(statement, **kwargs) -> LogicalPlan:
+    """ALTER MATERIALIZED VIEW <name> SUSPEND | RESUME — synthesized pre-parse.
+
+    Suspends automatic refresh without removing the machinery that performs it.
+    Dropping the view's triggers was previously the only way to stop it
+    refreshing, and left no way to tell "deliberately off" from "quietly
+    broken"."""
+    root = "AlterMaterializedViewSuspended"
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewSuspended)
+    node.relation_name = statement[root]["name"]
+    node.suspended = statement[root]["suspended"]
 
     plan.add_node(random_string(), node)
 
@@ -3129,6 +3150,7 @@ QUERY_BUILDERS = {
     "Analyze": plan_analyze_query,
     # synthesized pre-parse, like DropTrigger and RefreshMaterializedView
     "AlterMaterializedViewOwner": plan_alter_materialized_view_owner,
+    "AlterMaterializedViewSuspended": plan_alter_materialized_view_suspended,
     "DropStatistics": plan_drop_statistics,
     "DropTrigger": plan_drop_trigger,
     "Comment": plan_comment,

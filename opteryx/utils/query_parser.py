@@ -36,6 +36,38 @@ _STATEMENT_TARGETS = {
     "ShowCreate": ("obj_name",),
 }
 
+# The statements synthesized by `opteryx.planner.pre_parse` rather than parsed:
+# each names its target as a plain dotted string, not an identifier-part list, so
+# it is read out directly instead of through `_extract_table_name`. The value is
+# the key holding that name. A trigger's own name is not here: it names a trigger,
+# not a relation, and the table it hangs off is the permission target.
+_SYNTHESIZED_TARGETS = {
+    "DropStatistics": "table_name",
+    "DropTrigger": "table_name",
+    "RefreshMaterializedView": "name",
+    "AlterMaterializedViewOwner": "name",
+}
+
+# What each synthesized statement is, and the role it needs. Kept beside the
+# targets above rather than folded into the read/mutation/DDL lists below because
+# the role does not follow from the category for any of them: a refresh rewrites
+# a whole relation but is a writer-tier act (its contents are derived, not
+# authored - see permissions.PERMISSIONS["REFRESH"]), and dropping a trigger is a
+# WRITE on the table it hangs off rather than an owner-tier change.
+#
+# (is_mutation, is_ddl, permission_required); is_read is False for all of them.
+_SYNTHESIZED_STATEMENTS = {
+    # Replaces the view's contents from its definition. Nothing about the
+    # relation itself changes, so it is a mutation and not DDL.
+    "RefreshMaterializedView": (True, False, "writer"),
+    # Drops a stored object rather than data; the binder gates it at ALTER.
+    "DropStatistics": (False, True, "owner"),
+    # WRITE on the table the trigger hangs off, symmetric with creating one.
+    "DropTrigger": (False, True, "writer"),
+    # Ownership is a workspace-level change; the binder gates it at ALTER.
+    "AlterMaterializedViewOwner": (False, True, "owner"),
+}
+
 
 def _collect_relations(node: Any, tables: Set[str], cte_names: Set[str]) -> None:
     """
@@ -117,6 +149,13 @@ def _collect_statement_target(ast: Dict[str, Any], tables: Set[str]) -> None:
             name = _extract_table_name(name_parts)
             if name:
                 tables.add(name)
+        return
+
+    synthesized_key = _SYNTHESIZED_TARGETS.get(statement_type)
+    if synthesized_key is not None:
+        name = body.get(synthesized_key)
+        if isinstance(name, str) and name:
+            tables.add(name)
         return
 
     path = _STATEMENT_TARGETS.get(statement_type)
@@ -208,6 +247,73 @@ def _extract_placeholders(node: Any) -> Set[str]:
     return names
 
 
+def describe_statement(parsed_statement: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Everything `analyze_query` reports, derived from one ALREADY-PARSED statement.
+
+    Split from `parse_query_info` so `Session.check` can report the same fields
+    alongside its bind-time diagnostics without parsing the statement a second time -
+    two parses of one statement is two chances to disagree about what it is.
+
+    Takes the PRE-rewrite AST. The AST rewriter substitutes placeholders, so a
+    statement rewritten with its parameters supplied no longer records that a `:name`
+    was ever written, and `parameters` would come back empty for the very statement
+    that has them.
+
+    Parameters:
+        parsed_statement: one parsed statement, as `parse_statement` returns.
+
+    Returns:
+        The dict documented on `parse_query_info`, minus nothing.
+    """
+    query_type = next(iter(parsed_statement))
+
+    tables = _extract_tables_from_ast(parsed_statement)
+    # Remove system tables (those starting with $)
+    filtered_tables = [t for t in sorted(tables) if not t.startswith("$")]
+
+    parameters = sorted(_extract_placeholders(parsed_statement))
+
+    synthesized = _SYNTHESIZED_STATEMENTS.get(query_type)
+    if synthesized is not None:
+        is_mutation, is_ddl, permission_required = synthesized
+        return {
+            "query_type": query_type,
+            "tables": filtered_tables,
+            "parameters": parameters,
+            "is_read": False,
+            "is_mutation": is_mutation,
+            "is_ddl": is_ddl,
+            "permission_required": permission_required,
+        }
+
+    reader_actions = ["Query", "ShowColumns", "ShowTables", "Use", "ShowCreate"]
+    mutation_actions = ["Insert", "Update", "Delete"]
+    # "AlterFunction" is ALTER WORKSPACE - the SQL rewriter borrows the parser's
+    # AlterFunction statement for it (see sql_rewriter.rewrite_alter_workspace).
+    ddl_actions = ["CreateTable", "CreateView", "AlterTable", "AlterFunction", "Drop"]
+
+    return {
+        "query_type": query_type,
+        "tables": filtered_tables,
+        "parameters": parameters,
+        "is_read": query_type in reader_actions,
+        "is_mutation": query_type in mutation_actions,
+        "is_ddl": query_type in ddl_actions,
+        "permission_required": (
+            "owner"
+            if query_type in ddl_actions
+            else (
+                "writer"
+                if query_type in mutation_actions
+                else "reader"
+                if query_type in reader_actions
+                else "denied"
+            )
+        ),
+    }
+
+
 def parse_query_info(sql: str) -> Dict[str, Any]:
     """
     Parse a SQL query and extract metadata without executing it.
@@ -264,64 +370,17 @@ def parse_query_info(sql: str) -> Dict[str, Any]:
         >>> parse_query_info("SELECT * FROM t WHERE dept = :department")["parameters"]
         ['department']
     """
-    from opteryx.planner.sql_rewriter import do_sql_rewrite
-    from opteryx.third_party import sqloxide
+    # The planner's own rewrite-and-parse, so a statement that parses here parses
+    # there - including the pre-parse layer, without which a caller pre-flighting
+    # REFRESH MATERIALIZED VIEW / DROP TRIGGER / DROP STATISTICS was told a statement
+    # the engine runs happily does not parse.
+    from opteryx.planner import parse_statement
 
-    # The same rewriter the query planner uses, so a statement that parses here
-    # parses there. Comments are left in - the parser tokenizes them.
-    clean_sql = do_sql_rewrite(sql)
-
-    # Parse the SQL to get the AST
-    try:
-        parsed_statements = sqloxide.parse_sql(clean_sql, _dialect="opteryx")
-    except ValueError as e:
-        from opteryx.planner.parse_error import raise_parse_error
-
-        raise_parse_error(clean_sql, e)
+    _clean_sql, parsed_statements = parse_statement(sql)
 
     if not parsed_statements or len(parsed_statements) == 0:
         raise ValueError("No statements found in SQL query")
 
     # For now, only handle the first statement
     # Multiple statements could be handled in the future
-    parsed_statement = parsed_statements[0]
-
-    # Determine query type
-    query_type = next(iter(parsed_statement))
-
-    # Extract tables
-    tables = _extract_tables_from_ast(parsed_statement)
-
-    # Remove system tables (those starting with $)
-    filtered_tables = [t for t in sorted(tables) if not t.startswith("$")]
-
-    # Extract named `:name` placeholder parameters
-    parameters = sorted(_extract_placeholders(parsed_statement))
-
-    # Determine query characteristics
-
-    reader_actions = ["Query", "ShowColumns", "ShowTables", "Use", "ShowCreate"]
-    mutation_actions = ["Insert", "Update", "Delete"]
-    # "AlterFunction" is ALTER WORKSPACE - the SQL rewriter borrows the parser's
-    # AlterFunction statement for it (see sql_rewriter.rewrite_alter_workspace).
-    ddl_actions = ["CreateTable", "CreateView", "AlterTable", "AlterFunction", "Drop"]
-
-    return {
-        "query_type": query_type,
-        "tables": filtered_tables,
-        "parameters": parameters,
-        "is_read": query_type in reader_actions,
-        "is_mutation": query_type in mutation_actions,
-        "is_ddl": query_type in ddl_actions,
-        "permission_required": (
-            "owner"
-            if query_type in ddl_actions
-            else (
-                "writer"
-                if query_type in mutation_actions
-                else "reader"
-                if query_type in reader_actions
-                else "denied"
-            )
-        ),
-    }
+    return describe_statement(parsed_statements[0])

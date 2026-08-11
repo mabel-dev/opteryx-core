@@ -308,16 +308,24 @@ static void test_spill_profile_stays_raw() {
 
 // The stored posture's level is a MEASURED decision, not a preference: zstd
 // decodes at a rate independent of the level that produced the bytes, so a low
-// level gives up ratio for nothing. Pinned here because the previous value (1)
+// level gives up ratio for nothing. Pinned here because the ORIGINAL value (1)
 // was the worst available choice on both axes and nothing said so.
-static void test_storage_profile_uses_a_high_zstd_level() {
+//
+// The bound is a RANGE, not ">= 9". A full sweep of the operational band
+// (dev/codec_matrix_bench.cpp, 2026-08-11) showed the ratio curve is not
+// monotonic in level, so a level must be judged on its worst shape: L9 drops to
+// 47% of the achievable ratio on one (str8 sequential, 14.29x vs 30.70x) while
+// L7 never falls below 86%, and L9 costs about twice the compress time. The
+// floor stays to catch a regression back toward 1; the ceiling stops a future
+// "higher is better" edit from reintroducing L9's cliff.
+static void test_storage_profile_uses_a_measured_zstd_level() {
     const WriteOptions storage = WriteOptions::for_storage();
     CHECK(storage.read_acceleration);
     CHECK(storage.codec == SectionCodec::kZstd);
     ++skene_test::g_checks;
-    if (storage.zstd_level < 9)
+    if (storage.zstd_level < 5 || storage.zstd_level > 8)
         skene_test::report(__FILE__, __LINE__,
-                           "for_storage() writes a low zstd level",
+                           "for_storage() zstd level is outside the measured band (5-8)",
                            std::to_string(storage.zstd_level));
 
     const WriteOptions fast = WriteOptions::for_fast_reads();
@@ -369,7 +377,7 @@ int main() {
         test_the_selected_codec_is_the_one_recorded(posture);
     }
     test_spill_profile_stays_raw();
-    test_storage_profile_uses_a_high_zstd_level();
+    test_storage_profile_uses_a_measured_zstd_level();
     test_contradictory_codec_and_level_are_rejected();
     return skene_test::summary("test_compression");
 }

@@ -55,12 +55,22 @@ _WORD_BEFORE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*$")
 # IN, and neither reader meant a keyword. Every keyword worth misspelling is longer.
 _MIN_TYPO_LENGTH = 3
 
-# Keywords the generated catalogs in `reference/` do not carry: they describe
-# clauses, joins and operators, not the whole grammar. Listed most-used first -
+# The keyword set the typo detector matches against. Listed most-used first -
 # `suggest_alternative` keeps the FIRST best match, so when two keywords sit the
 # same edit distance from a typo the more common one should be offered. That
 # ordering is the whole reason this is a list and not a set.
-_COMMON_KEYWORDS: List[str] = [
+#
+# This used to be a top-up, with the clause, join and operator spellings read at
+# runtime from the generated catalogs in `reference/`. `reference/` is a
+# repo-root package that documentation tooling generates and the wheel does not
+# ship, so in an installed deployment that import raised ModuleNotFoundError -
+# from the error path, which meant every parse failure in production was
+# reported as `No module named 'reference'` and the reader never saw which token
+# the parser stopped on. The catalogs remain the source of truth for what the
+# engine supports; `tests/unit/reference/test_parse_error_keywords.py` fails if
+# one gains a word this list lacks, so nobody has to remember to add it here and
+# nothing has to be importable at runtime for it to be suggestable.
+_KEYWORDS: List[str] = [
     "SELECT", "FROM", "WHERE", "GROUP", "ORDER", "BY", "HAVING", "LIMIT", "JOIN",
     "AS", "ON", "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "DISTINCT",
     "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "USING", "UNION",
@@ -77,44 +87,16 @@ _COMMON_KEYWORDS: List[str] = [
     "ANALYZE", "COMMENT", "RENAME", "CLUSTER", "ALTER", "MATCH", "AGAINST", "ASOF",
     "EXCEPT", "INTERSECT", "NULLS", "FIRST", "LAST", "PRECEDING", "FOLLOWING",
     "CURRENT", "PRIMARY", "KEY", "DEFAULT", "ARRAY", "STRUCT", "INTERVAL",
+    # Named by the clause, join and operator catalogs but not by the grammar
+    # keywords above. Sorted, because none of them is the more common reading of
+    # any near-miss - the ordering rule only decides ties.
+    "ANTI", "MATERIALIZED", "NATURAL", "REFRESH", "SEMI", "TOP", "TRIGGERS",
 ]
-
-_keyword_cache: Optional[List[str]] = None
 
 
 def _keywords() -> List[str]:
-    """The keyword set the typo detector matches against.
-
-    Built from the generated catalogs in `reference/` where they cover the ground -
-    they are the source of truth for clause, join and operator spellings, so a new
-    clause becomes typo-detectable without anyone remembering to edit this file -
-    topped up with the grammar keywords those catalogs do not describe.
-
-    Built once, on the first parse failure. This is an error path; nobody should
-    pay for it while queries are succeeding.
-    """
-    global _keyword_cache
-    if _keyword_cache is not None:
-        return _keyword_cache
-
-    from reference.clauses_catalog import CLAUSE_DEFINITIONS
-    from reference.joins_catalog import JOIN_DEFINITIONS
-    from reference.operator_catalog import OPERATOR_DEFINITIONS
-
-    catalogued = set()
-    for entry in list(CLAUSE_DEFINITIONS.values()) + list(JOIN_DEFINITIONS.values()):
-        catalogued.update(entry["canonical_name"].split())
-    # Clause and join entries are plain dicts; operator entries are OperatorDefinition
-    # objects. The catalogs are generated, so this asymmetry is theirs to change, not
-    # this module's to paper over.
-    for entry in OPERATOR_DEFINITIONS.values():
-        symbol = entry.sql_symbol or ""
-        catalogued.update(part for part in symbol.split() if part.isalpha())
-
-    ordered = list(_COMMON_KEYWORDS)
-    ordered.extend(sorted(word for word in catalogued if word.isalpha() and word not in ordered))
-    _keyword_cache = ordered
-    return ordered
+    """The keyword set the typo detector matches against."""
+    return _KEYWORDS
 
 
 

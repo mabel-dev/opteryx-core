@@ -101,6 +101,9 @@ class JoinBuildShapeStrategy(OptimizationStrategy):
         context.optimized_plan[context.node_id] = node
         return context
 
+    def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
+        return plan
+
     @staticmethod
     def _output_rows(node) -> Optional[int]:
         """The join's estimated output row count, or None when unknown.
@@ -108,19 +111,16 @@ class JoinBuildShapeStrategy(OptimizationStrategy):
         Read straight off the statistics the refresh pass already propagated —
         ``_join_stats`` is what computes it, and it is the same number
         JoinOrderingStrategy costs its trees with. Never fabricated: a node with
-        no statistics, or a non-positive count, yields None so the sink keeps
-        today's behaviour.
+        no propagated statistics returns None, and the sink then keeps its
+        existing gather rather than being moved by a made-up number.
         """
         stats = getattr(node, "statistics", None)
         if stats is None:
             return None
         rows = getattr(stats, "row_count", None)
-        if rows is None or rows <= 0:
+        if rows is None:
             return None
         return int(rows)
-
-    def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
-        return plan
 
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return bool(

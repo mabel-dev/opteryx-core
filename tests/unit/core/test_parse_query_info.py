@@ -441,6 +441,90 @@ def test_permission_required_for_each_kind_of_statement():
     assert opteryx.analyze_query("SET x = 1")["permission_required"] == "denied"
 
 
+# ── Statements the parser has no grammar for ────────────────────────────────
+# These four are recognized before the parser, by opteryx.planner.pre_parse, and
+# synthesized straight into an AST. This function used to skip that step and hand
+# them to sqlparser unprepared, so it reported a syntax error for statements the
+# engine runs - and a caller that pre-flights a query before queueing it (the jobs
+# API does, to check permissions) rejected every one of them. `REFRESH
+# MATERIALIZED VIEW` reached a user as "Unable to parse query" from the Trigger
+# refresh button on a materialized view, which is the whole reason these exist.
+
+
+def test_parse_refresh_materialized_view():
+    info = opteryx.analyze_query("REFRESH MATERIALIZED VIEW opteryx.public.daily;")
+
+    assert info["query_type"] == "RefreshMaterializedView"
+    assert info["tables"] == ["opteryx.public.daily"]
+    assert info["is_read"] is False
+    # It replaces the view's contents, not its definition, and a refresh is a
+    # writer-tier act because those contents are derived rather than authored.
+    assert info["is_mutation"] is True
+    assert info["is_ddl"] is False
+    assert info["permission_required"] == "writer"
+
+
+def test_parse_drop_trigger():
+    info = opteryx.analyze_query("DROP TRIGGER IF EXISTS refresh_daily ON opteryx.public.orders;")
+
+    assert info["query_type"] == "DropTrigger"
+    # The table, not the trigger: a trigger name is not a relation, and the table
+    # it hangs off is what a permission is held on.
+    assert info["tables"] == ["opteryx.public.orders"]
+    assert info["is_ddl"] is True
+    assert info["permission_required"] == "writer"
+
+
+def test_parse_alter_materialized_view_owner():
+    info = opteryx.analyze_query(
+        "ALTER MATERIALIZED VIEW opteryx.public.daily OWNER TO 'olive@example.com';"
+    )
+
+    assert info["query_type"] == "AlterMaterializedViewOwner"
+    assert info["tables"] == ["opteryx.public.daily"]
+    assert info["is_ddl"] is True
+    assert info["permission_required"] == "owner"
+
+
+def test_parse_drop_statistics():
+    info = opteryx.analyze_query("DROP STATISTICS ON opteryx.public.orders FOR COLUMNS id, name;")
+
+    assert info["query_type"] == "DropStatistics"
+    assert info["tables"] == ["opteryx.public.orders"]
+    assert info["is_ddl"] is True
+    assert info["permission_required"] == "owner"
+
+
+def test_parse_rejects_a_near_miss_by_name():
+    """A statement opening with one of these keywords but matching none of them.
+
+    Rejected by name here rather than left to the parser, which would report a
+    syntax error pointing at a token several words from the actual problem - the
+    same reason the planner rejects it by name.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    with pytest.raises(UnsupportedSyntaxError, match="REFRESH MATERIALIZED VIEW"):
+        opteryx.analyze_query("REFRESH VIEW opteryx.public.daily;")
+
+
+def test_the_planner_and_analyze_query_agree_on_what_parses():
+    """Both go through the same pre-parse layer, so neither can drift from the other."""
+    from opteryx.planner.pre_parse import pre_parse
+
+    for statement in (
+        "REFRESH MATERIALIZED VIEW opteryx.public.daily;",
+        "DROP TRIGGER t ON opteryx.public.orders;",
+        "ALTER MATERIALIZED VIEW opteryx.public.daily OWNER TO 'olive';",
+        "DROP STATISTICS ON opteryx.public.orders;",
+    ):
+        assert pre_parse(statement) is not None, statement
+        assert opteryx.analyze_query(statement)["tables"] != []
+
+    # An ordinary statement is left for the parser
+    assert pre_parse("SELECT * FROM users") is None
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

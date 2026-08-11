@@ -1,7 +1,9 @@
 #include "bloom.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #include "core/string_slot.h"
 
@@ -148,7 +150,43 @@ bool bloom_build(const DrakenVector& vector, double false_positive_rate,
             || !value_bytes_at(vector, 0, &probe, &probe_length))
         return false;
 
-    const uint32_t blocks = block_count_for(vector.data_length, false_positive_rate);
+    // Sizing is on the DISTINCT count, established here, never on data_length.
+    //
+    // data_length is the PHYSICAL value count, which is shape-dependent (§11):
+    // for a Dict vector it is the unique count and sizing on it is exact, but for
+    // a DENSE vector it is the ROW COUNT. The writer's call site only substitutes
+    // the deduplicated array when value ordering was APPLIED, so every column that
+    // declined value ordering — which, per the string-only KMV fix, is every
+    // repetitive FIXED-WIDTH column — was sized for its row count and loaded with
+    // however few distinct values those rows carried. Measured on the ClickBench
+    // skene mirror: bloom sections were 21% of the file and 12.25x compressible,
+    // which is what a mostly-empty filter looks like.
+    //
+    // Counting is EXACT rather than sketched. An estimate that came in low would
+    // undersize the filter and silently miss the false-positive rate the caller
+    // was promised — the exact failure bits_per_key_for() exists to prevent.
+    //
+    // Deduplicating also removes the redundant insertions: a filter over N rows
+    // with D distinct values now costs D set_bits calls, not N.
+    std::vector<uint64_t> hashes;
+    hashes.reserve(vector.data_length);
+    for (uint32_t i = 0; i < vector.data_length; ++i) {
+        const uint8_t* bytes = nullptr;
+        uint32_t length = 0;
+        if (!value_bytes_at(vector, i, &bytes, &length)) return false;
+        uint64_t hash = 0;
+        if (!bloom_hash_value(bytes, length, &hash)) return false;
+        hashes.push_back(hash);
+    }
+    std::sort(hashes.begin(), hashes.end());
+    hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
+
+    // Distinct HASHES, not distinct values: a hash collision merges two values
+    // into one key, and that is precisely the key the filter would have stored
+    // for both. Sizing on the count of keys actually inserted is therefore the
+    // right count, and it can only ever be <= the distinct value count.
+    const uint32_t blocks =
+        block_count_for(static_cast<uint64_t>(hashes.size()), false_positive_rate);
     out->assign(sizeof(BloomHeader)
                     + static_cast<size_t>(blocks) * kBytesPerBlock, 0);
 
@@ -157,14 +195,8 @@ bool bloom_build(const DrakenVector& vector, double false_positive_rate,
     std::memcpy(out->data(), &header, sizeof(header));
 
     uint8_t* bitset = out->data() + sizeof(BloomHeader);
-    for (uint32_t i = 0; i < vector.data_length; ++i) {
-        const uint8_t* bytes = nullptr;
-        uint32_t length = 0;
-        if (!value_bytes_at(vector, i, &bytes, &length)) { out->clear(); return false; }
-        uint64_t hash = 0;
-        if (!bloom_hash_value(bytes, length, &hash)) { out->clear(); return false; }
+    for (uint64_t hash : hashes)
         set_bits(bitset, blocks, hash);
-    }
     return true;
 }
 

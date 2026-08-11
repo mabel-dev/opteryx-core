@@ -34,6 +34,22 @@ class BindingContext:
             Query execution context.
         relations: Set
             Relations involved in the current query.
+        schema_only: bool
+            Bind names and types, and read NOTHING a name cannot be resolved
+            without. A scan then takes the connector's schema alone and leaves
+            `manifests` empty, rather than building the Manifest - the file list
+            and per-column statistics for the whole relation.
+
+            Set only by the edit-time check path, which stops at the end of
+            binding: everything that consumes a Manifest (statistics, manifest
+            pruning, the physical planner's reader choice) runs after that point,
+            so on that path the Manifest is fetched and then discarded. It is the
+            larger of the two cloud reads binding performs.
+
+            A statement that cannot be bound without a Manifest - SHOW MANIFEST
+            FOR is the only one - fails loud here rather than binding against a
+            Manifest that isn't there.
+
         outer_schemas: Dict[str, Any]
             Schemas of the ENCLOSING query scope, for resolving correlated
             references from inside a subquery. Empty for a top-level query.
@@ -53,9 +69,12 @@ class BindingContext:
     telemetry: QueryTelemetry
     outer_schemas: Dict[str, Any] = field(default_factory=dict)
     manifests: Dict[str, Any] = field(default_factory=dict)
+    schema_only: bool = False
 
     @classmethod
-    def initialize(cls, query_id: str, execution_context=None) -> "BindingContext":
+    def initialize(
+        cls, query_id: str, execution_context=None, schema_only: bool = False
+    ) -> "BindingContext":
         """
         Initialize a new BindingContext with the given query ID and connection.
 
@@ -64,6 +83,8 @@ class BindingContext:
                 Query ID.
             execution_context: Any, optional
                 Database connection, defaults to None.
+            schema_only: bool, optional
+                Skip the per-relation Manifest read; see the class docstring.
 
         Returns:
             A new BindingContext instance.
@@ -74,6 +95,7 @@ class BindingContext:
             execution_context=execution_context,
             relations={},
             telemetry=QueryTelemetry(query_id),
+            schema_only=schema_only,
         )
 
     def copy(self) -> "BindingContext":
@@ -95,6 +117,7 @@ class BindingContext:
             # those being the same objects).
             outer_schemas=self.outer_schemas,
             manifests={k: v for k, v in self.manifests.items()},
+            schema_only=self.schema_only,
         )
 
     def open_correlated_scope(self) -> "BindingContext":
@@ -115,4 +138,5 @@ class BindingContext:
             relations={},
             telemetry=self.telemetry,
             outer_schemas={**self.outer_schemas, **self.schemas},
+            schema_only=self.schema_only,
         )

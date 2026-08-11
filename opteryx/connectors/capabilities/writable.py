@@ -408,6 +408,25 @@ class Writable:
             f"{self.__class__.__name__} does not support ALTER MATERIALIZED VIEW ... OWNER TO"
         )
 
+    def set_materialized_view_suspended(
+        self, relation_name: str, suspended: bool, author: str = None
+    ) -> None:
+        """Suspend or resume a materialized view's automatic refresh.
+
+        The state belongs to the VIEW, not to the triggers that drive it. A view
+        with four sources has four triggers, and suspending them individually could
+        leave it refreshing from a subset of its sources - silently partial
+        data. One flag cannot be partially applied.
+
+        Args:
+            relation_name: Fully-qualified name of the materialized view
+            suspended: True to suspend refreshes, False to resume them
+            author: session user this change is attributed to
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support ALTER MATERIALIZED VIEW ... SUSPEND"
+        )
+
     def mark_materialized_view_refreshed(
         self, relation_name: str, status: str, author: str = None
     ) -> None:

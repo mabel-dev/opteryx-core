@@ -268,15 +268,35 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             name=relation_name or getattr(schema, "name", "dataset"), columns=columns
         )
 
-    def get_dataset_metadata(self) -> Tuple[RelationSchema, Manifest]:
+    def get_dataset_schema(self) -> RelationSchema:
         """
-        Get dataset schema and build manifest from catalog.
+        Get the dataset's column schema, without building a Manifest.
 
-        Returns both schema and manifest to make the dual purpose explicit.
-        Manifest contains file-level statistics from table.scan().
+        Same schema `get_dataset_metadata` returns, resolved from the same snapshot,
+        reached without the `table.scan()` that lists every data file and its
+        per-column statistics. That scan is the expensive half of reading a catalog
+        relation and it is worth skipping only for a caller that will never look at a
+        file - the edit-time check, which stops at the end of binding.
+
+        Every other caller wants `get_dataset_metadata`: a Scan bound through here
+        carries no manifest, so it cannot be pruned, costed or turned into a physical
+        plan.
 
         Returns:
-            Tuple of (RelationSchema, Manifest)
+            RelationSchema
+        """
+        self._resolve_snapshot()
+        raw_schema = self.table.schema(self.snapshot.schema_id)
+        self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
+        self.dataset_committed_at = self.snapshot.timestamp_ms
+        return self.schema
+
+    def _resolve_snapshot(self) -> None:
+        """Settle which snapshot this read sees, honouring time travel.
+
+        Sets `self.snapshot` and `self.snapshot_id`. Shared by the schema-only and
+        the full-metadata reads so a statement cannot resolve to one snapshot when
+        checked and a different one when run.
         """
         if self.at_date is not None:
             # reload the dataset with history enabled
@@ -326,6 +346,18 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
                     "The dataset exists, but no data has been committed to it yet."
                 )
             self.snapshot_id = self.snapshot.snapshot_id
+
+    def get_dataset_metadata(self) -> Tuple[RelationSchema, Manifest]:
+        """
+        Get dataset schema and build manifest from catalog.
+
+        Returns both schema and manifest to make the dual purpose explicit.
+        Manifest contains file-level statistics from table.scan().
+
+        Returns:
+            Tuple of (RelationSchema, Manifest)
+        """
+        self._resolve_snapshot()
 
         raw_schema = self.table.schema(self.snapshot.schema_id)
         self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
@@ -1011,6 +1043,19 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             catalog.set_materialized_view_owner(relative_id, new_owner, author=author)
         except MaterializedViewError as exc:
             raise ValueError(f"ALTER MATERIALIZED VIEW {relation_name} OWNER TO: {exc}") from exc
+
+    def set_materialized_view_suspended(
+        self, relation_name: str, suspended: bool, author: str = None
+    ) -> None:
+        """Suspend or resume the view's automatic refresh in the catalog."""
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        try:
+            catalog.set_materialized_view_suspended(relative_id, suspended, author=author)
+        except MaterializedViewError as exc:
+            raise ValueError(f"ALTER MATERIALIZED VIEW {relation_name}: {exc}") from exc
 
     def mark_materialized_view_refreshed(
         self, relation_name: str, status: str, author: str = None

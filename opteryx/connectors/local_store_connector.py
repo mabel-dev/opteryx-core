@@ -339,6 +339,18 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         with open(self._mv_path(relation_name), "w") as f:
             json.dump(record, f)
 
+    def set_materialized_view_suspended(
+        self, relation_name: str, suspended: bool, author: str = None
+    ) -> None:
+        """Record suspended state on the sidecar, mirroring the catalog's fields."""
+        record = self._read_mv_record(relation_name)
+        if record is None:
+            raise ValueError(f"{relation_name} is not a materialized view")
+        record["suspended-at-ms"] = int(time.time() * 1000) if suspended else None
+        record["suspended-by"] = author if suspended else None
+        with open(self._mv_path(relation_name), "w") as f:
+            json.dump(record, f)
+
     def mark_materialized_view_refreshed(
         self, relation_name: str, status: str, author: str = None
     ) -> None:

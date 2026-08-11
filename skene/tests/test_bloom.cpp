@@ -189,6 +189,49 @@ static void test_filter_is_built_over_distinct_values() {
     }
 }
 
+// Sizing must track the DISTINCT count, not data_length.
+//
+// The test above goes through the writer, where value ordering deduplicates the
+// data array first and data_length IS the distinct count — so it cannot see this
+// bug. bloom_build is exercised DIRECTLY here instead, because the broken case is
+// a vector that reaches it WITHOUT having been deduplicated: value ordering is
+// declined per column, and a declined column arrives dense with data_length equal
+// to its row count. Going through the writer would couple this test to whatever
+// the ordering heuristic happens to be tuned to today, which is a different
+// component's decision and free to change.
+//
+// Two dense vectors with IDENTICAL data_length and different distinct counts:
+// sized on data_length these came out byte-identical, which is the defect.
+static void test_sizing_tracks_distinct_not_data_length() {
+    std::vector<int64_t> repetitive(100000), distinct(100000);
+    for (size_t i = 0; i < repetitive.size(); ++i) {
+        repetitive[i] = static_cast<int64_t>(i % 5000);
+        distinct[i]   = static_cast<int64_t>(i);
+    }
+
+    auto few  = dense_column<int64_t>(repetitive, DRAKEN_INT64);
+    auto many = dense_column<int64_t>(distinct, DRAKEN_INT64);
+    CHECK_EQ(few.view.data_length, uint32_t{100000});
+    CHECK_EQ(many.view.data_length, uint32_t{100000});
+
+    std::vector<uint8_t> few_body, many_body;
+    CHECK(bloom_build(few.view, kDefaultFalsePositiveRate, &few_body));
+    CHECK(bloom_build(many.view, kDefaultFalsePositiveRate, &many_body));
+
+    // 20x apart by construction (5000 keys against 100000). A 4x bound proves
+    // the sizing moved with distinct without pinning the bits-per-key curve,
+    // which is measured and free to be recalibrated.
+    CHECK(few_body.size() * 4 < many_body.size());
+
+    // Smaller, and still a filter: the one inviolable property survives.
+    for (int64_t value = 0; value < 5000; ++value) {
+        bool may = false;
+        CHECK(bloom_probe(few_body.data(), few_body.size(),
+                          &value, sizeof(value), &may).is_ok());
+        CHECK(may);
+    }
+}
+
 // ─── Corruption ─────────────────────────────────────────────────────────────
 
 static void test_corrupt_filter_is_rejected_not_answered() {
@@ -228,6 +271,7 @@ int main() {
     test_only_requested_columns_get_filters();
     test_types_without_hashable_bytes_are_skipped();
     test_filter_is_built_over_distinct_values();
+    test_sizing_tracks_distinct_not_data_length();
     test_corrupt_filter_is_rejected_not_answered();
     return skene_test::summary("test_bloom");
 }
