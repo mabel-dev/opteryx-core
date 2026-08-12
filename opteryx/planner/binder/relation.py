@@ -476,19 +476,34 @@ def _scanned_relations(visitor, context) -> list:
     already names the relation it reads, and by bind time views and CTEs have
     been resolved to what is actually scanned - so this sees through an
     indirection that text matching would miss.
+
+    A subquery embedded in an expression (`WHERE x IN (SELECT ...)`, `EXISTS
+    (...)`, a scalar subquery) carries its own LogicalPlan as the `value` of a
+    NodeType.SUBQUERY node hanging off the owning node's properties - e.g. a
+    Filter's `.condition`. It is not spliced into this graph until
+    decorrelation runs in the optimizer, well after binding calls this, so a
+    plain node walk misses any relation scanned only inside one. Each node's
+    expression properties are searched for embedded subqueries too, recursing
+    into their sub-plans, with the same walk relation_resolver's CTE/view
+    expansion already relies on to find them.
     """
     from opteryx.planner.logical_planner import LogicalPlanStepType
+    from opteryx.planner.relation_resolver import _expression_subqueries
 
     relations: list = []
-    graph = getattr(visitor, "graph", None)
-    if graph is None:
-        return relations
-    for _, plan_node in graph.nodes(True):
-        if plan_node.node_type != LogicalPlanStepType.Scan:
-            continue
-        relation = plan_node.relation
-        if relation not in relations:
-            relations.append(relation)
+
+    def _collect(graph) -> None:
+        if graph is None:
+            return
+        for _, plan_node in graph.nodes(True):
+            if plan_node.node_type == LogicalPlanStepType.Scan:
+                relation = plan_node.relation
+                if relation not in relations:
+                    relations.append(relation)
+            for subquery in _expression_subqueries(plan_node):
+                _collect(subquery.value)
+
+    _collect(getattr(visitor, "graph", None))
     return relations
 
 

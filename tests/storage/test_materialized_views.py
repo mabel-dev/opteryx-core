@@ -104,6 +104,28 @@ def test_create_mv_multiple_sources_deduplicated(tmp_path):
     assert sorted(record["source_tables"]) == ["ws.left_t", "ws.right_t"]
 
 
+def test_create_mv_subquery_only_source_is_captured(tmp_path):
+    # A table referenced *only* inside a WHERE-clause subquery must still be
+    # captured: decorrelation hasn't spliced it into the graph yet at bind
+    # time, so it lives solely as a NodeType.SUBQUERY expression node until
+    # the optimizer runs, well after source_tables is extracted.
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed_source(owner, "ws.left_t")
+    _seed_source(owner, "ws.right_t")
+
+    list(
+        owner.execute_to_morsels(
+            "CREATE MATERIALIZED VIEW ws.mv AS "
+            "SELECT l.a AS la FROM ws.left_t AS l "
+            "WHERE l.a IN (SELECT a FROM ws.right_t)"
+        )
+    )
+
+    record = _mv_record(tmp_path / "ws", "mv")
+    assert sorted(record["source_tables"]) == ["ws.left_t", "ws.right_t"]
+
+
 def test_create_or_replace_mv_re_registers(tmp_path):
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
