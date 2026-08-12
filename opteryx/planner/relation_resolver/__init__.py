@@ -347,11 +347,13 @@ def _resolve(
     root_path: Tuple[str, ...],
     telemetry,
     catalog_cache=None,
+    root_via_view: Optional[str] = None,
 ) -> LogicalPlan:
     """
     Expand every CTE and view reference in one plan, then recurse into the sub-plans of
     any subquery expressions it carries. `root_scope`/`root_path` are the scope and
-    expansion trail this plan is being resolved under.
+    expansion trail this plan is being resolved under; `root_via_view` is the innermost
+    view this plan came out of, if any.
     """
     from opteryx.managers.views import resolve_relation
 
@@ -360,9 +362,12 @@ def _resolve(
     # Tracked for EVERY node, not just Scans: a Filter carrying an IN-subquery needs the
     # scope of the body it was spliced in from, so its sub-plan resolves against the same
     # CTEs the surrounding relation sees.
-    scopes: Dict[str, Tuple[Dict[str, LogicalPlan], Tuple[str, ...]]] = {}
+    # The third element is the innermost VIEW the node came out of, carried so a
+    # refusal can name the view the caller actually wrote rather than only the
+    # relation behind it - see the Scan gate in the Binder.
+    scopes: Dict[str, Tuple[Dict[str, LogicalPlan], Tuple[str, ...], Optional[str]]] = {}
     for nid in plan.nodes():
-        scopes[nid] = (root_scope, root_path)
+        scopes[nid] = (root_scope, root_path, root_via_view)
 
     settled = set()  # scans known to be real datasets — never probed again
 
@@ -378,7 +383,7 @@ def _resolve(
                 settled.add(nid)
                 continue
 
-            scope, path = scopes.get(nid, (root_scope, root_path))
+            scope, path, via_view = scopes.get(nid, (root_scope, root_path, root_via_view))
 
             if relation in scope:
                 if relation in path:
@@ -386,6 +391,8 @@ def _resolve(
                 sub_plan = copy_sub_plan(scope[relation])
                 # a CTE body may reference CTEs declared alongside it
                 child_scope = scope
+                # a CTE inside a view is still read through that view
+                child_via_view = via_view
             else:
                 kind, resolved = resolve_relation(relation, telemetry, catalog_cache)
                 if kind == "view":
@@ -395,10 +402,18 @@ def _resolve(
                     sub_plan = copy_sub_plan(view_plan)
                     # a view is a closed unit: it sees its own CTEs, never the caller's
                     child_scope = view_ctes
+                    # everything spliced in from here is read through THIS view; the
+                    # innermost one wins, since that is the one naming the relation
+                    child_via_view = relation
                 else:
                     if kind == "dataset":
                         # stash it so the Binder doesn't re-read the catalog
                         node.resolved_dataset = resolved
+                    # Settled as a real relation, whatever the connector called
+                    # it - `kind` is None for connectors that prefetch nothing,
+                    # so this must not hang off the branch above.
+                    if via_view is not None:
+                        node.via_view = via_view
                     settled.add(nid)
                     continue
 
@@ -410,7 +425,7 @@ def _resolve(
 
             child_path = path + (relation,)
             for sub_nid in sub_plan.nodes():
-                scopes[sub_nid] = (child_scope, child_path)
+                scopes[sub_nid] = (child_scope, child_path, child_via_view)
 
             plan = _splice(plan, nid, node, sub_plan)
             expanded = True
@@ -423,9 +438,11 @@ def _resolve(
     # plans off to the side, so resolve each against the scope of the node carrying it.
     # Done after the fixpoint above: splicing a CTE body in can introduce more of them.
     for nid, node in list(plan.nodes(True)):
-        scope, path = scopes.get(nid, (root_scope, root_path))
+        scope, path, via_view = scopes.get(nid, (root_scope, root_path, root_via_view))
         for subquery in _expression_subqueries(node):
-            subquery.value = _resolve(subquery.value, scope, path, telemetry, catalog_cache)
+            subquery.value = _resolve(
+                subquery.value, scope, path, telemetry, catalog_cache, via_view
+            )
 
     return plan
 

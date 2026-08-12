@@ -505,6 +505,10 @@ def _create_rename_relation_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="rename_relation", **logical_node.properties)
 
 
+def _create_optimize_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="optimize_relation", **logical_node.properties)
+
+
 def _create_alter_workspace_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="alter_workspace", **logical_node.properties)
 
@@ -558,6 +562,7 @@ _DISPATCH = {
     LogicalPlanStepType.TruncateRelation: _create_truncate_relation_node,
     LogicalPlanStepType.AlterRelation:    _create_alter_relation_node,
     LogicalPlanStepType.RenameRelation:   _create_rename_relation_node,
+    LogicalPlanStepType.OptimizeRelation: _create_optimize_relation_node,
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.Insert:           _create_insert_node,
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,

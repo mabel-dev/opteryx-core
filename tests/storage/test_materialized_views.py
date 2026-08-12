@@ -52,7 +52,6 @@ def _mv_record(tmp_path, relation):
 
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
-_WRITER_POLICY = [{"pattern": "*", "role": "writer"}]
 
 
 def _seed_source(session, name="ws.src"):
@@ -200,75 +199,6 @@ def test_create_mv_mixed_virtual_source_rejected(tmp_path):
         )
 
 
-# --- permissions
-
-
-def test_create_mv_needs_only_write_on_target(tmp_path):
-    """Writer tier is enough for an MV target, exactly as it is for CTAS.
-
-    An MV does nothing its creator could not do by hand with a CTAS into the
-    same place, so it needs no more authority than one.
-    """
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    _seed_source(owner)
-
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-    list(writer.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.src"))
-    assert _mv_record(tmp_path, "ws.mv")["source_tables"] == ["ws.src"]
-
-
-def test_create_mv_refused_without_write_on_target(tmp_path):
-    """Reader on the target is not enough - the view still writes a table."""
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    _seed_source(owner)
-
-    reader = opteryx.session(user="rhea", access_policies=[{"pattern": "*", "role": "reader"}])
-    with pytest.raises(PermissionError, match="write required"):
-        list(reader.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.src"))
-    assert not (tmp_path / "ws" / "mv").exists()
-
-
-def test_create_mv_needs_only_read_on_sources(tmp_path):
-    """If you can read a table you may derive from it.
-
-    Requiring write on sources would mean no view could ever be built over
-    data you are only permitted to read, which is most of what views are for.
-    """
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    _seed_source(owner)
-
-    # Writer where the view lands, reader-only on the source it reads.
-    mixed = opteryx.session(
-        user="mara",
-        access_policies=[
-            {"pattern": "ws.mv", "role": "writer"},
-            {"pattern": "ws.src", "role": "reader"},
-        ],
-    )
-    list(mixed.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.src"))
-    assert _mv_record(tmp_path, "ws.mv")["source_tables"] == ["ws.src"]
-
-
-def test_create_mv_refused_without_read_on_sources(tmp_path):
-    """No grant at all on the source is still refused.
-
-    This is the check that keeps a pinned `runs-as` owner from turning edits
-    into a confused deputy: it runs on every registration, against whoever is
-    executing, so an editor can never repoint a view at data they cannot read.
-    """
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    _seed_source(owner)
-
-    blind = opteryx.session(user="bram", access_policies=[{"pattern": "ws.mv", "role": "writer"}])
-    with pytest.raises(PermissionError):
-        list(blind.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.src"))
-    assert not (tmp_path / "ws" / "mv").exists()
-
-
 # --- drops
 
 
@@ -310,22 +240,6 @@ def test_drop_materialized_view_on_plain_table_rejected(tmp_path):
     with pytest.raises(ValueError, match="not a materialized view"):
         list(owner.execute_to_morsels("DROP MATERIALIZED VIEW ws.src"))
     assert (tmp_path / "ws" / "src").exists()
-
-
-def test_drop_materialized_view_requires_owner(tmp_path):
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    _seed_source(owner)
-    list(
-        owner.execute_to_morsels(
-            "CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.src"
-        )
-    )
-
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-    with pytest.raises(PermissionError, match="permission to drop"):
-        list(writer.execute_to_morsels("DROP MATERIALIZED VIEW ws.mv"))
-    assert (tmp_path / "ws" / "mv").exists()
 
 
 def test_drop_materialized_view_if_exists_missing_ok(tmp_path):

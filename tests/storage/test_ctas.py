@@ -139,10 +139,6 @@ def test_ctas_unresolved_type_rejected(tmp_path):
         list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT NULL AS x"))
 
 
-_OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
-_WRITER_POLICY = [{"pattern": "*", "role": "writer"}]
-
-
 def test_ctas_or_replace_creates_when_missing(tmp_path):
     _setup_workspace(tmp_path)
     session = opteryx.session()
@@ -221,43 +217,6 @@ def test_ctas_without_or_replace_existing_still_rejected(tmp_path):
     list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
     with pytest.raises(ValueError, match="already exists"):
         list(session.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 2 AS a"))
-
-
-def test_create_requires_writer_or_owner(tmp_path):
-    _setup_workspace(tmp_path)
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-    with pytest.raises(PermissionError, match="permission to create table"):
-        list(reader.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
-
-
-def test_create_allowed_for_writer(tmp_path):
-    _setup_workspace(tmp_path)
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-    list(writer.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
-    assert (tmp_path / "ws" / "dst" / "dataset.json").exists()
-
-
-def test_replace_existing_requires_owner(tmp_path):
-    """A writer may not REPLACE an existing relation - same tier as DROP."""
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    list(owner.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
-
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-    with pytest.raises(PermissionError, match="permission to replace table"):
-        list(writer.execute_to_morsels("CREATE OR REPLACE TABLE ws.dst AS SELECT 2 AS a"))
-
-    rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.dst"))
-    assert rows == [{"a": 1}]
-
-
-def test_replace_existing_allowed_for_owner(tmp_path):
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    list(owner.execute_to_morsels("CREATE TABLE ws.dst AS SELECT 1 AS a"))
-    list(owner.execute_to_morsels("CREATE OR REPLACE TABLE ws.dst AS SELECT 2 AS a"))
-    rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.dst"))
-    assert rows == [{"a": 2}]
 
 
 def test_ctas_partial_failure_leaves_empty_relation(tmp_path):

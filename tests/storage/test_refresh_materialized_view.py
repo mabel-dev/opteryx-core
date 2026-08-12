@@ -66,35 +66,6 @@ def test_refresh_rebuilds_the_view_from_its_definition(tmp_path):
     assert sorted(r["a"] for r in rows) == [1, 2, 3, 4]
 
 
-def test_a_writer_can_refresh_the_view_they_created(tmp_path):
-    """The point of the REFRESH tier.
-
-    A refresh is mechanically a CREATE OR REPLACE, which is owner-tier for a
-    hand-written table. Charging that tier here would let a writer create a
-    materialized view that only an owner could ever keep fresh - so REFRESH is
-    its own writer-tier action.
-    """
-    register_workspace("ws", LocalStoreConnector, store_root=str(tmp_path))
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-    _seed_view(writer)
-
-    list(writer.execute_to_morsels("INSERT INTO ws.src VALUES (3)"))
-    list(writer.execute_to_morsels("REFRESH MATERIALIZED VIEW ws.mv"))
-
-    rows = _rows(writer.execute_to_morsels("SELECT * FROM ws.mv"))
-    assert sorted(r["a"] for r in rows) == [1, 2, 3]
-
-
-def test_refresh_refused_for_a_reader(tmp_path):
-    """Writer tier, not reader - a refresh still rewrites the view's contents."""
-    session = _setup(tmp_path)
-    _seed_view(session)
-
-    reader = opteryx.session(user="rhea", access_policies=[{"pattern": "*", "role": "reader"}])
-    with pytest.raises(PermissionError, match="refresh"):
-        list(reader.execute_to_morsels("REFRESH MATERIALIZED VIEW ws.mv"))
-
-
 def test_refresh_stamps_its_own_success(tmp_path):
     """A manual refresh is the documented recovery path after a failed one, so
     it has to record that it ran - the worker only ever stamps the

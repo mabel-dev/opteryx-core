@@ -336,6 +336,25 @@ class Writable:
             f"{self.__class__.__name__} does not support ALTER TABLE ... CLUSTER BY"
         )
 
+    def optimize_relation(self, relation_name: str, author: Optional[str] = None) -> bool:
+        """Compact a relation's small data files into fewer, larger ones.
+
+        Strategy (bin-pack vs. sort-aware) is auto-detected from whatever
+        clustering the relation already declares (see set_cluster_by) - this
+        call carries no strategy of its own.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            author: session user this compaction is attributed to (see create_relation)
+
+        Returns:
+            True if a new snapshot was committed, False if compaction declined
+            (nothing cleared the size/count thresholds - not an error).
+        """
+        # Reachable for the same reason as set_cluster_by: a connector with no
+        # catalog has no file layout to compact.
+        raise NotImplementedError(f"{self.__class__.__name__} does not support OPTIMIZE")
+
     def set_comment(self, object_name: str, comment: str, describer: Optional[str] = None) -> None:
         """Store a descriptive comment against a relation or view.
 

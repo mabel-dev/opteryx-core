@@ -7,9 +7,7 @@
 
 Triggers exist only as the automatic artifact of CREATE MATERIALIZED VIEW: a
 refresh trigger lands on each SOURCE table (the table whose commits fire it),
-so both DROP TRIGGER's permission gate (WRITE) and information_schema.triggers'
-row security (READ) are checked against that source table, never the target
-view.
+so a trigger is always found against that source table, never the target view.
 
 Two harnesses, mirroring test_materialized_views.py / test_catalog_ddl_delegation.py:
 - LocalStoreConnector executes the whole statement surface against its
@@ -36,8 +34,6 @@ except ImportError:  # wheel predates triggers; the connector catches KeyError t
     TriggerNotFound = KeyError
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
-_WRITER_POLICY = [{"pattern": "*", "role": "writer"}]
-_READER_POLICY = [{"pattern": "*", "role": "reader"}]
 
 
 def _morsels_to_rows(morsels):
@@ -148,31 +144,6 @@ def test_drop_trigger_missing_table_errors_even_with_if_exists(tmp_path):
 
     with pytest.raises(DatasetNotFoundError):
         list(owner.execute_to_morsels("DROP TRIGGER IF EXISTS t ON ws.no_such_table"))
-
-
-def test_drop_trigger_requires_write_on_table(tmp_path):
-    """WRITE on the carrying table - symmetric with trigger creation."""
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    _seed_source(owner)
-    _create_mv(owner)
-
-    reader = opteryx.session(user="rita", access_policies=_READER_POLICY)
-    with pytest.raises(PermissionError, match="drop a trigger"):
-        list(reader.execute_to_morsels("DROP TRIGGER refresh__mv ON ws.src"))
-    assert len(_source_triggers(tmp_path)) == 1
-
-
-def test_drop_trigger_writer_is_enough(tmp_path):
-    """Unlike DROP TABLE (owner), dropping a trigger is a WRITE to the table."""
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-    _seed_source(owner)
-    _create_mv(owner)
-
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-    list(writer.execute_to_morsels("DROP TRIGGER refresh__mv ON ws.src"))
-    assert _source_triggers(tmp_path) == []
 
 
 def test_drop_materialized_view_removes_source_triggers(tmp_path):
@@ -333,15 +304,6 @@ def test_drop_trigger_not_found_translated(catalog_workspace):
     list(session.execute_to_morsels("DROP TRIGGER IF EXISTS gone ON cat.coll1.src"))
 
 
-def test_drop_trigger_requires_write_on_catalog_table(catalog_workspace):
-    reader = opteryx.session(user="rita", access_policies=_READER_POLICY)
-
-    with pytest.raises(PermissionError, match="drop a trigger"):
-        list(reader.execute_to_morsels("DROP TRIGGER t ON cat.coll1.src"))
-
-    assert catalog_workspace.calls == []
-
-
 # --- information_schema.triggers
 
 
@@ -363,31 +325,6 @@ def test_information_schema_triggers_row_shape(catalog_workspace):
     assert row["created_at"] is not None
     assert row["last_fired_at"] is None
     assert row["last_fired_status"] is None
-
-
-def test_information_schema_triggers_row_security(catalog_workspace):
-    """Rows are filtered by READ on the SOURCE table the trigger hangs off."""
-    # Can read everything except the trigger's source table.
-    blinkered = opteryx.session(
-        user="bob",
-        access_policies=[
-            {"pattern": "cat.coll1.other", "role": "reader"},
-            {"pattern": "cat.coll2.*", "role": "reader"},
-        ],
-    )
-    rows = _morsels_to_rows(
-        blinkered.execute_to_morsels("SELECT * FROM cat.information_schema.triggers")
-    )
-    assert rows == []
-
-    # READ on the source table is enough to see its triggers.
-    sighted = opteryx.session(
-        user="sue", access_policies=[{"pattern": "cat.coll1.src", "role": "reader"}]
-    )
-    rows = _morsels_to_rows(
-        sighted.execute_to_morsels("SELECT * FROM cat.information_schema.triggers")
-    )
-    assert [r["trigger_name"] for r in rows] == ["refresh__coll1__mv"]
 
 
 def test_information_schema_triggers_denies_without_execution_context():

@@ -121,6 +121,40 @@ lineitem write cost, 6M rows across 96 row groups:
 
 ---
 
+## Which posture, and why skene and parquet deliberately disagree
+
+Measured 2026-08-11 on the TPC-H SF10 mirror. Three mirrors, one per codec,
+swapped in and out of the live path and run interleaved — minimum of three
+rounds each, all 22/22:
+
+| posture | codec | size | local |
+|---|---|---:|---:|
+| — | none | 7.8 GiB | 5823.8 ms |
+| `for_fast_reads()` | lz4 | 4.0 GiB | 6041.3 ms |
+| `for_storage()` | zstd-7 | 2.7 GiB | 7153.0 ms |
+
+LZ4 and uncompressed **overlap** across runs (6041–6232 against 5824–6250), so
+locally they are not distinguishable — and LZ4 is half the size. The marginal
+rates make the shape plain: `none → lz4` removes **18.8 MB per millisecond**
+spent, `lz4 → zstd-7` removes **1.25**. LZ4 is the knee, which is why there is
+no separate "performance" posture: `for_fast_reads()` already is one, and
+uncompressed would buy a further 3.7% for double the bytes.
+
+Remotely the ordering inverts. At the ~64 MB/s achieved on the 1 Gbps Cloud Run
+link (125 MB/s theoretical), total time is none 137.2 s, lz4 73.7 s, **zstd-7
+53.2 s**. LZ4 only overtakes zstd-7 above **~1.25 GB/s (10 Gbps)** — an order of
+magnitude beyond the link — so deployed data takes `for_storage()`.
+
+**So the codec a corpus uses states where it is READ, not what it holds.** The
+benchmark mirrors (`make clickbench-skene`, `make tpch-skene`) are read locally
+off NVMe and use lz4; the parquet corpora are written in the storage posture
+(zstd, per-type level, 95% keep floor) because they stand in for deployed data.
+
+⛔ **That gap is intentional, and it means a skene number and a parquet number
+from these suites are not a like-for-like format comparison** — they differ by
+codec as well as by format, so comparing them measures the codec choice as much
+as the format. Any quoted figure should name its posture.
+
 ## Which sections, which codec, what size floor
 
 `compression_bakeoff` tries every vendored codec on every `PLAIN` section body of

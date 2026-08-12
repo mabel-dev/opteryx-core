@@ -77,6 +77,7 @@ class LogicalPlanStepType(int, Enum):
     TruncateRelation = auto()
     AlterRelation = auto()
     RenameRelation = auto()
+    OptimizeRelation = auto()
     Insert = auto()
 
     CreateCollection = auto()
@@ -2820,6 +2821,53 @@ def plan_truncate(statement, **kwargs):
     return plan
 
 
+def plan_optimize_table(statement, **kwargs):
+    """
+    Create a logical plan for OPTIMIZE statement.
+
+    OPTIMIZE TABLE table_name
+
+    Opteryx only supports this exact form: the TABLE keyword is required
+    (unlike Databricks, which allows `OPTIMIZE table_name`), and strategy is
+    auto-detected from the table's stored CLUSTER BY / sort order, same as
+    the scheduled compaction job. ClickHouse's ON CLUSTER/PARTITION/FINAL/
+    DEDUPLICATE and Databricks's WHERE/ZORDER BY are all parsed by the
+    grammar but have no equivalent here yet, so they are rejected rather
+    than silently ignored.
+    """
+    root = "OptimizeTable"
+    optimize_stmt = statement[root]
+
+    if not optimize_stmt.get("has_table_keyword"):
+        raise UnsupportedSyntaxError(
+            "**OPTIMIZE** without the TABLE keyword is not supported. Write `OPTIMIZE TABLE <table>`."
+        )
+
+    for clause, label in (
+        ("on_cluster", "ON CLUSTER"),
+        ("partition", "PARTITION"),
+        ("include_final", "FINAL"),
+        ("deduplicate", "DEDUPLICATE"),
+        ("predicate", "WHERE"),
+        ("zorder", "ZORDER BY"),
+    ):
+        if optimize_stmt.get(clause):
+            raise UnsupportedSyntaxError(
+                f"**OPTIMIZE** does not support {label}. Only `OPTIMIZE TABLE <table>` is supported."
+            )
+
+    relation_name = extract_variable(optimize_stmt["name"])
+    if isinstance(relation_name, list):
+        relation_name = ".".join(relation_name)
+
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.OptimizeRelation)
+    node.relation_name = relation_name
+
+    plan.add_node(random_string(), node)
+    return plan
+
+
 def plan_insert(statement, **kwargs):
     """
     Create a logical plan for INSERT statement.
@@ -3170,6 +3218,7 @@ QUERY_BUILDERS = {
     "Drop": plan_drop,  # handles DROP VIEW and DROP TABLE
     "CreateTable": plan_create_table,
     "Truncate": plan_truncate,
+    "OptimizeTable": plan_optimize_table,
     "Insert": plan_insert,
     "RefreshMaterializedView": plan_refresh_materialized_view,  # synthesized pre-parse
 }

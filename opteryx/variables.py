@@ -170,6 +170,13 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # grant, same reasoning as match_threshold.
     "like_selectivity_decay": (
         FLOAT64, config.LIKE_SELECTIVITY_DECAY, VariableOwner.USER, Visibility.UNRESTRICTED),
+    # Bind-time only, read by visit_insert into the InsertNode's parameters (see
+    # insert.pyx) - same capture-at-bind reasoning as match_threshold. UNRESTRICTED:
+    # tuning how your OWN CTAS/INSERT batches its output files is not a data-access
+    # grant. The sink clamps this to rugo's max_rows_per_row_group itself, so a
+    # caller cannot SET this past the row-group ceiling into multi-row-group files.
+    "write_coalesce_rows": (
+        INT64, config.WRITE_COALESCE_ROWS, VariableOwner.USER, Visibility.UNRESTRICTED),
     # Late-materialization tuning is per-QUERY: the right values depend on this
     # query's predicate selectivity, not on the deployment.
     "parquet_late_materialization_abandon_after": (

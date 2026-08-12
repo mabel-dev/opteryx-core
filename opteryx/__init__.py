@@ -87,6 +87,7 @@ if OPTERYX_DEBUG:  # pragma: no cover
 
 from opteryx.connectors import register_workspace
 from opteryx.connectors import set_default_connector
+from opteryx.managers.permissions import register_permissions_capability
 
 from opteryx.__version__ import __author__
 from opteryx.__version__ import __build__
@@ -202,6 +203,10 @@ __all__ = [
     "session",
     "register_workspace",
     "set_default_connector",
+    # Installs the capability that decides permission checks. Absent one, the
+    # engine allows everything - access control belongs to a deployment, not
+    # to the engine. See opteryx.managers.permissions.
+    "register_permissions_capability",
     "__author__",
     "__build__",
     "__version__",

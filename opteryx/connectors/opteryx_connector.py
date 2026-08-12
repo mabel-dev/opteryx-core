@@ -853,6 +853,22 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
         catalog.update_dataset_sort_order(relative_id, columns, author=author)
 
+    def optimize_relation(self, relation_name: str, author: Optional[str] = None) -> bool:
+        """Compact a dataset's small data files, via the catalog's compactor.
+
+        Strategy is auto-detected by DatasetCompactor from the dataset's
+        stored sort order (see set_cluster_by) - "brute" bin-packing with no
+        sort order set, "performance" sort-aware compaction with one.
+        """
+        from opteryx_catalog.catalog import DatasetCompactor
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        dataset = catalog.load_dataset(relative_id)
+        compactor = DatasetCompactor(dataset, strategy=None, author=author, agent="opteryx-sql")
+        snapshot = compactor.compact(dry_run=False)
+        return snapshot is not None
+
     def rename_relation(
         self, relation_name: str, new_relation_name: str, author: Optional[str] = None
     ) -> None:

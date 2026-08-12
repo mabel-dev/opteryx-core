@@ -92,6 +92,8 @@ class RelationManagementNode(BasePlanNode):
             return f"cluster {self.relation_name} by ({', '.join(self.cluster_columns or [])})"
         if self.action == "rename_relation":
             return f"rename {self.relation_name} to {self.new_relation_name}"
+        if self.action == "optimize_relation":
+            return f"optimize {self.relation_name}"
         if self.action == "alter_workspace":
             return f"alter workspace {self.workspace_name} set {self.property_name} = {self.property_value}"
         if self.action == "drop_trigger":
@@ -197,6 +199,16 @@ class RelationManagementNode(BasePlanNode):
                 self.relation_name, self.cluster_columns, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "optimize_relation":
+            if not self.connector.relation_exists(self.relation_name):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            # Declared on the Writable mixin, and visit_optimize_relation has
+            # already rejected a non-Writable connector.
+            committed = self.connector.optimize_relation(self.relation_name, author=self._author)
+            return NonTabularResult(
+                record_count=1 if committed else 0, status=QueryStatus.SQL_SUCCESS
+            )
 
         elif self.action == "rename_relation":
             if not self.connector.relation_exists(self.relation_name):

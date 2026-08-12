@@ -99,16 +99,6 @@ def test_catalog_connector_is_writable():
     assert issubclass(OpteryxConnector, Writable)
 
 
-def test_drop_table_requires_owner_on_catalog(catalog_workspace):
-    """The owner-only rule applies to catalog-backed relations too."""
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-
-    with pytest.raises(PermissionError, match="permission to drop table"):
-        list(writer.execute_to_morsels("DROP TABLE cat.coll.tbl"))
-
-    assert catalog_workspace.calls == []
-
-
 def test_cluster_by_delegates_to_catalog_with_user(catalog_workspace):
     """ALTER TABLE ... CLUSTER BY reaches the catalog carrying the session user."""
     session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
@@ -138,16 +128,6 @@ def test_cluster_by_unauthenticated_passes_none(catalog_workspace):
     ]
 
 
-def test_cluster_by_requires_owner_on_catalog(catalog_workspace):
-    """The owner-only rule applies to CLUSTER BY too - a writer cannot change layout."""
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-
-    with pytest.raises(PermissionError, match="permission to alter table"):
-        list(writer.execute_to_morsels("ALTER TABLE cat.coll.tbl CLUSTER BY (name)"))
-
-    assert catalog_workspace.calls == []
-
-
 def test_drop_collection_delegates_to_catalog_with_user(catalog_workspace):
     """DROP COLLECTION reaches the catalog carrying the session user."""
     session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
@@ -162,16 +142,6 @@ def test_drop_collection_unauthenticated_passes_none(catalog_workspace):
     list(session.execute_to_morsels("DROP COLLECTION cat.coll"))
 
     assert catalog_workspace.calls == [("drop_collection", "coll", None)]
-
-
-def test_drop_collection_requires_owner_on_workspace(catalog_workspace):
-    """DROP COLLECTION is owner-only, same tier as DROP TABLE/VIEW - a writer cannot do it."""
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-
-    with pytest.raises(PermissionError, match="permission to drop collection"):
-        list(writer.execute_to_morsels("DROP COLLECTION cat.coll"))
-
-    assert catalog_workspace.calls == []
 
 
 def test_drop_collection_rejects_non_empty(catalog_workspace):
@@ -213,31 +183,6 @@ def test_rename_unauthenticated_passes_none(catalog_workspace):
     assert catalog_workspace.calls == [("rename_dataset", "coll.tbl", "coll.renamed", None)]
 
 
-def test_rename_requires_owner_on_source(catalog_workspace):
-    """A rename destroys the source name, so it is owner-only there."""
-    catalog_workspace.missing_datasets = {"coll.renamed"}
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-
-    with pytest.raises(PermissionError, match="permission to rename table cat.coll.tbl"):
-        list(writer.execute_to_morsels("ALTER TABLE cat.coll.tbl RENAME TO cat.coll.renamed"))
-
-    assert catalog_workspace.calls == []
-
-
-def test_rename_requires_grant_on_target(catalog_workspace):
-    """Owning the source does not license moving it into a collection the user
-    has no grant on."""
-    catalog_workspace.missing_datasets = {"locked.tbl"}
-    session = opteryx.session(
-        user="alice", access_policies=[{"pattern": "cat.coll.*", "role": "owner"}]
-    )
-
-    with pytest.raises(PermissionError, match="permission to rename table to cat.locked.tbl"):
-        list(session.execute_to_morsels("ALTER TABLE cat.coll.tbl RENAME TO cat.locked.tbl"))
-
-    assert catalog_workspace.calls == []
-
-
 def test_alter_workspace_delegates_to_catalog_with_user(catalog_workspace):
     """ALTER WORKSPACE reaches the catalog with the property already typed."""
     session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
@@ -276,64 +221,6 @@ def test_alter_workspace_unauthenticated_passes_none(catalog_workspace):
     ]
 
 
-def test_alter_workspace_requires_owner(catalog_workspace):
-    """A writer cannot change workspace-level settings."""
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-
-    with pytest.raises(PermissionError, match="permission to alter workspace cat"):
-        list(writer.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
-
-    assert catalog_workspace.calls == []
-
-
-def test_alter_workspace_whole_workspace_owner_grant_is_enough(catalog_workspace):
-    """"ws.*" is how ownership of a whole workspace is issued - it covers the
-    workspace itself, not merely things inside it."""
-    session = opteryx.session(
-        user="alice", access_policies=[{"pattern": "cat.*", "role": "owner"}]
-    )
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
-
-    assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"deletion_protection": False}, "alice")
-    ]
-
-
-def test_alter_workspace_named_owner_grant_is_enough(catalog_workspace):
-    """A grant matching the bare workspace name also unlocks it."""
-    session = opteryx.session(user="alice", access_policies=[{"pattern": "cat", "role": "owner"}])
-    list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
-
-    assert catalog_workspace.calls == [
-        ("set_workspace_properties", {"deletion_protection": False}, "alice")
-    ]
-
-
-def test_alter_workspace_partial_grant_is_not_enough(catalog_workspace):
-    """A grant scoped to one collection covers part of the workspace, so it
-    cannot change settings governing all of it."""
-    session = opteryx.session(
-        user="alice", access_policies=[{"pattern": "cat.coll.*", "role": "owner"}]
-    )
-
-    with pytest.raises(PermissionError, match="permission to alter workspace cat"):
-        list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
-
-    assert catalog_workspace.calls == []
-
-
-def test_alter_workspace_owner_of_another_workspace_is_not_enough(catalog_workspace):
-    """Ownership does not leak sideways between workspaces."""
-    session = opteryx.session(
-        user="alice", access_policies=[{"pattern": "other.*", "role": "owner"}]
-    )
-
-    with pytest.raises(PermissionError, match="permission to alter workspace cat"):
-        list(session.execute_to_morsels("ALTER WORKSPACE cat SET deletion_protection TO OFF"))
-
-    assert catalog_workspace.calls == []
-
-
 def test_create_collection_delegates_to_catalog_with_user(catalog_workspace):
     """CREATE COLLECTION reaches the catalog carrying the session user."""
     session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
@@ -357,24 +244,6 @@ def test_create_collection_unauthenticated_passes_none(catalog_workspace):
     list(session.execute_to_morsels("CREATE COLLECTION cat.coll"))
 
     assert catalog_workspace.calls == [("create_collection", "coll", False, None)]
-
-
-def test_create_collection_allowed_for_writer(catalog_workspace):
-    """Creating a collection risks nothing existing, so it is the writer tier -
-    NOT the owner tier DROP COLLECTION requires."""
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-    list(writer.execute_to_morsels("CREATE COLLECTION cat.coll"))
-
-    assert catalog_workspace.calls == [("create_collection", "coll", False, "wendy")]
-
-
-def test_create_collection_rejected_for_reader(catalog_workspace):
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-
-    with pytest.raises(PermissionError, match="permission to create collection"):
-        list(reader.execute_to_morsels("CREATE COLLECTION cat.coll"))
-
-    assert catalog_workspace.calls == []
 
 
 def test_create_schema_is_an_alias_for_create_collection(catalog_workspace):

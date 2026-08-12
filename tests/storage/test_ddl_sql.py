@@ -102,23 +102,6 @@ def test_create_table_readonly_connector_rejected(tmp_path):
         list(session.execute_to_morsels("CREATE TABLE somefile.foo (a BIGINT)"))
 
 
-def test_create_table_requires_writer_or_owner(tmp_path):
-    """Plain CREATE TABLE (column-defs form) must be permission-checked, same
-    as CTAS - a reader-only session cannot create a brand-new relation."""
-    _setup_workspace(tmp_path)
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-    with pytest.raises(PermissionError, match="permission to create table"):
-        list(reader.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
-    assert not (tmp_path / "ws" / "events").exists()
-
-
-def test_create_table_allowed_for_writer(tmp_path):
-    _setup_workspace(tmp_path)
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-    list(writer.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
-    assert (tmp_path / "ws" / "events" / "dataset.json").exists()
-
-
 def test_drop_table_removes_folder(tmp_path):
     """DROP TABLE removes the table folder."""
     _setup_workspace(tmp_path)
@@ -538,7 +521,6 @@ def test_create_table_all_types(tmp_path):
 
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
-_WRITER_POLICY = [{"pattern": "*", "role": "writer"}]
 
 
 def _seed_relations(tmp_path):
@@ -548,63 +530,6 @@ def _seed_relations(tmp_path):
     list(owner.execute_to_morsels("CREATE TABLE ws.t (id BIGINT)"))
     list(owner.execute_to_morsels("CREATE VIEW ws.v AS SELECT * FROM ws.t"))
     return owner
-
-
-def test_drop_table_requires_owner(tmp_path):
-    """A writer may not DROP TABLE - only an owner may."""
-    _seed_relations(tmp_path)
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-
-    with pytest.raises(PermissionError, match="permission to drop table"):
-        list(writer.execute_to_morsels("DROP TABLE ws.t"))
-
-    assert (tmp_path / "ws" / "t" / "dataset.json").exists()
-
-
-def test_drop_view_requires_owner(tmp_path):
-    """A writer may not DROP VIEW - only an owner may."""
-    _seed_relations(tmp_path)
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-
-    with pytest.raises(PermissionError, match="permission to drop view"):
-        list(writer.execute_to_morsels("DROP VIEW ws.v"))
-
-    assert (tmp_path / "ws" / "v" / "view.json").exists()
-
-
-def test_owner_can_drop_table_and_view(tmp_path):
-    """An owner may DROP both tables and views."""
-    owner = _seed_relations(tmp_path)
-
-    list(owner.execute_to_morsels("DROP VIEW ws.v"))
-    list(owner.execute_to_morsels("DROP TABLE ws.t"))
-
-    assert not (tmp_path / "ws" / "v" / "view.json").exists()
-    assert not (tmp_path / "ws" / "t").exists()
-
-
-def test_truncate_requires_writer_or_owner(tmp_path):
-    owner = _seed_relations(tmp_path)
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-    with pytest.raises(PermissionError, match="permission to truncate table"):
-        list(reader.execute_to_morsels("TRUNCATE TABLE ws.t"))
-
-
-def test_insert_into_existing_requires_writer_or_owner(tmp_path):
-    owner = _seed_relations(tmp_path)
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-    with pytest.raises(PermissionError, match="permission to insert into"):
-        list(reader.execute_to_morsels("INSERT INTO ws.t VALUES (1)"))
-
-
-def test_writer_retains_non_drop_ddl(tmp_path):
-    """Restricting DROP to owners does not restrict the WRITE tier."""
-    _seed_relations(tmp_path)
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-
-    list(writer.execute_to_morsels("CREATE VIEW ws.v2 AS SELECT * FROM ws.t"))
-
-    assert (tmp_path / "ws" / "v2" / "view.json").exists()
 
 
 def test_view_owner_is_session_user(tmp_path):
@@ -632,59 +557,6 @@ def test_view_owner_none_when_unauthenticated(tmp_path):
 
     with open(tmp_path / "ws" / "v" / "view.json") as f:
         assert json.load(f)["owner"] is None
-
-
-# --- Statements that reached their operator with no permission check at all.
-# Each of these node types had no binder visitor, and BinderVisitor.visit_node
-# used to pass an unvisited node straight through. See NO_BINDER_REQUIRED.
-
-
-def test_analyze_table_requires_owner(tmp_path):
-    """A writer may not ANALYZE - it rewrites the metadata the optimizer plans
-    from, the same tier as ALTER TABLE ... CLUSTER BY."""
-    _seed_relations(tmp_path)
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-
-    with pytest.raises(PermissionError, match="permission to analyze table"):
-        list(writer.execute_to_morsels("ANALYZE TABLE ws.t"))
-
-
-def test_analyze_table_reader_rejected(tmp_path):
-    _seed_relations(tmp_path)
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-
-    with pytest.raises(PermissionError, match="permission to analyze table"):
-        list(reader.execute_to_morsels("ANALYZE TABLE ws.t"))
-
-
-def test_drop_statistics_requires_owner(tmp_path):
-    """DROP STATISTICS destroys what ANALYZE builds, so it is gated the same."""
-    _seed_relations(tmp_path)
-    writer = opteryx.session(user="wendy", access_policies=_WRITER_POLICY)
-
-    with pytest.raises(PermissionError, match="permission to drop statistics on table"):
-        list(writer.execute_to_morsels("DROP STATISTICS ON ws.t"))
-
-
-def test_show_create_view_requires_read(tmp_path):
-    """A view's body names the relations it reads; showing it is a read of the
-    view, and a caller with no grant on it may not."""
-    _seed_relations(tmp_path)
-    outsider = opteryx.session(
-        user="oscar", access_policies=[{"pattern": "other.*", "role": "owner"}]
-    )
-
-    with pytest.raises(PermissionError, match="permission to read view"):
-        list(outsider.execute_to_morsels("SHOW CREATE VIEW ws.v"))
-
-
-def test_show_create_view_allowed_for_reader(tmp_path):
-    """READ is the tier - a reader can see the definition."""
-    _seed_relations(tmp_path)
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-
-    result = list(reader.execute_to_morsels("SHOW CREATE VIEW ws.v"))
-    assert len(result) == 1
 
 
 # --- Syntax the parser accepted and the engine silently ignored.
@@ -760,10 +632,3 @@ def test_create_collection_requires_two_part_name(tmp_path):
             list(owner.execute_to_morsels(f"CREATE COLLECTION {name}"))
 
 
-def test_create_collection_rejected_for_reader(tmp_path):
-    """Checked at bind time, before the connector is asked to do anything."""
-    _setup_workspace(tmp_path)
-    reader = opteryx.session(user="rita", access_policies=[{"pattern": "*", "role": "reader"}])
-
-    with pytest.raises(PermissionError, match="permission to create collection"):
-        list(reader.execute_to_morsels("CREATE COLLECTION ws.staging"))

@@ -78,26 +78,6 @@ def test_editing_a_view_does_not_transfer_it(tmp_path):
     assert record["author"] == "bob"  # but bob is on the record
 
 
-def test_alter_owner_requires_workspace_owner(tmp_path):
-    """Deliberately stricter than owning the view.
-
-    Pointing a view's refresh at another principal can borrow authority the
-    caller does not have, and nothing can check another principal's grants to
-    stop it. A workspace owner can already grant themselves anything, so that
-    tier escalates nothing; a mere relation owner could otherwise gain reach.
-    """
-    session = _setup(tmp_path)
-    _seed_view(session)
-
-    relation_owner = opteryx.session(
-        user="mara", access_policies=[{"pattern": "ws.mv", "role": "owner"}]
-    )
-    with pytest.raises(PermissionError, match="owner of workspace"):
-        list(relation_owner.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO mara"))
-
-    assert _record(tmp_path)["runs-as"] == "alice"
-
-
 def test_alter_owner_accepts_a_quoted_principal(tmp_path):
     """Principals are often email addresses, which need quoting to survive as
     one token."""
@@ -177,17 +157,6 @@ def test_suspend_and_resume(tmp_path):
     record = _record(tmp_path)
     assert record["suspended-at-ms"] is None
     assert record["suspended-by"] is None
-
-
-def test_suspend_needs_only_write(tmp_path):
-    """Unlike OWNER TO, suspending borrows nobody's authority - anyone who may
-    replace the view's contents may stop them being replaced automatically."""
-    register_workspace("ws", LocalStoreConnector, store_root=str(tmp_path))
-    writer = opteryx.session(user="wendy", access_policies=[{"pattern": "*", "role": "writer"}])
-    _seed_view(writer)
-
-    list(writer.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv SUSPEND"))
-    assert _record(tmp_path)["suspended-by"] == "wendy"
 
 
 def test_pause_is_not_the_keyword(tmp_path):

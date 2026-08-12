@@ -16,9 +16,10 @@
 """
 Insert Node
 
-Streaming sink: consumes morsels from a child sub-plan, writes one parquet
-file per morsel into the target relation's folder, then commits a single
-snapshot when EOS is received.
+Streaming sink: consumes morsels from a child sub-plan, coalesces them up to
+`write_coalesce_rows` (capped at one Parquet row group) before writing each
+batch as a single file into the target relation's folder, then commits a
+single snapshot when EOS is received.
 """
 
 from typing import Generator, Optional
@@ -28,7 +29,15 @@ from opteryx.constants import QueryStatus
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
-# BasePlanNode in scope via _operators.pyx include.
+# BasePlanNode and Morsel in scope via _operators.pyx include (the latter
+# cimported there from draken.morsels.morsel).
+
+# rugo's write_parquet_with_bounds default (rugo/parquet.py) - the coalescing
+# buffer below is capped here so a flushed file never spans more than one row
+# group. That path only populates FileEntry bounds for single-row-group files,
+# so staying within one row group keeps catalog pruning working unchanged.
+# Move this together with rugo's default if that ever changes.
+_MAX_ROWS_PER_ROW_GROUP = 262144
 
 
 class InsertNode(BasePlanNode):
@@ -63,6 +72,19 @@ class InsertNode(BasePlanNode):
         self._total_rows = 0
         self.result: Optional[NonTabularResult] = None
 
+        # Coalescing buffer: collects references to arriving morsels (no data
+        # movement) until the next one would push the pending row count past
+        # the ceiling, then merges the WHOLE pending list in one bulk concat
+        # pass (Morsel.combine) and writes that as a single file. Never concats
+        # a morsel into a live accumulator on arrival - that re-copies the
+        # growing buffer every time (O(n^2) over its lifetime).
+        self.coalesce_rows = min(
+            int(parameters.get("write_coalesce_rows", _MAX_ROWS_PER_ROW_GROUP)),
+            _MAX_ROWS_PER_ROW_GROUP,
+        )
+        self._pending = []
+        self._pending_rows = 0
+
     @property
     def name(self):
         return "Insert"
@@ -92,6 +114,7 @@ class InsertNode(BasePlanNode):
             return
 
         if morsel is _EOS_SENTINEL:
+            self._flush_pending()
             # All files are durably written before any catalog mutation - a
             # mid-query failure above this point leaves the target relation
             # completely untouched, whether this is a fresh create or a replace.
@@ -142,9 +165,28 @@ class InsertNode(BasePlanNode):
         if self.column_mapping is not None and self.target_column_names is not None:
             morsel = self._align_morsel(morsel)
 
-        file_entry = self.connector.write_morsel(self.relation_name, morsel)
+        cdef Py_ssize_t n = len(morsel)
+        if self._pending and self._pending_rows + n > self.coalesce_rows:
+            self._flush_pending()
+        self._pending.append(morsel)
+        self._pending_rows += n
+        self._total_rows += n
+
+    def _flush_pending(self):
+        """Merge and write whatever morsels have been collected since the last
+        flush, as a single file.
+
+        The pending list holds references only - this is the ONE bulk concat
+        pass over the whole list (Morsel.combine), not an incremental concat
+        per arrival.
+        """
+        if not self._pending:
+            return
+        merged = Morsel.combine(self._pending)
+        file_entry = self.connector.write_morsel(self.relation_name, merged)
         self._file_entries.append(file_entry)
-        self._total_rows += len(morsel)
+        self._pending = []
+        self._pending_rows = 0
 
     def _align_morsel(self, morsel):
         """Reorder columns to target-schema order and rename to target names.

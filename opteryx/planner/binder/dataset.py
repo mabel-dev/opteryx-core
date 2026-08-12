@@ -1180,6 +1180,16 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # view entirely.
     if not getattr(node.connector, "self_governs_permissions", False):
         if not can_perform_action(context.execution_context, node.relation, action="READ"):
+            # A view is expanded before it reaches here, so the relation being
+            # refused can be one the caller never wrote. Name the view they did
+            # write, or the refusal reads as being about a table they have never
+            # heard of - see relation_resolver, which stamps `via_view`.
+            via_view = getattr(node, "via_view", None)
+            if via_view:
+                raise PermissionError(
+                    f"View {via_view} reads {node.relation}, which the user does not "
+                    "have permission to read"
+                )
             raise PermissionError(f"User does not have permission to read {node.relation}")
 
     # SHOW MANIFEST FOR exposes file paths/layout, not just data — stricter

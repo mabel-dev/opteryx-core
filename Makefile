@@ -359,7 +359,7 @@ tpch-skene: ## Run TPC-H benchmark on the skene mirror of the dataset (generates
 	@# codec until then, so the mirror was written uncompressed — 8.2 GB from
 	@# 2.8 GB of parquet — and the TPC-H skene number was quoted against a
 	@# dataset in the spill posture rather than the stored one.
-	@test -f testdata/tpch_10_skene.rg16 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene zstd 7 && touch testdata/tpch_10_skene.rg16; }
+	@test -f testdata/tpch_10_skene.rg16 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene lz4 && touch testdata/tpch_10_skene.rg16; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --variant skene
 
@@ -381,7 +381,7 @@ clickbench:
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py
 
-clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, zstd-7, from scratch/hits_rugo_262k on first run)
+clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generates scratch/hits_skene, lz4 (performance posture), from scratch/hits_rugo_262k on first run)
 	$(call print_blue,"Running ClickBench benchmark on skene...")
 	@# Gate on a completion stamp, not on the directory: an interrupted conversion
 	@# leaves a partial tree that `test -d` would accept, silently benchmarking a
@@ -389,26 +389,36 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@# never trip the single-format manifest check. Re-running the converter over
 	@# an existing tree is idempotent (deterministic output filenames).
 	@#
-	@# The `zstd 7` arguments are NOT optional. zstd-7 is the reference storage
-	@# posture (architect, 2026-08-11 — WriteOptions::for_storage), so the mirror
-	@# this rebuilds must be the mirror the benchmark is quoted against. Dropping
-	@# them rebuilds an UNCOMPRESSED mirror into the same path, and nothing
-	@# downstream would say so — the suite would simply report a different number
-	@# for a dataset nobody knew had changed.
+	@# The `lz4` argument is NOT optional, and it is NOT what a deployed dataset
+	@# uses. It is WriteOptions::for_fast_reads — the LOCAL BENCHMARK posture.
+	@# Dropping it rebuilds an UNCOMPRESSED mirror into the same path and nothing
+	@# downstream would say so; the suite would report a different number for a
+	@# dataset nobody knew had changed.
 	@#
-	@# This was `lz4` until 2026-08-11. LZ4 lost on the axis that decides: the
-	@# REMOTE path. At the ~64 MB/s production GCS ceiling zstd wins every
-	@# compressible shape by 1.3-5.0x on total time, and LZ4 cannot use spare
-	@# cores to close the gap — measured at 0.93-1.03x scaling across 6 x86 cores
-	@# against zstd's 2.4-4.6x, because LZ4 is already at the memory bandwidth
-	@# ceiling on one thread (dev/codec_parallel_scaling.cpp).
+	@# ⛔ THE PARQUET/SKENE CODEC GAP IS INTENTIONAL. The parquet corpora are
+	@# written in the STORAGE posture (zstd, per-type level, 95% keep floor) and
+	@# these skene mirrors in the PERFORMANCE posture (lz4). That asymmetry is a
+	@# deliberate decision (architect, 2026-08-11), not drift:
+	@#
+	@#   - Deployed data is read REMOTELY, where bytes dominate. At ~64 MB/s
+	@#     achieved on the 1 Gbps Cloud Run link, zstd-7 beats lz4 by 1.39x on
+	@#     total time, and lz4 only overtakes it above ~1.25 GB/s (10 Gbps) —
+	@#     an order of magnitude away. So deployed data takes for_storage().
+	@#   - These mirrors are read LOCALLY off NVMe, where the pipe is not the
+	@#     bottleneck and decompression is pure cost. Measured on TPC-H SF10,
+	@#     interleaved, min of 3: lz4 6041ms vs zstd-7 7153ms — 1.1s, 16%.
+	@#
+	@# ⛔ Because of that split, a skene number here and a parquet number from
+	@# `make tpch` / `make clickbench` are NOT a like-for-like format comparison:
+	@# they are different codecs by design. Comparing them measures the codec
+	@# choice as much as the format. Say which posture any quoted figure came from.
 	@#
 	@# The stamp is named for the LAYOUT (rg16 = 16 row groups per file), not
 	@# just for "converted". A mirror written before row groups were packed into
 	@# files is a different set of objects under different names, so the old
 	@# stamp must not satisfy this gate and the old tree must go — otherwise the
 	@# converter refuses and the benchmark never runs.
-	@test -f scratch/hits_skene.rg16 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene zstd 7 && touch scratch/hits_skene.rg16; }
+	@test -f scratch/hits_skene.rg16 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.rg16; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene

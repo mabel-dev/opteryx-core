@@ -3,170 +3,163 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from fnmatch import fnmatch
-from typing import Iterable
+"""The permissions capability - what a session may do, and who decides it.
+
+The engine's intrinsic answer is that everything is allowed. Opteryx on its
+own has no workspaces to own, no identities to grant to, and no policy service
+to have issued anything: a CLI or embedded session reads what it can reach.
+Access control is a property of a DEPLOYMENT, not of a query engine, so the
+engine ships the permissive answer and nothing else.
+
+A deployment that does have those things registers a permissions capability
+over the intrinsic one:
+
+    import opteryx
+    import opteryx_access
+
+    opteryx.register_permissions_capability(opteryx_access.capability())
+
+Registration is the ONLY sanctioned way to change what a permission check
+means. There is no capability sniffing on the check path and no fallback:
+whatever is registered when a query binds is what decides it.
+
+A capability answers three questions:
+
+    can_perform_action(execution_context, resource, action) -> bool
+    can_perform_workspace_action(execution_context, workspace, action) -> bool
+    grants(identity, policies) -> list[dict]
+
+The first two are the gates the binder and `information_schema` call. The
+third backs `SHOW GRANTS` ($grants), so that what is reported and what is
+enforced come from one place and cannot drift into disagreeing.
+
+Returning `False` is how a capability denies; the callers turn that into the
+refusal their layer reports. A capability may raise instead when it cannot
+decide at all - a malformed policy, an unreachable policy store - and that
+error is deliberately not caught here: an access check that failed to run is
+not the same as one that ran and said no, and must never be flattened into it.
+"""
+
+from typing import Any
+from typing import Dict
 from typing import List
 
-from opteryx.exceptions import PermissionsError, md_syntax, md_table
-from opteryx.models import ExecutionContext
+from opteryx.exceptions import InvalidConfigurationError
 
-ACTION_MAP = {
-    "READ": {"reader", "writer", "owner"},
-    "DELETE": {"writer", "owner"},
-    "WRITE": {"writer", "owner"},
-    "UPDATE": {"writer", "owner"},
-    # Creating a brand-new relation risks nothing existing; a writer may do it.
-    "CREATE": {"writer", "owner"},
-    # Rebuilding a materialized view from its own stored definition. Mechanically
-    # it is a CREATE OR REPLACE, but the decision to have this relation at all
-    # was taken - and authorized - when the view was created, and its contents
-    # are derived rather than authored. So a refresh is a writer-tier act, not
-    # the owner-tier one that replacing a hand-written table is. Without this
-    # tier a writer could create a materialized view that only an owner could
-    # ever keep fresh, which is exactly the trap REFRESH MATERIALIZED VIEW
-    # exists to avoid.
-    "REFRESH": {"writer", "owner"},
-    # Dropping a relation destroys it and its history; a writer may change a
-    # relation's contents but only an owner may remove the relation itself.
-    # CREATE OR REPLACE on an existing relation reuses this tier: it has the
-    # same blast radius as DROP (the old relation's data/history is gone).
-    "DROP": {"owner"},
-    # ALTER changes a relation's physical layout (e.g. CLUSTER BY) rather than
-    # its contents — same tier as DROP: a writer may change what's in a
-    # relation, but only an owner may change what the relation fundamentally is.
-    "ALTER": {"owner"},
-    # SHOW MANIFEST FOR exposes file paths and layout (bucket/partition
-    # structure), not just data — stricter than a normal READ.
-    "MANIFEST": {"owner"},
-}
+__all__ = (
+    "active_permissions_capability",
+    "can_perform_action",
+    "can_perform_workspace_action",
+    "register_permissions_capability",
+)
+
+# The members a capability must provide. Checked once, at registration, so a
+# capability missing one is reported when it is installed rather than when the
+# first query happens to reach that gate.
+_REQUIRED_MEMBERS = ("can_perform_action", "can_perform_workspace_action", "grants")
 
 
-def implicit_policies(username: str) -> List[dict]:
-    """The grants every session holds without a policy being issued for them.
+class PermitAll:
+    """The intrinsic capability: every action on every resource is allowed.
 
-    These are hard-coded in the ENGINE, not handed over by the policy service,
-    so they never appear in `execution_context.access_policies`. This is the
-    SINGLE declaration of them: `can_perform_action` enforces this list and
-    `SHOW GRANTS` ($grants) reports it, so the two cannot drift into disagreeing
-    about what a caller holds.
-
-    Returned in the policy dict shape the issued policies use, and in the order
-    they are evaluated. Every pattern is `<namespace>.*` — see
-    `can_perform_action` for why the `*` is matched as a literal prefix rather
-    than a glob.
-
-    An anonymous session (no username) holds no personal namespace: there is no
-    `personal.<nobody>` for it to own.
+    Not a placeholder for a "real" implementation - this is the correct answer
+    for an engine with no deployment around it. It is also the reason there is
+    no None state to test for: a capability is always installed.
     """
-    policies = []
-    if username:
-        policies.append({"pattern": f"personal.{username}.*", "role": "owner"})
-    policies.append({"pattern": "public.*", "role": "reader"})
-    return policies
+
+    name = "permit-all"
+
+    def can_perform_action(self, execution_context, resource: str, action: str) -> bool:
+        return True
+
+    def can_perform_workspace_action(self, execution_context, workspace: str, action: str) -> bool:
+        return True
+
+    def grants(self, identity: str, policies: List[dict]) -> List[Dict[str, Any]]:
+        """One row saying so.
+
+        The session's issued policies are deliberately NOT reported here. With
+        no capability registered they decide nothing, and listing them would
+        describe a restriction that is not being applied - the one thing
+        `SHOW GRANTS` exists to be trusted about.
+        """
+        return [{"pattern": "*", "role": "*", "actions": "*"}]
 
 
-def can_perform_workspace_action(
-    execution_context: ExecutionContext, workspace: str, action: str = "ALTER"
-) -> bool:
-    """Check whether the session may perform a workspace-level action.
+_CORE = PermitAll()
 
-    This is deliberately not `can_perform_action`: that function reads a name
-    with no dots as a local table and short-circuits to READ-only, so a bare
-    workspace name can never clear it.
+_active = _CORE
 
-    A policy grants a workspace-level action when it covers the workspace in
-    full. "ws.*" is how ownership of the whole workspace is issued, so it
-    qualifies; so does a pattern matching the bare name ("ws", "*"). A policy
-    scoped to part of a workspace does not - "ws.coll.*" reduces to "ws.coll",
-    which is not the workspace, so it grants nothing at this level.
+# Set the first time a check is answered. A capability registered after that
+# would mean two queries in one process were decided by different rules, with
+# nothing in either result saying which - see `register_permissions_capability`.
+_consulted = False
 
-    Args:
-        execution_context (ExecutionContext): The execution context containing access policies.
-        workspace (str): The workspace name.
-        action (str): The action to check. Defaults to "ALTER".
 
-    Returns:
-        bool: True if any role can perform the action on the workspace, False otherwise.
+def register_permissions_capability(capability) -> None:
+    """Install `capability` as the one that decides permission checks.
+
+    Must be called before the first check is answered - typically at start-up,
+    alongside `set_default_connector`. Registering after a check has already
+    been decided raises, rather than silently changing the rules underneath a
+    process that has already let something through under the old ones.
+
+    Raises:
+        InvalidConfigurationError: if `capability` is missing a required
+            member, or if a check has already been answered.
     """
-    policies: Iterable[dict] = execution_context.access_policies
-    action_map = ACTION_MAP.get(action, set())
+    global _active
 
-    try:
-        for policy in policies:
-            pattern = policy.get("pattern", "")
-            role = policy.get("role", "reader")
-            if role not in action_map:
-                continue
-            # A trailing ".*" spans everything under the name it qualifies; drop
-            # it to ask what that name is. Anything else must match as written.
-            covered = pattern[:-2] if pattern.endswith(".*") else pattern
-            if fnmatch(workspace, covered):
-                return True
-        return False
-
-    except Exception as exc:
-        # On any error, deny access
-        from opteryx.logging import get_logger
-
-        get_logger().error(
-            f"Permission check failed for policies {policies} on workspace {workspace} with action {action}: {exc}"
-        )
-        raise PermissionsError(
-            f"This session is not permitted to {md_syntax(action)} the workspace "
-            f"{md_table(workspace)}."
+    missing = [member for member in _REQUIRED_MEMBERS if getattr(capability, member, None) is None]
+    if missing:
+        raise InvalidConfigurationError(
+            config_item="permissions_capability",
+            provided_value=type(capability).__name__,
+            valid_value_description=(
+                f"an object providing {', '.join(_REQUIRED_MEMBERS)} - this one is "
+                f"missing {', '.join(missing)}."
+            ),
         )
 
+    if _consulted:
+        # Queries already let through under the old rules cannot be recalled, and
+        # nothing in their results says which rules decided them. Refuse rather
+        # than let one process answer the same question two ways.
+        raise InvalidConfigurationError(
+            config_item="permissions_capability",
+            provided_value=type(capability).__name__,
+            valid_value_description=(
+                "a capability registered before any permission check is answered - this "
+                f"process has already decided one under {type(_active).__name__}. "
+                "Register the capability during startup, before running queries."
+            ),
+        )
 
-def can_perform_action(
-    execution_context: ExecutionContext, table: str, action: str = "READ"
-) -> bool:
-    """Check if any of the given roles can perform the action on the table.
+    _active = capability
 
-    Args:
-        execution_context (ExecutionContext): The execution context containing access policies.
-        table (str): The table to check.
-        action (str): The action to check. Defaults to "READ".
 
-    Returns:
-        bool: True if any role can perform the action on the table, False otherwise.
+def active_permissions_capability():
+    """The capability currently deciding checks. Never None - the core is always there."""
+    return _active
+
+
+def _capability():
+    """The active capability, marking it as having decided something."""
+    global _consulted
+    _consulted = True
+    return _active
+
+
+def can_perform_action(execution_context, table: str, action: str = "READ") -> bool:
+    """Whether this session may perform `action` on `table`."""
+    return _capability().can_perform_action(execution_context, table, action)
+
+
+def can_perform_workspace_action(execution_context, workspace: str, action: str = "ALTER") -> bool:
+    """Whether this session may perform `action` on `workspace` as a whole.
+
+    Deliberately separate from `can_perform_action`: a bare workspace name is
+    not a relation, and a grant over part of a workspace does not carry
+    authority over the workspace itself.
     """
-    if table.count(".") == 0:
-        return action == "READ"  # Local table, allow reading, nothing else
-
-    action_map = ACTION_MAP.get(action, set())
-
-    # The implicit grants CAP what they cover: a name inside `public.` or inside
-    # the caller's own `personal.` namespace is answered here and does NOT fall
-    # through to the issued policies. That short-circuit is what makes `public.`
-    # read-only for everyone regardless of what a policy says about it.
-    #
-    # The trailing `*` is stripped and the remainder matched as a literal
-    # prefix, not with fnmatch: fnmatch normalizes case per-platform (so the
-    # same policy would decide differently on macOS and Linux) and would treat
-    # glob metacharacters in a username as live, widening the namespace a
-    # caller owns.
-    for policy in implicit_policies(execution_context.user):
-        if table.startswith(policy["pattern"][:-1]):
-            return policy["role"] in action_map
-
-    policies: Iterable[dict] = execution_context.access_policies
-
-    try:
-        for policy in policies:
-            pattern = policy.get("pattern", "")
-            role = policy.get("role", "reader")
-            if role in action_map and fnmatch(table, pattern):
-                return True
-        return False
-
-    except Exception as exc:
-        # On any error, deny access
-        from opteryx.logging import get_logger
-
-        get_logger().error(
-            f"Permission check failed for policies {policies} on table {table} with action {action}: {exc}"
-        )
-        raise PermissionsError(
-            f"This session is not permitted to {md_syntax(action)} the table "
-            f"{md_table(table)}."
-        )
+    return _capability().can_perform_workspace_action(execution_context, workspace, action)

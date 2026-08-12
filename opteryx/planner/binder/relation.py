@@ -383,6 +383,35 @@ def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[
     return node, context
 
 
+def visit_optimize_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the OPTIMIZE node to determine which connector should handle
+    compacting the relation's data files.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support OPTIMIZE"
+        )
+
+    # OPTIMIZE rewrites files losslessly and declares no new structure - same
+    # trust tier as INSERT/UPDATE, not the owner-only tier ALTER TABLE uses.
+    if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to optimize table {node.relation_name}"
+        )
+
+    _reject_materialized_view_target(node, "**OPTIMIZE**")
+
+    node.columns = []
+    return node, context
+
+
 def _types_compatible(src, tgt) -> bool:
     """Permitted source→target type relationships for INSERT.
 
@@ -540,6 +569,11 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     if_not_exists = getattr(node, "if_not_exists", False)
     or_replace = getattr(node, "or_replace", False)
     is_materialized_view = getattr(node, "is_materialized_view", False)
+
+    # Bind-time capture, same reasoning as match_threshold: the InsertNode reads
+    # this once from its own parameters rather than the native write path
+    # touching session variables mid-execution.
+    node.write_coalesce_rows = context.execution_context.variables["write_coalesce_rows"]
 
     if is_materialized_view:
         # The MV target: writer tier. Creating a view is authoring derived data

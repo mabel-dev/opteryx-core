@@ -162,13 +162,33 @@ struct WriteOptions {
         return options;
     }
 
-    // Read-first stored data: the same acceleration, LZ4 instead of zstd.
+    // Read-first data: the same acceleration, LZ4 instead of zstd.
     //
     // Where `for_storage()` trades read latency for bytes, this trades bytes for
     // read latency — 4.49x against 7.34x, but decoding at 8414 MB/s against
     // 3078, which is close to the rate the reader's uncompressed path runs at on
-    // the same file. For a working set read far more often than it is written,
-    // and where the bytes still have to come down from somewhere.
+    // the same file. For a working set read far more often than it is written.
+    //
+    // ⭐ THIS IS ALSO THE LOCAL BENCHMARK POSTURE, and the reason there is no
+    // separate "performance" mode. Measured on the TPC-H SF10 mirror, three
+    // interleaved rounds, minimum of each (2026-08-11):
+    //
+    //     none      5823.8ms   7.8 GiB
+    //     lz4       6041.3ms   4.0 GiB     <- this posture
+    //     zstd-7    7153.0ms   2.7 GiB
+    //
+    // LZ4 and uncompressed OVERLAP across runs (6041-6232 against 5824-6250), so
+    // on a local read they are not distinguishable — but LZ4 is half the size.
+    // Uncompressed buys a further 3.7% for double the bytes, which is not a
+    // posture, it is a rounding error with a name. The marginal rates say the
+    // same thing: none->lz4 removes 18.8 MB per millisecond spent, lz4->zstd-7
+    // removes 1.25. LZ4 is the knee.
+    //
+    // ⛔ Which posture a corpus uses is a statement about where it is READ, not
+    // about what it contains. Deployed data is remote and takes for_storage();
+    // a local benchmark mirror takes this one. See the Makefile's
+    // clickbench-skene / tpch-skene targets, where that split is deliberate and
+    // the parquet corpora do NOT follow it.
     static WriteOptions for_fast_reads() {
         WriteOptions options;
         options.read_acceleration = true;

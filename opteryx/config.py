@@ -95,6 +95,15 @@ exact match; under a semantic capability (MiniLM) 0.5 separates related from unr
 text. Tune per embedder with `SET match_threshold`.
 """
 
+WRITE_COALESCE_ROWS: int = int(get("WRITE_COALESCE_ROWS", 262144))
+"""Row-count target the INSERT/CTAS/RMV sink coalesces small morsels up to
+before writing a Parquet file, cutting down the small-file count that a
+streaming per-morsel write would otherwise produce. Clamped in the sink to
+rugo's `max_rows_per_row_group` default (also 262144) so a flushed file never
+spans more than one row group - write_parquet_with_bounds only populates
+FileEntry bounds for single-row-group files, and this keeps that path
+unchanged. Tune per workload with `SET write_coalesce_rows`."""
+
 LIKE_SELECTIVITY_DECAY: float = float(get("LIKE_SELECTIVITY_DECAY", 0.7))
 """Geometric decay applied per-position when estimating infix `LIKE '%needle%'`
 selectivity from a column's char-class statistics (see

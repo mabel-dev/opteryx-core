@@ -1252,6 +1252,11 @@ cdef class Morsel:
         Native, buffer-level: each column's N nanobind vectors are concatenated
         by `vector_concat` directly on the underlying buffers — no per-row Python
         objects, no UTF-8 decode, type preserved exactly.
+
+        Raises ValueError if the morsels don't all share the same column names
+        in the same order. Callers guarantee schema uniformity; every column
+        read below is positional off the FIRST morsel's names, so a silent
+        mismatch would concat the wrong columns together rather than fail.
         """
         if not morsels:
             return _make_morsel()
@@ -1264,6 +1269,15 @@ cdef class Morsel:
         cdef list names = list(first.column_names)
         cdef Py_ssize_t ncols = len(names)
         cdef Py_ssize_t nmorsels = len(morsels)
+        cdef Py_ssize_t mi
+        cdef list other_names
+        for mi in range(1, nmorsels):
+            other_names = list((<Morsel>morsels[mi]).column_names)
+            if other_names != names:
+                raise ValueError(
+                    "Morsel.combine: all morsels must share one schema — "
+                    f"morsel 0 has columns {names!r}, morsel {mi} has {other_names!r}"
+                )
         cdef list out_vecs = []
         for col_idx in range(ncols):
             col_parts = [
