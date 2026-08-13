@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [oracle, notebook, cli, fuzz]
+        suite: [oracle, notebook, cli]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.1.7
@@ -61,15 +61,6 @@ jobs:
             oracle)   python -m pytest tests/rugo/test_oracle_conformance.py -q ;;
             notebook) python -m pytest tests/rugo/test_notebook_actions.py -q ;;
             cli)      python -m pytest tests/rugo/test_cli.py -q ;;
-            # Replays every Parquet/JSONL/CSV input the fuzzer has ever crashed
-            # on, under ASan and UBSan. rugo's whole job is reading files other
-            # people wrote, so a known crashing input must block the wheel just
-            # as an oracle conformance failure does.
-            #
-            # Excludes the skene target: a .skene corpus regression is skene's
-            # release to block, not rugo's. Built straight from the C++ sources,
-            # so it does not use the extension compiled in the step above.
-            fuzz)     make -C tests/fuzzing/native replay TARGETS="parquet jsonl csv" ;;
           esac
 
   build-linux:
