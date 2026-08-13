@@ -97,6 +97,7 @@ Table and catalog management.
 | `view_management` | `CREATE VIEW` | Create/drop views |
 | `table_management` | `CREATE TABLE` | Create/drop tables |
 | `show_columns` | `SHOW COLUMNS` | List columns |
+| `show_snapshots` | `SHOW SNAPSHOTS FOR` | List a relation's commit history |
 | `show_create` | `SHOW CREATE` | Show DDL |
 | `show_value` | `SHOW VARIABLE` | Read system variable |
 | `set_variable` | `SET VARIABLE` | Modify system variable |

@@ -39,6 +39,13 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
     output_columns = []
 
+    # Internal working columns a bare `*` must not expand into — today, the window
+    # columns QUALIFY appended so its Filter had something to read (see the QUALIFY
+    # hoist in logical_planner). They are minted, random per execution, and no reader
+    # named them; a wildcard expands the relations in scope, and the Window node's
+    # output relation is one of them, so without this they rode out to the caller.
+    hidden_columns = set(node.hidden_columns or ())
+
     for column in node.columns:
         if column.node_type == NodeType.WILDCARD:
             # Wildcard expansion — schema-driven. Each SCHEMA COLUMN produces exactly
@@ -83,6 +90,8 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                     if name == "$derived":
                         continue
                     for schema_col in schema.columns:
+                        if schema_col.name in hidden_columns:
+                            continue
                         if (schema_col.identity, schema_col.name) in seen_identities:
                             continue
                         output_columns.append(
@@ -125,6 +134,12 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     columns = []
     projected_column_count = 0
 
+    # Internal working columns a bare `*` must not expand into — see the note in
+    # visit_exit. A bare `SELECT *` builds no Project at all (see logical_planner),
+    # so this branch is reached only via `SELECT * EXCEPT (...)`, which leaks the
+    # same column by the same route.
+    hidden_columns = set(node.hidden_columns or ())
+
     # Handle wildcards, including qualified wildcards.
     for column in list(node.columns):
         if column.node_type != NodeType.WILDCARD:
@@ -136,6 +151,8 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
             for name, schema in list(context.schemas.items()):
                 for schema_column in schema.columns:
+                    if schema_column.name in hidden_columns:
+                        continue
                     if schema_column.name in except_columns:
                         except_columns.remove(schema_column.name)
                         continue
@@ -299,11 +316,20 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
             message=f"Query result contains multiple instances of the same column(s) - `{'`, `'.join(matches)}`"
         )
 
-    # Remove columns not being projected from the schemas, and remove empty schemas
+    # Remove columns not being projected from the schemas, and remove empty schemas.
+    #
+    # `retained_columns` are read STRUCTURALLY by an operator below rather than named
+    # by this projection — today, a CROSS JOIN UNNEST source, whose array lengths ARE
+    # the output row count. `SELECT 1 FROM t CROSS JOIN UNNEST(arr) AS v` projects a
+    # literal and references no column, so the plain top-level test drops `arr` and
+    # leaves the unnest with no source. Keeping them here only widens the schema; the
+    # `columns` list below is still built from top-level columns alone, so nothing
+    # extra is projected. See BindingContext.retained_columns.
+    keep_identities = all_top_level_identity_set | context.retained_columns
     columns = []
     for relation, schema in list(context.schemas.items()):
         schema_columns = [
-            column for column in schema.columns if column.identity in all_top_level_identity_set
+            column for column in schema.columns if column.identity in keep_identities
         ]
         if len(schema_columns) == 0:
             context.schemas.pop(relation)

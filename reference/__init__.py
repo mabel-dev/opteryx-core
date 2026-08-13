@@ -11,6 +11,8 @@ from .type_catalog import export_type_catalog
 from .type_catalog import write_type_catalog
 from .unary_ops_catalog import export_unary_ops_catalog
 from .unary_ops_catalog import write_unary_ops_catalog
+from .window_catalog import export_window_catalog
+from .window_catalog import write_window_catalog
 
 __all__ = [
     "export_aggregate_catalog",
@@ -19,6 +21,7 @@ __all__ = [
     "export_operator_catalog",
     "export_unary_ops_catalog",
     "export_type_catalog",
+    "export_window_catalog",
     "reexport_reference_catalogs",
     "write_aggregate_catalog",
     "write_clauses_catalog",
@@ -26,4 +29,5 @@ __all__ = [
     "write_operator_catalog",
     "write_unary_ops_catalog",
     "write_type_catalog",
+    "write_window_catalog",
 ]

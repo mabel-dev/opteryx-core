@@ -133,11 +133,18 @@ def _collect_scan_uuids(plan: LogicalPlan, root_id: str) -> List[str]:
 
 
 def _is_unconverted_cross_join(node: LogicalPlanNode) -> bool:
+    # A window join (`agg OVER ()`, window_to_join.py) is a cross join with no ON, so it
+    # matches everything below — but it is not one of the implicit `FROM a, b` joins this
+    # strategy exists to convert. Its right leg is a synthetic one-row aggregate, and its
+    # `left_relation_names` names only the source relation, not everything on that leg, so
+    # the relation-name bookkeeping here would be reasoning from a list that does not
+    # describe the join. Excluded by intent, not by accident.
     return (
         node.node_type == LogicalPlanStepType.Join
         and node.type == "cross join"
         and not getattr(node, "on", None)
         and not getattr(node, "using", None)
+        and not getattr(node, "is_window_join", False)
     )
 
 

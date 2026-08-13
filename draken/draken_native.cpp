@@ -6113,8 +6113,26 @@ static CxxMorsel cxx_take(const CxxMorsel& m, const int32_t* idx, uint32_t n) {
 // the flattened target (nothing above the unnest reads the raw array — and a
 // replicated ARRAY cannot pass a downstream gather_rows join/sort). When false the
 // target is APPENDED and the raw array survives, which `SELECT *` needs.
+//
+// `child_mask`: optional, one byte per LOGICAL child position (0 = drop the
+// element, non-zero = keep). NULL applies no filter, which is the shape every
+// caller had before pushed filters existed. This is a pushed WHERE on the
+// unnested column, and it is deliberately a MASK rather than a predicate: draken
+// stays predicate-agnostic, and the caller evaluates whatever it likes with
+// whatever kernels it likes (opteryx runs the same compiled bytecode the
+// standalone Filter would have run, so folding cannot change an answer).
+//
+// The mask is applied in pass 1, which is the entire point — a dropped element
+// never enters `child_idx` or `parent_idx`, so it is never flattened by
+// take_child and its parent row is never replicated for it. Filtering AFTER the
+// expansion cannot recover that: the copies are already built. Because
+// row-count semantics are element-count semantics (above), an element masked off
+// is indistinguishable from an element that was never in the array, and a parent
+// row whose every element is masked off contributes zero rows — the same INNER
+// rule a NULL or empty array already follows.
 static CxxMorsel cxx_unnest(const CxxMorsel& m, uint32_t array_idx,
-                            const std::string& target_name, bool drop_source) {
+                            const std::string& target_name, bool drop_source,
+                            const uint8_t* child_mask = nullptr) {
     const CxxColumn& arrcol = m.columns[array_idx];
     const DrakenVector& av = arrcol.view;
     const int32_t* offsets = static_cast<const int32_t*>(av.data);
@@ -6129,6 +6147,9 @@ static CxxMorsel cxx_unnest(const CxxMorsel& m, uint32_t array_idx,
         const int32_t start = offsets[sel_i];
         const int32_t end   = offsets[sel_i + 1u];
         for (int32_t j = start; j < end; ++j) {
+            // Pushed WHERE on the unnested column: skip the element BEFORE it is
+            // recorded, so neither it nor a copy of its parent row is ever built.
+            if (child_mask != nullptr && child_mask[j] == 0u) continue;
             parent_idx.push_back(static_cast<int32_t>(i));
             child_idx.push_back(j);
         }
@@ -6442,14 +6463,17 @@ extern "C" CxxMorsel* cxx_take_c(const CxxMorsel* m, const int32_t* idx, uint32_
 }
 // CROSS JOIN UNNEST (see cxx_unnest). array_idx is the ARRAY column to expand;
 // target_name is the identity (opaque bytes) of the flattened element column
-// appended after every replicated parent column. Caller owns the result and must
-// check num_rows(): a 0-row result means the batch produced no unnested rows.
+// appended after every replicated parent column. `child_mask` is an optional
+// pushed WHERE on the unnested column — one byte per logical child position,
+// NULL for no filter. Caller owns the result and must check num_rows(): a 0-row
+// result means the batch produced no unnested rows (which a mask that rejects
+// everything now also produces, and which the caller already drops).
 extern "C" CxxMorsel* cxx_unnest_c(const CxxMorsel* m, uint32_t array_idx,
                                    const char* target_name, uint32_t target_name_len,
-                                   int drop_source) {
+                                   int drop_source, const uint8_t* child_mask) {
     return new CxxMorsel(cxx_unnest(*m, array_idx,
                                     std::string(target_name, target_name_len),
-                                    drop_source != 0));
+                                    drop_source != 0, child_mask));
 }
 // CROSS JOIN UNNEST over a literal array (see cxx_unnest_literal). `vals` is the
 // plan-constant one-column morsel of literal elements. Caller owns the result.

@@ -73,6 +73,16 @@ struct ColumnStats {
   bool is_sorted = false;
   bool sort_descending = false;
   bool sort_nulls_first = false;
+
+  // True when the file's `created_by` identifies rugo as the writer (same gate
+  // as is_sorted above, kept rather than only consumed). The decoder needs the
+  // verdict, not just its side effect: a PLAIN page following dictionary pages
+  // is OUR writer's ratified cardinality decision on a rugo file and is honoured,
+  // but on a foreign file it is that writer's own budget — parquet-cpp overflows
+  // on a dictionary-PAGE BYTE cap, which long values blow through at low
+  // cardinality — so it carries no information about the encoding's value to us.
+  // See the byte_array branch in decode_column.cpp.
+  bool writer_is_rugo = false;
 };
 
 struct RowGroupStats {

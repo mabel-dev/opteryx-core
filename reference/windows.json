@@ -1,0 +1,176 @@
+{
+    "ranking_functions": {
+        "DENSE_RANK": {
+            "ast_symbol": "DENSE_RANK",
+            "friendly_name": "Dense Rank",
+            "category": "ranking",
+            "status": "supported",
+            "summary": "Ranks the rows of each window partition, tied rows sharing a rank and the next rank not skipping.",
+            "documentation": "1-based. Rows equal on the ORDER BY key share a rank and the following rank does not skip, so a two-way tie for first yields 1, 1, 2 - the ranks are contiguous. Ties are resolved by the ORDER BY key alone, so the answer does not depend on the order tied rows arrive in.",
+            "sql_forms": [
+                "DENSE_RANK() OVER (ORDER BY expr [ASC|DESC] [, ...])",
+                "DENSE_RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+            ],
+            "parameters": [],
+            "returns": "INTEGER",
+            "deterministic": true,
+            "window_spec": {
+                "over": "required",
+                "partition_by": "optional",
+                "order_by": "required",
+                "frame": "rejected"
+            }
+        },
+        "RANK": {
+            "ast_symbol": "RANK",
+            "friendly_name": "Rank",
+            "category": "ranking",
+            "status": "supported",
+            "summary": "Ranks the rows of each window partition, tied rows sharing a rank and the next rank skipping.",
+            "documentation": "1-based. Rows equal on the ORDER BY key share a rank, and the following rank skips the ties it jumped over, so a two-way tie for first yields 1, 1, 3. Ties are resolved by the ORDER BY key alone, so the answer does not depend on the order tied rows arrive in.",
+            "sql_forms": [
+                "RANK() OVER (ORDER BY expr [ASC|DESC] [, ...])",
+                "RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+            ],
+            "parameters": [],
+            "returns": "INTEGER",
+            "deterministic": true,
+            "window_spec": {
+                "over": "required",
+                "partition_by": "optional",
+                "order_by": "required",
+                "frame": "rejected"
+            }
+        },
+        "ROW_NUMBER": {
+            "ast_symbol": "ROW_NUMBER",
+            "friendly_name": "Row Number",
+            "category": "ranking",
+            "status": "supported",
+            "summary": "Numbers the rows of each window partition 1..n in the window's ORDER BY order.",
+            "documentation": "Every row in a partition gets a distinct number, so the numbering is a permutation of 1..n. Rows that tie on the ORDER BY key are numbered in an unspecified order: the result is only reproducible when the ORDER BY is a total order over the partition. The operator preserves input row order - SQL guarantees no ordering without a top-level ORDER BY, and preserving the input's is the least-surprising choice.",
+            "sql_forms": [
+                "ROW_NUMBER() OVER (ORDER BY expr [ASC|DESC] [, ...])",
+                "ROW_NUMBER() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+            ],
+            "parameters": [],
+            "returns": "INTEGER",
+            "deterministic": false,
+            "window_spec": {
+                "over": "required",
+                "partition_by": "optional",
+                "order_by": "required",
+                "frame": "rejected"
+            }
+        }
+    },
+    "aggregate_windows": {
+        "status": "supported",
+        "summary": "Compute an aggregate across a window of rows without collapsing them.",
+        "documentation": "`aggregate(expr) OVER ()` computes the aggregate across the whole result and repeats it on every row; `aggregate(expr) OVER (PARTITION BY ...)` computes it per partition. The result type is the aggregate's own - COUNT(*) OVER () is INTEGER, SUM(x) OVER (...) is SUM's type. An ORDER BY inside OVER (...) is REJECTED here, which is the opposite of the rule for the ranking functions, and there are no running or moving windows as a consequence.",
+        "sql_forms": [
+            "aggregate(expr) OVER ()",
+            "aggregate(expr) OVER (PARTITION BY expr [, ...])"
+        ],
+        "window_spec": {
+            "over": "required",
+            "partition_by": "optional",
+            "order_by": "rejected",
+            "frame": "rejected"
+        },
+        "support": {
+            "ANY_VALUE": {
+                "over_empty": false,
+                "over_partition_by": true
+            },
+            "APPROX_COUNT_DISTINCT": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "APPROX_PERCENTILE": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "ARRAY_AGG": {
+                "over_empty": false,
+                "over_partition_by": true
+            },
+            "AVG": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "CIDR_AGG": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "CORR": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "COUNT": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "COUNT_DISTINCT": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "MAX": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "MEDIAN": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "MIN": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "STDDEV": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "SUM": {
+                "over_empty": true,
+                "over_partition_by": true
+            }
+        }
+    },
+    "restrictions": {
+        "window_frames": {
+            "supported": false,
+            "clean_error": true,
+            "detail": "A frame specification (ROWS/RANGE BETWEEN) is rejected at plan time for both window forms."
+        },
+        "with_group_by": {
+            "supported": false,
+            "clean_error": true,
+            "detail": "A window function cannot appear in a statement that also has a GROUP BY; it is rejected at plan time."
+        },
+        "with_aggregate": {
+            "supported": false,
+            "clean_error": true,
+            "detail": "A window function cannot appear BESIDE a plain aggregate in the same statement - `SELECT COUNT(*), COUNT(*) OVER () FROM t` - and is rejected at plan time. A bare aggregate with no GROUP BY is still a group, and the Window step is planned UNDER the aggregate step, so the window would be computed over the rows the aggregate collapses and could never see the aggregated result. The aggregate need not be selected: one reached only through ORDER BY counts, as does a QUALIFY window beside a selected aggregate. Compute the aggregate in a subquery and apply the window to its result."
+        },
+        "aggregate_over_window": {
+            "supported": false,
+            "clean_error": true,
+            "detail": "A window function cannot appear inside an aggregate's ARGUMENT - `SUM(COUNT(*) OVER ())`, `MAX(ROW_NUMBER() OVER (ORDER BY id))` - and is rejected at plan time. Standard SQL forbids it outright, and the arrangement is the reverse of `with_aggregate` above, so the remedy is the reverse too: compute the WINDOW in a subquery and aggregate its result. It is the ancestry that is rejected, not adjacency, so the window may be only part of the argument (`SUM(mass + COUNT(*) OVER ())`) and the aggregate only part of the projection item. The same rule holds in QUALIFY."
+        },
+        "in_having": {
+            "supported": false,
+            "clean_error": true,
+            "detail": "A window function cannot appear in HAVING, and is rejected at plan time. This is the standard's rule, not a gap: HAVING filters GROUPS, and window functions are computed AFTER grouping and its filter, so the window's value does not exist yet when HAVING runs - there is no semantics to implement. Filter on a window function's output with QUALIFY instead. A ranking function is rejected there whether or not it carries an OVER, being window-only wherever it is written."
+        },
+        "nested_windows": {
+            "supported": false,
+            "clean_error": true,
+            "detail": "Window functions cannot be nested, and neither placement is accepted: not inside another window's ARGUMENT (`SUM(COUNT(*) OVER ()) OVER ()`) and not inside its OVER spec (`SUM(mass) OVER (PARTITION BY COUNT(*) OVER ())`, `ROW_NUMBER() OVER (ORDER BY COUNT(*) OVER ())`). Both are rejected at plan time. The legal way to write it is to CHAIN the windows across a subquery boundary, computing the inner one in a subquery and applying the outer one to its result - `SELECT SUM(x) OVER () FROM (SELECT COUNT(*) OVER () AS x FROM t) AS s`. Every combination of the two window forms runs, through a derived table or a CTE, and nests further than one level deep; each scope is rewritten as its own window chain, innermost first."
+        },
+        "nested_in_expression": {
+            "supported": true,
+            "detail": "A window function does not have to be a whole projection item - it may sit anywhere inside a larger expression, and both window forms may: `COUNT(*) OVER (PARTITION BY gravity) + 0`, `CAST(COUNT(*) OVER () AS VARCHAR)`, `ROW_NUMBER() OVER (ORDER BY mass) + 1`. The window is computed first and the rest of the expression is computed over its output, one row at a time, so the nested form answers exactly what the un-nested one does. Base columns may be named in the same expression (`mass / SUM(mass) OVER ()`) and several windows may appear in one expression, over the same spec or different ones. Placement is the SELECT list or QUALIFY; a window in ORDER BY or HAVING is not supported - see `in_having` above for why those two differ. The one enclosing expression it may NOT sit inside is an aggregate's argument, or another window's - see `aggregate_over_window` and `nested_windows` above."
+        }
+    }
+}

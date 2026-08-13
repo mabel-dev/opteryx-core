@@ -5,7 +5,7 @@
 
 from typing import List, Tuple
 
-from opteryx.expression import ExpressionColumn, NodeType
+from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import (
     _bound_cast_node,
@@ -653,6 +653,21 @@ def visit_unnest(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
 
         node.unnest_column, context = inner_binder(node.unnest_column, context)
         node.columns += [node.unnest_column]
+
+        # The source array must survive the bind-time schema narrowing even when no
+        # projection or aggregate names it. UNNEST reads it STRUCTURALLY — the output
+        # row count is the sum of its array lengths — so `SELECT COUNT(*) FROM t CROSS
+        # JOIN UNNEST(arr) AS v`, which references no column anywhere, still depends on
+        # it entirely. Without this the narrowing in aggregate.py/project.py dropped
+        # the column and the compiler refused the query outright ("a CROSS JOIN UNNEST
+        # source array the engine could not resolve here").
+        #
+        # Every identifier the source expression reads is retained, not just a bare
+        # column: the source can be computed (`UNNEST(SPLIT(s, ','))`), and it is `s`
+        # that has to reach the scan.
+        for identifier in get_all_nodes_of_type(node.unnest_column, (NodeType.IDENTIFIER,)):
+            if identifier.schema_column is not None:
+                context.retained_columns.add(identifier.schema_column.identity)
 
         # we can only UNNEST an ARRAY type column, we need to find it before we know its type
         if node.unnest_column.schema_column.category not in (

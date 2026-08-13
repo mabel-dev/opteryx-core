@@ -267,6 +267,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     cppvector[string] names)
         void add_limit(size_t p, int64_t offset, int64_t limit)
         void add_unnest(size_t p, uint32_t array_idx, string target_name, bint drop_source)
+        void add_unnest_filtered(size_t p, uint32_t array_idx, string target_name,
+                                 bint drop_source, void* instrs, int count,
+                                 cppvector[int] col_idx, cppvector[void*] lit_dv,
+                                 ExprEvalFn fn, bint distinct)
         void add_cidr_unnest(size_t p, uint32_t cidr_idx, string target_name, bint drop_source)
         void add_unnest_literal(size_t p, shared_ptr[CxxMorsel] lit, string target_name)
         void add_buffer_morsel(size_t buf, shared_ptr[CxxMorsel] m)
@@ -2590,6 +2594,53 @@ cdef class NativePlan:
                                   else (<str>target_name).encode("utf-8"))
         self._e.add_unnest(p, <uint32_t>array_idx, nm, drop_source)
 
+    def add_unnest_filtered(self, size_t p, size_t array_idx, target_name,
+                            bint drop_source, CompiledBytecode bc, list layout,
+                            bint distinct=False):
+        """CROSS JOIN UNNEST with a pushed WHERE and/or a pushed DISTINCT on the
+        unnested column. ``bc`` may be None when only DISTINCT is pushed.
+
+        ``distinct`` arms a PER-WORKER pre-reduction that skips an element whose value
+        this worker has already emitted. It does NOT replace the DISTINCT — the
+        compiler must leave the DistinctSink in place, because only the sink dedups
+        ACROSS workers. It is valid ONLY when the target is the sole column leaving
+        the unnest; with any other column present, two rows sharing a target value are
+        different rows and dropping one is a wrong answer.
+
+        Identical to ``add_unnest`` except that ``bc`` — a c-native BOOL-final
+        predicate — decides which ELEMENTS survive, evaluated over the array's child
+        vector BEFORE the expansion. Rows the predicate rejects are never built, which
+        is the whole point: an unnest explodes, and a filter above it pays for every
+        row it is about to discard.
+
+        ``layout`` must be the ONE-COLUMN layout ``[target_identity]`` the predicate
+        was resolved against — the child vector is presented to the program as that
+        single column. A predicate referencing anything else cannot be answered here
+        and the compiler must not fold it.
+
+        ``held`` keeps ``bc`` (and its instruction array and literal vectors) alive for
+        the Engine's whole run, exactly as ``add_expr_filter`` does."""
+        if bc is not None and not bytecode_is_c_native_predicate(bc):
+            raise ValueError("add_unnest_filtered requires a c-native "
+                             "bool-final program — the compiler must reject earlier")
+        if bc is None and not distinct:
+            raise ValueError("add_unnest_filtered with neither a predicate nor a "
+                             "pushed DISTINCT — the compiler must call add_unnest")
+        cdef string nm = <string>(target_name if isinstance(target_name, bytes)
+                                  else (<str>target_name).encode("utf-8"))
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
+        cdef void* instrs = NULL
+        cdef int count = 0
+        if bc is not None:
+            _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
+            self.held.append(bc)
+            instrs = <void*>bc.instrs
+            count = <int>bc.count
+        self._e.add_unnest_filtered(p, <uint32_t>array_idx, nm, drop_source,
+                                    instrs, count, col_idx, lit_dv,
+                                    _expr_eval_tramp, distinct)
+
     def add_cidr_unnest(self, size_t p, size_t cidr_idx, target_name, bint drop_source):
         """CROSS JOIN CIDR_UNNEST on pipeline ``p``: expand columns[cidr_idx] (text
         CIDR blocks) into one IPV4 row per address, under ``target_name``.
@@ -3132,6 +3183,7 @@ include "projection/projection.pyx"
 include "set_variable/set_variable.pyx"
 include "show_columns/show_columns.pyx"
 include "show_manifest/show_manifest.pyx"
+include "show_snapshots/show_snapshots.pyx"
 include "show_create/show_create.pyx"
 include "show_value/show_value.pyx"
 include "sort/sort.pyx"

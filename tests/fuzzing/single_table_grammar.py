@@ -627,10 +627,6 @@ class Relation:
 
     sql: str  # what goes after FROM
     columns: Tuple[Column, ...]
-    # True for a subquery or a CTE reference. An AGGREGATE window over a derived
-    # relation fails (single_table_known_gaps/aggregate-window-over-a-derived-table),
-    # so the generator needs to tell the two apart.
-    derived: bool = False
 
     def of(self, *types: Ty) -> List[Column]:
         wanted = set(types)
@@ -1643,13 +1639,7 @@ class SelectQuery:
         return self.limit is None and self.offset is None
 
 
-def build_select(
-    rng: random.Random,
-    relation: Relation,
-    names: Names,
-    *,
-    allow_aggregate_window: bool = True,
-) -> SelectQuery:
+def build_select(rng: random.Random, relation: Relation, names: Names) -> SelectQuery:
     """Generate one SELECT over `relation`."""
     generator = Generator(rng, relation, names)
     shape = rng.random()
@@ -1661,7 +1651,7 @@ def build_select(
     elif shape < 0.70:
         query = _build_distinct(generator, relation)
     elif shape < 0.85:
-        query = _build_window(generator, relation, allow_aggregate_window)
+        query = _build_window(generator, relation)
     else:
         query = _build_projection(generator, relation)
 
@@ -1851,9 +1841,7 @@ def _build_distinct(generator: Generator, relation: Relation) -> SelectQuery:
     )
 
 
-def _build_window(
-    generator: Generator, relation: Relation, allow_aggregate_window: bool = True
-) -> SelectQuery:
+def _build_window(generator: Generator, relation: Relation) -> SelectQuery:
     """A ranking or aggregate window.
 
     Only ROW_NUMBER / RANK / DENSE_RANK exist as ranking functions — LEAD, LAG,
@@ -1880,12 +1868,7 @@ def _build_window(
         outputs.append(column)
 
     alias = generator.names.next("w")
-    # Aggregate windows are withheld from CTE bodies and from anything reading a
-    # derived relation — both raise UnexpectedDatasetReferenceError, see
-    # single_table_known_gaps/aggregate-window-over-a-derived-table.
-    # Ranking windows are unaffected.
-    aggregate_window_ok = allow_aggregate_window and not relation.derived
-    ranking = True if not aggregate_window_ok else rng.random() < 0.6
+    ranking = rng.random() < 0.6
     qualify: Optional[str] = None
     if ranking:
         function = rng.choice(("ROW_NUMBER", "RANK", "DENSE_RANK"))
@@ -2025,8 +2008,8 @@ def generate(rng: random.Random, relation: Relation) -> Statement:
 
 
 def _wrap_cte(rng: random.Random, relation: Relation, names: Names) -> Statement:
-    inner = build_select(rng, relation, names, allow_aggregate_window=False)
-    derived = Relation(sql="cte_source", columns=_derived_columns(inner), derived=True)
+    inner = build_select(rng, relation, names)
+    derived = Relation(sql="cte_source", columns=_derived_columns(inner))
     outer = build_select(rng, derived, names)
     sql = f"WITH cte_source AS ({inner.sql}) {outer.sql}"
     return Statement(
@@ -2044,9 +2027,7 @@ def _wrap_cte(rng: random.Random, relation: Relation, names: Names) -> Statement
 
 def _wrap_subquery(rng: random.Random, relation: Relation, names: Names) -> Statement:
     inner = build_select(rng, relation, names)
-    derived = Relation(
-        sql=f"({inner.sql}) AS sub", columns=_derived_columns(inner), derived=True
-    )
+    derived = Relation(sql=f"({inner.sql}) AS sub", columns=_derived_columns(inner))
     outer = build_select(rng, derived, names)
     return Statement(
         sql=outer.sql,

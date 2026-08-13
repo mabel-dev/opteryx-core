@@ -1123,35 +1123,55 @@ VecResult fk_affix(void* ctx, const DrakenVector* const* args, uint32_t nargs,
         if (validity == nullptr) { draken_free(out); return draken_error_sentinel("allocation failed"); }
         std::memset(validity, 0xFF, nb > 0 ? nb : 1);
     }
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!fk_row_valid(v, i) || !fk_row_valid(p, i)) {
-            validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
-            continue;
-        }
-        const DrakenStringSlot* vs = &vsa->slots[v->selection[i]];
-        const DrakenStringSlot* ps = &psa->slots[p->selection[i]];
+    // One affix verdict for one (haystack slot, affix) pair. Extracted so the
+    // per-DISTINCT fast path below and the per-row path cannot drift apart — the
+    // failure mode of duplicating it is a shape-dependent WRONG ANSWER, which is
+    // exactly what §11 forbids of a fast path.
+    auto affix_hit = [&](const DrakenStringSlot* vs, const DrakenStringSlot* ps) -> bool {
         const uint8_t* hay = str_data(vs, vsa->arena);
         const uint8_t* aff = str_data(ps, psa->arena);
-        uint32_t hlen = str_length(vs), alen = str_length(ps);
-        bool hit = alen <= hlen;
-        if (hit) {
-            if (ci_utf8) {
-                // Codepoint-based: folded byte length isn't guaranteed equal to
-                // the source, so this can't reuse the fixed byte-offset `base`
-                // the ASCII/binary paths below rely on.
-                hit = suffix ? draken_utf8ci::ends_with(hay, hlen, aff, alen)
-                             : draken_utf8ci::starts_with(hay, hlen, aff, alen);
-            } else {
-                const uint8_t* base = suffix ? hay + (hlen - alen) : hay;
-                if (!ci) {
-                    hit = std::memcmp(base, aff, alen) == 0;
-                } else {
-                    for (uint32_t k = 0; k < alen; ++k)
-                        if (fk_ascii_lower(base[k]) != fk_ascii_lower(aff[k])) { hit = false; break; }
-                }
-            }
+        const uint32_t hlen = str_length(vs), alen = str_length(ps);
+        if (alen > hlen) return false;
+        if (ci_utf8) {
+            // Codepoint-based: folded byte length isn't guaranteed equal to
+            // the source, so this can't reuse the fixed byte-offset `base`
+            // the ASCII/binary paths below rely on.
+            return suffix ? draken_utf8ci::ends_with(hay, hlen, aff, alen)
+                          : draken_utf8ci::starts_with(hay, hlen, aff, alen);
         }
-        if (hit) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        const uint8_t* base = suffix ? hay + (hlen - alen) : hay;
+        if (!ci) return std::memcmp(base, aff, alen) == 0;
+        for (uint32_t k = 0; k < alen; ++k)
+            if (fk_ascii_lower(base[k]) != fk_ascii_lower(aff[k])) return false;
+        return true;
+    };
+
+    if (v->data_length < v->length && p->data_length == 1 && fk_row_valid(p, 0)) {
+        // Dict/constant haystack, constant affix: one verdict per DISTINCT slot,
+        // then scatter — data_length probes instead of length. Same gate and
+        // structure as draken_contains, which already had this; without it an
+        // ANCHORED match cost more than an unanchored one on the same column,
+        // which is backwards for a strictly cheaper test.
+        const DrakenStringSlot* ps = &psa->slots[p->selection[0]];
+        std::vector<uint8_t> uhit(v->data_length > 0 ? v->data_length : 1, 0);
+        for (uint32_t j = 0; j < v->data_length; ++j)
+            uhit[j] = affix_hit(&vsa->slots[j], ps) ? 1 : 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
+            if (uhit[v->selection[i]]) out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+    } else {
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!fk_row_valid(v, i) || !fk_row_valid(p, i)) {
+                validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;
+            }
+            if (affix_hit(&vsa->slots[v->selection[i]], &psa->slots[p->selection[i]]))
+                out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
     }
     VecResult r{};
     r.data = out; r.validity = validity; r.selection = draken_identity_sel(n);

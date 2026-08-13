@@ -68,31 +68,6 @@ _BUILD_SIDE_IS_RIGHT = ("left semi", "left anti")
 _COST_RATIO = 0.5
 
 
-def _subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
-    """
-    Extract the subtree feeding `root_nid` (inclusive) as a standalone plan.
-
-    The nodes are the SAME objects as in `plan` — `copy_sub_plan` deep-copies them
-    on the way out, so nothing here may be mutated before that happens.
-    """
-    sub = LogicalPlan()
-    seen: set = set()
-    stack = [root_nid]
-    while stack:
-        nid = stack.pop()
-        if nid in seen:
-            continue
-        seen.add(nid)
-        sub.add_node(nid, plan[nid])
-        for child, _target, _relation in plan.ingoing_edges(nid):
-            stack.append(child)
-    for nid in seen:
-        for child, _target, relation in plan.ingoing_edges(nid):
-            if child in seen:
-                sub.add_edge(child, nid, relation)
-    return sub
-
-
 def _is_restricted(plan: LogicalPlan) -> bool:
     """
     Is this subtree provably NARROWER than the relations it reads?
@@ -291,6 +266,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
     def _reduce_build_side(self, plan: LogicalPlan, join_nid: str) -> LogicalPlan:
         from opteryx.planner.relation_resolver import copy_sub_plan
         from opteryx.planner.relation_resolver import rename_relations
+        from opteryx.planner.relation_resolver import subplan_rooted_at
 
         join = plan[join_nid]
         in_edges = plan.ingoing_edges(join_nid)
@@ -349,7 +325,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
             key_relations.add(source_name)
         left_root = _narrowest_key_source(plan, left_root, key_relations)
 
-        source_subplan = _subplan_rooted_at(plan, left_root)
+        source_subplan = subplan_rooted_at(plan, left_root)
         if not _is_restricted(source_subplan):
             return plan
 
@@ -361,7 +337,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         # query measured SLOWER with the reducer than without it. Q04's source leg is
         # `orders` alone (15M against 60M) and measured 5.3x faster.
         source_cost = _scan_rows(source_subplan)
-        target_cost = _scan_rows(_subplan_rooted_at(plan, right_root))
+        target_cost = _scan_rows(subplan_rooted_at(plan, right_root))
         if source_cost is None or not target_cost:
             return plan
         if source_cost >= target_cost * _COST_RATIO:

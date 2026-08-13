@@ -28,8 +28,11 @@ from opteryx.planner.binder.view import (
     visit_show,
     visit_show_columns,
     visit_show_manifest,
+    visit_show_snapshots,
 )
 from opteryx.planner.binder.relation import (
+    visit_add_column,
+    visit_alter_column_type,
     visit_alter_materialized_view_owner,
     visit_alter_materialized_view_suspended,
     visit_alter_relation,
@@ -38,9 +41,11 @@ from opteryx.planner.binder.relation import (
     visit_create_collection,
     visit_create_relation,
     visit_drop_collection,
+    visit_drop_column,
     visit_drop_relation,
     visit_drop_trigger,
     visit_optimize_relation,
+    visit_rename_column,
     visit_rename_relation,
     visit_truncate_relation,
     visit_insert,
@@ -194,6 +199,11 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_show_manifest(self, node, context)
 
+    def visit_show_snapshots(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_show_snapshots(self, node, context)
+
     def visit_create_view(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -258,6 +268,26 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_rename_relation(self, node, context)
+
+    def visit_add_column(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_add_column(self, node, context)
+
+    def visit_drop_column(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_drop_column(self, node, context)
+
+    def visit_rename_column(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_rename_column(self, node, context)
+
+    def visit_alter_column_type(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_column_type(self, node, context)
 
     def visit_optimize_relation(
         self, node: Node, context: BindingContext

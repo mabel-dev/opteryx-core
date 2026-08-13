@@ -34,6 +34,7 @@ def _warn_no_native_sketches() -> None:
         )
 from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
+from opteryx.connectors.capabilities.writable import EgressRefusal
 from opteryx.connectors.manifest_disk_cache import CachingFileIO
 from opteryx.connectors.manifest_disk_cache import manifest_cache_tiers
 from opteryx.exceptions import (
@@ -290,6 +291,41 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
         self.dataset_committed_at = self.snapshot.timestamp_ms
         return self.schema
+
+    def get_snapshots(self) -> list:
+        """The relation's commit history, newest first, for `SHOW SNAPSHOTS FOR`.
+
+        Rows are the `opteryx.models.snapshot_history` shape, not the catalog's
+        `Snapshot` dataclass: normalizing HERE is what keeps that module free of
+        any opteryx_catalog import, so the statement's output shape is defined
+        once and a second connector with a commit log answers it by producing
+        the same dicts.
+
+        This reloads the dataset with `load_history=True` rather than reading
+        `self.table`, which was loaded without it and therefore carries only the
+        current snapshot - the same reload `_resolve_snapshot` performs for time
+        travel. It is a second catalog round trip and it is the statement's whole
+        result, so it is paid on this path only, never on a normal read.
+
+        Ordering is decided here, once: `snapshots_to_morsel` emits rows in the
+        order it receives them. Newest first, breaking ties on `snapshot_id` so
+        two commits sharing a millisecond do not order arbitrarily between runs.
+
+        Expired snapshots are absent - the catalog's loader tombstones them out
+        of the history it returns.
+        """
+        from opteryx.models.snapshot_history import normalize_snapshot
+
+        dataset = self.catalog.load_dataset(self.dataset, load_history=True)
+        snapshots = dataset.snapshots()
+        if not snapshots:
+            return []
+
+        current_snapshot_id = dataset.metadata.current_snapshot_id
+        ordered = sorted(
+            snapshots, key=lambda s: (s.timestamp_ms, s.snapshot_id), reverse=True
+        )
+        return [normalize_snapshot(s, current_snapshot_id) for s in ordered]
 
     def _resolve_snapshot(self) -> None:
         """Settle which snapshot this read sees, honouring time travel.
@@ -908,14 +944,16 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace_name)
         catalog.set_workspace_properties({property_name: value}, author=author)
 
-    def enforce_egress_policy(
+    def egress_verdict(
         self, target_relation: str, source_relations: "List[str]"
-    ) -> None:
-        """Refuse a write that would copy another workspace's data into this one.
+    ) -> "List[EgressRefusal]":
+        """Which workspaces refuse to let this write copy their data out.
 
         The catalog owns the decision (`egress_protection` on the SOURCE
         workspace, which is on unless explicitly turned off); this method's job
         is to turn relation names into the workspaces they live in and ask.
+        `enforce_egress_policy` is this plus a raise, inherited from `Writable`,
+        so the resolution below happens in one place for both shapes.
 
         Sources in the target's own workspace are dropped before asking: a copy
         that stays inside one workspace is not egress, and it is by far the
@@ -940,34 +978,35 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             if source_workspace not in source_workspaces:
                 source_workspaces.append(source_workspace)
         if not source_workspaces:
-            return
+            return []
 
         catalog = self._get_catalog(target_workspace)
 
-        # Fail closed on a catalog too old to hold the gate - both halves of it,
-        # the method and the exception it signals with. Silently skipping would
-        # turn a version skew into an unenforced security control, which is the
-        # one outcome worse than refusing a legitimate copy.
-        try:
-            from opteryx_catalog.exceptions import EgressRestricted
-        except ImportError:
-            EgressRestricted = None
-        enforce = getattr(catalog, "enforce_egress_policy", None)
-        if enforce is None or EgressRestricted is None:
+        # Fail closed on a catalog too old to hold the gate. Raising rather than
+        # returning no refusals: an empty verdict means "nothing objected", and
+        # a version skew is "nobody could be asked" - reporting the second as
+        # the first would turn it into an unenforced security control, the one
+        # outcome worse than refusing a legitimate copy.
+        verdict = getattr(catalog, "egress_verdict", None)
+        if verdict is None:
             raise EgressRestrictedError(
                 f"Cannot write {target_relation} from another workspace's data: this "
                 "deployment's opteryx-catalog is too old to evaluate egress protection. "
                 "Upgrade opteryx-catalog, or run the statement within one workspace."
             )
 
-        try:
-            enforce(
+        return [
+            EgressRefusal(
+                workspace=refusal.workspace,
+                remediation=refusal.remediation,
+                message=str(refusal),
+            )
+            for refusal in verdict(
                 source_workspaces,
                 target_workspace,
                 f"write {target_relation}",
             )
-        except EgressRestricted as exc:
-            raise EgressRestrictedError(str(exc)) from exc
+        ]
 
     def relation_exists(self, relation_name: str) -> bool:
         """Check whether a dataset exists in the catalog."""
@@ -1002,6 +1041,132 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
         schema = catalog.load_dataset(relative_id).schema()
         return [c.name for c in schema.columns]
+
+    def relation_column_types(self, relation_name: str):
+        """Return the dataset's current column name -> ColumnType mapping.
+
+        The catalog stores each column's type as the STRING `str(ColumnType)`
+        produces (`INT8`, `DECIMAL(10, 2)`, `TIMESTAMP[ms]`, `ARRAY<VARCHAR>`),
+        so it is parsed back here rather than read off the schema column - which
+        carries the spelling, not the object.
+        """
+        from opteryx.types.logical_type import parse_column_type
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        schema = catalog.load_dataset(relative_id).schema()
+        return {c.name: parse_column_type(c.type) for c in schema.columns}
+
+    def _alter_columns(self, relation_name: str, author: Optional[str], **changes) -> None:
+        """Rewrite every data file to a new column shape and commit it.
+
+        The catalog owns this end to end - it holds the storage IO, the manifest
+        writer and the snapshot commit, exactly as it does for `rename_relation`
+        and compaction. Doing the file half here instead would mean a second
+        implementation of the commit protocol living outside the catalog that
+        defines it.
+        """
+        from opteryx.exceptions import UnsupportedSyntaxError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        dataset = catalog.load_dataset(relative_id)
+
+        # Fail loudly on a catalog too old to carry column DDL, rather than
+        # letting a bare AttributeError out. Same posture as `egress_verdict`.
+        alter = getattr(dataset, "alter_columns", None)
+        if alter is None:
+            raise UnsupportedSyntaxError(
+                "Cannot change this relation's columns: this deployment's "
+                "opteryx-catalog is too old for column DDL. Upgrade opteryx-catalog."
+            )
+
+        alter(author=author, **changes)
+
+    def add_column(
+        self,
+        relation_name: str,
+        column_name: str,
+        column_type,
+        nullable: bool = True,
+        default=None,
+        if_not_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> None:
+        """Append a column, backfilling existing rows with `default` (NULL when
+        none was given).
+
+        `nullable` is carried into the schema but enforces nothing, and no
+        default is stored for later inserts to consult - a column DEFAULT here
+        is only the value written into the file for the rows that already
+        exist. See `Writable.add_column`.
+        """
+        from opteryx.connectors.capabilities.writable import build_column_donor
+
+        if if_not_exists and column_name in self.relation_column_names(relation_name):
+            return
+        self._alter_columns(
+            relation_name,
+            author,
+            add=[
+                {
+                    "name": column_name,
+                    "column_type": column_type,
+                    "donor": build_column_donor(column_name, column_type, default),
+                }
+            ],
+        )
+
+    def drop_column(
+        self,
+        relation_name: str,
+        column_name: str,
+        if_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> None:
+        """Remove a column without decoding the ones that stay."""
+        if if_exists and column_name not in self.relation_column_names(relation_name):
+            return
+        self._alter_columns(relation_name, author, drop=[column_name])
+
+    def rename_column(
+        self,
+        relation_name: str,
+        old_column_name: str,
+        new_column_name: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Rename a column, touching no data at all.
+
+        Unlike renaming the RELATION - which moves every byte so the storage
+        prefix keeps matching the name - this rewrites only each file's footer.
+        """
+        self._alter_columns(
+            relation_name, author, rename={old_column_name: new_column_name}
+        )
+
+    def alter_column_type(
+        self, relation_name: str, column_name: str, new_type, author: Optional[str] = None
+    ) -> None:
+        """Re-declare a column as a wider type.
+
+        The widening's legality was settled at bind time (`is_legal_widen`).
+        Most of the lattice costs nothing on disk - parquet has no physical
+        int8/int16, so INT8/INT16/INT32 all ride physical int32 - and only a
+        widening to INT64/UINT64 re-encodes, and then only that column.
+        """
+        from opteryx.connectors.capabilities.writable import build_column_donor
+
+        self._alter_columns(
+            relation_name,
+            author,
+            retype={
+                column_name: {
+                    "column_type": new_type,
+                    "donor": build_column_donor(column_name, new_type, None),
+                }
+            },
+        )
 
     def is_materialized_view(self, relation_name: str) -> bool:
         """Whether the dataset carries the catalog's materialized-view marker."""
@@ -1046,6 +1211,23 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 "MATERIALIZED VIEW."
             )
         return sql
+
+    def materialized_view_sources(self, relation_name: str) -> List[str]:
+        """The view's recorded sources, from the same record the definition comes from."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        from opteryx_catalog.exceptions import DatasetNotFound
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        try:
+            record = catalog.get_materialized_view(relative_id)
+        except (DatasetNotFound, MaterializedViewError) as exc:
+            raise ValueError(f"{relation_name} is not a materialized view") from exc
+
+        # The catalog spells this `source-tables`; the local store's sidecar
+        # spells it `source_tables`. Each store's own spelling, read here.
+        return list(record.get("source-tables") or [])
 
     def set_materialized_view_owner(
         self, relation_name: str, new_owner: str, author: str = None

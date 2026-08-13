@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 from typing import Dict
+from typing import Set
 
 from opteryx.managers.virtual_datasets import derived
 from opteryx.models import ExecutionContext
@@ -28,6 +29,13 @@ class BindingContext:
             (SHOW MANIFEST FOR). Not deep-copied like `schemas`: a Manifest
             holds native draken vector handles that read-only consumers share
             rather than clone.
+        snapshots: Dict[str, Any]
+            Bound commit histories, keyed by relation alias — populated by
+            visit_scan ONLY for a Scan the planner marked `for_snapshots_only`
+            (SHOW SNAPSHOTS FOR) and consumed by visit_show_snapshots. Unlike
+            `manifests`, an ordinary Scan leaves nothing here: a relation's
+            history is a second catalog round trip that no other statement
+            reads, so it is fetched where it is the answer and nowhere else.
         query_id: str
             Query ID.
         connection: ExecutionContext
@@ -69,7 +77,22 @@ class BindingContext:
     telemetry: QueryTelemetry
     outer_schemas: Dict[str, Any] = field(default_factory=dict)
     manifests: Dict[str, Any] = field(default_factory=dict)
+    snapshots: Dict[str, Any] = field(default_factory=dict)
     schema_only: bool = False
+    # Column identities that must survive the bind-time schema narrowing even though
+    # no SELECT / GROUP BY / aggregate operand names them.
+    #
+    # The narrowing in aggregate.py and project.py keeps only the columns the
+    # projection or aggregation references, which is right for every column whose
+    # only role is to be SELECTed. It is wrong for a column an OPERATOR reads
+    # structurally: `CROSS JOIN UNNEST(arr)` determines the ROW COUNT from `arr`, so
+    # `SELECT COUNT(*) FROM t CROSS JOIN UNNEST(arr) AS v` names no column at all and
+    # the narrowing dropped `arr` — leaving the compiler with an unnest whose source
+    # is not in the stream, which it correctly refused.
+    #
+    # Populated bottom-up (the binder visits the unnest before the aggregate above
+    # it), so by the time a narrowing site runs, every unnest beneath it is recorded.
+    retained_columns: Set[Any] = field(default_factory=set)
 
     @classmethod
     def initialize(
@@ -117,7 +140,9 @@ class BindingContext:
             # those being the same objects).
             outer_schemas=self.outer_schemas,
             manifests={k: v for k, v in self.manifests.items()},
+            snapshots={k: v for k, v in self.snapshots.items()},
             schema_only=self.schema_only,
+            retained_columns=set(self.retained_columns),
         )
 
     def open_correlated_scope(self) -> "BindingContext":

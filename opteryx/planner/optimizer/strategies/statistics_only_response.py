@@ -244,6 +244,17 @@ def is_statistics_only_query(logical_plan) -> bool:
             LogicalPlanStepType.Limit,
             LogicalPlanStepType.Order,
             LogicalPlanStepType.Join,
+            # A CROSS JOIN UNNEST is LogicalPlanStepType.Unnest, NOT .Join, so it
+            # slipped past the Join guard above. It must be listed in its own right:
+            # the answer to COUNT(*) over an unnest is the SUM OF THE ARRAY LENGTHS,
+            # which no manifest statistic records — the scan's row count is a
+            # different number entirely. The rewrite replaced the scan with a
+            # $no_table manifest count, which left the unnest with no source column
+            # and the query died as "a CROSS JOIN UNNEST source array the engine
+            # could not resolve here". The refusal was luck: the same rewrite over a
+            # plan that still resolved would have returned the PARENT row count as
+            # if it were the unnested one.
+            LogicalPlanStepType.Unnest,
             LogicalPlanStepType.Union,
         )
     ]
@@ -573,12 +584,15 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         return context
 
     def should_i_run(self, plan) -> bool:  # pragma: no cover - trivial
-        # Skip if there are Filter, Join, or AggregateAndGroup nodes present
+        # Skip if there are Filter, Join, Unnest, or AggregateAndGroup nodes present.
+        # Unnest for the reason given on the `unsupported_nodes` list above: it
+        # changes the row count to something no manifest statistic knows.
         killer_candidates = get_nodes_of_type_from_logical_plan(
             plan,
             (
                 LogicalPlanStepType.Filter,
                 LogicalPlanStepType.Join,
+                LogicalPlanStepType.Unnest,
                 LogicalPlanStepType.AggregateAndGroup,
             ),
         )

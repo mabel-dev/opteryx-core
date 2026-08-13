@@ -3,6 +3,7 @@
 
 from libc.stdint cimport uint8_t, uint32_t, int32_t, int64_t
 from libc.stddef cimport size_t
+from libcpp.pair cimport pair
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -96,3 +97,17 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
                            size_t rg_rows) except + nogil
         vector[uint8_t] take_pending() except + nogil
         vector[uint8_t] finish() except + nogil
+
+
+cdef extern from "_parquet_patch.hpp" namespace "rugo_pq_write":
+
+    # Rewrite a parquet file's shape by editing only its footer: surviving
+    # columns' encoded pages are copied byte-for-byte, never decoded. See
+    # _parquet_patch.hpp for why the source's own schema is the authority on
+    # the bytes being copied.
+    vector[uint8_t] PatchParquetColumnsByName(
+        const uint8_t* src, size_t src_len,
+        const vector[string]& drop,
+        const vector[pair[string, string]]& rename,
+        const vector[string]& add,
+        const vector[pair[string, string]]& retype) except + nogil

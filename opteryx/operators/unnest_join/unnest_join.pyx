@@ -48,6 +48,18 @@ cdef class UnnestJoinNode(BasePlanNode):
     cdef public object _unnest_target
     cdef public object _filters
     cdef public bint _distinct
+    # Predicates on the unnested column folded into this node by predicate_pushdown.
+    # A list of expression nodes, ANDed. DISTINCT from the legacy `_filters`, which
+    # was a list of literal VALUES for an IN test and which the compiler still
+    # refuses loudly — these are full expression nodes the compiler lowers to the
+    # same c-native bytecode a standalone FilterNode would have used, evaluated over
+    # the array's child vector before the fan-out.
+    cdef public object filter_conditions
+    # Set by distinct_pushdown when a DISTINCT above this node dedups on the target.
+    # An INTENT flag only — the compiler honours it just when the unnest emits the
+    # target alone, and never removes the Distinct node (the pre-reduction is
+    # per-worker; only the DistinctSink dedups across workers).
+    cdef public bint distinct_target
     # Identities still needed ABOVE this node (projection_pushdown liveness). The
     # plan compiler reads it to decide whether the consumed source ARRAY column may
     # be dropped from the unnest output. Empty = unknown -> keep everything.
@@ -73,6 +85,8 @@ cdef class UnnestJoinNode(BasePlanNode):
         self._unnest_target = parameters.get("unnest_target").schema_column
         self._filters = parameters.get("filters")
         self._distinct = parameters.get("distinct", False)
+        self.filter_conditions = parameters.get("filter_conditions") or []
+        self.distinct_target = parameters.get("distinct_target", False)
 
         # handle variation in how the unnested column is represented
         if self._unnest_column.node_type == NodeType.NESTED:

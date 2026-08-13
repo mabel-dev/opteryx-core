@@ -32,6 +32,7 @@ def main() -> None:
     from reference.type_catalog import write_type_catalog
     from reference.unary_ops_catalog import write_unary_ops_catalog
     from reference.variables_catalog import write_variables_catalog
+    from reference.window_catalog import write_window_catalog
 
     ref = _repo_root / "reference"
 
@@ -43,6 +44,7 @@ def main() -> None:
     write_type_catalog(ref / "types.json")
     write_unary_ops_catalog(ref / "unary_ops.json")
     write_variables_catalog(ref / "variables.json")
+    write_window_catalog(ref / "windows.json")
 
     print("All catalogs regenerated.")
 

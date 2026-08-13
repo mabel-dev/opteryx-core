@@ -15,6 +15,7 @@ if __package__ in {None, ""}:
     from reference.operator_catalog import write_operator_catalog
     from reference.type_catalog import write_type_catalog
     from reference.unary_ops_catalog import write_unary_ops_catalog
+    from reference.window_catalog import write_window_catalog
 else:
     from .signatures import write_function_signatures
     from .aggregate_catalog import write_aggregate_catalog
@@ -23,6 +24,7 @@ else:
     from .operator_catalog import write_operator_catalog
     from .type_catalog import write_type_catalog
     from .unary_ops_catalog import write_unary_ops_catalog
+    from .window_catalog import write_window_catalog
 
 
 def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str, Path]:
@@ -36,6 +38,7 @@ def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str
         "unary_ops": root / "reference/unary_ops.json",
         "types": root / "reference/types.json",
         "functions": root / "reference/function_signatures.json",
+        "windows": root / "reference/windows.json",
     }
 
     for output_path in output_paths.values():
@@ -48,13 +51,14 @@ def reexport_reference_catalogs(base_path: str | Path | None = None) -> dict[str
     write_unary_ops_catalog(output_paths["unary_ops"])
     write_type_catalog(output_paths["types"])
     write_function_signatures(output_paths["functions"])
+    write_window_catalog(output_paths["windows"])
 
     return output_paths
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Rewrite the generated aggregate, clause, join, operator, unary-op, type, and function catalogs."
+        description="Rewrite the generated aggregate, clause, join, operator, unary-op, type, function, and window catalogs."
     )
     parser.add_argument(
         "--base-path",

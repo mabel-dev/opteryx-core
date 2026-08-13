@@ -59,6 +59,16 @@ class RelationManagementNode(BasePlanNode):
         # ALTER ... RENAME TO
         self.new_relation_name: Optional[str] = parameters.get("new_relation_name")
 
+        # ADD / DROP / RENAME COLUMN, ALTER COLUMN ... TYPE
+        self.column_name: Optional[str] = parameters.get("column_name")
+        self.column_type = parameters.get("column_type")
+        self.column_nullable: bool = parameters.get("nullable", True)
+        self.column_default = parameters.get("default")
+        self.column_if_not_exists: bool = parameters.get("if_not_exists", False)
+        self.column_if_exists: bool = parameters.get("column_if_exists", False)
+        self.new_column_name: Optional[str] = parameters.get("new_column_name")
+        self.new_column_type = parameters.get("new_column_type")
+
         # DROP TRIGGER
         self.trigger_name: Optional[str] = parameters.get("trigger_name")
         self.table_name: Optional[str] = parameters.get("table_name")
@@ -92,6 +102,14 @@ class RelationManagementNode(BasePlanNode):
             return f"cluster {self.relation_name} by ({', '.join(self.cluster_columns or [])})"
         if self.action == "rename_relation":
             return f"rename {self.relation_name} to {self.new_relation_name}"
+        if self.action == "add_column":
+            return f"add column {self.column_name} to {self.relation_name}"
+        if self.action == "drop_column":
+            return f"drop column {self.column_name} from {self.relation_name}"
+        if self.action == "rename_column":
+            return f"rename column {self.column_name} to {self.new_column_name} on {self.relation_name}"
+        if self.action == "alter_column_type":
+            return f"alter column {self.column_name} on {self.relation_name} to {self.new_column_type}"
         if self.action == "optimize_relation":
             return f"optimize {self.relation_name}"
         if self.action == "alter_workspace":
@@ -221,6 +239,55 @@ class RelationManagementNode(BasePlanNode):
                 raise ValueError(f"relation already exists: {self.new_relation_name}")
             self.connector.rename_relation(
                 self.relation_name, self.new_relation_name, author=self._author
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "add_column":
+            if not self.connector.relation_exists(self.relation_name):
+                if self.if_exists:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            self.connector.add_column(
+                self.relation_name,
+                self.column_name,
+                self.column_type,
+                nullable=self.column_nullable,
+                default=self.column_default,
+                if_not_exists=self.column_if_not_exists,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_column":
+            if not self.connector.relation_exists(self.relation_name):
+                if self.if_exists:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            self.connector.drop_column(
+                self.relation_name,
+                self.column_name,
+                if_exists=self.column_if_exists,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "rename_column":
+            if not self.connector.relation_exists(self.relation_name):
+                if self.if_exists:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            self.connector.rename_column(
+                self.relation_name, self.column_name, self.new_column_name, author=self._author
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "alter_column_type":
+            if not self.connector.relation_exists(self.relation_name):
+                if self.if_exists:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            self.connector.alter_column_type(
+                self.relation_name, self.column_name, self.new_column_type, author=self._author
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 

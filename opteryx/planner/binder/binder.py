@@ -405,21 +405,35 @@ def merge_schemas(*schemas: Dict[str, RelationSchema]) -> Dict[str, RelationSche
 
     Returns:
         A merged dictionary containing RelationSchemas.
+
+    A relation holds each of its columns ONCE: two columns with the same identity are
+    the same column, so a repeated identity is added to the merged schema only the first
+    time it is seen. Callers merge one context PER BOUND COLUMN — `visit_project` does —
+    and appending blindly made every relation's schema grow by a factor of the projection
+    width at each Project. That is quadratic on its own (a 90-column SELECT over a
+    20-column relation left 1,800 schema columns for everything above it to scan), and it
+    was also a wrong ANSWER: a later qualified wildcard expands the schema it is given, so
+    `source.*` over a polluted schema emitted every source column many times over and the
+    parent Project rejected the query as ambiguous.
     """
     merged_dict: Dict[str, RelationSchema] = {}
+    identities: Dict[str, set] = {}
     for dic in schemas:
         # DEBUG: if type(dic) is not dict:
         # DEBUG:    raise InvalidInternalStateError("Internal Error - merge_schemas expected dicts")
         for key, value in dic.items():
             if key in merged_dict:
-                if type(value) is RelationSchema:
-                    merged_dict[key] += value
-                else:
+                if type(value) is not RelationSchema:
                     raise InvalidInternalStateError(
                         "Internal Error - merge_schemas expects schemas"
                     )
+                seen = identities[key]
+                new_columns = [column for column in value.columns if column.identity not in seen]
+                seen.update(column.identity for column in new_columns)
+                merged_dict[key].columns.extend(new_columns)
             else:
                 merged_dict[key] = _copy_relation_schema(value)
+                identities[key] = {column.identity for column in merged_dict[key].columns}
     return merged_dict
 
 

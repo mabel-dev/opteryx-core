@@ -227,14 +227,27 @@ def _try_extract_str_func(node) -> Optional[Tuple[str, str, Any]]:
 
     from opteryx.expression import NodeType
 
-    if node.node_type != NodeType.FUNCTION:
-        return None
     if node.value not in ("_STARTS_WITH", "_ENDS_WITH", "InStr"):
         return None
-    params = getattr(node, "parameters", None)
-    if not params or len(params) != 2:
+    # Two node shapes carry the same rewritten predicate, and BOTH have to be
+    # read here. The optimizer's LIKE rewrite emits a COMPARISON_OPERATOR with
+    # left/right (and `parameters` None); a FUNCTION node with two parameters is
+    # the other spelling. Matching only FUNCTION silently returned [] for every
+    # `col LIKE '%x%'`, which left `predicates` empty at the scan and so left the
+    # dictionary decode-skip (and the bloom decode-skip that shares the same
+    # `dict_preds_` guard) permanently disarmed — an optimization that looked
+    # wired end-to-end but could never fire.
+    if node.node_type == NodeType.FUNCTION:
+        params = getattr(node, "parameters", None)
+        if not params or len(params) != 2:
+            return None
+        col_node, pat_node = params[0], params[1]
+    elif node.node_type == NodeType.COMPARISON_OPERATOR:
+        col_node, pat_node = getattr(node, "left", None), getattr(node, "right", None)
+        if col_node is None or pat_node is None:
+            return None
+    else:
         return None
-    col_node, pat_node = params[0], params[1]
     if col_node.node_type != NodeType.IDENTIFIER or pat_node.node_type != NodeType.LITERAL:
         return None
     col_sc = getattr(col_node, "schema_column", None)

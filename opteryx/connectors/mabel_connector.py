@@ -222,7 +222,7 @@ class MabelTable(BaseTable, Diachronic):
             # name as typed, before its case-folding lowercase - use that
             # verbatim rather than the (already-lowercased) self.dataset.
             if original_relation is None:
-                raise InvalidInternalStateError(
+                raise DatasetReadError(
                     "MabelConnector was configured with preserve_sql_case=True but no "
                     "original_relation was supplied - the connector's requires_original_case "
                     "flag must be set for the binder to forward it (see MabelConnector.__init__)."
@@ -236,7 +236,7 @@ class MabelTable(BaseTable, Diachronic):
             # very likely wrong.
             resolved = case_map(self.dataset) if callable(case_map) else case_map.get(self.dataset)
             if resolved is None:
-                raise InvalidInternalStateError(
+                raise DatasetReadError(
                     f"No case mapping registered for dataset '{self.dataset}' - "
                     "MabelConnector was configured with a case_map but this dataset isn't in it."
                 )

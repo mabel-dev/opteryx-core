@@ -40,6 +40,7 @@ def _special_op_types():
     from opteryx.operators.set_variable import SetVariableNode
     from opteryx.operators.show_columns import ShowColumnsNode
     from opteryx.operators.show_manifest import ShowManifestNode
+    from opteryx.operators.show_snapshots import ShowSnapshotsNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
@@ -52,6 +53,7 @@ def _special_op_types():
         SetVariableNode,
         ShowColumnsNode,
         ShowManifestNode,
+        ShowSnapshotsNode,
         ShowCreateNode,
         ShowValueNode,
         TableManagementNode,
@@ -76,6 +78,7 @@ def execute(
     from opteryx.operators.set_variable import SetVariableNode
     from opteryx.operators.show_columns import ShowColumnsNode
     from opteryx.operators.show_manifest import ShowManifestNode
+    from opteryx.operators.show_snapshots import ShowSnapshotsNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
@@ -131,11 +134,14 @@ def execute(
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR
-    # SHOW COLUMNS/SHOW MANIFEST are answered entirely from what the binder
-    # already attached (binder/view.py's visit_show_columns/visit_show_manifest)
-    # — the Scan below either in the plan is never read. No pipeline, no native
-    # engine.
-    if isinstance(head_node, (ShowValueNode, ShowCreateNode, ShowColumnsNode, ShowManifestNode)):
+    # SHOW COLUMNS/MANIFEST/SNAPSHOTS are answered entirely from what the binder
+    # already attached (binder/view.py's visit_show_columns/visit_show_manifest/
+    # visit_show_snapshots) — the Scan below any of them in the plan is never
+    # read. No pipeline, no native engine.
+    if isinstance(
+        head_node,
+        (ShowValueNode, ShowCreateNode, ShowColumnsNode, ShowManifestNode, ShowSnapshotsNode),
+    ):
         return head_node(None), ResultType.TABULAR
 
     # serial_engine handles ONLY the special, non-pipeline operations above. A

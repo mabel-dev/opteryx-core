@@ -30,7 +30,7 @@ DATASET = Dataset.FULL_SPLIT
 # compared on the same queries, same machine, same iteration count.
 VARIANT_DATASETS = {
     "": DATASET,
-    "skene": Dataset.FULL_SPLIT_SKENE,
+    "skene": Dataset.FULL_SPLIT,
 }
 
 # fmt:off

@@ -64,6 +64,48 @@ def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
+def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind SHOW SNAPSHOTS FOR: consume the commit history the Scan below
+    already fetched (visit_scan populates context.snapshots for a
+    `for_snapshots_only` Scan, gated at READ — see dataset.py) and fix the
+    output to the history's own schema, never the scanned relation's column
+    schema, which is unrelated.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.models.snapshot_history import snapshots_output_schema
+
+    if context.schema_only:
+        # The history IS this statement's result, and a schema-only bind
+        # deliberately did not read one — the same reasoning as SHOW MANIFEST.
+        raise UnsupportedSyntaxError(
+            f"**SHOW SNAPSHOTS FOR** {node.relation} cannot be checked without reading "
+            "the relation's commit history, which is the statement's own result. "
+            "Run it to see it."
+        )
+
+    snapshots = context.snapshots.get(node.relation)
+    if snapshots is None:
+        # None is "this connector keeps no commit log", which is not the same
+        # answer as an empty list ("it does, and nothing has been committed").
+        raise UnsupportedSyntaxError(
+            f"'{node.relation}' has no snapshot history (its connector does not "
+            "keep a commit log)."
+        )
+    node.snapshots = snapshots
+    node.schema = snapshots_output_schema(node.relation)
+    node.schema.row_count_estimate = len(snapshots)
+    node.columns = []
+    for schema_column in node.schema.columns:
+        column_reference = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=schema_column.name,
+            source=node.relation,
+            schema_column=schema_column,
+        )
+        node.columns.append(column_reference)
+    return node, context
+
+
 def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind SHOW CREATE VIEW.
 

@@ -19,6 +19,7 @@ cimport cython
 
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t, int8_t, int16_t, int32_t, int64_t
 from libc.string cimport memcpy
+from libcpp.pair cimport pair
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -67,6 +68,7 @@ from parquet_writer cimport (
     ColumnStats,
     StrSlice,
     WriteParquet,
+    PatchParquetColumnsByName,
     StreamingParquetWriter,
     PT_INT32,
     PT_INT64,
@@ -1352,3 +1354,91 @@ def write_parquet_stream(morsel_iter, sink, str compression="zstd",
             writer.write_row_group(morsel)
             n += 1
     return n
+
+
+def patch_columns(bytes source not None, drop=None, rename=None, add=None,
+                  retype=None):
+    """Rewrite a parquet file's SHAPE without decoding the columns it keeps.
+
+    Drops, renames, adds and/or retypes columns, returning the new file's bytes.
+    Every untouched column's encoded pages are copied verbatim from `source` - not
+    decoded and re-encoded - so the result's pages are byte-identical to the
+    source's and the cost is proportional to file SIZE, not to the number of
+    values in it.
+
+    The source is never modified. Callers write the result to a new path and
+    commit it in a new snapshot, so older snapshots keep pointing at the bytes
+    they were written against.
+
+    Args:
+        source: the complete parquet file to patch
+        drop: column names to remove
+        rename: {old_name: new_name}
+        add: donor files, one per column to append. A donor is a complete
+            single-column, single-row parquet file - as produced by
+            ``write_parquet(one_row_morsel, compression="none",
+            dictionary=False, bloom_filters=False)`` - carrying the new
+            column's name and type, and holding the value every existing row
+            should be filled with. A null row means fill with NULL.
+
+            The donor exists so the added column is annotated by exactly the
+            code that writes that type normally; there is no second copy of the
+            Draken-to-parquet type mapping here to drift from it. Its single
+            value is repeated across the file as a one-entry dictionary (or, for
+            BOOLEAN/DECIMAL, a constant run), so an added column costs a few
+            bytes per row group however many rows the file holds.
+        retype: {column_name: donor} - re-declare an existing column as the
+            donor's type. Only the donor's ANNOTATION is used; its value is
+            ignored. When the target's parquet physical type matches what is
+            already stored (INT8/INT16/INT32 all ride physical int32, and
+            FLOAT32 is already written as float64) the pages are copied
+            verbatim and this costs exactly what a rename costs. When it
+            differs - only physical int32 to int64 is supported - that ONE
+            column is decoded and re-encoded and every other column is still
+            copied byte for byte.
+
+    Returns:
+        bytes: the patched parquet file
+
+    Raises:
+        RuntimeError: if a named column is absent, an added name collides,
+            dropping would leave no columns, a donor is not the single-column
+            single-row PLAIN uncompressed shape described above, a retype asks
+            for a physical change other than int32 to int64, or the source
+            uses a shape this cannot reproduce exactly (a nested LIST/STRUCT
+            column, or a logical type it would have to approximate). It refuses
+            rather than relabelling real data.
+    """
+    cdef vector[string] c_drop
+    cdef vector[pair[string, string]] c_rename
+    cdef vector[string] c_add
+    cdef vector[pair[string, string]] c_retype
+    cdef const uint8_t* src_ptr
+    cdef size_t src_len = len(source)
+    cdef vector[uint8_t] out
+
+    for name in (drop or ()):
+        c_drop.push_back(_to_std_string(name))
+    for old, new in dict(rename or {}).items():
+        c_rename.push_back(pair[string, string](_to_std_string(old),
+                                                _to_std_string(new)))
+    for donor in (add or ()):
+        if not isinstance(donor, bytes):
+            raise TypeError("patch_columns: each `add` donor must be parquet bytes")
+        c_add.push_back(string(<const char*><bytes>donor, len(<bytes>donor)))
+    for name, donor in dict(retype or {}).items():
+        if not isinstance(donor, bytes):
+            raise TypeError("patch_columns: each `retype` donor must be parquet bytes")
+        c_retype.push_back(pair[string, string](
+            _to_std_string(name),
+            string(<const char*><bytes>donor, len(<bytes>donor))))
+
+    if src_len == 0:
+        raise ValueError("patch_columns: source is empty")
+
+    src_ptr = <const uint8_t*><const char*>source
+    with nogil:
+        out = PatchParquetColumnsByName(src_ptr, src_len, c_drop, c_rename, c_add,
+                                        c_retype)
+
+    return PyBytes_FromStringAndSize(<const char*>out.data(), out.size())

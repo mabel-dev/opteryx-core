@@ -440,23 +440,6 @@ REGISTER: List[RegisteredDefect] = [
         ),
     ),
     RegisteredDefect(
-        id="aggregate-window-over-a-derived-table",
-        repro=(
-            "SELECT val, SUM(val) OVER (PARTITION BY val) AS w FROM "
-            "(SELECT val FROM testdata.fuzzing.wide) AS s"
-        ),
-        error_type="UnexpectedDatasetReferenceError",
-        signature="does not appear in a **FROM** or **JOIN**",
-        detail=(
-            "An AGGREGATE window over a derived table fails with an error naming the BASE "
-            "relation. The same shape with a CTE fails identically:\n"
-            "  WITH c AS (SELECT gravity, SUM(mass) OVER (PARTITION BY gravity) AS w\n"
-            "             FROM testdata.planets) SELECT gravity FROM c\n"
-            "A RANKING window (ROW_NUMBER/RANK/DENSE_RANK) in either position works, and an "
-            "aggregate window applied directly to a base table works."
-        ),
-    ),
-    RegisteredDefect(
         id="count-star-over-a-ranking-window-subquery",
         repro=(
             "SELECT COUNT(*) FROM (SELECT row_id, ROW_NUMBER() OVER (ORDER BY row_id) AS rn "
@@ -476,6 +459,76 @@ REGISTER: List[RegisteredDefect] = [
     # INTERNAL ERRORS REACHING THE CALLER — raw Python exceptions, and internal
     # mangled column names, escaping as the user-facing diagnostic.
     # ─────────────────────────────────────────────────────────────────────────
+    RegisteredDefect(
+        id="stacked-aggregate-windows-across-a-derived-boundary",
+        repro=(
+            "SELECT gravity, COUNT(w) OVER (PARTITION BY gravity) AS w2 FROM "
+            "(SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w "
+            "FROM testdata.planets) AS s"
+        ),
+        error_type="InvalidInternalStateError",
+        signature="an aggregate Window node was left below a window chain",
+        detail=(
+            "An aggregate window in BOTH an inner derived table and the query reading it "
+            "trips a plan-rewriter invariant. `_rewrite_window_chain` "
+            "(planner/plan_rewriter/strategies/window_to_join.py) refuses to proceed if any "
+            "aggregate Window node survives below the chain it is rewriting, on the stated "
+            "ground that 'the logical planner emits every aggregate Window node for one "
+            "SELECT as one unbroken stack'. That premise holds WITHIN a SELECT, but the "
+            "check is applied to the whole source sub-plan, which reaches THROUGH the "
+            "subquery boundary and finds the INNER select's Window node — a different "
+            "SELECT, legitimately below. The CTE spelling fails identically:\n"
+            "  WITH c AS (SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w\n"
+            "             FROM testdata.planets)\n"
+            "  SELECT gravity, COUNT(w) OVER (PARTITION BY gravity) AS w2 FROM c\n"
+            "A SINGLE aggregate window over a derived table is fine, and a ranking window in "
+            "either position is fine. It takes one aggregate window on each side.\n"
+            "\n"
+            "Found 2026-08-13, when `aggregate-window-over-a-derived-table` was deleted from "
+            "this register as fixed. THAT entry had been justifying two outright suppressions "
+            "in single_table_grammar.py — `Relation.derived` withheld aggregate windows from "
+            "anything reading a derived relation, and `allow_aggregate_window=False` withheld "
+            "them from CTE bodies — so this narrower shape had never been generated at all. "
+            "Both suppressions are gone and this entry replaces them, which is the whole point "
+            "of deleting a stale entry rather than leaving it to keep the generator blind."
+        ),
+    ),
+    RegisteredDefect(
+        id="aggregate-window-over-a-grouped-source-filtered-on-its-aggregate",
+        repro=(
+            "WITH c AS (SELECT name, COUNT(*) AS n FROM testdata.planets GROUP BY name) "
+            "SELECT n, MAX(n) OVER (PARTITION BY name) AS w FROM c WHERE n > 0"
+        ),
+        error_type="NotSupportedError",
+        signature="a join without labelled left/right legs",
+        detail=(
+            "An AGGREGATE window over a CTE or derived table whose body is a GROUP BY, where "
+            "the OUTER query filters on an aggregate OUTPUT column, is refused by the physical "
+            "compiler (`_unsupported` in managers/execution/compiler.py). The user wrote no "
+            "join at all: the only join in the plan is the one window_to_join.py builds for "
+            "the window, so it is that join whose legs are unlabelled — the same "
+            "`left_relation_names`-must-be-STATED class the OVER () work hit, reached by a "
+            "different route.\n"
+            "\n"
+            "ALL THREE INGREDIENTS ARE REQUIRED — each was checked separately and each alone "
+            "runs clean:\n"
+            "  * the source must be derived AND grouped. A derived source with no GROUP BY is "
+            "    fine; a base table is fine.\n"
+            "  * the predicate must be one that CANNOT push below the aggregate. The same "
+            "    query with `WHERE name != 'x'` (the group KEY) runs — that predicate pushes "
+            "    down and leaves nothing between the source and the Window node. Only a "
+            "    predicate on the aggregate output leaves a Filter stranded there.\n"
+            "  * the window must be an AGGREGATE window. The ranking spelling "
+            "    (`ROW_NUMBER() OVER (ORDER BY n)`) runs — it does not lower to a join. "
+            "    `MAX(n) OVER ()` fails the same way, so it is not about PARTITION BY.\n"
+            "\n"
+            "Found 2026-08-13 alongside "
+            "`stacked-aggregate-windows-across-a-derived-boundary`, by the same deletion of "
+            "the stale `aggregate-window-over-a-derived-table` entry and the two generator "
+            "suppressions it was justifying. Two distinct defects were hiding behind that one "
+            "suppression; this is the second."
+        ),
+    ),
     RegisteredDefect(
         id="time-bucket-non-integer-magnitude",
         repro=(

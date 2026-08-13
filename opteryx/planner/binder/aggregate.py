@@ -118,6 +118,11 @@ def visit_aggregate_and_group(
     node.columns = list(node.aggregates) + identifier_columns
     all_identifiers = [node.schema_column.identity for node in node.columns]
     columns_to_keep = columns_to_keep.union(all_identifiers)
+    # Columns an operator BELOW reads structurally rather than by name — today, a
+    # CROSS JOIN UNNEST source. `SELECT COUNT(*) FROM t CROSS JOIN UNNEST(arr) AS v`
+    # names no column, so without this the trim below drops `arr` and the unnest is
+    # left with no source. See BindingContext.retained_columns.
+    columns_to_keep = columns_to_keep.union(context.retained_columns)
 
     for name, schema in list(context.schemas.items()):
         schema_columns = [column for column in schema.columns if column.identity in columns_to_keep]

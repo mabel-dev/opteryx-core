@@ -203,6 +203,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.set_variable import SetVariableNode
     from opteryx.operators.show_columns import ShowColumnsNode
     from opteryx.operators.show_manifest import ShowManifestNode
+    from opteryx.operators.show_snapshots import ShowSnapshotsNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.sort import SortNode
@@ -426,6 +427,12 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         ShowManifestNode,
         name="Show Manifest",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowSnapshotsNode,
+        name="Show Snapshots",
         category=OperatorCategory.DDL,
         is_not_explained=True,
     )

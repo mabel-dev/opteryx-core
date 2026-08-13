@@ -46,6 +46,7 @@ __all__ = [
     "column_type_from_vector",
     "morsel_column_types",
     "find_compatible_type",
+    "is_legal_widen",
     "PYTHON_TO_SQL_MAP",
     "SQL_TO_PYTHON_MAP",
     "_CATEGORY_TO_CANONICAL",
@@ -815,6 +816,35 @@ def integer_bounds(column_type) -> Optional[tuple]:
     if column_type is None:
         return None
     return _INTEGER_BOUNDS.get(getattr(column_type, "physical", None))
+
+
+_SIGNED_INT_LADDER = (DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64)
+_UNSIGNED_INT_LADDER = (DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64)
+_FLOAT_LADDER = (DrakenType.FLOAT32, DrakenType.FLOAT64)
+
+
+def is_legal_widen(old: "ColumnType", new: "ColumnType") -> bool:
+    """Whether ALTER COLUMN ... TYPE from `old` to `new` is a safe, lossless widening.
+
+    Directional — unlike `find_compatible_type`, which blends N values to a common
+    supertype and deliberately falls back to VARCHAR for anything it doesn't
+    recognise. This never falls back: an unrecognised pair is illegal, not "coerce
+    to string". Legal only within one ladder — signed int, unsigned int, or float —
+    strictly widening. Everything else is rejected: integer->float (not exact
+    across the full range at the top of the ladder), any type carrying a `logical`
+    descriptor (DECIMAL/TIMESTAMP/TIME/VECTOR are a separate, not-yet-designed
+    lattice; IPV4 is a UINT32 descriptor, not a plain integer — widening it away
+    would silently drop the descriptor), VARCHAR/temporal involvement, and
+    `old == new` (a no-op ALTER has no reason to mint a new schema generation).
+    """
+    if old is None or new is None or old == new:
+        return False
+    if old.logical is not None or new.logical is not None:
+        return False
+    for ladder in (_SIGNED_INT_LADDER, _UNSIGNED_INT_LADDER, _FLOAT_LADDER):
+        if old.physical in ladder and new.physical in ladder:
+            return ladder.index(new.physical) > ladder.index(old.physical)
+    return False
 
 
 def find_compatible_type(types: list) -> Optional["ColumnType"]:

@@ -1218,7 +1218,35 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         # reads it, so a caller that stops at the end of binding pays for it and throws
         # it away. `node.manifest` stays None and every later stage that needs one is
         # unreachable from here - see BindingContext.schema_only.
-        if context.schema_only and getattr(node.connector, "get_dataset_schema", None) is not None:
+        if node.for_snapshots_only and not context.schema_only:
+            # SHOW SNAPSHOTS FOR: the commit history is the result. Neither the
+            # Manifest (binding's expensive half) nor the relation's own column
+            # schema is read — this Scan contributes the history and nothing
+            # else, so the schema it carries is the history's, which is also what
+            # the ShowSnapshots node above it emits.
+            #
+            # Reading the dataset schema here would not just be wasted work, it
+            # would be WRONG for a relation with nothing committed: resolving a
+            # schema needs a snapshot to resolve it against, and a relation that
+            # has never been written to has none. That is an empty history — the
+            # accurate answer to this statement — not a failure to read one.
+            #
+            # A schema_only bind falls through to the branch below instead and
+            # leaves `context.snapshots` empty; visit_show_snapshots then refuses
+            # rather than reporting an empty history, which would read as "this
+            # relation has never been written to".
+            from opteryx.models.snapshot_history import snapshots_output_schema
+
+            node.manifest = None
+            get_snapshots = getattr(node.connector, "get_snapshots", None)
+            # None (no commit log on this connector) is NOT an empty history, and
+            # visit_show_snapshots tells the two apart. Storing the absence keeps
+            # that distinction rather than flattening it to "no rows".
+            context.snapshots[node.alias] = (
+                None if get_snapshots is None else get_snapshots()
+            )
+            node.schema = snapshots_output_schema(node.alias)
+        elif context.schema_only and getattr(node.connector, "get_dataset_schema", None) is not None:
             node.schema = node.connector.get_dataset_schema()
             node.manifest = None
         elif getattr(node.connector, "get_dataset_metadata", None) is not None:

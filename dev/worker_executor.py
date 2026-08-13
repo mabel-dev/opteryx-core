@@ -1,3 +1,22 @@
+"""A local stand-in for the deployed worker: run one statement the way it does.
+
+Developer tooling, not a test — `dev/` is not packaged and is never imported by
+production code. It lived at `tests/integration/worker/test_worker.py`, where its
+`test_`-prefixed FILENAME got it collected by pytest even though it defines no tests.
+Collection IMPORTS every file it collects before running anything, so the
+`set_default_connector` call this once made at module scope pointed the whole session
+at the catalog and failed nine unrelated tests in other files. Both halves of that are
+fixed: the global now happens in `__main__` only, and the file no longer looks like a
+test.
+
+Run it directly:
+
+    python dev/worker_executor.py
+
+It needs the catalog credentials in `.env` (loaded when opteryx is imported) and the
+`opteryx-catalog` sibling repo checked out next to this one.
+"""
+
 from __future__ import annotations
 
 import datetime
@@ -7,18 +26,18 @@ import os
 import sys
 from typing import List, Tuple
 
-sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
-sys.path.insert(1, os.path.join(sys.path[0], "../../../../opteryx-catalog"))
-sys.path.insert(1, os.path.join(sys.path[0], "../../../../opteryx-catalog"))
+# The repo root, and the catalog sibling repo beside it. Anchored on __file__ rather
+# than sys.path[0], which is the CALLER's directory and not this file's.
+_DEV_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(1, os.path.join(_DEV_DIR, ".."))
+sys.path.insert(1, os.path.join(_DEV_DIR, "..", "..", "opteryx-catalog"))
 
 from opteryx.third_party import yyjson as orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 from draken.morsels.morsel import Morsel
-from opteryx_catalog import OpteryxCatalog
 
 import opteryx
-from opteryx.connectors import OpteryxConnector
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +46,32 @@ FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE")
 BUCKET_NAME = os.environ.get("GCS_BUCKET")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 
-opteryx.set_default_connector(
-    OpteryxConnector,
-    catalog=OpteryxCatalog,
-    firestore_project=GCP_PROJECT_ID,
-    firestore_database=FIRESTORE_DATABASE,
-    gcs_bucket=BUCKET_NAME,
-)
+
+def _point_default_connector_at_the_catalog() -> None:
+    """Route every unprefixed dataset name through the catalog, as the deployed worker does.
+
+    Called from __main__ ONLY, and that placement is the point — see the module docstring
+    for what it cost when it was not. `set_default_connector` is PROCESS-GLOBAL: it
+    catches every dataset whose name matches no registered prefix, so anything that
+    imports this module would inherit it. Code that needs the same global inside a test
+    must take it the way `tests/integration/test_catalog_gcs_scan.py` does — a fixture
+    that saves and restores the connector state around the tests that want it.
+
+    The `opteryx_catalog` import is deferred with it: the catalog is a sibling repo
+    rather than a dependency, and at module scope a machine without it checked out could
+    not import this file at all.
+    """
+    from opteryx_catalog import OpteryxCatalog
+
+    from opteryx.connectors import OpteryxConnector
+
+    opteryx.set_default_connector(
+        OpteryxConnector,
+        catalog=OpteryxCatalog,
+        firestore_project=GCP_PROJECT_ID,
+        firestore_database=FIRESTORE_DATABASE,
+        gcs_bucket=BUCKET_NAME,
+    )
 
 
 def _estimate_table_bytes(table: pa.Table) -> int:
@@ -251,6 +289,7 @@ def worker_executor(
 
 
 if __name__ == "__main__":
+    _point_default_connector_at_the_catalog()
     statement = create_statement(
         sql_text="SELECT 1",
         identity="test_statement_001",

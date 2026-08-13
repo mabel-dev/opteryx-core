@@ -152,7 +152,7 @@ def test_asof_basic_ltoreq_correctness():
 
 def test_asof_using_partition_row_count():
     # Partition by planetId so each satellite only matches quotes from same planet.
-    # Self-join $satellites using planetId, ASOF on id.
+    # Self-join testdata.satellites using planetId, ASOF on id.
     sql = """
         SELECT s.name, s2.name AS match_name
         FROM testdata.satellites AS s

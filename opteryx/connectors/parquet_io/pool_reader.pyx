@@ -2201,6 +2201,37 @@ cpdef NativeScanPlan open_native_scan_plan(
     # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
     plan.pipeline_ptr.set_hash_key_columns(plan.hash_key_columns)
     plan.pipeline_ptr.set_length_only_columns(plan.length_only_columns)
+    # Phase 2: pushed per-value predicates → worker dictionary decode-skip, mirroring
+    # `open_ipc_source`. Registration is what ARMS the mechanism: `dict_preds_` empty
+    # leaves BOTH guarded blocks in io_pipeline.hpp dead — the per-chunk dictionary
+    # probe AND the adjacent bloom decode-skip — so without this the native path
+    # decodes every data page even when no dictionary value can satisfy the
+    # predicate. Plan-time row-group pruning above does NOT cover this: min/max
+    # answers ranges and bloom answers equality, neither answers substring
+    # containment (kinds 2..4), which only the dictionary probe can decide.
+    # Same single-conjunct soundness assumption as that pruning.
+    # Registered here, after construction and before the Source issues any
+    # submit_row_group, per the C++ contract ("once per column before any submit").
+    cdef vector[int64_t] _int_v
+    cdef vector[string] _str_v
+    cdef int64_t _needle
+    cdef bytes _pat
+    if predicates:
+        int_needles, str_preds = _flatten_dict_skip_predicates(predicates)
+        for cname, needles in int_needles.items():
+            if needles and cname not in str_preds:
+                _int_v.clear()
+                for _needle in needles:
+                    _int_v.push_back(_needle)
+                plan.pipeline_ptr.add_int_needles(cname.encode('utf-8'), _int_v)
+        for cname in str_preds:
+            kind, pats = str_preds[cname]
+            if pats:
+                _str_v.clear()
+                for p in pats:
+                    _pat = p if isinstance(p, bytes) else str(p).encode('utf-8')
+                    _str_v.push_back(<string>_pat)
+                plan.pipeline_ptr.add_str_pred(cname.encode('utf-8'), <int>kind, _str_v)
     # A pool sink must be wired regardless — the decode worker's pool-path
     # (dk=0) branch expects one to exist even though this plan's Source never
     # routes a column there deliberately (it fails loud on dk=0 instead).

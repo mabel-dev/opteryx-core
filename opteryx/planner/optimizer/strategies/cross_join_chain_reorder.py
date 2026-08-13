@@ -60,11 +60,17 @@ def _identifier_source(node: Optional[Node]) -> Optional[str]:
 
 
 def _is_unconverted_cross_join(node: LogicalPlanNode) -> bool:
+    # A window join (`agg OVER ()`, window_to_join.py) is a cross join with no ON, so it
+    # matches everything below — but it is not part of a `FROM a, b, c` chain and must not
+    # be reordered into one. Its legs are labelled and its right leg is a synthetic one-row
+    # aggregate that the Project above the chain reads by alias; moving it changes which
+    # relation that Project is expanding. Excluded by intent, not by accident.
     return (
         node.node_type == LogicalPlanStepType.Join
         and node.type == "cross join"
         and not getattr(node, "on", None)
         and not getattr(node, "using", None)
+        and not getattr(node, "is_window_join", False)
     )
 
 

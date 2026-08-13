@@ -518,8 +518,43 @@ static inline DirectKind direct_kind_for(const DecodedColumn& d) {
         (!d.dict_indices.empty() || !d.dict_codes_array.empty()))
         return DK_FLOAT32_DICT;
     if (!d.dict_indices.empty() || !d.dict_codes_array.empty()) return DK_POOL;
+    // RLE skip-dense NUMERIC → §11 Dict-shaped direct, rebuilt from the run table
+    // by build_direct_rle_dict. Previously this fell to DK_POOL below, and the
+    // native scan Source cannot consume a POOL column that is not array/decimal/
+    // varchar — so a plain `SELECT SUM(<low-cardinality int>)` over any parquet
+    // file whose writer RLE-encoded that column failed outright with
+    // "unsupported column encoding". Width/signedness rules are identical to the
+    // dict branch above; the run table is only emitted for max_definition_level
+    // == 0, hence the valid_bits guard.
+    if ((t == "int64" || t == "int32") && !d.rle_int64_values.empty() &&
+        !d.rle_run_lengths.empty() && d.valid_bits.empty()) {
+        if (d.is_unsigned) {
+            switch (d.int_bit_width) {
+                case 8:  return DK_UINT8_DICT;
+                case 16: return DK_UINT16_DICT;
+                case 32: return DK_UINT32_DICT;
+                default: return DK_UINT64_DICT;
+            }
+        }
+        if (t == "int32") {
+            switch (d.int_bit_width) {
+                case 8:  return DK_INT8_DICT;
+                case 16: return DK_INT16_DICT;
+                default: return DK_INT32_DICT;
+            }
+        }
+        return DK_INT64_DICT;
+    }
+    // RLE skip-dense float / string → §11 Dict-shaped direct, same treatment and
+    // same reason as the numeric branch above.
+    if (!d.rle_run_lengths.empty() && d.valid_bits.empty()) {
+        if (t == "float64" && !d.rle_float64_values.empty()) return DK_FLOAT64_DICT;
+        if (t == "float32" && !d.rle_float64_values.empty()) return DK_FLOAT32_DICT;
+        if ((t == "string" || t == "byte_array") && !d.rle_str_lens.empty())
+            return DK_VARCHAR_DICT;
+    }
     if (!d.rle_int64_values.empty() || !d.rle_float64_values.empty() ||
-        !d.rle_str_lens.empty()) return DK_POOL;         // RLE skip-dense
+        !d.rle_str_lens.empty()) return DK_POOL;         // RLE skip-dense, unhandled shape
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool nullable = !d.valid_bits.empty();
     if (!d.int128_values.empty() && _fixed_eligible(d.int128_values.size(), n, nullable))
@@ -702,6 +737,17 @@ static inline void expand_packed_codes(const uint8_t* ca, uint32_t n, uint8_t cw
     }
 }
 
+// Defined below, next to build_direct_narrow_dict whose payload rules they share.
+static inline bool build_direct_rle_dict(const DecodedColumn& d, int elem_bytes,
+                                         void* (*alloc)(size_t), void (*freefn)(void*),
+                                         ColumnOut& out);
+static inline bool build_direct_rle_float_dict(const DecodedColumn& d, bool is_f32,
+                                               void* (*alloc)(size_t), void (*freefn)(void*),
+                                               ColumnOut& out);
+static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
+                                                void* (*alloc)(size_t), void (*freefn)(void*),
+                                                ColumnOut& out, bool want_seed);
+
 // Build the DICT-VARCHAR direct buffers for a dict-encoded byte_array column,
 // mirroring _build_string_dict (consumer) + serialize_string_dict (source): a
 // compact value array of `dict_size` unique slots over a verbatim copy of
@@ -713,6 +759,9 @@ static inline void expand_packed_codes(const uint8_t* ca, uint32_t n, uint8_t cw
 static inline bool build_direct_string_dict(const DecodedColumn& d,
                                             void* (*alloc)(size_t), void (*freefn)(void*),
                                             ColumnOut& out, bool want_seed = false) {
+    // RLE skip-dense carries one string per RUN, not a dict + code source.
+    if (!d.rle_run_lengths.empty())
+        return build_direct_rle_string_dict(d, alloc, freefn, out, want_seed);
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const uint32_t dict_size = static_cast<uint32_t>(d.string_dict_lens.size());
     const bool nullable = !d.valid_bits.empty();
@@ -784,6 +833,8 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
 static inline bool build_direct_int64_dict(const DecodedColumn& d,
                                            void* (*alloc)(size_t), void (*freefn)(void*),
                                            ColumnOut& out) {
+    // RLE skip-dense carries its values in the run table, not in a code source.
+    if (!d.rle_run_lengths.empty()) return build_direct_rle_dict(d, 8, alloc, freefn, out);
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool is32 = !d.dict_int32_values.empty();
     const uint32_t dsz = is32
@@ -832,6 +883,267 @@ static inline bool build_direct_int64_dict(const DecodedColumn& d,
     return true;
 }
 
+// RLE skip-dense → §11 Dict shape. The decoder resolves dict codes to VALUES per
+// run (rle_int64_values[r] repeated rle_run_lengths[r] times) and discards the
+// codes, so the dictionary has to be rebuilt from the run values.
+//
+// Values are DEDUPED. Emitting one dict entry per run would be cheaper but would
+// hand downstream a Dict-shaped vector whose codes are not a bijection onto
+// values; §11 defines data_length as "unique values in data", and both the
+// compression-aware group keying and the dict-aware int filter read codes on
+// that basis — duplicate values under distinct codes would split one group in
+// two. Open-addressed probe table (power-of-two, linear probing) keeps the
+// dedupe O(runs) without an std::unordered_map allocation per column.
+//
+// Returns false rather than writing a partial column if the runs do not cover
+// exactly num_rows — a short/long run table means the decode and the row count
+// disagree, and scattering that into a positional buffer is the silent-wrong-
+// answer case, not something to paper over.
+// T is int64_t (int columns) or double (float columns — rle_float64_values holds
+// both float32 and float64 runs). Keying on the raw BIT PATTERN rather than on
+// operator== is what makes this correct for floats: == would make every NaN run
+// a fresh dictionary entry (NaN != NaN), reintroducing exactly the duplicate-value
+// codes this dedupe exists to prevent. -0.0 cannot reach here unequal to +0.0 —
+// canonicalise_decoded_floats runs over rle_float64_values before the DK split.
+// For int64_t the bit pattern and the value are in bijection, so it is a no-op
+// change of key.
+template <typename T>
+static inline bool rle_dedupe_and_expand(const DecodedColumn& d, uint32_t n,
+                                         const std::vector<T>& run_values,
+                                         std::vector<T>& uniq,
+                                         uint32_t* codes) {
+    static_assert(sizeof(T) == sizeof(uint64_t), "run value must be 64-bit");
+    const size_t runs = d.rle_run_lengths.size();
+    if (runs != run_values.size()) return false;
+    size_t cap = 16;
+    while (cap < runs * 2) cap <<= 1;
+    std::vector<uint32_t> table(cap, 0xFFFFFFFFu);
+    std::vector<uint64_t> uniq_bits;
+    uniq_bits.reserve(runs < 64 ? runs : 64);
+    const size_t mask = cap - 1;
+    size_t off = 0;
+    for (size_t r = 0; r < runs; ++r) {
+        const T v = run_values[r];
+        uint64_t bits;
+        std::memcpy(&bits, &v, sizeof(uint64_t));
+        const uint64_t h = bits * 0x9E3779B97F4A7C15ull;
+        size_t slot = static_cast<size_t>(h >> 32) & mask;
+        uint32_t code;
+        for (;;) {
+            const uint32_t e = table[slot];
+            if (e == 0xFFFFFFFFu) {
+                code = static_cast<uint32_t>(uniq.size());
+                uniq.push_back(v);
+                uniq_bits.push_back(bits);
+                table[slot] = code;
+                break;
+            }
+            if (uniq_bits[e] == bits) { code = e; break; }
+            slot = (slot + 1) & mask;
+        }
+        const int32_t cnt = d.rle_run_lengths[r];
+        if (cnt < 0 || off + static_cast<size_t>(cnt) > static_cast<size_t>(n)) return false;
+        for (int32_t j = 0; j < cnt; ++j) codes[off + static_cast<size_t>(j)] = code;
+        off += static_cast<size_t>(cnt);
+    }
+    return off == static_cast<size_t>(n);
+}
+
+// Dict-shaped direct column built from the RLE skip-dense outputs. elem_bytes
+// selects the payload width (1/2/4/8) exactly as build_direct_narrow_dict does;
+// 8 reproduces build_direct_int64_dict's widened int64 payload.
+//
+// RLE skip-dense is only produced for max_definition_level == 0 (see decode.hpp),
+// so a validity bitmap here means the decoder's own invariant broke — refuse
+// rather than silently drop the nulls.
+static inline bool build_direct_rle_dict(const DecodedColumn& d, int elem_bytes,
+                                         void* (*alloc)(size_t), void (*freefn)(void*),
+                                         ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    if (!d.valid_bits.empty()) return false;
+
+    uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
+    if (!codes) return false;
+
+    std::vector<int64_t> uniq;
+    uniq.reserve(d.rle_run_lengths.size() < 64 ? d.rle_run_lengths.size() : 64);
+    if (!rle_dedupe_and_expand(d, n, d.rle_int64_values, uniq, codes)) {
+        freefn(codes);
+        return false;
+    }
+
+    const uint32_t dsz = static_cast<uint32_t>(uniq.size());
+    uint8_t* dict = static_cast<uint8_t*>(alloc((dsz ? dsz : 1u) * static_cast<size_t>(elem_bytes)));
+    if (!dict) { freefn(codes); return false; }
+    // Keeping the low elem_bytes yields the correct value at the declared width
+    // for both domains, exactly as in build_direct_narrow_dict: the decode never
+    // sign-extends an unsigned magnitude, and a signed value's two's-complement
+    // low bytes are the value at that width.
+    for (uint32_t k = 0; k < dsz; ++k) {
+        const uint64_t v = static_cast<uint64_t>(uniq[k]);
+        std::memcpy(dict + static_cast<size_t>(k) * elem_bytes, &v, static_cast<size_t>(elem_bytes));
+    }
+
+    out.data = dict;
+    out.data_length = dsz;
+    out.codes = codes;
+    out.validity = nullptr;
+    out.length = n;
+    // Built in first-appearance order, NOT dictionary order — d.dict_ordered
+    // describes the parquet dictionary, which these codes no longer index.
+    out.dict_sorted = false;
+    return true;
+}
+
+// Float counterpart of build_direct_rle_dict. rle_float64_values holds the runs
+// as double for BOTH float32 and float64 columns; narrowing back to float for a
+// float32 column is exact, because those doubles are float32 dict values that were
+// widened losslessly — so two distinct dictionary entries cannot collapse into one
+// float and silently re-create a duplicate code.
+static inline bool build_direct_rle_float_dict(const DecodedColumn& d, bool is_f32,
+                                               void* (*alloc)(size_t), void (*freefn)(void*),
+                                               ColumnOut& out) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    if (!d.valid_bits.empty()) return false;
+
+    uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
+    if (!codes) return false;
+
+    std::vector<double> uniq;
+    uniq.reserve(d.rle_run_lengths.size() < 64 ? d.rle_run_lengths.size() : 64);
+    if (!rle_dedupe_and_expand(d, n, d.rle_float64_values, uniq, codes)) {
+        freefn(codes);
+        return false;
+    }
+
+    const uint32_t dsz = static_cast<uint32_t>(uniq.size());
+    const size_t elem = is_f32 ? sizeof(float) : sizeof(double);
+    void* dict = alloc((dsz ? dsz : 1u) * elem);
+    if (!dict) { freefn(codes); return false; }
+    if (is_f32) {
+        float* f = static_cast<float*>(dict);
+        for (uint32_t k = 0; k < dsz; ++k) f[k] = static_cast<float>(uniq[k]);
+    } else if (dsz) {
+        std::memcpy(dict, uniq.data(), static_cast<size_t>(dsz) * sizeof(double));
+    }
+
+    out.data = dict;
+    out.data_length = dsz;
+    out.codes = codes;
+    out.validity = nullptr;
+    out.length = n;
+    out.dict_sorted = false;
+    return true;
+}
+
+// String counterpart. The run table carries one string per RUN
+// (rle_str_arena/offsets/lens), so the same value repeats across runs and the
+// unique set has to be rebuilt — byte-compared, not just hash-compared, so a hash
+// collision cannot merge two different strings into one dictionary entry. The
+// emitted arena holds only the unique values, and slot offsets are relative to it
+// (build_direct_string_dict copies the parquet dict arena verbatim; here the arena
+// is constructed, so offsets are assigned as values are appended).
+static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
+                                                void* (*alloc)(size_t), void (*freefn)(void*),
+                                                ColumnOut& out, bool want_seed = false) {
+    const uint32_t n = static_cast<uint32_t>(d.num_rows);
+    if (!d.valid_bits.empty()) return false;
+    const size_t runs = d.rle_run_lengths.size();
+    if (runs != d.rle_str_lens.size() || runs != d.rle_str_offsets.size()) return false;
+
+    uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
+    if (!codes) return false;
+
+    // Dedupe the run strings: uniq_idx[k] is the run that first produced value k.
+    size_t cap = 16;
+    while (cap < runs * 2) cap <<= 1;
+    std::vector<uint32_t> table(cap, 0xFFFFFFFFu);
+    const size_t mask = cap - 1;
+    std::vector<uint32_t> uniq_run;   // run index of each unique value
+    std::vector<uint32_t> run_code(runs, 0u);
+    uniq_run.reserve(runs < 64 ? runs : 64);
+    size_t uniq_bytes = 0;
+    for (size_t r = 0; r < runs; ++r) {
+        const int32_t len = d.rle_str_lens[r];
+        const uint32_t off = d.rle_str_offsets[r];
+        if (len < 0 || off + static_cast<size_t>(len) > d.rle_str_arena.size()) {
+            freefn(codes);
+            return false;
+        }
+        const uint8_t* p = d.rle_str_arena.data() + off;
+        uint64_t h = 1469598103934665603ull;               // FNV-1a, dedupe only
+        for (int32_t j = 0; j < len; ++j) { h ^= p[j]; h *= 1099511628211ull; }
+        size_t slot = static_cast<size_t>(h >> 32) & mask;
+        for (;;) {
+            const uint32_t e = table[slot];
+            if (e == 0xFFFFFFFFu) {
+                run_code[r] = static_cast<uint32_t>(uniq_run.size());
+                table[slot] = run_code[r];
+                uniq_run.push_back(static_cast<uint32_t>(r));
+                uniq_bytes += static_cast<size_t>(len);
+                break;
+            }
+            const uint32_t er = uniq_run[e];
+            if (d.rle_str_lens[er] == len &&
+                std::memcmp(d.rle_str_arena.data() + d.rle_str_offsets[er], p,
+                            static_cast<size_t>(len)) == 0) {
+                run_code[r] = e;
+                break;
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    // Expand run codes to per-row codes, validating run coverage.
+    size_t pos = 0;
+    for (size_t r = 0; r < runs; ++r) {
+        const int32_t cnt = d.rle_run_lengths[r];
+        if (cnt < 0 || pos + static_cast<size_t>(cnt) > static_cast<size_t>(n)) {
+            freefn(codes);
+            return false;
+        }
+        const uint32_t c = run_code[r];
+        for (int32_t j = 0; j < cnt; ++j) codes[pos + static_cast<size_t>(j)] = c;
+        pos += static_cast<size_t>(cnt);
+    }
+    if (pos != static_cast<size_t>(n)) { freefn(codes); return false; }
+
+    const uint32_t dsz = static_cast<uint32_t>(uniq_run.size());
+    DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
+        alloc((dsz ? dsz : 1u) * sizeof(DrakenStringSlot)));
+    if (!slots) { freefn(codes); return false; }
+    uint8_t* arena = static_cast<uint8_t*>(alloc(uniq_bytes ? uniq_bytes : 1u));
+    if (!arena) { freefn(slots); freefn(codes); return false; }
+    uint64_t* keyhash = nullptr;
+    if (want_seed) {
+        keyhash = static_cast<uint64_t*>(alloc((dsz ? dsz : 1u) * sizeof(uint64_t)));
+        if (!keyhash) { freefn(arena); freefn(slots); freefn(codes); return false; }
+    }
+
+    uint32_t a_off = 0;
+    for (uint32_t k = 0; k < dsz; ++k) {
+        const uint32_t r = uniq_run[k];
+        const uint32_t slen = static_cast<uint32_t>(d.rle_str_lens[r]);
+        std::memcpy(arena + a_off, d.rle_str_arena.data() + d.rle_str_offsets[r], slen);
+        if (want_seed)
+            draken::ops::draken_build_string_slot_seed(&slots[k], arena + a_off, slen, a_off, &keyhash[k]);
+        else
+            draken_build_string_slot(&slots[k], arena + a_off, slen, a_off);
+        a_off += slen;
+    }
+
+    out.data = slots;
+    out.data_length = dsz;
+    out.arena = arena;
+    out.arena_len = uniq_bytes;
+    out.codes = codes;
+    out.validity = nullptr;
+    out.length = n;
+    out.keyhash = keyhash;
+    out.dict_sorted = false;
+    return true;
+}
+
 // E33 — exact-width "compressed" (Dict-shaped) direct column: a draken_alloc'd
 // dictionary narrowed/reinterpreted to elem_bytes (1/2/4/8, matching the declared
 // DRAKEN_UINT8/16/32/64 or DRAKEN_INT8/16/32 width) + a uint32 per-row code
@@ -847,6 +1159,9 @@ static inline bool build_direct_int64_dict(const DecodedColumn& d,
 static inline bool build_direct_narrow_dict(const DecodedColumn& d, int elem_bytes,
                                             void* (*alloc)(size_t), void (*freefn)(void*),
                                             ColumnOut& out) {
+    // RLE skip-dense carries its values in the run table, not in a code source.
+    if (!d.rle_run_lengths.empty())
+        return build_direct_rle_dict(d, elem_bytes, alloc, freefn, out);
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const bool is32 = !d.dict_int32_values.empty();
     const uint32_t dsz = is32
@@ -900,6 +1215,9 @@ static inline bool build_direct_narrow_dict(const DecodedColumn& d, int elem_byt
 static inline bool build_direct_float_dict(const DecodedColumn& d, bool is_f32,
                                            void* (*alloc)(size_t), void (*freefn)(void*),
                                            ColumnOut& out) {
+    // RLE skip-dense carries its values in the run table, not in a code source.
+    if (!d.rle_run_lengths.empty())
+        return build_direct_rle_float_dict(d, is_f32, alloc, freefn, out);
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const uint32_t dsz = is_f32
         ? static_cast<uint32_t>(d.dict_float32_values.size())

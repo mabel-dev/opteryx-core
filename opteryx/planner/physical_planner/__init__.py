@@ -401,6 +401,19 @@ def _create_scan_node(logical_node, query_properties, registry):
     if connector == "__null__":
         # Scan marked for empty result (contradictory predicates)
         return registry.create("Null Reader", query_properties, **node_config)
+    elif node_config.get("for_snapshots_only"):
+        # SHOW SNAPSHOTS FOR: this Scan exists so the relation is BOUND — the
+        # permission gate, the connector, and the commit history the statement
+        # answers from — and is never read. serial_engine answers from the
+        # ShowSnapshots node above it and never drives the pipeline.
+        #
+        # It carries no manifest by design: the history is the result, and
+        # building one would pay binding's expensive half to produce a file list
+        # nothing looks at. So it cannot take the manifest branch below, and the
+        # reader that yields no rows is the honest physical form of a scan whose
+        # rows are not part of the answer. SHOW MANIFEST FOR differs here — its
+        # Scan does carry a Manifest, because that IS its result.
+        return registry.create("Null Reader", query_properties, **node_config)
     elif connector and node_config.get("manifest") is not None:
         # Manifest-backed Scan: dispatch on the dataset's single format.
         # For parquet this is the column-chunk range-read path: footer-first
@@ -460,6 +473,10 @@ def _create_show_manifest_node(logical_node, query_properties, registry):
     return registry.create("Show Manifest", query_properties, **logical_node.properties)
 
 
+def _create_show_snapshots_node(logical_node, query_properties, registry):
+    return registry.create("Show Snapshots", query_properties, **logical_node.properties)
+
+
 def _create_union_node(logical_node, query_properties, registry):
     return registry.create("Union", query_properties, **logical_node.properties)
 
@@ -503,6 +520,22 @@ def _create_alter_relation_node(logical_node, query_properties, registry):
 
 def _create_rename_relation_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="rename_relation", **logical_node.properties)
+
+
+def _create_add_column_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="add_column", **logical_node.properties)
+
+
+def _create_drop_column_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="drop_column", **logical_node.properties)
+
+
+def _create_rename_column_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="rename_column", **logical_node.properties)
+
+
+def _create_alter_column_type_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="alter_column_type", **logical_node.properties)
 
 
 def _create_optimize_relation_node(logical_node, query_properties, registry):
@@ -550,6 +583,7 @@ _DISPATCH = {
     LogicalPlanStepType.DropView:         _create_drop_view_node,
     LogicalPlanStepType.ShowColumns:      _create_show_columns_node,
     LogicalPlanStepType.ShowManifest:     _create_show_manifest_node,
+    LogicalPlanStepType.ShowSnapshots:    _create_show_snapshots_node,
     LogicalPlanStepType.Union:            _create_union_node,
     LogicalPlanStepType.Window:           _create_window_node,
     LogicalPlanStepType.Unnest:           _create_unnest_node,
@@ -562,6 +596,10 @@ _DISPATCH = {
     LogicalPlanStepType.TruncateRelation: _create_truncate_relation_node,
     LogicalPlanStepType.AlterRelation:    _create_alter_relation_node,
     LogicalPlanStepType.RenameRelation:   _create_rename_relation_node,
+    LogicalPlanStepType.AddColumn:        _create_add_column_node,
+    LogicalPlanStepType.DropColumn:       _create_drop_column_node,
+    LogicalPlanStepType.RenameColumn:     _create_rename_column_node,
+    LogicalPlanStepType.AlterColumnType:  _create_alter_column_type_node,
     LogicalPlanStepType.OptimizeRelation: _create_optimize_relation_node,
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.Insert:           _create_insert_node,

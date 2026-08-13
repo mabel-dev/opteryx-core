@@ -691,6 +691,25 @@ public:
         add_op_(p, std::make_unique<UnnestOperator>(array_idx, std::move(target_name),
                                                     drop_source));
     }
+    // CROSS JOIN UNNEST with a WHERE on the unnested column folded in. The program
+    // is bool-final and resolved against a ONE-COLUMN layout holding the target: it
+    // runs over the array's child (element) vector before expansion, so the rows it
+    // rejects are never built. See UnnestOperator::build_child_mask.
+    // `instrs == nullptr` means no pushed WHERE (a DISTINCT-only fold); `distinct`
+    // arms the per-worker pre-reduction, which NEVER replaces the DistinctSink.
+    void add_unnest_filtered(size_t p, uint32_t array_idx, std::string target_name,
+                             bool drop_source, void* instrs, int count,
+                             std::vector<int> col_idx, std::vector<void*> lit_dv,
+                             ExprEvalFn fn, bool distinct) {
+        ExprProgram prog;
+        prog.instrs = instrs;
+        prog.count = count;
+        prog.col_idx = std::move(col_idx);
+        prog.lit_dv = std::move(lit_dv);
+        add_op_(p, std::make_unique<UnnestOperator>(
+                       array_idx, std::move(target_name), drop_source,
+                       std::move(prog), instrs != nullptr ? fn : nullptr, distinct));
+    }
     // CROSS JOIN CIDR_UNNEST. Unlike add_unnest, this operator is RESUMABLE: one
     // input morsel can expand to billions of rows, so it emits bounded batches
     // and the executor re-drives it (HAVE_MORE) until the input is consumed.

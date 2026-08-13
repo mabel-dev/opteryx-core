@@ -46,6 +46,7 @@ __all__ = [
     "read_metadata_from_memoryview",
     "write_parquet",
     "write_parquet_with_bounds",
+    "patch_columns",
     "decode_value",
     "_make_scan_row_group",
 ]
@@ -478,3 +479,49 @@ def write_parquet_stream(morsel_iter, sink, compression: str = "zstd",
                                         sorted_by=sorted_by,
                                         sorted_descending=sorted_descending,
                                         profile=profile)
+
+
+def patch_columns(source: bytes, drop=None, rename=None, add=None, retype=None) -> bytes:
+    """Rewrite a parquet file's SHAPE without decoding the columns it keeps.
+
+    Drops, renames, adds and/or retypes columns, returning the new file's bytes.
+    Untouched columns' encoded pages are copied byte-for-byte rather than
+    decoded and re-encoded, so the cost tracks file SIZE, not the number of
+    values, and the result's pages are bit-identical to the source's.
+
+    The source bytes are never modified: callers write the result to a new path
+    so older snapshots keep pointing at what they were written against.
+
+    Args:
+        source: the complete parquet file to patch
+        drop: column names to remove
+        rename: {old_name: new_name}
+        add: donor files, one per column to append - each a single-column,
+            single-row parquet file written with compression="none",
+            dictionary=False, carrying the new column's name and type and the
+            value to fill existing rows with (a null row fills with NULL).
+            Going through a donor means the added column is annotated by the
+            same code that writes that type normally, rather than by a second
+            copy of the type mapping that could drift from it. The value is
+            stored once per row group, so an added column costs a few bytes
+            however many rows the file holds.
+        retype: {column_name: donor} - re-declare an existing column as the
+            donor's type (only the donor's annotation is used, not its value).
+            Free when parquet's physical type is unchanged, which covers most
+            of the widening lattice; only physical int32 -> int64 needs real
+            work, and then only that one column is decoded and re-encoded.
+
+    Returns:
+        The patched parquet file.
+
+    Raises:
+        RuntimeError: a named column is absent, an added name collides,
+            dropping would leave no columns, a donor is not the shape described
+            above, a retype asks for an unsupported physical change, or the
+            file uses a shape the patcher cannot reproduce exactly (nested
+            LIST/STRUCT, or a logical type it would have to approximate). It
+            refuses rather than relabelling real data.
+    """
+    return _native.patch_columns(
+        source, drop=drop, rename=rename, add=add, retype=retype
+    )

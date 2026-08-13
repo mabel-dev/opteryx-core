@@ -4,9 +4,9 @@ Storage architecture: **local = ad-hoc, GCS = catalog-driven**. Ad-hoc local
 (`FileSystemConnector`) is covered heavily by the `make q` battery, and ad-hoc GCS by
 `test_documentation.py::test_readme_4` — but the catalog path, which is what real traffic
 actually runs on, had NO end-to-end test at all: `test_opteryx_connector_catalog_factory.py`
-only exercises factory wiring, and `tests/integration/worker/test_worker.py` is a script
-(no test functions) whose only SQL is `SELECT 1`. Nothing proved the engine could read a
-row from GCS through the catalog.
+only exercises factory wiring, and `dev/worker_executor.py` is a script (no test
+functions) whose only SQL is `SELECT 1`. Nothing proved the engine could read a row from
+GCS through the catalog.
 
 Two DIFFERENT engine paths are covered here, and conflating them is the trap:
 

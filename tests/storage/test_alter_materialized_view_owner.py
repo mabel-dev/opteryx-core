@@ -164,3 +164,55 @@ def test_pause_is_not_the_keyword(tmp_path):
     _seed_view(session)
     with pytest.raises(UnsupportedSyntaxError, match="SUSPEND"):
         list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv PAUSE"))
+
+
+# ---------------------------------------------------------------------------
+# The catalog connector's source accessor.
+#
+# The ownership check reads a view's sources to judge the incoming owner against
+# them. The catalog spells that list `source-tables`; the local store's sidecar
+# spells it `source_tables`. Reading the wrong key would not fail - it would
+# return an empty list, and a check with nothing to look at is a check that
+# cannot refuse anything. Hence a test against the catalog's spelling, not just
+# the local store's.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCatalog:
+    """Stands in for opteryx_catalog, returning its record shape verbatim."""
+
+    record = None
+
+    def __init__(self, workspace=None, **kwargs):
+        pass
+
+    def get_materialized_view(self, identifier):
+        if _FakeCatalog.record is None:
+            from opteryx_catalog.exceptions import MaterializedViewError
+
+            raise MaterializedViewError(f"{identifier} is not a materialized view")
+        return _FakeCatalog.record
+
+
+def _catalog_connector():
+    from opteryx.connectors.opteryx_connector import OpteryxConnector
+
+    return OpteryxConnector(catalog=_FakeCatalog)
+
+
+def test_catalog_connector_reads_the_kebab_case_source_list():
+    _FakeCatalog.record = {"sql": "SELECT 1", "source-tables": ["ops.a", "ops.b"]}
+    assert _catalog_connector().materialized_view_sources("ops.mv") == ["ops.a", "ops.b"]
+
+
+def test_a_record_without_the_key_yields_no_sources():
+    """What reading the wrong key would look like. Harmless only because the
+    binder refuses to transfer a view whose source list comes back empty."""
+    _FakeCatalog.record = {"sql": "SELECT 1"}
+    assert _catalog_connector().materialized_view_sources("ops.mv") == []
+
+
+def test_catalog_connector_rejects_a_relation_that_is_not_a_view():
+    _FakeCatalog.record = None
+    with pytest.raises(ValueError, match="not a materialized view"):
+        _catalog_connector().materialized_view_sources("ops.mv")

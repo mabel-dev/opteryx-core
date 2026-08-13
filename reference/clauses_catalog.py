@@ -14,19 +14,33 @@ CLAUSE_DEFINITIONS = {
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
+            "ALTER TABLE [IF EXISTS] table_name ADD COLUMN column_name data_type [DEFAULT literal]",
+            "ALTER TABLE [IF EXISTS] table_name DROP COLUMN column_name",
+            "ALTER TABLE [IF EXISTS] table_name RENAME COLUMN column_name TO new_column_name",
+            "ALTER TABLE [IF EXISTS] table_name ALTER COLUMN column_name TYPE data_type",
             "ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column, ...)",
             "ALTER TABLE [IF EXISTS] table_name RENAME TO new_table_name",
         ],
-        "summary": "Change a table's clustering columns or its name.",
+        "summary": "Change a table's columns, its clustering columns, or its name.",
         "documentation": (
-            "CLUSTER BY records the columns a catalog-backed table is sorted by, in "
-            "priority order. RENAME TO renames the relation and may move it between "
-            "collections."
+            "ADD/DROP/RENAME COLUMN and ALTER COLUMN ... TYPE change the table's "
+            "shape, rewriting each data file's footer and copying the columns they "
+            "do not touch byte-for-byte. ADD COLUMN ... DEFAULT fills the rows that "
+            "already exist with a literal; it is a backfill value, not stored state "
+            "a later INSERT consults. ALTER COLUMN ... TYPE only widens within a "
+            "type family. CLUSTER BY records the columns a catalog-backed table is "
+            "sorted by, in priority order. RENAME TO renames the relation and may "
+            "move it between collections."
         ),
         "notes": (
             "One operation per statement. CLUSTER BY takes column names, not "
-            "expressions. RENAME TO cannot cross workspaces. Every other ALTER TABLE "
-            "operation (ADD COLUMN, DROP COLUMN, ...) is rejected at plan time."
+            "expressions. RENAME TO cannot cross workspaces. DROP COLUMN takes one "
+            "column and rejects CASCADE/RESTRICT. ADD COLUMN accepts only a literal "
+            "DEFAULT. ALTER COLUMN ... TYPE rejects narrowing, integer-to-float, "
+            "cross-family changes, no-ops and USING. SET DEFAULT, DROP DEFAULT, SET "
+            "NOT NULL and ADD CONSTRAINT are rejected at plan time - the engine "
+            "enforces no constraints, so accepting them would imply behaviour it "
+            "does not have."
         ),
     },
     "alter_view": {
@@ -95,11 +109,20 @@ CLAUSE_DEFINITIONS = {
         "syntax_forms": [
             "COMMENT ON TABLE object_name IS 'comment'",
             "COMMENT ON VIEW object_name IS 'comment'",
-            "COMMENT ON EXTENSION object_name IS 'comment'",
         ],
         "summary": "Add or update object comments.",
-        "documentation": "The SQL rewriter normalizes TABLE and VIEW to EXTENSION before parsing.",
-        "notes": "Supports IF EXISTS.",
+        "documentation": (
+            "TABLE and VIEW are the only object types Opteryx has anything to "
+            "comment on. Every other CommentObject sqlparser accepts - COLUMN, "
+            "EXTENSION, and the rest - parses and is then turned away by name in "
+            "plan_comment."
+        ),
+        "notes": (
+            "Supports IF EXISTS. An EXTENSION form was listed here while the SQL "
+            "rewriter normalized TABLE and VIEW to EXTENSION before parsing; "
+            "sqlparser gained CommentObject::Table and ::View, the rewrite was "
+            "deleted, and the planner now rejects EXTENSION outright."
+        ),
     },
     "create_collection": {
         "canonical_name": "CREATE COLLECTION",
@@ -336,6 +359,80 @@ CLAUSE_DEFINITIONS = {
         "documentation": "The planner rejects literal ORDER BY expressions and supports alias-aware rewriting.",
         "notes": "Order-by columns may be injected before projection.",
     },
+    "over": {
+        "canonical_name": "OVER",
+        "planner_entry": "plan_query",
+        # Not a clause of the query - a clause of a projection item, which is why
+        # it needs a scope of its own rather than being filed as a query_clause.
+        "scope": "expression_clause",
+        "status": "supported",
+        "syntax_forms": [
+            "ranking_function() OVER (ORDER BY expr [ASC|DESC] [, ...])",
+            "ranking_function() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+            "aggregate(expr) OVER ()",
+            "aggregate(expr) OVER (PARTITION BY expr [, ...])",
+        ],
+        "summary": "Compute a value across a window of rows without collapsing them.",
+        "documentation": (
+            "OVER turns a call into a window function: it is evaluated over a window "
+            "of rows and returns one value per input row, unlike GROUP BY which "
+            "collapses them. The two window forms take OPPOSITE window specs. Ranking "
+            "functions - ROW_NUMBER, RANK, DENSE_RANK - REQUIRE an ORDER BY inside "
+            "OVER (...) and take an optional PARTITION BY. Aggregate windows REJECT an "
+            "ORDER BY inside OVER (...), so `OVER ()` and `OVER (PARTITION BY ...)` are "
+            "their only forms. The ranking functions themselves, and which aggregates "
+            "are legal in which aggregate-window form, are in windows.json."
+        ),
+        "notes": (
+            "A frame specification (ROWS/RANGE BETWEEN) is rejected for both forms, so "
+            "there are no running or moving windows. A window function cannot be "
+            "combined with GROUP BY in the same statement, nor with a plain aggregate "
+            "beside it (`SELECT COUNT(*), COUNT(*) OVER () FROM t`) - a bare aggregate "
+            "is still a group, and the window would be computed over the rows it "
+            "collapses. It does not have to be a "
+            "whole projection item - it may sit inside a larger expression, as in "
+            "`COUNT(*) OVER (PARTITION BY gravity) + 0` or "
+            "`mass / SUM(mass) OVER ()`, and the expression around it is computed over "
+            "the window's output one row at a time. The exception is an aggregate's "
+            "ARGUMENT: `SUM(COUNT(*) OVER ())` is forbidden by the standard and is "
+            "rejected, with the reverse remedy of the case above - compute the window "
+            "in a subquery and aggregate its result. Windows cannot be nested inside "
+            "one another either, in the argument or in the OVER spec - "
+            "`SUM(COUNT(*) OVER ()) OVER ()` and "
+            "`SUM(mass) OVER (PARTITION BY COUNT(*) OVER ())` are both rejected; chain "
+            "them across a subquery instead. It must appear in the SELECT list "
+            "or in QUALIFY. HAVING is rejected at plan time and always will be - the "
+            "standard forbids it, because HAVING filters groups and windows are computed "
+            "after grouping, so the value does not exist yet; filter on a window's output "
+            "with QUALIFY. A window in ORDER BY is not supported either, but that one is "
+            "an engine gap rather than a rule."
+        ),
+    },
+    "qualify": {
+        "canonical_name": "QUALIFY",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": ["QUALIFY predicate"],
+        "summary": "Filter rows on the result of a window function.",
+        "documentation": (
+            "QUALIFY is to window functions what HAVING is to aggregates - it filters "
+            "AFTER the windows are computed. Each window function in the predicate is "
+            "appended to the projection and computed by the same Window node a selected "
+            "window function would use, and the predicate is then re-pointed at that "
+            "computed column so the window is evaluated once rather than re-derived. "
+            "The appended columns ride through the Project as pass-throughs and the "
+            "Exit node prunes them, so they never reach the caller."
+        ),
+        "notes": (
+            "The predicate must contain at least one window function; one that does not "
+            "is rejected at plan time - use WHERE to filter plain columns and HAVING to "
+            "filter a grouped result. Both window forms are accepted, so "
+            "`QUALIFY COUNT(*) OVER () > 5` and "
+            "`QUALIFY ROW_NUMBER() OVER (ORDER BY column) <= 3` are both valid. The "
+            "window rules themselves are on the OVER clause."
+        ),
+    },
     "select": {
         "canonical_name": "SELECT",
         "planner_entry": "plan_query",
@@ -375,6 +472,58 @@ CLAUSE_DEFINITIONS = {
         "summary": "Show CREATE SQL for an object.",
         "documentation": "Handled as a SHOW node with object metadata.",
         "notes": "Currently used for view-style objects.",
+    },
+    "show_manifest": {
+        "canonical_name": "SHOW MANIFEST",
+        "planner_entry": "plan_show_variables",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SHOW MANIFEST FOR table_name"],
+        "summary": "Inspect a relation's file-level manifest and per-file statistics.",
+        "documentation": (
+            "Reached through the parser's generic SHOW catch-all and planned as a "
+            "Scan bound for its manifest alone - the relation's data files are never "
+            "read. One row per file, carrying the file's path and format, its record "
+            "count and sizes, and the per-column statistics the planner prunes with: "
+            "null counts, min/max bounds positional by field id, string length "
+            "bounds, and the internal sketches. The manifest is metadata binding "
+            "already loads for query planning, so answering costs no extra read."
+        ),
+        "notes": (
+            "Requires the owner-only MANIFEST permission on top of READ - it exposes "
+            "file paths and storage layout, not just data, which is stricter than "
+            "the tier that can SELECT from the relation. Bare SHOW MANIFEST is "
+            "rejected; name the relation with FOR. Always returns the whole "
+            "manifest - there is no WHERE or column list, and the result is not a "
+            "subquery source. A connector that exposes no file-level metadata "
+            "reports that rather than an empty manifest. It cannot be answered by "
+            "the edit-time check, which does not read a manifest."
+        ),
+    },
+    "show_snapshots": {
+        "canonical_name": "SHOW SNAPSHOTS",
+        "planner_entry": "plan_show_variables",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["SHOW SNAPSHOTS FOR table_name"],
+        "summary": "List the commit history of a catalog-backed table.",
+        "documentation": (
+            "Reached through the parser's generic SHOW catch-all and planned as a "
+            "Scan bound for the commit history alone - the relation's data and its "
+            "manifest are never read. One row per live snapshot, newest first, "
+            "carrying the snapshot's identity, its author and operation, and the "
+            "added/deleted/total record, file and byte counts the catalog recorded "
+            "with it. Gated at READ, the same tier as selecting from the table: a "
+            "snapshot row is commit metadata, and exposes no file paths or storage "
+            "layout."
+        ),
+        "notes": (
+            "Bare SHOW SNAPSHOTS is rejected - a commit history belongs to one "
+            "relation and there is no session default workspace to sweep. Only "
+            "connectors that keep a commit log answer it; others report that they "
+            "have no snapshot history rather than an empty one. Expired snapshots "
+            "are not listed - the catalog retires them from the history it returns."
+        ),
     },
     "show_triggers": {
         "canonical_name": "SHOW TRIGGERS",

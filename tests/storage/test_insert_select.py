@@ -97,7 +97,7 @@ def test_insert_select_column_count_mismatch(tmp_path):
     _setup_workspace(tmp_path)
     session = opteryx.session()
     list(session.execute_to_morsels("CREATE TABLE ws.t (a BIGINT, b VARCHAR)"))
-    with pytest.raises(UnsupportedSyntaxError, match="INSERT row has"):
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*INSERT\*\* row has"):
         list(session.execute_to_morsels("INSERT INTO ws.t SELECT 1, 'x', 99"))
 
 

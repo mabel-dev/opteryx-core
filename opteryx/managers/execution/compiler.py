@@ -3631,6 +3631,11 @@ class _Compiler:
             layout = self._add_computed(p, [source], layout)
             if array_identity not in layout:
                 _unsupported("a CROSS JOIN UNNEST source array the engine could not resolve here")
+
+        # Prune dead parent columns before the fan-out replicates them (see
+        # _narrow_unnest_input). Must run AFTER the computed-source hoist above, or
+        # the array column it just added would not be in the layout being narrowed.
+        layout = self._narrow_unnest_input(p, layout, node, keep_identities=(array_identity,))
         array_idx = layout.index(array_identity)
 
         # Drop the consumed source array unless something ABOVE the unnest still
@@ -3641,13 +3646,103 @@ class _Compiler:
         needed = getattr(node, "pre_update_columns", None) or set()
         drop_source = bool(needed) and array_identity not in needed
 
-        self.nplan.add_unnest(p, array_idx, target_identity, drop_source)
+        # A WHERE on the unnested column, folded here by predicate_pushdown. The
+        # native operator evaluates it over the array's CHILD vector before the
+        # fan-out, so the rows it rejects are never built — an unnest explodes, and a
+        # filter above it pays for every row it is about to throw away.
+        #
+        # The program is resolved against the ONE-COLUMN layout `[target_identity]`
+        # because that is what the child vector is presented as. predicate_pushdown
+        # only folds predicates reading nothing but the target, so nothing else can
+        # need resolving; if that ever changes, _resolve_bc_for_layout fails loudly on
+        # the unresolvable identity rather than reading a wrong column.
+        folded = list(getattr(node, "filter_conditions", None) or [])
+        bytecode = None
+        if folded:
+            from opteryx.compiled.structures.node import Node
+
+            condition = folded[0]
+            for extra in folded[1:]:
+                conjunction = Node(NodeType.AND)
+                conjunction.left = condition
+                conjunction.right = extra
+                condition = conjunction
+            bytecode = self._lower_expression(
+                condition, "a filter pushed into a CROSS JOIN UNNEST")
+
+        # Work out the output layout BEFORE deciding on the pushed DISTINCT — the
+        # precondition is a statement about that layout.
         new_layout = list(layout)
         if drop_source:
             new_layout[array_idx] = target_identity
         else:
             new_layout.append(target_identity)
+
+        # PUSHED DISTINCT (distinct_pushdown set the intent; this is the veto).
+        # Honoured ONLY when the target is the sole column leaving the unnest: with
+        # any other column present, two rows sharing a target value are DIFFERENT
+        # rows and dropping one deletes a distinct result. The optimizer cannot make
+        # this test — a no-ON Distinct dedups on whatever reaches it, which its
+        # `.columns` does not describe — so the check belongs here, against the real
+        # layout, and a flag that fails it is silently and correctly ignored.
+        #
+        # The Distinct node is NOT removed. This is a per-worker pre-reduction that
+        # shrinks what the DistinctSink has to dedup; only the sink dedups ACROSS
+        # workers.
+        distinct_target = (
+            bool(getattr(node, "distinct_target", False))
+            and len(new_layout) == 1
+            and new_layout[0] == target_identity
+        )
+
+        if bytecode is not None or distinct_target:
+            self.nplan.add_unnest_filtered(p, array_idx, target_identity, drop_source,
+                                           bytecode, [target_identity], distinct_target)
+        else:
+            self.nplan.add_unnest(p, array_idx, target_identity, drop_source)
         return p, new_layout
+
+    def _narrow_unnest_input(self, p, layout, node, keep_identities=()):
+        """Drop parent columns the fan-out would replicate for nothing, BEFORE it fans out.
+
+        CROSS JOIN UNNEST does not expand, it EXPLODES: rows out is the SUM of the
+        array lengths. A parent column that nothing above the unnest reads is still
+        replicated across every expanded row and then discarded by the Project above,
+        so the waste is paid at the EXPANDED row count. A select placed AFTER the
+        unnest cannot recover it — the copies have already been built.
+
+        `drop_source` (below) already removes the consumed source ARRAY. This removes
+        the parent's OTHER dead columns, which `drop_source` never covered. The
+        clearest case is a COMPUTED source, `UNNEST(SPLIT(s, ','))`: `s` is live
+        BELOW the unnest because SPLIT reads it, and dead ABOVE it, so projection
+        pushdown cannot prune it at the scan the way it prunes an unread column out
+        of a plain `UNNEST(arr)`. Measured on this corpus that is one ~24-byte VARCHAR
+        replicated across 1.7M expanded rows to be thrown away.
+
+        `keep_identities` are columns the OPERATOR still needs — the source array.
+        They are live by definition but are deliberately absent from
+        `pre_update_columns`, which is snapshotted before the node's own columns are
+        collected precisely so it holds what survives once those columns' purpose is
+        spent.
+
+        `ColumnSelectOperator` is zero-copy (it moves each kept column's shared
+        owner), so on the no-dead-column path this costs nothing and is skipped
+        outright.
+
+        An empty `pre_update_columns` means UNKNOWN, not "nothing is wanted", so it
+        keeps every column — never lose a column to an assumption."""
+        live = getattr(node, "pre_update_columns", None) or set()
+        if not live:
+            return layout
+        keep = [
+            i for i, identity in enumerate(layout)
+            if identity in live or identity in keep_identities
+        ]
+        if len(keep) == len(layout):
+            return layout      # nothing dead — stay on the untouched path
+        narrowed = [layout[i] for i in keep]
+        self.nplan.add_select(p, keep, narrowed)
+        return narrowed
 
     def _compile_cidr_unnest(self, in_edges, node, source, target_identity):
         """CROSS JOIN CIDR_UNNEST: expand text CIDR blocks into one IPV4 row each.
@@ -3673,6 +3768,10 @@ class _Compiler:
             layout = self._add_computed(p, [source], layout)
             if cidr_identity not in layout:
                 _unsupported("a CROSS JOIN CIDR_UNNEST source the engine could not resolve here")
+
+        # Same fan-out prune as the array form — and CIDR_UNNEST is the extreme of
+        # the shape, expanding one row to a whole subnet.
+        layout = self._narrow_unnest_input(p, layout, node, keep_identities=(cidr_identity,))
         cidr_idx = layout.index(cidr_identity)
 
         # Same liveness rule as the array form: drop the consumed source only when
@@ -3709,6 +3808,13 @@ class _Compiler:
             [target_identity], [vector_from_sequence(values, dtype=physical)])
 
         (p, layout) = self._compile_only_child(in_edges, "UnnestJoinNode", node)
+
+        # This form never had a `drop_source` at all — it only ever APPENDS, so
+        # every parent column rode the fan-out regardless of whether anything read
+        # it. There is no source array to exempt here, so the keep-set is purely
+        # what is live above.
+        layout = self._narrow_unnest_input(p, layout, node)
+
         self.nplan.add_unnest_literal(p, literal_morsel, target_identity)
         return p, list(layout) + [target_identity]
 

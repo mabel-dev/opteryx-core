@@ -2139,12 +2139,29 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             data_ptr += safe_count * flba_byte_width;
           }
         } else if (result.type == "byte_array") {
-          // A PLAIN/DELTA page after dict pages is the writer's high-cardinality
-          // verdict — honour it rather than re-deriving it at read time:
-          // materialise any dict rows decoded so far to dense strings, drop the
-          // dictionary, and decode this and every later page dense. We never
-          // intern a PLAIN page into a dictionary on read.
-          if (byte_array_dict_mode) {
+          // A PLAIN/DELTA page after dictionary pages ends the writer's dictionary.
+          // What that MEANS depends on who wrote the file:
+          //
+          //   rugo  — our own writer already applied its ratified cardinality gate
+          //           (distinct <= present/2, capped; _parquet_writer.hpp), so the
+          //           switch IS the decision and we honour it. We do not relitigate
+          //           our own writer's output.
+          //   other — the switch reflects THAT writer's budget, which is typically a
+          //           dictionary-PAGE BYTE cap (parquet-cpp: ~1MB). Long values blow
+          //           through it at low cardinality — ClickBench URL is 13-54%
+          //           distinct per file and still ships dense — so it says nothing
+          //           about the encoding's value to us. We re-derive under OUR gate.
+          //
+          // Re-deriving means interning the plain page into the unified dictionary
+          // instead of materialising dense. Cost-to-build is bounded by the SAME
+          // rule the writer uses, so a foreign file converges on the encoding rugo
+          // would have chosen for it; exceeding the cap aborts to dense, paying at
+          // most one partial pass.
+          //
+          // Materialise everything decoded so far to dense strings and abandon the
+          // dictionary. Used both to honour a rugo verdict up front and to abort a
+          // re-derivation that outgrew the gate.
+          auto drop_dictionary_to_dense = [&]() {
             result.string_offsets.reserve(result.string_offsets.size() +
                                           result.dict_indices.size());
             result.string_lens.reserve(result.string_lens.size() +
@@ -2166,7 +2183,16 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             // The (possibly sorted) dictionary no longer exists — the flag
             // must not survive to describe the dense output.
             result.dict_ordered = false;
-          }
+            unified_dict_map.clear();
+          };
+
+          // DELTA_BYTE_ARRAY is decoded whole-page into std::string; it is rare and
+          // is not worth a second interning path, so it always honours the switch.
+          const bool rederive = byte_array_dict_mode &&
+                                !target_col->writer_is_rugo &&
+                                page_encoding != 7;
+          if (byte_array_dict_mode && !rederive) drop_dictionary_to_dense();
+
           if (page_encoding == 7) {
             std::vector<std::string> page_strs;
             int32_t decoded = DecodeDeltaByteArray(data_ptr, data_size,
@@ -2179,11 +2205,45 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             // to that EXACT size, so the next page reserves again and reallocates
             // — one full arena copy per page, i.e. quadratic in the chunk. Let the
             // insert below grow the buffers geometrically (amortized O(1)) instead.
+            //
+            // Mirrors _parquet_writer.hpp's auto-build gate: at most half the chunk's
+            // values distinct, and an absolute entry ceiling. Kept as a local
+            // constant because the decoder must not include the writer header — the
+            // writer remains the source of truth for the policy.
+            static const size_t kRederiveMaxCardinality = 1u << 20;  // == DICT_MAX_CARDINALITY
+            const size_t dict_cap = std::min<size_t>(
+                kRederiveMaxCardinality,
+                target_col->num_values > 0 ? (size_t)target_col->num_values / 2 : 0);
+            bool interning = rederive && dict_cap > 0;
+            if (interning && unified_dict_map.empty()) {
+              SeedDictionaryMapFromArena(
+                  unified_dict_map,
+                  result.string_dict_arena,
+                  result.string_dict_offsets,
+                  result.string_dict_lens);
+            }
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);
               data_ptr += 4;
               if (data_ptr + length > data_end) break;
-              result.append_string(data_ptr, length);
+              if (interning) {
+                const int32_t code = InternByteArrayToDictionary(
+                    reinterpret_cast<const char*>(data_ptr), length,
+                    unified_dict_map,
+                    result.string_dict_arena,
+                    result.string_dict_offsets,
+                    result.string_dict_lens);
+                result.dict_indices.push_back(code);
+                if (result.string_dict_lens.size() > dict_cap) {
+                  // Outgrew our own gate: this column is genuinely high-cardinality.
+                  // Abandon the re-derivation, flush what was interned (including
+                  // this value) to dense, and finish the page dense.
+                  drop_dictionary_to_dense();
+                  interning = false;
+                }
+              } else {
+                result.append_string(data_ptr, length);
+              }
               data_ptr += length;
             }
           }

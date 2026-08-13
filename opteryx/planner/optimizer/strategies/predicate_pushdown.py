@@ -707,15 +707,43 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     )
                     continue
 
-                # NOTE: folding an Eq/InList filter on the unnested column INTO the
-                # UNNEST (`node.filters`) is intentionally disabled. The native
-                # UnnestOperator (src/cpp/engine/native_unnest.hpp) does plain
-                # expansion only and does not apply a folded value filter. Falling
-                # through to the branch below places the predicate as a standalone
-                # FilterNode AFTER the unnest, which compiles to the proven native
-                # ExprFilter (correct; it filters the expanded stream rather than
-                # during expansion — a perf, not correctness, difference). Re-enable
-                # the fold once the native operator applies node.filters.
+                # Fold a predicate that references ONLY the unnest target INTO the
+                # unnest, so the elements it rejects are never expanded. The native
+                # UnnestOperator evaluates it over the array's CHILD vector before
+                # the fan-out (src/cpp/engine/native_unnest.hpp::build_child_mask),
+                # running the SAME compiled bytecode this predicate would have
+                # compiled to as a standalone FilterNode — so the fold cannot change
+                # an answer, only when the work happens.
+                #
+                # The restriction to target-ONLY predicates is not conservatism, it
+                # is the boundary of what is answerable: a predicate touching a
+                # parent column cannot be evaluated before the parent rows are
+                # replicated, so it stays above the unnest. `known_columns` is the
+                # full set of columns the predicate reads, which is exactly the test.
+                #
+                # The compiler refuses a folded predicate it cannot lower to a
+                # c-native bool-final program, so an exotic predicate degrades to the
+                # standalone filter rather than failing the query — but it degrades
+                # LOUDLY at plan time, never silently at runtime.
+                # CIDR_UNNEST is excluded on purpose: it is a different operator with
+                # a different shape (RESUMABLE — one input row can expand to billions
+                # of addresses, so it emits bounded batches and is re-driven). A
+                # child-vector mask is meaningless there because there is no stored
+                # child vector to mask; its elements are generated. Folding is an
+                # UNNEST-over-ARRAY optimization and says so.
+                if (
+                    getattr(node, "unnest_function", "UNNEST") == "UNNEST"
+                    and node.unnest_target.schema_column.identity in known_columns
+                    and known_columns == {node.unnest_target.schema_column.identity}
+                    and predicate.condition is not None
+                ):
+                    folded = list(getattr(node, "filter_conditions", None) or [])
+                    folded.append(predicate.condition)
+                    node.filter_conditions = folded
+                    context.optimized_plan[context.node_id] = node
+                    self.telemetry.optimization_predicate_pushdown += 1
+                    continue
+
                 # A predicate that references the UNNEST TARGET must be placed directly
                 # ABOVE the unnest: the target column does not exist below it, so
                 # letting it stay in `remaining_predicates` pushes it past the unnest

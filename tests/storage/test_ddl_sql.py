@@ -191,15 +191,16 @@ def test_alter_table_cluster_by_readonly_rejected(tmp_path):
 
 
 def test_alter_table_unsupported_operation_rejected(tmp_path):
-    """Only CLUSTER BY and RENAME TO are supported; any other ALTER TABLE
-    operation is rejected at plan time rather than silently mishandled."""
+    """Only CLUSTER BY, RENAME TO, and the four column operations are
+    supported; any other ALTER TABLE operation is rejected at plan time
+    rather than silently mishandled."""
     _setup_workspace(tmp_path)
     session = opteryx.session()
 
     list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
 
     with pytest.raises(UnsupportedSyntaxError):
-        list(session.execute_to_morsels("ALTER TABLE ws.events ADD COLUMN extra VARCHAR"))
+        list(session.execute_to_morsels("ALTER TABLE ws.events ADD CONSTRAINT pk PRIMARY KEY (id)"))
 
 
 def test_alter_table_rename_not_implemented_on_local_store(tmp_path):
@@ -595,7 +596,7 @@ def test_show_create_table_rejected_at_plan_time(tmp_path):
     _seed_relations(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
 
-    with pytest.raises(UnsupportedSyntaxError, match="SHOW CREATE TABLE"):
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*SHOW CREATE\*\* TABLE"):
         list(owner.execute_to_morsels("SHOW CREATE TABLE ws.t"))
 
 
@@ -604,7 +605,7 @@ def test_comment_on_column_rejected(tmp_path):
     _seed_relations(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
 
-    with pytest.raises(UnsupportedSyntaxError, match="COMMENT ON COLUMN"):
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*COMMENT ON\*\* COLUMN"):
         list(owner.execute_to_morsels("COMMENT ON COLUMN ws.t.id IS 'the id'"))
 
 

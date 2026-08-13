@@ -21,13 +21,14 @@ from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
 from opteryx.connectors.capabilities import Eidetic
 from opteryx.connectors.capabilities import Writable
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
-from opteryx.exceptions import ConcurrentModificationError, DatasetNotFoundError
+from opteryx.exceptions import ColumnNotFoundError, ConcurrentModificationError, DatasetNotFoundError
 from opteryx.models.dataset_descriptor import DatasetDescriptor
 from opteryx.models.file_entry import FileEntry
 from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.models.manifest_io import write_manifest_parquet
 from opteryx.types.schema import RelationSchema
+from opteryx.utils import random_string, suggest_alternative
 
 
 def _now_utc_iso() -> str:
@@ -328,6 +329,13 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             )
         return sql
 
+    def materialized_view_sources(self, relation_name: str) -> List[str]:
+        """The sidecar's recorded sources, mirroring the catalog's `source-tables`."""
+        record = self._read_mv_record(relation_name)
+        if record is None:
+            raise ValueError(f"{relation_name} is not a materialized view")
+        return list(record.get("source_tables") or [])
+
     def set_materialized_view_owner(
         self, relation_name: str, new_owner: str, author: str = None
     ) -> None:
@@ -591,6 +599,300 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         if descriptor is None:
             raise ValueError(f"relation does not exist: {relation_name}")
         return [c.name for c in descriptor.schema.columns]
+
+    def _patch_column(
+        self,
+        relation_name: str,
+        new_columns: List,
+        drop: Optional[List[str]] = None,
+        rename: Optional[Dict[str, str]] = None,
+        add: Optional[List[bytes]] = None,
+        retype: Optional[Dict[str, bytes]] = None,
+        keep: Optional[List[int]] = None,
+    ) -> None:
+        """Rewrite every live file's SHAPE, then commit the new schema.
+
+        Each file is patched by `rugo.parquet.patch_columns`, which copies the
+        surviving columns' encoded pages byte-for-byte and writes a new footer -
+        nothing is decoded, so the cost tracks bytes on disk rather than values
+        stored.
+
+        Patched files are written to NEW paths and only the new snapshot points
+        at them. The originals stay where they are, still referenced by earlier
+        snapshots, so time travel keeps answering with the shape those snapshots
+        were written under. That leaves the superseded files to be reclaimed
+        later, exactly as DROP TABLE already does (see drop_relation).
+
+        `add` is a donor file per column being appended (see
+        `build_column_donor`); the patcher synthesises each one's chunks as a
+        single repeated value, so an added column costs a few bytes per row
+        group whatever the row count.
+
+        `retype` is a donor per column being re-declared. Free when parquet's
+        physical type does not change; otherwise that ONE column is decoded and
+        re-encoded and every other column is still copied verbatim.
+
+        `keep` is the source position of each surviving column, in the new
+        order, or None when positions are unchanged (a rename, or an add -
+        appending shifts nothing). Manifest
+        statistics for this store are keyed BY POSITION, so dropping a column
+        shifts every later column's stats and they have to be remapped in step -
+        leaving them alone would silently attribute one column's min/max to
+        another.
+        """
+        import dataclasses
+
+        import rugo.parquet as _rugo_parquet
+
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise ValueError(f"relation does not exist: {relation_name}")
+
+        current_files = self._read_current_file_entries(relation_dir, descriptor)
+
+        def _remap_dict(mapping):
+            if mapping is None or keep is None:
+                return mapping
+            return {j: mapping[s] for j, s in enumerate(keep) if s in mapping}
+
+        def _remap_list(values):
+            if values is None or keep is None:
+                return values
+            return [values[s] if s < len(values) else None for s in keep]
+
+        new_entries: List[FileEntry] = []
+        for entry in current_files:
+            source_path = os.path.join(relation_dir, entry.file_path)
+            with open(source_path, "rb") as f:
+                patched = _rugo_parquet.patch_columns(
+                    f.read(), drop=drop, rename=rename, add=add, retype=retype
+                )
+
+            file_name = f"data-{random_string(32)}.parquet"
+            full_path = os.path.join(relation_dir, file_name)
+            tmp_path = f"{full_path}.tmp"
+            with open(tmp_path, "wb") as f:
+                f.write(patched)
+            os.replace(tmp_path, full_path)
+
+            new_entries.append(
+                dataclasses.replace(
+                    entry,
+                    file_path=file_name,
+                    file_size_in_bytes=os.path.getsize(full_path),
+                    lower_bounds=_remap_dict(entry.lower_bounds),
+                    upper_bounds=_remap_dict(entry.upper_bounds),
+                    null_value_counts=_remap_dict(entry.null_value_counts),
+                    min_length_bounds=_remap_dict(entry.min_length_bounds),
+                    max_length_bounds=_remap_dict(entry.max_length_bounds),
+                    min_values=_remap_list(entry.min_values),
+                    max_values=_remap_list(entry.max_values),
+                    null_counts=_remap_list(entry.null_counts),
+                    min_lengths=_remap_list(entry.min_lengths),
+                    max_lengths=_remap_list(entry.max_lengths),
+                    char_total_bytes=_remap_list(entry.char_total_bytes),
+                    column_uncompressed_sizes_in_bytes=_remap_list(
+                        entry.column_uncompressed_sizes_in_bytes
+                    ),
+                    # A prebuilt native stats accelerator is keyed by the OLD
+                    # column positions. Dropping it costs a rebuild; keeping a
+                    # stale one would answer for the wrong column.
+                    column_stats=entry.column_stats if keep is None else None,
+                )
+            )
+
+        new_schema = RelationSchema(name=relation_name, columns=new_columns)
+        self._commit(relation_name, new_entries, schema=new_schema)
+
+    def add_column(
+        self,
+        relation_name: str,
+        column_name: str,
+        column_type,
+        nullable: bool = True,
+        default=None,
+        if_not_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> None:
+        """Append a column, filling existing rows with one repeated value.
+
+        `default` is the fill value written into the files now - NULL when
+        none was given. Opteryx honours no defaults afterwards and has no NULL
+        constraints, so nothing about it is stored: the only question it
+        answers is what goes in the file for the rows that already exist.
+        """
+        from opteryx.connectors.capabilities.writable import build_column_donor
+        from opteryx.types.schema import SchemaColumn
+        from opteryx.types.schema import mint_column_identity
+
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise ValueError(f"relation does not exist: {relation_name}")
+
+        columns = list(descriptor.schema.columns)
+        if column_name in {c.name for c in columns}:
+            if if_not_exists:
+                return
+            raise ValueError(
+                f"cannot add {column_name} to {relation_name}: it already has a column "
+                f"of that name"
+            )
+
+        # Only files need a donor - an empty relation is a pure schema change,
+        # and building one for a type the patcher could not synthesise anyway
+        # would refuse a statement that has no data to write.
+        donors = None
+        if self._read_current_file_entries(relation_dir, descriptor):
+            donors = [build_column_donor(column_name, column_type, default)]
+
+        columns.append(
+            SchemaColumn(
+                name=column_name,
+                column_type=column_type,
+                nullable=nullable,
+                identity=mint_column_identity("$add_column", column_name),
+            )
+        )
+        # keep=None: appending shifts no existing column's position, so the
+        # per-position manifest statistics stay attached to the right columns.
+        self._patch_column(relation_name, new_columns=columns, add=donors)
+
+    def drop_column(
+        self,
+        relation_name: str,
+        column_name: str,
+        if_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> None:
+        """Remove a column without decoding the ones that stay."""
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise ValueError(f"relation does not exist: {relation_name}")
+
+        columns = list(descriptor.schema.columns)
+        names = [c.name for c in columns]
+        if column_name not in names:
+            if if_exists:
+                return
+            raise ColumnNotFoundError(
+                column=column_name,
+                dataset=relation_name,
+                suggestion=suggest_alternative(column_name, names),
+            )
+        if len(columns) == 1:
+            raise ValueError(
+                f"cannot drop the last column of {relation_name}: a relation with no "
+                "columns is not a relation"
+            )
+
+        keep = [i for i, c in enumerate(columns) if c.name != column_name]
+        self._patch_column(
+            relation_name,
+            new_columns=[columns[i] for i in keep],
+            drop=[column_name],
+            keep=keep,
+        )
+
+    def rename_column(
+        self,
+        relation_name: str,
+        old_column_name: str,
+        new_column_name: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Rename a column, touching no data at all."""
+        import dataclasses
+
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise ValueError(f"relation does not exist: {relation_name}")
+
+        columns = list(descriptor.schema.columns)
+        names = [c.name for c in columns]
+        if old_column_name not in names:
+            raise ColumnNotFoundError(
+                column=old_column_name,
+                dataset=relation_name,
+                suggestion=suggest_alternative(old_column_name, names),
+            )
+        if new_column_name in names:
+            raise ValueError(
+                f"cannot rename {old_column_name} to {new_column_name}: "
+                f"{relation_name} already has a column called {new_column_name}"
+            )
+
+        new_columns = [
+            dataclasses.replace(c, name=new_column_name) if c.name == old_column_name else c
+            for c in columns
+        ]
+        self._patch_column(
+            relation_name,
+            new_columns=new_columns,
+            rename={old_column_name: new_column_name},
+        )
+
+    def alter_column_type(
+        self, relation_name: str, column_name: str, new_type, author: Optional[str] = None
+    ) -> None:
+        """Re-declare a column as a wider type.
+
+        The widening's legality was settled at bind time (`is_legal_widen`), so
+        this only has to make the files say the new type. Most of the lattice
+        costs nothing on disk - INT8/INT16/INT32 all ride parquet's physical
+        int32, and FLOAT32 is already written as float64 - so only the
+        annotation changes and every page is copied verbatim. Widening to
+        INT64/UINT64 does change the physical type, and then that one column is
+        decoded and re-encoded while the rest of the file is still copied.
+        """
+        import dataclasses
+
+        from opteryx.connectors.capabilities.writable import build_column_donor
+
+        self._validate_relation_name(relation_name)
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise ValueError(f"relation does not exist: {relation_name}")
+
+        columns = list(descriptor.schema.columns)
+        names = [c.name for c in columns]
+        if column_name not in names:
+            raise ColumnNotFoundError(
+                column=column_name,
+                dataset=relation_name,
+                suggestion=suggest_alternative(column_name, names),
+            )
+
+        # Only files need a donor; on an empty relation this is a pure schema
+        # change, the same posture add_column takes.
+        donors = None
+        if self._read_current_file_entries(relation_dir, descriptor):
+            donors = {column_name: build_column_donor(column_name, new_type, None)}
+
+        new_columns = [
+            dataclasses.replace(c, column_type=new_type) if c.name == column_name else c
+            for c in columns
+        ]
+        # keep=None: retyping shifts no column's position. The retyped column's
+        # own min/max bounds stay VALID under a widening - the value set is
+        # unchanged and the ordering is the same in the wider domain - so they
+        # are carried over rather than dropped.
+        self._patch_column(relation_name, new_columns=new_columns, retype=donors)
+
+    def relation_column_types(self, relation_name: str) -> Dict[str, "ColumnType"]:
+        """Return the relation's current column name -> ColumnType mapping."""
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise ValueError(f"relation does not exist: {relation_name}")
+        return {c.name: c.column_type for c in descriptor.schema.columns}
 
     def _commit(
         self,

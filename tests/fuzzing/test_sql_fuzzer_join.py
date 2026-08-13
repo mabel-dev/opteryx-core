@@ -102,9 +102,9 @@ def random_value(t):
 # ---------------------------------------------------------------------------------
 # Source relations
 # ---------------------------------------------------------------------------------
-# The $satellites, $astronauts and $missions virtual datasets no longer exist — only
-# $planets survives in opteryx.managers.virtual_datasets. The same four relations are
-# still present as parquet under testdata/, so the join fuzzer reads them from there.
+# $planets is the only virtual dataset left in opteryx.managers.virtual_datasets. The
+# relations below are all present as parquet under testdata/, so the join fuzzer reads
+# every one of them from there rather than mixing the two sources.
 #
 # `testdata.fuzzing.mixed` is here for its TYPES, not its size: it is the only
 # relation in reach carrying BOOLEAN, VARBINARY, DECIMAL, DATE and TIMESTAMP columns,

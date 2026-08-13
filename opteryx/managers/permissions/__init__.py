@@ -23,14 +23,26 @@ Registration is the ONLY sanctioned way to change what a permission check
 means. There is no capability sniffing on the check path and no fallback:
 whatever is registered when a query binds is what decides it.
 
-A capability answers three questions:
+A capability answers four questions:
 
     can_perform_action(execution_context, resource, action) -> bool
     can_perform_workspace_action(execution_context, workspace, action) -> bool
+    can_principal_perform_action(principal, resource, action) -> bool
     grants(identity, policies) -> list[dict]
 
-The first two are the gates the binder and `information_schema` call. The
-third backs `SHOW GRANTS` ($grants), so that what is reported and what is
+The first two are the gates the binder and `information_schema` call, and both
+ask about the session doing the asking.
+
+The third asks about somebody else - a principal named in a statement, who has
+no session here and whose policies this process was never issued. It exists
+because a materialized view refreshes as a pinned identity rather than as its
+author, so `ALTER MATERIALIZED VIEW ... OWNER TO` has to establish that the
+incoming owner can read what the view reads before pinning it there. Resolving
+that principal's policies and interpreting them both belong to the capability:
+the engine is never handed policies it was not issued, and there is no second
+implementation of what a policy means to drift away from this one.
+
+The fourth backs `SHOW GRANTS` ($grants), so that what is reported and what is
 enforced come from one place and cannot drift into disagreeing.
 
 Returning `False` is how a capability denies; the callers turn that into the
@@ -50,13 +62,19 @@ __all__ = (
     "active_permissions_capability",
     "can_perform_action",
     "can_perform_workspace_action",
+    "can_principal_perform_action",
     "register_permissions_capability",
 )
 
 # The members a capability must provide. Checked once, at registration, so a
 # capability missing one is reported when it is installed rather than when the
 # first query happens to reach that gate.
-_REQUIRED_MEMBERS = ("can_perform_action", "can_perform_workspace_action", "grants")
+_REQUIRED_MEMBERS = (
+    "can_perform_action",
+    "can_perform_workspace_action",
+    "can_principal_perform_action",
+    "grants",
+)
 
 
 class PermitAll:
@@ -73,6 +91,9 @@ class PermitAll:
         return True
 
     def can_perform_workspace_action(self, execution_context, workspace: str, action: str) -> bool:
+        return True
+
+    def can_principal_perform_action(self, principal: str, resource: str, action: str) -> bool:
         return True
 
     def grants(self, identity: str, policies: List[dict]) -> List[Dict[str, Any]]:
@@ -163,3 +184,19 @@ def can_perform_workspace_action(execution_context, workspace: str, action: str 
     authority over the workspace itself.
     """
     return _capability().can_perform_workspace_action(execution_context, workspace, action)
+
+
+def can_principal_perform_action(principal: str, table: str, action: str = "READ") -> bool:
+    """Whether `principal` may perform `action` on `table`.
+
+    Asked about somebody who is not the caller: there is no execution context
+    because that principal has no session here, and the calling session's
+    policies say nothing about what they hold. The capability resolves their
+    policies itself.
+
+    A caller's own authority is never a substitute for this answer. Statements
+    that name a principal to act as - rather than acting as their author - have
+    to establish what that principal can do, or authority becomes something a
+    caller can hand out by naming somebody who has it.
+    """
+    return _capability().can_principal_perform_action(principal, table, action)

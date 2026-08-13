@@ -7,7 +7,26 @@
 Marker mixin for connectors that support DDL/DML operations.
 """
 
+from dataclasses import dataclass
 from typing import List, Optional
+
+
+@dataclass(frozen=True)
+class EgressRefusal:
+    """One source workspace refusing to let a copy of its data leave it.
+
+    The engine's own type, built at the connector boundary from whatever the
+    backing store reports - so a store's representation never travels into the
+    engine, the same way `ViewDefinition` and `Manifest` are the engine's.
+
+    Carries the remediation separately from the message because a caller
+    composing several refusals wants to list what has to change without
+    repeating a full sentence per workspace.
+    """
+
+    workspace: str
+    remediation: str
+    message: str
 
 
 class Writable:
@@ -314,6 +333,113 @@ class Writable:
         """
         raise NotImplementedError
 
+    def add_column(
+        self,
+        relation_name: str,
+        column_name: str,
+        column_type: "ColumnType",
+        nullable: bool = True,
+        default: object = None,
+        if_not_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> None:
+        """Add a column to a relation, without rewriting existing rows' data.
+
+        `default` is a WRITE-TIME FILL VALUE, not a stored constraint: it is
+        `None` (existing rows read back as NULL for the new column) or an
+        already bind-time-validated literal (existing rows read back as that
+        value), and nothing consults it again afterwards. Either way this is a
+        metadata-scale change per row - a single repeated value, never one
+        computed per row.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            column_name: Name of the new column
+            column_type: Declared type of the new column
+            nullable: Recorded on the column. Opteryx has no NULL constraints,
+                so nothing enforces it - it is carried for the catalog's and
+                readers' benefit only
+            default: NULL, or the literal value existing rows should read back
+            if_not_exists: If True, do not raise if the column already exists
+            author: session user this change is attributed to (see create_relation)
+
+        Raises:
+            ValueError: If the relation doesn't exist, or the column already
+                exists and if_not_exists is False
+        """
+        raise NotImplementedError
+
+    def drop_column(
+        self,
+        relation_name: str,
+        column_name: str,
+        if_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> None:
+        """Drop a column from a relation, without rewriting other columns' data.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            column_name: Name of the column to remove
+            if_exists: If True, do not raise if the column doesn't exist
+            author: session user this change is attributed to (see create_relation)
+
+        Raises:
+            ValueError: If the relation doesn't exist, or the column doesn't
+                exist and if_exists is False
+        """
+        raise NotImplementedError
+
+    def rename_column(
+        self,
+        relation_name: str,
+        old_column_name: str,
+        new_column_name: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Rename a column, without rewriting any column's data.
+
+        The column keeps its identity (stable field-id, where the store has
+        one) - only its name changes, so a value written under the old name
+        reads back correctly under the new one.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            old_column_name: The column's current name
+            new_column_name: The column's new name
+
+        Raises:
+            ValueError: If the relation doesn't exist, the source column
+                doesn't exist, or the target name is already taken
+        """
+        raise NotImplementedError
+
+    def alter_column_type(
+        self,
+        relation_name: str,
+        column_name: str,
+        new_type: "ColumnType",
+        author: Optional[str] = None,
+    ) -> None:
+        """Widen a column's type, rewriting only that column's data.
+
+        Callers guarantee `new_type` is already a bind-time-validated legal
+        widening of the column's current type (see
+        `opteryx.types.is_legal_widen`) - this method does not re-derive
+        legality, only applies it. Every other column in every affected file
+        is untouched.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            column_name: Name of the column to retype
+            new_type: The new, wider type
+            author: session user this change is attributed to (see create_relation)
+
+        Raises:
+            ValueError: If the relation or column doesn't exist
+        """
+        raise NotImplementedError
+
     def set_cluster_by(
         self, relation_name: str, cluster_columns: "List[str]", author: Optional[str] = None
     ) -> None:
@@ -408,6 +534,28 @@ class Writable:
             f"{self.__class__.__name__} does not support REFRESH MATERIALIZED VIEW"
         )
 
+    def materialized_view_sources(self, relation_name: str) -> List[str]:
+        """The catalog tables a materialized view reads, as recorded at registration.
+
+        Read from the record rather than recovered by re-planning the defining
+        SELECT: the sources were resolved once, when the view was bound, and
+        that list is what the view's refresh triggers were landed against.
+
+        Needed wherever a view's sources must be judged without a plan in hand -
+        `ALTER MATERIALIZED VIEW ... OWNER TO` has to know what the incoming
+        owner would be refreshing before it pins them to it, and its statement
+        has no SELECT subtree to walk.
+
+        Args:
+            relation_name: Fully-qualified name of the materialized view
+
+        Raises:
+            ValueError: If the relation is not a materialized view.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support ALTER MATERIALIZED VIEW ... OWNER TO"
+        )
+
     def set_materialized_view_owner(
         self, relation_name: str, new_owner: str, author: str = None
     ) -> None:
@@ -464,35 +612,41 @@ class Writable:
         """
         raise NotImplementedError
 
-    def enforce_egress_policy(
+    def egress_verdict(
         self, target_relation: str, source_relations: "List[str]"
-    ) -> None:
-        """Refuse a write that would copy data out of a protected workspace.
+    ) -> "List[EgressRefusal]":
+        """Every workspace that refuses this write, without refusing it here.
 
-        Called at bind time by the INSERT/CTAS path, before anything is
-        written, with the relation being written and every catalog relation the
-        statement reads. A connector that recognises a workspace boundary
-        between them raises; one that does not, returns.
+        Called at bind time by the INSERT/CTAS path, before anything is written,
+        with the relation being written and every catalog relation the statement
+        reads. The caller decides what to do with the refusals - see
+        `_enforce_egress` in the binder, which reports all of them at once so
+        that clearing egress across several workspaces is not a sequence of
+        failed statements.
 
-        **No-op by default, and that is not a gap.** Egress protection is a
-        boundary between workspaces, and a connector with no workspace concept
-        - a filesystem, a single-store backend - has no boundary to cross. It
-        would be wrong to make this `NotImplementedError` like its neighbours
-        above: those describe capabilities a connector may genuinely lack,
-        whereas here "nothing to check" is the correct and complete answer.
+        The ONLY shape of this decision. There is deliberately no enforcing
+        sibling: two methods would let a connector implement one and leave the
+        other answering permissively, and the permissive answer here is the
+        dangerous one.
+
+        **An empty list means allowed.** A connector that cannot reach the
+        decision at all must raise rather than return `[]`: "I could not ask"
+        and "nothing objected" are different answers, and only one of them is
+        safe to act on.
+
+        **Empty by default, and that is not a gap.** Egress protection is a
+        boundary between workspaces, and a connector with no workspace concept -
+        a filesystem, a single-store backend - has no boundary to cross, so
+        "nothing refuses" is the correct and complete answer. It would be wrong
+        to make this `NotImplementedError` like its neighbours above: those
+        describe capabilities a connector may genuinely lack.
 
         Args:
             target_relation: Fully-qualified relation being written
             source_relations: Fully-qualified names of the catalog relations the
-                statement reads. Non-catalog sources ($planets,
-                information_schema, files) are filtered out before this call -
-                they belong to no workspace and so cannot leave one.
-
-        Raises:
-            EgressRestrictedError: If the write would copy data out of a
-                workspace whose `egress_protection` is on.
+                statement reads, non-catalog sources already filtered out.
         """
-        return None
+        return []
 
     def relation_column_names(self, relation_name: str) -> "List[str]":
         """Return the relation's current column names only (not full type
@@ -506,3 +660,100 @@ class Writable:
             ValueError: If relation doesn't exist
         """
         raise NotImplementedError
+
+    def relation_column_types(self, relation_name: str) -> "Dict[str, ColumnType]":
+        """Return the relation's current column name -> ColumnType mapping.
+
+        Used at bind time by `ALTER COLUMN ... TYPE` to check the requested
+        change against the column's actual current type before anything is
+        written - the same "ask the connector, don't assume" posture as
+        `relation_column_names`, just with the type fidelity that call
+        deliberately drops.
+
+        Args:
+            relation_name: Fully-qualified relation name
+
+        Raises:
+            ValueError: If relation doesn't exist
+        """
+        raise NotImplementedError
+
+
+def build_column_donor(column_name: str, column_type: "ColumnType", value: object) -> bytes:
+    """Build the one-row parquet file that describes a column being ADDed.
+
+    `rugo.parquet.patch_columns(..., add=[...])` takes a new column's parquet
+    annotation from a DONOR file rather than from a DrakenType -> parquet
+    mapping of its own. This builds that donor: a single-column, single-row
+    file holding `value` (or a NULL row when `value` is None), written
+    uncompressed and without a dictionary so the patcher can lift the value
+    straight out of the page.
+
+    Going the long way round - through the real write path and back out of the
+    file it produced - is deliberate. It means an ADDed column is annotated by
+    exactly the code that would have written that same column in a CTAS, so the
+    two cannot drift into disagreeing about widths, signedness, decimal
+    precision/scale, or timestamp units.
+
+    A literal the declared type cannot hold raises out of Draken's ingestion,
+    which is the right place for it to fail: the value never reaches a file.
+
+    Args:
+        column_name: Name the new column will carry
+        column_type: Declared type of the new column
+        value: The fill value for existing rows, or None for NULL
+
+    Returns:
+        The donor parquet file's bytes.
+    """
+    from decimal import Decimal
+
+    import rugo.parquet as _rugo_parquet
+    from draken import draken_native as _draken
+    from draken.interop.vector_sequence import vector_from_sequence
+    from draken.morsels.morsel import Morsel
+
+    from draken.draken_native import LogicalKind
+
+    # The canonical TimestampUnit spelling, not a second copy of it - draken's
+    # sequence constructors take the same "s"/"ms"/"us"/"ns" strings the SQL
+    # surface uses.
+    from opteryx.types.logical_type import _UNIT_TO_SQL
+
+    physical = column_type.physical
+    logical = column_type.logical
+    values = [value]
+
+    if logical is not None and logical.kind == LogicalKind.DECIMAL:
+        # SQL exact-numeric literals bind as float64, so the value arriving here
+        # is typically a float; Decimal(str(...)) reads the digits the user
+        # wrote rather than the binary approximation of them.
+        if value is not None and not isinstance(value, Decimal):
+            values = [Decimal(str(value))]
+        builder = (
+            _draken.vector_decimal128_from_sequence
+            if physical == _draken.DrakenType.DECIMAL128
+            else _draken.vector_decimal_from_sequence
+        )
+        vector = builder(values, logical.precision, logical.scale)
+    elif logical is not None and logical.kind == LogicalKind.TIMESTAMP:
+        vector = _draken.vector_timestamp_from_sequence(
+            values, _UNIT_TO_SQL[logical.unit], logical.offset_minutes
+        )
+    elif logical is not None and logical.kind == LogicalKind.TIME:
+        builder = (
+            _draken.vector_time32_from_sequence
+            if physical == _draken.DrakenType.TIME32
+            else _draken.vector_time64_from_sequence
+        )
+        vector = builder(values, _UNIT_TO_SQL[logical.unit])
+    else:
+        # Everything else is fully described by its physical type. IPV4 rides a
+        # plain UINT32 here on purpose: parquet has no notion of it, and the
+        # descriptor lives on the relation's schema, which the connector writes.
+        vector = vector_from_sequence(values, dtype=physical)
+
+    morsel = Morsel.from_vectors([column_name], [vector])
+    return _rugo_parquet.write_parquet(
+        morsel, compression="none", dictionary=False, bloom_filters=False
+    )

@@ -53,7 +53,22 @@ from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
-__all__ = ["do_resolve_relations", "rename_relations", "join_leg_preprocess"]
+__all__ = [
+    "do_resolve_relations",
+    "rename_relations",
+    "join_leg_preprocess",
+    "subplan_rooted_at",
+    "RELATION_STEP_TYPES",
+]
+
+# The plan steps that INTRODUCE a relation name — the names a column reference, a join's
+# left/right_relation_names, or a qualified wildcard can address. Everything else in a
+# plan passes its input's names through unchanged.
+RELATION_STEP_TYPES = (
+    LogicalPlanStepType.Scan,
+    LogicalPlanStepType.FunctionDataset,
+    LogicalPlanStepType.Subquery,
+)
 
 # The deepest chain of view/CTE expansions we will follow. A legitimate plan nests a
 # handful deep; anything beyond this is a runaway and is failed rather than followed.
@@ -124,15 +139,43 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
     return new_plan
 
 
+def subplan_rooted_at(plan: LogicalPlan, root_nid: str) -> LogicalPlan:
+    """
+    Extract the subtree feeding `root_nid` (inclusive) as a standalone plan.
+
+    The nodes are the SAME objects as in `plan` — `copy_sub_plan` deep-copies them on
+    the way out, so nothing here may be mutated before that happens. The pairing is the
+    point: this says WHICH nodes, `copy_sub_plan` makes them independent, and
+    `rename_relations` stops the copy claiming the original's relation names.
+    """
+    sub = LogicalPlan()
+    seen: set = set()
+    stack = [root_nid]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        sub.add_node(nid, plan[nid])
+        for child, _target, _relation in plan.ingoing_edges(nid):
+            stack.append(child)
+    for nid in seen:
+        for child, _target, relation in plan.ingoing_edges(nid):
+            if child in seen:
+                sub.add_edge(child, nid, relation)
+    return sub
+
+
 def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
     """
     When we include VIEWs and CTEs in a plan, we randomize the name of the
     relations to avoid conflicts.
     """
+    from opteryx.expression import NodeType
     from opteryx.models import LogicalColumn
     from opteryx.utils import random_string
 
-    relations = {}
+    relations = {}  # old_alias -> new_alias
     uuid_remap = {}  # old_uuid -> new_uuid for updating join readers
 
     # first we collection the relations
@@ -142,26 +185,51 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
     # join/union relation-name lists can point at — it must be renamed too, or a clone of
     # a subplan whose only relations are FunctionDataset nodes (e.g. a FULL OUTER JOIN
     # between two VALUES clauses) collides with the original names it was cloned from.
+    # Subquery is the third: a derived table (`FROM (SELECT ...) AS s`) and an already-
+    # expanded CTE/view reference both present as a Subquery node, and its alias is a
+    # relation name in exactly the same sense — `get_subplan_schemas` stops AT a Subquery
+    # and returns its alias, so it reaches a join's left/right_relation_names too. A copy
+    # that kept the original's subquery alias put two relations of one name in front of
+    # the Binder (a window over a CTE died with a misleading SEMI-join error).
     # Guard on a non-empty alias: some FunctionDataset nodes (READ_JSONL/READ_PARQUET/
     # READ_CSV) are not required to carry one, and mapping `None` as a relations-dict
     # key would make every unrelated `.source is None` column reference match it.
     for nid, node in [
         (nid, node)
         for (nid, node) in plan.nodes(True)
-        if node.node_type in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset)
-        and node.alias
+        if node.node_type in RELATION_STEP_TYPES and node.alias
     ]:
         alias = f"{prefix}{random_string(4)}"
-        unique_id = random_string(32)
-        relations[node.alias] = (node.relation, alias, unique_id)
-        uuid_remap[node.uuid] = unique_id
+        relations[node.alias] = alias
+        # Only scan-like nodes are READERS: join_leg_preprocess walks Scan nodes and
+        # collects their uuids into left_readers/right_readers, so those are the uuids
+        # that have to be made unique per copy. A Subquery's uuid reaches no such list,
+        # and minting a new one for it would be churn with nothing reading it.
+        if node.node_type != LogicalPlanStepType.Subquery:
+            unique_id = random_string(32)
+            uuid_remap[node.uuid] = unique_id
+            node.uuid = unique_id
         node.alias = alias
-        node.uuid = unique_id
         plan[nid] = node
 
     def _prop(property):
         if isinstance(property, LogicalColumn) and property.source in relations:
-            property.source = relations[property.source][1]
+            property.source = relations[property.source]
+        # A QUALIFIED wildcard (`p.*`) names a relation too, and names it as a plain
+        # string in `value` rather than as a LogicalColumn.source — so nothing above
+        # reaches it, and the tuple branch below walks straight past a bare string. Left
+        # unmapped it points at the alias the copy was renamed AWAY from, matches no
+        # relation in scope, and expands to NOTHING: every source column silently
+        # disappears from the copy, and the Project above it fails on a column that is
+        # plainly there in the original. `WITH c AS (SELECT p.* FROM $planets AS p)
+        # SELECT name FROM c` died with a raw `ValueError: not enough values to unpack`
+        # from the binder's `zip(*...)` over an empty expansion.
+        if (
+            isinstance(property, Node)
+            and property.node_type == NodeType.WILDCARD
+            and property.value
+        ):
+            property.value = type(property.value)(relations.get(q, q) for q in property.value)
         if isinstance(property, list):
             return [_prop(p) for p in property]
         if isinstance(property, tuple):
@@ -194,13 +262,9 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
             LogicalPlanStepType.Except,
         ):
             if node.left_relation_names:
-                node.left_relation_names = [
-                    relations[n][1] if n in relations else n for n in node.left_relation_names
-                ]
+                node.left_relation_names = [relations.get(n, n) for n in node.left_relation_names]
             if node.right_relation_names:
-                node.right_relation_names = [
-                    relations[n][1] if n in relations else n for n in node.right_relation_names
-                ]
+                node.right_relation_names = [relations.get(n, n) for n in node.right_relation_names]
             if node.left_readers:
                 node.left_readers = [uuid_remap.get(u, u) for u in node.left_readers]
             if node.right_readers:

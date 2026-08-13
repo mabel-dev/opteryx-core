@@ -296,6 +296,11 @@ def render_show_manifest(node: LogicalPlanNode) -> str:
     return f"SHOW MANIFEST FOR ({node.relation})"
 
 
+@register_render(LogicalPlanStepType.ShowSnapshots)
+def render_show_snapshots(node: LogicalPlanNode) -> str:
+    return f"SHOW SNAPSHOTS FOR ({node.relation})"
+
+
 @register_render(LogicalPlanStepType.Subquery)
 def render_subquery(node: LogicalPlanNode) -> str:
     return f"SUBQUERY{' AS ' + node.alias if node.alias else ''}"

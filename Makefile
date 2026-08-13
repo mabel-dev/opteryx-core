@@ -195,6 +195,51 @@ et: compile ## Run expression engine tests (value-checked gates)
 	@clear || true
 	@$(PYTEST) tests/test_expression_engine.py -v --tb=short
 
+rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
+	$(call print_blue,"Building and running RLE direct-dict tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O1 -DNDEBUG \
+	    -DHAVE_SNAPPY=1 -DHAVE_ZSTD=1 -DZSTD_STATIC_LINKING_ONLY=1 -DHAVE_CONFIG_H=1 \
+	    -I$(CURDIR)/rugo/src/parquet \
+	    -I$(CURDIR) \
+	    -I$(CURDIR)/src/cpp \
+	    -I$(CURDIR)/draken \
+	    -I$(CURDIR)/draken/core \
+	    -I$(CURDIR)/draken/simd \
+	    -I$(CURDIR)/src/c \
+	    -I$(CURDIR)/third_party/mabel \
+	    -I$(CURDIR)/third_party/mabel/base16 \
+	    -I$(CURDIR)/third_party/mabel/base64 \
+	    -I$(CURDIR)/third_party/mabel/base85 \
+	    -I$(CURDIR)/third_party/mabel/carchar \
+	    -I$(CURDIR)/third_party/mabel/parvi \
+	    -I$(CURDIR)/third_party/mabel/perfect_hash \
+	    -I$(CURDIR)/third_party/fastfloat \
+	    -I$(CURDIR)/third_party/fastfloat/fast_float \
+	    -I$(CURDIR)/third_party/yyjson/src \
+	    -I$(CURDIR)/third_party/re2 \
+	    -I$(CURDIR)/third_party/cyan4973 \
+	    -I$(CURDIR)/third_party/tdigest-c/src \
+	    -I$(CURDIR)/third_party/ulfjack/ryu \
+	    -I$(CURDIR)/third_party/nanobind \
+	    -I$(CURDIR)/third_party/crypto \
+	    -I$(CURDIR)/third_party/bshoshany \
+	    -I$(CURDIR)/third_party/moodycamel \
+	    -I$(CURDIR)/third_party/boost_math \
+	    -I$(CURDIR)/third_party/utf8h \
+	    -I$(CURDIR)/third_party/pcg \
+	    -I$(CURDIR)/third_party/snappy \
+	    -I$(CURDIR)/third_party/zstd \
+	    -I$(CURDIR)/third_party/zstd/common \
+	    -I$(CURDIR)/third_party/zstd/decompress \
+	    -I$(CURDIR)/third_party/lz4 \
+	    -I$(CURDIR)/third_party/miniz \
+	    $(CURDIR)/rugo/src/parquet/rle_direct_dict_test.cpp \
+	    -o rle_direct_dict_test
+	@/tmp/opteryx-tests/rle_direct_dict_test
+	$(call print_green,"✓ RLE direct-dict tests passed")
+
 kernel-parity: compile ## Build and run Phase 9a C ABI parity test
 	$(call print_blue,"Building and running C ABI parity test...")
 	@mkdir -p /tmp/opteryx-tests

@@ -54,6 +54,7 @@ class LogicalPlanStepType(int, Enum):
     Show = auto()  # show a variable
     ShowColumns = auto()  # SHOW COLUMNS
     ShowManifest = auto()  # SHOW MANIFEST FOR <table>
+    ShowSnapshots = auto()  # SHOW SNAPSHOTS FOR <table>
     Set = auto()  # set a variable
     Limit = auto()  # limit and offset
     Order = auto()  # order by
@@ -77,6 +78,10 @@ class LogicalPlanStepType(int, Enum):
     TruncateRelation = auto()
     AlterRelation = auto()
     RenameRelation = auto()
+    AddColumn = auto()
+    DropColumn = auto()
+    RenameColumn = auto()
+    AlterColumnType = auto()
     OptimizeRelation = auto()
     Insert = auto()
 
@@ -563,7 +568,20 @@ def _validate_where_clause_expression(
 
 
 def _find_base_scan(plan: LogicalPlan) -> "LogicalPlanNode":
-    """Return the sole Scan node from plan, for use as the CTE source in a window rewrite."""
+    """Refuse a window with no base table, or with more than one, while the clause that
+    wrote it is still in hand.
+
+    Validation only — the returned Scan is discarded. The rewriter copies the whole
+    sub-plan below the Window node instead (window_to_join._rewrite_one_window), which is
+    the window's real input, WHERE included.
+
+    This runs at LOGICAL PLANNING time, before the Relation Resolver expands CTEs and
+    views, so it counts a CTE reference as the one Scan it is at this point. The
+    post-resolution rule is `window_to_join._source_relation`, and it is the narrower
+    one in one direction and the wider one in the other: a derived table whose body joins
+    two tables is already inlined here and so is refused, while the same body written as
+    a CTE reaches the rewriter as a single Subquery relation and is allowed.
+    """
     scans = [node for _, node in plan.nodes(True) if node.node_type == LogicalPlanStepType.Scan]
     if not scans:
         raise UnsupportedSyntaxError(
@@ -574,6 +592,220 @@ def _find_base_scan(plan: LogicalPlan) -> "LogicalPlanNode":
             "Window functions over multiple joined tables are not yet supported. Compute the window in a subquery over a single relation, then join to that result."
         )
     return scans[0]
+
+
+def _enclosing_aggregator(tree, target, nearest=None):
+    """The aggregate or window call `target` is written INSIDE, or None.
+
+    Two shapes are forbidden by the standard and both arrive here, told apart by
+    whether the returned node carries an `over`:
+
+    * `SUM(COUNT(*) OVER ())` - an aggregate's argument cannot contain a window;
+    * `SUM(COUNT(*) OVER ()) OVER ()` - window calls cannot be nested.
+
+    Both were made reachable by the window hoist: the inner window is lifted out
+    and the enclosing call is left over its output column, which is a plan the
+    engine can build. They are refused rather than planned.
+
+    Ancestry, not co-occurrence, is what separates these from the window-BESIDE-
+    aggregate case (`SELECT COUNT(*), COUNT(*) OVER ()`), which is a different
+    arrangement with the opposite remedy - so this walks for a strict ancestor
+    rather than asking whether both are present.
+
+    The NEAREST enclosing call is returned, not the outermost: it is the call that
+    directly holds the window and therefore the one that cannot hold it. In
+    `SUM(SUM(COUNT(*) OVER ()) OVER ()) OVER ()` the middle window is the honest
+    complaint, and it renders without having to splice two levels at once.
+    Matching is by IDENTITY, for the reason `_replace_node` matches that way.
+
+    Ranking functions need no special handling: they take no arguments, so one can
+    never BE an ancestor - which is also why the outer half of an argument nesting
+    is always an aggregate window.
+
+    Call this before the hoist mutates anything. The aggregate-window branch clears
+    `over` on the nodes it processes, which would make an already-hoisted window
+    look like a plain aggregate to a later window in the same expression.
+    """
+    if tree is None:
+        return None
+    if tree is target:
+        return nearest
+    if tree.node_type == NodeType.AGGREGATOR:
+        nearest = tree
+
+    children = []
+    if tree.parameters:
+        children.extend(p for p in tree.parameters if isinstance(p, (Node, LogicalColumn)))
+    for _side in ("left", "centre", "right"):
+        _child = getattr(tree, _side, None)
+        if isinstance(_child, (Node, LogicalColumn)):
+            children.append(_child)
+    if tree.node_type == NodeType.CASE:
+        if tree.conditions:
+            children.extend(c for c in tree.conditions if isinstance(c, (Node, LogicalColumn)))
+        if tree.results:
+            children.extend(r for r in tree.results if isinstance(r, (Node, LogicalColumn)))
+        if isinstance(tree.else_result, (Node, LogicalColumn)):
+            children.append(tree.else_result)
+
+    for _child in children:
+        found = _enclosing_aggregator(_child, target, nearest)
+        if found is not None:
+            return found
+    return None
+
+
+def _rendered_window(window) -> str:
+    """A window's display form, rendered from its own OVER spec.
+
+    The loop below renders the same thing from the spec nodes it has already built
+    (`_window_display_name`); this builds them itself, because the refusals that
+    need it fire BEFORE the loop reaches the window - refusing on the pristine tree
+    is the whole point (see `_enclosing_aggregator`). Only refusal paths call it, so
+    the duplicate build costs nothing on a statement that runs.
+
+    A malformed spec is rendered, not validated: a nested `ROW_NUMBER() OVER ()` is
+    named as written and refused for the nesting, which is the structural problem -
+    adding the ORDER BY it is missing would not make it legal.
+
+    Windows nested inside this one are rendered too, recursively. `format_expression`
+    sees no OVER anywhere - the spec is the parser's dict, not a child node - so
+    without this a doubly-nested window rendered as `SUM(COUNT(*)) OVER ()`, which is
+    not what the caller wrote and is not even the same statement. Substituting mutates
+    the subtree, which is sound only because every caller raises.
+    """
+    if window.alias:
+        return window.alias
+    for _nested in get_all_nodes_of_type(window, select_nodes=(NodeType.AGGREGATOR,)):
+        if _nested is window or getattr(_nested, "over", None) is None:
+            continue
+        _nested_display = _rendered_window(_nested)
+        _nested_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_nested_display)
+        _nested_ref.query_column = _nested_display
+        _replace_node(window, _nested, _nested_ref)
+    _partition_by, _order_by = _window_spec_nodes(window.over)
+    return _window_display_name(window, _partition_by, _order_by)
+
+
+def _refuse_nested_window(tree, window) -> None:
+    """Refuse a window written inside an aggregate's or another window's argument.
+
+    Both halves are named as the CALLER wrote them. That is the whole reason this
+    refuses here instead of letting the window-beside-aggregate guard downstream
+    catch it: by then the window has been hoisted, and `format_expression` renders
+    the enclosing call around the minted `$win_<random>` join key - a column the
+    caller never wrote, different on every execution. `format_expression` has no
+    OVER to render either (the spec lives on the parser's dict), so the window is
+    swapped for a column carrying its display form and the enclosing call rendered
+    around that. The swap mutates in place, which is sound ONLY because this raises
+    on the next statement: nothing downstream ever sees the tree.
+    """
+    _enclosing = _enclosing_aggregator(tree, window)
+    if _enclosing is None:
+        return
+
+    _window_display = _rendered_window(window)
+    _display_ref = LogicalColumn(node_type=NodeType.IDENTIFIER, source_column=_window_display)
+    _display_ref.query_column = _window_display
+    _replace_node(_enclosing, window, _display_ref)
+
+    if getattr(_enclosing, "over", None) is None:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"Window function {md_code(_window_display)} cannot appear inside the "
+                f"aggregate {md_code(format_expression(_enclosing))}",
+                "The window produces one value per row and the aggregate collapses "
+                "them, so the window cannot be computed over the aggregated result",
+                "Compute the window in a subquery and aggregate its result",
+            )
+        )
+
+    # Window inside a window. Chaining the two across a subquery is the rewrite, and it
+    # is advised unconditionally: it used to be offered only when the inner window was a
+    # ranking one, because an aggregate window over a subquery computing an aggregate
+    # window died with "an aggregate Window node was left below a window chain" — that
+    # was a plan-rewrite ordering defect, since fixed (window_to_join
+    # `_innermost_chain_first`), and all four combinations run.
+    raise UnsupportedSyntaxError(
+        compose(
+            f"Window function {md_code(_window_display)} cannot appear inside the window "
+            f"function {md_code(_rendered_window(_enclosing))}",
+            "Window functions cannot be nested — each is computed over the rows of its "
+            "own window, so neither can be the input to the other",
+            "Compute the inner window in a subquery and apply the outer window to its result",
+        )
+    )
+
+
+def _refuse_window_in_window_spec(spec_nodes: list, clause: str) -> None:
+    """Refuse a window function written in a PARTITION BY or a window's ORDER BY.
+
+    The other half of "window functions cannot be nested", and it is invisible to
+    `_refuse_nested_window`: the spec is not part of the expression tree, it is the
+    parser's `over` dict hanging off the node, so a window in it is reached by no
+    walk of the projection. It arrived at the binder as a bare function call and was
+    reported as a MISSING COLUMN — "Column *COUNT* cannot be found" for
+    `OVER (PARTITION BY COUNT(*) OVER ())`, which names something the caller did not
+    write and points them at a table that was never the problem.
+
+    Called with the spec nodes already built, which is the first point at which the
+    nested window exists as a node; `build` carries its `over` through, so the same
+    test identifies it.
+    """
+    for _spec_node in spec_nodes:
+        for _node in get_all_nodes_of_type(_spec_node, select_nodes=(NodeType.AGGREGATOR,)):
+            if getattr(_node, "over", None) is None:
+                continue
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"Window function {md_code(_rendered_window(_node))} cannot appear in "
+                    f"the {md_syntax(clause)} of an {md_syntax('over')} (...) clause",
+                    "Window functions cannot be nested — the window spec is computed "
+                    "before the window it defines",
+                    f"Compute the inner window in a subquery and {clause.lower()} its result",
+                )
+            )
+
+
+def _refuse_window_in_having(having) -> None:
+    """Refuse a window function written in HAVING.
+
+    Standard SQL does not allow one there, and the reason is the evaluation order it
+    fixes: HAVING filters GROUPS, and window functions are computed AFTER grouping and
+    its filter. A window in HAVING asks to filter on a value that does not exist yet, so
+    there is no semantics to implement — refusing is the fix, not a gap.
+
+    It had no guard because the hoist walks the PROJECTION (and the windows QUALIFY
+    borrows into it), and HAVING is neither. Its aggregates are collected straight into
+    `_aggregates` further down, and nothing on that path reads `over` — so the spec was
+    DISCARDED and the window silently became a plain aggregate:
+    `SELECT COUNT(*) FROM $planets HAVING COUNT(*) OVER () > 100` computed `COUNT(*)`,
+    compared 9 > 100, and returned no rows. No error, and an answer that looks right.
+    A GROUP BY beside it did not help — that combination is refused everywhere else, but
+    the guard for it never saw HAVING either.
+
+    Called with the HAVING tree freshly built, which is while `over` is still on the node.
+
+    A ranking function is caught whether or not it carries an OVER: it is window-only
+    wherever it is written, and a bare `RANK()` in HAVING was reported as
+    "the aggregate function ROW_NUMBER is not supported", which names it as the one thing
+    it is not. It is rendered as WRITTEN — with its spec if it has one, bare if it does
+    not — rather than being given an `OVER ()` the caller did not type.
+    """
+    for _node in get_all_nodes_of_type(having, select_nodes=(NodeType.AGGREGATOR,)):
+        _is_window = getattr(_node, "over", None) is not None
+        if not _is_window and _node.value not in _RANKING_FUNCTIONS:
+            continue
+        _display = _rendered_window(_node) if _is_window else format_expression(_node)
+        raise UnsupportedSyntaxError(
+            compose(
+                f"Window function {md_code(_display)} cannot appear in {md_syntax('having')}",
+                f"{md_syntax('having')} filters groups, and window functions are computed "
+                "after grouping — so the window's value does not exist yet when the filter "
+                "runs",
+                f"Filter on a window function's output with {md_syntax('qualify')}",
+            )
+        )
 
 
 def _replace_node(tree, target, replacement):
@@ -610,6 +842,188 @@ def _replace_node(tree, target, replacement):
         if isinstance(tree.else_result, (Node, LogicalColumn)):
             tree.else_result = _replace_node(tree.else_result, target, replacement)
     return tree
+
+
+def _window_display_name(function_node, partition_by: list, window_order_by: list) -> str:
+    """The user-facing name of an unaliased window function — what it renders to.
+
+    Every unaliased projection expression is named by its rendering (see the binder's
+    `query_column = alias or format_expression(...)`), and a window function is no
+    different. It is rendered HERE rather than in `format_expression` because the OVER
+    clause only exists as the parser's dict on the node; by the time the plan is built
+    the spec has been lifted onto the Window node and `over` is cleared. The spec is
+    part of what the column IS — two windows over the same aggregate but different
+    partitions are two different columns — so it is rendered too.
+
+    `partition_by` and `window_order_by` are the already-built nodes, not the parser's
+    branches; `window_order_by` is a list of (expression, ascending).
+    """
+    _parts = []
+    if partition_by:
+        _parts.append("PARTITION BY " + ", ".join(format_expression(pb) for pb in partition_by))
+    if window_order_by:
+        _parts.append(
+            "ORDER BY "
+            + ", ".join(
+                format_expression(_col) + ("" if _ascending else " DESC")
+                for _col, _ascending in window_order_by
+            )
+        )
+    return f"{format_expression(function_node)} OVER ({' '.join(_parts)})"
+
+
+_RANKING_FUNCTIONS = ("ROW_NUMBER", "RANK", "DENSE_RANK")
+
+
+def _window_spec_nodes(over: Optional[dict]) -> Tuple[list, list]:
+    """An OVER clause's PARTITION BY and its ORDER BY, built into expression nodes.
+
+    The WINDOW's own ORDER BY is a different thing from the statement-level ORDER BY,
+    and the two are built from the same builders — so they are built in one place and
+    handed back named apart, rather than by a loop variable that can shadow the other.
+    """
+    _over = over or {}
+    _partition_by = [logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])]
+    _window_order_by = [
+        (
+            logical_planner_builders.build(item["expr"]),
+            True if item["options"]["asc"] is None else item["options"]["asc"],
+        )
+        for item in _over.get("order_by", [])
+    ]
+    return _partition_by, _window_order_by
+
+
+def _hoist_windows(
+    item,
+    clause: str,
+    window_specs: list,
+    ranking_specs: list,
+    window_displays: list,
+    minted: dict,
+    newly_minted: list,
+):
+    """Lift every window function out of `item`, leaving a reference to its output.
+
+    A window function does not have to BE the item — it can sit inside a larger
+    expression (`COUNT(*) OVER (PARTITION BY gravity) + 0`). Every window in the item's
+    tree is hoisted out and replaced by a reference to the Window node's output, leaving
+    the residual expression to be computed ABOVE the window; a top-level window is the
+    degenerate case of the same rewrite, where the window IS the tree and `_replace_node`
+    returns the reference.
+
+    Testing only the item itself was a SILENT WRONG ANSWER: a nested window kept `over`
+    set, fell through to the aggregate walk, and was computed as a plain aggregate with
+    its OVER spec discarded, so `COUNT(*) OVER (PARTITION BY gravity) + 0` collapsed nine
+    rows to one global count.
+
+    A ranking function is a candidate even with NO over clause, so the missing-OVER
+    refusal fires wherever it is written; a nested `ROW_NUMBER() + 1` used to die with an
+    internal IndexError instead.
+
+    `clause` is the clause the window was WRITTEN in. It travels with the display name
+    because the window-beside-aggregate refusal has to name both, and it offers a
+    different remedy for each.
+
+    `minted` maps a window's canonical rendering to the (internal alias, display name)
+    already minted for it, so the SAME window written twice is computed once and every
+    reference reads the one column. The case that needs it is a projection window
+    repeated in the statement-level ORDER BY: two spellings of one column, which without
+    this became two Window outputs and rode a duplicate through the Project.
+
+    Newly minted internal aliases are appended to `newly_minted`. A caller hoisting from a
+    clause whose windows are NOT in the SELECT list (QUALIFY, ORDER BY) uses them to keep
+    those columns out of a wildcard's expansion.
+
+    Returns the rewritten item.
+    """
+    _windows = [
+        _node
+        for _node in get_all_nodes_of_type(item, select_nodes=(NodeType.AGGREGATOR,))
+        if getattr(_node, "over", None) is not None or _node.value in _RANKING_FUNCTIONS
+    ]
+    if not _windows:
+        return item
+
+    # (reference, minted alias) per hoisted window. The references are built carrying the
+    # window's DISPLAY form and re-pointed at their minted aliases once the residual
+    # expression has been rendered — see the naming note at the end of this function.
+    _hoisted: list = []
+    for _window in _windows:
+        _over = getattr(_window, "over", None)
+        _user_alias = _window.alias
+        _is_ranking = _window.value in _RANKING_FUNCTIONS
+        if _is_ranking:
+            if _over is None:
+                raise UnsupportedSyntaxError(
+                    f"{_window.value}() is a window function and requires an **OVER** (...) clause. Add one, for example `ROW_NUMBER() OVER (PARTITION BY column)`."
+                )
+            if not _over.get("order_by"):
+                raise UnsupportedSyntaxError(
+                    f"{_window.value}() requires an **ORDER BY** in its **OVER** (...) clause. Add one, for example `OVER (ORDER BY column)`."
+                )
+        elif _over.get("order_by"):
+            raise UnsupportedSyntaxError(
+                "Window functions with **ORDER BY** are not supported. Use **PARTITION BY** only."
+            )
+        if _over.get("window_frame") is not None:
+            raise UnsupportedSyntaxError(
+                "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
+            )
+        _partition_by, _window_order_by = _window_spec_nodes(_over)
+
+        # Rendered before anything is mutated — the aggregate path clears `over`, and the
+        # spec is part of what the column IS. Deliberately alias-independent, because this
+        # is also the dedup key: `w OVER (...)` written in ORDER BY is the same column as
+        # `w OVER (...) AS x` written in the SELECT list.
+        _canonical = _window_display_name(_window, _partition_by, _window_order_by)
+        _already = minted.get(_canonical)
+        if _already is None:
+            # Two different names for two different jobs: `_win_alias` is the INTERNAL
+            # identity — it names the Window node's output column and the references to it
+            # — while `_win_display` is what the caller sees. Collapsing them put the
+            # minted `$win_...` in the result (and it is random per execution, so callers
+            # could not even rely on it).
+            _win_alias = _user_alias or f"$win_{random_string(6)}"
+            _win_display = _user_alias or _canonical
+            if _is_ranking:
+                ranking_specs.append((_window.value, _partition_by, _window_order_by, _win_alias))
+            else:
+                # `_win_alias` names the aggregate inside the CTE the window rewrite builds
+                # and the join-side reference to it, so it must be minted and must stay on
+                # the window node; only the OUTER reference carries the display name.
+                _window.alias = _win_alias
+                _window.query_column = _win_alias
+                _window.over = None  # clear so it acts as a plain aggregate inside the CTE
+                window_specs.append((_window, _partition_by))
+            minted[_canonical] = (_win_alias, _win_display)
+            newly_minted.append(_win_alias)
+            window_displays.append((_win_display, clause))
+        else:
+            _win_alias, _win_display = _already
+
+        _ref = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=_win_display,
+            alias=_user_alias,
+        )
+        _ref.query_column = _win_display
+        item = _replace_node(item, _window, _ref)
+        _hoisted.append((_ref, _win_alias))
+
+    # Naming: an unaliased item is named by its rendering, and the binder honours a
+    # `query_column` set here (see `binder.py`). A reference left in place of a hoisted
+    # window renders as its MINTED alias, which is random per execution — so the residual
+    # expression is rendered while the references still carry the window's display form,
+    # and that rendering is pinned as the item's name BEFORE they are re-pointed at the
+    # aliases they must resolve against. Order matters: render, then re-point. A top-level
+    # window skips the render — the reference already carries the display name as its
+    # query_column.
+    if item.query_column is None:
+        item.query_column = format_expression(item)
+    for _ref, _minted_alias in _hoisted:
+        _ref.source_column = _minted_alias
+    return item
 
 
 def inner_query_planner(ast_branch: dict) -> LogicalPlan:
@@ -739,10 +1153,20 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # Replace each window function in _projection with a plain column reference to its output alias,
     # so the regular aggregate path does not see them. Window logical nodes are inserted here so
     # they sit between the scan/filter chain and the project, ready for the plan rewriter.
-    _RANKING_FUNCTIONS = ("ROW_NUMBER", "RANK", "DENSE_RANK")
-    _window_specs: list = []  # aggregate windows: (index, agg_node, partition_by_nodes)
+    _window_specs: list = []  # aggregate windows: (agg_node, partition_by_nodes)
     # ranking windows: (kind, partition_by_nodes, order_by_pairs, win_alias)
     _ranking_specs: list = []
+    # (display name, the clause it was WRITTEN in) for every window hoisted below, in
+    # projection order. The window-beside-aggregate refusal further down has to name the
+    # window the caller wrote, and by the time it runs the window node is gone from the
+    # projection — replaced by a reference whose `source_column` is the minted `$win_`
+    # join key. So the display form is captured here, where it is still in hand.
+    #
+    # The clause travels with it because the two are refused with different remedies:
+    # a SELECT window is escaped by aggregating in a subquery, a QUALIFY window by
+    # windowing-and-filtering in one. QUALIFY's windows are borrowed into `_projection`
+    # (see `_qualify_window_slots` below), so the index is what tells them apart.
+    _window_displays: list = []
 
     # QUALIFY is filtering on a window function's OUTPUT, so its window functions
     # have to be computed before the filter can run. They ride into `_projection`
@@ -762,6 +1186,13 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # the unfiltered relation.
     _qualify = logical_planner_builders.build(ast_branch["Select"].get("qualify"))
     _qualify_window_slots: list = []  # (index into _projection, original node)
+    # The minted names of the window columns QUALIFY borrowed. Removing them from
+    # `_projection` below is enough for a projection that NAMES its columns, but a
+    # wildcard is expanded from the schemas in scope at bind time — and the Window
+    # node's output relation is one of them. These names travel to the Project and
+    # Exit nodes so their wildcard expansion can skip a column no reader asked for
+    # and could not name if they wanted to (it is random per execution).
+    _qualify_hidden_columns: list = []
     if _qualify is not None:
         _qualify_windows = [
             _node
@@ -776,71 +1207,152 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             )
         _projection_length_without_qualify = len(_projection)
         for _window_function in _qualify_windows:
+            # Ancestry has to be read from the PREDICATE, not from the projection slot
+            # below: only the window itself is borrowed into `_projection`, so a
+            # `QUALIFY SUM(COUNT(*) OVER ()) > 1` arrives at the loop as a bare window
+            # with the aggregate left behind here. Nothing saw that aggregate — it was
+            # never collected into `_aggregates` either — and the statement planned,
+            # then died in the engine with a raw KeyError naming a `$derived_` column.
+            _refuse_nested_window(_qualify, _window_function)
             _qualify_window_slots.append((len(_projection), _window_function))
             _projection.append(_window_function)
+    _qualify_slot_indices = {_slot for _slot, _ in _qualify_window_slots}
     for _i, proj_col in enumerate(_projection):
-        _over = getattr(proj_col, "over", None)
-        _is_ranking = (
-            proj_col.node_type == NodeType.AGGREGATOR and proj_col.value in _RANKING_FUNCTIONS
-        )
-        if _is_ranking:
-            if _over is None:
-                raise UnsupportedSyntaxError(
-                    f"{proj_col.value}() is a window function and requires an **OVER** (...) clause. Add one, for example `ROW_NUMBER() OVER (PARTITION BY column)`."
-                )
-            if not _over.get("order_by"):
-                raise UnsupportedSyntaxError(
-                    f"{proj_col.value}() requires an **ORDER BY** in its **OVER** (...) clause. Add one, for example `OVER (ORDER BY column)`."
-                )
-            if _over.get("window_frame") is not None:
-                raise UnsupportedSyntaxError(
-                    "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
-                )
-            _partition_by = [
-                logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
-            ]
-            # The WINDOW's own ORDER BY (inside OVER(...)), which is a different thing
-            # from the statement-level ORDER BY built below — named apart so the two
-            # cannot be confused or clobber one another.
-            _window_order_by = [
-                (
-                    logical_planner_builders.build(item["expr"]),
-                    True if item["options"]["asc"] is None else item["options"]["asc"],
-                )
-                for item in _over.get("order_by", [])
-            ]
-            _win_alias = proj_col.alias or f"$win_{random_string(6)}"
-            _ranking_specs.append((proj_col.value, _partition_by, _window_order_by, _win_alias))
-            _ref = LogicalColumn(
-                node_type=NodeType.IDENTIFIER, source_column=_win_alias, alias=_win_alias
-            )
-            _ref.query_column = _win_alias
-            _projection[_i] = _ref
+        # A window function does not have to BE the projection item — it can sit
+        # inside a larger expression (`COUNT(*) OVER (PARTITION BY gravity) + 0`).
+        # Every window in the item's tree is hoisted out and replaced by a reference
+        # to the Window node's output, leaving the residual expression to be computed
+        # by the Project ABOVE the window; a top-level window is the degenerate case
+        # of the same rewrite, where the window IS the tree and `_replace_node`
+        # returns the reference. This is the mechanism the QUALIFY hoist below
+        # already uses — a window inside a comparison — applied to the projection.
+        #
+        # Testing only the item itself was a SILENT WRONG ANSWER: a nested window
+        # kept `over` set, fell through to the aggregate walk below, and was computed
+        # as a plain aggregate with its OVER spec discarded, so
+        # `COUNT(*) OVER (PARTITION BY gravity) + 0` collapsed nine rows to one
+        # global count.
+        #
+        # A ranking function is a candidate even with NO over clause, so the
+        # missing-OVER refusal below fires wherever it is written; a nested
+        # `ROW_NUMBER() + 1` used to die with an internal IndexError instead.
+        _windows = [
+            _node
+            for _node in get_all_nodes_of_type(proj_col, select_nodes=(NodeType.AGGREGATOR,))
+            if getattr(_node, "over", None) is not None or _node.value in _RANKING_FUNCTIONS
+        ]
+        if not _windows:
             continue
-        if _over is not None and proj_col.node_type == NodeType.AGGREGATOR:
-            if _over.get("order_by"):
-                raise UnsupportedSyntaxError(
-                    "Window functions with **ORDER BY** are not supported. Use **PARTITION BY** only."
+        # A window written inside another call — an aggregate's argument or another
+        # window's — is refused BEFORE anything is mutated. The loop below clears `over`
+        # on each aggregate window it processes and splices it out of the tree; after
+        # either, a second window in the same expression can no longer see what it was
+        # written inside, and an already-hoisted window reads as a plain aggregate.
+        for _window in _windows:
+            _refuse_nested_window(proj_col, _window)
+        _item = proj_col
+        # (reference, minted alias) per hoisted window. The references are built
+        # carrying the window's DISPLAY form and re-pointed at their minted aliases
+        # once the residual expression has been rendered — see the naming note below.
+        _hoisted: list = []
+        for _window in _windows:
+            _over = getattr(_window, "over", None)
+            if _window.value in _RANKING_FUNCTIONS:
+                if _over is None:
+                    raise UnsupportedSyntaxError(
+                        f"{_window.value}() is a window function and requires an **OVER** (...) clause. Add one, for example `ROW_NUMBER() OVER (PARTITION BY column)`."
+                    )
+                if not _over.get("order_by"):
+                    raise UnsupportedSyntaxError(
+                        f"{_window.value}() requires an **ORDER BY** in its **OVER** (...) clause. Add one, for example `OVER (ORDER BY column)`."
+                    )
+                if _over.get("window_frame") is not None:
+                    raise UnsupportedSyntaxError(
+                        "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
+                    )
+                _partition_by = [
+                    logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
+                ]
+                # The WINDOW's own ORDER BY (inside OVER(...)), which is a different thing
+                # from the statement-level ORDER BY built below — named apart so the two
+                # cannot be confused or clobber one another.
+                _window_order_by = [
+                    (
+                        logical_planner_builders.build(item["expr"]),
+                        True if item["options"]["asc"] is None else item["options"]["asc"],
+                    )
+                    for item in _over.get("order_by", [])
+                ]
+                # A window in the SPEC is invisible to `_refuse_nested_window` — the spec
+                # is the parser's dict, not part of the expression tree — so it is tested
+                # here, where it has just become nodes.
+                _refuse_window_in_window_spec(_partition_by, "PARTITION BY")
+                _refuse_window_in_window_spec(
+                    [_col for _col, _ascending in _window_order_by], "ORDER BY"
                 )
-            if _over.get("window_frame") is not None:
-                raise UnsupportedSyntaxError(
-                    "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
+                # Two different names for two different jobs: `_win_alias` is the INTERNAL
+                # identity — it names the Window node's output column and the reference to
+                # it above — while `_win_display` is what the caller sees. Collapsing them
+                # put the minted `$win_...` in the result (and it is random per execution,
+                # so callers could not even rely on it).
+                _user_alias = _window.alias
+                _win_alias = _user_alias or f"$win_{random_string(6)}"
+                _win_display = _user_alias or _window_display_name(
+                    _window, _partition_by, _window_order_by
                 )
-            _partition_by = [
-                logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
-            ]
-            _win_alias = proj_col.alias or f"$win_{random_string(6)}"
-            proj_col.alias = _win_alias
-            proj_col.query_column = _win_alias
-            proj_col.over = None  # clear so it acts as a plain aggregate inside the CTE
-            _window_specs.append((_i, proj_col, _partition_by))
+                _ranking_specs.append((_window.value, _partition_by, _window_order_by, _win_alias))
+            else:
+                if _over.get("order_by"):
+                    raise UnsupportedSyntaxError(
+                        "Window functions with **ORDER BY** are not supported. Use **PARTITION BY** only."
+                    )
+                if _over.get("window_frame") is not None:
+                    raise UnsupportedSyntaxError(
+                        "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
+                    )
+                _partition_by = [
+                    logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])
+                ]
+                # See the note on the ranking path above — the spec is PARTITION BY only
+                # here, an ORDER BY having been refused already.
+                _refuse_window_in_window_spec(_partition_by, "PARTITION BY")
+                # Internal identity vs display name — see the note on the ranking path
+                # above. `_win_alias` names the aggregate inside the CTE the window rewrite
+                # builds and the join-side reference to it, so it must be minted and must
+                # stay on the window node; only the OUTER reference carries the display
+                # name. Rendered before `over` is cleared, because the spec is part of the
+                # name; the spec is PARTITION BY only here — an ORDER BY was refused above.
+                _user_alias = _window.alias
+                _win_alias = _user_alias or f"$win_{random_string(6)}"
+                _win_display = _user_alias or _window_display_name(_window, _partition_by, [])
+                _window.alias = _win_alias
+                _window.query_column = _win_alias
+                _window.over = None  # clear so it acts as a plain aggregate inside the CTE
+                _window_specs.append((_window, _partition_by))
+            _window_displays.append(
+                (_win_display, "QUALIFY" if _i in _qualify_slot_indices else "SELECT")
+            )
             _ref = LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
-                source_column=_win_alias,
-                alias=_win_alias,
+                source_column=_win_display,
+                alias=_user_alias,
             )
-            _ref.query_column = _win_alias
-            _projection[_i] = _ref
+            _ref.query_column = _win_display
+            _item = _replace_node(_item, _window, _ref)
+            _hoisted.append((_ref, _win_alias))
+        _projection[_i] = _item
+        # Naming: an unaliased projection item is named by its rendering, and the
+        # binder honours a `query_column` set here (see `binder.py`). A reference left
+        # in place of a hoisted window renders as its MINTED alias, which is random
+        # per execution — so the residual expression is rendered while the references
+        # still carry the window's display form, and that rendering is pinned as the
+        # item's name BEFORE they are re-pointed at the aliases they must resolve
+        # against. Order matters: render, then re-point. A top-level window skips the
+        # render — the reference already carries the display name as its query_column.
+        if _item.query_column is None:
+            _item.query_column = format_expression(_item)
+        for _ref, _minted_alias in _hoisted:
+            _ref.source_column = _minted_alias
 
     # Collect aggregates in projection (SELECT) order. get_all_nodes_of_type uses a
     # LIFO stack, so passing the whole projection list scrambles cross-column order;
@@ -921,6 +1433,10 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _having = logical_planner_builders.build(ast_branch["Select"].get("having"))
     _having_passthrough: list = []
     if _having:
+        # Before the aggregates below are collected — that walk cannot tell a window from
+        # a plain aggregate, and appending one to `_aggregates` is what silently threw its
+        # OVER spec away.
+        _refuse_window_in_having(_having)
         _projection_aliases = {p.alias.lower() for p in _projection if p.alias}
         _seen_expressions = {format_expression(p).lower() for p in _projection}
         _seen_expressions.update(
@@ -1020,13 +1536,72 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _rewritten_groups.append(_group_expr)
         _groups = _rewritten_groups
 
+    # A window function beside a plain aggregate is refused for exactly the reason an
+    # explicit GROUP BY beside one is (the two refusals immediately below): the Window
+    # step is planned UNDER the aggregate step, so the window is computed over the rows
+    # the aggregate then collapses. It can never see the grouped result the standard
+    # says it should be computed over.
+    #
+    # A bare aggregate with no GROUP BY is still a group — the same wall — but it had no
+    # guard of its own and fell through to the generic "must appear in the `GROUP BY`
+    # clause" error below. That error names a column, and the only column it had to name
+    # was the hoisted window's reference, whose `source_column` is the MINTED `$win_` key:
+    # a column the caller never wrote, random per execution. Refused here instead, while
+    # the window's display form is in hand and the failure can be described in the
+    # window's own terms.
+    #
+    # QUALIFY is refused on the same terms (architect, 2026-08-13). Its Filter is planned
+    # below the aggregate step too, so `SELECT COUNT(*) ... QUALIFY w > 1` filters the
+    # PRE-aggregation rows and then counts — the same wall reached through a different
+    # clause, and it ran without complaint. Only the clause named and the remedy differ:
+    # a SELECT window is escaped by aggregating in a subquery, a QUALIFY window by doing
+    # the windowing and its filtering in one and aggregating the result. A QUALIFY window
+    # with no plain aggregate beside it is untouched — there is no collapse to lose it to.
+    #
+    # Refused, not supported: computing the window above the aggregate is a plan-shape
+    # change (`window_to_join.py` copies the sub-plan BELOW the Window node as the
+    # window's input, which would have to become the aggregate's output). Tracked as
+    # follow-up, deliberately not smuggled in here.
+    if _window_displays and _aggregates and (_groups is None or _groups == []):
+        # SELECT windows are enumerated before QUALIFY's borrowed ones, so a statement
+        # carrying both names the one the caller can see in their SELECT list.
+        _refused_window, _refused_clause = _window_displays[0]
+        _refused_aggregate = md_code(format_expression(_aggregates[0]))
+        if _refused_clause == "SELECT":
+            _refusal = (
+                f"Window function {md_code(_refused_window)} cannot be combined with the "
+                f"aggregate {_refused_aggregate} in the same {md_syntax('select')}"
+            )
+            _remedy = "Compute the aggregate in a subquery and apply the window to its result"
+        else:
+            _refusal = (
+                f"Window function {md_code(_refused_window)} in {md_syntax('qualify')} cannot "
+                f"be combined with the aggregate {_refused_aggregate}"
+            )
+            _remedy = (
+                f"Apply the window and its {md_syntax('qualify')} in a subquery, and "
+                "aggregate the result"
+            )
+        raise UnsupportedSyntaxError(
+            compose(
+                _refusal,
+                "The window is computed over the rows the aggregate collapses, so it cannot "
+                "see the aggregated result",
+                _remedy,
+            )
+        )
+
     if _window_specs:
         if _groups is not None and _groups != []:
             raise UnsupportedSyntaxError("Window functions cannot be combined with **GROUP BY**.")
-        _source_scan = _find_base_scan(inner_plan)
+        # Refuse a window with no base table, or with more than one, while the clause that
+        # wrote it is still in hand. The scan itself is NOT captured: the rewriter copies
+        # the whole sub-plan below the Window node instead, which is both the window's real
+        # input (WHERE included) and the post-resolution shape of it.
+        _find_base_scan(inner_plan)
         # Group by distinct partition spec; same partition → one Window node (shared CTE).
         _by_partition: dict = {}
-        for _i, _agg_node, _partition_by in _window_specs:
+        for _agg_node, _partition_by in _window_specs:
             _key = tuple(
                 getattr(pb, "source_column", None)
                 or getattr(pb, "value", None)
@@ -1040,7 +1615,6 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _window_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
             _window_step.aggregates = _agg_nodes
             _window_step.partition_by = _partition_by
-            _window_step.source_scan = _source_scan.copy()
             previous_step_id, step_id = step_id, random_string()
             inner_plan.add_node(step_id, _window_step)
             inner_plan.add_edge(previous_step_id, step_id)
@@ -1110,6 +1684,16 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         # result without keeping them out of the filter's input. Leaving them in
         # returned an extra column nobody asked for — `SELECT name ... QUALIFY
         # ROW_NUMBER() OVER (...) = 1` answered two columns.
+        #
+        # Removing them only covers a projection that NAMES its columns. A wildcard
+        # names none of them and is expanded at bind time from the relations in
+        # scope — which include the Window node's output relation (a ranking window)
+        # or the aggregate CTE the window-to-join rewrite builds — so `SELECT *`
+        # picked the minted column straight back up. Record the names so both
+        # wildcard expansion sites can skip them.
+        _qualify_hidden_columns = [
+            _projection[_slot].source_column for _slot, _ in _qualify_window_slots
+        ]
         del _projection[_projection_length_without_qualify:]
 
     if _groups is not None and _groups != []:
@@ -1152,7 +1736,14 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         if len(project_columns) > 0:
             from opteryx.exceptions import SqlError
 
-            column = project_columns.pop().source_column
+            # The name the caller WROTE, not the internal one. `source_column` is the
+            # bare identity — for a hoisted window reference it is the minted `$win_`
+            # join key (random per execution, and a column nobody typed), and for a
+            # qualified column it has already lost its qualifier. `query_column` is the
+            # display form every identifier carries from the builders, and is the only
+            # spelling safe to put in front of a caller.
+            _offending = project_columns.pop()
+            column = _offending.query_column or _offending.source_column
             error = f"Column '{column}' must appear in the `GROUP BY` clause or must be part of an aggregate function. Either add it to the `GROUP BY` list, or add an aggregation such as `MIN({column})`."
             raise SqlError(error)
 
@@ -1275,6 +1866,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         project_step.columns = _projection
         project_step.passthrough_columns = _order_by_columns_not_in_projection
         project_step.except_columns = _projection[0].except_columns
+        project_step.hidden_columns = _qualify_hidden_columns
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, project_step)
         if previous_step_id is not None:
@@ -1365,6 +1957,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # add the exit node
     exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
     exit_node.columns = _projection
+    exit_node.hidden_columns = _qualify_hidden_columns
     previous_step_id, step_id = step_id, random_string()
     inner_plan.add_node(step_id, exit_node)
     if previous_step_id is not None:
@@ -1951,6 +2544,44 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
     return plan
 
 
+def _plan_show_snapshots(table_name: str) -> LogicalPlan:
+    """`SHOW SNAPSHOTS FOR <table>` — Scan (bound for the commit history only,
+    never read) -> ShowSnapshots.
+
+    Same plan shape and the same no-Exit-node reasoning as _plan_show_manifest
+    above: a special op answered from what the binder attached, kept off the
+    native compiler, which has no operator for ShowSnapshotsNode.
+
+    It differs from SHOW MANIFEST in what the Scan below is asked for. The
+    Manifest is already loaded by an ordinary bind, so that statement consumes
+    state the Scan would have produced anyway; a relation's snapshot history is
+    NOT, and `for_snapshots_only` makes the connector fetch it (a second catalog
+    round trip) while skipping the manifest read the Scan would otherwise do.
+    """
+    plan = LogicalPlan()
+
+    from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
+    from_step.relation = table_name
+    from_step.alias = table_name
+    from_step.hints = []
+    # binder.visit_scan reads this to (a) load the commit history in place of the
+    # Manifest and (b) never compile a real file scan for this Scan — the history
+    # IS the answer. Unlike for_manifest_only it adds no permission beyond READ:
+    # a snapshot row is commit metadata about a relation the caller can already
+    # read, and exposes no file paths or storage layout.
+    from_step.for_snapshots_only = True
+    step_id = random_string()
+    plan.add_node(step_id, from_step)
+
+    show_step = LogicalPlanNode(node_type=LogicalPlanStepType.ShowSnapshots)
+    show_step.relation = table_name
+    previous_step_id, step_id = step_id, random_string()
+    plan.add_node(step_id, show_step)
+    plan.add_edge(previous_step_id, step_id)
+
+    return plan
+
+
 def _plan_show_triggers(table_name: str) -> LogicalPlan:
     """`SHOW TRIGGERS FOR <table>` — desugars to
     `SELECT * FROM <workspace>.information_schema.triggers
@@ -2052,6 +2683,19 @@ def plan_show_variables(statement, **kwargs):
         # `words` list; catalog/schema/table names are case-sensitive.
         table_name = ".".join(part["value"] for part in parts[2:])
         return _plan_show_manifest(table_name)
+    if words[0] == "SNAPSHOTS":
+        if len(words) < 3 or words[1] != "FOR":
+            # Bare SHOW SNAPSHOTS has nothing to enumerate for the same reason
+            # bare SHOW TRIGGERS does not: a commit history belongs to one
+            # relation, and the planner has no session default workspace to
+            # sweep for relations to list one for.
+            raise UnsupportedSyntaxError(
+                "`SHOW SNAPSHOTS FOR <table>` requires a table name, e.g. "
+                "`SHOW SNAPSHOTS FOR opteryx.test.pypi`."
+            )
+        # Original case preserved, as for SHOW MANIFEST FOR above.
+        table_name = ".".join(part["value"] for part in parts[2:])
+        return _plan_show_snapshots(table_name)
     if words[0] == "TRIGGERS":
         if len(words) < 3 or words[1] != "FOR":
             # Bare SHOW TRIGGERS cannot be answered: triggers live in a
@@ -2069,7 +2713,8 @@ def plan_show_variables(statement, **kwargs):
     raise UnsupportedSyntaxError(
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
         "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, "
-        "`SHOW TRIGGERS FOR <table>`, and `SHOW MANIFEST FOR <table>`."
+        "`SHOW TRIGGERS FOR <table>`, `SHOW MANIFEST FOR <table>`, and "
+        "`SHOW SNAPSHOTS FOR <table>`."
     )
 
 
@@ -2247,9 +2892,10 @@ def plan_alter_table(statement, **kwargs):
 
     ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column [, column ...])
     ALTER TABLE [IF EXISTS] table_name RENAME TO new_table_name
-
-    These are the only ALTER TABLE operations Opteryx supports; any other
-    operation (ADD COLUMN, DROP COLUMN, ...) is rejected.
+    ALTER TABLE [IF EXISTS] table_name ADD COLUMN [IF NOT EXISTS] name type [DEFAULT <literal>]
+    ALTER TABLE [IF EXISTS] table_name DROP COLUMN [IF EXISTS] name
+    ALTER TABLE [IF EXISTS] table_name RENAME COLUMN old_name TO new_name
+    ALTER TABLE [IF EXISTS] table_name ALTER COLUMN name TYPE type
     """
     root_node = "AlterTable"
     plan = LogicalPlan()
@@ -2315,9 +2961,170 @@ def plan_alter_table(statement, **kwargs):
         plan.add_node(random_string(), rename_relation_node)
         return plan
 
+    if "AddColumn" in operation:
+        from opteryx.exceptions import SqlError as _SqlError
+        from opteryx.planner.logical_planner.logical_planner_builders import (
+            build as build_expression,
+        )
+        from opteryx.planner.logical_planner.logical_planner_builders import (
+            column_type_from_ast,
+        )
+
+        add_op = operation["AddColumn"]
+        if add_op.get("column_position") is not None:
+            raise UnsupportedSyntaxError(
+                "**ALTER TABLE ... ADD COLUMN ... FIRST/AFTER** is not supported. A new column is always appended."
+            )
+
+        column_def = add_op["column_def"]
+        column_name = column_def["name"]["value"]
+
+        try:
+            column_type = column_type_from_ast(column_def)
+        except (_SqlError, ValueError) as err:
+            raise UnsupportedSyntaxError(
+                f"unsupported column type in **ALTER TABLE ... ADD COLUMN** for '{column_name}': {err}"
+            ) from err
+
+        col_nullable = True
+        default_value = None
+        for opt in column_def.get("options", []) or []:
+            option = opt.get("option")
+            if option == "NotNull":
+                col_nullable = False
+            elif option == "Null":
+                continue
+            elif isinstance(option, dict) and "Default" in option:
+                default_expr = build_expression(option["Default"])
+                if default_expr is None or default_expr.node_type != NodeType.LITERAL:
+                    raise UnsupportedSyntaxError(
+                        "**ALTER TABLE ... ADD COLUMN ... DEFAULT** only supports literal "
+                        "values, not expressions - a default that isn't a constant would "
+                        "need evaluating once per existing row, which this statement never does."
+                    )
+                default_value = default_expr.value
+            else:
+                raise UnsupportedSyntaxError(
+                    f"**ALTER TABLE ... ADD COLUMN** does not support column option: {option}"
+                )
+
+        add_column_node = LogicalPlanNode(node_type=LogicalPlanStepType.AddColumn)
+        add_column_node.relation_name = relation_name
+        add_column_node.if_exists = if_exists
+        add_column_node.column_name = column_name
+        add_column_node.column_type = column_type
+        add_column_node.nullable = col_nullable
+        add_column_node.default = default_value
+        add_column_node.if_not_exists = add_op.get("if_not_exists", False)
+
+        plan.add_node(random_string(), add_column_node)
+        return plan
+
+    if "DropColumn" in operation:
+        drop_op = operation["DropColumn"]
+        drop_behavior = drop_op.get("drop_behavior")
+        if drop_behavior is not None:
+            raise UnsupportedSyntaxError(
+                f"**ALTER TABLE ... DROP COLUMN ... {drop_behavior.upper()}** is not supported."
+            )
+
+        # The dialect's grammar only accepts one column per DROP COLUMN today, but
+        # the AST always carries a list (`column_names`) - guard rather than assume,
+        # so a future grammar change that allows `DROP COLUMN a, b` fails loud here
+        # instead of silently dropping only the first name.
+        column_names = drop_op.get("column_names") or []
+        if len(column_names) != 1:
+            raise UnsupportedSyntaxError(
+                "**ALTER TABLE ... DROP COLUMN** supports a single column name. Split "
+                "multiple drops into one statement each."
+            )
+
+        drop_column_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropColumn)
+        drop_column_node.relation_name = relation_name
+        drop_column_node.if_exists = if_exists
+        drop_column_node.column_name = column_names[0]["value"]
+        drop_column_node.column_if_exists = drop_op.get("if_exists", False)
+
+        plan.add_node(random_string(), drop_column_node)
+        return plan
+
+    if "RenameColumn" in operation:
+        rename_op = operation["RenameColumn"]
+
+        rename_column_node = LogicalPlanNode(node_type=LogicalPlanStepType.RenameColumn)
+        rename_column_node.relation_name = relation_name
+        rename_column_node.if_exists = if_exists
+        rename_column_node.column_name = rename_op["old_column_name"]["value"]
+        rename_column_node.new_column_name = rename_op["new_column_name"]["value"]
+
+        plan.add_node(random_string(), rename_column_node)
+        return plan
+
+    if "AlterColumn" in operation:
+        from opteryx.exceptions import SqlError as _SqlError
+        from opteryx.planner.logical_planner.logical_planner_builders import (
+            column_type_from_ast,
+        )
+
+        alter_col_op = operation["AlterColumn"]
+        column_name = alter_col_op["column_name"]["value"]
+        column_op = alter_col_op.get("op") or {}
+        # These three parse, and each would be silently inert if accepted.
+        # Opteryx stores no column default to consult on a later INSERT and has
+        # no NULL constraints: a DEFAULT is only ever the value ADD COLUMN
+        # writes into the file for the rows that already exist. Refuse rather
+        # than record state nothing reads.
+        #
+        # NOTE the two AST shapes - SetDefault arrives as a dict, DropDefault
+        # and SetNotNull as bare strings - so a dict-only membership test would
+        # catch the first and silently miss the other two.
+        _INERT_COLUMN_OPS = {
+            "SetDefault": "SET DEFAULT",
+            "DropDefault": "DROP DEFAULT",
+            "SetNotNull": "SET NOT NULL",
+            "DropNotNull": "DROP NOT NULL",
+        }
+        op_key = column_op if isinstance(column_op, str) else next(iter(column_op), None)
+        if op_key in _INERT_COLUMN_OPS:
+            raise UnsupportedSyntaxError(
+                f"**ALTER TABLE ... ALTER COLUMN ... {_INERT_COLUMN_OPS[op_key]}** is not "
+                "supported. Opteryx honours no column defaults and enforces no NULL "
+                "constraints - a DEFAULT is only the value **ADD COLUMN** writes into "
+                "existing rows, so there is nothing for this to change."
+            )
+        if not isinstance(column_op, dict) or "SetDataType" not in column_op:
+            raise UnsupportedSyntaxError(
+                "Opteryx only supports '**ALTER TABLE** ... ALTER COLUMN ... TYPE ...'."
+            )
+        set_type_op = column_op["SetDataType"]
+        if set_type_op.get("using") is not None:
+            raise UnsupportedSyntaxError(
+                "**ALTER TABLE ... ALTER COLUMN ... TYPE ... USING** is not supported. "
+                "A supported type change is always a lossless widening, which never needs "
+                "a transform expression."
+            )
+
+        try:
+            new_column_type = column_type_from_ast(set_type_op)
+        except (_SqlError, ValueError) as err:
+            raise UnsupportedSyntaxError(
+                f"unsupported column type in **ALTER TABLE ... ALTER COLUMN ... TYPE** for '{column_name}': {err}"
+            ) from err
+
+        alter_column_type_node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterColumnType)
+        alter_column_type_node.relation_name = relation_name
+        alter_column_type_node.if_exists = if_exists
+        alter_column_type_node.column_name = column_name
+        alter_column_type_node.new_column_type = new_column_type
+
+        plan.add_node(random_string(), alter_column_type_node)
+        return plan
+
     raise UnsupportedSyntaxError(
-        "Opteryx only supports '**ALTER TABLE** ... CLUSTER BY (...)' and "
-        "'**ALTER TABLE** ... RENAME TO ...'."
+        "Opteryx only supports '**ALTER TABLE** ... CLUSTER BY (...)', "
+        "'**ALTER TABLE** ... RENAME TO ...', '**ALTER TABLE** ... ADD COLUMN ...', "
+        "'**ALTER TABLE** ... DROP COLUMN ...', '**ALTER TABLE** ... RENAME COLUMN ... TO ...' "
+        "and '**ALTER TABLE** ... ALTER COLUMN ... TYPE ...'."
     )
 
 

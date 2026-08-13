@@ -76,6 +76,7 @@ _PASS_THROUGH_TYPES = {
     LogicalPlanStepType.Show,
     LogicalPlanStepType.ShowColumns,
     LogicalPlanStepType.ShowManifest,
+    LogicalPlanStepType.ShowSnapshots,
     LogicalPlanStepType.Set,
     LogicalPlanStepType.Comment,
     LogicalPlanStepType.Analyze,

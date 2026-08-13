@@ -192,7 +192,7 @@ def test_insert_column_count_mismatch(tmp_path):
     list(session.execute_to_morsels("CREATE TABLE ws.t (a BIGINT, b VARCHAR)"))
 
     # Try to insert only 1 value
-    with pytest.raises(UnsupportedSyntaxError, match="INSERT row has"):
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*INSERT\*\* row has"):
         list(session.execute_to_morsels("INSERT INTO ws.t VALUES (1)"))
 
 

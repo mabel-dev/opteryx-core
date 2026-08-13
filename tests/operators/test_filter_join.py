@@ -101,7 +101,7 @@ def test_semi_join_full_right_returns_all():
 def test_semi_join_no_row_duplication():
     """
     Semi-join must not duplicate outer rows even when the right side has repeated keys.
-    $satellites has many rows per planet (multiple satellites per planetId).
+    testdata.satellites has many rows per planet (multiple satellites per planetId).
     """
     total_planets = row_count("SELECT name FROM $planets")
     n = row_count(
@@ -126,7 +126,7 @@ def test_semi_join_only_left_columns():
 def test_semi_join_null_outer_key_excluded():
     """
     When the outer join key is NULL, the row must be excluded (NULL IN (...) = UNKNOWN).
-    $satellites has nullable gravity; we join on gravity against a set built from
+    $planets has nullable gravity; we join on gravity against a set built from
     the same column — null rows must not appear in the semi-join output.
     """
     # Build a reference count excluding null gravity rows from $planets

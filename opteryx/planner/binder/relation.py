@@ -199,6 +199,137 @@ def visit_rename_relation(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
+def visit_add_column(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ALTER TABLE ... ADD COLUMN node to determine which connector
+    should handle adding the column.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    # Same tier as CLUSTER BY/RENAME TO - a column ADD changes what the relation
+    # fundamentally is, not just its contents, so a writer cannot do it, only an
+    # owner can.
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    _reject_materialized_view_target(node, "**ALTER TABLE ... ADD COLUMN**")
+
+    node.columns = []
+    return node, context
+
+
+def visit_drop_column(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ALTER TABLE ... DROP COLUMN node to determine which connector
+    should handle removing the column.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    _reject_materialized_view_target(node, "**ALTER TABLE ... DROP COLUMN**")
+
+    node.columns = []
+    return node, context
+
+
+def visit_rename_column(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ALTER TABLE ... RENAME COLUMN node to determine which connector
+    should handle renaming the column.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    _reject_materialized_view_target(node, "**ALTER TABLE ... RENAME COLUMN**")
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_column_type(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """
+    Bind the ALTER TABLE ... ALTER COLUMN ... TYPE node: resolve the connector,
+    and reject an illegal type change before anything is written.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.managers.permissions import can_perform_action
+    from opteryx.types import is_legal_widen
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    _reject_materialized_view_target(node, "**ALTER TABLE ... ALTER COLUMN ... TYPE**")
+
+    current_types = node.connector.relation_column_types(node.relation_name)
+    if node.column_name not in current_types:
+        raise ColumnNotFoundError(
+            column=node.column_name,
+            dataset=node.relation_name,
+            suggestion=suggest_alternative(node.column_name, list(current_types)),
+        )
+    node.current_column_type = current_types[node.column_name]
+
+    if not is_legal_widen(node.current_column_type, node.new_column_type):
+        raise UnsupportedSyntaxError(
+            f"**ALTER TABLE ... ALTER COLUMN ... TYPE** cannot change '{node.column_name}' "
+            f"from {node.current_column_type} to {node.new_column_type} - only a lossless "
+            "widening within the same type family is supported (e.g. INT32 to INT64)."
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_analyze(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the ANALYZE TABLE / DROP STATISTICS node.
@@ -232,21 +363,38 @@ def visit_alter_materialized_view_owner(
 ) -> Tuple[Node, BindingContext]:
     """Bind ALTER MATERIALIZED VIEW ... OWNER TO ...
 
-    Gated on WORKSPACE owner, deliberately stricter than the view itself.
+    Two identities decide a materialized view, and this statement moves one of
+    them without touching the other, so it owes both an answer.
 
-    At creation a view's `runs-as` is necessarily an identity that held every
-    grant its definition needed, because it was the identity that ran it. This
-    statement is the one thing that breaks that invariant: it can point a
-    view's refresh at a principal with broader grants than the caller's own,
-    and nothing here can check another principal's grants to stop it. A
-    workspace owner can already grant themselves anything in the workspace, so
-    requiring that tier escalates nothing; a mere relation owner could
-    otherwise borrow authority they do not have.
+    Definition-time: whoever authors a view must be able to run the query it is
+    defined by, or authoring becomes a way to read what you could not read
+    directly. `visit_insert` enforces that against the caller on every
+    registration.
+
+    Execution-time: a TRIGGERED refresh runs as the pinned `runs-as` principal,
+    judged on that principal's own grants and inheriting nothing from its
+    author - a refresh that borrowed its author's authority would be a deputy
+    acting beyond its own. That identity belongs to the trigger and is not
+    consulted here: a `REFRESH MATERIALIZED VIEW` statement may be submitted by
+    anyone and is assessed on the submitting identity's own merits, so nothing
+    in this engine reads `runs-as`. It only writes it, and this is what writes
+    it.
+
+    So this statement asks two things. The caller must hold workspace owner,
+    deliberately stricter than the view itself: a workspace owner can already
+    grant themselves anything in the workspace and so escalates nothing by
+    transferring, where a mere relation owner could borrow authority they do
+    not have. AND the incoming owner must independently be able to read every
+    source - without which a transfer is a way to aim somebody else's authority
+    at data, or to leave a view whose triggered refresh can only ever fail.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import InvalidInternalStateError
     from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
     from opteryx.managers.permissions import can_perform_workspace_action
+    from opteryx.managers.permissions import can_principal_perform_action
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable):
@@ -260,6 +408,41 @@ def visit_alter_materialized_view_owner(
             f"User does not have permission to change the owner of {node.relation_name} "
             f"(owner of workspace {workspace} required)"
         )
+
+    # CURRENT_USER names the executing session, which the session-scoped gate
+    # answers exactly - and the principal it resolves to is not known here, only
+    # when the statement executes.
+    owner = node.new_owner
+    if node.owner_is_current_user:
+        owner = context.execution_context.user or "CURRENT_USER"
+
+    sources = node.connector.materialized_view_sources(node.relation_name)
+    if not sources:
+        # `visit_insert` refuses to register a view with no catalog sources, so a
+        # registered view that reports none is a record that cannot be true - not
+        # a view that genuinely reads nothing. Deliberately NOT PermissionError:
+        # nothing was denied here, the check could not be run at all, and a gate
+        # that answers "allowed" because it found nothing to look at is exactly
+        # the hole this whole check exists to close.
+        raise InvalidInternalStateError(
+            f"materialized view {node.relation_name} has no source tables recorded, so "
+            f"there is nothing to establish that {owner} can read what it reads. Its "
+            "registration record is incomplete; re-register it with CREATE OR REPLACE "
+            "MATERIALIZED VIEW before transferring it."
+        )
+
+    for source in sources:
+        if node.owner_is_current_user:
+            permitted = can_perform_action(context.execution_context, source, action="READ")
+        else:
+            permitted = can_principal_perform_action(node.new_owner, source, action="READ")
+        if not permitted:
+            raise PermissionError(
+                f"{owner} does not have permission to read {source}, a source of "
+                f"{node.relation_name} (read required). A triggered refresh runs as the "
+                "view's owner and inherits nothing from whoever transferred it, so an "
+                "owner that cannot read a source is a view that can never refresh itself."
+            )
 
     node.columns = []
     return node, context
@@ -535,6 +718,7 @@ def _enforce_egress(visitor, node, context) -> None:
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import EgressRestrictedError
 
     sources = []
     for relation in _scanned_relations(visitor, context):
@@ -544,8 +728,26 @@ def _enforce_egress(visitor, node, context) -> None:
         if isinstance(gateway, Writable):
             sources.append(relation)
 
-    if sources:
-        node.connector.enforce_egress_policy(node.relation_name, sources)
+    if not sources:
+        return
+
+    refusals = node.connector.egress_verdict(node.relation_name, sources)
+    if not refusals:
+        return
+
+    # One refusal reads as the catalog wrote it. Several are composed here
+    # rather than reported one at a time: a join across three protected
+    # workspaces would otherwise take three attempts to discover, and someone
+    # asking for access needs to ask once.
+    if len(refusals) == 1:
+        raise EgressRestrictedError(refusals[0].message)
+
+    workspaces = ", ".join(f"'{refusal.workspace}'" for refusal in refusals)
+    remediations = " ".join(refusal.remediation for refusal in refusals)
+    raise EgressRestrictedError(
+        f"Cannot write {node.relation_name}: it would copy data out of workspaces "
+        f"{workspaces}, which restrict egress. Clear them with: {remediations}"
+    )
 
 
 def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:

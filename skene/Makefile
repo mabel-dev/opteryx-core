@@ -46,7 +46,20 @@ INCLUDES := -Iinclude \
             -I$(DRAKEN_ROOT)/draken/simd \
             -I$(DRAKEN_ROOT)/third_party/mabel/carchar \
             -I$(DRAKEN_ROOT)/third_party/cyan4973
-CXXFLAGS := $(CXXSTD) $(OPT) $(WARN) $(INCLUDES)
+# -MMD -MP makes the compiler emit a .d file listing every header each object
+# actually included; the `-include` below feeds those back to make. Without it
+# NO rule here depended on a header at all, so editing include/skene/format.h —
+# or, worse, one of draken's headers outside this tree — rebuilt nothing.
+#
+# That is not a stale-comment nuisance, it is a layout mismatch: `VectorOwner`
+# gained fields on 2026-08-09 while build/ still held objects from 2026-08-08.
+# The library and the test binaries then disagreed about the struct's size, and
+# six of eleven test binaries died in ~VectorOwner decrementing a refcount
+# through a garbage pointer — a crash with nothing wrong in any source file,
+# which is why it sat undiagnosed from 2026-08-11. `make clean` fixed it; this
+# stops it coming back.
+DEPFLAGS := -MMD -MP
+CXXFLAGS := $(CXXSTD) $(OPT) $(WARN) $(INCLUDES) $(DEPFLAGS)
 
 BUILD := build
 
@@ -54,8 +67,8 @@ BUILD := build
 # and each consuming binary is documented as owning its own copy of those
 # globals (draken/core/vector_alloc.cpp header comment), so compiling it in is
 # correct rather than a layering violation.
-LIB_SRCS := src/checksum.cpp src/probe.cpp src/writer.cpp src/reader.cpp src/reader_v1.cpp src/value_order.cpp src/statistics.cpp src/encoding.cpp src/bloom.cpp src/file_io.cpp $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp
-LIB_OBJS := $(BUILD)/checksum.o $(BUILD)/probe.o $(BUILD)/writer.o $(BUILD)/reader.o $(BUILD)/reader_v1.o $(BUILD)/value_order.o $(BUILD)/statistics.o $(BUILD)/encoding.o $(BUILD)/bloom.o $(BUILD)/file_io.o $(BUILD)/draken_vector_alloc.o $(BUILD)/lz4.o
+LIB_SRCS := src/checksum.cpp src/probe.cpp src/writer.cpp src/reader.cpp src/reader_v1.cpp src/value_order.cpp src/statistics.cpp src/encoding.cpp src/bloom.cpp src/file_io.cpp src/patch.cpp $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp
+LIB_OBJS := $(BUILD)/checksum.o $(BUILD)/probe.o $(BUILD)/writer.o $(BUILD)/reader.o $(BUILD)/reader_v1.o $(BUILD)/value_order.o $(BUILD)/statistics.o $(BUILD)/encoding.o $(BUILD)/bloom.o $(BUILD)/file_io.o $(BUILD)/patch.o $(BUILD)/draken_vector_alloc.o $(BUILD)/lz4.o
 
 TEST_SRCS := $(wildcard tests/test_*.cpp)
 TEST_BINS := $(patsubst tests/%.cpp,$(BUILD)/%,$(TEST_SRCS))
@@ -136,6 +149,9 @@ $(BUILD)/encoding.o: src/encoding.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
 
 $(BUILD)/bloom.o: src/bloom.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
+
+$(BUILD)/patch.o: src/patch.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -Isrc -c $< -o $@
 
 $(BUILD)/draken_vector_alloc.o: $(DRAKEN_ROOT)/draken/core/vector_alloc.cpp | $(BUILD)
@@ -314,3 +330,8 @@ check-no-fuzz-flag:
 
 clean:
 	rm -rf $(BUILD)
+
+# Header dependencies emitted by -MMD, for every object AND every test binary.
+# Wildcarded and `-include`d so a missing .d (first build, or after clean) is
+# not an error. Kept at the end so it cannot shadow a real rule.
+-include $(shell find $(BUILD) -name '*.d' 2>/dev/null)

@@ -391,3 +391,50 @@ def test_insert_from_a_cte_resolves(tmp_path):
         )
     )
     assert _rows("SELECT * FROM wsi.target") == [(1,), (2,), (3,)]
+
+
+# ---------------------------------------------------------------------------
+# 5. rename_relations covers Subquery aliases
+# ---------------------------------------------------------------------------
+
+def test_rename_relations_re_aliases_subquery_nodes():
+    """A Subquery alias is a relation name and must be re-aliased with the Scans.
+
+    `get_subplan_schemas` stops AT a Subquery and returns its alias, so that alias
+    reaches column references and a join's left/right_relation_names exactly as a Scan
+    alias does. A copy that kept the original's put two relations of one name in front
+    of the Binder. This is the shared machinery, so it is pinned here rather than only
+    through the window rewrite that first tripped over it (see the window entries in
+    tests/integration/sql_battery/test_shapes_basic.py).
+    """
+    from opteryx.planner.relation_resolver import copy_sub_plan
+    from opteryx.planner.relation_resolver import rename_relations
+
+    ast = sqloxide.parse_sql(
+        "SELECT name FROM (SELECT * FROM $planets) AS s", _dialect="opteryx"
+    )[0]
+    plan, _, ctes = do_logical_planning_phase(ast)
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry())
+
+    def _subquery_aliases(p):
+        return {
+            node.alias
+            for _nid, node in p.nodes(True)
+            if node.node_type == LogicalPlanStepType.Subquery and node.alias
+        }
+
+    assert _subquery_aliases(plan) == {"s"}, "expected the derived table to be a Subquery named s"
+
+    copy = rename_relations(copy_sub_plan(plan), prefix="$test-")
+    renamed = _subquery_aliases(copy)
+    assert renamed and all(a.startswith("$test-") for a in renamed), (
+        f"Subquery alias was not re-aliased: {renamed}"
+    )
+    assert _subquery_aliases(plan) == {"s"}, "renaming the copy mutated the original"
+
+    # every column reference that named the old alias must have moved with it
+    for _nid, node in copy.nodes(True):
+        for column in node.columns or []:
+            assert column.source != "s", (
+                f"a column reference kept the old subquery alias: {column}"
+            )

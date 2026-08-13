@@ -21,6 +21,8 @@ the engine did with it. Nothing here restates a role or a policy pattern:
 what a role confers is not the engine's business.
 """
 
+import json
+
 import pytest
 
 import opteryx
@@ -29,6 +31,8 @@ from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.connectors.opteryx_connector import OpteryxConnector
 from opteryx.exceptions import InvalidConfigurationError
+from opteryx.exceptions import InvalidInternalStateError
+from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.permissions import PermitAll
 from opteryx.managers.permissions import active_permissions_capability
 from opteryx.managers.permissions import register_permissions_capability
@@ -39,13 +43,22 @@ class ScriptedCapability:
 
     name = "scripted"
 
-    def __init__(self, allow=(), allow_workspace=(), rows=(), allow_local_read=True):
+    def __init__(
+        self,
+        allow=(),
+        allow_workspace=(),
+        allow_principal=(),
+        rows=(),
+        allow_local_read=True,
+    ):
         self.allow = set(allow)
         self.allow_workspace = set(allow_workspace)
+        self.allow_principal = set(allow_principal)
         self.rows = list(rows)
         self.allow_local_read = allow_local_read
         self.asked = []
         self.asked_workspace = []
+        self.asked_principal = []
 
     def can_perform_action(self, execution_context, resource, action):
         self.asked.append((resource, action))
@@ -63,6 +76,12 @@ class ScriptedCapability:
     def can_perform_workspace_action(self, execution_context, workspace, action):
         self.asked_workspace.append((workspace, action))
         return (workspace, action) in self.allow_workspace
+
+    def can_principal_perform_action(self, principal, resource, action):
+        # No execution context: the principal being asked about is not the one
+        # running the query, and this session was never issued their policies.
+        self.asked_principal.append((principal, resource, action))
+        return (principal, resource, action) in self.allow_principal
 
     def grants(self, identity, policies):
         return self.rows
@@ -129,6 +148,7 @@ def test_the_intrinsic_capability_is_permit_all():
     capability = active_permissions_capability()
     assert capability.can_perform_action(None, "anything.at.all", "DROP")
     assert capability.can_perform_workspace_action(None, "anything", "ALTER")
+    assert capability.can_principal_perform_action("anybody", "anything.at.all", "READ")
 
 
 def test_an_incomplete_capability_is_refused_at_registration(install):
@@ -137,6 +157,9 @@ def test_an_incomplete_capability_is_refused_at_registration(install):
             return True
 
         def can_perform_workspace_action(self, execution_context, workspace, action):
+            return True
+
+        def can_principal_perform_action(self, principal, resource, action):
             return True
 
     with pytest.raises(InvalidConfigurationError):
@@ -292,6 +315,7 @@ def test_internal_relations_are_asked_about_too(tmp_path, install):
         ("INSERT INTO ws.t (id) VALUES (1)", ("ws.t", "WRITE")),
         ("CREATE VIEW ws.v2 AS SELECT * FROM ws.t", ("ws.v2", "WRITE")),
         ("SHOW CREATE VIEW ws.v", ("ws.v", "READ")),
+        ("SHOW SNAPSHOTS FOR ws.t", ("ws.t", "READ")),
         ("COMMENT ON TABLE ws.t IS 'hello'", ("ws.t", "WRITE")),
     ],
 )
@@ -318,6 +342,27 @@ def test_show_manifest_asks_for_manifest_on_top_of_read(tmp_path, install):
         list(session.execute_to_morsels("SHOW MANIFEST FOR ws.t"))
 
     assert ("ws.t", "MANIFEST") in capability.asked
+
+
+def test_show_snapshots_asks_for_read_and_nothing_more(tmp_path, install):
+    """The other side of the manifest gate. A snapshot row is commit metadata
+    about a relation the caller can already read - no file paths, no storage
+    layout - so it must not inherit MANIFEST's owner-only bar and lock owners
+    out of their own history.
+
+    The statement goes on to fail: this store keeps no commit log. That is a
+    connector capability, decided after the gate, and it does not weaken what
+    this pins - which questions the engine asked before getting there.
+    """
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow={("ws.t", "READ")}))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(UnsupportedSyntaxError, match="no snapshot history"):
+        list(session.execute_to_morsels("SHOW SNAPSHOTS FOR ws.t"))
+
+    assert ("ws.t", "READ") in capability.asked
+    assert ("ws.t", "MANIFEST") not in capability.asked
 
 
 def test_a_grant_for_the_wrong_action_does_not_clear_the_gate(tmp_path, install):
@@ -524,6 +569,196 @@ def test_a_materialized_view_still_needs_authority_over_its_target(tmp_path, ins
         list(session.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.b"))
 
     assert not (tmp_path / "ws" / "mv").exists()
+
+
+# ---------------------------------------------------------------------------
+# ... and the other half of the same problem: who it refreshes AS.
+#
+# Creating a view establishes that its AUTHOR could read the sources. A view
+# refreshes as a pinned owner, though, and this statement moves that owner
+# without touching the definition. The incoming owner is judged on their own
+# grants: authority is not something a caller can confer by naming somebody.
+# ---------------------------------------------------------------------------
+
+
+def _materialized_view(tmp_path, install):
+    """A view over ws.b, created with everything it needs permitted."""
+    _two_tables(tmp_path, install)
+    install(
+        ScriptedCapability(allow={("ws.mv", "WRITE"), ("ws.mv", "CREATE"), ("ws.b", "READ")})
+    )
+    session = opteryx.session(user="olive")
+    list(session.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.b"))
+
+
+def _runs_as(tmp_path):
+    with open(tmp_path / "ws" / "mv" / "materialized_view.json") as f:
+        return json.load(f)["runs-as"]
+
+
+def test_alter_owner_asks_whether_the_new_owner_can_read_the_sources(tmp_path, install):
+    _materialized_view(tmp_path, install)
+    capability = install(
+        ScriptedCapability(
+            allow_workspace={("ws", "ALTER")},
+            allow_principal={("ginny", "ws.b", "READ")},
+        )
+    )
+    session = opteryx.session(user="olive")
+
+    list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO ginny"))
+
+    assert ("ginny", "ws.b", "READ") in capability.asked_principal
+    assert _runs_as(tmp_path) == "ginny"
+
+
+def test_alter_owner_refuses_an_owner_who_cannot_read_the_sources(tmp_path, install):
+    """The bug this exists to stop: a view pinned to a principal who cannot read
+    what it reads is not a view that fails at its next refresh, it is a
+    definition that was never valid."""
+    _materialized_view(tmp_path, install)
+    capability = install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError, match="ginny"):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO ginny"))
+
+    assert ("ginny", "ws.b", "READ") in capability.asked_principal
+    assert _runs_as(tmp_path) == "olive"  # the transfer left nothing behind
+
+
+def test_the_callers_own_authority_does_not_carry_to_the_new_owner(tmp_path, install):
+    """The caller owns the workspace and can read the source themselves. Neither
+    fact says anything about ginny, and neither is allowed to stand in for her."""
+    _materialized_view(tmp_path, install)
+    install(
+        ScriptedCapability(
+            allow={("ws.b", "READ")},
+            allow_workspace={("ws", "ALTER")},
+        )
+    )
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO ginny"))
+
+
+def test_owner_to_current_user_is_judged_on_the_session(tmp_path, install):
+    """CURRENT_USER names the session, which the session-scoped gate answers
+    exactly - and the principal it resolves to is not known until execution."""
+    _materialized_view(tmp_path, install)
+    capability = install(
+        ScriptedCapability(allow={("ws.b", "READ")}, allow_workspace={("ws", "ALTER")})
+    )
+    session = opteryx.session(user="mallory")
+
+    list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO CURRENT_USER"))
+
+    assert ("ws.b", "READ") in capability.asked
+    assert capability.asked_principal == []
+    assert _runs_as(tmp_path) == "mallory"
+
+
+def test_every_source_is_checked_not_just_the_first(tmp_path, install):
+    """A view over two tables needs the owner to hold READ on both - stopping at
+    the first permitted source would pass a view they can only half read."""
+    _two_tables(tmp_path, install)
+    install(
+        ScriptedCapability(
+            allow={("ws.mv", "WRITE"), ("ws.mv", "CREATE"), ("ws.a", "READ"), ("ws.b", "READ")}
+        )
+    )
+    session = opteryx.session(user="olive")
+    list(
+        session.execute_to_morsels(
+            "CREATE MATERIALIZED VIEW ws.mv AS "
+            "SELECT a.id FROM ws.a AS a JOIN ws.b AS b ON a.id = b.id"
+        )
+    )
+
+    capability = install(
+        ScriptedCapability(
+            allow_workspace={("ws", "ALTER")},
+            allow_principal={("ginny", "ws.a", "READ")},  # ws.a yes, ws.b never
+        )
+    )
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError, match="ws.b"):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO ginny"))
+
+    assert ("ginny", "ws.b", "READ") in capability.asked_principal
+
+
+def test_a_view_with_no_recorded_sources_is_not_transferable(tmp_path, install):
+    """A gate that finds nothing to look at must not answer "allowed".
+
+    `visit_insert` refuses to register a view with no catalog sources, so an
+    empty list here is a record that cannot be true. It is deliberately not a
+    PermissionError: nothing was denied, the check could not run at all.
+    """
+    _materialized_view(tmp_path, install)
+    sidecar = tmp_path / "ws" / "mv" / "materialized_view.json"
+    record = json.loads(sidecar.read_text())
+    record["source_tables"] = []
+    sidecar.write_text(json.dumps(record))
+
+    install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(InvalidInternalStateError, match="no source tables recorded"):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO ginny"))
+
+    assert _runs_as(tmp_path) == "olive"
+
+
+def test_a_capability_that_cannot_answer_raises_rather_than_denying(tmp_path, install):
+    """`opteryx_access` raises when it cannot read a principal's policies - an
+    unreachable policy store, say. That has to reach the caller as itself: a
+    check that failed to run is not a check that ran and said no, and flattening
+    it into a refusal would hide an outage as a permissions decision."""
+    _materialized_view(tmp_path, install)
+
+    class PolicyStoreUnreachable(Exception):
+        """Shaped like `opteryx_access.PolicyStoreRequiredError`, which derives
+        from Exception. The base class matters: the planner wraps RuntimeError
+        into ExecutionError, so a capability raising one of those would arrive
+        as "the query could not be planned" instead of as itself."""
+
+    class Unreachable(ScriptedCapability):
+        def can_principal_perform_action(self, principal, resource, action):
+            raise PolicyStoreUnreachable("policy store unreachable")
+
+    install(Unreachable(allow_workspace={("ws", "ALTER")}))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PolicyStoreUnreachable):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO ginny"))
+
+    assert _runs_as(tmp_path) == "olive"
+
+
+def test_a_quoted_principal_reaches_the_capability_verbatim(tmp_path, install):
+    """Principals are usually email addresses, which need quoting to survive as
+    one token. Whatever normalizing happens is the capability's; the engine must
+    hand over what was written."""
+    _materialized_view(tmp_path, install)
+    capability = install(
+        ScriptedCapability(
+            allow_workspace={("ws", "ALTER")},
+            allow_principal={("someone@example.com", "ws.b", "READ")},
+        )
+    )
+    session = opteryx.session(user="olive")
+
+    list(
+        session.execute_to_morsels(
+            "ALTER MATERIALIZED VIEW ws.mv OWNER TO 'someone@example.com'"
+        )
+    )
+
+    assert ("someone@example.com", "ws.b", "READ") in capability.asked_principal
+    assert _runs_as(tmp_path) == "someone@example.com"
 
 
 # ---------------------------------------------------------------------------

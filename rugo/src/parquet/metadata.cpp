@@ -1039,9 +1039,13 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
   // arrives before field 6 on the wire in every writer, including our own),
   // so it must be revoked here, after created_by is known, for any file rugo
   // did not write itself. See IsTrustedRugoWriter.
-  if (!IsTrustedRugoWriter(created_by)) {
-    for (auto &rg : fs.row_groups) {
-      for (auto &col : rg.columns) {
+  const bool trusted = IsTrustedRugoWriter(created_by);
+  for (auto &rg : fs.row_groups) {
+    for (auto &col : rg.columns) {
+      // Recorded for every file, not only untrusted ones: the decoder branches
+      // on provenance rather than merely losing a claim (see ColumnStats).
+      col.writer_is_rugo = trusted;
+      if (!trusted) {
         col.is_sorted = false;
         col.sort_descending = false;
         col.sort_nulls_first = false;
