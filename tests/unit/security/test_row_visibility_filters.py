@@ -137,6 +137,43 @@ test_cases = [
     # 10) ANY AND ANY: ('Apollo 11' ANY missions) AND ('Gemini 8' ANY missions) -> Armstrong only
     ("SELECT * FROM testdata.astronauts", {"testdata.astronauts": [[("missions","AnyOpEq","Apollo 11"), ("missions","AnyOpEq","Gemini 8")]]}, (1, 19)),
 
+    # PATTERN KEYS. A key holding a glob metacharacter is fnmatched against the
+    # relation name, so a caller can scope a namespace without enumerating it.
+    ("SELECT * FROM $planets", {"$plan*": [("id", "Eq", 4)]}, (1, 20)),
+    ("SELECT * FROM $planets", {"$pl?nets": [("id", "Eq", 4)]}, (1, 20)),
+    ("SELECT * FROM $planets", {"$plane[st]s": [("id", "Eq", 4)]}, (1, 20)),
+    ("SELECT * FROM $planets", {"*": [("id", "Eq", 4)]}, (1, 20)),
+    ("SELECT * FROM testdata.satellites", {"testdata.*": [("id", "Eq", 4)]}, (1, 8)),
+    # fnmatch's `*` spans the dots, so one key covers a whole namespace's depth.
+    ("SELECT * FROM testdata.satellites", {"testdata.*": [("planetId", "Eq", 3)]}, (1, 8)),
+    # A pattern that does not match leaves the relation alone.
+    ("SELECT * FROM $planets", {"testdata.*": [("id", "Eq", 4)]}, (9, 20)),
+    ("SELECT * FROM $planets", {"$satell*": [("id", "Eq", 4)]}, (9, 20)),
+    # Matching is case-sensitive: relation names are.
+    ("SELECT * FROM $planets", {"$PLAN*": [("id", "Eq", 4)]}, (9, 20)),
+    # A pattern key valued None is "no filter", exactly as an exact key valued None is.
+    ("SELECT * FROM $planets", {"$plan*": None}, (9, 20)),
+    # A pattern deny-all denies, and cannot be widened by a permissive exact key.
+    ("SELECT * FROM $planets", {"$plan*": []}, (0, 20)),
+    ("SELECT * FROM $planets", {"$planets": [("id", "Eq", 4)], "$plan*": []}, (0, 20)),
+    ("SELECT * FROM $planets", {"$planets": [], "$plan*": [("id", "Eq", 4)]}, (0, 20)),
+
+    # EVERY matching key applies, and they are conjunctive - the most restrictive
+    # wins, and a pattern can only narrow what an exact key allowed.
+    ("SELECT * FROM $planets", {"$planets": [("id", "Gt", 3)], "$plan*": [("id", "Lt", 6)]}, (2, 20)),  # id in (4, 5)
+    ("SELECT * FROM $planets", {"$pl*": [("id", "Gt", 3)], "*ets": [("id", "Lt", 6)]}, (2, 20)),
+    ("SELECT * FROM $planets", {"$planets": [("id", "Gt", 3)], "$plan*": [("id", "Lt", 2)]}, (0, 20)),
+    # An exact key valued None does not suppress a pattern that matches.
+    ("SELECT * FROM $planets", {"$planets": None, "$pl*": [("id", "Eq", 4)]}, (1, 20)),
+    # Three keys over one relation, all applied.
+    ("SELECT * FROM $planets", {"$planets": [("id", "Gt", 2)], "$pl*": [("id", "Lt", 8)], "*ets": [("name", "Like", "M%")]}, (1, 20)),
+
+    # Patterns attach per-relation in a join, same as exact keys.
+    ("SELECT p.id, s.id AS satellite_id FROM $planets AS p INNER JOIN testdata.satellites AS s ON p.id = s.planetId", {"$plan*": [("id", "Eq", 3)]}, (1, 2)),
+    ("SELECT p.id, s.id AS satellite_id FROM $planets p LEFT JOIN testdata.satellites s ON p.id = s.planetId", {"$plan*": [("id", "Gt", 3)], "testdata.*": [("id", "Lt", 10)]}, (12, 2)),
+    # A pattern key does not match an alias, for the same reason an exact key does not.
+    ("SELECT * FROM $planets AS p", {"p*": [("id", "Eq", 4)]}, (9, 20)),
+
 ]
 
 
@@ -146,6 +183,37 @@ def test_visibility_filters(sql, filters, shape):
 
     result_shape = execute_with_visibility_filters(sql, filters)
     assert result_shape == shape, result_shape
+
+
+def test_pattern_match_on_a_relation_without_the_column_fails_rather_than_serves():
+    """The property that makes a namespace pattern safe to rely on.
+
+    A pattern is written once and then covers relations that do not exist yet. If a
+    relation lands under a covered namespace without the column the filter scopes on,
+    the only two options are to serve its rows unscoped or to refuse the query -- and
+    the whole reason to prefer patterns over an enumerated list is that the enumerated
+    list fails the first way, silently. This pins the second.
+    """
+    from opteryx.exceptions import ColumnNotFoundError
+
+    with pytest.raises(ColumnNotFoundError):
+        execute_with_visibility_filters(
+            "SELECT * FROM $planets", {"$plan*": [("billing_account", "Eq", "acme")]}
+        )
+
+
+def test_a_key_with_no_metacharacters_is_never_treated_as_a_pattern():
+    """Exact keys stay an O(1) dict lookup: they are not fnmatched, so a relation name
+    is not silently able to match some other relation's key."""
+    from opteryx.planner.logical_planner.logical_planner import (
+        VISIBILITY_PATTERN_CHARACTERS,
+    )
+
+    assert not any(c in "opteryx.ops.billing" for c in VISIBILITY_PATTERN_CHARACTERS)
+    # `$planets` holds no metacharacter, so it cannot act as a pattern over `$planet`.
+    assert execute_with_visibility_filters(
+        "SELECT * FROM $planets", {"$planet": [("id", "Eq", 4)]}
+    ) == (9, 20)
 
 
 if __name__ == "__main__":  # pragma: no cover

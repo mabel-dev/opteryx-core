@@ -206,15 +206,29 @@ struct TopNSink : Sink, EmitSubset {
     }
 };
 
-// ---- WindowSink (ROW_NUMBER / RANK / DENSE_RANK) -----------------------------------
+// ---- WindowSink (ROW_NUMBER / RANK / DENSE_RANK / LAG / LEAD) ----------------------
 // OVER (PARTITION BY p... ORDER BY o...). Breaker: buffer all input, sort by
 // (partition keys ASC, order keys with their asc), one pass assigns the rank per
-// partition, appends them as INT64 columns, emits in sorted order. Sort-key equality
-// (win_keys_equal) defines partition boundaries and order-ties EXACTLY (value
-// compare, not a hash).
+// partition, appends the ranks as INT64 columns, emits in sorted order. Sort-key
+// equality (win_keys_equal) defines partition boundaries and order-ties EXACTLY
+// (value compare, not a hash).
+//
+// LAG/LEAD are a SHIFTED-PERMUTATION GATHER, not a kernel: the value for output
+// row i (in sorted order) is the argument column's value at sorted position
+// i - offset (LAG) / i + offset (LEAD), when that position exists and its
+// partition keys are equal to row i's; otherwise NULL. gather_rows already
+// supports both halves of that — kGatherNullRow rows and a single-column emit
+// subset — so the navigation output reuses the canonical row gather and inherits
+// every type it supports, string arenas and ARRAY children included.
+//
+// The mirror of these codes is WINDOW_FUNCTIONS in
+// opteryx/operators/window/helpers.py — change one, change both.
 
-enum class WinFn : uint8_t { RowNumber = 0, Rank = 1, DenseRank = 2 };
-struct WindowFnSpec { WinFn kind; std::string name; };
+enum class WinFn : uint8_t { RowNumber = 0, Rank = 1, DenseRank = 2, Lag = 3, Lead = 4 };
+inline bool win_fn_is_nav(WinFn k) { return k == WinFn::Lag || k == WinFn::Lead; }
+// arg_col / offset are only meaningful for the navigation kinds: arg_col is the
+// INPUT column the value is read from (-1 for ranking), offset the row shift.
+struct WindowFnSpec { WinFn kind; std::string name; int arg_col = -1; int64_t offset = 0; };
 
 struct WindowLocal : LocalSinkState { std::vector<MorselPtr> morsels; };
 struct WindowGlobal : GlobalSinkState { std::mutex mtx; std::vector<MorselPtr> morsels; };
@@ -288,8 +302,27 @@ struct WindowSink : Sink, EmitSubset {
         sort_perm(keys, perm);
 
         // Rank numbers in perm order (gather_rows emits rows in perm order too).
+        // Navigation functions (LAG/LEAD) get no rank: their per-row value is a
+        // SOURCE ROW ID — the global row id of the row `offset` sorted positions
+        // away, or kGatherNullRow when that position falls outside the partition.
+        // Same-partition is decided by partition-key equality, which is exact: the
+        // sort groups each partition contiguously, so the row at i±offset is in row
+        // i's partition iff their partition keys compare equal (win_keys_equal).
         size_t nf = funcs.size();
-        std::vector<std::vector<int64_t>> ranks(nf, std::vector<int64_t>(n));
+        if (top_k >= 0 && nf > 0 && win_fn_is_nav(funcs[0].kind)) {
+            // WindowTopKFusionStrategy only fuses rank-valued outputs; a fused
+            // navigation output would filter on values as if they were ranks.
+            err.code = 1;
+            err.msg = "WindowSink: top_k fused onto a navigation window function — "
+                      "fail loud, never a silent wrong answer";
+            return;
+        }
+        std::vector<std::vector<int64_t>> ranks(nf);
+        std::vector<std::vector<uint32_t>> nav_order(nf);
+        for (size_t f = 0; f < nf; ++f) {
+            if (win_fn_is_nav(funcs[f].kind)) nav_order[f].resize(n);
+            else ranks[f].resize(n);
+        }
         std::vector<int64_t> prev(nf, 0);
         size_t part_start = 0;
         for (size_t i = 0; i < n; ++i) {
@@ -300,6 +333,17 @@ struct WindowSink : Sink, EmitSubset {
                 win_keys_equal(keys, perm[i], perm[i - 1], n_part, sort_spec.size());
             int64_t pos = static_cast<int64_t>(i - part_start) + 1;
             for (size_t f = 0; f < nf; ++f) {
+                if (win_fn_is_nav(funcs[f].kind)) {
+                    int64_t j = funcs[f].kind == WinFn::Lag
+                        ? static_cast<int64_t>(i) - funcs[f].offset
+                        : static_cast<int64_t>(i) + funcs[f].offset;
+                    bool in_part = j >= 0 && j < static_cast<int64_t>(n) &&
+                        win_keys_equal(keys, perm[static_cast<size_t>(j)], perm[i],
+                                       0, n_part);
+                    nav_order[f][i] =
+                        in_part ? perm[static_cast<size_t>(j)] : kGatherNullRow;
+                    continue;
+                }
                 int64_t val;
                 switch (funcs[f].kind) {
                     case WinFn::RowNumber: val = pos; break;
@@ -322,8 +366,10 @@ struct WindowSink : Sink, EmitSubset {
         // immediately filter back out the other 9.8M via a separate downstream Filter.
         std::vector<uint32_t> kept_perm;
         std::vector<std::vector<int64_t>> filtered_ranks;
+        std::vector<std::vector<uint32_t>> filtered_nav;
         const std::vector<uint32_t>* gather_order = &perm;
         const std::vector<std::vector<int64_t>>* ranks_src = &ranks;
+        const std::vector<std::vector<uint32_t>>* nav_src = &nav_order;
         size_t total = n;
         if (top_k >= 0 && nf > 0) {
             std::vector<uint32_t> kept;
@@ -332,11 +378,24 @@ struct WindowSink : Sink, EmitSubset {
             total = kept.size();
             kept_perm.resize(total);
             for (size_t j = 0; j < total; ++j) kept_perm[j] = perm[kept[j]];
-            filtered_ranks.assign(nf, std::vector<int64_t>(total));
-            for (size_t f = 0; f < nf; ++f)
-                for (size_t j = 0; j < total; ++j) filtered_ranks[f][j] = ranks[f][kept[j]];
+            // Nav entries are GLOBAL row ids (or kGatherNullRow), so compacting the
+            // OUTPUT rows never invalidates them — a source row outside the kept set
+            // is still gathered from `src` by id.
+            filtered_ranks.assign(nf, {});
+            filtered_nav.assign(nf, {});
+            for (size_t f = 0; f < nf; ++f) {
+                if (!ranks[f].empty()) {
+                    filtered_ranks[f].resize(total);
+                    for (size_t j = 0; j < total; ++j) filtered_ranks[f][j] = ranks[f][kept[j]];
+                }
+                if (!nav_order[f].empty()) {
+                    filtered_nav[f].resize(total);
+                    for (size_t j = 0; j < total; ++j) filtered_nav[f][j] = nav_order[f][kept[j]];
+                }
+            }
             gather_order = &kept_perm;
             ranks_src = &filtered_ranks;
+            nav_src = &filtered_nav;
         }
 
         // Chunked gather: each chunk builds one independent output morsel (its own
@@ -374,6 +433,29 @@ struct WindowSink : Sink, EmitSubset {
                 if (errs[tid].code != 0) return;
                 uint32_t cn = static_cast<uint32_t>(count);
                 for (size_t f = 0; f < nf; ++f) {
+                    if (win_fn_is_nav(funcs[f].kind)) {
+                        // LAG/LEAD: gather the argument column by the shifted
+                        // source ids computed above. gather_rows handles the NULL
+                        // rows (kGatherNullRow) and every supported type; the
+                        // emit subset narrows it to the one argument column.
+                        size_t ncols_in = src.front()->columns.size();
+                        if (funcs[f].arg_col < 0 ||
+                            static_cast<size_t>(funcs[f].arg_col) >= ncols_in) {
+                            errs[tid].code = 1;
+                            errs[tid].msg = "WindowSink: navigation function "
+                                            "argument column index out of range";
+                            return;
+                        }
+                        std::vector<uint32_t> one_col{
+                            static_cast<uint32_t>(funcs[f].arg_col)};
+                        MorselPtr nav = gather_rows(src, (*nav_src)[f], start, count,
+                                                    row_m, row_r, names, errs[tid],
+                                                    &one_col);
+                        if (nav == nullptr || errs[tid].code != 0) return;
+                        m->columns.push_back(std::move(nav->columns[0]));
+                        m->names.push_back(funcs[f].name);
+                        continue;
+                    }
                     int64_t* data = static_cast<int64_t*>(
                         draken_malloc((cn == 0 ? 1 : cn) * sizeof(int64_t)));
                     for (uint32_t j = 0; j < cn; ++j) data[j] = (*ranks_src)[f][start + j];

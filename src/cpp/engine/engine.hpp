@@ -747,17 +747,22 @@ public:
         set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, buffers[buf].get(),
                                                 emit_prune, std::move(emit_cols)));
     }
-    // Window ranking: sort_spec = [partition keys asc..., order keys...]; n_part =
-    // count of leading partition keys; fn_kinds[i] pairs with fn_names[i]. top_k =
+    // Window functions: sort_spec = [partition keys asc..., order keys...]; n_part =
+    // count of leading partition keys; fn_kinds[i] / fn_names[i] / fn_args[i] /
+    // fn_offsets[i] are parallel. fn_args[i] = the input column a navigation
+    // function (LAG/LEAD) reads its value from, -1 for the ranking functions;
+    // fn_offsets[i] = the navigation row offset (0 for ranking). top_k =
     // WindowTopKFusionStrategy's fused `rank <= K` hint, or -1 if none.
     void set_window_sink(size_t p, std::vector<SortKeySpec> sort_spec, size_t n_part,
                          std::vector<int> fn_kinds, std::vector<std::string> fn_names,
+                         std::vector<int> fn_args, std::vector<long long> fn_offsets,
                          int64_t top_k, size_t buf,
                          bool emit_prune, std::vector<uint32_t> emit_cols) {
         std::vector<WindowFnSpec> funcs;
         funcs.reserve(fn_kinds.size());
         for (size_t i = 0; i < fn_kinds.size(); ++i)
-            funcs.push_back({static_cast<WinFn>(fn_kinds[i]), fn_names[i]});
+            funcs.push_back({static_cast<WinFn>(fn_kinds[i]), fn_names[i],
+                             fn_args[i], static_cast<int64_t>(fn_offsets[i])});
         set_sink_(p, std::make_unique<WindowSink>(
             std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get(), top_k,
             131072, emit_prune, std::move(emit_cols)));

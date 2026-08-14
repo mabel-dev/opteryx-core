@@ -18,6 +18,7 @@
 
 #include <cstring>
 
+#include "core/buffers.h"  // DRAKEN_SEL_* / DRAKEN_DICT_* layout-hint flags
 #include "skene/checksum.h"
 #include "skene/format.h"
 
@@ -216,6 +217,189 @@ void write_schema_entry(Sink& sink, const SchemaNode& node) {
     for (const SchemaNode& child : node.children) write_schema_entry(sink, child);
 }
 
+// ─── added columns ──────────────────────────────────────────────────────────
+
+// A donor, parsed: everything needed to emit the same column at any length.
+struct Donor {
+    SchemaNode  schema;
+    ColumnEntryHead head{};
+    std::string name;
+    LogicalTypeDescriptor logical{};
+    // The donor's required sections, bytes lifted out. kSelection is never among
+    // them (a one-row column is CONSTANT or IDENTITY, and both store none) and
+    // kValidity is dropped here because its size depends on the row count — it
+    // is synthesised per row group instead.
+    std::vector<SectionEntry>          sections;
+    std::vector<std::vector<uint8_t>>  section_bytes;
+    bool null_fill = false;
+};
+
+// How many bits of a validity section are set for row 0 — i.e. whether the
+// donor's single row carries a value or a NULL.
+bool donor_row_is_null(const SectionEntry& validity, const uint8_t* src) {
+    if (validity.stored_bytes == 0) return false;
+    if (validity.encoding != static_cast<uint16_t>(Encoding::kPlain)) return false;
+    return (src[validity.offset] & 1u) == 0u;
+}
+
+// Read a donor file: one column, one row group, one row.
+Status parse_donor(const DonorFile& bytes, Donor* donor) {
+    const uint8_t* src = bytes.data();
+    if (bytes.size() < kFileHeadBytes + kFileTailBytes)
+        return fail(Code::kTruncated, "patch_columns: donor is too small to be a skene file");
+
+    FileHead head{};
+    std::memcpy(&head, src, sizeof(head));
+    FileTail tail{};
+    std::memcpy(&tail, src + bytes.size() - kFileTailBytes, sizeof(tail));
+    if (head.magic != kMagic || tail.magic != kMagic)
+        return fail(Code::kNotSkene, "patch_columns: donor is not a skene file");
+
+    const size_t footer_end = bytes.size() - kFileTailBytes;
+    if (tail.footer_bytes > footer_end - kFileHeadBytes)
+        return fail(Code::kTruncated, "patch_columns: donor footer runs past its head");
+    const size_t footer_start = footer_end - tail.footer_bytes;
+    if (checksum_xxh3_64(src + footer_start, tail.footer_bytes) != tail.footer_checksum)
+        return fail(Code::kChecksumMismatch, "patch_columns: donor footer checksum mismatch");
+
+    Cursor fc(src, footer_start, footer_end);
+    FileFooterHeader fh{};
+    if (!fc.pod(&fh)) return fail(Code::kTruncated, "patch_columns: short donor footer");
+    if (fh.footer_magic != kFileFooterMagic)
+        return fail(Code::kMalformed, "patch_columns: donor footer magic missing");
+    if (fh.column_count != 1 || fh.row_group_count != 1 || fh.row_count != 1)
+        return fail(Code::kMalformed,
+                    "patch_columns: a donor must hold exactly one column of one row");
+
+    std::string writer_tag;
+    if (!fc.take_string(&writer_tag, fh.writer_tag_bytes))
+        return fail(Code::kTruncated, "patch_columns: donor footer ends in the writer tag");
+    RowGroupEntry rg_entry{};
+    if (!fc.pod(&rg_entry)) return fail(Code::kTruncated, "patch_columns: short donor row group directory");
+    Status s = read_schema_node(fc, &donor->schema);
+    if (!s.is_ok()) return s;
+
+    if (rg_entry.footer_offset + rg_entry.footer_bytes > footer_start)
+        return fail(Code::kMalformed, "patch_columns: donor row group footer out of range");
+    Cursor rc(src, static_cast<size_t>(rg_entry.footer_offset),
+              static_cast<size_t>(rg_entry.footer_offset + rg_entry.footer_bytes));
+    RowGroupFooterHeader rh{};
+    if (!rc.pod(&rh)) return fail(Code::kTruncated, "patch_columns: short donor row group footer");
+    std::string rg_tag;
+    if (!rc.take_string(&rg_tag, rh.writer_tag_bytes))
+        return fail(Code::kTruncated, "patch_columns: donor row group footer ends in the tag");
+
+    Column column;
+    s = read_column_head(rc, &column);
+    if (!s.is_ok()) return s;
+    if (column.head.child_count != 0)
+        return fail(Code::kMalformed,
+                    "patch_columns: donor column '" + column.name +
+                    "' is nested; adding an ARRAY column is not supported");
+
+    std::vector<SectionEntry> sections(rh.section_count);
+    for (SectionEntry& entry : sections)
+        if (!rc.pod(&entry))
+            return fail(Code::kTruncated, "patch_columns: short donor section directory");
+    s = attach_sections(&column, sections);
+    if (!s.is_ok()) return s;
+
+    for (const SectionEntry& entry : column.required)
+        if (entry.offset + entry.stored_bytes > bytes.size())
+            return fail(Code::kMalformed, "patch_columns: donor section runs past its end");
+
+    donor->head    = column.head;
+    donor->name    = column.name;
+    donor->logical = column.logical;
+
+    // Split the donor's sections: everything but VALIDITY is length-independent
+    // and copied verbatim; VALIDITY is re-made per row group because its size is
+    // ceil(length/8). A SELECTION section would mean the donor was not constant-
+    // or identity-shaped, which a one-row column cannot be.
+    for (const SectionEntry& entry : column.required) {
+        if (entry.kind == static_cast<uint16_t>(SectionKind::kSelection))
+            return fail(Code::kMalformed,
+                        "patch_columns: donor column carries a stored selection");
+        if (entry.kind == static_cast<uint16_t>(SectionKind::kValidity)) {
+            donor->null_fill = donor_row_is_null(entry, src);
+            continue;
+        }
+        donor->sections.push_back(entry);
+        donor->section_bytes.emplace_back(src + entry.offset,
+                                          src + entry.offset + entry.stored_bytes);
+    }
+    return Status::ok();
+}
+
+// Emit one added column into `sink` at `rows` logical rows, appending its
+// section entries to `directory`.
+void emit_added_column(Sink& sink, const Donor& donor, uint64_t rows,
+                       std::vector<SectionEntry>* directory, Column* out) {
+    out->head    = donor.head;
+    out->name    = donor.name;
+    out->logical = donor.logical;
+
+    // CONSTANT is the whole trick: one value, no selection section, and the
+    // reader hands every row data[0]. So the donor's data section is already
+    // the right data section for any number of rows.
+    out->head.length         = static_cast<uint32_t>(rows);
+    out->head.data_length    = 1;
+    out->head.selection_kind = static_cast<uint8_t>(SelectionKind::kConstant);
+    out->head.value_order    = static_cast<uint8_t>(ValueOrder::kAsWritten);
+
+    // The donor's vector_flags describe a ONE-ROW column and must not be copied
+    // wholesale. A one-row dense column is SEL_IDENTITY, and the reader checks
+    // that flag against selection_kind — a hint contradicting the stored layout
+    // means the file disagrees with itself, and it is rejected (reader_v1.cpp).
+    //
+    // Cleared:
+    //   SEL_IDENTITY / SEL_PERMUTATION — false once data_length is 1 and
+    //     length is N; both imply data_length == length.
+    //   DICT_CODES_DENSE — asserts every code is referenced by at least one
+    //     VALID row, which is untrue for a NULL fill, where no row is valid.
+    // Everything else is left as the donor set it: they are pure hints and a
+    // constant column satisfies them if a one-row column did.
+    out->head.vector_flags &= static_cast<uint8_t>(
+        ~(DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION | DRAKEN_DICT_CODES_DENSE));
+    // No statistics. The donor's describe ONE row; scaling a null count or a
+    // distinct count to N would be fabricating a fact about data nobody
+    // measured, and `stats_bytes == 0` means NOT TRACKED, which the format is
+    // careful to distinguish from zero.
+    out->head.stats_bytes = 0;
+    out->statistics.clear();
+    out->head.index_section_index = 0;
+    out->head.index_section_count = 0;
+    out->children.clear();
+
+    const uint32_t first = static_cast<uint32_t>(directory->size());
+    for (size_t i = 0; i < donor.sections.size(); ++i) {
+        SectionEntry entry = donor.sections[i];
+        entry.offset = sink.position();
+        sink.bytes(donor.section_bytes[i].data(), donor.section_bytes[i].size());
+        directory->push_back(entry);
+    }
+
+    if (donor.null_fill) {
+        // The only part that scales with the row count: ceil(rows/8) bytes of
+        // zero, meaning "no row is valid". Bits at or above `length` are
+        // padding and carry no meaning (FORMAT.md §7.1).
+        const size_t bitmap_bytes = static_cast<size_t>((rows + 7u) / 8u);
+        std::vector<uint8_t> bitmap(bitmap_bytes, 0u);
+        SectionEntry entry{};
+        entry.kind         = static_cast<uint16_t>(SectionKind::kValidity);
+        entry.encoding     = static_cast<uint16_t>(Encoding::kPlain);
+        entry.offset       = sink.position();
+        entry.stored_bytes = bitmap_bytes;
+        entry.plain_bytes  = bitmap_bytes;
+        entry.checksum     = checksum_xxh3_64(bitmap.data(), bitmap_bytes);
+        sink.bytes(bitmap.data(), bitmap_bytes);
+        directory->push_back(entry);
+    }
+
+    out->head.section_index = first;
+    out->head.section_count = static_cast<uint32_t>(directory->size()) - first;
+}
+
 // How many statistics slots a column subtree occupies in the FILE footer's
 // per-row-group statistics, which are written for EVERY column including
 // untracked ones (a zero length) and including ARRAY children.
@@ -230,11 +414,18 @@ size_t stat_slots(const SchemaNode& node) {
 Status patch_columns(const void* file, size_t file_bytes,
                      const std::vector<std::string>& drop,
                      const std::vector<std::pair<std::string, std::string>>& rename,
+                     const std::vector<DonorFile>& add,
                      std::vector<uint8_t>* out) {
     if (file == nullptr || out == nullptr)
         return fail(Code::kMalformed, "patch_columns: null file or output");
-    if (drop.empty() && rename.empty())
+    if (drop.empty() && rename.empty() && add.empty())
         return fail(Code::kMalformed, "patch_columns: no changes to make");
+
+    std::vector<Donor> donors(add.size());
+    for (size_t i = 0; i < add.size(); ++i) {
+        Status s = parse_donor(add[i], &donors[i]);
+        if (!s.is_ok()) return s;
+    }
     if (file_bytes < kFileHeadBytes + kFileTailBytes)
         return fail(Code::kTruncated, "patch_columns: too small to be a skene file");
 
@@ -321,19 +512,21 @@ Status patch_columns(const void* file, size_t file_bytes,
                         "patch_columns: no column named '" + pair.first + "' to rename");
     }
 
-    size_t surviving = 0;
+    size_t surviving = donors.size();
     for (size_t i = 0; i < schema.size(); ++i) if (keep[i]) ++surviving;
     if (surviving == 0)
         return fail(Code::kMalformed,
                     "patch_columns: dropping every column would leave no relation");
-    for (size_t i = 0; i < schema.size(); ++i) {
-        if (!keep[i]) continue;
-        for (size_t j = i + 1; j < schema.size(); ++j)
-            if (keep[j] && new_names[i] == new_names[j])
+    std::vector<std::string> surviving_names;
+    for (size_t i = 0; i < schema.size(); ++i)
+        if (keep[i]) surviving_names.push_back(new_names[i]);
+    for (const Donor& donor : donors) surviving_names.push_back(donor.name);
+    for (size_t i = 0; i < surviving_names.size(); ++i)
+        for (size_t j = i + 1; j < surviving_names.size(); ++j)
+            if (surviving_names[i] == surviving_names[j])
                 return fail(Code::kMalformed,
                             "patch_columns: the result would have two columns named '" +
-                            new_names[i] + "'");
-    }
+                            surviving_names[i] + "'");
 
     // ── emit ──
     out->clear();
@@ -389,6 +582,7 @@ Status patch_columns(const void* file, size_t file_bytes,
             if (entry.offset + entry.stored_bytes > file_bytes)
                 return fail(Code::kMalformed, "patch_columns: a section runs past the end of the file");
 
+        const uint64_t entry_row_count = old_entry.row_count;
         RowGroupEntry entry{};
         entry.row_count   = old_entry.row_count;
         entry.first_row   = old_entry.first_row;
@@ -399,6 +593,16 @@ Status patch_columns(const void* file, size_t file_bytes,
         new_sections.reserve(sections.size());
         for (size_t i = 0; i < columns.size(); ++i)
             if (keep[i]) copy_sections(sink, src, &columns[i], /*optional=*/false, &new_sections);
+
+        // An added column's sections are REQUIRED, so they belong in the DATA
+        // region with the other required ones — before the INDEX pass below.
+        // Emitting them after it would put required sections inside the index
+        // region, which breaks the one-range-request guarantee that region split
+        // exists for (FORMAT.md §3).
+        std::vector<Column> added(donors.size());
+        for (size_t d = 0; d < donors.size(); ++d)
+            emit_added_column(sink, donors[d], entry_row_count, &new_sections, &added[d]);
+
         for (size_t i = 0; i < columns.size(); ++i)
             if (keep[i]) copy_sections(sink, src, &columns[i], /*optional=*/true, &new_sections);
 
@@ -417,9 +621,11 @@ Status patch_columns(const void* file, size_t file_bytes,
             columns[i].head.name_bytes = static_cast<uint32_t>(new_names[i].size());
             write_column_entry(sink, columns[i]);
         }
+        for (const Column& column : added) write_column_entry(sink, column);
         for (const SectionEntry& section : new_sections) sink.pod(section);
         for (size_t i = 0; i < columns.size(); ++i)
             if (keep[i]) write_statistics(sink, columns[i]);
+        // Added columns carry no statistics blob (stats_bytes == 0).
 
         const uint64_t footer_len = sink.position() - entry.footer_offset;
         if (footer_len > UINT32_MAX)
@@ -439,6 +645,7 @@ Status patch_columns(const void* file, size_t file_bytes,
                 for (size_t k = 0; k < width; ++k) kept.push_back(file_stats[rg][slot + k]);
             slot += width;
         }
+        for (size_t d = 0; d < donors.size(); ++d) kept.emplace_back();  // not tracked
     }
 
     // ── FILE FOOTER ──
@@ -456,6 +663,7 @@ Status patch_columns(const void* file, size_t file_bytes,
         schema[i].head.name_bytes = static_cast<uint32_t>(new_names[i].size());
         write_schema_entry(sink, schema[i]);
     }
+    for (const Donor& donor : donors) write_schema_entry(sink, donor.schema);
     for (const std::vector<std::vector<uint8_t>>& group : new_file_stats)
         for (const std::vector<uint8_t>& slot : group) {
             sink.u32(static_cast<uint32_t>(slot.size()));

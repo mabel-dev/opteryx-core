@@ -29,8 +29,8 @@
 // could carry it — after the format had frozen.
 //
 // NOT YET SUPPORTED, and refused rather than approximated:
-//   - adding a column      (needs a synthesised constant section)
-//   - retyping a column    (needs the values re-encoded)
+//   - retyping a column    (needs the values re-encoded, since skene stores the
+//                           exact DrakenType and so the exact item width)
 //   - dropping or renaming an ARRAY child; only top-level columns are named
 
 #include <cstddef>
@@ -43,17 +43,49 @@
 
 namespace skene {
 
-// Produce a new file from `file`, with `drop` removed and `rename` applied.
+// A column to ADD, described by a DONOR file: a complete .skene file holding
+// exactly one column of exactly one row, written by skene's own writer.
 //
-// `rename` is (old_name, new_name). Both operate on TOP-LEVEL column names,
-// matched exactly.
+// The donor carries the new column's name, DrakenType, logical descriptor and
+// the value every existing row is filled with. Taking all of that from a file
+// the writer produced means this code needs no copy of draken's type mapping —
+// there is no second version of it to drift.
 //
-// A name in `drop` or `rename` that the file does not have is an error: the
-// caller believes something about this file that is not true, and quietly doing
-// nothing would leave it believing it.
+// Skene makes the rest almost free, because a constant column is a first-class
+// shape rather than a special case: `selection_kind == CONSTANT` stores ONE
+// value and no selection section, and the reader attaches the shared zero
+// selection so every row reads `data[0]`. A one-row donor and an N-row constant
+// column therefore have the SAME data section — they differ only in `length`.
+// The one thing that scales with N is the validity bitmap, and only when the
+// fill is NULL, where it is `ceil(N/8)` zero bytes.
+//
+// Whether the fill is NULL is read from the donor's own row, not passed
+// separately: a flag that disagreed with the donor would be a second source of
+// truth for the same fact.
+using DonorFile = std::vector<uint8_t>;
+
+// Produce a new file from `file`, with `drop` removed, `rename` applied, and a
+// column appended per entry in `add`.
+//
+// `rename` is (old_name, new_name). All three operate on TOP-LEVEL column
+// names, matched exactly.
+//
+// A name in `drop` or `rename` that the file does not have is an error, as is
+// an `add` whose name is already in use: the caller believes something about
+// this file that is not true, and quietly doing nothing would leave it
+// believing it.
 Status patch_columns(const void* file, size_t file_bytes,
                      const std::vector<std::string>& drop,
                      const std::vector<std::pair<std::string, std::string>>& rename,
+                     const std::vector<DonorFile>& add,
                      std::vector<uint8_t>* out);
+
+// Drop/rename only.
+inline Status patch_columns(const void* file, size_t file_bytes,
+                            const std::vector<std::string>& drop,
+                            const std::vector<std::pair<std::string, std::string>>& rename,
+                            std::vector<uint8_t>* out) {
+    return patch_columns(file, file_bytes, drop, rename, {}, out);
+}
 
 }  // namespace skene

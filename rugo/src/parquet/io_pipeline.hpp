@@ -64,7 +64,20 @@
 // rule on the engine side, and trace_bridge_c.h for why the bridge exists.
 #include "core/trace_bridge_c.h"
 
+// H6 (2026-08-14, unratified): per-architecture default for the whole-file
+// local mmap cache — see the use_mmap_cache lambda in decode_row_group for the
+// measurements behind each arm. Overridable at build time
+// (-DRUGO_LOCAL_MMAP_CACHE_DEFAULT=0|1) and at run time (RUGO_LOCAL_MMAP_CACHE).
+#ifndef RUGO_LOCAL_MMAP_CACHE_DEFAULT
+  #if defined(__x86_64__) || defined(_M_X64)
+    #define RUGO_LOCAL_MMAP_CACHE_DEFAULT 1
+  #else
+    #define RUGO_LOCAL_MMAP_CACHE_DEFAULT 0
+  #endif
+#endif
+
 namespace rugo {
+
 
 // C-ABI sink for handing decoded columns to the opteryx side. Pure C types only
 // — rugo must not depend on opteryx/draken; the opteryx adapter fills these in
@@ -746,7 +759,7 @@ static inline bool build_direct_rle_float_dict(const DecodedColumn& d, bool is_f
                                                ColumnOut& out);
 static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
                                                 void* (*alloc)(size_t), void (*freefn)(void*),
-                                                ColumnOut& out, bool want_seed);
+                                                ColumnOut& out, bool want_seed, bool length_only);
 
 // Build the DICT-VARCHAR direct buffers for a dict-encoded byte_array column,
 // mirroring _build_string_dict (consumer) + serialize_string_dict (source): a
@@ -756,12 +769,21 @@ static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
 // selection from dict_codes_array (packed code_width) or dict_indices (sparse,
 // null rows → code 0). The result is data_length < length (dict shape) but
 // accessed through the same uniform value[codes[i]] path.
+// `length_only` has the same meaning and the same contract as in
+// build_direct_string_plain: the planner proved every read of this column is
+// length-answerable, so long-form payload bytes are never copied — the slot
+// records the true length and carries STR_ELIDED_PAYLOAD_OFFSET so any misuse
+// faults. Without this the DICT path silently defeated the elision: a column the
+// planner had proved length-only still copied one payload per DISTINCT value,
+// which is how `AVG(length(URL))` regressed when URL started arriving dict-shaped
+// instead of plain (it had been copying nothing at all).
 static inline bool build_direct_string_dict(const DecodedColumn& d,
                                             void* (*alloc)(size_t), void (*freefn)(void*),
-                                            ColumnOut& out, bool want_seed = false) {
+                                            ColumnOut& out, bool want_seed = false,
+                                            bool length_only = false) {
     // RLE skip-dense carries one string per RUN, not a dict + code source.
     if (!d.rle_run_lengths.empty())
-        return build_direct_rle_string_dict(d, alloc, freefn, out, want_seed);
+        return build_direct_rle_string_dict(d, alloc, freefn, out, want_seed, length_only);
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     const uint32_t dict_size = static_cast<uint32_t>(d.string_dict_lens.size());
     const bool nullable = !d.valid_bits.empty();
@@ -771,9 +793,12 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         alloc((dict_size ? dict_size : 1u) * sizeof(DrakenStringSlot)));
     if (!slots) return false;
-    uint8_t* arena = static_cast<uint8_t*>(alloc(arena_len ? arena_len : 1u));
+    // Elided: no payload bytes are copied at all, so the arena is a stub. Slots
+    // still carry each value's true length.
+    const size_t arena_alloc = length_only ? 0u : arena_len;
+    uint8_t* arena = static_cast<uint8_t*>(alloc(arena_alloc ? arena_alloc : 1u));
     if (!arena) { freefn(slots); return false; }
-    if (arena_len) std::memcpy(arena, d.string_dict_arena.data(), arena_len);
+    if (arena_alloc) std::memcpy(arena, d.string_dict_arena.data(), arena_alloc);
     // E37: one seed per DISTINCT value (data_length entries) — only when the plan
     // marks this column a downstream key. Non-key dict columns take the cheap
     // builder (no XXH3). Dict already hashes per-distinct, so the cost is small,
@@ -783,13 +808,23 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
         keyhash = static_cast<uint64_t*>(alloc((dict_size ? dict_size : 1u) * sizeof(uint64_t)));
         if (!keyhash) { freefn(arena); freefn(slots); return false; }
     }
+    // Read the bytes from the SOURCE arena, not the copy: when eliding there is
+    // no copy to read. Short values still live INLINE in the slot, so their bytes
+    // are always taken; only long-form payloads are dropped, and those slots get
+    // STR_ELIDED_PAYLOAD_OFFSET (per-slot, as the contract requires — a consumer
+    // must never infer "no payload" from the arena-level flag alone).
+    const uint8_t* src_arena = d.string_dict_arena.data();
     for (uint32_t k = 0; k < dict_size; ++k) {
         const uint32_t s_off = d.string_dict_offsets[k];
         const uint32_t slen = (k + 1u < dict_size)
             ? (d.string_dict_offsets[k + 1u] - s_off)
             : (static_cast<uint32_t>(arena_len) - s_off);
-        if (want_seed) draken::ops::draken_build_string_slot_seed(&slots[k], arena + s_off, slen, s_off, &keyhash[k]);
-        else           draken_build_string_slot(&slots[k], arena + s_off, slen, s_off);
+        const uint8_t* sp = src_arena + s_off;
+        const uint32_t slot_off = (slen > STR_INLINE_MAX)
+            ? (length_only ? STR_ELIDED_PAYLOAD_OFFSET : s_off)
+            : (length_only ? 0u : s_off);
+        if (want_seed) draken::ops::draken_build_string_slot_seed(&slots[k], sp, slen, slot_off, &keyhash[k]);
+        else           draken_build_string_slot(&slots[k], sp, slen, slot_off);
     }
 
     uint32_t* codes = static_cast<uint32_t*>(alloc((n ? n : 1u) * sizeof(uint32_t)));
@@ -816,12 +851,13 @@ static inline bool build_direct_string_dict(const DecodedColumn& d,
 
     out.data = slots;
     out.arena = arena;
-    out.arena_len = arena_len;
+    out.arena_len = length_only ? 0u : arena_len;
     out.codes = codes;
     out.data_length = dict_size;
     out.validity = validity;
     out.length = n;
     out.dict_sorted = d.dict_ordered;
+    out.payloads_elided = length_only;
     out.keyhash = keyhash;
     return true;
 }
@@ -1045,7 +1081,8 @@ static inline bool build_direct_rle_float_dict(const DecodedColumn& d, bool is_f
 // is constructed, so offsets are assigned as values are appended).
 static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
                                                 void* (*alloc)(size_t), void (*freefn)(void*),
-                                                ColumnOut& out, bool want_seed = false) {
+                                                ColumnOut& out, bool want_seed = false,
+                                                bool length_only = false) {
     const uint32_t n = static_cast<uint32_t>(d.num_rows);
     if (!d.valid_bits.empty()) return false;
     const size_t runs = d.rle_run_lengths.size();
@@ -1120,11 +1157,23 @@ static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
         if (!keyhash) { freefn(arena); freefn(slots); freefn(codes); return false; }
     }
 
+    // Same elision contract as the other two string builders: when the planner
+    // proved every read length-answerable, long-form payloads are not copied and
+    // the slot carries STR_ELIDED_PAYLOAD_OFFSET. Short values are inline in the
+    // slot, so their bytes are taken either way.
     uint32_t a_off = 0;
     for (uint32_t k = 0; k < dsz; ++k) {
         const uint32_t r = uniq_run[k];
         const uint32_t slen = static_cast<uint32_t>(d.rle_str_lens[r]);
-        std::memcpy(arena + a_off, d.rle_str_arena.data() + d.rle_str_offsets[r], slen);
+        const uint8_t* sp = d.rle_str_arena.data() + d.rle_str_offsets[r];
+        if (slen > STR_INLINE_MAX && length_only) {
+            if (want_seed)
+                draken::ops::draken_build_string_slot_seed(&slots[k], sp, slen, STR_ELIDED_PAYLOAD_OFFSET, &keyhash[k]);
+            else
+                draken_build_string_slot(&slots[k], sp, slen, STR_ELIDED_PAYLOAD_OFFSET);
+            continue;                      // no arena write, no cursor advance
+        }
+        std::memcpy(arena + a_off, sp, slen);
         if (want_seed)
             draken::ops::draken_build_string_slot_seed(&slots[k], arena + a_off, slen, a_off, &keyhash[k]);
         else
@@ -1135,7 +1184,8 @@ static inline bool build_direct_rle_string_dict(const DecodedColumn& d,
     out.data = slots;
     out.data_length = dsz;
     out.arena = arena;
-    out.arena_len = uniq_bytes;
+    out.arena_len = a_off;             // bytes actually written (0 when eliding)
+    out.payloads_elided = length_only;
     out.codes = codes;
     out.validity = nullptr;
     out.length = n;
@@ -1561,6 +1611,59 @@ class ParquetIOPipeline {
         std::vector<std::string> str_vals;   // kinds 1..4
     };
     std::unordered_map<std::string, ColDictPred> dict_preds_;
+
+    // PROTOTYPE (2026-08-14, unratified) — H6: per-pipeline whole-file mmap
+    // cache for LOCAL files. Previously every row-group decode opened the file
+    // and mapped its own column span, then unmapped it: with 100 files x 5 row
+    // groups that is 500 open/mmap/munmap cycles per query, and each munmap on
+    // a ~30-thread process pays cross-CPU TLB-shootdown IPIs. Mapping each file
+    // ONCE per pipeline (whole file, PROT_READ) and slicing every row group out
+    // of that single mapping cuts the syscall count 5x and drops the shootdowns
+    // to scan teardown. Pages of unprojected columns are never touched, so a
+    // whole-file mapping costs address space (14GB for the full ClickBench
+    // split set) but no memory or IO. Remote paths are untouched.
+    // Lifetime: mappings live until the pipeline is destroyed (after
+    // wait_shutdown(), so no worker can still hold a slice). Failures are
+    // cached too — a file whose open/mmap fails once falls back to per-column
+    // pread for every row group without retrying the map per item.
+    struct LocalFileMapping {
+        void*  base = MAP_FAILED;
+        size_t len  = 0;
+    };
+    std::unordered_map<std::string, LocalFileMapping> local_mmap_cache_;
+    std::mutex local_mmap_mutex_;
+
+    LocalFileMapping local_file_mapping(const std::string& path) {
+        {
+            std::lock_guard<std::mutex> lk(local_mmap_mutex_);
+            auto it = local_mmap_cache_.find(path);
+            if (it != local_mmap_cache_.end()) return it->second;
+        }
+        LocalFileMapping m;  // MAP_FAILED unless every step below succeeds
+        int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && st.st_size > 0) {
+                void* b = mmap(nullptr, static_cast<size_t>(st.st_size),
+                               PROT_READ, MAP_PRIVATE, fd, 0);
+                if (b != MAP_FAILED) {
+                    m.base = b;
+                    m.len  = static_cast<size_t>(st.st_size);
+                }
+            }
+            close(fd);
+        }
+        std::lock_guard<std::mutex> lk(local_mmap_mutex_);
+        auto it = local_mmap_cache_.find(path);
+        if (it != local_mmap_cache_.end()) {
+            // Another worker mapped it while we were outside the lock: keep
+            // theirs, release ours.
+            if (m.base != MAP_FAILED) munmap(m.base, m.len);
+            return it->second;
+        }
+        local_mmap_cache_.emplace(path, m);
+        return m;
+    }
     // Q24 latmat: pushed pass-1 predicate (opteryx callback). Set once before any
     // submit; workers read it const, no sync.
     Pass1Pred pass1_pred_;
@@ -1818,40 +1921,80 @@ class ParquetIOPipeline {
         uint64_t total_read_ns = 0;
         uint64_t total_decode_ns = 0;
 
-        // For local files, mmap the full column-chunk extent of the row group
-        // once rather than open/pread/close per column.  Eliminates per-column
-        // heap allocation and gives the kernel a sequential-prefetch hint via
-        // MADV_SEQUENTIAL.  Falls back to read_range() for HTTP/GCS.
+        // For local files, slice this row group's column chunks out of the
+        // pipeline's whole-file mapping (local_file_mapping above — one
+        // open+mmap per FILE per pipeline, not per row group). Falls back to
+        // read_range() for HTTP/GCS, and to per-column pread when the map
+        // failed. PROTOTYPE H6 — see local_file_mapping's comment.
         bool is_local = item.path.rfind("gs://",   0) != 0 &&
                         item.path.rfind("http://",  0) != 0 &&
                         item.path.rfind("https://", 0) != 0;
 
         void*   mmap_base   = MAP_FAILED;
         size_t  mmap_len    = 0;
-        int64_t mmap_offset = 0;  // page-aligned file offset of the mapping
+        int64_t mmap_offset = 0;  // file offset of the mapping (0: whole file)
 
-        if (is_local && !item.column_stats.empty()) {
-            int64_t span_min = INT64_MAX, span_max = 0;
-            for (const auto& cs : item.column_stats) {
-                int64_t base = cs.data_page_offset;
-                if (cs.dictionary_page_offset >= 0 && cs.dictionary_page_offset < base)
-                    base = cs.dictionary_page_offset;
-                int64_t end = base + cs.total_compressed_size;
-                if (base < span_min) span_min = base;
-                if (end   > span_max) span_max = end;
+        // H6 whole-file mapping cache. The default is a BUILD-TIME decision
+        // (§3: prefer compile-time decisions over runtime decisions) because
+        // the measured verdict differs by ARCHITECTURE, and the two wheels are
+        // already built per-arch:
+        //
+        //   x86_64 : full ClickBench hot suite 131.5 → 130.0s, narrow-int
+        //            scans -11% (ranges separated), string scans +2%.  ON.
+        //   arm64  : consistently 2-5% SLOWER across two independent 7-round
+        //            interleaved A/Bs, on every query shape measured.  OFF.
+        //
+        // ⚠ The ARM regression is NOT diagnosed — this split ships the x86 win
+        // while that remains open, which is a deliberate call, not a finding.
+        // RUGO_LOCAL_MMAP_CACHE=0/1 overrides in either direction so a single
+        // binary can still run both arms of an A/B.
+        static const bool use_mmap_cache = []() {
+            const char* v = getenv("RUGO_LOCAL_MMAP_CACHE");
+            if (v != nullptr && v[0] != '\0' && v[1] == '\0') {
+                if (v[0] == '1') return true;
+                if (v[0] == '0') return false;
             }
-            long page_size  = sysconf(_SC_PAGESIZE);
-            mmap_offset     = (span_min / page_size) * page_size;
-            mmap_len        = static_cast<size_t>(span_max - mmap_offset);
+            return RUGO_LOCAL_MMAP_CACHE_DEFAULT != 0;
+        }();
 
+        bool per_rg_mapped = false;  // true when THIS row group owns the mapping
+        if (is_local && !item.column_stats.empty()) {
             auto t_map = std::chrono::steady_clock::now();
-            int fd = open(item.path.c_str(), O_RDONLY | O_CLOEXEC);
-            if (fd >= 0) {
-                mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_PRIVATE, fd, mmap_offset);
-                close(fd);
-                // No madvise: let the OS manage readahead.
-                if (mmap_base == MAP_FAILED)
-                    mmap_base = MAP_FAILED;
+            if (use_mmap_cache) {
+                LocalFileMapping m = local_file_mapping(item.path);
+                mmap_base = m.base;
+                mmap_len  = m.len;
+            } else {
+                int64_t span_min = INT64_MAX, span_max = 0;
+                for (const auto& cs : item.column_stats) {
+                    int64_t base = cs.data_page_offset;
+                    if (cs.dictionary_page_offset >= 0 && cs.dictionary_page_offset < base)
+                        base = cs.dictionary_page_offset;
+                    int64_t end = base + cs.total_compressed_size;
+                    if (base < span_min) span_min = base;
+                    if (end   > span_max) span_max = end;
+                }
+                long page_size  = sysconf(_SC_PAGESIZE);
+                mmap_offset     = (span_min / page_size) * page_size;
+                mmap_len        = static_cast<size_t>(span_max - mmap_offset);
+                int fd = open(item.path.c_str(), O_RDONLY | O_CLOEXEC);
+                if (fd >= 0) {
+                    mmap_base = mmap(nullptr, mmap_len, PROT_READ, MAP_PRIVATE, fd, mmap_offset);
+                    close(fd);
+                }
+                per_rg_mapped = (mmap_base != MAP_FAILED);
+                // H13 REJECTED 2026-08-14 — do not re-attempt without new evidence.
+                // The read amplification is real: AdvEngineID is 0.96 MB compressed
+                // for the whole 100M-row dataset, yet a cold scan of it transfers
+                // 56 MB (per-row-group mapping) or 95 MB (whole-file mapping). The
+                // arithmetic even fit: read_ahead_kb=128 x 325 row groups = 41.6 MB.
+                // But `madvise(MADV_RANDOM)` on the mapped extent changed the bytes
+                // read by ZERO — measured cold on x86, both mapping paths, 3 rounds:
+                // 56/57 MB with it and 56/57 MB without. So readahead on THIS mapping
+                // is not the source, and the fitting arithmetic was a coincidence.
+                // Whatever causes the amplification is elsewhere (the footer/bloom
+                // read path is the untested candidate — a cold COUNT(*) that projects
+                // no column at all already reads 33 MB).
             }
             total_read_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - t_map).count();
@@ -2212,7 +2355,7 @@ class ParquetIOPipeline {
                     else if (dk == DK_VARCHAR)
                         ok = build_direct_string_plain(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed, length_only);
                     else if (dk == DK_VARCHAR_DICT)
-                        ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed);
+                        ok = build_direct_string_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout, want_seed, length_only);
                     else if (dk == DK_INT64_DICT)
                         ok = build_direct_int64_dict(decoded, pool_sink_.draken_alloc, pool_sink_.draken_free, cout);
                     else if (dk == DK_FLOAT64_DICT)
@@ -2281,7 +2424,10 @@ class ParquetIOPipeline {
             result.error = e.what();
         }
 
-        if (mmap_base != MAP_FAILED)
+        // H6: a cached mapping is pipeline-owned (local_mmap_cache_) — released
+        // in the destructor after wait_shutdown(). Only the toggle's per-RG arm
+        // unmaps here.
+        if (per_rg_mapped)
             munmap(mmap_base, mmap_len);
 
         result.read_ns = total_read_ns;
@@ -2454,6 +2600,14 @@ class ParquetIOPipeline {
 
     ~ParquetIOPipeline() {
         wait_shutdown();
+        // H6: release the whole-file mappings only after wait_shutdown() — no
+        // ticket can still hold a slice into them. No lock needed: workers are
+        // done and the destructor is single-threaded by definition.
+        for (auto& kv : local_mmap_cache_) {
+            if (kv.second.base != MAP_FAILED)
+                munmap(kv.second.base, kv.second.len);
+        }
+        local_mmap_cache_.clear();
     }
 
     // Wire the destination MemoryPool. Must be called before any submit; the

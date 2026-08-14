@@ -404,6 +404,20 @@ STATEMENTS = [
         ("SELECT name, SUM(gravity) OVER (PARTITION BY id), AVG(mass) OVER (PARTITION BY id) FROM $planets", 9, 3, None),
         # Non-unique partition key: each satellite belongs to a planet
         ("SELECT name, COUNT(name) OVER (PARTITION BY planetId) FROM testdata.satellites", 177, 2, None),
+        # Navigation windows (LAG/LEAD): shapes; values are pinned in
+        # test_navigation_window_values.
+        ("SELECT name, LAG(name) OVER (ORDER BY id) FROM $planets", 9, 2, None),
+        ("SELECT name, LEAD(id, 2) OVER (PARTITION BY planetId ORDER BY id) FROM testdata.satellites", 177, 2, None),
+        ("SELECT name, LAG(id) OVER (ORDER BY id), LEAD(id) OVER (ORDER BY id), ROW_NUMBER() OVER (ORDER BY id) FROM $planets", 9, 4, None),
+        # Refusals: 3-argument default form, bad offsets, missing OVER / ORDER BY,
+        # and arguments on the argument-less ranking functions.
+        ("SELECT LAG(id, 1, 42) OVER (ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        ("SELECT LAG(id, -1) OVER (ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        ("SELECT LAG(id, id) OVER (ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        ("SELECT LAG(id) FROM $planets", None, None, UnsupportedSyntaxError),
+        ("SELECT LAG(id) OVER (PARTITION BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        ("SELECT LAG() OVER (ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        ("SELECT ROW_NUMBER(id) OVER (ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
         # Unsupported: ORDER BY inside window spec
         ("SELECT id, SUM(gravity) OVER (PARTITION BY id ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
         # Unsupported: window function combined with GROUP BY
@@ -610,6 +624,45 @@ STATEMENTS = [
         ("SELECT SUM(c) OVER (PARTITION BY number_of_moons) FROM (SELECT number_of_moons, COUNT(*) OVER (PARTITION BY gravity) AS c FROM $planets) AS t", 9, 1, None),
         # More than one spec in the inner scope — a chain of length > 1 BELOW another chain.
         ("SELECT SUM(a + b) OVER () FROM (SELECT COUNT(*) OVER () AS a, COUNT(*) OVER (PARTITION BY number_of_moons) AS b FROM $planets) AS t", 9, 1, None),
+
+        # WINDOW IN ORDER BY — SUPPORTED. Legal SQL: windows are computed before the sort,
+        # so ordering on one is well defined. It used to fall through to the aggregate walk
+        # as a PLAIN aggregate with its OVER discarded, which made the statement look like
+        # an aggregate query and produced "Column 'name' must appear in the `GROUP BY`
+        # clause" — a rule that was never the problem, naming a column the caller could not
+        # act on. Values and column sets are pinned in test_window_in_order_by.
+        ("SELECT name FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)", 9, 1, None),
+        ("SELECT name FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id) DESC", 9, 1, None),
+        ("SELECT name FROM $planets ORDER BY COUNT(*) OVER ()", 9, 1, None),
+        ("SELECT name FROM $planets ORDER BY COUNT(*) OVER (PARTITION BY number_of_moons)", 9, 1, None),
+        # The ordering column must NOT reach the caller — one column, not two.
+        ("SELECT name FROM $planets ORDER BY COUNT(*) OVER (PARTITION BY number_of_moons), name", 9, 1, None),
+        # …and a wildcard must not pick it up either.
+        ("SELECT * FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)", 9, 20, None),
+        # The SAME window selected AND ordered by is ONE column, computed once. This case
+        # produced the most misleading message of the lot before the shared dedup: the
+        # beside-aggregate refusal, naming the ALIAS as the window and the window as the
+        # aggregate.
+        ("SELECT name, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)", 9, 2, None),
+        ("SELECT name, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM $planets ORDER BY rn", 9, 2, None),
+        # Positional ORDER BY onto a selected window.
+        ("SELECT ROW_NUMBER() OVER (ORDER BY id) AS rn FROM $planets ORDER BY 1", 9, 1, None),
+        # With LIMIT — the sort still drives which rows survive.
+        ("SELECT name FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id) LIMIT 3", 3, 1, None),
+        # Still refused, and for reasons that are NOT this one. A malformed window is
+        # malformed wherever it is written.
+        ("SELECT name FROM $planets ORDER BY ROW_NUMBER() OVER ()", None, None, UnsupportedSyntaxError),
+        ("SELECT name FROM $planets ORDER BY RANK()", None, None, UnsupportedSyntaxError),
+        ("SELECT name FROM $planets ORDER BY SUM(COUNT(*) OVER ()) OVER ()", None, None, UnsupportedSyntaxError),
+        ("SELECT COUNT(*) FROM $planets GROUP BY gravity ORDER BY ROW_NUMBER() OVER (ORDER BY gravity)", None, None, UnsupportedSyntaxError),
+        # Beside a plain aggregate — refused, and the refusal must name ORDER BY, not
+        # QUALIFY. The message is asserted in test_window_beside_aggregate_is_refused_by_name.
+        ("SELECT COUNT(*) FROM $planets ORDER BY COUNT(*) OVER ()", None, None, UnsupportedSyntaxError),
+        # DISTINCT makes the ordering value ambiguous once rows collapse — the existing
+        # rule applies to a window exactly as it does to any other unselected sort key.
+        ("SELECT DISTINCT name FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)", None, None, UnsupportedSyntaxError),
+        # The remedy the beside-aggregate refusal advises for ORDER BY must run.
+        ("SELECT c FROM (SELECT COUNT(*) AS c FROM $planets) AS s ORDER BY COUNT(*) OVER ()", 1, 1, None),
 
         # WINDOW IN HAVING — refused. The standard forbids it and the reason is the
         # evaluation order: HAVING filters GROUPS, and windows are computed AFTER
@@ -1204,6 +1257,16 @@ def test_window_beside_aggregate_is_refused_by_name():
         assert "**QUALIFY**" in message, f"clause not named: {statement} -> {message}"
         assert "in the same **SELECT**" not in message, f"wrong clause: {statement}"
 
+    # ORDER BY is the THIRD clause a window can be written in, and it needs its own
+    # wording for the same reason QUALIFY does — the remedies are not variations on one
+    # rewrite. While the branch was an `if SELECT ... else QUALIFY`, a window written in
+    # ORDER BY was reported as being in QUALIFY, with QUALIFY's remedy.
+    _ordered = _message("SELECT COUNT(*) FROM $planets ORDER BY COUNT(*) OVER ()")
+    assert "COUNT(*) OVER ()" in _ordered, _ordered
+    assert "**ORDER BY**" in _ordered, _ordered
+    assert "**QUALIFY**" not in _ordered, f"wrong clause named: {_ordered}"
+    assert "order its result by the window" in _ordered, f"wrong remedy: {_ordered}"
+
     # A statement carrying BOTH names the SELECT one — the caller can see that window in
     # their output list, where the QUALIFY one is invisible to them.
     _both = _message(
@@ -1453,6 +1516,76 @@ def test_nested_window_is_refused_by_name():
             morsel.materialize()
             values.extend(morsel.column("s").to_pylist())
         assert values[0] == expected, f"{statement} -> {values[:3]!r}"
+
+
+def test_window_in_order_by():
+    """
+    VALUE-level regression: ORDER BY a window function.
+
+    Legal SQL — windows are computed before the sort — and it used to be refused with
+    "Column 'name' must appear in the `GROUP BY` clause". The window fell through to the
+    aggregate walk as a PLAIN aggregate with its OVER discarded, which made the statement
+    look like an aggregate query, so the error named a rule that was never the problem and
+    a column the caller had no way to act on.
+
+    The shape battery pins the row and column COUNTS, which is what catches the ordering
+    column leaking into the result. It cannot catch a wrong ORDER, so the actual sequence
+    is asserted here against an independently ordered query.
+    """
+    session = opteryx.session()
+
+    def _run(statement):
+        columns, values = None, {}
+        for morsel in session.execute_to_morsels(statement):
+            morsel.materialize()
+            columns = [name.decode() for name in morsel.column_names]
+            for name in morsel.column_names:
+                values.setdefault(name.decode(), []).extend(morsel.column(name).to_pylist())
+        return columns, values
+
+    by_id = _run("SELECT name FROM $planets ORDER BY id")[1]["name"]
+
+    # A ranking window over `id` must order exactly as `id` does — and must NOT return the
+    # column it ordered by.
+    columns, values = _run("SELECT name FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)")
+    assert columns == ["name"], f"the ordering column reached the caller: {columns}"
+    assert values["name"] == by_id, values["name"]
+
+    # DESC reverses it, so the sort key is genuinely being read rather than the rows
+    # arriving in scan order and looking right by accident.
+    columns, values = _run(
+        "SELECT name FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id) DESC"
+    )
+    assert columns == ["name"], columns
+    assert values["name"] == by_id[::-1], values["name"]
+
+    # The SAME window selected AND ordered by is ONE column, computed once. Before the
+    # shared dedup this was the worst message in the family — the beside-aggregate
+    # refusal, naming the ALIAS as the window and the window as the aggregate.
+    columns, values = _run(
+        "SELECT name, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM $planets "
+        "ORDER BY ROW_NUMBER() OVER (ORDER BY id)"
+    )
+    assert columns == ["name", "rn"], columns
+    assert values["name"] == by_id, values["name"]
+    assert values["rn"] == list(range(1, len(by_id) + 1)), values["rn"]
+
+    # An aggregate window as the sort key: rows come out grouped by partition size.
+    moons = _run("SELECT number_of_moons AS n FROM $planets")[1]["n"]
+    per_partition = {m: moons.count(m) for m in moons}
+    columns, values = _run(
+        "SELECT name FROM $planets ORDER BY COUNT(*) OVER (PARTITION BY number_of_moons)"
+    )
+    assert columns == ["name"], columns
+    assert sorted(values["name"]) == sorted(by_id), values["name"]
+    sizes = [per_partition[moons[by_id.index(n)]] for n in values["name"]]
+    assert sizes == sorted(sizes), f"not ordered by partition size: {sizes}"
+
+    # A wildcard must not pick the hidden ordering column up — it is expanded from the
+    # relations in scope at bind time, and the Window node's output is one of them.
+    columns, _ = _run("SELECT * FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)")
+    planets = _run("SELECT * FROM $planets")[0]
+    assert columns == planets, f"wildcard leaked the ordering column: {columns}"
 
 
 def test_window_in_having_is_refused_by_name():
@@ -1776,6 +1909,282 @@ def test_window_nested_in_expression():
     assert names == ["SUM(mass) OVER () + 1"], f"nested window naming: {names}"
 
 
+def test_ranking_window_values():
+    """
+    VALUE-level regression: the rank numbers themselves.
+
+    Every ranking entry in the shape battery orders by a UNIQUE key, so no shape
+    test can tell RANK from DENSE_RANK — the 1,1,3 vs 1,1,2 tie behaviour in
+    WindowSink (src/cpp/engine/native_sort.hpp), partition reset, DESC ordering,
+    and the NULL-partition rule were all unasserted until here.
+    """
+    session = opteryx.session()
+
+    def _rows(statement, *columns):
+        collected = []
+        for morsel in session.execute_to_morsels(statement):
+            cols = [morsel.column(c).to_pylist() for c in columns]
+            collected.extend(zip(*cols))
+        return collected
+
+    # Mercury and Venus tie at 0 moons. RANK shares then skips (1,1,3);
+    # DENSE_RANK shares then continues (1,1,2); ROW_NUMBER never shares.
+    # Three functions on one OVER spec also exercises the shared-node path
+    # with values, not just column counts.
+    by_name = {
+        name: (rn, rk, dr)
+        for name, rn, rk, dr in _rows(
+            "SELECT name, "
+            "ROW_NUMBER() OVER (ORDER BY number_of_moons) AS rn, "
+            "RANK() OVER (ORDER BY number_of_moons) AS rk, "
+            "DENSE_RANK() OVER (ORDER BY number_of_moons) AS dr "
+            "FROM $planets",
+            "name", "rn", "rk", "dr",
+        )
+    }
+    # The tied pair: distinct row numbers (either order — SQL does not say which
+    # of two peers is row 1), shared rank, shared dense rank.
+    assert sorted((by_name["Mercury"][0], by_name["Venus"][0])) == [1, 2], by_name
+    assert by_name["Mercury"][1:] == (1, 1), by_name
+    assert by_name["Venus"][1:] == (1, 1), by_name
+    # After the tie: RANK skips to 3, DENSE_RANK continues at 2 — and the offset
+    # persists to the end of the partition.
+    assert by_name["Earth"] == (3, 3, 2), by_name
+    assert by_name["Saturn"] == (9, 9, 8), by_name
+
+    # Partition reset and DESC: numbering restarts at 1 in every partition and
+    # follows the declared direction (highest v first).
+    numbered = dict(
+        _rows(
+            "SELECT x, ROW_NUMBER() OVER (PARTITION BY p ORDER BY v DESC) AS rn "
+            "FROM (VALUES ('g1','a',1),('g1','b',2),('g2','c',3),('g2','d',4),('g2','e',5)) "
+            "AS t(p,x,v)",
+            "x", "rn",
+        )
+    )
+    assert numbered == {"b": 1, "a": 2, "e": 1, "d": 2, "c": 3}, numbered
+
+    # NULL partition keys: win_keys_equal treats two NULLs as equal, so NULL keys
+    # form ONE real partition on the ranking path.
+    numbered = dict(
+        _rows(
+            "SELECT x, ROW_NUMBER() OVER (PARTITION BY p ORDER BY x) AS rn "
+            "FROM (VALUES ('k','c'), (NULL,'a'), (NULL,'b')) AS t(p,x)",
+            "x", "rn",
+        )
+    )
+    assert numbered == {"a": 1, "b": 2, "c": 1}, numbered
+
+    # The same rule on a scan source: the four gas giants share a NULL
+    # surface_pressure and are ranked as one partition of four.
+    numbered = dict(
+        _rows(
+            "SELECT name, ROW_NUMBER() OVER (PARTITION BY surface_pressure ORDER BY name) AS rn "
+            "FROM $planets",
+            "name", "rn",
+        )
+    )
+    assert numbered["Jupiter"] == 1 and numbered["Uranus"] == 4, numbered
+    assert len(numbered) == 9, numbered
+
+    # KNOWN DIVERGENCE, pinned deliberately: the AGGREGATE window path lowers to an
+    # inner join on the partition key (Eq, not IS NOT DISTINCT FROM — see
+    # window_to_join.py), so rows with a NULL partition key are DROPPED there,
+    # while the ranking path above keeps them. If either side changes, this test
+    # is the notice — the fix is a ruling, not a silent edit here.
+    counted = dict(
+        _rows(
+            "SELECT name, COUNT(*) OVER (PARTITION BY surface_pressure) AS c FROM $planets",
+            "name", "c",
+        )
+    )
+    assert len(counted) == 5 and "Jupiter" not in counted, counted
+
+
+def test_navigation_window_values():
+    """
+    VALUE-level regression: LAG/LEAD — the shifted-permutation gather.
+
+    Covers each piece of the navigation path: partition-edge NULLs (the
+    kGatherNullRow rows), explicit and default offsets, DESC ordering, a STRING
+    argument (the binder's output-typing path — the planner mints INT64 and the
+    binder must overwrite it with the argument's type), a computed argument
+    (the compiler's _add_computed route), offset 0, ranking and navigation
+    sharing one window node, and the top-K fusion gate (a `LAG(...) <= K`
+    filter must NOT be fused as a top-K — it is an ordinary value filter).
+    """
+    session = opteryx.session()
+
+    def _rows(statement, *columns):
+        collected = []
+        for morsel in session.execute_to_morsels(statement):
+            cols = [morsel.column(c).to_pylist() for c in columns]
+            collected.extend(zip(*cols))
+        return collected
+
+    # String argument, both directions, default offset 1. Typing: prev/nxt are
+    # VARCHAR because `name` is — INT64 placeholders leaking through would fail
+    # loudly here.
+    rows = _rows(
+        "SELECT name, LAG(name) OVER (ORDER BY id) AS prev, "
+        "LEAD(name) OVER (ORDER BY id) AS nxt FROM $planets",
+        "name", "prev", "nxt",
+    )
+    by_name = {name: (prev, nxt) for name, prev, nxt in rows}
+    assert by_name["Mercury"] == (None, "Venus"), by_name
+    assert by_name["Earth"] == ("Venus", "Mars"), by_name
+    assert by_name["Pluto"] == ("Neptune", None), by_name
+
+    # Explicit offset: rows closer to the partition edge than the offset are NULL.
+    lagged = dict(_rows(
+        "SELECT name, LAG(id, 2) OVER (ORDER BY id) AS l2 FROM $planets",
+        "name", "l2",
+    ))
+    assert lagged["Mercury"] is None and lagged["Venus"] is None, lagged
+    assert lagged["Earth"] == 1 and lagged["Pluto"] == 7, lagged
+
+    # Offset 0 is the current row.
+    same = dict(_rows(
+        "SELECT name, LAG(id, 0) OVER (ORDER BY id) AS l0 FROM $planets",
+        "name", "l0",
+    ))
+    assert same == {n: i for n, i in _rows("SELECT name, id FROM $planets", "name", "id")}, same
+
+    # Partition reset + DESC: LAG follows the DECLARED direction, and restarts
+    # (NULL) at every partition edge.
+    lagged = dict(_rows(
+        "SELECT x, LAG(v) OVER (PARTITION BY p ORDER BY v DESC) AS lg "
+        "FROM (VALUES ('g1','a',1),('g1','b',2),('g2','c',3),('g2','d',4),('g2','e',5)) "
+        "AS t(p,x,v)",
+        "x", "lg",
+    ))
+    assert lagged == {"b": None, "a": 2, "e": None, "d": 5, "c": 4}, lagged
+
+    # Computed argument — projected to a stream column by the compiler first.
+    computed = dict(_rows(
+        "SELECT name, LAG(id + 100) OVER (ORDER BY id) AS lc FROM $planets",
+        "name", "lc",
+    ))
+    assert computed["Mercury"] is None and computed["Venus"] == 101, computed
+
+    # Two navigation functions with DIFFERENT arguments over one spec are two
+    # distinct columns (the dedup key includes the argument), and ranking +
+    # navigation share a single window node.
+    mixed = dict(_rows(
+        "SELECT name, ROW_NUMBER() OVER (ORDER BY id) AS rn, "
+        "LAG(name) OVER (ORDER BY id) AS lg FROM $planets",
+        "name", "rn",
+    ))
+    assert mixed["Mercury"] == 1 and mixed["Pluto"] == 9, mixed
+    both = dict(_rows(
+        "SELECT name, LAG(name) OVER (ORDER BY id) AS a, LAG(id) OVER (ORDER BY id) AS b "
+        "FROM $planets",
+        "name", "b",
+    ))
+    assert both["Venus"] == 1, both
+
+    # Fusion gate: `LAG(...) <= K` is a value filter, not a top-K — the optimizer
+    # must not fuse it. Values prove it filtered on the VALUE (NULL excluded);
+    # telemetry proves fusing did not fire.
+    gate_session = opteryx.session()
+    kept = []
+    for morsel in gate_session.execute_to_morsels(
+        "SELECT name FROM $planets QUALIFY LAG(id) OVER (ORDER BY id) <= 3"
+    ):
+        kept.extend(morsel.column("name").to_pylist())
+    assert sorted(kept) == ["Earth", "Mars", "Venus"], kept
+    assert dict(gate_session.telemetry).get("optimization_window_topk_fuse", 0) == 0, (
+        "a LAG filter was fused as a top-K — silent wrong answer gate failed"
+    )
+
+    # NULL partition keys form one partition on this path too.
+    lagged = dict(_rows(
+        "SELECT name, LAG(name) OVER (PARTITION BY surface_pressure ORDER BY name) AS lg "
+        "FROM $planets",
+        "name", "lg",
+    ))
+    # The four gas giants share a NULL surface_pressure: alphabetical within it.
+    assert lagged["Jupiter"] is None and lagged["Neptune"] == "Jupiter", lagged
+    assert lagged["Saturn"] == "Neptune" and lagged["Uranus"] == "Saturn", lagged
+
+
+def test_window_topk_fusion_parity():
+    """
+    The fused `rank <= K` path must answer exactly what the unfused path answers.
+
+    WindowTopKFusionStrategy folds a downstream `<rank> <= K` filter into the
+    Window node (telemetry: optimization_window_topk_fuse). The COMPILER then
+    independently picks WindowTopKSink (only for a single ROW_NUMBER over one
+    fixed-width ORDER BY key) or WindowSink's post-rank filter — the optimizer
+    counter fires for BOTH sink choices, so all three shapes below assert
+    counter-on-fused and value parity; the sink split is invisible to telemetry
+    and is covered by the shapes chosen.
+
+    The A/B uses config.features (read live by the optimizer) with save/restore —
+    the same harness as test_topn_manifest_pruning. Without the telemetry
+    assertion this test proves nothing: a shape that silently fails to qualify
+    "passes" while fusing never runs.
+    """
+    from opteryx import config
+
+    statements = [
+        # Qualifies for WindowTopKSink: single ROW_NUMBER, one INT ORDER BY key.
+        (
+            "SELECT name, r FROM (SELECT name, "
+            "ROW_NUMBER() OVER (PARTITION BY planetId ORDER BY id) AS r "
+            "FROM testdata.satellites) AS t WHERE r <= 2"
+        ),
+        # Fuses at the optimizer, but RANK falls back to WindowSink's post-rank
+        # filter (ties need every row's exact rank first).
+        (
+            "SELECT name, r FROM (SELECT name, "
+            "RANK() OVER (PARTITION BY planetId ORDER BY id) AS r "
+            "FROM testdata.satellites) AS t WHERE r <= 2"
+        ),
+        # Fuses at the optimizer; two ORDER BY keys also fall back to WindowSink.
+        (
+            "SELECT name, r FROM (SELECT name, "
+            "ROW_NUMBER() OVER (PARTITION BY planetId ORDER BY id, name) AS r "
+            "FROM testdata.satellites) AS t WHERE r <= 2"
+        ),
+    ]
+
+    def _rows(session, statement):
+        collected = []
+        for morsel in session.execute_to_morsels(statement):
+            collected.extend(
+                zip(morsel.column("name").to_pylist(), morsel.column("r").to_pylist())
+            )
+        return sorted(collected)
+
+    for statement in statements:
+        fused_session = opteryx.session()
+        fused = _rows(fused_session, statement)
+        fused_telemetry = dict(fused_session.telemetry)
+        assert fused_telemetry.get("optimization_window_topk_fuse", 0) >= 1, (
+            f"fusion did not fire — the shape no longer qualifies and this "
+            f"case is testing nothing: {statement}"
+        )
+
+        original = config.features.disable_window_topk_fusion
+        try:
+            config.features.disable_window_topk_fusion = True
+            unfused_session = opteryx.session()
+            unfused = _rows(unfused_session, statement)
+            unfused_telemetry = dict(unfused_session.telemetry)
+        finally:
+            config.features.disable_window_topk_fusion = original
+
+        assert unfused_telemetry.get("optimization_window_topk_fuse", 0) == 0, (
+            "disable flag did not disable fusing"
+        )
+        assert fused == unfused, (
+            f"fused and unfused paths disagree for: {statement}\n"
+            f"fused:   {fused}\nunfused: {unfused}"
+        )
+        assert fused, f"parity holds but the query returned nothing: {statement}"
+
+
 def test_humanize_modes():
     """
     VALUE-level regression: HUMANIZE's scale systems and the two defects the
@@ -1939,6 +2348,10 @@ if __name__ == "__main__":  # pragma: no cover
             test_nested_window_is_refused_by_name,
         ),
         (
+            "window in ORDER BY",
+            test_window_in_order_by,
+        ),
+        (
             "window in HAVING is refused by name",
             test_window_in_having_is_refused_by_name,
         ),
@@ -1950,6 +2363,9 @@ if __name__ == "__main__":  # pragma: no cover
             "qualify does not leak its window column",
             test_qualify_does_not_leak_its_window_column,
         ),
+        ("ranking window values", test_ranking_window_values),
+        ("navigation window values", test_navigation_window_values),
+        ("window top-k fusion parity", test_window_topk_fusion_parity),
         ("humanize scale systems", test_humanize_modes),
     ):
         print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)

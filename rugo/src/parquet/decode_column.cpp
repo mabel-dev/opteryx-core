@@ -28,6 +28,12 @@
 
 namespace {
 
+// H12b (2026-08-14, unratified): ceiling on the ONE-SHOT intern-arena reserve.
+// Every decode worker can be mid-chunk simultaneously, so an unbounded reserve
+// on a large string chunk would multiply across the pool. 32 MB covers the
+// ClickBench URL chunks (~25 MB uncompressed per row group) without that risk.
+constexpr size_t kInternArenaReserveCapBytes = 32u * 1024u * 1024u;
+
 inline uint8_t CodeWidthForDictSize(size_t dict_size) {
   if (dict_size <= 256) return 1;
   if (dict_size <= 65536) return 2;
@@ -2221,6 +2227,31 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   result.string_dict_arena,
                   result.string_dict_offsets,
                   result.string_dict_lens);
+              // H12b (2026-08-14, unratified): ONE reserve for the whole chunk, to a
+              // known total — the only form the arena rule permits. The banned form
+              // is `reserve(size() + page_span)` INSIDE the page loop, which pins
+              // capacity to the exact current size so every subsequent page
+              // reallocates and copies the whole arena (measured -7% previously).
+              // This runs once, on the first interning page of the chunk (the guard
+              // above is false thereafter because the map is no longer empty), and
+              // targets the chunk's uncompressed size — a true upper bound on the
+              // distinct bytes we can intern. Capped so a huge string chunk cannot
+              // have every decode worker reserve hundreds of MB at once.
+              // Runtime-toggleable (RUGO_INTERN_ARENA_RESERVE=0 disables) so both
+              // arms of the A/B run from one binary — a cross-build comparison of a
+              // few percent is not trustworthy on this hardware.
+              static const size_t reserve_cap = []() -> size_t {
+                const char* v = getenv("RUGO_INTERN_ARENA_RESERVE");
+                if (v != nullptr && *v != '\0') return strtoull(v, nullptr, 10);
+                return kInternArenaReserveCapBytes;
+              }();
+              const int64_t ucs = target_col->total_uncompressed_size;
+              if (ucs > 0 && reserve_cap > 0) {
+                const size_t want =
+                    std::min<size_t>(static_cast<size_t>(ucs), reserve_cap);
+                if (result.string_dict_arena.capacity() < want)
+                  result.string_dict_arena.reserve(want);
+              }
             }
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);

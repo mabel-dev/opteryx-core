@@ -415,9 +415,11 @@ def _is_aggregate_window(node: LogicalPlanNode) -> bool:
 
     Ranking windows (ROW_NUMBER/RANK/DENSE_RANK) carry `outputs` and are executed by
     the dedicated WindowNode operator instead — they must NOT be picked up here, or
-    the fixed-point rewriter would loop on an un-rewritable node. `outputs` is set by
-    the producer at plan-rewrite time (unlike `window_functions`, which the binder
-    fills in later), so it is the reliable discriminator here.
+    the fixed-point rewriter would loop on an un-rewritable node. `outputs` is set
+    before this strategy runs — at logical-planning time for user-facing ranking
+    windows, at plan-rewrite time by the INTERSECT/EXCEPT ALL rewrite — unlike
+    `window_functions`, which the binder fills in later, so it is the reliable
+    discriminator here.
     """
     return (
         node.node_type == LogicalPlanStepType.Window

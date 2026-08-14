@@ -2134,6 +2134,43 @@ cpdef NativeScanPlan open_native_scan_plan(
                             NULL, None)
     plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
+    # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers the
+    # way the remote pre-pass above already batches remote ones. The serial
+    # fallback in the loop below costs ~3ms per cold local footer (open + two
+    # dependent tail preads at device latency), a fixed ~0.3s plan-time tax on
+    # a 100-file cold scan. `_fetch_footers_many` fans the local reads across
+    # threads in C++ (GIL released for the whole batch); parsing stays here,
+    # serial — it is microseconds. A cache HIT inside try_get also fills the
+    # footer_map slot, exactly as the loop's own try_get would.
+    _local_miss_paths = []
+    _local_miss_urls = []
+    for path in paths:
+        fetch_url = orig_to_cpp.get(path, path)
+        if not _is_local_path(fetch_url):
+            continue
+        path_bytes_cpp = fetch_url.encode('utf-8')
+        if plan.footer_map[0].count(path_bytes_cpp) == 0 and \
+                not _PARSED_FOOTER_CACHE.try_get(path, &plan.footer_map[0][path_bytes_cpp]):
+            _local_miss_paths.append(path)
+            _local_miss_urls.append(fetch_url)
+    if len(_local_miss_paths) > 1:
+        _footer_t0 = time.perf_counter_ns()
+        _local_envs = _fetch_footers_many(
+            _local_miss_urls,
+            [file_sizes.get(p, -1) if file_sizes else -1 for p in _local_miss_paths],
+        )
+        for _lm_i in range(len(_local_miss_paths)):
+            path = _local_miss_paths[_lm_i]
+            envelope = _local_envs[_lm_i]
+            path_bytes_cpp = _local_miss_urls[_lm_i].encode('utf-8')
+            footer_buf_ptr = <const uint8_t*>envelope
+            footer_buf_size = len(envelope)
+            plan.footer_map[0][path_bytes_cpp] = ReadParquetMetadataFromBuffer(
+                footer_buf_ptr, footer_buf_size
+            )
+            _PARSED_FOOTER_CACHE.put_fs(path, plan.footer_map[0][path_bytes_cpp])
+        plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
+
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)
         path_bytes_cpp = fetch_url.encode('utf-8')
@@ -2357,6 +2394,33 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     # round-trip per file.
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
                             NULL, None)
+
+    # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers.
+    # This gate is the FIRST toucher of local footers on the native path (it
+    # runs before open_native_scan_plan, whose own pre-pass therefore only ever
+    # sees warm caches), and the serial loop below pays ~3ms per cold local
+    # footer — a fixed ~0.3s plan-time tax on a 100-file cold scan.
+    # `_fetch_footers_many` fans the local reads across threads in C++ with the
+    # GIL released; parses land in `_PARSED_FOOTER_CACHE` so the loop below
+    # borrows them exactly as it would any warm footer.
+    _local_miss_paths = []
+    _local_miss_urls = []
+    for path in paths:
+        fetch_url = orig_to_cpp.get(path, path)
+        if _is_local_path(fetch_url) and _PARSED_FOOTER_CACHE.try_get_ptr(path) == NULL:
+            _local_miss_paths.append(path)
+            _local_miss_urls.append(fetch_url)
+    if len(_local_miss_paths) > 1:
+        _local_envs = _fetch_footers_many(
+            _local_miss_urls,
+            [file_sizes.get(p, -1) if file_sizes else -1 for p in _local_miss_paths],
+        )
+        for _lm_i in range(len(_local_miss_paths)):
+            envelope = _local_envs[_lm_i]
+            buf_ptr = <const uint8_t*>envelope
+            buf_size = <size_t>len(envelope)
+            fs = ReadParquetMetadataFromBuffer(buf_ptr, buf_size)
+            _PARSED_FOOTER_CACHE.put_fs(_local_miss_paths[_lm_i], fs)
 
     for path in paths:
         fetch_url = orig_to_cpp.get(path, path)

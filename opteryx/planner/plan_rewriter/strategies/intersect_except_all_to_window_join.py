@@ -105,8 +105,10 @@ def _make_window(partition_relation: str, col_names: list):
         )
         for c in col_names
     ]
-    window.order_by = []  # internal ROW_NUMBER has no ORDER BY (streaming path)
-    window.outputs = [("ROW_NUMBER", rn_column)]
+    window.order_by = []  # internal ROW_NUMBER has no ORDER BY
+    # (kind, pre-minted SchemaColumn, params) — params is empty for ROW_NUMBER;
+    # only LAG/LEAD carry argument expressions there.
+    window.outputs = [("ROW_NUMBER", rn_column, [])]
     window.output_relation = rn_relation
     window.columns = []
     return window, rn_relation

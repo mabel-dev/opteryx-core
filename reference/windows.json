@@ -1,5 +1,5 @@
 {
-    "ranking_functions": {
+    "functions": {
         "DENSE_RANK": {
             "ast_symbol": "DENSE_RANK",
             "friendly_name": "Dense Rank",
@@ -14,6 +14,72 @@
             "parameters": [],
             "returns": "INTEGER",
             "deterministic": true,
+            "window_spec": {
+                "over": "required",
+                "partition_by": "optional",
+                "order_by": "required",
+                "frame": "rejected"
+            }
+        },
+        "LAG": {
+            "ast_symbol": "LAG",
+            "friendly_name": "Lag",
+            "category": "navigation",
+            "status": "supported",
+            "summary": "The argument's value from the row `offset` rows earlier in the partition, in the window's ORDER BY order.",
+            "documentation": "LAG(expr) reads the previous row's value of `expr`; LAG(expr, offset) reads the row `offset` rows earlier. Rows closer to the start of their partition than the offset return NULL. The offset must be a non-negative integer literal and defaults to 1; offset 0 is the current row. The result's type is the ARGUMENT's type. The 3-argument default form is not supported - wrap the result: COALESCE(LAG(expr), default) - and neither is IGNORE NULLS / RESPECT NULLS. Rows that tie on the ORDER BY key sit in an unspecified order, so over a non-total ORDER BY the neighbouring row - and therefore the answer - is not deterministic.",
+            "sql_forms": [
+                "LAG(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+                "LAG(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])"
+            ],
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "any"
+                },
+                {
+                    "label": "offset",
+                    "type": "integer",
+                    "constant_only": true,
+                    "optional": true,
+                    "minimum": 0
+                }
+            ],
+            "returns": "same as `expr`",
+            "deterministic": false,
+            "window_spec": {
+                "over": "required",
+                "partition_by": "optional",
+                "order_by": "required",
+                "frame": "rejected"
+            }
+        },
+        "LEAD": {
+            "ast_symbol": "LEAD",
+            "friendly_name": "Lead",
+            "category": "navigation",
+            "status": "supported",
+            "summary": "The argument's value from the row `offset` rows later in the partition, in the window's ORDER BY order.",
+            "documentation": "LEAD(expr) reads the next row's value of `expr`; LEAD(expr, offset) reads the row `offset` rows later. Rows closer to the end of their partition than the offset return NULL. The offset must be a non-negative integer literal and defaults to 1; offset 0 is the current row. The result's type is the ARGUMENT's type. The 3-argument default form is not supported - wrap the result: COALESCE(LEAD(expr), default) - and neither is IGNORE NULLS / RESPECT NULLS. Rows that tie on the ORDER BY key sit in an unspecified order, so over a non-total ORDER BY the neighbouring row - and therefore the answer - is not deterministic.",
+            "sql_forms": [
+                "LEAD(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+                "LEAD(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])"
+            ],
+            "parameters": [
+                {
+                    "label": "expr",
+                    "type": "any"
+                },
+                {
+                    "label": "offset",
+                    "type": "integer",
+                    "constant_only": true,
+                    "optional": true,
+                    "minimum": 0
+                }
+            ],
+            "returns": "same as `expr`",
+            "deterministic": false,
             "window_spec": {
                 "over": "required",
                 "partition_by": "optional",
@@ -48,7 +114,7 @@
             "category": "ranking",
             "status": "supported",
             "summary": "Numbers the rows of each window partition 1..n in the window's ORDER BY order.",
-            "documentation": "Every row in a partition gets a distinct number, so the numbering is a permutation of 1..n. Rows that tie on the ORDER BY key are numbered in an unspecified order: the result is only reproducible when the ORDER BY is a total order over the partition. The operator preserves input row order - SQL guarantees no ordering without a top-level ORDER BY, and preserving the input's is the least-surprising choice.",
+            "documentation": "Every row in a partition gets a distinct number, so the numbering is a permutation of 1..n. Rows that tie on the ORDER BY key are numbered in an unspecified order: the result is only reproducible when the ORDER BY is a total order over the partition. The operator emits rows in the window's sort order (partition keys, then order keys) - SQL guarantees no ordering without a top-level ORDER BY, so add one if the output order matters.",
             "sql_forms": [
                 "ROW_NUMBER() OVER (ORDER BY expr [ASC|DESC] [, ...])",
                 "ROW_NUMBER() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"

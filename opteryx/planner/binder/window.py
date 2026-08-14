@@ -7,10 +7,11 @@
 Binder for ranking-window nodes (ROW_NUMBER / RANK / DENSE_RANK).
 
 Aggregate windows are lowered to joins by the plan rewriter and never reach the
-binder. Ranking windows survive as `LogicalPlanStepType.Window` nodes carrying a
-`window_functions` list; they are produced today only by the INTERSECT/EXCEPT ALL
-rewrite, which pre-mints the output (row-number) schema column and the relation to
-register it under. This visitor:
+binder. Ranking windows survive as `LogicalPlanStepType.Window` nodes carrying an
+`outputs` list; they come from two producers — the logical planner for user-facing
+ranking windows (PARTITION BY ... ORDER BY ...), and the INTERSECT/EXCEPT ALL
+rewrite (no ORDER BY, single ROW_NUMBER). Both pre-mint the output schema columns
+and the relation to register them under. This visitor:
 
   1. binds the PARTITION BY columns so the physical operator can resolve their
      identities, and
@@ -45,14 +46,34 @@ def visit_window(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         bound_order.append((bound, ascending))
     node.order_by = bound_order
 
-    # `outputs` is a list of (kind, pre-minted SchemaColumn). Register them under a
-    # dedicated relation so the downstream projection / join condition resolves, and
-    # hand the operator the (kind, identity) pairs it executes.
-    schema_columns = [sc for _, sc in node.outputs]
+    # `outputs` is a list of (kind, pre-minted SchemaColumn, params). Ranking
+    # functions carry no params and their pre-minted INT64 type is final.
+    # LAG/LEAD carry (argument expression[, offset literal]): the argument is
+    # bound here, and the output column TAKES THE ARGUMENT'S TYPE — the INT64 the
+    # planner minted is a placeholder, overwritten before the schema is
+    # registered so everything downstream sees the true type.
+    bound_outputs = []
+    for kind, sc, params in node.outputs:
+        arg_node = None
+        offset = 1
+        if params:
+            arg_node, context = inner_binder(params[0], context)
+            if len(params) > 1:
+                offset = int(params[1].value)
+            sc.column_type = arg_node.schema_column.column_type
+        bound_outputs.append((kind, sc, arg_node, offset))
+    node.outputs = [(kind, sc, [a] if a is not None else []) for kind, sc, a, _ in bound_outputs]
+
+    # Register the outputs under a dedicated relation so the downstream
+    # projection / join condition resolves, and hand the operator
+    # (kind, output identity, bound argument node or None, offset) per function.
+    schema_columns = [sc for _, sc, _params in node.outputs]
     context.schemas[node.output_relation] = RelationSchema(
         name=node.output_relation, columns=schema_columns
     )
-    node.window_functions = [(kind, sc.identity) for kind, sc in node.outputs]
+    node.window_functions = [
+        (kind, sc.identity, arg_node, offset) for kind, sc, arg_node, offset in bound_outputs
+    ]
 
     node.columns = [
         LogicalColumn(
@@ -61,7 +82,7 @@ def visit_window(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             source_column=sc.name,
             schema_column=sc,
         )
-        for _, sc in node.outputs
+        for _, sc, _params in node.outputs
     ]
 
     return node, context

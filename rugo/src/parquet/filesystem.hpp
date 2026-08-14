@@ -14,11 +14,13 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -133,6 +135,26 @@ static std::vector<uint8_t> read_range(const std::string& path,
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0)
         throw std::runtime_error("Cannot open file: " + path);
+    // H14 (2026-08-14, unratified): this read_range only ever serves FOOTER
+    // fetches — a single ~64 KB pread at EOF whose bytes we use in full and
+    // never read around. Default readahead treats it as the start of a
+    // sequential stream and pulls far more: MEASURED on x86, a cold scan that
+    // projects NO columns requests 100 x 64 KB = 6.4 MB of footer but the device
+    // delivers 54 MB (~540 KB/file, 8x), and that 54 MB is ~95% of the cold IO
+    // of a narrow-column query (SUM(AdvEngineID), whose column is 0.96 MB,
+    // totals 57 MB). POSIX_FADV_RANDOM asks the kernel not to read around a
+    // request we know is isolated. Guarded so it cannot fail the read.
+    // Toggle: RUGO_FOOTER_FADVISE=0 disables, for A/B from one binary.
+#if defined(POSIX_FADV_RANDOM)
+    {
+        static const bool fadvise_on = []() {
+            const char* v = getenv("RUGO_FOOTER_FADVISE");
+            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+        }();
+        if (fadvise_on)
+            posix_fadvise(fd, offset, size, POSIX_FADV_RANDOM);
+    }
+#endif
     ssize_t n = pread(fd, buf.data(), static_cast<size_t>(size), offset);
     close(fd);
     if (n < 0)
@@ -275,16 +297,54 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
     remote_idx.reserve(count);
     reqs.reserve(count);
 
+    std::vector<size_t> local_idx;
     for (size_t i = 0; i < count; ++i) {
         if (!is_remote_path(paths[i])) {
-            int64_t sz = (i < file_sizes.size()) ? file_sizes[i] : -1;
-            results[i] = FetchParquetFooter(paths[i], sz);
+            local_idx.push_back(i);
             continue;
         }
         remote_idx.push_back(i);
         reqs.emplace_back(footer_http_url(paths[i]),
                           std::map<std::string, std::string>{
                               {"Range", "bytes=-" + std::to_string(kFooterSuffixPrefetch)}});
+    }
+
+    // PROTOTYPE (2026-08-14, unratified) — H5: local footers in parallel.
+    // A cold local footer costs ~3ms (open walks directory + inode metadata,
+    // then two dependent preads chase the tail), and the serial loop this
+    // replaces paid that once per file — a fixed ~0.3s plan-time tax on a
+    // 100-file cold scan, on EVERY query. The reads are independent, so run
+    // them across a bounded thread fan-out (the same idea the remote branch
+    // already applies via get_many). Exceptions are captured per slot and the
+    // first is rethrown after join — same fail-fast surface as the serial
+    // loop, never a silent partial result. Remote handling is untouched.
+    if (!local_idx.empty()) {
+        const size_t n_threads = std::min<size_t>(local_idx.size(), 16);
+        std::vector<std::exception_ptr> errs(local_idx.size());
+        std::atomic<size_t> next{0};
+        auto worker = [&]() {
+            for (;;) {
+                size_t k = next.fetch_add(1, std::memory_order_relaxed);
+                if (k >= local_idx.size()) return;
+                size_t i = local_idx[k];
+                try {
+                    int64_t sz = (i < file_sizes.size()) ? file_sizes[i] : -1;
+                    results[i] = FetchParquetFooter(paths[i], sz);
+                } catch (...) {
+                    errs[k] = std::current_exception();
+                }
+            }
+        };
+        if (n_threads == 1) {
+            worker();
+        } else {
+            std::vector<std::thread> threads;
+            threads.reserve(n_threads);
+            for (size_t t = 0; t < n_threads; ++t) threads.emplace_back(worker);
+            for (auto& th : threads) th.join();
+        }
+        for (auto& e : errs)
+            if (e) std::rethrow_exception(e);
     }
 
     if (remote_idx.empty())

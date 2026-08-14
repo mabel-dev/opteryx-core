@@ -6,18 +6,18 @@ does:
 
 * `aggregates.json` is generated from `AGGREGATORS`, and ROW_NUMBER has no
   aggregator kernel - it is executed by the dedicated Window operator
-  (`opteryx/operators/window/row_number.pyx`).
+  (`opteryx/operators/window/window_node.pyx`).
 * `function_signatures.json` is generated from the function registry, and a
   ranking function has no entry there either.
 
 Hand-spiking either one would have meant hand-written rows in a wholly derived
 file, so this is a catalog of its own.
 
-The single most important fact recorded here is that the two window forms have
+The single most important fact recorded here is that the window forms have
 OPPOSITE rules for ORDER BY:
 
-* Ranking windows - ROW_NUMBER/RANK/DENSE_RANK - REQUIRE an ORDER BY inside
-  OVER (...); PARTITION BY is optional.
+* Ranking windows - ROW_NUMBER/RANK/DENSE_RANK - and navigation windows -
+  LAG/LEAD - REQUIRE an ORDER BY inside OVER (...); PARTITION BY is optional.
 * Aggregate windows - `aggregate(expr) OVER (...)` - REJECT an ORDER BY inside
   OVER (...); PARTITION BY is optional and `OVER ()` is legal.
 
@@ -39,14 +39,17 @@ from pathlib import Path
 from typing import Any
 
 from opteryx.operators.aggregate.helpers import AGGREGATORS
+from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 
 from .aggregate_catalog import _GLOBAL_SUPPORTED
 from .aggregate_catalog import _GROUPED_SUPPORTED
 
-# Ranking window functions. The set is closed and small: WindowNode's `_KIND_CODES`
-# (opteryx/operators/window/row_number.pyx) holds exactly these three, and anything
-# else is refused with "**ROW_NUMBER**, **RANK** and **DENSE_RANK** are the
-# supported window functions".
+# The dedicated Window operator's functions: ranking (ROW_NUMBER/RANK/
+# DENSE_RANK) and navigation (LAG/LEAD). The set is closed and small: the
+# window-function registry (opteryx/operators/window/helpers.py) — which
+# WindowNode's `_KIND_CODES` and the planner's routing both derive from — holds
+# exactly these, and anything else is refused. export_window_catalog() fails
+# fast if this prose table and the registry ever disagree.
 #
 # `deterministic` is a claim about the RESULT, not about the current
 # implementation's incidental behaviour. RANK and DENSE_RANK give tied rows the
@@ -54,8 +57,13 @@ from .aggregate_catalog import _GROUPED_SUPPORTED
 # rows DISTINCT numbers and nothing in the window spec says which tied row gets
 # which, so it is only reproducible when the ORDER BY is a total order over the
 # partition - the same reason ANY_VALUE is flagged non-deterministic in
-# aggregates.json.
-_RANKING_FUNCTIONS: dict[str, dict[str, Any]] = {
+# aggregates.json. LAG/LEAD read a row at a fixed offset in that same tied
+# ordering, so they carry ROW_NUMBER's caveat, not RANK's guarantee.
+#
+# Entries may carry optional `category` (default "ranking"), `sql_forms`,
+# `parameters` (default none) and `returns` (default "INTEGER") overrides —
+# the navigation functions differ from the ranking three on all four.
+_WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "ROW_NUMBER": {
         "friendly_name": "Row Number",
         "summary": "Numbers the rows of each window partition 1..n in the window's ORDER BY order.",
@@ -63,9 +71,9 @@ _RANKING_FUNCTIONS: dict[str, dict[str, Any]] = {
             "Every row in a partition gets a distinct number, so the numbering is a "
             "permutation of 1..n. Rows that tie on the ORDER BY key are numbered in an "
             "unspecified order: the result is only reproducible when the ORDER BY is a "
-            "total order over the partition. The operator preserves input row order - "
-            "SQL guarantees no ordering without a top-level ORDER BY, and preserving "
-            "the input's is the least-surprising choice."
+            "total order over the partition. The operator emits rows in the window's "
+            "sort order (partition keys, then order keys) - SQL guarantees no ordering "
+            "without a top-level ORDER BY, so add one if the output order matters."
         ),
         "deterministic": False,
     },
@@ -91,11 +99,66 @@ _RANKING_FUNCTIONS: dict[str, dict[str, Any]] = {
         ),
         "deterministic": True,
     },
+    "LAG": {
+        "friendly_name": "Lag",
+        "category": "navigation",
+        "summary": "The argument's value from the row `offset` rows earlier in the partition, in the window's ORDER BY order.",
+        "documentation": (
+            "LAG(expr) reads the previous row's value of `expr`; LAG(expr, offset) "
+            "reads the row `offset` rows earlier. Rows closer to the start of their "
+            "partition than the offset return NULL. The offset must be a non-negative "
+            "integer literal and defaults to 1; offset 0 is the current row. The "
+            "result's type is the ARGUMENT's type. The 3-argument default form is not "
+            "supported - wrap the result: COALESCE(LAG(expr), default) - and neither "
+            "is IGNORE NULLS / RESPECT NULLS. Rows that tie on the ORDER BY key sit in "
+            "an unspecified order, so over a non-total ORDER BY the neighbouring row - "
+            "and therefore the answer - is not deterministic."
+        ),
+        "deterministic": False,
+        "sql_forms": [
+            "LAG(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+            "LAG(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+        ],
+        "parameters": [
+            {"label": "expr", "type": "any"},
+            {"label": "offset", "type": "integer", "constant_only": True,
+             "optional": True, "minimum": 0},
+        ],
+        "returns": "same as `expr`",
+    },
+    "LEAD": {
+        "friendly_name": "Lead",
+        "category": "navigation",
+        "summary": "The argument's value from the row `offset` rows later in the partition, in the window's ORDER BY order.",
+        "documentation": (
+            "LEAD(expr) reads the next row's value of `expr`; LEAD(expr, offset) "
+            "reads the row `offset` rows later. Rows closer to the end of their "
+            "partition than the offset return NULL. The offset must be a non-negative "
+            "integer literal and defaults to 1; offset 0 is the current row. The "
+            "result's type is the ARGUMENT's type. The 3-argument default form is not "
+            "supported - wrap the result: COALESCE(LEAD(expr), default) - and neither "
+            "is IGNORE NULLS / RESPECT NULLS. Rows that tie on the ORDER BY key sit in "
+            "an unspecified order, so over a non-total ORDER BY the neighbouring row - "
+            "and therefore the answer - is not deterministic."
+        ),
+        "deterministic": False,
+        "sql_forms": [
+            "LEAD(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+            "LEAD(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+        ],
+        "parameters": [
+            {"label": "expr", "type": "any"},
+            {"label": "offset", "type": "integer", "constant_only": True,
+             "optional": True, "minimum": 0},
+        ],
+        "returns": "same as `expr`",
+    },
 }
 
 # The window spec each form accepts. Values are the vocabulary a generator can
-# switch on: "required", "optional", "rejected".
-_RANKING_WINDOW_SPEC = {
+# switch on: "required", "optional", "rejected". Ranking and navigation share
+# the ordered spec — both require an ORDER BY inside OVER (...).
+_ORDERED_WINDOW_SPEC = {
     "over": "required",
     "partition_by": "optional",
     "order_by": "required",
@@ -110,7 +173,8 @@ _AGGREGATE_WINDOW_SPEC = {
 }
 
 
-def _ranking_sql_forms(function: str) -> list[str]:
+def _default_sql_forms(function: str) -> list[str]:
+    # The argument-less ranking shape; navigation entries override sql_forms.
     return [
         f"{function}() OVER (ORDER BY expr [ASC|DESC] [, ...])",
         f"{function}() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
@@ -134,25 +198,36 @@ def _aggregate_window_support() -> OrderedDict[str, dict[str, bool]]:
 
 
 def export_window_catalog() -> OrderedDict[str, Any]:
-    ranking: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    for function in sorted(_RANKING_FUNCTIONS):
-        entry = _RANKING_FUNCTIONS[function]
-        ranking[function] = {
+    # The engine registry is the source of truth for WHICH functions exist; this
+    # module holds their prose. If the sets diverge the catalog is lying about
+    # the engine — refuse to generate rather than publish the lie.
+    if set(_WINDOW_FUNCTION_PROSE) != set(WINDOW_FUNCTIONS):
+        raise RuntimeError(
+            "reference/window_catalog.py's prose table and the engine's window-function "
+            "registry (opteryx/operators/window/helpers.py) disagree: "
+            f"prose {sorted(_WINDOW_FUNCTION_PROSE)} vs registry {sorted(WINDOW_FUNCTIONS)}. "
+            "Add the missing entry before regenerating."
+        )
+
+    functions: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    for function in sorted(_WINDOW_FUNCTION_PROSE):
+        entry = _WINDOW_FUNCTION_PROSE[function]
+        functions[function] = {
             "ast_symbol": function,
             "friendly_name": entry["friendly_name"],
-            "category": "ranking",
+            "category": entry.get("category", "ranking"),
             "status": "supported",
             "summary": entry["summary"],
             "documentation": entry["documentation"],
-            "sql_forms": _ranking_sql_forms(function),
-            "parameters": [],
-            "returns": "INTEGER",
+            "sql_forms": entry.get("sql_forms") or _default_sql_forms(function),
+            "parameters": [dict(p) for p in entry.get("parameters", [])],
+            "returns": entry.get("returns", "INTEGER"),
             "deterministic": entry["deterministic"],
-            "window_spec": dict(_RANKING_WINDOW_SPEC),
+            "window_spec": dict(_ORDERED_WINDOW_SPEC),
         }
 
     catalog: OrderedDict[str, Any] = OrderedDict()
-    catalog["ranking_functions"] = ranking
+    catalog["functions"] = functions
     catalog["aggregate_windows"] = {
         "status": "supported",
         "summary": "Compute an aggregate across a window of rows without collapsing them.",

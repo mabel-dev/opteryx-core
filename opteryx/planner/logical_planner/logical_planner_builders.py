@@ -42,6 +42,7 @@ from opteryx.expression.operator_catalog import get_operator_for_sql_symbol
 from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
+from opteryx.operators.window.helpers import NAVIGATION_FUNCTIONS, WINDOW_FUNCTIONS
 from opteryx.types.logical_type import (
     ARRAY as _CT_ARRAY,
 )
@@ -1657,14 +1658,45 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
     if func == "MATCH_AGAINST" or func.startswith("_"):
         raise UnsupportedSyntaxError(f"`{func}` is internal. Use documented SQL syntax instead.")
 
-    if func in ("ROW_NUMBER", "RANK", "DENSE_RANK"):
-        # Ranking window functions. Parsed as AGGREGATOR so the window-function
-        # detection in the logical planner picks them up; they are only valid with
-        # an OVER (...) clause (enforced there).
+    if func in WINDOW_FUNCTIONS:
+        # Window functions. Parsed as AGGREGATOR so the window-function detection
+        # in the logical planner picks them up; they are only valid with an
+        # OVER (...) clause (enforced there).
         node_type = NodeType.AGGREGATOR
         if filter_condition is not None:
             raise UnsupportedSyntaxError(
                 f"Filters are not supported with window function '{func}'. Filter in a subquery first, then apply the window to its result."
+            )
+        if func in NAVIGATION_FUNCTIONS:
+            # LAG(expr[, offset]) / LEAD(expr[, offset]). The 3-argument default
+            # form and null treatment are refused, never silently ignored.
+            if null_treatment is not None:
+                raise UnsupportedSyntaxError(
+                    f"**IGNORE NULLS** / **RESPECT NULLS** are not supported with {func}()."
+                )
+            if len(args) == 3:
+                raise UnsupportedSyntaxError(
+                    f"{func}(expr, offset, default) — the 3-argument form is not supported. "
+                    f"Wrap the result instead: `COALESCE({func}(expr, offset), default)`."
+                )
+            if len(args) not in (1, 2):
+                raise UnsupportedSyntaxError(
+                    f"{func}() takes 1 or 2 arguments: {func}(expr) or {func}(expr, offset)."
+                )
+            if len(args) == 2:
+                _offset = args[1]
+                if (
+                    _offset.node_type != NodeType.LITERAL
+                    or not isinstance(_offset.value, int)
+                    or isinstance(_offset.value, bool)
+                    or _offset.value < 0
+                ):
+                    raise UnsupportedSyntaxError(
+                        f"{func}()'s offset must be a non-negative integer literal."
+                    )
+        elif args:
+            raise UnsupportedSyntaxError(
+                f"{func}() takes no arguments — the window's **ORDER BY** is its input."
             )
     elif _is_function(func):
         node_type = NodeType.FUNCTION

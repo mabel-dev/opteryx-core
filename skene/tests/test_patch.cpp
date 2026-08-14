@@ -102,6 +102,50 @@ std::vector<int64_t> int_values(const std::vector<uint8_t>& file, uint32_t row_g
     return {};
 }
 
+// A donor: a one-column, one-row file, exactly as the caller of patch_columns
+// would build one — through skene's own writer.
+template <typename T>
+std::vector<uint8_t> donor(const std::string& name, T value, DrakenType type) {
+    WriteOptions options;
+    options.writer_tag = "skene-test/donor";
+    CxxMorsel morsel;
+    morsel.names = {name};
+    morsel.columns.push_back(skene_test::dense_column<T>({value}, type));
+    std::vector<uint8_t> out;
+    CHECK(write_morsel(morsel, options, &out).is_ok());
+    return out;
+}
+
+// A donor whose single row is NULL — the fill for an ADD with no default.
+std::vector<uint8_t> null_donor(const std::string& name, DrakenType type) {
+    WriteOptions options;
+    options.writer_tag = "skene-test/donor";
+    CxxMorsel morsel;
+    morsel.names = {name};
+    morsel.columns.push_back(skene_test::dense_column<int64_t>({0}, type, {false}));
+    std::vector<uint8_t> out;
+    CHECK(write_morsel(morsel, options, &out).is_ok());
+    return out;
+}
+
+// Which rows of a column read back as NULL.
+std::vector<bool> null_mask(const std::vector<uint8_t>& file, uint32_t row_group,
+                            const std::string& name) {
+    CxxMorsel morsel;
+    CHECK(read_morsel(file.data(), file.size(), row_group, &morsel).is_ok());
+    for (size_t i = 0; i < morsel.names.size(); ++i) {
+        if (morsel.names[i] != name) continue;
+        const DrakenVector& v = morsel.columns[i].view;
+        std::vector<bool> nulls;
+        for (uint32_t r = 0; r < v.length; ++r)
+            nulls.push_back(v.validity != nullptr &&
+                            ((v.validity[r >> 3] >> (r & 7)) & 1u) == 0u);
+        return nulls;
+    }
+    CHECK(false);
+    return {};
+}
+
 }  // namespace
 
 int main() {
@@ -267,6 +311,127 @@ int main() {
             CxxMorsel morsel;
             CHECK(!read_morsel(patched.data(), patched.size(), 0, &morsel).is_ok());
         }
+    }
+
+    // ── ADD ─────────────────────────────────────────────────────────────────
+    //
+    // skene stores a constant column as ONE value with no selection section, so
+    // a backfilled column costs the same handful of bytes whatever the row
+    // count. These pin that, not just the values.
+    {
+        const std::vector<uint8_t> source = make_file();
+        std::vector<uint8_t> patched;
+        CHECK(patch_columns(source.data(), source.size(), {}, {},
+                            {donor<int64_t>("added", 99, DRAKEN_INT64)}, &patched).is_ok());
+
+        CHECK(column_names(patched) ==
+              std::vector<std::string>({"id", "amount", "label", "flag", "added"}));
+        CHECK(int_values(patched, 0, "added") == std::vector<int64_t>({99, 99, 99, 99}));
+        // every existing column untouched
+        CHECK(int_values(patched, 0, "id") == std::vector<int64_t>({1, 2, 3, 4}));
+        CHECK(int_values(patched, 0, "amount") == std::vector<int64_t>({10, 20, 30, 40}));
+
+        // The existing sections keep their bytes AND their order, so the old
+        // data region is a prefix of the new one.
+        const std::vector<uint8_t> before = data_region(source);
+        const std::vector<uint8_t> after  = data_region(patched);
+        CHECK(after.size() > before.size());
+        CHECK(std::memcmp(before.data(), after.data(), before.size()) == 0);
+    }
+
+    // NULL fill: the donor's own row is null, and that is the only signal.
+    {
+        const std::vector<uint8_t> source = make_file();
+        std::vector<uint8_t> patched;
+        CHECK(patch_columns(source.data(), source.size(), {}, {},
+                            {null_donor("note", DRAKEN_INT64)}, &patched).is_ok());
+        CHECK(null_mask(patched, 0, "note") == std::vector<bool>({true, true, true, true}));
+        CHECK(null_mask(patched, 0, "id") == std::vector<bool>({false, false, false, false}));
+    }
+
+    // A constant column costs a constant number of bytes: adding one to a file
+    // with 4 rows and to a file with 4x the row groups must cost the same per
+    // row group, because only `length` changes.
+    {
+        const std::vector<uint8_t> one = make_file(1);
+        const std::vector<uint8_t> three = make_file(3);
+        std::vector<uint8_t> p1, p3;
+        CHECK(patch_columns(one.data(), one.size(), {}, {},
+                            {donor<int64_t>("k", 5, DRAKEN_INT64)}, &p1).is_ok());
+        CHECK(patch_columns(three.data(), three.size(), {}, {},
+                            {donor<int64_t>("k", 5, DRAKEN_INT64)}, &p3).is_ok());
+        const size_t grew_1 = data_region(p1).size() - data_region(one).size();
+        const size_t grew_3 = data_region(p3).size() - data_region(three).size();
+        CHECK(grew_3 == grew_1 * 3);   // per row group, and no more
+        CHECK(grew_1 <= 16);           // one int64 value, not four
+    }
+
+    // Several at once, and composed with the other operations.
+    {
+        const std::vector<uint8_t> source = make_file(2);
+        std::vector<uint8_t> patched;
+        std::vector<DonorFile> add;
+        add.push_back(donor<int64_t>("one", 1, DRAKEN_INT64));
+        add.push_back(null_donor("two", DRAKEN_INT64));
+        CHECK(patch_columns(source.data(), source.size(), {"label"},
+                            {{"amount", "total"}}, add, &patched).is_ok());
+
+        CHECK(column_names(patched) ==
+              std::vector<std::string>({"id", "total", "flag", "one", "two"}));
+        for (uint32_t g = 0; g < 2; ++g) {
+            const int64_t base = static_cast<int64_t>(g) * 100;
+            CHECK(int_values(patched, g, "one") == std::vector<int64_t>({1, 1, 1, 1}));
+            CHECK(int_values(patched, g, "total") ==
+                  std::vector<int64_t>({base + 10, base + 20, base + 30, base + 40}));
+            CHECK(null_mask(patched, g, "two") ==
+                  std::vector<bool>({true, true, true, true}));
+        }
+    }
+
+    // A string constant carries slots and an arena, so it exercises the
+    // multi-section donor path.
+    {
+        const std::vector<uint8_t> source = make_file();
+        WriteOptions options;
+        options.writer_tag = "skene-test/donor";
+        CxxMorsel morsel;
+        morsel.names = {"tag"};
+        morsel.columns.push_back(skene_test::string_column({"backfilled"}));
+        std::vector<uint8_t> d;
+        CHECK(write_morsel(morsel, options, &d).is_ok());
+
+        std::vector<uint8_t> patched;
+        CHECK(patch_columns(source.data(), source.size(), {}, {}, {d}, &patched).is_ok());
+        CHECK(column_names(patched).back() == "tag");
+
+        CxxMorsel back;
+        CHECK(read_morsel(patched.data(), patched.size(), 0, &back).is_ok());
+        CHECK(back.num_rows() == 4);
+    }
+
+    // ── ADD refusals ────────────────────────────────────────────────────────
+    {
+        const std::vector<uint8_t> source = make_file();
+        std::vector<uint8_t> patched;
+
+        // a name already in use
+        CHECK(!patch_columns(source.data(), source.size(), {}, {},
+                             {donor<int64_t>("id", 1, DRAKEN_INT64)}, &patched).is_ok());
+        // two added columns sharing a name
+        std::vector<DonorFile> twice;
+        twice.push_back(donor<int64_t>("dup", 1, DRAKEN_INT64));
+        twice.push_back(donor<int64_t>("dup", 2, DRAKEN_INT64));
+        CHECK(!patch_columns(source.data(), source.size(), {}, {}, twice, &patched).is_ok());
+        // adding a name freed by a drop in the same call is fine
+        CHECK(patch_columns(source.data(), source.size(), {"flag"}, {},
+                            {donor<int64_t>("flag", 3, DRAKEN_INT64)}, &patched).is_ok());
+        CHECK(int_values(patched, 0, "flag") == std::vector<int64_t>({3, 3, 3, 3}));
+        // a donor that is not a skene file
+        const std::vector<uint8_t> junk(64, 0);
+        CHECK(!patch_columns(source.data(), source.size(), {}, {}, {junk}, &patched).is_ok());
+        // a donor with more than one row
+        CHECK(!patch_columns(source.data(), source.size(), {}, {}, {make_file()},
+                             &patched).is_ok());
     }
 
     return skene_test::summary("test_patch");

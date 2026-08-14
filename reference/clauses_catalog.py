@@ -369,6 +369,7 @@ CLAUSE_DEFINITIONS = {
         "syntax_forms": [
             "ranking_function() OVER (ORDER BY expr [ASC|DESC] [, ...])",
             "ranking_function() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+            "navigation_function(expr [, offset]) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
             "aggregate(expr) OVER ()",
             "aggregate(expr) OVER (PARTITION BY expr [, ...])",
         ],
@@ -376,12 +377,13 @@ CLAUSE_DEFINITIONS = {
         "documentation": (
             "OVER turns a call into a window function: it is evaluated over a window "
             "of rows and returns one value per input row, unlike GROUP BY which "
-            "collapses them. The two window forms take OPPOSITE window specs. Ranking "
-            "functions - ROW_NUMBER, RANK, DENSE_RANK - REQUIRE an ORDER BY inside "
-            "OVER (...) and take an optional PARTITION BY. Aggregate windows REJECT an "
-            "ORDER BY inside OVER (...), so `OVER ()` and `OVER (PARTITION BY ...)` are "
-            "their only forms. The ranking functions themselves, and which aggregates "
-            "are legal in which aggregate-window form, are in windows.json."
+            "collapses them. The window forms take OPPOSITE window specs. Ranking "
+            "functions - ROW_NUMBER, RANK, DENSE_RANK - and navigation functions - "
+            "LAG, LEAD - REQUIRE an ORDER BY inside OVER (...) and take an optional "
+            "PARTITION BY. Aggregate windows REJECT an ORDER BY inside OVER (...), so "
+            "`OVER ()` and `OVER (PARTITION BY ...)` are their only forms. The window "
+            "functions themselves, and which aggregates are legal in which "
+            "aggregate-window form, are in windows.json."
         ),
         "notes": (
             "A frame specification (ROWS/RANGE BETWEEN) is rejected for both forms, so "
@@ -400,12 +402,12 @@ CLAUSE_DEFINITIONS = {
             "one another either, in the argument or in the OVER spec - "
             "`SUM(COUNT(*) OVER ()) OVER ()` and "
             "`SUM(mass) OVER (PARTITION BY COUNT(*) OVER ())` are both rejected; chain "
-            "them across a subquery instead. It must appear in the SELECT list "
-            "or in QUALIFY. HAVING is rejected at plan time and always will be - the "
-            "standard forbids it, because HAVING filters groups and windows are computed "
-            "after grouping, so the value does not exist yet; filter on a window's output "
-            "with QUALIFY. A window in ORDER BY is not supported either, but that one is "
-            "an engine gap rather than a rule."
+            "them across a subquery instead. It may appear in the SELECT list, in "
+            "QUALIFY, or as an ORDER BY sort key - windows are computed before the sort, "
+            "and a column used only to sort does not reach the caller. HAVING is rejected "
+            "at plan time and always will be: the standard forbids it, because HAVING "
+            "filters groups and windows are computed after grouping, so the value does "
+            "not exist yet. Filter on a window's output with QUALIFY."
         ),
     },
     "qualify": {

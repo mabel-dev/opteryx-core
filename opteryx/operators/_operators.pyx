@@ -327,6 +327,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                            bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_window_sink(size_t p, cppvector[SortKeySpec] sort_spec, size_t n_part,
                              cppvector[int] fn_kinds, cppvector[string] fn_names,
+                             cppvector[int] fn_args, cppvector[long long] fn_offsets,
                              long long top_k, size_t buf,
                              bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_window_topk_sink(size_t p, cppvector[size_t] part_idx, size_t order_idx,
@@ -2694,23 +2695,32 @@ cdef class NativePlan:
                               emit is not None, _emit_cols_from_list(emit))
 
     def set_window_sink(self, size_t p, list sort_spec, size_t n_part,
-                        list fn_kinds, list fn_names, long long top_k, size_t buf,
-                        list emit=None):
+                        list fn_kinds, list fn_names, list fn_args, list fn_offsets,
+                        long long top_k, size_t buf, list emit=None):
         """``sort_spec`` = [(col_idx, ascending), ...] = partition keys (all asc) then
         order keys; ``n_part`` leading entries are the partition keys. ``fn_kinds`` =
-        int codes (0 ROW_NUMBER, 1 RANK, 2 DENSE_RANK); ``fn_names`` the output names.
+        int codes (0 ROW_NUMBER, 1 RANK, 2 DENSE_RANK, 3 LAG, 4 LEAD); ``fn_names``
+        the output names. ``fn_args``[i] = the INPUT column index a navigation
+        function reads its value from, or -1 for the ranking functions;
+        ``fn_offsets``[i] = the LAG/LEAD row offset (0 for the ranking functions).
         ``top_k`` = WindowTopKFusionStrategy's fused `rank <= K` hint, or -1 if none —
         keep only rows whose rank is <= top_k, computed after ranking every row.
-        ``emit`` as in :meth:`set_sort_sink`, over the INPUT columns only — the rank
-        columns are appended to whatever survives it."""
+        ``emit`` as in :meth:`set_sort_sink`, over the INPUT columns only — the
+        window-function columns are appended to whatever survives it."""
         cdef cppvector[int] kinds
         cdef cppvector[string] names
+        cdef cppvector[int] args
+        cdef cppvector[long long] offsets
         for k in fn_kinds:
             kinds.push_back(<int>k)
         for nm in fn_names:
             names.push_back(<string>(nm if isinstance(nm, bytes) else (<str>nm).encode("utf-8")))
+        for a in fn_args:
+            args.push_back(<int>a)
+        for o in fn_offsets:
+            offsets.push_back(<long long>o)
         self._e.set_window_sink(p, _sort_spec_from_list(sort_spec), n_part,
-                                kinds, names, top_k, buf,
+                                kinds, names, args, offsets, top_k, buf,
                                 emit is not None, _emit_cols_from_list(emit))
 
     def set_window_topk_sink(self, size_t p, list part_idx, size_t order_idx,
@@ -3174,7 +3184,7 @@ include "heap_sort/heap_sort.pyx"
 include "jsonl_read/jsonl_read.pyx"
 include "skene_read/skene_read.pyx"
 include "limit/limit.pyx"
-include "window/row_number.pyx"
+include "window/window_node.pyx"
 include "nested_loop_join/nested_loop_join.pyx"
 include "null_reader/null_reader.pyx"
 include "outer_join/outer_join.pyx"

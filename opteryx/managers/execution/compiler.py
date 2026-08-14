@@ -38,6 +38,7 @@ from opteryx.exceptions import md_code
 from opteryx.exceptions import md_column
 from opteryx.exceptions import md_syntax
 from opteryx.expression import NodeType
+from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 
 _MAX_WORKER_CAP = 16
 _QUEUE_DEPTH = 4
@@ -1204,7 +1205,8 @@ class _Compiler:
         if t not in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
                      DrakenType.DECIMAL128)
     )
-    _RANK_ROW_NUMBER = 0  # row_number.pyx's _RANK_ROW_NUMBER kind code
+    # Kind code from the window-function registry (opteryx/operators/window/helpers.py)
+    _RANK_ROW_NUMBER = WINDOW_FUNCTIONS["ROW_NUMBER"]
 
     def _check_key_type(self, what, name, pt):
         if pt is None or pt in self._KEY_COLUMN_TYPES:
@@ -1697,7 +1699,7 @@ class _Compiler:
             (p, layout) = self._compile_only_child(in_edges, kind, node)
             spec, sink_layout = self._sort_spec(p, node.order_by, layout)
             emit, layout = self._emit_subset(node, sink_layout)
-            spec, emit = self._narrow_sink_input(p, sink_layout, spec, emit)
+            spec, emit, _ = self._narrow_sink_input(p, sink_layout, spec, emit)
             buf = self.nplan.new_buffer()
             self.nplan.set_sort_sink(p, spec, buf, emit)
             p2 = self.nplan.new_pipeline()
@@ -1714,7 +1716,7 @@ class _Compiler:
                 _unsupported("a HeapSort without a positive LIMIT")
             spec, sink_layout = self._sort_spec(p, node.order_by, layout)
             emit, layout = self._emit_subset(node, sink_layout)
-            spec, emit = self._narrow_sink_input(p, sink_layout, spec, emit)
+            spec, emit, _ = self._narrow_sink_input(p, sink_layout, spec, emit)
             buf = self.nplan.new_buffer()
             self.nplan.set_topn_sink(p, spec, int(limit), buf, emit)
             p2 = self.nplan.new_pipeline()
@@ -1731,15 +1733,21 @@ class _Compiler:
             if not funcs:
                 _unsupported("a window node with no functions")
             # PARTITION BY / ORDER BY over a computed key (CAST(...), arithmetic,
-            # etc.): project the key expression to a stream column first, then
-            # resolve by identity — mirrors GroupedAggregateHashedNode's
-            # computed_keys and _sort_spec's `computed` handling above.
+            # etc.), and a LAG/LEAD ARGUMENT that is itself an expression: project
+            # each to a stream column first, then resolve by identity — mirrors
+            # GroupedAggregateHashedNode's computed_keys and _sort_spec's
+            # `computed` handling above. The bound argument NODES live in
+            # node.parameters["window_functions"]; `funcs` (from the plan-time
+            # WindowNode) carries their identities.
             partition_by = list(node.parameters.get("partition_by") or [])
             order_by = list(node.parameters.get("order_by") or [])
+            window_fn_nodes = list(node.parameters.get("window_functions") or [])
             computed = [col for col in partition_by
                         if col.node_type != NodeType.IDENTIFIER]
             computed += [col for col, _asc in order_by
                          if col.node_type != NodeType.IDENTIFIER]
+            computed += [arg for _k, _o, arg, _off in window_fn_nodes
+                         if arg is not None and arg.node_type != NodeType.IDENTIFIER]
             if computed:
                 layout = self._add_computed(p, computed, layout)
             # sort_spec = partition keys (ASC) then order keys (their direction);
@@ -1759,8 +1767,21 @@ class _Compiler:
                     "window ORDER BY", self._layout_name(identity),
                     self._layout_type(None, identity))
                 sort_spec.append((layout.index(identity), bool(asc)))
-            fn_kinds = [int(k) for k, _out in funcs]
-            fn_names = [out for _k, out in funcs]
+            fn_kinds = [int(k) for k, _out, _arg, _off in funcs]
+            fn_names = [out for _k, out, _arg, _off in funcs]
+            fn_offsets = [int(off) for _k, _out, _arg, off in funcs]
+            # A navigation function's argument is a VALUE column, not a sort key:
+            # it joins the sink's READ set (it must be buffered and survive input
+            # narrowing) but never `sort_spec`, and key-type checking does not
+            # apply — any gatherable type is legal.
+            fn_args = []
+            for _k, _out, arg_identity, _off in funcs:
+                if arg_identity is None:
+                    fn_args.append(-1)
+                else:
+                    if arg_identity not in layout:
+                        _unsupported("a window function argument the engine could not resolve here")
+                    fn_args.append(layout.index(arg_identity))
             top_k = int(getattr(node, "_top_k", -1))
 
             # WindowTopKFusionStrategy's fused `rank <= K`, restricted to the shape
@@ -1794,12 +1815,16 @@ class _Compiler:
 
             # PARTITION BY / ORDER BY keys are spent once the ranks are assigned —
             # drop any the plan above does not read, over the INPUT layout only (the
-            # rank columns are appended after the gather, so they are not in `emit`).
+            # window-function columns are appended after the gather, so they are not
+            # in `emit`). A LAG/LEAD argument column is READ at finalize, so it rides
+            # through the narrowing via `extra_read` even when nothing above emits it.
             sink_layout = layout
             emit, layout = self._emit_subset(node, sink_layout)
-            sort_spec, emit = self._narrow_sink_input(p, sink_layout, sort_spec, emit)
+            sort_spec, emit, fn_args = self._narrow_sink_input(
+                p, sink_layout, sort_spec, emit, fn_args)
             self.nplan.set_window_sink(p, sort_spec, len(part_cols),
-                                       fn_kinds, fn_names, top_k, buf, emit)
+                                       fn_kinds, fn_names, fn_args, fn_offsets,
+                                       top_k, buf, emit)
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order
@@ -1936,8 +1961,13 @@ class _Compiler:
             return None, layout      # nothing dead — stay on the untouched path
         return emit, [layout[i] for i in emit]
 
-    def _narrow_sink_input(self, p, layout, spec, emit):
+    def _narrow_sink_input(self, p, layout, spec, emit, extra_read=None):
         """Drop what a sort/window sink would BUFFER for nothing, before it buffers it.
+
+        ``extra_read`` names layout positions the sink READS beyond the sort keys —
+        a window function's argument column — which must survive the narrowing and
+        be remapped like the spec. It is returned remapped as the third element;
+        ``None`` in, ``None`` out.
 
         `_emit_subset` above stops a spent column being MATERIALIZED into the output.
         This stops a different column being HELD AT ALL. These sinks are breakers:
@@ -1959,15 +1989,18 @@ class _Compiler:
 
         ``emit is None`` means the live set is unknown, and unknown means keep
         everything: with no EMIT set there is no column this can prove dead."""
+        extra = [i for i in (extra_read or []) if i >= 0]
         if emit is None:
-            return spec, emit
-        keep = sorted({idx for idx, _ascending in spec} | set(emit))
+            return spec, emit, extra_read
+        keep = sorted({idx for idx, _ascending in spec} | set(emit) | set(extra))
         if len(keep) == len(layout):
-            return spec, emit
+            return spec, emit, extra_read
         self.nplan.add_select(p, keep, [layout[i] for i in keep])
         position = {old: new for new, old in enumerate(keep)}
         return ([(position[idx], ascending) for idx, ascending in spec],
-                [position[i] for i in emit])
+                [position[i] for i in emit],
+                None if extra_read is None
+                else [position[i] if i >= 0 else i for i in extra_read])
 
     def _sort_spec(self, p, order_by, layout):
         if not order_by:

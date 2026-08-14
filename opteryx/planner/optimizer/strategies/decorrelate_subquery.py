@@ -792,9 +792,12 @@ def _rewrite_order_limit_to_row_number(inner_plan: LogicalPlan, key_pairs) -> bo
     window = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
     window.partition_by = [_local_copy(inner_key) for inner_key, _outer_key in key_pairs]
     window.order_by = list(order_by)
-    window.outputs = [("ROW_NUMBER", rn_schema_column)]
+    # Post-bind producer: the binder's window visitor never sees this node, so both
+    # `outputs` (kind, SchemaColumn, params) and `window_functions`
+    # (kind, identity, arg node, offset) are laid down here in their bound shapes.
+    window.outputs = [("ROW_NUMBER", rn_schema_column, [])]
     window.output_relation = rn_relation
-    window.window_functions = [("ROW_NUMBER", rn_schema_column.identity)]
+    window.window_functions = [("ROW_NUMBER", rn_schema_column.identity, None, 0)]
     window.top_k = 1  # the operator keeps only rank-1 rows per partition
     # Everything the window READS as well as what it emits: projection pushdown
     # harvests referenced identities from `columns`, and the sort key is typically

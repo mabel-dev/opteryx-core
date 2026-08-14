@@ -28,10 +28,46 @@ DATASET = Dataset.FULL_SPLIT
 # Format variant -> dataset. `--variant skene` runs the identical battery against
 # the skene mirror (built by dev/parquet_to_skene.py) so the two formats are
 # compared on the same queries, same machine, same iteration count.
+#
+# ⛔ Both entries pointed at FULL_SPLIT (parquet) until 2026-08-14, so
+# `make clickbench-skene` built the skene mirror, announced "(skene)", and then
+# benchmarked parquet. Every skene-vs-parquet figure produced before that date is
+# parquet-vs-parquet and must not be quoted. The path assertion in
+# `resolve_dataset_path` below is what stops a mis-wired variant recurring
+# silently — a variant that cannot be located is a hard failure, never a
+# fallback to another dataset.
 VARIANT_DATASETS = {
     "": DATASET,
-    "skene": Dataset.FULL_SPLIT,
+    "skene": Dataset.FULL_SPLIT_SKENE,
 }
+
+# Queries whose per-round spread exceeds this fraction of their own minimum are
+# reported as UNSTABLE. An unstable query's minimum is not a usable signal: the
+# machine moved under it, so a change measured against it is measuring the
+# machine.
+UNSTABLE_SPREAD = 0.15
+
+
+def resolve_dataset_path(dataset: Dataset) -> str:
+    """Map a Dataset's dotted relation name onto its on-disk directory.
+
+    Raises rather than returning a sentinel: a benchmark that cannot find its
+    dataset must stop, not fall through to whatever else is lying around. The
+    repository root is derived from this file's location, not the working
+    directory, so the answer does not change with where make was invoked from.
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../.."))
+    path = os.path.join(repo_root, *dataset.value.split("."))
+    if not os.path.isdir(path):
+        raise FileNotFoundError(
+            f"dataset {dataset.name} ({dataset.value}) resolves to {path}, which does not exist"
+        )
+    entries = os.listdir(path)
+    if not entries:
+        raise FileNotFoundError(
+            f"dataset {dataset.name} ({dataset.value}) resolves to {path}, which is empty"
+        )
+    return path
 
 # fmt:off
 STATEMENTS = [
@@ -124,23 +160,22 @@ if __name__ == "__main__":  # pragma: no cover
     import argparse
     import gc
     import json
-    import shutil
+    import statistics
+    import subprocess
     import time
-
-    from tests import trunc_printable
 
     parser = argparse.ArgumentParser(description="ClickBench Performance Test")
     parser.add_argument(
-        "--warm",
-        action="store_true",
-        default=True,
-        help="Run warm queries (3 iterations per query)",
-    )
-    parser.add_argument(
         "--iterations",
         type=int,
-        default=2,
-        help="Number of iterations for warm queries (default: 3)",
+        default=3,
+        help="Rounds of the full battery (default: 3)",
+    )
+    parser.add_argument(
+        "--json",
+        type=str,
+        default=None,
+        help="Write timings and provenance to this path (default: write nothing)",
     )
     parser.add_argument(
         "--duckdb-baseline",
@@ -166,6 +201,14 @@ if __name__ == "__main__":  # pragma: no cover
     args = parser.parse_args()
 
     DATASET = VARIANT_DATASETS[args.variant]
+    # Hard-fails if the variant's dataset is absent or empty. `--variant skene`
+    # silently ran against parquet for as long as the mapping was wrong; the only
+    # defence against the next mis-wiring is refusing to run on a dataset we
+    # cannot locate.
+    dataset_path = resolve_dataset_path(DATASET)
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../..")
+    )
 
     # Resolve DuckDB baseline path: prefer local results if present
     _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -208,139 +251,166 @@ if __name__ == "__main__":  # pragma: no cover
             # Red: 1000%+ slower
             return f"\033[38;2;255;69;69m{ratio_str}\033[0m"
 
+    def git_fact(*argv: str) -> str:
+        """Read-only git probe. Reports unavailability rather than hiding it."""
+        proc = subprocess.run(["git", *argv], capture_output=True, text=True, cwd=repo_root)
+        if proc.returncode != 0:
+            return "unavailable"
+        return proc.stdout.strip()
+
+    # Provenance. A timing without this is not reproducible and must not be
+    # quoted; collecting it is cheap and it is printed whether or not --json is
+    # given. Build flags are read from the environment as a statement of what
+    # this shell would build with — the compiled extensions do not record the
+    # flags they were built with, so this is NOT proof of how they were built.
+    git_sha = git_fact("rev-parse", "--short", "HEAD")
+    git_dirty = git_fact("status", "--porcelain")
+    provenance = {
+        "opteryx_version": opteryx.__version__,
+        "opteryx_build": opteryx.__build__,
+        "git_sha": git_sha,
+        "git_clean": (git_dirty == "") if git_dirty != "unavailable" else "unavailable",
+        "python": sys.version.split()[0],
+        "gil_enabled": sys._is_gil_enabled(),
+        "cpu_count": os.cpu_count(),
+        "dataset": DATASET.name,
+        "dataset_relation": DATASET.value,
+        "dataset_path": dataset_path,
+        "dataset_entries": len(os.listdir(dataset_path)),
+        "rounds": args.iterations,
+        "preload": os.environ.get("DYLD_INSERT_LIBRARIES") or os.environ.get("LD_PRELOAD") or "none",
+        "env_lto": os.environ.get("OPTERYX_ENABLE_LTO", "unset"),
+        "env_pgo": os.environ.get("OPTERYX_ENABLE_PGO", "unset"),
+    }
+
     start_suite = time.monotonic_ns()
-    width = shutil.get_terminal_size((80, 20))[0] - 18
     passed: int = 0
     failed: int = 0
     sum_min_ms: float = 0.0  # Σ per-query best (minimum) time — the headline total
     sum_duckdb_min_ms: float = 0.0  # Σ DuckDB baseline over the same queries
-    nl: str = "\n"
     failures = []
 
-    if args.warm:
-        print(f"{'=' * 80}")
-        print(f"CLICKBENCH WARM PERFORMANCE BENCHMARK")
-        print(f"Version: {opteryx.__version__}")
-        print(f"Iterations per query: {args.iterations}")
-        print(f"Dataset: {DATASET.name} ({DATASET.value})")
-        if duckdb_results:
-            print(f"Baseline: DuckDB on {duckdb_machine} (comparing to warm2 times)")
-        print()
-        print(f"{'=' * 80}\n")
+    print(f"{'=' * 88}")
+    print("CLICKBENCH WARM PERFORMANCE BENCHMARK")
+    print(f"{'=' * 88}")
+    for key, value in provenance.items():
+        print(f"  {key:<20} {value}")
+    if duckdb_results:
+        print(f"  {'duckdb_baseline':<20} {duckdb_machine} (warm2 times)")
+        print(
+            "  ⚠ the DuckDB column is ORIENTATION ONLY — a stored baseline from another\n"
+            "    session and thermal state. It is not an interleaved A/B and must not be\n"
+            "    quoted as one."
+        )
+    print(f"{'=' * 88}\n")
 
-        # Cold start
-        print("Warming up (cold start)...")
-        start = time.monotonic_ns()
-        warm_session = None
-        try:
-            warm_session = opteryx.session()
-            for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET.value};"):
-                pass
-            cold_time_ms = (time.monotonic_ns() - start) / 1e6
-            print(f"Cold start: {cold_time_ms:.2f}ms\n")
-        except Exception as e:
-            print(f"Cold start failed: {e}\n")
-        finally:
-            if warm_session is not None:
-                warm_session.close()
+    # Cold start, outside the measured battery: the first query through the
+    # process pays module-level lazy imports and first-touch allocation that no
+    # subsequent query pays. Reported, never folded into a query's timing.
+    print("Warming up (cold start)...")
+    start = time.monotonic_ns()
+    warm_session = opteryx.session()
+    try:
+        for _ in warm_session.execute_to_morsels(f"SELECT COUNT(*) FROM {DATASET.value};"):
+            pass
+        cold_time_ms = (time.monotonic_ns() - start) / 1e6
+        print(f"Cold start: {cold_time_ms:.2f}ms\n")
+    finally:
+        warm_session.close()
 
-        header = f"{'Query':<8} {'Iteration 1':>14} {'Iteration 2':>14} {'Iteration 3':>14}         {'Avg':<13} {'Min':<13} {'Max':<13}"
-        if duckdb_results:
-            header += "vs DuckDB"
-        print(header)
-        print("-" * (102 + (12 if duckdb_results else 0)))
+    # Round-robin over the battery rather than all rounds of Q1, then all of Q2.
+    # Thermal drift over a suite this long is real; running each query once per
+    # round spreads it across every query instead of concentrating it on
+    # whichever queries happened to run during the machine's ramp.
+    print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES × {args.iterations} ROUNDS\n")
+    timings: dict = {index: [] for index in range(len(STATEMENTS))}
+    dead: set = set()
 
-    print(f"RUNNING CLICKBENCH BATTERY OF {len(STATEMENTS)} QUERIES\n")
-    for index, (statement, err) in enumerate(STATEMENTS):
-        statement = statement.replace("{DATASET}", f"{DATASET.value}")
-        printable = statement
-        query_num = f"Q{(index + 1):02d}/{index:02d}"
+    for round_no in range(args.iterations):
+        round_start = time.monotonic_ns()
+        for index, (statement, _err) in enumerate(STATEMENTS):
+            if index in dead:
+                continue
+            statement = statement.replace("{DATASET}", f"{DATASET.value}")
+            query_num = f"Q{(index + 1):02d}"
 
-        if args.warm:
-            # Run multiple iterations for warm query testing
-            times = []
-            query_failed = False
-
-            for iteration in range(args.iterations):
-                gc.collect()
-                session = None
-                try:
-                    start = time.monotonic_ns()
-                    session = opteryx.session()
-                    for _ in session.execute_to_morsels(statement):
-                        pass
-                    elapsed_ms = (time.monotonic_ns() - start) / 1e6
-                    times.append(elapsed_ms)
-                except opteryx.exceptions.MissingSqlStatement:
-                    # Commented-out queries (e.g. Q33) are intentional skips.
-                    query_failed = True
-                    print(f"{query_num:<8} SKIP  (no SQL statement)")
-                    break
-                except Exception as e:
-                    query_failed = True
-                    print(f"{query_num:<8} ERROR: {str(e)[:60]}")
-                    failures.append((statement, e))
-                    failed += 1
-                    break
-                finally:
-                    if session is not None:
-                        session.close()
-
-            if not query_failed and times:
-                avg_time = sum(times) / len(times)
-                min_time = min(times)
-                max_time = max(times)
-
-                # Format iteration times
-                iter_strs = [f"{t:.2f}ms" for t in times]
-                while len(iter_strs) < 3:
-                    iter_strs.append("-")
-
-                result_str = (
-                    f"{query_num:<8} {iter_strs[0]:>14} {iter_strs[1]:>14} {iter_strs[2]:>14} "
-                    f"{avg_time:>9.2f}ms   {min_time:>9.2f}ms   {max_time:>9.2f}ms"
-                )
-
-                # Add DuckDB comparison if available
-                if duckdb_results and index < len(duckdb_results):
-                    duckdb_ms = duckdb_results[index] * 1000  # Convert from seconds to ms
-                    ratio_str = format_ratio(min_time, duckdb_ms)
-                    result_str += f"  {ratio_str}"
-                    sum_duckdb_min_ms += duckdb_ms
-
-                print(result_str)
-
-                sum_min_ms += min_time
-                passed += 1
-        else:
-            # Original single-run mode
-            print(
-                f"\033[38;2;255;184;108m{(index + 1):04}\033[0m"
-                f" {trunc_printable(format_sql(printable), width - 1)}",
-                end="",
-                flush=True,
-            )
+            gc.collect()
+            # Session construction is NOT engine work and is NOT on the clock.
+            # It stays per-query so query isolation is unchanged from before.
+            session = opteryx.session()
             try:
                 start = time.monotonic_ns()
-                test_sql_battery(statement, err)
-                print(
-                    f"\033[38;2;26;185;67m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms\033[0m ✅",
-                    end="",
-                )
-                passed += 1
-                if failed > 0:
-                    print(f" \033[0;31m{failed}\033[0m")
-                else:
-                    print()
-            except Exception as err:
+                for _ in session.execute_to_morsels(statement):
+                    pass
+                timings[index].append((time.monotonic_ns() - start) / 1e6)
+            except Exception as error:
+                # A query that cannot run is a failure with its error attached,
+                # never a skip and never a fast time. Drop it from later rounds
+                # so one broken query does not cost three rounds of noise.
+                dead.add(index)
+                timings[index] = []
+                failures.append((statement, error))
                 failed += 1
-                print(
-                    f"\033[0;31m{str(int((time.monotonic_ns() - start) / 1e6)).rjust(4)}ms ❌ {failed}\033[0m"
-                )
-                print(">", err)
-                failures.append((statement, err))
+                print(f"  {query_num} FAILED (round {round_no + 1}): {type(error).__name__}: {str(error)[:70]}")
+            finally:
+                session.close()
+        print(
+            f"  round {round_no + 1}/{args.iterations} complete "
+            f"({(time.monotonic_ns() - round_start) / 1e9:.2f}s)"
+        )
+
+    print()
+    header = f"{'Query':<7} {'Min':>11} {'Median':>11} {'Max':>11} {'Spread':>9}  {'Rounds':<8}"
+    if duckdb_results:
+        header += " vs DuckDB"
+    print(header)
+    print("-" * (len(header) + 4))
+
+    unstable = []
+    for index in range(len(STATEMENTS)):
+        query_num = f"Q{(index + 1):02d}"
+        times = timings[index]
+        if not times:
+            print(f"{query_num:<7} {'FAILED':>11}")
+            continue
+
+        min_time = min(times)
+        max_time = max(times)
+        med_time = statistics.median(times)
+        spread = (max_time - min_time) / min_time if min_time > 0 else 0.0
+        spread_str = f"{spread * 100:>8.1f}%"
+        if spread > UNSTABLE_SPREAD:
+            unstable.append((query_num, spread))
+            spread_str = f"\033[38;2;255;165;0m{spread * 100:>8.1f}%\033[0m"
+
+        row = (
+            f"{query_num:<7} {min_time:>9.2f}ms {med_time:>9.2f}ms {max_time:>9.2f}ms "
+            f"{spread_str}  {len(times):<8}"
+        )
+        if duckdb_results and index < len(duckdb_results):
+            duckdb_ms = duckdb_results[index] * 1000  # baseline JSON is in seconds
+            row += f" {format_ratio(min_time, duckdb_ms)}"
+            sum_duckdb_min_ms += duckdb_ms
+        print(row)
+
+        sum_min_ms += min_time
+        passed += 1
 
     print("--- ✅ \033[0;32mdone\033[0m")
+
+    if unstable:
+        print(
+            f"\n\033[38;2;255;165;0m{len(unstable)} UNSTABLE QUERIES\033[0m "
+            f"(spread > {UNSTABLE_SPREAD * 100:.0f}% of their own minimum — the machine moved "
+            f"under them, so their minimum is not a usable signal):"
+        )
+        if args.iterations < 3:
+            print(
+                "  ⚠ with 2 rounds, spread is one difference rather than a distribution and\n"
+                "    over-reports. Re-run at --iterations 3 or more before acting on this list."
+            )
+        for query_num, spread in sorted(unstable, key=lambda x: -x[1]):
+            print(f"  {query_num}  {spread * 100:.1f}%")
 
     if args.profile:
         import collections
@@ -481,17 +551,44 @@ if __name__ == "__main__":  # pragma: no cover
         for statement, err in failures:
             print(err)
 
-    # Headline total: the sum of each query's BEST (minimum) time — the
-    # ClickBench-style metric, insensitive to the wall-clock noise of cold start,
-    # GC pauses, and per-iteration session setup that the suite runtime includes.
-    if args.warm:
-        summary = f"\n\033[38;2;139;233;253m\033[3mSUM OF MINIMUMS\033[0m  {sum_min_ms / 1000:.2f}s ({sum_min_ms:.0f}ms)"
-        if sum_duckdb_min_ms > 0:
-            summary += (
-                f"\n  vs DuckDB {sum_duckdb_min_ms / 1000:.2f}s  "
-                f"{format_ratio(sum_min_ms, sum_duckdb_min_ms)}"
-            )
-        print(summary)
+    # Headline total: the sum of each query's BEST (minimum) time. This is OUR
+    # metric, not the published ClickBench one — ClickBench normalises per query
+    # against the best system and has cold/hot semantics this runner does not
+    # reproduce. Never compare this number to a ×N figure from the public chart.
+    #
+    # Queries that FAILED contribute nothing, so a suite with failures has a
+    # smaller total than a working one. The failure count below is part of the
+    # headline, not a footnote to it.
+    summary = f"\n\033[38;2;139;233;253m\033[3mSUM OF MINIMUMS\033[0m  {sum_min_ms / 1000:.2f}s ({sum_min_ms:.0f}ms) over {passed}/{len(STATEMENTS)} queries"
+    if failed > 0:
+        summary += f"\n  \033[0;31m{failed} queries failed and contribute 0ms — this total is not comparable to a clean run\033[0m"
+    if sum_duckdb_min_ms > 0:
+        summary += (
+            f"\n  vs DuckDB {sum_duckdb_min_ms / 1000:.2f}s  "
+            f"{format_ratio(sum_min_ms, sum_duckdb_min_ms)}  (orientation only)"
+        )
+    print(summary)
+
+    if args.json:
+        payload = {
+            "provenance": provenance,
+            "cold_start_ms": cold_time_ms,
+            "unstable_spread_threshold": UNSTABLE_SPREAD,
+            "queries": [
+                {
+                    "query": f"Q{(index + 1):02d}",
+                    "times_ms": timings[index],
+                    "failed": index in dead,
+                }
+                for index in range(len(STATEMENTS))
+            ],
+            "sum_of_minimums_ms": sum_min_ms,
+            "passed": passed,
+            "failed": failed,
+        }
+        with open(args.json, "w") as results_file:
+            json.dump(payload, results_file, indent=2)
+        print(f"\nresults written to {args.json}")
 
     print(
         f"\n\033[38;2;139;233;253m\033[3mCOMPLETE\033[0m ({((time.monotonic_ns() - start_suite) / 1e9):.2f} seconds wall)\n"

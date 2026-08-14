@@ -292,9 +292,10 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                     if col.schema_column
                 )
 
-        # A ranking Window node reads its PARTITION BY / ORDER BY columns at
-        # execution time even though they are not in node.columns (which holds only
-        # the emitted ranking outputs). They must not be pruned from the input.
+        # A Window node reads its PARTITION BY / ORDER BY columns — and a
+        # navigation function's (LAG/LEAD) argument column — at execution time
+        # even though none of them are in node.columns (which holds only the
+        # emitted window outputs). They must not be pruned from the input.
         if node.node_type == LogicalPlanStepType.Window:
             for col in node.partition_by or []:
                 if col.schema_column:
@@ -302,5 +303,11 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             for col, _ in node.order_by or []:
                 if col.schema_column:
                     identities.add(col.schema_column.identity)
+            for _kind, _identity, arg_node, _offset in node.window_functions or []:
+                if arg_node is None:
+                    continue
+                for col in get_all_nodes_of_type(arg_node, (NodeType.IDENTIFIER,)):
+                    if col.schema_column:
+                        identities.add(col.schema_column.identity)
 
         return identities

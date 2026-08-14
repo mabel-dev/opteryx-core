@@ -45,6 +45,7 @@ Scope of this first cut (deliberately narrow):
 """
 
 from opteryx.expression import NodeType, binary_operands
+from opteryx.operators.window.helpers import RANK_VALUED
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -129,6 +130,11 @@ class WindowTopKFusionStrategy(OptimizationStrategy):
             return context
         if getattr(node, "top_k", None) is not None:
             return context  # already fused
+        if outputs[0][0] not in RANK_VALUED:
+            # LAG/LEAD outputs are VALUES from another row, not ranks — a
+            # `lag_col <= K` filter is an ordinary filter, and fusing it as a
+            # top-K would keep the wrong rows: a silent wrong answer.
+            return context
 
         target_identity = outputs[0][1].identity
 
