@@ -391,7 +391,7 @@ _STRUCT_ARRAY = "testdata/flat/struct_array"
     # zero-projection (A2 shape) over an array predicate input
     "SELECT COUNT(*) FROM '%s' WHERE strs IS NULL" % _ARRAY_TYPES,
     # array-consuming SQL over the native scan
-    "SELECT ARRAY_CONTAINS(ints, 5) FROM '%s'" % _ARRAY_TYPES,
+    "SELECT 5 = ANY(ints) FROM '%s'" % _ARRAY_TYPES,
     "SELECT u FROM '%s' CROSS JOIN UNNEST(ints) AS u" % _ARRAY_TYPES,
 ])
 def test_array_column_now_native(sql):

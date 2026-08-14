@@ -237,15 +237,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     )
     from opteryx.expression.functions.implementations.logical import null_if as _of_null_if
     from opteryx.expression.functions.implementations.utility import (
-        array_contains as _of_array_contains,
-    )
-    from opteryx.expression.functions.implementations.utility import (
-        array_contains_all as _of_array_contains_all,
-    )
-    from opteryx.expression.functions.implementations.utility import (
-        array_contains_any as _of_array_contains_any,
-    )
-    from opteryx.expression.functions.implementations.utility import (
         cosine_distance as _of_cosine_distance,
     )
     from opteryx.expression.functions.implementations.utility import (
@@ -258,9 +249,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     )
 
     class other_functions:
-        array_contains = staticmethod(_of_array_contains)
-        array_contains_all = staticmethod(_of_array_contains_all)
-        array_contains_any = staticmethod(_of_array_contains_any)
         null_if = staticmethod(_of_null_if)
         cosine_distance = staticmethod(_of_cosine_distance)
         cosine_similarity = staticmethod(_of_cosine_similarity)
@@ -269,27 +257,6 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
 
     # Parameter short-hands
-    _arr = ParameterSpec(name="arr", type_family="array")
-    # The probe must match the ARRAY's ELEMENT type — draken_array_contains
-    # rejects a mismatch at execution ("string item but array elements are
-    # type 4"). Typed `any`, that relationship was invisible, and no schema the
-    # engine exposes records an array's element type either (every list reports
-    # as DrakenType.ARRAY), so a caller had nothing to check against.
-    # `element_of` names the parameter whose element type this one must equal.
-    _item = ParameterSpec(
-        name="item",
-        type_family="any",
-        element_of="arr",
-        documentation="Must be of the array's element type.",
-    )
-    # Same rule one level up: every element of `items` must be of `arr`'s
-    # element type, so the two arrays must share an element type.
-    _set = ParameterSpec(
-        name="items",
-        type_family="array",
-        element_of="arr",
-        documentation="Must be an array with the same element type as `arr`.",
-    )
     _any = ParameterSpec(name="val", type_family="any")
 
     def _embed_return_type(_arg_nodes):
@@ -303,31 +270,12 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
 
         return _CT_VECTOR(embedding_dimensions())
 
+    # ARRAY_CONTAINS / _ANY / _ALL were removed: the operator spellings
+    # (`item = ANY(arr)`, `arr @> (…)`, `arr @>> (…)`) are the supported
+    # surface and reach the very same draken kernels through their own
+    # bind-time lowerings in compiled_expression.pyx. The function names were
+    # pure duplicate surface area.
     return [
-        _make(
-            "ARRAY_CONTAINS",
-            other_functions.array_contains,
-            _CT_BOOLEAN,
-            (_arr, _item),
-            summary="Test if array contains item.",
-            cost=1.19,
-        ),
-        _make(
-            "ARRAY_CONTAINS_ANY",
-            other_functions.array_contains_any,
-            _CT_BOOLEAN,
-            (_arr, _set),
-            summary="Test if array contains any item from set.",
-            cost=1.02,
-        ),
-        _make(
-            "ARRAY_CONTAINS_ALL",
-            other_functions.array_contains_all,
-            _CT_BOOLEAN,
-            (_arr, _set),
-            summary="Test if array contains all items from set.",
-            cost=1.21,
-        ),
         _make(
             "JSONB_OBJECT_KEYS",
             other_functions.jsonb_object_keys,

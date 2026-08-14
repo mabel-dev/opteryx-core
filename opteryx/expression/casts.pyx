@@ -456,6 +456,19 @@ def _c_native_cast(source_physical, target_type, bint safe=False, bint source_is
             return ("draken_cast_integer_to_decimal", 0)
         if s in _CAST_UNSIGNED_INT:
             return ("draken_cast_uint_to_decimal", 0)
+        # BOOL → DECIMAL — true is 1, false is 0, the same integer promotion BOOL
+        # already has to INT64/FLOAT64/the narrow and unsigned families. DECIMAL was
+        # the only hole in that row, and it surfaced through UNION leg coercion:
+        # find_compatible_type promotes BOOL + DECIMAL to DECIMAL, so the bound CAST
+        # had no kernel and the query died at the c-native admission gate.
+        if s == "BOOL":
+            return ("draken_cast_bool_to_decimal", 0)
+        # STRING → DECIMAL parses the text EXACTLY (its own integer accumulation, not
+        # a detour through draken_cast_string_to_float64 — a double cannot hold 18
+        # significant digits, so composing the two would silently corrupt the low
+        # digits of the values DECIMAL exists to keep).
+        if s in _CAST_STRINGS:
+            return ("draken_cast_string_to_decimal", 0)
         return None
     # → VARCHAR / BLOB (string result; executor owns it as a Vector). NVARCHAR as
     # a TARGET is handled separately below (validate+retag, a different kernel);

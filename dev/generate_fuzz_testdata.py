@@ -269,7 +269,7 @@ def build_mixed(rows: int = 2_000) -> pa.Table:
     ]
 
     # Arrays: present-and-populated, empty, and NULL-element cases all appear, so
-    # ARRAY_CONTAINS / subscript / UNNEST see more than the happy path.
+    # `= ANY` / `@>` / subscript / UNNEST see more than the happy path.
     arr_int = []
     arr_str = []
     for _ in range(rows):

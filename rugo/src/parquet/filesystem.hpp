@@ -135,26 +135,16 @@ static std::vector<uint8_t> read_range(const std::string& path,
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0)
         throw std::runtime_error("Cannot open file: " + path);
-    // H14 (2026-08-14, unratified): this read_range only ever serves FOOTER
-    // fetches — a single ~64 KB pread at EOF whose bytes we use in full and
-    // never read around. Default readahead treats it as the start of a
-    // sequential stream and pulls far more: MEASURED on x86, a cold scan that
-    // projects NO columns requests 100 x 64 KB = 6.4 MB of footer but the device
-    // delivers 54 MB (~540 KB/file, 8x), and that 54 MB is ~95% of the cold IO
-    // of a narrow-column query (SUM(AdvEngineID), whose column is 0.96 MB,
-    // totals 57 MB). POSIX_FADV_RANDOM asks the kernel not to read around a
-    // request we know is isolated. Guarded so it cannot fail the read.
-    // Toggle: RUGO_FOOTER_FADVISE=0 disables, for A/B from one binary.
-#if defined(POSIX_FADV_RANDOM)
-    {
-        static const bool fadvise_on = []() {
-            const char* v = getenv("RUGO_FOOTER_FADVISE");
-            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
-        }();
-        if (fadvise_on)
-            posix_fadvise(fd, offset, size, POSIX_FADV_RANDOM);
-    }
-#endif
+    // H14 REJECTED 2026-08-14 — `posix_fadvise(POSIX_FADV_RANDOM)` here changed
+    // nothing. The cold footer read IS amplified: this path requests 64 KB/file
+    // (100 files = 6.4 MB) against ~34 KB of real footer, and the device delivers
+    // 34 MB. But suppressing readahead on the pread moved neither bytes nor time
+    // (x86 cold, quiet box, 3 interleaved rounds: 66/57 MB median with and
+    // without). Together with the rejected mmap `MADV_RANDOM` (io_pipeline.hpp),
+    // TWO readahead-suppression attempts have now produced exactly zero effect,
+    // so the amplification is NOT kernel readahead responding to these hints.
+    // Mechanism still unidentified — do not re-try a third advice call without
+    // first establishing where the extra bytes are actually requested.
     ssize_t n = pread(fd, buf.data(), static_cast<size_t>(size), offset);
     close(fd);
     if (n < 0)
@@ -288,9 +278,21 @@ static constexpr int64_t kFooterSuffixPrefetch = 64 * 1024;
  */
 inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
         const std::vector<std::string>& paths,
-        const std::vector<int64_t>& file_sizes) {
+        const std::vector<int64_t>& file_sizes,
+        const std::string& auth_header = std::string()) {
     const size_t count = paths.size();
     std::vector<ParquetFooterResult> results(count);
+
+    // Both suffix-range rounds below build their headers here. `auth_header` is
+    // the caller's bearer credential when it is NOT pre-signing the URLs; empty
+    // means the URL carries its own signature and no header is wanted. A remote
+    // footer fetched with neither is anonymous, which a private bucket answers
+    // with a 403 — the failure this function's caller documents at length.
+    auto headers_for = [&auth_header](std::string range) {
+        std::map<std::string, std::string> h{{"Range", std::move(range)}};
+        if (!auth_header.empty()) h.emplace("Authorization", auth_header);
+        return h;
+    };
 
     std::vector<size_t> remote_idx;
     std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
@@ -305,8 +307,7 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
         }
         remote_idx.push_back(i);
         reqs.emplace_back(footer_http_url(paths[i]),
-                          std::map<std::string, std::string>{
-                              {"Range", "bytes=-" + std::to_string(kFooterSuffixPrefetch)}});
+                          headers_for("bytes=-" + std::to_string(kFooterSuffixPrefetch)));
     }
 
     // PROTOTYPE (2026-08-14, unratified) — H5: local footers in parallel.
@@ -374,8 +375,7 @@ inline std::vector<ParquetFooterResult> FetchParquetFootersMany(
             extra_remote.push_back(k);
             extra_len.push_back(fl);
             extra_reqs.emplace_back(footer_http_url(paths[i]),
-                                    std::map<std::string, std::string>{
-                                        {"Range", "bytes=-" + std::to_string(total)}});
+                                    headers_for("bytes=-" + std::to_string(total)));
         }
     }
 

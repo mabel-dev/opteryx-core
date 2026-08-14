@@ -22,7 +22,7 @@
 // into child_owner recursively. Before that field existed an ARRAY was not an
 // expressible kernel result at all.
 //
-// READ half — SORT and ARRAY_CONTAINS_ANY/ALL take an ARRAY in. They reuse the
+// READ half — SORT and the `@>`/`@>>` containment kernels take an ARRAY in. They reuse the
 // ARRAY->VARCHAR cast's BC_C_NATIVE_CHILD mechanism, extended to BC_FUNCTION
 // (compiled_expression.pyx, evaluation.pyx): the VM resolves the column's child
 // via cxx_column_child_vec and appends it as a SYNTHETIC extra arg, so these
@@ -33,7 +33,7 @@
 // has no Python fallback — an unregistered/ineligible function is a plan-time
 // error, not a slow path).
 //
-// ARRAY_CONTAINS_ANY/ALL fit inside that one-child budget because their needle
+// The containment kernels fit inside that one-child budget because their needle
 // set is a LITERAL baked into an in_list_ctx blob at bind time (the same vehicle
 // draken_in_list uses), not a second vector operand — so there is no second
 // child to resolve.
@@ -44,12 +44,12 @@
 // ARRAY<VARIANT>, so its child rides out on VecResult::child exactly like
 // JSONB_OBJECT_KEYS.
 //
-// ARRAY_CONTAINS(arr, item) IS in this file (draken_array_contains, below): it
-// is lowered at plan-build time to `item = ANY(arr)` (AnyOpEq), bypassing the
-// compare admission gate entirely by dispatching as a BC_FUNCTION (same
-// BC_C_NATIVE_CHILD path as ARRAY_CONTAINS_ANY/ALL) rather than a BC_COMPARE —
-// so AnyOpEq itself stays refused, but ARRAY_CONTAINS never emits it. A literal
-// array on the right (`x = ANY([1,2,3])`) lowers separately, to draken_in_list.
+// The single-item test `item = ANY(arr)` (AnyOpEq) IS in this file
+// (draken_array_contains, below): it bypasses the compare admission gate
+// entirely by dispatching as a BC_FUNCTION (same BC_C_NATIVE_CHILD path as the
+// `@>`/`@>>` kernels) rather than a BC_COMPARE — so AnyOpEq as a *compare*
+// stays refused, while this lowering never emits one. A literal array on the
+// right (`x = ANY([1,2,3])`) lowers separately, to draken_in_list.
 
 #include <algorithm>
 #include <cstdint>
@@ -68,6 +68,7 @@
 #include "core/vector_alloc.h"            // draken_identity_sel
 #include "ops/array_reductions.h"         // arr_reduce_int64/string — reference = ANY(arr) impl
 #include "ops/float_ops.h"                // fp_total_lt — Draken's canonical NaN-highest order
+#include "ops/json_extract.h"             // JsonNav/nav_tokens/ReadPool/JDocGuard — shared with `->`
 #include "ops/string_result.h"            // StringRows + sr_* helpers
 #include "ops/vec_result.h"
 #include "ops/kernels/cast_kernels.h"     // draken_cast_to_array decl (impl lives here)
@@ -91,15 +92,10 @@ inline bool aj_row_valid(const DrakenVector* v, uint32_t i) noexcept {
     return v->validity == nullptr || ((v->validity[i >> 3] >> (i & 7u)) & 1u) != 0u;
 }
 
-// RAII for yyjson_doc* (mirrors draken::ops::JDocGuard; kept local so this TU does
-// not pull in the whole extract_rows loop for one guard).
-struct AjDocGuard {
-    yyjson_doc* doc;
-    explicit AjDocGuard(yyjson_doc* d) noexcept : doc(d) {}
-    ~AjDocGuard() noexcept { if (doc) yyjson_doc_free(doc); }
-    AjDocGuard(const AjDocGuard&)            = delete;
-    AjDocGuard& operator=(const AjDocGuard&) = delete;
-};
+// RAII for yyjson_doc*. This TU used to keep a local copy of it rather than pull in
+// json_extract.h for one guard; draken_json_path_exists now needs that header's
+// navigation machinery anyway, so the duplicate is gone and there is one guard.
+using draken::ops::JDocGuard;
 
 // Consolidate a flattened StringRows into the single owned block a string
 // DrakenVector requires, boxed as an ARRAY result's child. CONSUMES `rows`
@@ -357,7 +353,7 @@ inline VecResult* sort_string_child(const DrakenVector* parent, const DrakenVect
 }
 
 // ---------------------------------------------------------------------------
-// ARRAY_CONTAINS_ANY / ARRAY_CONTAINS_ALL support
+// `@>` (contains-any) / `@>>` (contains-all) support
 // ---------------------------------------------------------------------------
 // The needle set arrives as a bind-time in_list_ctx blob (kernel_context.h) —
 // the SAME vehicle draken_in_list uses:
@@ -370,7 +366,7 @@ inline VecResult* sort_string_child(const DrakenVector* parent, const DrakenVect
 // Widen an integer-family element to int64, mirroring draken_in_list's kind-0
 // accessor. Returns false when the element type is not integer-family — the
 // caller fails loud (the blob kind was inferred from the LITERAL, so a mismatch
-// means the query asked e.g. ARRAY_CONTAINS_ANY(string_array, (1,2))).
+// means the query asked e.g. `string_array @> (1,2)`).
 inline bool acm_elem_int64(const DrakenVector* v, uint32_t phys, int64_t& out) {
     switch (v->type) {
         case DRAKEN_INT8:   out = static_cast<const int8_t*>(v->data)[phys];  return true;
@@ -1160,7 +1156,7 @@ VecResult draken_jsonb_object_keys(void* ctx, const DrakenVector* const* args, u
                 throw std::runtime_error(
                     "jsonb_object_keys: invalid JSON at row " + std::to_string(i) +
                     ": " + (perr.msg ? perr.msg : "parse error"));
-            AjDocGuard guard{raw};
+            JDocGuard guard{raw};
 
             yyjson_val* root = yyjson_doc_get_root(raw);
             if (!root || !yyjson_is_obj(root))
@@ -1248,13 +1244,132 @@ VecResult draken_jsonb_object_keys(void* ctx, const DrakenVector* const* args, u
     }
 }
 
+// `doc @? path` (AtQuestion) -> BOOL. True on rows where the bind-time JSON path
+// resolves to a node in that row's document.
+//
+// ARITY 1. The path is not a vector operand: it is a bind-time LITERAL carried in
+// the SAME extraction_ctx that `->` and `->>` bind, already converted to an RFC 6901
+// pointer and tokenized by kernel_alloc_extraction_ctx. So this loop does no path
+// work, and the accepted spellings cannot drift from `->`'s: bare key (`city`),
+// dot-path (`$.contact.email`, `$.a[0]`) and a raw pointer (`/a/b`) all reach here
+// as the same tokens. A per-ROW path is a different kernel and is not built — the
+// binder refuses a non-literal right operand (operator_map.determine_type) before
+// the plan gets here.
+//
+// EXISTENCE, not extraction — and the two deliberately differ on one case:
+//   * path resolves            -> TRUE, INCLUDING when the value is JSON `null`.
+//     `doc -> 'k' IS NOT NULL` answers FALSE there because extraction maps JSON
+//     null onto SQL NULL; `@?` asks whether the NODE is present, and it is. This
+//     is Postgres's jsonb `@?` / `?` behaviour, and it is the one thing the
+//     documented `->` rewrite cannot express.
+//   * path absent, an index past the end, or a token applied to a scalar -> FALSE.
+//   * NULL document row        -> NULL (three-valued, exactly as `->`).
+//   * invalid JSON in any row  -> hard error, exactly as `->`. Never a silent false;
+//     a document the engine cannot read has no answer to give about its keys.
+VecResult draken_json_path_exists(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    try {
+        if (!args || nargs != 1u || !args[0])
+            return draken_error_sentinel("draken_json_path_exists: expected 1 argument");
+        if (!ctx)
+            return draken_error_sentinel(
+                "draken_json_path_exists: missing bind-time path ctx");
+
+        const auto* c = static_cast<const extraction_ctx*>(ctx);
+        if (c->sub_op_code != 3 /* BC_EXTR_JSON_PTR */)
+            return draken_error_sentinel("draken_json_path_exists: unexpected sub-op code");
+
+        const DrakenVector* dv = args[0];
+        // VARIANT is accepted so `(doc -> 'a') @? 'b'` composes, same as `->` itself.
+        if (!aj_is_string_family(dv->type) && dv->type != DRAKEN_VARIANT)
+            return draken_error_sentinel(
+                "draken_json_path_exists: operand must be a string-family or VARIANT vector");
+
+        const uint32_t n  = dv->length;
+        const size_t   nb = (static_cast<size_t>(n) + 7u) / 8u;
+
+        auto* out = static_cast<uint8_t*>(draken_malloc(nb > 0u ? nb : 1u));
+        if (!out) throw std::bad_alloc();
+        std::memset(out, 0, nb > 0u ? nb : 1u);
+
+        // A null document row answers NULL, so the operand's mask is carried
+        // through verbatim; an all-valid operand needs no mask at all.
+        uint8_t* validity = nullptr;
+
+        // Frees both buffers if a row throws (invalid JSON, OOM) — the catch below
+        // turns the throw into an error sentinel, which owns nothing.
+        struct BufGuard {
+            uint8_t* bits;
+            uint8_t* val;
+            bool     released = false;
+            ~BufGuard() {
+                if (released) return;
+                if (bits) draken_free(bits);
+                if (val) draken_free(val);
+            }
+        } bg{out, nullptr};
+
+        if (dv->validity != nullptr) {
+            validity = ar_alloc_validity(n);   // padded, all-valid
+            bg.val   = validity;
+            std::memcpy(validity, dv->validity, nb);
+        }
+
+        draken::ops::JsonNav nav;
+        nav.tokens  = reinterpret_cast<const draken::ops::JsonPtrToken*>(
+                          extraction_ctx_tokens(c));
+        nav.ntokens = c->ntokens;
+        nav.blob    = extraction_ctx_blob(c);
+        nav.mode    = 0;
+
+        const auto* sa = static_cast<const DrakenStringArena*>(dv->data);
+        // One parse arena for the whole column — the same ReadPool `->` uses.
+        draken::ops::ReadPool pool(draken::ops::max_slot_length(dv));
+
+        for (uint32_t i = 0u; i < n; ++i) {
+            if (!aj_row_valid(dv, i)) continue;          // NULL row -> NULL, bit stays 0
+
+            const DrakenStringSlot* slot = &sa->slots[dv->selection[i]];
+            const uint8_t* json_bytes    = str_data(slot, sa->arena);
+            const uint32_t json_len      = str_length(slot);
+
+            yyjson_read_err perr;
+            yyjson_doc* raw = pool.read(reinterpret_cast<const char*>(json_bytes),
+                                        static_cast<size_t>(json_len), &perr);
+            if (!raw)
+                throw std::runtime_error(
+                    "draken_json_path_exists: invalid JSON at row " + std::to_string(i) +
+                    ": " + (perr.msg ? perr.msg : "parse error"));
+
+            JDocGuard guard{raw};
+            if (draken::ops::nav_tokens(yyjson_doc_get_root(raw), nav) != nullptr)
+                out[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+        }
+
+        VecResult r{};
+        r.data           = out;
+        r.validity       = validity;
+        r.selection      = draken_identity_sel(n);   // global; not owned
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.type           = DRAKEN_BOOL;
+        r.flags          = DRAKEN_SEL_IDENTITY;
+        bg.released      = true;                     // r owns out + validity now
+        return r;
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_json_path_exists");
+    }
+}
+
 // LENGTH(arr) -> INT64: the element count of each ARRAY row.
 //
 // Alone among the ARRAY-reading kernels here, this one needs NO child: a row's
 // element COUNT is fully described by the offsets in `data`
 // (offsets[phys+1] - offsets[phys]). So it keeps the plain 1-arg shape and needs
 // no BC_C_NATIVE_CHILD plumbing — which is why it composes over a COMPUTED array
-// where the element-reading kernels (SORT, ARRAY_CONTAINS) cannot.
+// where the element-reading kernels (SORT, array containment) cannot.
 //
 // Null TVL: a null row answers NULL, not 0 — an absent array has no length. The
 // offsets of a null row are still in-bounds (an empty span), so the value loop
@@ -1472,7 +1587,7 @@ VecResult draken_sort(void* ctx, const DrakenVector* const* args, uint32_t nargs
     }
 }
 
-// ARRAY_CONTAINS_ANY(arr, needles) -> BOOL. True iff the row shares at least one
+// `arr @> needles` -> BOOL. True iff the row shares at least one
 // element with the bind-time needle set. See acm_run for null semantics.
 VecResult draken_array_contains_any(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
     try {
@@ -1484,7 +1599,7 @@ VecResult draken_array_contains_any(void* ctx, const DrakenVector* const* args, 
     }
 }
 
-// ARRAY_CONTAINS_ALL(arr, needles) -> BOOL. True iff EVERY needle appears in the
+// `arr @>> needles` -> BOOL. True iff EVERY needle appears in the
 // row (needles ⊆ row) — note the direction: it is not "every element is a
 // needle". An empty row is therefore false for any non-empty needle set, and the
 // needle set is never empty (_membership_values rejects that).
@@ -1498,16 +1613,16 @@ VecResult draken_array_contains_all(void* ctx, const DrakenVector* const* args, 
     }
 }
 
-// ARRAY_CONTAINS(arr, item) -> BOOL, i.e. `item = ANY(arr)`. The item is a
+// `item = ANY(arr)` -> BOOL. The item is a
 // bind-time LITERAL packed into a one-element in_list_ctx blob (the same vehicle
-// ARRAY_CONTAINS_ANY uses), NOT a vector operand — a per-row item column is not
+// `@>` uses), NOT a vector operand — a per-row item column is not
 // supported (same as the GIL anyop_eq it replaces). args[0]=parent (offsets),
 // args[1]=child (elements, via BC_C_NATIVE_CHILD), nargs==2; item via ctx.
 //
 // Semantics are the reference SQL `= ANY` (arr_reduce_int64/arr_reduce_string in
 // array_reductions.h for kind 0/1; contains_numeric_child/contains_bool_child
 // above match that SAME contract for the wider type set), which is THREE-VALUED
-// and differs from ARRAY_CONTAINS_ANY (acm_run): a NULL array row -> NULL
+// and differs from `@>` (acm_run): a NULL array row -> NULL
 // (validity cleared), an empty row -> FALSE, a NULL element is skipped, TRUE iff
 // any non-null element equals the item.
 //
@@ -1882,7 +1997,7 @@ VecResult draken_cast_to_array(void* ctx, const DrakenVector* vector) {
             yyjson_doc* raw = yyjson_read_opts(
                 const_cast<char*>(reinterpret_cast<const char*>(json_bytes)),
                 static_cast<size_t>(json_len), 0u, nullptr, &perr);
-            AjDocGuard guard{raw};
+            JDocGuard guard{raw};
 
             if (!raw) {
                 why = "invalid JSON";

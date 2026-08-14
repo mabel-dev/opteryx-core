@@ -517,16 +517,17 @@ extensions = [
             ),
         )
     ],
-    # operations/__init__ includes special_ops.pyx which cimports yyjson at C level.
-    # On Linux (RTLD_LOCAL), cyyjson.so symbols are not visible to other extensions,
-    # so yyjson.c must be compiled directly into this extension.
+    # yyjson.c used to be compiled in here for special_ops.pyx (`@?`), which
+    # cimported it at C level — on Linux (RTLD_LOCAL) cyyjson.so's symbols are not
+    # visible to other extensions. `@?` has a native kernel now and special_ops.pyx
+    # is deleted, so nothing under operations/ touches yyjson and the source is no
+    # longer linked in.
     Extension(
         "opteryx.expression.operations.__init__",
         sources=[
             "opteryx/expression/operations/__init__.pyx",
-            "third_party/yyjson/src/yyjson.c",
         ],
-        include_dirs=include_dirs + ["third_party/yyjson/src"],
+        include_dirs=include_dirs,
         extra_compile_args=C_FLAGS,
     ),
     # functions/catalog.pyx is textually included by functions/__init__.pyx;
@@ -620,16 +621,14 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
     ),
     # Expression evaluator — consolidated .so for all evaluator leaf modules.
-    # Leaf .pyx files are textually included by _impl.pyx. json_ops.pyx cimports
-    # yyjson at C level; on Linux (RTLD_LOCAL) cyyjson.so's symbols are not
-    # visible to this extension, so yyjson.c must be compiled directly in (same
-    # as operations/__init__ above).
+    # Leaf .pyx files are textually included by _impl.pyx. yyjson.c used to be
+    # compiled in for json_ops.pyx's `@?` row loop; `@?` has a native kernel now
+    # and that loop is deleted, so no leaf here cimports yyjson.
     Extension(
         "opteryx.expression.evaluator._impl",
         sources=[
             "opteryx/expression/evaluator/_impl.pyx",
             "opteryx/expression/evaluator/bytecode_worker.cpp",
-            "third_party/yyjson/src/yyjson.c",
         ],
         include_dirs=include_dirs
         + [

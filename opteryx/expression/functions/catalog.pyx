@@ -24,9 +24,9 @@ class ParameterSpec:
     They were added because a type-directed generator reading only the catalog
     produced calls that satisfied every declared type and then died inside a
     kernel with a raw Python exception — `TO_CHAR(-303083)`, `TIME_BUCKET(-125533.0, ...)`,
-    `JSONB_OBJECT_KEYS('delta')`, `ARRAY_CONTAINS(int_array, 'x')`. Each of
-    those is a real, deliberate engine rule; none of them was recorded. A rule
-    that the catalog does not carry is a rule every consumer has to rediscover.
+    `JSONB_OBJECT_KEYS('delta')`. Each of those is a real, deliberate engine
+    rule; none of them was recorded. A rule that the catalog does not carry is
+    a rule every consumer has to rediscover.
 
     Keeping them declarative is the point: the kernel is still the enforcer, so
     a constraint stated here can be stale but can never make the engine wrong.
@@ -51,9 +51,11 @@ class ParameterSpec:
     #: "json", "base64", "base85", "hex", "dfa-regex".
     value_format: Optional[str] = None
     #: This parameter's type must be the ELEMENT type of the named sibling
-    #: parameter (ARRAY_CONTAINS's probe against its array). The engine exposes
-    #: no schema that records an array's element type, so without this the
-    #: relationship is invisible.
+    #: parameter. The engine exposes no schema that records an array's element
+    #: type, so without this the relationship is invisible.
+    #: NOTE: currently declared by NO registered function — its only three users
+    #: (ARRAY_CONTAINS/_ANY/_ALL) were removed in favour of the `= ANY` / `@>` /
+    #: `@>>` operators, which are comparisons and carry no ParameterSpec.
     element_of: Optional[str] = None
     #: Canonical types.json spellings that `type_family` nominally covers but
     #: the implementation rejects. `excludes=("DECIMAL",)` on the null-conditional
@@ -101,9 +103,10 @@ class KernelSpec:
     # validated, normalized, and exported into reference/function_signatures.json —
     # and read by NOTHING. It described no behaviour: every kernel's real null
     # semantics live in the kernel itself, so a declaration that disagreed with its
-    # kernel (as ARRAY_CONTAINS_ANY/ALL's "passthru" did — the kernel answers FALSE
-    # for a null row, not null) was silently misleading rather than wrong-in-a-way-
-    # anything-would-catch. Removed 2026-07-16 (architect).
+    # kernel (as the since-removed ARRAY_CONTAINS_ANY/ALL functions' "passthru"
+    # did — the kernel answers FALSE for a null row, not null) was silently
+    # misleading rather than wrong-in-a-way-anything-would-catch. Removed
+    # 2026-07-16 (architect).
     id: str  # kernel identifier, e.g., "integer_integer" or "polymorphic"
     callable_ref: Callable
     engine: Literal["draken"] | object = _UNSET

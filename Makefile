@@ -195,6 +195,19 @@ et: compile ## Run expression engine tests (value-checked gates)
 	@clear || true
 	@$(PYTEST) tests/test_expression_engine.py -v --tb=short
 
+medius-test: ## Build and run the Medius bounded middle-tier tests
+	$(call print_blue,"Building and running Medius tests...")
+	@mkdir -p /tmp/opteryx-tests
+	@cd /tmp/opteryx-tests && \
+	  clang++ -std=c++20 -O2 -DNDEBUG \
+	    -I$(CURDIR) \
+	    -I$(CURDIR)/draken \
+	    -I$(CURDIR)/draken/simd \
+	    -I$(CURDIR)/third_party/mabel/carchar \
+	    -I$(CURDIR)/third_party/mabel/medius \
+	    -o medius_test $(CURDIR)/third_party/mabel/medius/medius_test.cpp
+	@/tmp/opteryx-tests/medius_test
+
 rle-dict-test: ## Build and run the RLE skip-dense -> Dict direct-builder tests
 	$(call print_blue,"Building and running RLE direct-dict tests...")
 	@mkdir -p /tmp/opteryx-tests

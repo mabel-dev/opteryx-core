@@ -28,12 +28,6 @@
 
 namespace {
 
-// H12b (2026-08-14, unratified): ceiling on the ONE-SHOT intern-arena reserve.
-// Every decode worker can be mid-chunk simultaneously, so an unbounded reserve
-// on a large string chunk would multiply across the pool. 32 MB covers the
-// ClickBench URL chunks (~25 MB uncompressed per row group) without that risk.
-constexpr size_t kInternArenaReserveCapBytes = 32u * 1024u * 1024u;
-
 inline uint8_t CodeWidthForDictSize(size_t dict_size) {
   if (dict_size <= 256) return 1;
   if (dict_size <= 65536) return 2;
@@ -491,9 +485,21 @@ void DecodeColumnFromChunk(DecodedColumn &result,
   try {
     // Guard: only supported codecs.
     // UNCOMPRESSED(0), SNAPPY(1), GZIP(2), ZSTD(6), LZ4_RAW(7).
+    // A bare `return` here left success=false with NO reason, which every
+    // caller reads as the honest "column absent from this row group" outcome —
+    // so an unreadable column was silently dropped and read_parquet handed back
+    // a zero-column, zero-row morsel for a file whose footer said otherwise.
+    // An unsupported codec is a hard failure and must carry its reason.
     if (target_col->codec != 0 && target_col->codec != 1 &&
         target_col->codec != 2 && target_col->codec != 6 &&
         target_col->codec != 7) {
+      result.error_message =
+          "compression codec " +
+          rugo::compression::CodecName(
+              rugo::compression::CodecFromInt(target_col->codec)) +
+          " (parquet codec " + std::to_string(target_col->codec) +
+          ") is not supported; supported codecs are UNCOMPRESSED, SNAPPY, "
+          "GZIP, ZSTD and LZ4_RAW";
       return;
     }
 
@@ -513,7 +519,19 @@ void DecodeColumnFromChunk(DecodedColumn &result,
         break;
       }
     }
-    if (!has_supported_encoding) return;
+    if (!has_supported_encoding) {
+      std::string listed;
+      for (int32_t enc : target_col->encodings) {
+        if (!listed.empty()) listed += ", ";
+        listed += std::to_string(enc);
+      }
+      result.error_message =
+          "column declares no decodable encoding (parquet encoding ids: " +
+          (listed.empty() ? std::string("none") : listed) +
+          "); supported ids are 0 PLAIN, 2 PLAIN_DICTIONARY, 3 RLE, "
+          "5 DELTA_BINARY_PACKED, 7 DELTA_BYTE_ARRAY, 8 RLE_DICTIONARY";
+      return;
+    }
 
     result.type = target_col->physical_type;
     result.max_rep_level = target_col->max_repetition_level;
@@ -572,12 +590,28 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     //   width <= 8  → int64   (DECIMAL,  precision <= 18)
     //   width 9..16 → int128  (DECIMAL128, precision > 18) — type "int128"
     // flba_byte_width > 0 selects the BE-stride read path; flba_int128 picks the tier.
+    // INT96 (deprecated): 12 bytes on the wire, one nanosecond timestamp.
+    // Converted to int64 nanos at every read site and decoded as an int64
+    // column from here on — int96_stride > 0 selects the 12-byte-stride read
+    // exactly as flba_byte_width selects the big-endian decimal stride.
+    int int96_stride = 0;
+    if (target_col->physical_type == "int96") {
+      int96_stride = 12;
+      result.type = "int64";
+    }
+
     int flba_byte_width = 0;
     bool flba_int128 = false;
     if (target_col->physical_type == "fixed_len_byte_array") {
       if (target_col->type_length <= 0 || target_col->type_length > 16 ||
           target_col->logical_type.rfind("decimal", 0) != 0) {
-        // Caller should have been gated by CanDecode; defensive bail.
+        // Non-DECIMAL FIXED_LEN_BYTE_ARRAY (UUID, fixed-width hashes) and
+        // out-of-range widths have no decode path. Reason-carrying so callers
+        // fail loud instead of reading this as an absent column.
+        result.error_message =
+            "fixed_len_byte_array column is only decodable as DECIMAL with "
+            "width 1..16 (got width " + std::to_string(target_col->type_length) +
+            ", logical type '" + target_col->logical_type + "')";
         return;
       }
       flba_byte_width = target_col->type_length;
@@ -676,7 +710,25 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           }
 #endif
         } else if (result.type == "int64") {
-          if (flba_byte_width > 0) {
+          if (int96_stride > 0) {
+            // INT96 dict: 12 bytes per entry, converted to int64 nanos here so
+            // every downstream consumer (rle_path, dict codes, dense
+            // materialisation) sees an ordinary int64 dictionary.
+            int32_t safe_count = std::min(
+                dict_size,
+                (int32_t)((dict_end - dict_data_ptr) / int96_stride));
+            result.dict_int64_values.resize(safe_count);
+            for (int32_t i = 0; i < safe_count; i++) {
+              if (!Int96ToUnixNanos(dict_data_ptr,
+                                    result.dict_int64_values.data() + i)) {
+                result.error_message =
+                    "int96 timestamp out of representable range at dictionary "
+                    "entry " + std::to_string(i);
+                return;
+              }
+              dict_data_ptr += int96_stride;
+            }
+          } else if (flba_byte_width > 0) {
             // FIXED_LEN_BYTE_ARRAY DECIMAL dict: each value is `flba_byte_width`
             // bytes, big-endian, signed. Sign-extend to int64.
             int32_t safe_count = std::min(
@@ -1032,6 +1084,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           target_col->max_repetition_level == 0 &&
           row_mask == nullptr &&
           flba_byte_width == 0 &&
+          // int96 reports result.type "int64" but is 12 bytes on the wire; the
+          // parallel page workers bulk-copy at the natural width, so it must
+          // stay on the sequential (stride-aware) path.
+          int96_stride == 0 &&
           (result.type == "int32" || result.type == "int64" ||
            result.type == "float32" || result.type == "float64")
       );
@@ -2059,6 +2115,21 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   data_ptr, data_size, present_count, result.ext_int64 + result.ext_written);
               if (decoded != present_count) return;
               result.ext_written += decoded;
+            } else if (int96_stride > 0) {
+              int32_t safe_count = std::min(
+                  present_count,
+                  (int32_t)((data_end - data_ptr) / int96_stride));
+              int64_t* edst = result.ext_int64 + result.ext_written;
+              for (int32_t i = 0; i < safe_count; i++) {
+                if (!Int96ToUnixNanos(data_ptr + i * int96_stride, edst + i)) {
+                  result.error_message =
+                      "int96 timestamp out of representable range at row " +
+                      std::to_string(result.ext_written + i);
+                  return;
+                }
+              }
+              data_ptr += safe_count * int96_stride;
+              result.ext_written += safe_count;
             } else if (flba_byte_width > 0) {
               int32_t safe_count = std::min(
                   present_count,
@@ -2097,6 +2168,23 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 result.int64_values.resize(old_sz);
                 return;
               }
+            } else if (int96_stride > 0) {
+              int32_t safe_count = std::min(
+                  present_count,
+                  (int32_t)((data_end - data_ptr) / int96_stride));
+              size_t old_sz = result.int64_values.size();
+              result.int64_values.resize(old_sz + safe_count);
+              int64_t* dst = result.int64_values.data() + old_sz;
+              for (int32_t i = 0; i < safe_count; i++) {
+                if (!Int96ToUnixNanos(data_ptr + i * int96_stride, dst + i)) {
+                  result.error_message =
+                      "int96 timestamp out of representable range at row " +
+                      std::to_string(old_sz + i);
+                  result.int64_values.resize(old_sz);
+                  return;
+                }
+              }
+              data_ptr += safe_count * int96_stride;
             } else if (flba_byte_width > 0) {
               int32_t safe_count = std::min(
                   present_count,
@@ -2227,31 +2315,14 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                   result.string_dict_arena,
                   result.string_dict_offsets,
                   result.string_dict_lens);
-              // H12b (2026-08-14, unratified): ONE reserve for the whole chunk, to a
-              // known total — the only form the arena rule permits. The banned form
-              // is `reserve(size() + page_span)` INSIDE the page loop, which pins
-              // capacity to the exact current size so every subsequent page
-              // reallocates and copies the whole arena (measured -7% previously).
-              // This runs once, on the first interning page of the chunk (the guard
-              // above is false thereafter because the map is no longer empty), and
-              // targets the chunk's uncompressed size — a true upper bound on the
-              // distinct bytes we can intern. Capped so a huge string chunk cannot
-              // have every decode worker reserve hundreds of MB at once.
-              // Runtime-toggleable (RUGO_INTERN_ARENA_RESERVE=0 disables) so both
-              // arms of the A/B run from one binary — a cross-build comparison of a
-              // few percent is not trustworthy on this hardware.
-              static const size_t reserve_cap = []() -> size_t {
-                const char* v = getenv("RUGO_INTERN_ARENA_RESERVE");
-                if (v != nullptr && *v != '\0') return strtoull(v, nullptr, 10);
-                return kInternArenaReserveCapBytes;
-              }();
-              const int64_t ucs = target_col->total_uncompressed_size;
-              if (ucs > 0 && reserve_cap > 0) {
-                const size_t want =
-                    std::min<size_t>(static_cast<size_t>(ucs), reserve_cap);
-                if (result.string_dict_arena.capacity() < want)
-                  result.string_dict_arena.reserve(want);
-              }
+              // H12b TRIED AND DROPPED 2026-08-14. A single reserve per chunk to the
+              // chunk's uncompressed size (the only form the arena rule permits — the
+              // banned form is `reserve(size()+page_span)` inside the page loop, which
+              // measured -7%) was worth at most ~2.3% on `URL LIKE` and nothing at all
+              // on plain URL decode, with the OLD/NEW ranges overlapping. Measured
+              // over 7 interleaved rounds from one binary with a non-string control
+              // that stayed flat (0.041s both arms), so there was no arm offset —
+              // the effect is simply too small to justify the knob.
             }
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);

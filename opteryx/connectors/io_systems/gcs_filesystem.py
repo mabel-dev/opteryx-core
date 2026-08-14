@@ -126,6 +126,41 @@ class OpteryxGcsFileSystem:
                     self.client_credentials.refresh(self._Request())
         return f"Bearer {self.client_credentials.token}"
 
+    @property
+    def signs_urls(self) -> bool:
+        """Whether object URLs are pre-signed instead of carrying an auth header.
+
+        Defaults to FALSE, which is the cheap path. Signing mints a credential per
+        OBJECT, and on Compute Engine / Cloud Run there is no local private key, so
+        each one is an IAM signBlob round trip — measured ~63ms, i.e. ~6.3s of pure
+        overhead on a 100-file scan, paid again on every query. A bearer token is
+        one credential for the caller and covers every object it touches.
+
+        The cost is invisible in development: with a service-account key file the
+        client library signs locally in ~0.6ms, so the same code is ~155x cheaper
+        on a laptop than on the deployment it ships to.
+
+        Set GCS_SIGN_URLS=true to restore signing — for exercising the signed-URL
+        path, or for a consumer that genuinely needs a self-contained URL (one that
+        cannot send headers, or that receives the URL out-of-band).
+        """
+        from opteryx import config
+
+        return config.get_bool("GCS_SIGN_URLS", False)
+
+    def native_auth_header(self):
+        """Authorization header for the C++ fetches, or None when pre-signing.
+
+        Exactly one mechanism authenticates a given read. When signing is on the
+        URL already carries its credential and this returns None; when it is off
+        this supplies the header instead. Returning None here while ALSO not
+        signing would send an anonymous request, which GCS refuses with a 401 —
+        it never reads as public.
+        """
+        if self.signs_urls:
+            return None
+        return self._bearer
+
     def _resolve_signing_service_account_email(self) -> str:
         """Return the concrete service account email used for IAM-backed signing.
 

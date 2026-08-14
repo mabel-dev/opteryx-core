@@ -8,7 +8,7 @@
 // int32_t offsets[data_length+1]; the elements hang off VectorOwner::child_owner
 // and are NOT reachable from a `const DrakenVector*`. So these loops take the
 // parent and the child as SEPARATE vectors — the (parent, child) shape SORT,
-// GREATEST/LEAST and ARRAY_CONTAINS_* already use, whose child the VM resolves
+// GREATEST/LEAST and the containment kernels already use, whose child the VM resolves
 // per morsel from the column owner (BC_C_NATIVE_CHILD, cxx_column_child_vec).
 //
 // Access is the uniform one, twice over: the row's span is

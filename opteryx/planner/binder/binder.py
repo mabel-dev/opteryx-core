@@ -787,6 +787,30 @@ def inner_binder(
             and node.alias not in (found_column.aliases or [])
         ):
             found_column = None
+        # Same rule again on the one axis the two guards above cannot see: TYPE. Two
+        # NULL literals are byte-identical in value (both None) and neither need carry
+        # an alias, so an untyped NULL adopted the ConstantColumn of a DIFFERENTLY
+        # TYPED null that merely rendered the same — and with it that null's type.
+        #
+        # `COUNT(*) FILTER (WHERE p)` lowers to `COUNT(IIF(p, 1, NULL))`
+        # (logical_planner_builders) where the ELSE is deliberately an UNTYPED null. If
+        # `p` is a BOOL-typed null — `CAST(NULL AS BOOLEAN)` — the ELSE interned onto it
+        # and came back BOOL, so the blend check refused a query whose branches are
+        # really INT64 and untyped NULL: "IIF: literal 1 is INT64 but literal None is
+        # BOOL". Hand-written `IIF(CAST(NULL AS BOOLEAN), 1, NULL)` failed identically,
+        # while `IIF(id > 3, 1, NULL)` ran — the difference was never the branches.
+        #
+        # Both types must be known before this can rule; an unknown type is not a
+        # disagreement, and refusing on it would stop interning far more than this.
+        if (
+            found_column
+            and node_type == NodeType.LITERAL
+            and isinstance(found_column, ConstantColumn)
+            and node.type is not None
+            and found_column.column_type is not None
+            and node.type != found_column.column_type
+        ):
+            found_column = None
         # If the column exists in the schema, update node and context accordingly.
         if found_column:
             # found_identity = found_column.identity

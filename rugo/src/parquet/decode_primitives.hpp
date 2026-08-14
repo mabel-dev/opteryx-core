@@ -56,6 +56,34 @@ static inline double ReadFloat64(const uint8_t *p) {
 }
 
 // ---------------------------------------------------------------------------
+// INT96 (deprecated physical type) → int64 nanoseconds since the Unix epoch
+// ---------------------------------------------------------------------------
+// Wire layout, 12 bytes, as written by Impala/Hive and by pyarrow under
+// use_deprecated_int96_timestamps: 8 bytes little-endian UNSIGNED
+// nanoseconds-since-midnight, then 4 bytes little-endian INT32 Julian day
+// number. The Unix epoch is Julian day 2440588. The Parquet spec assigns INT96
+// exactly one meaning — a nanosecond timestamp — so the conversion is total,
+// not a heuristic.
+//
+// Returns false (and leaves *out untouched) when the encoded instant cannot be
+// represented as int64 nanoseconds. days * 86400e9 overflows int64 outside
+// ±106751 days (~±292 years around 1970), so a corrupt or out-of-range Julian
+// day must be rejected rather than silently wrapped to a plausible-looking
+// wrong instant. Callers turn false into a decode error.
+static inline bool Int96ToUnixNanos(const uint8_t *p, int64_t *out) {
+  const uint64_t nanos_of_day = ReadLE64U(p);
+  const int32_t julian_day = ReadLE32(p + 8);
+  const int64_t days = (int64_t)julian_day - 2440588LL;
+  if (days > 106751LL || days < -106751LL) return false;
+  if (nanos_of_day > (uint64_t)INT64_MAX) return false;
+  const int64_t day_nanos = days * 86400000000000LL;
+  const int64_t nod = (int64_t)nanos_of_day;
+  if (day_nanos > INT64_MAX - nod) return false;
+  *out = day_nanos + nod;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Varint readers
 // ---------------------------------------------------------------------------
 

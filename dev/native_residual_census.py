@@ -150,7 +150,7 @@ HAND_SET: Dict[str, str] = {
     # scans native, zero residual reasons of any kind, and (b) a 43-shape hand
     # sweep over the regex family (RLIKE / NOT RLIKE / SIMILAR TO / ~ / !~,
     # composed with AND / OR / NOT), string transforms, hashing/encoding, SPLIT,
-    # SOUNDEX, LEVENSHTEIN, ARRAY_CONTAINS, CASE, COALESCE/NULLIF, casts and
+    # SOUNDEX, LEVENSHTEIN, `= ANY`, CASE, COALESCE/NULLIF, casts and
     # arithmetic — every one either goes native or raises. None tags R4.
     #
     # ⚠ The `return None` guard in compiler.py STAYS, defensively: it is the

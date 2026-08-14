@@ -2059,7 +2059,7 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
                 # ARRAY was a consumed INTERMEDIATE. draken_length_array reads only
                 # the offsets — it needs no child, which is exactly why it composes
                 # over a computed array where the element-reading kernels (SORT,
-                # ARRAY_CONTAINS) cannot. The child is genuinely unused, so freeing
+                # array containment) cannot. The child is genuinely unused, so freeing
                 # it and returning the result is correct, not a silent drop. The old
                 # guard tested only `child_vr != NULL` and so refused this case too.
                 if dv_stack[0] != NULL and dv_stack[0].type == DRAKEN_ARRAY:

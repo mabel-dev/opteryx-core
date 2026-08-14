@@ -134,9 +134,6 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
             "Array Functions",
             (
                 "ARRAY",
-                "ARRAY_CONTAINS",
-                "ARRAY_CONTAINS_ANY",
-                "ARRAY_CONTAINS_ALL",
                 "TRY_ARRAY",
                 "GREATEST",
                 "LEAST",
@@ -439,9 +436,6 @@ _FUNCTION_NOTES = {
 
 _RELATED_HINTS = {
     "ARRAY": ("TRY_ARRAY", "SORT", "GREATEST", "LEAST"),
-    "ARRAY_CONTAINS": ("ARRAY_CONTAINS_ANY", "ARRAY_CONTAINS_ALL", "SORT"),
-    "ARRAY_CONTAINS_ALL": ("ARRAY_CONTAINS", "ARRAY_CONTAINS_ANY", "SORT"),
-    "ARRAY_CONTAINS_ANY": ("ARRAY_CONTAINS", "ARRAY_CONTAINS_ALL", "SORT"),
     "ASCII": ("CHAR", "LEFT", "RIGHT"),
     "BASE64_DECODE": ("BASE64_ENCODE", "BASE85_DECODE", "HEX_DECODE"),
     "BASE64_ENCODE": ("BASE64_DECODE", "BASE85_ENCODE", "HEX_ENCODE"),

@@ -23,7 +23,7 @@ class Dataset(enum.Enum):
     FULL_SPLIT_SKENE = "scratch.hits_skene"
 
 
-DATASET = Dataset.FULL_SPLIT
+DATASET = Dataset.FULL_SPLIT_SKENE
 
 # Format variant -> dataset. `--variant skene` runs the identical battery against
 # the skene mirror (built by dev/parquet_to_skene.py) so the two formats are

@@ -7,7 +7,7 @@
 Utility function kernels.
 
 Includes:
-- Array operations: ARRAY_CONTAINS, ARRAY_CONTAINS_ANY, ARRAY_CONTAINS_ALL
+- Array operations: ARRAY_CAST
 - JSON operations: JSONB_OBJECT_KEYS
 - Random generation: RANDOM, RAND, NORMAL, RANDOM_STRING
 - Statistics: GREATEST, LEAST
@@ -41,15 +41,6 @@ def _dot_product(a: list, b: list) -> float:
 def _is_finite(x: float) -> bool:
     """Check if a float value is finite (not NaN or inf)."""
     return x == x and abs(x) != float("inf")  # x==x is False for NaN
-
-
-def _normalize_membership_values(value):
-    """Extract membership test values as frozenset."""
-    if value is None:
-        return frozenset()
-    return frozenset(value)
-
-
 
 
 def _coerce_text_scalar(value):
@@ -364,55 +355,6 @@ def humanize(arr):
         return format_number(value)
 
     return [humanize_number(value) for value in arr]
-
-
-def array_contains(arr, val):
-    """
-    ARRAY_CONTAINS is rewritten to `item = ANY(arr)` (AnyOpEq) at plan-build
-    time (logical_planner_builders.function), so this catalog entry is never
-    actually a FUNCTION node by the time compiled_expression.pyx runs — it
-    exists only because FunctionDefinition registration (_make) requires a
-    real callable. It must never be invoked at runtime; this guard fails loud
-    if a bind path somehow bypasses the AnyOpEq rewrite, rather than silently
-    degrading to a row-wise Python implementation (there is no Python
-    fallback on this engine — see native_engine_has_no_python_fallback).
-    """
-    raise NotImplementedError(
-        "ARRAY_CONTAINS must be lowered to `item = ANY(arr)` (AnyOpEq) during "
-        "planning; the array_contains kernel should never be invoked."
-    )
-
-
-def array_contains_any(arr, val):
-    from draken.interop.vector_sequence import vector_from_sequence
-
-    needles = frozenset(_normalize_membership_values(val))
-    bool_list = []
-    for row in arr:
-        if row is None:
-            bool_list.append(False)
-        else:
-            try:
-                bool_list.append(bool(set(row).intersection(needles)))
-            except TypeError:
-                bool_list.append(any(n in row for n in needles))
-    return vector_from_sequence(bool_list)
-
-
-def array_contains_all(arr, val):
-    from draken.interop.vector_sequence import vector_from_sequence
-
-    needles = frozenset(_normalize_membership_values(val))
-    bool_list = []
-    for row in arr:
-        if row is None:
-            bool_list.append(False)
-        else:
-            try:
-                bool_list.append(needles.issubset(set(row)))
-            except TypeError:
-                bool_list.append(all(n in row for n in needles))
-    return vector_from_sequence(bool_list)
 
 
 def array_cast(array, element_type):

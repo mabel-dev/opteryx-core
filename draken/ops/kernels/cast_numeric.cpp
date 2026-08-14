@@ -1088,6 +1088,94 @@ VecResult draken_cast_uint_to_decimal(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({ return int_to_decimal_core(ctx, v, "cast uint->decimal"); });
 }
 
+// --- BOOL → DECIMAL ------------------------------------------------------------
+//
+// true is the decimal 1, false the decimal 0 — the same integer promotion BOOL
+// already has to every other numeric target (int64, float32/64, and the narrow
+// signed and unsigned families). DECIMAL was the one hole in that row, which made
+// `SELECT dec_col UNION ALL SELECT bool_expr` unrunnable: the union coerces the
+// legs to DECIMAL (find_compatible_type), inserts a CAST, and the missing arm then
+// failed the compiler's c-native admission gate.
+//
+// BOOL cannot join int_to_decimal_core's `switch (v->type)`: its payload is
+// BIT-packed, one bit per PHYSICAL slot, not a fixed-width lane the SRC_T macro can
+// index. So it gets its own loop, exactly as draken_cast_bool_to_int64 does.
+//
+// The range check is NOT vestigial. `true` is stored as 10^scale, which leaves the
+// declared precision whenever scale >= precision — DECIMAL(1,1) spans -0.9..0.9 and
+// genuinely cannot hold 1. Hoisted out of the loop (`one_fits`) because it depends
+// only on the target type, never on the row (§3).
+//
+// DENSE output, matching every other → DECIMAL kernel in this file.
+VecResult draken_cast_bool_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_BOOL)
+            return draken_error_sentinel_fmt("cast bool->decimal: expected BOOL, got %d", v->type);
+        if (!ctx) return draken_error_sentinel("cast bool->decimal: missing ctx (scale)");
+        const auto* c = static_cast<const binary_op_ctx*>(ctx);
+        if (c->result_precision == 0u || c->result_precision > 38u)
+            return draken_error_sentinel_fmt("cast bool->decimal: bad target precision %d",
+                                             (int)c->result_precision);
+
+        const __int128 factor  = dec_pow10(static_cast<int>(c->result_scale));
+        const __int128 dec_lim = dec_pow10(static_cast<int>(c->result_precision));
+        const bool one_fits = factor < dec_lim;   // `true` is the only value that can overflow
+
+        const bool dst128 = c->result_precision > 18u;
+        const uint32_t n = v->length;
+        const size_t es = dst128 ? 16u : 8u;
+        uint8_t* out = static_cast<uint8_t*>(draken_malloc((n > 0u ? n : 1u) * es));
+        if (!out) return draken_error_sentinel("Allocation failed");
+        const uint8_t* src = static_cast<const uint8_t*>(v->data);
+        const uint8_t* val_in = v->validity;
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(n > 0u ? n : 1u, 0u);
+        bool any_bad = false;
+
+        for (uint32_t j = 0u; j < n; ++j) {
+            uint8_t* dst = out + static_cast<size_t>(j) * es;
+            // validity is indexed by LOGICAL row, the payload bit by PHYSICAL slot.
+            if (val_in && ((val_in[j >> 3u] >> (j & 7u)) & 1u) == 0u) {
+                std::memset(dst, 0, es); continue;
+            }
+            const uint32_t phys = v->selection[j];
+            const unsigned bit = (src[phys >> 3u] >> (phys & 7u)) & 1u;
+            if (bit && !one_fits) {
+                if (!is_safe) {
+                    draken_free(out);
+                    return draken_error_sentinel_fmt(
+                        "cast bool->decimal: value overflows DECIMAL(%d, %d)",
+                        (int)c->result_precision, (int)c->result_scale);
+                }
+                std::memset(dst, 0, es); bad[j] = 1u; any_bad = true; continue;
+            }
+            if (dst128) {
+                __int128 w = bit ? factor : static_cast<__int128>(0);
+                std::memcpy(dst, &w, 16u);
+            } else {
+                int64_t w = bit ? static_cast<int64_t>(factor) : static_cast<int64_t>(0);
+                std::memcpy(dst, &w, 8u);
+            }
+        }
+
+        VecResult r;
+        r.data = out;
+        r.type = dst128 ? DRAKEN_DECIMAL128 : DRAKEN_DECIMAL;
+        r.validity_embedded = 0u;
+        r.ts_unit = 0xFFu;
+        r.dec_precision = c->result_precision;
+        r.dec_scale = c->result_scale;
+        r.length = n; r.data_length = n;
+        r.selection = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.validity = kernel_copy_validity(v);
+        r.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
+        return r;
+    });
+}
+
 // --- DECIMAL → INT64 / FLOAT64 -------------------------------------------------
 //
 // The reverse of the two casts above, and the pair that made DECIMAL a dead end:

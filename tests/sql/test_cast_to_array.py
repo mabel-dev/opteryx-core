@@ -210,7 +210,7 @@ def test_subscript_past_the_end_is_null_not_an_error():
 # LENGTH(SPLIT(<literals>)) — whose FINAL result is INT64 — was rejected along with
 # genuine ARRAY results. draken_length_array reads only the offsets and needs no
 # child (which is precisely why it composes over a computed array where SORT and
-# ARRAY_CONTAINS cannot), so the child there is a consumed intermediate and freeing
+# array containment cannot), so the child there is a consumed intermediate and freeing
 # it is correct. The guard now keys on the FINAL result type, not on "a child
 # existed". These pin the values, so a future re-tightening cannot pass by
 # returning the wrong count.

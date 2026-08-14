@@ -152,6 +152,19 @@ VecResult draken_cast_int64_to_decimal(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_integer_to_decimal(void* ctx, const DrakenVector* vector);
 VecResult draken_cast_uint_to_decimal(void* ctx, const DrakenVector* vector);
 
+// BOOL -> DECIMAL: true is the decimal 1, false the decimal 0, i.e. the integer
+// promotion above at scale 0. Own loop rather than an int_to_decimal_core arm
+// because the BOOL payload is bit-packed. `true` overflows when the target scale
+// reaches its precision (DECIMAL(1,1) cannot hold 1) and raises there.
+VecResult draken_cast_bool_to_decimal(void* ctx, const DrakenVector* vector);
+
+// STRING -> DECIMAL: exact text -> fixed-point (NOT via double, which would lose
+// the low digits DECIMAL exists to keep). Accepts optional sign, a decimal point,
+// and exponent notation, matching the literal path's decimal.Decimal() syntax.
+// Fractional digits past the declared scale, and magnitudes past the declared
+// precision, raise rather than round or wrap. Defined in cast_string.cpp.
+VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* vector);
+
 // DECIMAL -> INT64 / FLOAT64, named by the SOURCE tier. ctx reads ONLY
 // binary_op_ctx.left_scale (the source scale, which the vector does not carry).
 // INT64 truncates toward zero, matching draken_cast_float64_to_int64; an

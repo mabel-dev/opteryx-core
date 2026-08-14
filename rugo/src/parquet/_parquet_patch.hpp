@@ -80,6 +80,50 @@ inline int ts_unit_from_logical(const std::string &lt) {
   throw std::runtime_error("parquet patch: unreadable time unit in '" + lt + "'");
 }
 
+// Walk a LIST column's schema subtree down to its leaf, counting nesting depth.
+//
+// The only nesting this can re-declare is the all-nullable scheme the writer
+// emits (write_schema in _parquet_writer.hpp):
+//
+//     name(OPTIONAL, LIST) -> "list"(REPEATED) -> element(OPTIONAL)
+//
+// giving max_rep == depth and max_def == 2*depth + 1. That matters far more
+// here than it would in a decoder: the repetition types in the schema are what
+// tell a reader how to interpret the definition levels stored in the pages
+// being COPIED. A source using any other nullability - a REQUIRED element, or
+// the legacy 2-level Hive/Avro list - encodes different level values in those
+// very bytes, so re-declaring them under this scheme would make every row read
+// back wrong while the file still looked well-formed. Refuse instead.
+inline const SchemaElement *list_leaf_and_depth(const SchemaElement &e, int &depth) {
+  depth = 0;
+  const SchemaElement *node = &e;
+  while (node->logical_type == "array") {
+    if (node->repetition_type != REP_OPTIONAL || node->children.size() != 1)
+      throw std::runtime_error(
+          "parquet patch: column '" + e.name +
+          "' is a LIST whose group is not the OPTIONAL single-child form this "
+          "patcher can re-declare");
+    const SchemaElement &repeated = node->children[0];
+    if (repeated.repetition_type != REP_REPEATED || repeated.children.size() != 1)
+      throw std::runtime_error(
+          "parquet patch: column '" + e.name +
+          "' is a LIST without the REPEATED single-child group the 3-level "
+          "list encoding requires");
+    node = &repeated.children[0];
+    depth++;
+  }
+  if (!node->children.empty())
+    throw std::runtime_error(
+        "parquet patch: column '" + e.name +
+        "' is a LIST of STRUCT; patching struct columns is not supported yet");
+  if (node->repetition_type != REP_OPTIONAL)
+    throw std::runtime_error(
+        "parquet patch: column '" + e.name +
+        "' is a LIST with a non-OPTIONAL element; its definition levels do not "
+        "match the all-nullable scheme this patcher re-declares");
+  return node;
+}
+
 // Rebuild a column's writer-side SHAPE from the source file's own schema.
 //
 // The source describes the very bytes being copied, so it - not a caller's
@@ -87,13 +131,52 @@ inline int ts_unit_from_logical(const std::string &lt) {
 // represent EXACTLY throws: emitting an approximate annotation would relabel
 // real data, which is a wrong answer rather than a missing optimisation.
 inline ColumnInput shape_from_schema_element(const SchemaElement &e) {
+  ColumnInput ci;
+  ci.name = e.name;
+
+  if (e.logical_type == "array") {
+    // A LIST is one leaf column chunk however deep it nests, so its pages copy
+    // exactly like a primitive's - only the schema subtree and the chunk's
+    // num_values (levels, not rows) differ, and both are reproduced from the
+    // source. DROP and RENAME therefore cost a LIST column nothing to carry.
+    const SchemaElement *leaf = list_leaf_and_depth(e, ci.array_depth);
+    ci.is_array = true;
+    ci.elem_type = ptype_from_reader_name(leaf->physical_type);
+    // Everything that consumes an array shape reads elem_type (`is_array ?
+    // elem_type : type`); keeping the two agreeing means a stray read of
+    // `type` cannot disagree with the bytes.
+    ci.type = ci.elem_type;
+
+    // The writer annotates an array leaf with UTF8 or INTEGER(width, signed)
+    // and nothing else - see write_schema's is_array branch, which emits no
+    // type_length, scale, precision or time unit. So a DECIMAL, DATE,
+    // TIMESTAMP or FLBA leaf has no exact re-declaration available here.
+    const std::string &elt = leaf->logical_type;
+    if (elt.empty() || elt == leaf->physical_type) {
+      // A bare physical leaf says everything there is to say.
+    } else if (elt == "varchar" || elt == "utf8" || elt == "string") {
+      ci.elem_is_utf8 = true;
+    } else if (elt.rfind("uint", 0) == 0 || elt.rfind("int", 0) == 0) {
+      ci.is_unsigned = (elt[0] == 'u');
+      ci.int_bit_width = std::stoi(elt.substr(ci.is_unsigned ? 4 : 3));
+      if (ci.int_bit_width != 8 && ci.int_bit_width != 16 &&
+          ci.int_bit_width != 32 && ci.int_bit_width != 64)
+        throw std::runtime_error(
+            "parquet patch: column '" + e.name + "' has a list element of width " +
+            std::to_string(ci.int_bit_width) + ", which is not a parquet integer width");
+    } else {
+      throw std::runtime_error(
+          "parquet patch: column '" + e.name + "' has a list element carrying "
+          "logical type '" + elt + "' which this patcher cannot reproduce exactly");
+    }
+    return ci;
+  }
+
   if (!e.children.empty())
     throw std::runtime_error(
         "parquet patch: column '" + e.name +
-        "' is nested (LIST/STRUCT); patching nested columns is not supported yet");
+        "' is a STRUCT; patching struct columns is not supported yet");
 
-  ColumnInput ci;
-  ci.name = e.name;
   ci.type = ptype_from_reader_name(e.physical_type);
 
   const std::string &lt = e.logical_type;
@@ -198,6 +281,13 @@ inline ConstantColumn parse_donor(const uint8_t *src, size_t src_len) {
 
   ConstantColumn cc;
   cc.shape = shape_from_schema_element(fs.schema[0]);
+  // A LIST shape is readable from a schema (the copy path needs it) but not
+  // fillable: the synthesis below writes one repeated primitive value, and a
+  // list column would additionally need rep/def levels and element offsets that
+  // no donor carries.
+  if (cc.shape.is_array)
+    throw std::runtime_error(
+        "parquet patch: donor column is a LIST; an ADDed column must be a primitive");
   cc.shape.bloom = false;
   cc.shape.dict_enabled = false;
 
@@ -442,6 +532,12 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
   for (size_t rg = 0; rg < fs.row_groups.size(); rg++) {
     const RowGroupStats &src_rg = fs.row_groups[rg];
 
+    // Per-row-group shapes. Identical to `shapes` except for a LIST column's
+    // `num_levels`, which the footer writes as that chunk's num_values and
+    // which is a per-chunk count (levels, not rows) - so it cannot live on the
+    // one schema-level shape. Filled from the source chunk below.
+    std::vector<ColumnInput> rg_cols = shapes;
+
     RGMeta meta;
     meta.data_offsets.assign(ncols, 0);
     meta.dict_offsets.assign(ncols, -1);
@@ -495,10 +591,31 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
       // would tell a reader the chunk has no nulls, and an IS NULL predicate
       // would then prune a row group that does have them - a wrong answer, not
       // a lost optimisation.
-      if (cs.null_count < 0)
+      //
+      // A LIST column is exempt because it has no statistics to carry either
+      // way: nested null semantics have no single leaf null_count, so neither
+      // the writer nor the footer emitted below records Statistics for one
+      // (write_column_chunk skips them when is_array). Demanding one here would
+      // reject every array column over a fact that is not missing, just absent
+      // by design.
+      if (!cols[j].shape.is_array && cs.null_count < 0)
         throw std::runtime_error(
             "parquet patch: column '" + cols[j].shape.name +
             "' has no null_count in its source statistics; refusing to fabricate one");
+
+      // A LIST chunk's num_values counts LEVELS, not rows - one row expands to
+      // as many entries as it has elements. Carry the source's own count so the
+      // new footer describes the copied pages exactly; deriving it from
+      // row_count would under-declare every row holding more than one element
+      // and the reader would stop short.
+      if (rg_cols[j].is_array) {
+        if (cs.num_values < 0)
+          throw std::runtime_error(
+              "parquet patch: list column '" + cols[j].shape.name +
+              "' has no num_values in its source metadata; its levels cannot be "
+              "re-declared");
+        rg_cols[j].num_levels = (size_t)cs.num_values;
+      }
 
       src_chunk_start[j] = chunk_start;
       meta.sizes[j] = (size_t)chunk_len;
@@ -692,7 +809,7 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
     }
 
     rg_metas.push_back(std::move(meta));
-    all_rg_cols.push_back(shapes);
+    all_rg_cols.push_back(std::move(rg_cols));
   }
 
   write_parquet_footer(out, shapes, (size_t)fs.num_rows, rg_metas, all_rg_cols);

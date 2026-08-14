@@ -29,7 +29,6 @@ from opteryx.compiled.nanobind.vectors import vector_contains
 # bind-time-resolved op_code. The shim below stays plan-time-only.
 from opteryx.expression.evaluator.comparisons import draken_compare_int
 from opteryx.expression.evaluator._impl import _OP_CODE as _COMPARE_OP_CODE
-from opteryx.third_party import yyjson
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.scalars.value_parsing import parse_value
 from opteryx.types.timestamps._datetime_conversion import (
@@ -40,13 +39,12 @@ from opteryx.types.timestamps._datetime_conversion import (
 )
 
 # Leaf includes — the operator wrappers (comparisons / list_ops /
-# string_matching) route through the uniform Draken vector path. array_ops and
-# special_ops are independent and follow.
+# string_matching) route through the uniform Draken vector path. array_ops is
+# independent and follows.
 include "comparisons.pyx"
 include "list_ops.pyx"
 include "string_matching.pyx"
 include "array_ops.pyx"
-include "special_ops.pyx"
 
 
 # Operators that should skip null compression during filtering.

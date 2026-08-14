@@ -63,243 +63,6 @@
             }
         ]
     },
-    "ARRAY_CONTAINS": {
-        "catalog_name": "ARRAY_CONTAINS",
-        "aliases": [],
-        "summary": "Test if array contains item.",
-        "volatility": "immutable",
-        "deterministic": true,
-        "foldable": false,
-        "pushdown_safe": false,
-        "lifecycle": {
-            "status": "active",
-            "introduced": null,
-            "deprecated_in": null,
-            "remove_after": null,
-            "replacement": null
-        },
-        "overloads": [
-            {
-                "id": "ARRAY_CONTAINS_default",
-                "label": "ARRAY_CONTAINS(arr, item)",
-                "category": "Array Functions",
-                "documentation": "Test if array contains item.",
-                "related_functions": [
-                    "ARRAY_CONTAINS_ANY",
-                    "ARRAY_CONTAINS_ALL",
-                    "SORT",
-                    "GREATEST",
-                    "LEAST"
-                ],
-                "return_type": "BOOLEAN",
-                "returns": {
-                    "type": "BOOLEAN",
-                    "documentation": "Returns the computed result as `BOOLEAN`."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 1.19
-                },
-                "parameters": [
-                    {
-                        "label": "arr",
-                        "type": "array",
-                        "documentation": "Input array or vector value.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    },
-                    {
-                        "label": "item",
-                        "type": "any",
-                        "documentation": "Must be of the array's element type.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": "arr",
-                        "excludes": []
-                    }
-                ]
-            }
-        ]
-    },
-    "ARRAY_CONTAINS_ALL": {
-        "catalog_name": "ARRAY_CONTAINS_ALL",
-        "aliases": [],
-        "summary": "Test if array contains all items from set.",
-        "volatility": "immutable",
-        "deterministic": true,
-        "foldable": false,
-        "pushdown_safe": false,
-        "lifecycle": {
-            "status": "active",
-            "introduced": null,
-            "deprecated_in": null,
-            "remove_after": null,
-            "replacement": null
-        },
-        "overloads": [
-            {
-                "id": "ARRAY_CONTAINS_ALL_default",
-                "label": "ARRAY_CONTAINS_ALL(arr, items)",
-                "category": "Array Functions",
-                "documentation": "Test if array contains all items from set.",
-                "related_functions": [
-                    "ARRAY_CONTAINS",
-                    "ARRAY_CONTAINS_ANY",
-                    "SORT",
-                    "GREATEST",
-                    "LEAST"
-                ],
-                "return_type": "BOOLEAN",
-                "returns": {
-                    "type": "BOOLEAN",
-                    "documentation": "Returns the computed result as `BOOLEAN`."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 1.21
-                },
-                "parameters": [
-                    {
-                        "label": "arr",
-                        "type": "array",
-                        "documentation": "Input array or vector value.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    },
-                    {
-                        "label": "items",
-                        "type": "array",
-                        "documentation": "Must be an array with the same element type as `arr`.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": "arr",
-                        "excludes": []
-                    }
-                ]
-            }
-        ]
-    },
-    "ARRAY_CONTAINS_ANY": {
-        "catalog_name": "ARRAY_CONTAINS_ANY",
-        "aliases": [],
-        "summary": "Test if array contains any item from set.",
-        "volatility": "immutable",
-        "deterministic": true,
-        "foldable": false,
-        "pushdown_safe": false,
-        "lifecycle": {
-            "status": "active",
-            "introduced": null,
-            "deprecated_in": null,
-            "remove_after": null,
-            "replacement": null
-        },
-        "overloads": [
-            {
-                "id": "ARRAY_CONTAINS_ANY_default",
-                "label": "ARRAY_CONTAINS_ANY(arr, items)",
-                "category": "Array Functions",
-                "documentation": "Test if array contains any item from set.",
-                "related_functions": [
-                    "ARRAY_CONTAINS",
-                    "ARRAY_CONTAINS_ALL",
-                    "SORT",
-                    "GREATEST",
-                    "LEAST"
-                ],
-                "return_type": "BOOLEAN",
-                "returns": {
-                    "type": "BOOLEAN",
-                    "documentation": "Returns the computed result as `BOOLEAN`."
-                },
-                "arity": {
-                    "minimum": 2,
-                    "maximum": 2,
-                    "variadic": false
-                },
-                "homogeneous": false,
-                "execution": {
-                    "kernel_id": "default",
-                    "engine": "draken",
-                    "cost_us_per_million": 1.02
-                },
-                "parameters": [
-                    {
-                        "label": "arr",
-                        "type": "array",
-                        "documentation": "Input array or vector value.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": null,
-                        "excludes": []
-                    },
-                    {
-                        "label": "items",
-                        "type": "array",
-                        "documentation": "Must be an array with the same element type as `arr`.",
-                        "optional": false,
-                        "variadic": false,
-                        "constant_only": false,
-                        "null_handling": "strict",
-                        "domain": [],
-                        "minimum": null,
-                        "maximum": null,
-                        "value_format": null,
-                        "element_of": "arr",
-                        "excludes": []
-                    }
-                ]
-            }
-        ]
-    },
     "BASE64_DECODE": {
         "catalog_name": "BASE64_DECODE",
         "aliases": [],
@@ -2342,9 +2105,7 @@
                 "related_functions": [
                     "LEAST",
                     "SORT",
-                    "ARRAY_CONTAINS",
-                    "ARRAY_CONTAINS_ANY",
-                    "ARRAY_CONTAINS_ALL"
+                    "UNNEST"
                 ],
                 "return_type": "element type of `arr`",
                 "returns": {
@@ -3153,9 +2914,7 @@
                 "related_functions": [
                     "GREATEST",
                     "SORT",
-                    "ARRAY_CONTAINS",
-                    "ARRAY_CONTAINS_ANY",
-                    "ARRAY_CONTAINS_ALL"
+                    "UNNEST"
                 ],
                 "return_type": "element type of `arr`",
                 "returns": {
@@ -5632,9 +5391,7 @@
                 "related_functions": [
                     "GREATEST",
                     "LEAST",
-                    "ARRAY_CONTAINS",
-                    "ARRAY_CONTAINS_ANY",
-                    "ARRAY_CONTAINS_ALL"
+                    "UNNEST"
                 ],
                 "return_type": "same as `arr`",
                 "returns": {

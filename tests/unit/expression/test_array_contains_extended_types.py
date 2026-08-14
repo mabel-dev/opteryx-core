@@ -1,15 +1,20 @@
 """
-Extended type coverage for the native ARRAY_CONTAINS / `item = ANY(arr)` kernel
+Extended type coverage for the native `item = ANY(arr)` kernel
 (draken_array_contains, function_array_json.cpp) beyond the original INT64 +
 string-family port covered in test_array_reducer_split_native.py.
 
 Adds: the full int/uint width family, FLOAT32/FLOAT64, BOOL, TIMESTAMP64 (with
 bind-time unit quantization), an out-of-range integer item (must be FALSE, not
-an error), a literal ARRAY on the right (`x = ANY([1,2,3])` /
-`ARRAY_CONTAINS([1,2,3], x)` — lowered to draken_in_list, not
-draken_array_contains), and the fully-literal constant-fold path (both sides
-literal) that used to raise `draken_vector_unwrap: expected ... Vector, got
-list` via the old GIL AnyOpEq fallback.
+an error), a literal ARRAY on the right (`x = ANY([1,2,3])` — lowered to
+draken_in_list, not draken_array_contains), and the fully-literal constant-fold
+path (both sides literal) that used to raise `draken_vector_unwrap: expected
+... Vector, got list` via the old GIL AnyOpEq fallback.
+
+`= ANY` is the ONLY spelling of this test — the ARRAY_CONTAINS function these
+cases were originally written against was removed as duplicate surface area
+(the operator forms are the supported spelling). Note that bare `= ANY` does
+NOT honour a column alias — the engine names the output column after the
+expression — so the computed columns here are read POSITIONALLY via `_values`.
 
 Oracle is plain Python over the raw column values pulled from the engine
 (same reference `= ANY` semantics as test_array_reducer_split_native.py: NULL
@@ -43,6 +48,12 @@ def _fetch(sql):
         for i, name in enumerate(names):
             data[name].extend(morsel.column(morsel.column_names[i]).to_pylist())
     return data
+
+
+def _values(sql):
+    """Column value-lists in SELECT order. Bare `= ANY` does not honour `AS`, so
+    every computed column in this file is read positionally, not by name."""
+    return list(_fetch(sql).values())
 
 
 def _contains_any_eq(array, item):
@@ -97,9 +108,9 @@ def test_array_contains_int_width_family(parquet_array_dataset, pa_type_name, it
     ptype = pa.list_(getattr(pa, pa_type_name)())
     data = [[3, 1, 2], [None], [], None, [5], [9, None, 7]]
     dataset, rows = parquet_array_dataset(pa_type_name, data, ptype)
-    d = _fetch(f"SELECT arr, ARRAY_CONTAINS(arr, {item}) AS c FROM {dataset}")
-    assert d["arr"] == rows
-    assert d["c"] == [_contains_any_eq(a, item) for a in rows]
+    arr_col, c = _values(f"SELECT arr, {item} = ANY(arr) FROM {dataset}")
+    assert arr_col == rows
+    assert c == [_contains_any_eq(a, item) for a in rows]
 
 
 def test_array_contains_out_of_range_item_is_false_not_error(parquet_array_dataset):
@@ -109,16 +120,16 @@ def test_array_contains_out_of_range_item_is_false_not_error(parquet_array_datas
     pa = pytest.importorskip("pyarrow")
     data = [[3, 1, 2], None, []]
     dataset, rows = parquet_array_dataset("uint8_oob", data, pa.list_(pa.uint8()))
-    d = _fetch(f"SELECT ARRAY_CONTAINS(arr, 9999) AS c FROM {dataset}")
-    assert d["c"] == [False, None, False]
+    (c,) = _values(f"SELECT 9999 = ANY(arr) FROM {dataset}")
+    assert c == [False, None, False]
 
 
 def test_array_contains_negative_item_over_unsigned_array_is_false(parquet_array_dataset):
     pa = pytest.importorskip("pyarrow")
     data = [[1, 2, 3], None]
     dataset, rows = parquet_array_dataset("uint32_neg", data, pa.list_(pa.uint32()))
-    d = _fetch(f"SELECT ARRAY_CONTAINS(arr, -1) AS c FROM {dataset}")
-    assert d["c"] == [False, None]
+    (c,) = _values(f"SELECT -1 = ANY(arr) FROM {dataset}")
+    assert c == [False, None]
 
 
 @pytest.mark.parametrize("pa_type_name", ["float32", "float64"])
@@ -127,18 +138,18 @@ def test_array_contains_float_family(parquet_array_dataset, pa_type_name):
     data = [[1.5, 2.5, 3.5], [None], [], None, [9.25]]
     ptype = pa.list_(getattr(pa, pa_type_name)())
     dataset, rows = parquet_array_dataset(pa_type_name, data, ptype)
-    d = _fetch(f"SELECT arr, ARRAY_CONTAINS(arr, 2.5) AS hit, ARRAY_CONTAINS(arr, 99.9) AS miss FROM {dataset}")
-    assert d["hit"] == [_contains_any_eq(a, 2.5) for a in rows]
-    assert d["miss"] == [_contains_any_eq(a, 99.9) for a in rows]
+    _arr, hit, miss = _values(f"SELECT arr, 2.5 = ANY(arr), 99.9 = ANY(arr) FROM {dataset}")
+    assert hit == [_contains_any_eq(a, 2.5) for a in rows]
+    assert miss == [_contains_any_eq(a, 99.9) for a in rows]
 
 
 def test_array_contains_bool_array(parquet_array_dataset):
     pa = pytest.importorskip("pyarrow")
     data = [[True, False], [False], [], None, [True]]
     dataset, rows = parquet_array_dataset("bool", data, pa.list_(pa.bool_()))
-    d = _fetch(f"SELECT ARRAY_CONTAINS(arr, true) AS t, ARRAY_CONTAINS(arr, false) AS f FROM {dataset}")
-    assert d["t"] == [_contains_any_eq(a, True) for a in rows]
-    assert d["f"] == [_contains_any_eq(a, False) for a in rows]
+    t, f = _values(f"SELECT true = ANY(arr), false = ANY(arr) FROM {dataset}")
+    assert t == [_contains_any_eq(a, True) for a in rows]
+    assert f == [_contains_any_eq(a, False) for a in rows]
 
 
 def test_array_contains_timestamp_array_matching_unit(parquet_array_dataset):
@@ -149,12 +160,12 @@ def test_array_contains_timestamp_array_matching_unit(parquet_array_dataset):
     d2 = datetime.datetime(2024, 1, 2, 0, 0, 0)
     data = [[d1, d2], [], None]
     dataset, rows = parquet_array_dataset("ts_us", data, pa.list_(pa.timestamp("us")))
-    d = _fetch(
-        f"SELECT ARRAY_CONTAINS(arr, CAST('2024-01-01 12:00:00' AS TIMESTAMP)) AS hit, "
-        f"ARRAY_CONTAINS(arr, CAST('2024-01-09 00:00:00' AS TIMESTAMP)) AS miss FROM {dataset}"
+    hit, miss = _values(
+        f"SELECT CAST('2024-01-01 12:00:00' AS TIMESTAMP) = ANY(arr), "
+        f"CAST('2024-01-09 00:00:00' AS TIMESTAMP) = ANY(arr) FROM {dataset}"
     )
-    assert d["hit"] == [_contains_any_eq(a, d1) for a in rows]
-    assert d["miss"] == [False, False, None]
+    assert hit == [_contains_any_eq(a, d1) for a in rows]
+    assert miss == [False, False, None]
 
 
 def test_array_contains_timestamp_array_ms_unit_quantizes_item(parquet_array_dataset):
@@ -165,10 +176,10 @@ def test_array_contains_timestamp_array_ms_unit_quantizes_item(parquet_array_dat
 
     d1 = datetime.datetime(2024, 1, 1, 12, 0, 0)
     dataset, rows = parquet_array_dataset("ts_ms", [[d1]], pa.list_(pa.timestamp("ms")))
-    d = _fetch(
-        f"SELECT ARRAY_CONTAINS(arr, CAST('2024-01-01 12:00:00' AS TIMESTAMP)) AS hit FROM {dataset}"
+    (hit,) = _values(
+        f"SELECT CAST('2024-01-01 12:00:00' AS TIMESTAMP) = ANY(arr) FROM {dataset}"
     )
-    assert d["hit"] == [True]
+    assert hit == [True]
 
 
 def test_array_contains_timestamp_item_finer_than_array_unit_is_refused(parquet_array_dataset):
@@ -183,24 +194,19 @@ def test_array_contains_timestamp_item_finer_than_array_unit_is_refused(parquet_
     dataset, _ = parquet_array_dataset("ts_ms_lossy", [[d1]], pa.list_(pa.timestamp("ms")))
     with pytest.raises(Exception):
         _fetch(
-            f"SELECT ARRAY_CONTAINS(arr, CAST('2024-01-01 12:00:00.123456' AS TIMESTAMP)) "
-            f"AS hit FROM {dataset}"
+            f"SELECT CAST('2024-01-01 12:00:00.123456' AS TIMESTAMP) = ANY(arr) "
+            f"FROM {dataset}"
         )
 
 
 def test_array_contains_literal_array_on_right_over_column():
-    # ARRAY_CONTAINS(<literal array>, <column>) / bare `<column> = ANY(<literal
-    # array>)` is a DIFFERENT native shape from the array-is-a-column case: an
-    # IN-list test, lowered to draken_in_list (not draken_array_contains).
-    # `AS r1` is read positionally, not by name — bare `x = ANY(...)` doesn't
+    # `<column> = ANY(<literal array>)` is a DIFFERENT native shape from the
+    # array-is-a-column case: an IN-list test, lowered to draken_in_list (not
+    # draken_array_contains). Read positionally — bare `x = ANY(...)` doesn't
     # honour a column alias (pre-existing, reproduces on the already-shipped
-    # `'Apollo 11' = ANY(missions)` shape too; not introduced by this change,
-    # not fixed here — see the ARRAY_CONTAINS report).
-    d = _fetch("SELECT id, id = ANY([2, 4, 6]) AS r1, ARRAY_CONTAINS([2, 4, 6], id) AS r2 FROM $planets")
-    values = list(d.values())
-    ids, r1, r2 = values[0], values[1], values[2]
+    # `'Apollo 11' = ANY(missions)` shape too).
+    ids, r1 = _values("SELECT id, id = ANY([2, 4, 6]) FROM $planets")
     assert r1 == [i in (2, 4, 6) for i in ids]
-    assert d["r2"] == [i in (2, 4, 6) for i in ids]
 
 
 def test_array_contains_fully_literal_constant_folds():
@@ -209,9 +215,74 @@ def test_array_contains_fully_literal_constant_folds():
     # compiled bytecode), not the old GIL AnyOpEq path that only accepted
     # materialised Vectors and raised `draken_vector_unwrap: ... got list` for
     # a bare Python list operand.
-    d = _fetch("SELECT ARRAY_CONTAINS([1, 2, 3], 2) AS hit, ARRAY_CONTAINS([1, 2, 3], 9) AS miss FROM $planets LIMIT 1")
-    assert d["hit"] == [True]
-    assert d["miss"] == [False]
+    hit, miss = _values("SELECT 2 = ANY([1, 2, 3]), 9 = ANY([1, 2, 3]) FROM $planets LIMIT 1")
+    assert hit == [True]
+    assert miss == [False]
+
+
+# --- the removed function spellings ---------------------------------------------
+# ARRAY_CONTAINS / _ANY / _ALL were removed: the operator forms are the supported
+# spelling and the functions were pure duplicate surface area (ARRAY_CONTAINS was
+# already lowered to the identical AnyOpEq node at plan-build time). They must now
+# fail as UNKNOWN FUNCTIONS — a clean FunctionNotFoundError naming the function,
+# not a bind-time type error, not a silent no-op, and not a crash.
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT ARRAY_CONTAINS(missions, 'Apollo 11') FROM testdata.astronauts",
+        "SELECT ARRAY_CONTAINS_ANY(missions, ('Apollo 11')) FROM testdata.astronauts",
+        "SELECT ARRAY_CONTAINS_ALL(missions, ('Apollo 11')) FROM testdata.astronauts",
+        # predicate position reaches a different bind path than projection
+        "SELECT name FROM testdata.astronauts WHERE ARRAY_CONTAINS(missions, 'Apollo 11')",
+        "SELECT name FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, ('a','b'))",
+        "SELECT name FROM testdata.astronauts WHERE ARRAY_CONTAINS_ALL(missions, ('a','b'))",
+        # a literal array argument used to be a separate lowering
+        "SELECT ARRAY_CONTAINS([1,2,3], 2) FROM $planets",
+    ],
+)
+def test_removed_function_spellings_raise_function_not_found(sql):
+    from opteryx.exceptions import FunctionNotFoundError
+
+    with pytest.raises(FunctionNotFoundError) as err:
+        _fetch(sql)
+    assert "ARRAY_CONTAINS" in str(err.value), str(err.value)
+
+
+def test_removed_function_arity_does_not_resurrect_it():
+    """The old ARRAY_CONTAINS had a dedicated two-argument SqlError at plan-build
+    time. That arity check must not survive the removal as a different-shaped
+    error — a wrong-arity call is an unknown function like any other."""
+    from opteryx.exceptions import FunctionNotFoundError
+
+    with pytest.raises(FunctionNotFoundError):
+        _fetch("SELECT ARRAY_CONTAINS(missions) FROM testdata.astronauts")
+
+
+def test_operator_forms_still_work_for_each_removed_function():
+    """Equivalence cover: every removed spelling has a live operator form."""
+    # ARRAY_CONTAINS(missions, x)      -> x = ANY(missions)
+    (single,) = _values(
+        "SELECT 'Apollo 11' = ANY(missions) FROM testdata.astronauts"
+    )
+    assert any(v is True for v in single)
+    # ARRAY_CONTAINS_ANY(missions, s)  -> missions @> s   (alias IS honoured here)
+    d = _fetch(
+        "SELECT missions @> ('Apollo 11','Gemini 8') AS c FROM testdata.astronauts"
+    )
+    assert any(v is True for v in d["c"])
+    # ARRAY_CONTAINS_ALL(missions, s)  -> missions @>> s
+    d = _fetch(
+        "SELECT missions @>> ('Apollo 11','Gemini 8') AS c FROM testdata.astronauts"
+    )
+    assert any(v is True for v in d["c"])
+    # and @> / @>> must not agree — contains-ANY is strictly weaker
+    assert sum(v is True for v in _fetch(
+        "SELECT missions @> ('Apollo 11','Gemini 8') AS c FROM testdata.astronauts")["c"]
+    ) > sum(v is True for v in _fetch(
+        "SELECT missions @>> ('Apollo 11','Gemini 8') AS c FROM testdata.astronauts")["c"]
+    )
 
 
 if __name__ == "__main__":

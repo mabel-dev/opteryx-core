@@ -164,7 +164,7 @@ statement error UnsupportedSyntaxError
 SELECT name[id] as m FROM $planets
 
 statement ok
-SELECT * FROM testdata.astronauts WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)
+SELECT * FROM testdata.astronauts WHERE missions @> @@user_memberships
 
 # `$user` is internal-only — `SHOW USER` is its only surface, and no SHOW form can
 # stand in a FROM clause, so joining a caller's memberships to a relation is no

@@ -87,6 +87,7 @@ cdef _decide_compiled(list cond_bcs, morsel):
     cdef Py_ssize_t n = morsel.num_rows
     cdef Py_ssize_t i
     cdef Py_ssize_t num_conditions = len(cond_bcs)
+    cdef object _null_type = _draken_native.DrakenType.NULL
 
     branch_id = _make_const_int16(n, -1)
     live = _make_range_int32(n)
@@ -95,7 +96,29 @@ cdef _decide_compiled(list cond_bcs, morsel):
         if len(live) == 0:
             break
         sub = _sub_morsel(morsel, live)
-        c = execute_bytecode(cond_bcs[i], sub)   # returns BoolVector
+        c = execute_bytecode(cond_bcs[i], sub)   # BoolVector for every typed condition
+        # The condition-side counterpart of the THEN-side normalisation in
+        # _compute_compiled below. `decide_one_branch` is declared `BoolVector bv`
+        # and reads the bit-packed layout through it, so anything else arrived as
+        # the raw Cython `TypeError: Argument 'bv' has incorrect type` — which is
+        # what `CASE WHEN NULL`, `CASE WHEN 1` and `CASE WHEN 'x'` all raised, while
+        # the same conditions written over a COLUMN are refused with a sentence that
+        # names the type ("expected BOOLEAN, got INTEGER").
+        if not isinstance(c, BoolVector):
+            if getattr(c, "type", None) is _null_type:
+                # An untyped NULL condition is UNKNOWN for every row, and UNKNOWN
+                # never matches: this WHEN wins nothing and every row stays live for
+                # the next one (or for ELSE). Same answer the typed BOOL null gives
+                # through decide_one_branch, which is the point — `CASE WHEN NULL`
+                # and `CASE WHEN CAST(NULL AS BOOLEAN)` are the same question.
+                continue
+            from opteryx.exceptions import IncorrectTypeError
+
+            _seen = getattr(c, "type", None)
+            raise IncorrectTypeError(
+                f"**CASE WHEN** requires a BOOLEAN condition, not "
+                f"`{getattr(_seen, 'name', _seen)}`."
+            )
         live = decide_one_branch(c, live, branch_id, i)
 
     rows_per_branch, unmatched, pos_in_branch = group_indices_and_perm(

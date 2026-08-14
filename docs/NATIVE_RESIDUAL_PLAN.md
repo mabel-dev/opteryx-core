@@ -92,7 +92,7 @@ Confirmed as a whole category, not just the one trigger:
 * a 43-shape hand sweep found no SQL that tags R4 — the regex family (`RLIKE`,
   `NOT RLIKE`, `SIMILAR TO`, `NOT SIMILAR TO`, `~`, `!~`, composed with
   `AND`/`OR`/`NOT`), string transforms, hashing/encoding, `SPLIT`, `SOUNDEX`,
-  `LEVENSHTEIN`, `ARRAY_CONTAINS`, `CASE`, `COALESCE`/`NULLIF`, casts and
+  `LEVENSHTEIN`, `= ANY`, `CASE`, `COALESCE`/`NULLIF`, casts and
   arithmetic all either go native or raise.
 
 Retired from `_OPEN_CATEGORIES` and `HAND_SET`; replaced by real passing
@@ -389,7 +389,7 @@ value** (not row counts), all **SHA-identical**. On top of that,
 query natively and forced-trampoline **in one process**, over every element type,
 `SELECT *`, mixed projections, role-3 (filter-only) arrays, zero-projection
 `COUNT(*)`, and the operators that actually consume a list (`UNNEST`,
-`ARRAY_CONTAINS`, `LENGTH`, `ARRAY_AGG`). The four null-ish shapes are pinned
+`= ANY`, `LENGTH`, `ARRAY_AGG`). The four null-ish shapes are pinned
 *by value* because they are genuinely different and a decoder can collapse them:
 a NULL list (`None`), an EMPTY list (`[]`), a list of NULLs (`[None]`), and a
 NULL *inner* list inside a nested one (`[[7, None], None, []]`).

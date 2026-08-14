@@ -28,9 +28,13 @@ static bool CheckColumnCompatibility(const ColumnStats &col) {
       col.codec != 6 && col.codec != 7)
     return false;
 
+  // int96 is the deprecated nanosecond-timestamp physical type; the decoder
+  // converts it to int64 nanos (see Int96ToUnixNanos), so it decodes like an
+  // int64 column from here on.
   if (col.physical_type != "int32"     && col.physical_type != "int64" &&
       col.physical_type != "byte_array" && col.physical_type != "boolean" &&
       col.physical_type != "float32"   && col.physical_type != "float64" &&
+      col.physical_type != "int96"     &&
       col.physical_type != "fixed_len_byte_array") {
     return false;
   }

@@ -548,6 +548,30 @@ def determine_type(node):
     if right_lc is None or right_lc == OT.NULL:
         return None
 
+    # `doc @? path` resolves its path ONCE at bind time — into RFC 6901 tokens
+    # stored in the extraction_ctx the kernel reads (draken_json_path_exists). A
+    # path that varies per row has no such bind-time resolution and no kernel; it
+    # is a capability we have not built, not a typing error.
+    #
+    # Refuse it HERE, where the operand shapes are still visible and the message can
+    # name the requirement. Left to fall through, it types cleanly, reaches the plan
+    # compiler with no lowering, and dies as "a comparison ... outside the c-native
+    # kernel set" — which tells the reader nothing about what to change.
+    if operator == "AtQuestion" and (
+        node.right is None or node.right.node_type != NodeType.LITERAL
+    ):
+        from opteryx.expression import format_expression
+
+        raise UnsupportedSyntaxError(
+            compose(
+                f"{md_code(format_expression(node))} cannot be evaluated, because the "
+                f"path on the right of {md_code('@?')} must be a literal - it is "
+                f"resolved once when the query is planned, not per row",
+                "Write the path as a literal, for example "
+                + md_code("doc @? '$.contact.email'"),
+            )
+        )
+
     # Subscripting a VARIANT is ambiguous - the value may be an array (index it),
     # a string (take a character), or neither - and the answer differs per row, so
     # there is no single correct reading. Require the intent to be spelled out with

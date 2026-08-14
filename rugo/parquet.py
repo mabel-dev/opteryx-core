@@ -518,9 +518,18 @@ def patch_columns(source: bytes, drop=None, rename=None, add=None, retype=None) 
         RuntimeError: a named column is absent, an added name collides,
             dropping would leave no columns, a donor is not the shape described
             above, a retype asks for an unsupported physical change, or the
-            file uses a shape the patcher cannot reproduce exactly (nested
-            LIST/STRUCT, or a logical type it would have to approximate). It
-            refuses rather than relabelling real data.
+            file uses a shape the patcher cannot reproduce exactly. It refuses
+            rather than relabelling real data.
+
+            A LIST column is carried: it is one leaf chunk however deep it
+            nests, so drop/rename copy its pages verbatim like a primitive's.
+            The refusals that remain are STRUCT columns, a LIST whose element
+            is not OPTIONAL (its definition levels are encoded against a
+            different nesting scheme, so re-declaring them would misread every
+            row), a LIST element carrying a logical type the writer cannot
+            annotate (DECIMAL/DATE/TIMESTAMP/FLBA), and any logical type on a
+            primitive it would have to approximate. `add` still takes only
+            primitive donors.
     """
     return _native.patch_columns(
         source, drop=drop, rename=rename, add=add, retype=retype

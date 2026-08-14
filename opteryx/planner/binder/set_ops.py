@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+from copy import copy
 from typing import List, Tuple
 
 from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
@@ -16,7 +17,7 @@ from opteryx.planner.binder.binding_context import BindingContext
 from opteryx.planner.logical_planner import LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, find_compatible_type
 from opteryx.types import logical_type as _lt
-from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema
+from opteryx.types.schema import ConstantColumn, SchemaColumn, RelationSchema, mint_column_identity
 
 
 def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -355,14 +356,23 @@ def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -
         if schema_column is None:
             continue
         current_type = schema_column.column_type
-        # A matching CATEGORY is enough only for types whose tag tells the whole
-        # story (binder._descriptor_carries_meaning). Legs at DECIMAL(10,2) and
-        # DECIMAL(10,4), or at timestamp[ms] and timestamp[us], all passed this
-        # guard UNCAST and then concatenated raw payloads under ONE declared
-        # scale/unit: SUM over the decimal union was silently 100x wrong, and the
-        # timestamp pair hit Morsel.combine's "mismatched unit/offset_minutes".
-        # Those legs now go through a real rescale cast.
-        if current_type is not None and current_type.category == target.category:
+        # Skip the cast only when the PHYSICAL tag already matches — the tag is what
+        # Morsel.combine concatenates on. Matching CATEGORY is not enough: every
+        # integer width shares LogicalCategory.INTEGER and FLOAT32/FLOAT64 share
+        # FLOAT, so `SELECT int8_col ... UNION ALL SELECT int64_col ...` computed the
+        # right target (INT64) and then skipped BOTH legs' casts, leaving one leg at
+        # INT8 for draken's concat to reject with "all inputs must share one type".
+        # COUNT(*) (always INT64) unioned with MAX(int8_col) is the everyday shape.
+        #
+        # The category test was right about the case it was written for and wrong
+        # only in its closing premise — an unparameterized type CAN hide a
+        # difference, it just hides it in the physical tag instead of the logical
+        # descriptor. Comparing physical keeps that original case intact: legs at
+        # DECIMAL(10,2) and DECIMAL(10,4), or timestamp[ms] and timestamp[us], share
+        # one physical tag and so still fall through to a real rescale cast via
+        # _descriptor_carries_meaning — without it they concatenated raw payloads
+        # under ONE declared scale/unit (SUM 100x wrong; "mismatched unit").
+        if current_type is not None and current_type.physical == target.physical:
             if current_type == target or not _descriptor_carries_meaning(target):
                 continue
         if col.node_type == NodeType.LITERAL and col.value is None:
@@ -372,16 +382,192 @@ def _cast_leg_columns_to(columns: List[Node], coerced_types: List[ColumnType]) -
         columns[i] = _bound_cast_node(col, target)
 
 
+_SET_OP_STEP_TYPES = (
+    LogicalPlanStepType.Union,
+    LogicalPlanStepType.Intersect,
+    LogicalPlanStepType.Except,
+)
+
+
+def _retype_declared_columns(columns: List[Node], context: BindingContext, coerced_types) -> None:
+    """Point a set-op node's DECLARED output columns at the types its legs were just
+    coerced to, in `columns` and in `context.schemas` alike.
+
+    `_cast_leg_columns_to` only rewrites the LEGS. The set-op node's own output
+    columns are bound to the FIRST leg's ORIGINAL, pre-cast SchemaColumn, so without
+    this the node keeps declaring a type it no longer produces —
+    `SELECT id AS n FROM $planets UNION ALL SELECT CAST(gravity AS FLOAT64) AS n ...`
+    ran, but declared INT8 at EXIT while delivering FLOAT64. `A UNION B UNION C` is
+    nested binary unions, so the outer union READS that lie when it reconciles C
+    against `union(A, B)` — it picked its target from the stale type and skipped the
+    cast the legs actually needed, and draken's concat rejected the result ("all
+    inputs must share one type").
+
+    Retypes a COPY of the SchemaColumn, never the SchemaColumn itself. That object is
+    the LEG's — for `SELECT id AS n FROM $planets` the union's output column IS the
+    reader's `id` column, so retyping it in place would retype the scan. The reader
+    still produces INT8; it is the leg's inserted CAST that produces the coerced
+    type. The copy keeps the identity, which is what the executor keys on
+    (`UnionNode.column_ids`) and what the schema update below matches on.
+
+    PRECONDITION: `columns` must be a set-op node's POST-`visit_exit` output columns.
+    Those are freshly built LogicalColumns (see project.visit_exit), owned by this
+    node alone. A set-op node's PRE-exit columns are the very node objects the left
+    leg projects, and `_cast_leg_columns_to` keeps each as its CAST's source operand
+    (`_bound_cast_node(col, target)` sets `left=col`) while replacing it only in the
+    leg's own list — so assigning a retyped `schema_column` there told that CAST its
+    input was already coerced, and `CAST(id AS INT64)` compiled a float→int64 kernel
+    over INT8 data ("expected FLOAT, got 1").
+
+    The NULL-literal arm of `_cast_leg_columns_to` retypes `schema_column.column_type`
+    in place instead; that is sound there because that arm retypes the leg's own
+    projected node, which is the thing whose type it is changing.
+
+    Positional over `columns` — the same alignment the executor uses (each leg's
+    first N columns become the union's N `column_ids`). `context.schemas` is NOT in
+    projection order (see `_columns_for_side`), so it is matched by identity, and an
+    identity appearing at two positions with two different targets (`SELECT id AS a,
+    id AS b ...`) is ambiguous there and left alone rather than resolved by guess.
+    """
+    if not columns or len(columns) != len(coerced_types):
+        return
+
+    retyped_by_identity = {}
+    claimed_identities = set()
+    for i, column in enumerate(columns):
+        target = coerced_types[i]
+        schema_column = getattr(column, "schema_column", None)
+        if target is None or schema_column is None:
+            continue
+        identity = schema_column.identity
+        if schema_column.column_type == target and identity not in claimed_identities:
+            claimed_identities.add(identity)
+            continue
+        replacement = copy(schema_column)
+        replacement.column_type = target
+        if identity in claimed_identities:
+            # Two OUTPUT positions cannot share one identity once they carry different
+            # columns: identity is the engine's column key, so `UnionNode.column_ids`
+            # would name both legs' columns the same and the second would resolve to
+            # the first. `SELECT id AS a, id AS b ... UNION ALL SELECT CAST(id AS
+            # INT64) AS a, CAST(gravity AS FLOAT64) AS b ...` answered `b` with `a`'s
+            # data — the leg projected the two casts correctly (they get their own
+            # identities from `_bound_cast_node`), and the union's duplicated ids threw
+            # one of them away.
+            #
+            # The duplication is legitimate up to here: `SELECT id AS a, id AS b` IS
+            # one column named twice, and the binder deliberately folds those onto one
+            # SchemaColumn. It only stops being expressible where a set operation makes
+            # the positions DIVERGE, which is exactly here, so re-identify here and
+            # nowhere else — the first occurrence keeps the leg's identity, which
+            # projection pushdown and the aggregate-key emit rely on ("the union's
+            # output identities ARE the first leg's").
+            replacement.identity = mint_column_identity(None, schema_column.name)
+        claimed_identities.add(replacement.identity)
+        column.schema_column = replacement
+        retyped_by_identity.setdefault(identity, replacement)
+
+    if not retyped_by_identity:
+        return
+
+    for schema in context.schemas.values():
+        for position, schema_column in enumerate(schema.columns):
+            replacement = retyped_by_identity.get(schema_column.identity)
+            if replacement is not None and replacement.identity == schema_column.identity:
+                schema.columns[position] = replacement
+
+
+def _publish_declared_columns(bound_columns: List[Node], exit_columns: List[Node]) -> None:
+    """Make the query's EXIT read this set operation's settled output columns.
+
+    A set operation's output IS the query's output, and logical_planner says so by
+    handing ONE list object to both the set-op node and the EXIT node. This node then
+    gets its own list from visit_exit and settles its columns (coercion, and the
+    re-identification in `_retype_declared_columns`); `exit_columns` is that original
+    shared list, still what the EXIT node will iterate when the binder reaches it.
+
+    Republishing positionally is the only way to carry a RE-IDENTIFIED column across.
+    The EXIT's own entries are the left leg's projection nodes, already bound, and
+    `inner_binder` short-circuits on those — so it would keep whatever they resolved to
+    when the LEG was bound. For `SELECT id AS a, id AS b ... UNION ALL SELECT CAST(id AS
+    INT64) AS a, CAST(gravity AS FLOAT64) AS b ...` both entries are bound to the one
+    folded `id` SchemaColumn, so the EXIT asked the union for that identity twice and
+    got column `a` back for `b` — the union had the two columns right by then, and the
+    EXIT threw one away.
+
+    Slots are replaced, never the nodes in them: those nodes are also the CAST source
+    operands in the leg's own (now separate) column list, and assigning a settled
+    `schema_column` onto one tells its CAST the input is already coerced.
+
+    Length disagreement means the EXIT is not a mirror of this node after all — a
+    wildcard set-op EXIT, which expands from the schemas on its own — so leave it be.
+    """
+    if len(bound_columns) != len(exit_columns):
+        return
+    for position, bound_column in enumerate(bound_columns):
+        exit_columns[position] = bound_column
+
+
+def _coerce_branch_to(self, branch: Node, context: BindingContext, coerced_types) -> None:
+    """Make one side of a set operation actually produce `coerced_types`.
+
+    For an ordinary leg this is `_cast_leg_columns_to` on its Project.
+
+    For a leg that is ITSELF a set operation (`A UNION B UNION C` parses as nested
+    binary unions, so the outer union's left side is the inner union node) the cast
+    cannot go on that node: `UnionNode` evaluates nothing — the compiler only
+    positionally selects each leg's first N columns into a shared buffer (see
+    compiler.py's UnionNode branch) — so a CAST written onto a union's own columns
+    is never executed, and the declared type would be a second lie on top of the one
+    this function exists to fix. Push it down to the LEAVES instead, then retype the
+    inner node's declared output to match what its legs now emit.
+    """
+    if branch.node_type in _SET_OP_STEP_TYPES:
+        left = _branch_project_node(self, branch, branch.left_relation_names)
+        right = _branch_project_node(self, branch, branch.right_relation_names)
+        if left is None or right is None:
+            # Best-effort, exactly as the caller is: a branch we cannot confidently
+            # locate is left exactly as it was rather than half-coerced.
+            return
+        _coerce_branch_to(self, left, context, coerced_types)
+        _coerce_branch_to(self, right, context, coerced_types)
+        _retype_declared_columns(branch.columns, context, coerced_types)
+        return
+
+    _cast_leg_columns_to(branch.columns, coerced_types)
+
+
+def _set_op_common_type(left_type, right_type):
+    """The type both legs of a set operation must arrive at for this column position.
+
+    Legs that ALREADY carry the identical ColumnType need no coercion, and saying so
+    here rather than deferring to `find_compatible_type` is not just an optimization:
+    that function deliberately widens INT8/INT16/INT32 to INT64 when resolving a
+    MIXED set of types, which is right for `INT8 ∪ INT16` but turns `INT8 ∪ INT8`
+    into a pointless 8x widening of a union whose legs never disagreed. Nothing is
+    being reconciled in that case, so nothing should be cast.
+
+    Only the identical case short-circuits — any genuine disagreement still goes to
+    `find_compatible_type` and gets its ladder (DECIMAL > FLOAT > INTEGER > BOOLEAN,
+    narrow ints to INT64).
+    """
+    if left_type is not None and left_type == right_type:
+        return left_type
+    return find_compatible_type([left_type, right_type])
+
+
 def _validate_set_operation_types(
     self,
     node: Node,
     context: BindingContext,
     operation_name: str = "SET OPERATION",
-) -> list:
-    """Validate and find compatible types for columns in set operations.
+) -> None:
+    """Both sides of a set operation must present the same number of columns.
 
-    For each column position across left and right relations, find a compatible type.
-    Returns list of coerced ColumnTypes in column order (None where type is unresolvable).
+    It also used to return a per-position coerced type, which every caller stored on
+    the node as `coerced_types` and NOTHING ever read — the leg coercion in
+    visit_union computes its own (see the note there on why that list could not be
+    reused). Dead, so cut; the count check is what is left, and it is real.
     """
     left_columns = _columns_for_side(self, node, node.left_relation_names, context)
     right_columns = _columns_for_side(self, node, node.right_relation_names, context)
@@ -391,46 +577,40 @@ def _validate_set_operation_types(
             f"{operation_name}: column count mismatch — left has {len(left_columns)}, right has {len(right_columns)}"
         )
 
-    coerced_types = []
-    for left_col, right_col in zip(left_columns, right_columns):
-        coerced_type = find_compatible_type([left_col.column_type, right_col.column_type])
-        coerced_types.append(coerced_type)
-
-    return coerced_types
-
 
 def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    # Validate and determine coerced types for UNION/INTERSECT/EXCEPT
-    coerced_types = _validate_set_operation_types(self, node, context, "UNION")
-    node.coerced_types = coerced_types
+    _validate_set_operation_types(self, node, context, "UNION")
+
+    # The list object this node's columns live in is SHARED with the query's EXIT node
+    # (logical_planner assigns one list to both), and the EXIT is bound after this node.
+    # Captured before visit_exit below swaps this node onto its own list, so that what
+    # this node settles on can be published back into it — see `_publish_declared_columns`.
+    exit_columns = node.columns
 
     # Physically enforce the coercion: the executor concatenates each leg's
     # columns by position with no type check of its own (UnionNode just selects
     # column indices into a shared buffer — see compiler.py's UnionNode handling),
     # so two legs whose actual column types differ (most commonly: a NULL literal
     # on one side, a real typed column on the other) crash at morsel-combine time.
-    # `coerced_types` was computed but never applied anywhere else in the
-    # codebase.
     #
-    # NOT reused here: `coerced_types` above is built from `_columns_for_side`,
-    # which (in its primary, non-fallback path) sums `context.schemas[rel].columns`
-    # — RELATION SCHEMA order, not the branch's actual SELECT-list order. Those
-    # only coincide when a branch happens to project columns in the underlying
-    # table's declared order; `SELECT name, id FROM $planets` (name before id,
-    # the schema's order is id-then-name) already disagrees. Applying that
-    # mis-ordered list positionally against `project.columns` silently pairs the
-    # wrong target type with the wrong column — caught by `make q` regressing
-    # `... UNION ...` with a `name, id` projection into an
-    # "Invalid digit in integer literal" CAST failure.
+    # Per-position types come from each side's own located Project
+    # (`_branch_project_node`), which is unambiguously in the branch's real output
+    # order — NOT from `_columns_for_side`, which the count check above uses. That
+    # one (in its primary, non-fallback path) sums `context.schemas[rel].columns` —
+    # RELATION SCHEMA order, which coincides with the SELECT-list order only when a
+    # branch happens to project columns in the underlying table's declared order;
+    # `SELECT name, id FROM $planets` (the schema's order is id-then-name) already
+    # disagrees. Applying that mis-ordered list positionally against
+    # `project.columns` silently pairs the wrong target type with the wrong column —
+    # caught by `make q` regressing `... UNION ...` with a `name, id` projection into
+    # an "Invalid digit in integer literal" CAST failure.
     #
-    # Recompute per-position types directly from each side's own located Project
-    # (`_branch_project_node`), which is unambiguously in the branch's real
-    # output order. Best-effort: only touches a leg whose own Project node can
-    # be confidently located AND whose sibling side is too — anything else is
-    # left exactly as before, i.e. no behaviour change beyond fixing the
-    # concrete mismatch case.
+    # Best-effort: only touches a leg whose own Project node can be confidently
+    # located AND whose sibling side is too — anything else is left exactly as it
+    # was, rather than half-coerced.
     left_project = _branch_project_node(self, node, node.left_relation_names)
     right_project = _branch_project_node(self, node, node.right_relation_names)
+    leg_coerced_types = None
     if left_project is not None and right_project is not None:
         left_cols, right_cols = left_project.columns, right_project.columns
         if len(left_cols) == len(right_cols):
@@ -440,9 +620,9 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
                 right_sc = getattr(right_col, "schema_column", None)
                 left_type = left_sc.column_type if left_sc is not None else None
                 right_type = right_sc.column_type if right_sc is not None else None
-                leg_coerced_types.append(find_compatible_type([left_type, right_type]))
-            _cast_leg_columns_to(left_cols, leg_coerced_types)
-            _cast_leg_columns_to(right_cols, leg_coerced_types)
+                leg_coerced_types.append(_set_op_common_type(left_type, right_type))
+            _coerce_branch_to(self, left_project, context, leg_coerced_types)
+            _coerce_branch_to(self, right_project, context, leg_coerced_types)
 
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)
@@ -464,13 +644,21 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
     from opteryx.planner.binder.project import visit_exit
 
     node, context = visit_exit(self, node, context)
+
+    # AFTER visit_exit, which is what makes these columns this node's own — see the
+    # precondition in _retype_declared_columns. It is also after the wildcard
+    # expansion above, so a wildcard union's columns (schema order, which is the
+    # order the branch node below a wildcard reports too) line up with the leg
+    # types positionally.
+    if leg_coerced_types is not None:
+        _retype_declared_columns(node.columns, context, leg_coerced_types)
+        _publish_declared_columns(node.columns, exit_columns)
+
     return node, context
 
 
 def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    # Validate and determine coerced types for INTERSECT
-    coerced_types = _validate_set_operation_types(self, node, context, "INTERSECT")
-    node.coerced_types = coerced_types
+    _validate_set_operation_types(self, node, context, "INTERSECT")
 
     is_wildcard = len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD
 
@@ -508,9 +696,7 @@ def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
 
 
 def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    # Validate and determine coerced types for EXCEPT
-    coerced_types = _validate_set_operation_types(self, node, context, "EXCEPT")
-    node.coerced_types = coerced_types
+    _validate_set_operation_types(self, node, context, "EXCEPT")
 
     is_wildcard = len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD
 

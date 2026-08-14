@@ -153,6 +153,7 @@ VecResult draken_ifnotnull(void* ctx, const DrakenVector* const* args, uint32_t 
 VecResult draken_iif(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 // ARRAY & JSON kernels (function_array_json.cpp)
 VecResult draken_jsonb_object_keys(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_json_path_exists(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_length_array(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_sort(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_array_contains_any(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -385,6 +386,10 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_cast_int64_to_decimal", (kernel_fn_t)&draken_cast_int64_to_decimal},
     {"draken_cast_integer_to_decimal", (kernel_fn_t)&draken_cast_integer_to_decimal},
     {"draken_cast_uint_to_decimal", (kernel_fn_t)&draken_cast_uint_to_decimal},
+    // BOOL / STRING → DECIMAL — the two remaining holes in the → DECIMAL column.
+    // Same ctx (target precision/scale) as the integer arms above.
+    {"draken_cast_bool_to_decimal", (kernel_fn_t)&draken_cast_bool_to_decimal},
+    {"draken_cast_string_to_decimal", (kernel_fn_t)&draken_cast_string_to_decimal},
     // DECIMAL → INT64 / FLOAT64, keyed on the source tier; the SOURCE scale comes
     // from the ctx (left_scale) — the vector does not carry it.
     {"draken_cast_decimal_to_int64", (kernel_fn_t)&draken_cast_decimal_to_int64},
@@ -598,7 +603,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // into child_owner. Before that field existed an ARRAY result was not
     // expressible on this ABI at all.
     //
-    // SORT, ARRAY_CONTAINS_ANY and ARRAY_CONTAINS_ALL all READ an ARRAY. They
+    // SORT and the `@>` / `@>>` containment kernels all READ an ARRAY. They
     // reuse the ARRAY->VARCHAR cast's BC_C_NATIVE_CHILD mechanism, extended to
     // BC_FUNCTION (compiled_expression.pyx / evaluation.pyx): the VM appends the
     // column-resolved child element vector as a SYNTHETIC extra arg, so each still
@@ -607,7 +612,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // DIRECT column load; a computed array argument is not bind-time eligible and
     // is refused at plan time (this engine has no Python fallback).
     //
-    // ARRAY_CONTAINS_ANY/ALL fit that one-child budget because their needle set is
+    // The containment kernels fit that one-child budget because their needle set is
     // a LITERAL, baked into an in_list_ctx blob at bind time (the same vehicle
     // draken_in_list uses) rather than passed as a second vector operand — so
     // there is no second child to resolve. The blob's kind is inferred from the
@@ -627,18 +632,23 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     // SPLIT reads a VARCHAR and RETURNS an ARRAY<VARIANT> (child rides VecResult::
     // child, like JSONB_OBJECT_KEYS); its scalar delimiter/limit are literal args.
     //
-    // ARRAY_CONTAINS(arr, item) == `item = ANY(arr)` (AnyOpEq). Architect ruling
-    // 2026-07-17: make the AnyOp form native (Fix B). The old comments claiming it
-    // was "already native via AnyOpEq" were WRONG — the compare admission gate
-    // refuses AnyOpEq, so it was unrunnable. Rather than widen that hot gate, the
-    // compare arm lowers AnyOpEq-over-an-ARRAY-column to this BC_FUNCTION (the same
-    // BC_C_NATIVE_CHILD + WRAP_AS_BOOL path ARRAY_CONTAINS_ANY uses). The item is a
+    // `item = ANY(arr)` (AnyOpEq). Architect ruling 2026-07-17: make the AnyOp
+    // form native (Fix B). The old comments claiming it was "already native via
+    // AnyOpEq" were WRONG — the compare admission gate refuses AnyOpEq, so it was
+    // unrunnable. Rather than widen that hot gate, the compare arm lowers
+    // AnyOpEq-over-an-ARRAY-column to this BC_FUNCTION (the same
+    // BC_C_NATIVE_CHILD + WRAP_AS_BOOL path `@>` uses). The item is a
     // one-element in_list_ctx blob; semantics are the reference SQL `= ANY`
-    // (three-valued: null row -> NULL), distinct from ARRAY_CONTAINS_ANY's
-    // null-row -> false. Bare `x = ANY(arr)` gets it too. A per-row item column or
-    // a computed array stays refused at plan time (no fallback).
+    // (three-valued: null row -> NULL), distinct from `@>`'s
+    // null-row -> false. A per-row item column or a computed array stays refused
+    // at plan time (no fallback).
     // ========================================================================
     {"draken_jsonb_object_keys", (kernel_fn_t)&draken_jsonb_object_keys},
+    // `doc @? path` — arity 1, path in an extraction_ctx (the SAME ctx `->` binds,
+    // allocated by kernel_alloc_extraction_ctx with BC_EXTR_JSON_PTR), so the two
+    // operators cannot disagree about what a path means. Existence, not extraction:
+    // a JSON `null` at the path is TRUE here and NULL through `->`.
+    {"draken_json_path_exists", (kernel_fn_t)&draken_json_path_exists},
     {"draken_sort", (kernel_fn_t)&draken_sort},
     {"draken_array_contains_any", (kernel_fn_t)&draken_array_contains_any},
     {"draken_array_contains_all", (kernel_fn_t)&draken_array_contains_all},

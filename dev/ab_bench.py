@@ -176,7 +176,14 @@ def _bench_preload_env() -> dict[str, str]:
             ).stdout.strip()
             if out:
                 env["LD_PRELOAD"] = out
-                env["MIMALLOC_PURGE_DELAY"] = "100"
+                # 1000, not 100. MEASURED 2026-08-14 on the x86 repro box, full
+                # ClickBench hot suite, 43/43 queries, interleaved with arm order
+                # alternating per query: PURGE_DELAY=100 → 132.99s,
+                # PURGE_DELAY=1000 → 119.43s. 0.898x, faster on 41/43, ZERO
+                # regressions beyond 3ms. Plain glibc measures ≈ PD=1000, so 100
+                # was the worst of the three settings — every A/B run through
+                # this harness was measuring a ~10% handicapped configuration.
+                env["MIMALLOC_PURGE_DELAY"] = "1000"
         except Exception:
             pass
     return env

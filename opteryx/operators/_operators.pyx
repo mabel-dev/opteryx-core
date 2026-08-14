@@ -143,6 +143,7 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_calls "opteryx::engine::groupby_tel::calls_count" ()
     long long gb_tel_parvi_sinks "opteryx::engine::groupby_tel::parvi_sinks_count" ()
     long long gb_tel_parvi_promotes "opteryx::engine::groupby_tel::parvi_promotes_count" ()
+    long long gb_tel_mid_promotes "opteryx::engine::groupby_tel::mid_promotes_count" ()
     long long gb_tel_distinct_parvi_sinks "opteryx::engine::groupby_tel::distinct_parvi_sinks_count" ()
     long long gb_tel_distinct_parvi_promotes "opteryx::engine::groupby_tel::distinct_parvi_promotes_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
@@ -548,6 +549,7 @@ def get_groupby_telemetry():
         "calls":   gb_tel_calls(),
         "parvi_sinks":    gb_tel_parvi_sinks(),
         "parvi_promotes": gb_tel_parvi_promotes(),
+        "mid_promotes": gb_tel_mid_promotes(),
         "distinct_parvi_sinks":    gb_tel_distinct_parvi_sinks(),
         "distinct_parvi_promotes": gb_tel_distinct_parvi_promotes(),
     }

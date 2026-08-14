@@ -56,6 +56,7 @@ inline std::uint64_t match_mask64(std::uint64_t group, std::uint8_t tag) noexcep
     return (comparison - kByteOnes64) & ~comparison & kByteHighBits64;
 }
 
+template <std::size_t HStride>
 inline ProbeResult probe_find_slot_scalar(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -78,7 +79,7 @@ inline ProbeResult probe_find_slot_scalar(
                 break;
             }
             const std::size_t candidate = (slot + index) & mask;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + index + 1U};
             }
             matches_lo &= (matches_lo - 1U);
@@ -101,7 +102,7 @@ inline ProbeResult probe_find_slot_scalar(
                 break;
             }
             const std::size_t candidate = (slot + 8U + index) & mask;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + 8U + index + 1U};
             }
             matches_hi &= (matches_hi - 1U);
@@ -120,6 +121,7 @@ inline ProbeResult probe_find_slot_scalar(
     return {0, false, capacity};
 }
 
+template <std::size_t HStride>
 inline ProbeResult probe_find_bucket_scalar(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -144,7 +146,7 @@ inline ProbeResult probe_find_bucket_scalar(
                 break;
             }
             const std::size_t candidate = slot + index;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + index + 1U};
             }
             matches_lo &= (matches_lo - 1U);
@@ -167,7 +169,7 @@ inline ProbeResult probe_find_bucket_scalar(
                 break;
             }
             const std::size_t candidate = slot + 8U + index;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + 8U + index + 1U};
             }
             matches_hi &= (matches_hi - 1U);
@@ -187,6 +189,7 @@ inline ProbeResult probe_find_bucket_scalar(
 }
 
 #if defined(__AVX2__)
+template <std::size_t HStride>
 inline ProbeResult probe_find_slot_avx2(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -216,7 +219,7 @@ inline ProbeResult probe_find_slot_avx2(
                 break;
             }
             const std::size_t candidate = (slot + index) & mask;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + index + 1U};
             }
             matches &= (matches - 1U);
@@ -233,6 +236,7 @@ inline ProbeResult probe_find_slot_avx2(
     return {0, false, capacity};
 }
 
+template <std::size_t HStride>
 inline ProbeResult probe_find_bucket_avx2(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -264,7 +268,7 @@ inline ProbeResult probe_find_bucket_avx2(
                 break;
             }
             const std::size_t candidate = slot + index;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + index + 1U};
             }
             matches &= (matches - 1U);
@@ -283,6 +287,7 @@ inline ProbeResult probe_find_bucket_avx2(
 #endif
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
+template <std::size_t HStride>
 inline ProbeResult probe_find_slot_neon(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -321,7 +326,7 @@ inline ProbeResult probe_find_slot_neon(
                     break;
                 }
                 const std::size_t candidate = (slot + index) & mask;
-                if (hashes[candidate] == key) {
+                if (hashes[candidate * HStride] == key) {
                     return {candidate, true, probes + index + 1U};
                 }
                 matches_lo &= (matches_lo - 1U);
@@ -344,7 +349,7 @@ inline ProbeResult probe_find_slot_neon(
                     break;
                 }
                 const std::size_t candidate = (slot + 8U + index) & mask;
-                if (hashes[candidate] == key) {
+                if (hashes[candidate * HStride] == key) {
                     return {candidate, true, probes + 8U + index + 1U};
                 }
                 matches_hi &= (matches_hi - 1U);
@@ -363,6 +368,7 @@ inline ProbeResult probe_find_slot_neon(
     return {0, false, capacity};
 }
 
+template <std::size_t HStride>
 inline ProbeResult probe_find_bucket_neon(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -403,7 +409,7 @@ inline ProbeResult probe_find_bucket_neon(
                     break;
                 }
                 const std::size_t candidate = slot + index;
-                if (hashes[candidate] == key) {
+                if (hashes[candidate * HStride] == key) {
                     return {candidate, true, probes + index + 1U};
                 }
                 matches_lo &= (matches_lo - 1U);
@@ -426,7 +432,7 @@ inline ProbeResult probe_find_bucket_neon(
                     break;
                 }
                 const std::size_t candidate = slot + 8U + index;
-                if (hashes[candidate] == key) {
+                if (hashes[candidate * HStride] == key) {
                     return {candidate, true, probes + 8U + index + 1U};
                 }
                 matches_hi &= (matches_hi - 1U);
@@ -462,6 +468,7 @@ inline bool group_has_tag_or_empty_rvv(const std::uint8_t* control, std::uint8_t
     return __riscv_vfirst_m_b2(interesting, vl) >= 0;
 }
 
+template <std::size_t HStride>
 inline ProbeResult probe_find_slot_rvv(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -490,7 +497,7 @@ inline ProbeResult probe_find_slot_rvv(
                 break;
             }
             const std::size_t candidate = (slot + index) & mask;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + index + 1U};
             }
             matches_lo &= (matches_lo - 1U);
@@ -511,7 +518,7 @@ inline ProbeResult probe_find_slot_rvv(
                 break;
             }
             const std::size_t candidate = (slot + 8U + index) & mask;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + 8U + index + 1U};
             }
             matches_hi &= (matches_hi - 1U);
@@ -529,6 +536,7 @@ inline ProbeResult probe_find_slot_rvv(
     return {0, false, capacity};
 }
 
+template <std::size_t HStride>
 inline ProbeResult probe_find_bucket_rvv(
     const std::uint8_t* control,
     const std::uint64_t* hashes,
@@ -559,7 +567,7 @@ inline ProbeResult probe_find_bucket_rvv(
                 break;
             }
             const std::size_t candidate = slot + index;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + index + 1U};
             }
             matches_lo &= (matches_lo - 1U);
@@ -580,7 +588,7 @@ inline ProbeResult probe_find_bucket_rvv(
                 break;
             }
             const std::size_t candidate = slot + 8U + index;
-            if (hashes[candidate] == key) {
+            if (hashes[candidate * HStride] == key) {
                 return {candidate, true, probes + 8U + index + 1U};
             }
             matches_hi &= (matches_hi - 1U);
@@ -605,21 +613,23 @@ inline ProbeResult probe_find_bucket_rvv(
 // the 16-way tag compare could never be fused into the caller's row loop and
 // the control-array base could not stay in a register across rows. These call
 // the chosen implementation by name — same code, no indirection.
+template <std::size_t HStride = 1>
 inline ProbeResult probe_find_slot_direct(const std::uint8_t* control,
                                           const std::uint64_t* hashes,
                                           std::size_t capacity, std::uint64_t key,
                                           std::uint8_t tag) noexcept {
-    return SIMD_STATIC_SELECT(probe_find_slot_avx2, probe_find_slot_neon,
-                              probe_find_slot_rvv, probe_find_slot_scalar)(
+    return SIMD_STATIC_SELECT(probe_find_slot_avx2<HStride>, probe_find_slot_neon<HStride>,
+                              probe_find_slot_rvv<HStride>, probe_find_slot_scalar<HStride>)(
         control, hashes, capacity, key, tag);
 }
 
+template <std::size_t HStride = 1>
 inline ProbeResult probe_find_bucket_direct(const std::uint8_t* control,
                                             const std::uint64_t* hashes,
                                             std::size_t capacity, std::uint64_t key,
                                             std::uint8_t tag) noexcept {
-    return SIMD_STATIC_SELECT(probe_find_bucket_avx2, probe_find_bucket_neon,
-                              probe_find_bucket_rvv, probe_find_bucket_scalar)(
+    return SIMD_STATIC_SELECT(probe_find_bucket_avx2<HStride>, probe_find_bucket_neon<HStride>,
+                              probe_find_bucket_rvv<HStride>, probe_find_bucket_scalar<HStride>)(
         control, hashes, capacity, key, tag);
 }
 

@@ -1659,8 +1659,16 @@ cdef _decode_from_buffer(const uint8_t* buf, size_t size, column_names, row_grou
                     vec = _make_float64_vector(column, num_rows)
                 _TEL["cython_float_s"] += _time.perf_counter() - _t0
             else:
-                _TEL["cython_other_s"] += _time.perf_counter() - _t0
-                continue
+                # A column the C++ decoder accepted but no materializer here can
+                # build. Skipping it produced a morsel missing that column — for
+                # a single-column file, a zero-column morsel reporting zero rows
+                # for a file whose footer says otherwise. There is no honest
+                # partial answer: fail with the type we could not build.
+                raise NotImplementedError(
+                    "rugo parquet reader: no vector materializer for column %r "
+                    "of decoded physical type %r"
+                    % (col_names[col_idx], column.type.decode("utf-8"))
+                )
 
             _TEL["columns"] += 1
             vectors.append(vec)
@@ -1718,7 +1726,10 @@ _CODEC_INT = {
     'GZIP':         2,
     'LZO':          3,
     'BROTLI':       4,
-    'LZ4':          4,
+    # LZ4 is Parquet codec 5 (legacy Hadoop-framed), not 4. It was mapped to 4
+    # here, so an LZ4 column was handed to the decoder as BROTLI — which now
+    # names the wrong codec in the refusal it raises.
+    'LZ4':          5,
     'ZSTD':         6,
     'LZ4_RAW':      7,
 }
@@ -1832,9 +1843,16 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
     _tmp = col_stats.get('type_length')
     cpp_col.type_length = _tmp if _tmp is not None else 0
 
-    # Convert codec string → int (e.g. 'SNAPPY' → 1)
+    # Convert codec string → int (e.g. 'SNAPPY' → 1). An unmapped name defaulted
+    # to 0 (UNCOMPRESSED), which handed compressed bytes to the plain decoder and
+    # produced garbage instead of a refusal — the same silent-wrong-answer class
+    # the codec guard in decode_column.cpp now rejects.
     codec_str = col_stats.get('compression_codec') or 'UNCOMPRESSED'
-    cpp_col.codec = _CODEC_INT.get(codec_str, 0)
+    if codec_str not in _CODEC_INT:
+        raise ValueError(
+            "rugo parquet reader: unrecognised compression codec %r" % codec_str
+        )
+    cpp_col.codec = _CODEC_INT[codec_str]
 
     # Convert encoding strings → ints (e.g. ['PLAIN', 'RLE_DICTIONARY'] → [0, 8])
     for enc_str in (col_stats.get('encodings') or []):
@@ -1999,9 +2017,16 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
     _tmp = col_stats.get('type_length')
     cpp_col.type_length = _tmp if _tmp is not None else 0
 
-    # Convert codec string → int (e.g. 'SNAPPY' → 1)
+    # Convert codec string → int (e.g. 'SNAPPY' → 1). An unmapped name defaulted
+    # to 0 (UNCOMPRESSED), which handed compressed bytes to the plain decoder and
+    # produced garbage instead of a refusal — the same silent-wrong-answer class
+    # the codec guard in decode_column.cpp now rejects.
     codec_str = col_stats.get('compression_codec') or 'UNCOMPRESSED'
-    cpp_col.codec = _CODEC_INT.get(codec_str, 0)
+    if codec_str not in _CODEC_INT:
+        raise ValueError(
+            "rugo parquet reader: unrecognised compression codec %r" % codec_str
+        )
+    cpp_col.codec = _CODEC_INT[codec_str]
 
     # Convert encoding strings → ints (e.g. ['PLAIN', 'RLE_DICTIONARY'] → [0, 8])
     for enc_str in (col_stats.get('encodings') or []):

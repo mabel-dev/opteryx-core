@@ -65,6 +65,7 @@
 #include "carchar_set.hpp"       // opteryx::carchar::CarcharSet — hash-identity dedup set
 #include "carchar_index.hpp"     // opteryx::carchar::CarcharIndex — hash → group-id
 #include "native_cidr_emit.hpp"  // CIDR_AGG: Roaring32 address sets + minimal-cover emit
+#include "medius.hpp"            // opteryx::medius::MediusMap — bounded middle tier
 #include "parvi.hpp"             // opteryx::parvi::ParviMap — 64-slot low-card front map
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "_agg_kernels.hpp"      // opteryx::ungrouped::MedianState — MEDIAN's per-group
@@ -2450,6 +2451,15 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
 struct GBPartition {
     opteryx::carchar::CarcharIndex index;
     opteryx::parvi::ParviMap small;   // low-card front map (kGBParviGateNDV gate)
+    // MEDIUS (2026-08-14, unratified): the ladder was 64 -> unbounded, so every
+    // column above 64 distinct paid full CarcharIndex probe cost. duckdb and
+    // clickhouse both special-case this band and size it 8k-20k (see
+    // medius.hpp for the sourced numbers). 512 slots PER PARTITION x 64
+    // partitions covers a ~26k-distinct column while each map stays 8 KB and
+    // L1-resident. Armed unconditionally — no NDV estimate is trusted; a column
+    // that outgrows it simply promotes, exactly as parvi does.
+    opteryx::medius::MediusMap<128> mid;   // FOOTPRINT TEST: 2KB/partition instead of 8KB
+    bool use_mid = true;
     bool use_parvi = false;           // armed by GroupBySink when the NDV estimate is low
     std::vector<uint64_t> hashes;
     std::vector<GroupKeyColumn> keycols;
@@ -2470,6 +2480,15 @@ struct GBPartition {
 
     // Group-id find-or-insert for the keying loop. next_id must be
     // static_cast<int64_t>(hashes.size()). Returns true iff the group is new.
+    // One-shot: move the mid-tier entries into the CarcharIndex. Same contract as
+    // promote_small — group ids are already dense and monotone, so nothing is
+    // remapped; the carchar simply continues the same id space.
+    void promote_mid() {
+        mid.drain_into(index);
+        mid.clear();
+        use_mid = false;
+    }
+
     inline bool find_or_insert_group(uint64_t h, int64_t next_id, int64_t& gid) {
         if (use_parvi) {
             const auto r = small.find_or_insert_id(h, next_id, gid);
@@ -2477,6 +2496,17 @@ struct GBPartition {
                 return r == opteryx::parvi::ParviInsert::kInserted;
             groupby_tel::parvi_promotes.fetch_add(1, std::memory_order_relaxed);
             promote_small();  // estimate was wrong for this partition — fall through
+            // parvi drained into `index`, so the mid tier must be retired too:
+            // leaving it armed would let it mint a SECOND group id for a key that
+            // is already in `index` (measured: AdvEngineID 19 -> 36 groups).
+            use_mid = false;
+        }
+        if (use_mid) {
+            const auto r = mid.find_or_insert_id(h, next_id, gid);
+            if (r != opteryx::medius::MediusInsert::kFull)
+                return r == opteryx::medius::MediusInsert::kInserted;
+            groupby_tel::mid_promotes.fetch_add(1, std::memory_order_relaxed);
+            promote_mid();  // outgrew the bounded tier — fall through to carchar
         }
         return index.find_or_insert_id(h, next_id, gid);
     }
@@ -2491,9 +2521,21 @@ struct GroupByLocal : LocalSinkState {
     bool has_rows = false;            // any COUNT(*) spec
     bool init = false;
     size_t entries_total = 0;         // Σ partition sizes (adaptive flush trigger)
+    // EARLY-PROMOTE (2026-08-14): once any partition has outgrown Medius we know
+    // this column is high-cardinality, so fresh partitions after a flush must NOT
+    // re-arm it. Without this the bounded tier is refilled and re-promoted on EVERY
+    // flush cycle — MEASURED 10,880 promotions on GROUP BY UserID (64 partitions,
+    // ~269 flushes) where the ceiling should be 64. That repeated doomed fill is
+    // what made Medius a net +0.4% on the suite. duckdb learns the same way
+    // (DecideAdaptation -> SkipLookups, decided once from early rows).
+    bool mid_disabled = false;
     // per-morsel ingest scratch
     std::vector<uint64_t> mk_hash;    // per row: draken key hash
     std::vector<uint32_t> mk_ent;     // per row: group id within its partition
+    // H20 compressed-key path: one entry per DISTINCT hash, not per row.
+    std::vector<uint32_t> dict_rep;   // per code: first row using it (representative)
+    std::vector<uint8_t>  dict_part;  // per code: partition index
+    std::vector<uint32_t> dict_gid;   // per code: group id within that partition
     std::vector<uint64_t> cd_vhash;   // per row: value hash for a CountDistinct spec
 };
 struct GroupByGlobal : GlobalSinkState {
@@ -2714,9 +2756,14 @@ struct GroupBySink : Sink {
                 // promote any live parvi front map so every queued partition's
                 // groups are in the index (dense ids preserved).
                 if (l.parts[p].use_parvi) l.parts[p].promote_small();
+                // A partition that already fell out of Medius proves the column is
+                // high-cardinality; remember it before the partition is destroyed.
+                if (!l.parts[p].use_mid) l.mid_disabled = true;
+                if (l.parts[p].use_mid) l.parts[p].promote_mid();
                 g.pending[p].push_back(std::move(l.parts[p]));
                 l.parts[p] = GBPartition();
                 l.parts[p].use_parvi = low_card;        // fresh partition: re-arm the gate
+                l.parts[p].use_mid = !l.mid_disabled;   // ...but never re-arm a lost cause
                 type_keycols(l.parts[p], l.key_meta);   // fresh partition needs key types
             }
         }
@@ -2737,10 +2784,146 @@ struct GroupBySink : Sink {
 
         // Pass A: draken owns the key hash for the whole morsel (cxx_hash_c is
         // shape-preserving for a single key — it hashes each distinct value once).
-        GROUPBY_TEL_START(_gbA_t0);
-        if (!compute_row_hashes(in, key_idx, l.mk_hash, err))
-            return SinkResult::CONTINUE;
-        GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbA_t0);
+        // H20 (2026-08-14): probe once per DISTINCT key, not once per row.
+        //
+        // For a single key cxx_hash_c is shape-preserving — it returns
+        // `data_length` distinct hashes addressed by per-row codes. The dense
+        // path below then gathers `out[i] = khashes[codes[i]]` and probes every
+        // row, rediscovering groups draken had already separated. On a 65,536-row
+        // morsel of RegionID that is ~2-5k distinct hashes turned into 65,536
+        // probes; on URL it is ~13.7k turned into 65,536.
+        //
+        // Compressed path: probe each distinct hash ONCE into (partition, gid),
+        // then every row is two small-array lookups indexed by its code. The side
+        // arrays are data_length entries, so they stay cache-resident exactly when
+        // the win is available. Rows never touch mk_hash/mk_ent at all.
+        //
+        // Gated: single key only (multi-key hashing is dense per-row by contract),
+        // must actually be compressed, and must clear a compression ratio so we
+        // never pay the side-array setup for a near-unique column (UserID at ~50k
+        // distinct per 65k-row morsel correctly falls through to the dense path).
+        // OPTERYX_GB_DICT=0 disables, for A/B from one binary.
+        static const bool gb_dict_on = []() {
+            const char* v = getenv("OPTERYX_GB_DICT");
+            return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+        }();
+        static const uint32_t kGBDictMaxDistinct = 1u << 14;  // 16,384
+        static const uint32_t kGBDictMinRatio = 2;            // distinct*2 <= rows
+
+        // Only the all-Rows shape (plain COUNT(*) GROUP BY) takes the dict path:
+        // every other spec kind has a per-row loop further down that indexes the
+        // dense mk_hash/mk_ent, and making those range/code-aware is separate work.
+        bool gb_rows_only = l.has_rows;
+        for (size_t s = 0; s < nspecs && gb_rows_only; ++s)
+            if (l.kinds[s] != GBKind::Rows) gb_rows_only = false;
+
+        ShapedKeyHash skh;
+        bool dict_path = false;
+        if (gb_dict_on && key_idx.size() == 1) {
+            GROUPBY_TEL_START(_gbA_t0);
+            if (!compute_row_hashes_shaped(in, key_idx, skh, err))
+                return SinkResult::CONTINUE;
+            GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbA_t0);
+            dict_path = skh.compressed() && skh.data_length <= kGBDictMaxDistinct &&
+                        static_cast<uint64_t>(skh.data_length) * kGBDictMinRatio <=
+                            static_cast<uint64_t>(rows);
+            if (!dict_path) {
+                // Not worth it: densify from the vector we already have rather
+                // than hashing a second time.
+                l.mk_hash.resize(rows);
+                for (uint32_t i = 0; i < rows; ++i)
+                    l.mk_hash[i] = skh.hashes[skh.codes[i]];
+                cxx_morsel_delete(skh.owner);
+                skh.owner = nullptr;
+            }
+        } else {
+            GROUPBY_TEL_START(_gbA_t0);
+            if (!compute_row_hashes(in, key_idx, l.mk_hash, err))
+                return SinkResult::CONTINUE;
+            GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbA_t0);
+        }
+
+        if (dict_path) {
+            struct HmGuard {
+                CxxMorsel* m;
+                ~HmGuard() { if (m != nullptr) cxx_morsel_delete(m); }
+            } _hm_guard{skh.owner};
+
+            const uint32_t D = skh.data_length;
+            GROUPBY_TEL_START(_gbB_t0);
+            // First occurrence of each code — the representative row whose key
+            // VALUES a new group stores. Same representative the dense path would
+            // have picked (the first row that created the group).
+            l.dict_rep.assign(D, UINT32_MAX);
+            for (uint32_t i = 0; i < rows; ++i) {
+                const uint32_t c = skh.codes[i];
+                if (l.dict_rep[c] == UINT32_MAX) l.dict_rep[c] = i;
+            }
+            // One probe per distinct value.
+            l.dict_part.resize(D);
+            l.dict_gid.resize(D);
+            for (uint32_t d = 0; d < D; ++d) {
+                if (l.dict_rep[d] == UINT32_MAX) continue;  // code never used
+                const uint64_t h = skh.hashes[d];
+                const uint8_t pi = static_cast<uint8_t>(h >> kGBPartShift);
+                GBPartition& P = l.parts[pi];
+                int64_t gid;
+                const bool is_new =
+                    P.find_or_insert_group(h, static_cast<int64_t>(P.hashes.size()), gid);
+                if (is_new) {
+                    P.hashes.push_back(h);
+                    for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                        P.keycols[j].append_row(in->columns[store_col_idx[j]].view,
+                                                l.dict_rep[d], err, "GROUP BY key value");
+                        if (err.code != 0) return SinkResult::CONTINUE;
+                    }
+                }
+                l.dict_part[d] = pi;
+                l.dict_gid[d] = static_cast<uint32_t>(gid);
+            }
+            for (size_t p = 0; p < kGBParts; ++p) {
+                GBPartition& P = l.parts[p];
+                if (P.hashes.empty()) continue;
+                size_t nn = P.size();
+                if (l.has_rows) P.grows.resize(nn);
+                if (P.lanes.size() != nspecs) P.lanes.resize(nspecs);
+                if (P.cd.size() != nspecs) P.cd.resize(nspecs);
+                for (size_t s = 0; s < nspecs; ++s)
+                    gb_lanes_resize(P.lanes[s], l.kinds[s], nn);
+            }
+            GROUPBY_TEL_ACCUM(groupby_tel::probe_ns, _gbB_t0);
+
+            if (gb_rows_only) {
+                // Pass C, dict form: per row, two small-array lookups by code. No
+                // mk_hash gather and no mk_ent write anywhere in this path.
+                GROUPBY_TEL_START(_gbC_t0);
+                for (uint32_t i = 0; i < rows; ++i) {
+                    const uint32_t c = skh.codes[i];
+                    l.parts[l.dict_part[c]].grows[l.dict_gid[c]] += 1;
+                }
+                GROUPBY_TEL_ACCUM(groupby_tel::apply_ns, _gbC_t0);
+                l.entries_total = 0;
+                for (size_t p = 0; p < kGBParts; ++p) l.entries_total += l.parts[p].size();
+                if (l.entries_total > kGBFlushEntries)
+                    flush_locals(static_cast<GroupByGlobal&>(gs), l);
+                return SinkResult::CONTINUE;
+            }
+            // Other spec kinds (SUM/AVG/MIN/MAX/CountDistinct) each have their own
+            // per-row loop below that indexes mk_hash/mk_ent, so fill those from the
+            // code arrays and let the generic pass C run unchanged. The expensive
+            // part — the PROBES — has already been done once per DISTINCT value;
+            // this fill is two sequential array reads and two writes per row, which
+            // the hardware prefetcher covers. This is what lets a single-key
+            // `SELECT k, sum(v) ... GROUP BY k` use the per-distinct path: every
+            // H2O group-by is that shape, and half of TPC-H's single-key ones are.
+            l.mk_hash.resize(rows);
+            l.mk_ent.resize(rows);
+            for (uint32_t i = 0; i < rows; ++i) {
+                const uint32_t c = skh.codes[i];
+                l.mk_hash[i] = skh.hashes[c];
+                l.mk_ent[i] = l.dict_gid[c];
+            }
+        }
 
         // Pass B: find-or-insert each row's group into its partition (partition =
         // hash >> kGBPartShift; group id from CarcharIndex, equality by 64-bit hash
@@ -2750,7 +2933,35 @@ struct GroupBySink : Sink {
         // GROUP BY requires. A hash-only key stores nothing: it separated the groups
         // in pass A and its purpose is spent.
         GROUPBY_TEL_START(_gbB_t0);
+        if (!dict_path) {
         l.mk_ent.resize(rows);
+
+        // ⛔ TESTED AND REJECTED 2026-08-14 — slicing passes B+C.
+        // Rationale was sound: morsels cap at 65,536 rows, so the inter-pass scratch
+        // (mk_hash 512 KB + mk_ent 256 KB = 768 KB) is 3x the i5-8500's 256 KB
+        // per-core L2, written in A, read in B, written in B, both read again in C.
+        // Slicing to 2k/8k/16k would have kept it resident.
+        // MEASURED: flat on ARM; on x86, flat at 9k groups and ~2% SLOWER at 17.6M
+        // and 18.3M, at every slice size, 3 interleaved rounds.
+        // WHY IT DOES NOTHING: the scratch is streamed STRICTLY SEQUENTIALLY in all
+        // three passes, and hardware prefetch covers that regardless of L2 size — it
+        // costs bandwidth, not stalls. The real cost is the probe's RANDOM DEPENDENT
+        // chain (control_[slot] -> tag -> hashes_[candidate] -> payload_refs_[slot]),
+        // which slicing cannot shorten. Same reason software prefetch failed here.
+        // Shorten the chain instead: pack hashes_ and payload_refs_ into one array.
+        // ⛔ Compute-path software prefetch stays OUT of this loop. The ban
+        // (architect, 2026-07-02) rested on Apple Silicon measurements; it was
+        // re-tested HERE on x86 (2026-08-14) in case aggressive Apple hardware
+        // prefetchers had been masking a real effect. They were not. x86, 3
+        // interleaved rounds, prefetching the control line 8/16 rows ahead
+        // (optionally also the hashes_ line):
+        //   RegionID  9k groups (L2-resident): 0.570 -> 0.615  = 8% SLOWER
+        //   SearchPhrase 6M                  : 1.898 -> 1.898  = flat
+        //   UserID   17.6M                   : 1.979 -> 1.923  = 2.8%, ranges barely separate
+        //   URL      18.3M                   : 9.564 -> 9.506  = noise
+        // Net negative across a mixed workload: the cache-resident regression is
+        // large and reproducible, the high-cardinality gain marginal. The ban now
+        // holds on BOTH architectures. Restructure the passes instead.
         for (uint32_t i = 0; i < rows; ++i) {
             uint64_t h = l.mk_hash[i];
             GBPartition& P = l.parts[h >> kGBPartShift];
@@ -2780,6 +2991,7 @@ struct GroupBySink : Sink {
             for (size_t s = 0; s < nspecs; ++s)
                 gb_lanes_resize(P.lanes[s], l.kinds[s], n);
         }
+        }  // !dict_path — the dict path probed per DISTINCT and grew lanes already
         GROUPBY_TEL_ACCUM(groupby_tel::probe_ns, _gbB_t0);
 
         // Pass C: columnar updates — kind dispatched ONCE per spec, tight row loops.

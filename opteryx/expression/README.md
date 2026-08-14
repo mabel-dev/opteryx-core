@@ -103,7 +103,10 @@ Each operation category is a separate module with clear responsibility:
 | `list_ops.pyx` | `InList`, `NotInList` |
 | `string_matching.pyx` | `Like`, `RLike`, `InStr`, `ILike`, etc. |
 | `array_ops.pyx` | `AnyOp*`, `AllOp*`, `@>`, `@>>` |
-| `special_ops.pyx` | `@?` (JSON path) |
+
+`@?` (JSON path existence) used to be here, in `special_ops.pyx`. It has a native
+kernel now — `draken_json_path_exists` — so that module is deleted rather than
+kept as a second implementation.
 
 **Encoding shapes:** All vectors are `DrakenVector` in the unified format
 (dense / constant / dict), accessed uniformly as `data[selection[i]]`. The

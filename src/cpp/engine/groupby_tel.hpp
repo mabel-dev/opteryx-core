@@ -31,6 +31,7 @@ inline std::atomic<long long> calls    {0};  // GroupBySink::sink() calls (morse
 // Parvi low-card gate engagement (per-event, never per-row):
 inline std::atomic<long long> parvi_sinks    {0};  // GroupBySink locals armed with parvi partitions
 inline std::atomic<long long> parvi_promotes {0};  // partition's parvi front map overflowed (estimate misfire)
+inline std::atomic<long long> mid_promotes {0};    // partition outgrew the bounded mid tier -> carchar
 inline std::atomic<long long> distinct_parvi_sinks    {0};  // DistinctSink locals armed with a parvi front set
 inline std::atomic<long long> distinct_parvi_promotes {0};  // front set overflowed (estimate misfire)
 
@@ -41,6 +42,7 @@ inline void reset() {
     calls.store(0, std::memory_order_relaxed);
     parvi_sinks.store(0, std::memory_order_relaxed);
     parvi_promotes.store(0, std::memory_order_relaxed);
+    mid_promotes.store(0, std::memory_order_relaxed);
     distinct_parvi_sinks.store(0, std::memory_order_relaxed);
     distinct_parvi_promotes.store(0, std::memory_order_relaxed);
 }
@@ -61,6 +63,7 @@ inline double apply_s() { return apply_ns.load(std::memory_order_relaxed) * 1e-9
 inline long long calls_count() { return calls.load(std::memory_order_relaxed); }
 inline long long parvi_sinks_count()    { return parvi_sinks.load(std::memory_order_relaxed); }
 inline long long parvi_promotes_count() { return parvi_promotes.load(std::memory_order_relaxed); }
+inline long long mid_promotes_count()   { return mid_promotes.load(std::memory_order_relaxed); }
 inline long long distinct_parvi_sinks_count()    { return distinct_parvi_sinks.load(std::memory_order_relaxed); }
 inline long long distinct_parvi_promotes_count() { return distinct_parvi_promotes.load(std::memory_order_relaxed); }
 

@@ -230,6 +230,56 @@ def _physical_type(schema_column):
     return ct.physical if ct is not None else None
 
 
+def _computed_array_subexpression(node, _depth=0):
+    """The first COMPUTED (non-column, non-literal) ARRAY sub-expression in `node`,
+    or None.
+
+    An ARRAY's elements hang off the column owner, not off the 40-byte
+    DrakenVector, so every element-reading op resolves them by column identity
+    against the morsel - which a mid-expression intermediate does not have. The
+    compiler materializes such an operand into its own column where it can
+    (_hoist_array_operands), but the hoist only runs on the WHERE and HAVING
+    predicates. Everywhere else the refusal stands, and the ARRAY is the reason -
+    so name it, and name the rewrite that gives it the column it needs.
+    """
+    if node is None or _depth > 32:
+        return None
+    if node.node_type not in (
+        NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR, NodeType.LITERAL
+    ):
+        sc = getattr(node, "schema_column", None)
+        if sc is not None and _physical_type(sc) == DrakenType.ARRAY:
+            return node
+    for child in (getattr(node, "parameters", None) or []):
+        found = _computed_array_subexpression(child, _depth + 1)
+        if found is not None:
+            return found
+    for attr in ("left", "right"):
+        found = _computed_array_subexpression(getattr(node, attr, None), _depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _predicate_remedy(expr):
+    """The rewrite for a refused predicate, when we know one; None for the default.
+
+    Only the computed-ARRAY case is answered here, because it is the only one where
+    a mechanical rewrite is always available AND always equivalent: project the
+    array in a subquery, filter outside it."""
+    from opteryx.expression.formatter import format_expression
+
+    array_node = _computed_array_subexpression(expr)
+    if array_node is None:
+        return None
+    rendered = format_expression(array_node)
+    return (
+        f"{md_code(rendered)} builds an array mid-expression, and array element "
+        "tests need it as a column. Project it in a subquery and filter outside "
+        f"that subquery: {md_code(f'SELECT * FROM (SELECT *, {rendered} AS keys FROM ...) AS s WHERE ...')}"
+    )
+
+
 def _logical_tuple(ct):
     """(kind, unit, precision, scale, dimension) ints for a ColumnType's descriptor,
     or None when the type carries no logical type — same shape NativePlan's native
@@ -749,11 +799,33 @@ class _Compiler:
         # descriptor is never surfaced — so `col::TIMESTAMP[s] >= <ts>` is safe and
         # correct here even though it is not is_all_c_native. (The engine's own
         # add_expr_filter enforces this same bytecode_is_c_native_predicate gate.)
+        #
+        # On refusal, name the OPERATION and the sub-expression it sits in, the way
+        # the projection gate already does (_add_computed). "a filter predicate
+        # outside the c-native kernel set ... it will need rewriting to avoid that
+        # construct" named no construct and no rewrite, so every refusal here read
+        # identically and left the reader nothing to act on.
+        from opteryx.expression.formatter import format_expression
         from opteryx.operators._operators import bytecode_is_c_native_predicate
+        from opteryx.operators._operators import bytecode_non_c_native_op
 
         bc = self._lower_bytecode(expr)
         if not bytecode_is_c_native_predicate(bc):
-            _unsupported(f"{what} outside the c-native kernel set")
+            # The gate has two independent halves; say which one said no rather than
+            # blaming an operation when the program was in fact non-bool-final.
+            offending_op = bytecode_non_c_native_op(bc)
+            if offending_op:
+                _unsupported(
+                    f"{offending_op} in {what} {md_code(format_expression(expr))}, "
+                    "outside the c-native kernel set,",
+                    _predicate_remedy(expr),
+                )
+            _unsupported(
+                f"{what} that does not produce a true/false result "
+                f"({md_code(format_expression(expr))})",
+                f"Wrap it as {md_code('<expression> IS TRUE')} to make the "
+                "true/false test explicit",
+            )
         return bc
 
     def _lower_scan_predicate(self, predicates):
@@ -855,10 +927,25 @@ class _Compiler:
     # case is not an exception.
     _ARRAY_CONSUMING_FNS = {"SORT", "GREATEST", "LEAST", "LENGTH"}
 
+    # Comparison operators that CONSUME an ARRAY operand element-wise, mapped to the
+    # side that operand sits on. Side-specific by necessity, not tidiness: `@>`/`@>>`
+    # carry an ARRAY-typed *literal* needle set on the right, so a both-sides probe
+    # would hoist that literal into a column and destroy the bind-time
+    # membership-blob lowering it is supposed to feed.
+    #
+    #   AnyOpEq            `item = ANY(arr)` — array on the RIGHT.
+    #   AtArrow            `arr @> (…)`  contains-any; array on the LEFT.
+    #   ArrayContainsAll   `arr @>> (…)` contains-all; array on the LEFT.
+    _ARRAY_CONSUMING_COMPARISONS = {
+        "AnyOpEq": "right",
+        "AtArrow": "left",
+        "ArrayContainsAll": "left",
+    }
+
     def _hoist_array_operands(self, p, eval_nodes, layout):
         """Materialize a COMPUTED ARRAY operand into its own ExprProject column, then
-        point the consuming op at that column. Covers SORT/GREATEST/LEAST/LENGTH and
-        the `arr[i]` subscript.
+        point the consuming op at that column. Covers SORT/GREATEST/LEAST/LENGTH, the
+        `arr[i]` subscript, and the containment comparisons (`= ANY`, `@>`, `@>>`).
 
         Two independent reasons an ARRAY operand must be a column, not an intermediate:
 
@@ -907,6 +994,18 @@ class _Compiler:
             return None
         if node.node_type == NodeType.EXTRACTION_OPERATOR and node.value == "MapAccess":
             return node.left
+        if node.node_type == NodeType.COMPARISON_OPERATOR:
+            side = self._ARRAY_CONSUMING_COMPARISONS.get(node.value)
+            if side is None:
+                return None
+            operand = getattr(node, side)
+            # A LITERAL array is not a per-row array and has no column to become:
+            # `x = ANY([1,2,3])` lowers to draken_in_list, and a fully-literal
+            # comparison constant-folds. Hoisting either would replace a bind-time
+            # answer with a materialized column. Only a COMPUTED array needs this.
+            if operand is None or operand.node_type == NodeType.LITERAL:
+                return None
+            return operand
         return None
 
     def _hoist_array_in_tree(self, p, node, layout):
@@ -1065,6 +1164,7 @@ class _Compiler:
         projection boundary (no force-densify). Set ONLY when every column added by
         this call feeds a compression-aware consumer — currently just computed
         GROUP BY / DISTINCT keys, whose sole consumer is the group/distinct sink."""
+        from opteryx.expression import should_evaluate
         from opteryx.expression.evaluator import compile_eval_nodes
         from opteryx.expression.formatter import format_expression
         from opteryx.operators._operators import bytecode_non_c_native_op
@@ -1094,35 +1194,59 @@ class _Compiler:
                 node_by_identity[sc.identity] = node_
 
         layout = list(layout)
-        for identity, bc in compile_eval_nodes(eval_nodes):
-            if identity in layout:
-                # The stream already carries this identity — legal ONLY when it is
-                # the same-typed column (an earlier program's output, or a plain
-                # passthrough). When the binder assigns a COMPUTED node the same
-                # identity as a raw column of a DIFFERENT type (observed:
-                # `SELECT EventTime, EventTime::TIMESTAMP[s]` — the cast shares
-                # the raw column's identity but declares unit=us while the stream
-                # carries unit=s), silently skipping the computation displayed the
-                # raw values under the computed descriptor = WRONG ANSWER. Fail
-                # loud on descriptor mismatch instead.
-                declared = ct_by_identity.get(identity)
-                stream_lt = self._layout_type(None, identity)
-                if declared is not None and stream_lt is not None:
-                    declared_pt = getattr(declared, "physical", None)
-                    if declared_pt is not None and declared_pt != stream_lt:
-                        _unsupported(
-                            "a computed column whose identity collides with a "
-                            "differently-typed stream column (binder identity reuse)")
-                declared_lg = getattr(declared, "logical", None) if declared is not None else None
-                stream_ct = (getattr(self, "_cts", None) or {}).get(identity)
-                if declared_lg is not None and stream_ct is not None:
-                    stream_lg = getattr(stream_ct, "logical", None)
-                    if stream_lg is not None and str(stream_lg) != str(declared_lg):
-                        _unsupported(
-                            "a computed column whose identity collides with a "
-                            "same-physical, different-descriptor stream column "
-                            "(binder identity reuse)")
+
+        # Settle what the stream ALREADY carries before building any bytecode.
+        # This used to be a `continue` inside the compile loop below, which meant
+        # `compile_eval_nodes` had already lowered and built every node — including
+        # the ones about to be skipped. That is not merely wasted work: a node whose
+        # value is already in the stream is not required to be fully bound, because
+        # the binder resolves a repeated expression to the EXISTING column and stops
+        # (binder.py's "early exit for calculated columns" — it leaves the children
+        # unbound on purpose, since nothing is going to evaluate them). Building
+        # bytecode for one of those reaches an IDENTIFIER with no schema_column and
+        # dies. `SELECT id + 1 AS u FROM $planets ORDER BY id + 1` was exactly that:
+        # the sort key resolves to the projection's own output column, and trying to
+        # recompute it raised
+        #   ValueError: compiled_expression: IDENTIFIER node missing schema_column
+        # `should_evaluate` is applied here so this pre-pass sees exactly the node
+        # set the compile loop used to see, and no more.
+        pending = []
+        for node_ in eval_nodes:
+            if not should_evaluate(node_):
                 continue
+            sc = getattr(node_, "schema_column", None)
+            identity = getattr(sc, "identity", None) if sc is not None else None
+            if identity is None or identity not in layout:
+                pending.append(node_)
+                continue
+            # The stream already carries this identity — legal ONLY when it is
+            # the same-typed column (an earlier program's output, or a plain
+            # passthrough). When the binder assigns a COMPUTED node the same
+            # identity as a raw column of a DIFFERENT type (observed:
+            # `SELECT EventTime, EventTime::TIMESTAMP[s]` — the cast shares
+            # the raw column's identity but declares unit=us while the stream
+            # carries unit=s), silently skipping the computation displayed the
+            # raw values under the computed descriptor = WRONG ANSWER. Fail
+            # loud on descriptor mismatch instead.
+            declared = ct_by_identity.get(identity)
+            stream_lt = self._layout_type(None, identity)
+            if declared is not None and stream_lt is not None:
+                declared_pt = getattr(declared, "physical", None)
+                if declared_pt is not None and declared_pt != stream_lt:
+                    _unsupported(
+                        "a computed column whose identity collides with a "
+                        "differently-typed stream column (binder identity reuse)")
+            declared_lg = getattr(declared, "logical", None) if declared is not None else None
+            stream_ct = (getattr(self, "_cts", None) or {}).get(identity)
+            if declared_lg is not None and stream_ct is not None:
+                stream_lg = getattr(stream_ct, "logical", None)
+                if stream_lg is not None and str(stream_lg) != str(declared_lg):
+                    _unsupported(
+                        "a computed column whose identity collides with a "
+                        "same-physical, different-descriptor stream column "
+                        "(binder identity reuse)")
+
+        for identity, bc in compile_eval_nodes(pending):
             if not bytecode_ops_all_c_native(bc):
                 # Name the expression AND the operation inside it. The refusal is
                 # correct either way, but "a computed expression outside the

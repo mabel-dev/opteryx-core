@@ -130,6 +130,12 @@ cdef extern from "filesystem.hpp" namespace "rugo":
     ParquetFooterResult FetchParquetFooter(const string& path) except + nogil
     vector[ParquetFooterResult] FetchParquetFootersMany(
         const vector[string]& paths, const vector[int64_t]& file_sizes) except + nogil
+    # auth_header overload: bearer credential for remote footer fetches when the
+    # caller is not pre-signing. Omitted/empty keeps the previous behaviour, where
+    # the signed URL carries its own credential.
+    vector[ParquetFooterResult] FetchParquetFootersMany(
+        const vector[string]& paths, const vector[int64_t]& file_sizes,
+        const string& auth_header) except + nogil
 
 cdef extern from "decode.hpp":
     cdef cppclass DecodedColumn:

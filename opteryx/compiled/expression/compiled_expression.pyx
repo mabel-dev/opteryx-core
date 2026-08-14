@@ -35,10 +35,12 @@ import decimal as _decimal
 import struct as _struct
 
 from draken.vectors.vector cimport Vector
+from draken.vectors.bool_vector cimport BoolVector
 from draken.core.buffers cimport DRAKEN_VARCHAR, DRAKEN_NVARCHAR, DRAKEN_VARBINARY, DRAKEN_INTERVAL, DRAKEN_DATE32, DRAKEN_TIMESTAMP64, DRAKEN_VECTOR_FP16, DRAKEN_ARRAY
 from draken.core.buffers cimport DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64, DRAKEN_FLOAT32, DRAKEN_FLOAT64
 from draken.core.buffers cimport DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64
 from draken.core.buffers cimport DRAKEN_DECIMAL128, DRAKEN_DECIMAL, DRAKEN_TIME32, DRAKEN_TIME64
+from draken.core.buffers cimport DRAKEN_BOOL
 
 # Epoch anchor for DATE literal → days-since-1970 conversion (bind time only).
 cdef object _EPOCH_DATE = _datetime.date(1970, 1, 1)
@@ -165,9 +167,37 @@ cdef Vector _materialise_constant_literal(object value, int physical_type,
             if logical is not None:
                 _draken_native.vector_attach_logical_type(null_t, logical)
             return Vector(null_t)
-        # BOOL has no constant constructor in draken_native at all. Numeric and
-        # genuinely untyped (physical_type == -1) NULLs keep DRAKEN_NULL — their
-        # kernels short-circuit on the DRAKEN_NULL tag.
+        if physical_type == <int>DRAKEN_BOOL:
+            # A BOOL null constant is NOT interchangeable with an untyped
+            # DRAKEN_NULL, because a BOOL vector is where a CONDITION comes from
+            # and the conditional kernels type-check that argument rather than
+            # short-circuiting on it: `draken_iif` refuses anything but
+            # DRAKEN_BOOL outright ("condition must be BOOLEAN"), as does
+            # draken_if_then_else. `COUNT(*) FILTER (WHERE p)` lowers to
+            # `COUNT(IIF(p, 1, NULL))` (logical_planner_builders), so a `p` the
+            # optimizer constant-folds to a BOOL-typed NULL — `CASE WHEN ('beta'
+            # <= '0') THEN TRUE ELSE NULL END`, whose condition is decidable at
+            # plan time and whose surviving branch is NULL — arrived untyped and
+            # killed the query. The plan was right throughout: it declares BOOL,
+            # and this is the one place that dropped it.
+            #
+            # This arm was previously commented as impossible ("BOOL has no
+            # constant constructor in draken_native at all"). It has one; it is
+            # spelled `vector_from_bool_constant`, on the `vector_from_bool_*`
+            # pattern rather than the `vector_<type>_from_constant` pattern every
+            # other arm here uses, and it takes value=None for an all-null
+            # constant exactly like they do.
+            #
+            # Wrapped as BoolVector, not Vector: BoolVector is a Vector subclass with
+            # no extra state, and it is the wrapper every other BOOL producer returns
+            # (the compare kernels, vector_like/vector_rlike, casts.pyx). Consumers
+            # rely on that — `case_helpers.decide_one_branch` is declared
+            # `BoolVector bv` and reads the bit-packed layout through it, so a plain
+            # Vector here reached a user as the raw Cython
+            # `TypeError: Argument 'bv' has incorrect type`.
+            return BoolVector(_draken_native.vector_from_bool_constant(None, 1))
+        # Numeric and genuinely untyped (physical_type == -1) NULLs keep
+        # DRAKEN_NULL — their kernels short-circuit on the DRAKEN_NULL tag.
         return Vector(_draken_native.vector_null_from_length(1))
     if isinstance(value, bool):
         # Bools are handled upstream by BC_LOAD_LIT_BOOL; reaching here is a bug.
@@ -571,10 +601,10 @@ def _pack_membership_blob(vals, int kind, int negate):
     invariant to preserve — draken_in_list has no kind-2 arm); kind 3 is uint64
     SORTED ASCENDING (UNSIGNED int family — a separate kind from 0 so a value
     above INT64_MAX is never reinterpreted as negative). Shared by the
-    IN-list lowering and the ARRAY_CONTAINS_ANY/ALL/single-item lowerings so
-    they cannot drift on the byte format or the kind-0 sort invariant.
+    IN-list lowering and the `@>`/`@>>`/single-item lowerings so they cannot
+    drift on the byte format or the kind-0 sort invariant.
     Duplicates are collapsed (set()) — membership is unaffected, and for
-    ARRAY_CONTAINS_ALL a de-duplicated needle set is exactly the subset test.
+    `@>>` (contains-ALL) a de-duplicated needle set is exactly the subset test.
     """
     import struct as _struct
 
@@ -639,15 +669,15 @@ def _build_in_list_blob(values, left_type, int negate):
 
 
 def _build_array_membership_blob(values):
-    """ARRAY_CONTAINS_ANY/ALL needle set → in_list_ctx blob (negate always 0; the
-    ANY/ALL distinction is the KERNEL, not a blob flag).
+    """`@>` / `@>>` needle set → in_list_ctx blob (negate always 0; the
+    contains-ANY/contains-ALL distinction is the KERNEL, not a blob flag).
 
     Unlike _build_in_list_blob there is no column type to gate on: the binder
     leaves ARRAY columns UNTYPED (schema_column.column_type is None — see the
     ARRAY->VARCHAR cast's comment), so the element type is simply not knowable
     here. The blob kind is therefore inferred from the LITERAL values, and the
     kernel verifies it against the actual child element type at RUN time, failing
-    loud on a mismatch (e.g. ARRAY_CONTAINS_ANY(int_array, ('a','b'))) rather
+    loud on a mismatch (e.g. `int_array @> ('a','b')`) rather
     than silently answering false."""
     vals = _membership_values(values)
     if vals is None:
@@ -683,8 +713,8 @@ def _micros_to_array_unit(long long micros, int unit_value):
 
 
 def _build_single_item_blob(value, element_ct):
-    """Serialize ONE scalar item — the LEFT (item) side of ARRAY_CONTAINS's
-    lowered `item = ANY(arr)` — into a one-element in_list_ctx blob. Kind is
+    """Serialize ONE scalar item — the LEFT (item) side of `item = ANY(arr)`
+    — into a one-element in_list_ctx blob. Kind is
     inferred from the item's Python/bind-time type:
       bool/int  -> kind 0 (int64)
       float     -> kind 2 (float64)
@@ -1507,18 +1537,17 @@ cdef Py_ssize_t _linearize(
                             slot.ctx_ptr = <void*>(<unsigned long long>_la_ctx.ctx_ptr)
                         return sub_depth   # pops 1 (subject), pushes mask — net 0
 
-        # ARRAY_CONTAINS(arr, item) lowers to `item = ANY(arr)` (AnyOpEq) at
-        # plan-build time; bare `x = ANY(arr)` produces the same node. Two
+        # `item = ANY(arr)` (AnyOpEq) — the single-item containment test. Two
         # native shapes, both GIL-free (no Python `anyop_eq`/`vector_anyop_eq`
         # is ever reached — that GIL path is retired for this node type):
         #
         # (a) node.right is a DIRECT ARRAY column, node.left a literal item —
         #     pack the item into a one-element in_list_ctx blob and dispatch
         #     draken_array_contains via the SAME BC_C_NATIVE_CHILD +
-        #     WRAP_AS_BOOL path ARRAY_CONTAINS_ANY uses, so the compare
+        #     WRAP_AS_BOOL path `@>` uses, so the compare
         #     admission gate (which refuses AnyOpEq) is never touched.
-        # (b) node.right is a LITERAL array (`x = ANY([1,2,3])` /
-        #     `ARRAY_CONTAINS([1,2,3], x)`), node.left anything (literal or
+        # (b) node.right is a LITERAL array (`x = ANY([1,2,3])`), node.left
+        #     anything (literal or
         #     column) — this is exactly an IN-list test, so it reuses
         #     draken_in_list directly: no new kernel, no new blob kind, and a
         #     fully-literal expression (both sides) now constant-folds through
@@ -1582,16 +1611,27 @@ cdef Py_ssize_t _linearize(
                         return sub_depth   # value pushed, fn pops 1 pushes 1 — net 0
 
         # `arr @> (…)` (AtArrow, contains-ANY) and `arr @>> (…)` (ArrayContainsAll,
-        # contains-ALL) — the OPERATOR spellings of ARRAY_CONTAINS_ANY/ALL, lowered
-        # to the same draken_array_contains_any/all kernels through the same
-        # BC_C_NATIVE_CHILD + WRAP_AS_BOOL shape (see the FUNCTION lowering below
-        # for why only the array operand is pushed and the needles ride the ctx).
+        # contains-ALL), lowered to draken_array_contains_any/all. These are the
+        # ONLY spellings of the multi-needle containment test — the former
+        # ARRAY_CONTAINS_ANY/ALL functions were removed as duplicate surface area.
         #
-        # These reach the filter from two directions, and BOTH were unrunnable while
-        # only the function spelling was lowered: written directly by a user, and
+        # The needle set is a LITERAL, baked into an in_list_ctx blob exactly as the
+        # IN-list lowering does — so it is NOT a second vector operand, and there is
+        # no second ARRAY child to resolve. That matters: the array operand's child
+        # element vector rides the BC_C_NATIVE_CHILD path (same as SORT / the
+        # ARRAY->VARCHAR cast), whose encoding carries exactly ONE column_identity.
+        # Only arity 1 is pushed (the array); the needles reach the kernel via ctx.
+        #
+        # Eligibility is tested BEFORE linearizing: a non-column array operand has no
+        # resolvable child, and once operands have been linearized there is no clean
+        # way to un-emit them and fall through to the generic compare.
+        # _NT_IDENTIFIER/_NT_EVALUATED/_NT_AGGREGATOR are exactly the node types that
+        # lower to BC_LOAD_COL.
+        #
+        # These reach the filter from two directions: written directly by a user, and
         # synthesised by predicate_rewriter, which folds OR'd / AND'd `x = ANY(col)`
-        # over one column into a single AtArrow / ArrayContainsAll node. So a query
-        # the rewriter had just made cheaper became a query the engine refused.
+        # over one column into a single AtArrow / ArrayContainsAll node — so a query
+        # the rewriter had just made cheaper must not become one the engine refuses.
         #
         # The needle literal is whatever the producer built — the rewriter emits a
         # list for AtArrow and a set for ArrayContainsAll — and
@@ -1618,12 +1658,62 @@ cdef Py_ssize_t _linearize(
                                   | BC_C_NATIVE_CHILD)
                     slot.kernel_fn = <void*>(<unsigned long long>_aco_fn)
                     # bc.count - 2 is the array's BC_LOAD_COL (this FUNCTION slot is
-                    # bc.count - 1) — same indexing the ARRAY_CONTAINS child path uses.
+                    # bc.count - 1) — same indexing the `= ANY` child path uses.
                     slot.column_identity = bc.instrs[bc.count - 2].column_identity
                     if _aco_ctx is not None:
                         bc._hold(_aco_ctx)
                         slot.ctx_ptr = <void*>(<unsigned long long>_aco_ctx.ctx_ptr)
                     return sub_depth   # array pushed, fn pops 1 pushes 1 — net 0
+
+        # `doc @? path` (AtQuestion) — JSON path existence, lowered to
+        # draken_json_path_exists. Arity 1: the path is a bind-time literal riding
+        # the SAME extraction_ctx `->` binds (BC_EXTR_JSON_PTR), so `@?` and `->`
+        # cannot drift on what a path spelling means — bare key, `$.a.b[0]` and a
+        # raw `/a/b` pointer all normalise in kernel_alloc_extraction_ctx.
+        #
+        # A NON-literal path has no lowering here (the tokens are resolved once at
+        # bind, not per row) and never reaches this point: operator_map's
+        # determine_type refuses it in the binder with a message that names the
+        # requirement, rather than letting it fall through to the generic compare
+        # and die as "outside the c-native kernel set".
+        if op_str == "AtQuestion" and node.left != NULL and node.right != NULL \
+                and node.right.node_type == _NT_LITERAL and node.right.value != NULL:
+            # Refuse a non-JSON document in the SAME shape and place `->` does
+            # (the EXTRACTION_OPERATOR branch below). Without this an untyped NULL
+            # document reached the kernel and came back with an internal message
+            # about vector types; `NULL -> 'a'` has always named the operator and
+            # the category instead. Only checked when the operand carries a
+            # schema_column — a bare literal document does not, and it is the
+            # kernel's own type test that covers that one.
+            _jpe_left_sc = <object>node.left.schema_column if node.left.schema_column != NULL else None
+            if _jpe_left_sc is not None:
+                _ensure_sql_types()
+                _jpe_left_ct = _jpe_left_sc.column_type
+                _jpe_left_cat = _jpe_left_ct.category if _jpe_left_ct is not None else None
+                if _jpe_left_cat is not None and _jpe_left_cat not in _STRING_FAMILY:
+                    raise IncorrectTypeError(
+                        f"@? requires a string/JSON document on the left; got {_jpe_left_cat!r}"
+                    )
+            _jpe_path = <object>node.right.value
+            if isinstance(_jpe_path, str):
+                _jpe_path = _jpe_path.encode("utf-8")
+            if isinstance(_jpe_path, bytes):
+                from draken.ops.kernels._kernel_registry import alloc_extraction_ctx as _jpe_alloc
+                _jpe_fn, _jpe_ctx = _resolve_kernel_and_context(
+                    "draken_json_path_exists", _jpe_alloc,
+                    (BC_EXTR_JSON_PTR, _jpe_path, 0))
+                if _jpe_fn is not None:
+                    sub_depth = _linearize(node.left, bc, depth)
+                    slot = bc._push_instr()
+                    slot.opcode = BC_FUNCTION
+                    slot.arity = 1
+                    slot.bool_value = 0
+                    slot.flags = BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
+                    slot.kernel_fn = <void*>(<unsigned long long>_jpe_fn)
+                    if _jpe_ctx is not None:
+                        bc._hold(_jpe_ctx)
+                        slot.ctx_ptr = <void*>(<unsigned long long>_jpe_ctx.ctx_ptr)
+                    return sub_depth   # doc pushed, fn pops 1 pushes 1 — net 0
 
         # IN-list — bind-time lowering to the C-ABI draken_in_list kernel for
         # plain literal collections over integer-family or string columns.
@@ -2558,50 +2648,6 @@ cdef Py_ssize_t _linearize(
                             bc._hold(_fmt_ctx)
                             slot.ctx_ptr = <void*>(<unsigned long long>_fmt_ctx.ctx_ptr)
                         return sub_depth
-
-        # ARRAY_CONTAINS_ANY / ARRAY_CONTAINS_ALL(arr, needles) — bind-time lowering.
-        #
-        # The needle set is a LITERAL, baked into an in_list_ctx blob exactly as the
-        # IN-list lowering does — so it is NOT a second vector operand, and there is
-        # no second ARRAY child to resolve. That matters: the array operand's child
-        # element vector rides the BC_C_NATIVE_CHILD path (same as SORT / the
-        # ARRAY->VARCHAR cast), whose encoding carries exactly ONE column_identity.
-        # Only arity 1 is pushed (the array); the needles reach the kernel via ctx.
-        #
-        # Eligibility is tested BEFORE linearizing: a non-column array operand has no
-        # resolvable child, and once parameters have been linearized there is no
-        # clean way to un-emit them and fall through to the generic path below.
-        # _NT_IDENTIFIER/_NT_EVALUATED/_NT_AGGREGATOR are exactly the node types that
-        # lower to BC_LOAD_COL.
-        _acm_func = func_val.upper() if func_val else ""
-        if _acm_func in ("ARRAY_CONTAINS_ANY", "ARRAY_CONTAINS_ALL") and n == 2 \
-                and node.parameters[0] != NULL and node.parameters[1] != NULL \
-                and node.parameters[1].node_type == _NT_LITERAL \
-                and (node.parameters[0].node_type == _NT_IDENTIFIER
-                     or node.parameters[0].node_type == _NT_EVALUATED
-                     or node.parameters[0].node_type == _NT_AGGREGATOR):
-            _acm_blob = _build_array_membership_blob(<object>node.parameters[1].value)
-            if _acm_blob is not None:
-                from draken.ops.kernels._kernel_registry import alloc_in_list_ctx as _acm_alloc
-                _acm_fn, _acm_ctx = _resolve_kernel_and_context(
-                    f"draken_{_acm_func.lower()}", _acm_alloc, _acm_blob)
-                if _acm_fn is not None:
-                    sub_depth = _linearize(node.parameters[0], bc, depth)
-                    slot = bc._push_instr()
-                    slot.opcode = BC_FUNCTION
-                    slot.arity = 1
-                    slot.bool_value = 0
-                    slot.flags = (BC_INSTR_C_NATIVE | BC_RESULT_WRAP_AS_BOOL
-                                  | BC_C_NATIVE_CHILD)
-                    slot.kernel_fn = <void*>(<unsigned long long>_acm_fn)
-                    # The child is resolved per morsel from THIS instruction's
-                    # identity; bc.count - 2 is the BC_LOAD_COL just linearized.
-                    slot.column_identity = bc.instrs[bc.count - 2].column_identity
-                    if _acm_ctx is not None:
-                        bc._hold(_acm_ctx)
-                        slot.ctx_ptr = <void*>(<unsigned long long>_acm_ctx.ctx_ptr)
-                    # No callable_ref: c-native, no Python fallback.
-                    return sub_depth   # operand pushed, fn pops 1 pushes 1 — net +1
 
         sub_depth = depth
         for i in range(n):

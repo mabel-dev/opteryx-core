@@ -59,6 +59,7 @@
             "third_party/mabel/base64",
             "third_party/mabel/base85",
             "third_party/mabel/carchar",
+            "third_party/mabel/medius",
             "third_party/mabel/parvi",
             "third_party/mabel/perfect_hash",
             "third_party/fastfloat",

@@ -346,7 +346,7 @@ cdef class CppIOPipeline:
 
     def __cinit__(self, int decode_workers=4, size_t queue_capacity=256,
                   int64_t pool_size=256*1024*1024,
-                  http_tuning=None, coalesce_tuning=None):
+                  http_tuning=None, coalesce_tuning=None, auth_header=None):
         self.pipeline = new ParquetIOPipeline(decode_workers, queue_capacity)
         self.pool = MemoryPool(pool_size, name="parquet-io", auto_resize=False)
         self.committed_bytes = 0
@@ -371,6 +371,11 @@ cdef class CppIOPipeline:
                 <double>_min_bw_bytes_per_s, <long>_timeout_floor_ms,
                 <bint>_use_multiplexing, <bint>_use_pipewait, <bint>_force_http11,
             )
+        # Bearer credential for the C++ fetches — the alternative to pre-signing
+        # each object (see _sign_paths). None when the connector still signs, in
+        # which case the URL carries its own credential and no header is wanted.
+        if auth_header:
+            self.pipeline.set_auth_header(auth_header.encode("utf-8"))
 
     def __dealloc__(self):
         if self.pipeline:
@@ -699,14 +704,19 @@ cdef tuple _read_footer_payload(
     return envelope, result.bytes_fetched
 
 
-cdef list _fetch_footers_many(list urls, list sizes):
+cdef list _fetch_footers_many(list urls, list sizes, str auth_header=None):
     """Concurrently fetch footer envelopes for many remote files (one get_many
-    batch in C++). `urls` are the already-rewritten/signed fetch URLs; `sizes`
-    are the known file sizes (no per-file HEAD). Returns envelopes (bytes) in
-    input order.
+    batch in C++). `urls` are the already-rewritten fetch URLs; `sizes` are the
+    known file sizes (no per-file HEAD). Returns envelopes (bytes) in input order.
+
+    `auth_header` authenticates the fetch when the caller did NOT pre-sign the
+    URLs. Exactly one of the two supplies the credential: a signed URL carries it
+    in the query string, an unsigned one needs the header. Neither yields an
+    anonymous request and a 403 on a private bucket.
     """
     cdef vector[string] cpp_paths
     cdef vector[int64_t] cpp_sizes
+    cdef string cpp_auth = (auth_header or "").encode("utf-8")
     cdef Py_ssize_t i, n = len(urls)
     cdef str url
     cpp_paths.reserve(n)
@@ -718,7 +728,7 @@ cdef list _fetch_footers_many(list urls, list sizes):
 
     cdef vector[ParquetFooterResult] results
     with nogil:
-        results = FetchParquetFootersMany(cpp_paths, cpp_sizes)
+        results = FetchParquetFootersMany(cpp_paths, cpp_sizes, cpp_auth)
 
     cdef list out = []
     cdef size_t k
@@ -1324,21 +1334,40 @@ cdef inline bint _is_remote_url(str url):
             or url.startswith("https://"))
 
 
+cdef str _native_auth_header(object filesystem):
+    """Bearer credential for the C++ fetches, or None when the caller pre-signs.
+
+    Exactly one of this and `_sign_paths` does the authenticating — never both,
+    never neither. A filesystem that signs returns None here (its URLs already
+    carry a credential); one that does not sign returns a header, and the C++ side
+    attaches it to every range GET. Both returning nothing means an unauthenticated
+    request, which GCS answers with a 401, so a connector exposing neither hook is
+    a local filesystem by construction."""
+    header_for = getattr(filesystem, "native_auth_header", None)
+    return header_for() if header_for is not None else None
+
+
 cdef tuple _sign_paths(object filesystem, object paths):
-    """Signed-URL rewrite (GCS): the C++ libcurl fetches carry no auth header, so a
-    gs:// path is rewritten to a signed HTTPS URL before it reaches the pipeline.
+    """Signed-URL rewrite (GCS): rewrites a gs:// path to a signed HTTPS URL whose
+    credential rides in the query string, for callers that cannot send a header.
 
     Returns (orig_to_cpp, cpp_to_orig). Both are EMPTY when the filesystem does not
-    sign (a local scan, or a connector with no rewrite hook), which is why every
-    caller reads through `orig_to_cpp.get(path, path)` — an unsigned path passes
-    through unchanged. The reverse map exists so C++ result paths translate back to
-    originals for telemetry; a caller whose native Source never reports paths back
-    (NativeScanPlan) can discard it."""
+    sign — a local scan, a connector with no rewrite hook, or (since bearer-token
+    support landed in the pipeline) a connector that authenticates by header
+    instead. Every caller reads through `orig_to_cpp.get(path, path)`, so an
+    unsigned path passes through unchanged and is authenticated by
+    `_native_auth_header` instead. The reverse map exists so C++ result paths
+    translate back to originals for telemetry; a caller whose native Source never
+    reports paths back (NativeScanPlan) can discard it.
+
+    Signing costs one IAM signBlob RPC per file wherever there is no local private
+    key (Compute Engine / Cloud Run), so `signs_urls` defaults to False on the GCS
+    filesystem and this returns empty maps there."""
     cdef dict orig_to_cpp = {}
     cdef dict cpp_to_orig = {}
     cdef str cpp_path
     sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
-    if sign_url:
+    if sign_url and getattr(filesystem, "signs_urls", True):
         for path in paths:
             if path not in orig_to_cpp:
                 cpp_path = sign_url(path)
@@ -1354,6 +1383,7 @@ cdef tuple _acquire_remote_footers(
     ParquetFooterBytesCache footer_bytes_cache,
     unordered_map[string, FileStats]* footer_map,
     object prefetched_footers,
+    str auth_header=None,
 ):
     """Acquire the Parquet footer for every REMOTE file in `paths`, in three steps
     that share ONE eligibility pass so the caching rules can't drift apart (they used
@@ -1458,7 +1488,7 @@ cdef tuple _acquire_remote_footers(
         batch_urls.append(fetch_url)
         batch_sizes.append(size)
     if batch_urls:
-        envelopes = _fetch_footers_many(batch_urls, batch_sizes)
+        envelopes = _fetch_footers_many(batch_urls, batch_sizes, auth_header)
         pending_remote = []
         for bi in range(len(batch_orig)):
             envelope = envelopes[bi]
@@ -1550,7 +1580,7 @@ cpdef list fetch_column_stats_many(
 
     orig_to_cpp, _ = _sign_paths(filesystem, paths)
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            &footer_map, None)
+                            &footer_map, None, _native_auth_header(filesystem))
 
     for path in paths:
         path_bytes = path.encode("utf-8")
@@ -1655,7 +1685,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     cdef Py_ssize_t remote_files_seen, process_hits, tier_hits, tier_misses
     remote_files_seen, process_hits, tier_hits, tier_misses = _acquire_remote_footers(
         paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-        src.footer_map, prefetched_footers,
+        src.footer_map, prefetched_footers, _native_auth_header(filesystem),
     )
     # Reported whenever this scan considered a remote file, including when the in-process
     # caches served every one of them and the remote tier was never reached — that is
@@ -1766,6 +1796,7 @@ cpdef IpcRowGroupSource open_ipc_source(
         pool_size=dyn_pool_size,
         http_tuning=http_tuning,
         coalesce_tuning=coalesce_tuning,
+        auth_header=_native_auth_header(filesystem),
     )
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
@@ -1819,15 +1850,11 @@ cpdef IpcRowGroupSource open_pass2_source(
     src.prefetched_footers = None
     src.footer_map = new unordered_map[string, FileStats]()
 
-    sign_url = getattr(filesystem, "rewrite_to_signed_url", None)
-    cdef dict orig_to_cpp = {}
-    cdef dict cpp_to_orig = {}
-    if sign_url:
-        for path, _rg, _mask in work_items:
-            if path not in orig_to_cpp:
-                cpp_path = sign_url(path)
-                orig_to_cpp[path] = cpp_path
-                cpp_to_orig[cpp_path] = path
+    # Was an inlined copy of _sign_paths; folded back onto the shared helper so the
+    # signs_urls check cannot be honoured in one place and missed in the other.
+    cdef dict orig_to_cpp
+    cdef dict cpp_to_orig
+    orig_to_cpp, cpp_to_orig = _sign_paths(filesystem, [w[0] for w in work_items])
     src.orig_to_cpp = orig_to_cpp
     src.cpp_to_orig = cpp_to_orig
 
@@ -1865,6 +1892,7 @@ cpdef IpcRowGroupSource open_pass2_source(
         pool_size=256*1024*1024,
         http_tuning=http_tuning,
         coalesce_tuning=coalesce_tuning,
+        auth_header=_native_auth_header(filesystem),
     )
     return src
 
@@ -2131,7 +2159,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     # `_read_footer_payload` once per remote file.
     _footer_t0 = time.perf_counter_ns()
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            NULL, None)
+                            NULL, None, _native_auth_header(filesystem))
     plan.footer_fetch_ns += time.perf_counter_ns() - _footer_t0
 
     # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers the
@@ -2393,7 +2421,7 @@ cpdef bint native_scan_supported(paths, column_names, expected_kinds, file_sizes
     # gate — the first toucher of remote footers — pay one serial, GIL-held
     # round-trip per file.
     _acquire_remote_footers(paths, orig_to_cpp, file_sizes, footer_bytes_cache,
-                            NULL, None)
+                            NULL, None, _native_auth_header(filesystem))
 
     # PROTOTYPE (2026-08-14, unratified) — H5: batch the LOCAL cold footers.
     # This gate is the FIRST toucher of local footers on the native path (it
@@ -2677,6 +2705,7 @@ def iter_pass2_row_groups_ipc(
         decode_workers=decode_workers,
         queue_capacity=1024,
         pool_size=256*1024*1024,
+        auth_header=_native_auth_header(filesystem),
     )
 
     cdef unordered_map[string, FileStats] local_footers_native

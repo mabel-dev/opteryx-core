@@ -735,4 +735,216 @@ VecResult draken_cast_string_to_nvarchar(void* ctx, const DrakenVector* v) {
     });
 }
 
+// --- STRING → DECIMAL ----------------------------------------------------------
+//
+// EXACT text → fixed-point. Deliberately NOT composed from
+// draken_cast_string_to_float64 the way the uint/narrow-int/float32 targets above
+// compose from their parsers: a double cannot hold 18 significant digits, so
+// routing through one would silently corrupt the low digits of exactly the values
+// DECIMAL exists to keep. The parse is therefore its own integer accumulation.
+//
+// Accepted syntax mirrors the literal path (`decimal.Decimal(text.strip())` in
+// _parse_decimal / _build_decimal_closure, casts.pyx) so a cast over a COLUMN and
+// the same cast over a LITERAL cannot disagree:
+//   [ws] [+|-] digits [ . digits] [ (e|E) [+|-] digits ] [ws]
+// with at least one mantissa digit ('1.' and '.5' are both accepted). Infinity and
+// NaN are rejected — neither has a fixed-point representation, and the literal path
+// rejects them too (at quantize).
+//
+// Value policy is the one every → DECIMAL kernel in this tree enforces: a declared
+// type is a contract, not a hint.
+//   - fractional digits beyond the declared scale FAIL LOUD when they would be
+//     dropped; trailing zeros re-pad silently ('1.250' → DECIMAL(10,2) is 1.25).
+//   - a magnitude outside the declared precision FAILS LOUD, never wraps.
+//   - malformed text FAILS LOUD.
+// Under TRY_CAST each of those maps the row to NULL instead (kernel_cast_is_safe).
+//
+// LIMIT, deliberate and loud: a mantissa carrying more than 38 significant digits
+// is refused as an overflow even when a negative exponent would bring it back into
+// range ('1e39' * 1e-30). 38 digits IS the DECIMAL precision ceiling, so no
+// representable target loses reachable values; the alternative is arbitrary-
+// precision accumulation for inputs no DECIMAL column can store.
+//
+// SHAPE-PRESERVING (parse the data_length PHYSICAL values, keep the input's
+// selection), matching every other string→numeric kernel in this file rather than
+// the dense → DECIMAL kernels: parsing is the expensive step here, and a
+// dict-encoded string column would otherwise re-parse every repeat. Liveness-masked
+// like draken_cast_string_to_int64, so a dictionary value referenced only by NULL
+// rows can never raise on text SQL does not read.
+static __int128 str_dec_pow10(int k) noexcept {
+    __int128 r = 1;
+    while (k-- > 0) r *= 10;
+    return r;
+}
+
+// Parse dispositions. File scope, NOT inside the kernel body: an enum's brace list
+// commas would be parsed as DRAKEN_KERNEL_TRY macro argument separators (the same
+// trap the bool→string literals at the top of cast_numeric.cpp are hoisted for).
+#define STR_DEC_OK        0
+#define STR_DEC_MALFORMED 1
+#define STR_DEC_OVERFLOW  2
+#define STR_DEC_SCALE     3
+
+VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
+    DRAKEN_KERNEL_TRY({
+        if (!v) return draken_error_sentinel("Input vector is null");
+        if (v->type != DRAKEN_VARCHAR && v->type != DRAKEN_NVARCHAR && v->type != DRAKEN_VARBINARY)
+            return draken_error_sentinel_fmt("cast string->decimal: expected string, got %d", v->type);
+        if (!ctx) return draken_error_sentinel("cast string->decimal: missing ctx (precision/scale)");
+        const auto* c = static_cast<const binary_op_ctx*>(ctx);
+        if (c->result_precision == 0u || c->result_precision > 38u)
+            return draken_error_sentinel_fmt("cast string->decimal: bad target precision %d",
+                                             (int)c->result_precision);
+
+        const int target_scale = static_cast<int>(c->result_scale);
+        const __int128 dec_lim = str_dec_pow10(static_cast<int>(c->result_precision));
+        // Accumulation ceiling: 10^38 is the widest DECIMAL, and __int128 holds it
+        // with room for the *10+d step below without ever wrapping.
+        const __int128 acc_lim = str_dec_pow10(38);
+
+        const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
+        const uint32_t k = v->data_length;
+        const uint32_t n = v->length;
+        const bool dst128 = c->result_precision > 18u;
+        const size_t es = dst128 ? 16u : 8u;
+        uint8_t* out = static_cast<uint8_t*>(draken_malloc((k > 0u ? k : 1u) * es));
+        if (!out) return draken_error_sentinel("Allocation failed");
+
+        std::vector<uint8_t> live(k > 0u ? k : 1u, 0u);
+        for (uint32_t i = 0u; i < n; ++i)
+            if (!kernel_row_is_null(v, i)) live[v->selection[i]] = 1u;
+
+        const bool is_safe = kernel_cast_is_safe(ctx);
+        std::vector<uint8_t> bad(k > 0u ? k : 1u, 0u);
+        bool any_bad = false;
+
+        for (uint32_t j = 0u; j < k; ++j) {
+            uint8_t* dst = out + static_cast<size_t>(j) * es;
+            if (!live[j]) { std::memset(dst, 0, es); continue; }
+
+            const DrakenStringSlot* slot = &sa->slots[j];
+            const uint8_t* sdata = str_data(slot, sa->arena);
+            const uint32_t slen  = str_length(slot);
+
+            // Declared separately, NOT `uint32_t p = 0u, end = slen;` — the comma in a
+            // multi-declarator statement is a DRAKEN_KERNEL_TRY macro argument separator.
+            uint32_t p = 0u;
+            uint32_t end = slen;
+            while (p < end && cast_is_ascii_space(sdata[p])) ++p;
+            while (end > p && cast_is_ascii_space(sdata[end - 1u])) --end;
+
+            int status = STR_DEC_OK;
+            bool negative = false;
+            if (p < end && (sdata[p] == '+' || sdata[p] == '-')) {
+                negative = (sdata[p] == '-');
+                ++p;
+            }
+
+            __int128 mag = 0;
+            int frac_digits = 0;
+            uint32_t digits_seen = 0u;
+            bool seen_point = false;
+            for (; p < end; ++p) {
+                const uint8_t ch = sdata[p];
+                if (ch == '.') {
+                    if (seen_point) { status = STR_DEC_MALFORMED; break; }
+                    seen_point = true;
+                    continue;
+                }
+                if (ch == 'e' || ch == 'E') break;
+                if (ch < '0' || ch > '9') { status = STR_DEC_MALFORMED; break; }
+                ++digits_seen;
+                if (seen_point) ++frac_digits;
+                if (mag >= acc_lim) { status = STR_DEC_OVERFLOW; continue; }
+                mag = mag * 10 + static_cast<__int128>(ch - '0');
+            }
+            if (status == STR_DEC_OK && digits_seen == 0u) status = STR_DEC_MALFORMED;
+
+            int exponent = 0;
+            if (status == STR_DEC_OK && p < end && (sdata[p] == 'e' || sdata[p] == 'E')) {
+                ++p;
+                bool exp_neg = false;
+                if (p < end && (sdata[p] == '+' || sdata[p] == '-')) {
+                    exp_neg = (sdata[p] == '-');
+                    ++p;
+                }
+                uint32_t exp_digits = 0u;
+                for (; p < end; ++p) {
+                    const uint8_t ch = sdata[p];
+                    if (ch < '0' || ch > '9') { status = STR_DEC_MALFORMED; break; }
+                    ++exp_digits;
+                    // Clamped: any |exponent| past 1000 is already decided by the
+                    // precision/scale checks below, and this keeps the int bounded.
+                    if (exponent < 1000) exponent = exponent * 10 + (ch - '0');
+                }
+                if (exp_digits == 0u) status = STR_DEC_MALFORMED;
+                if (exp_neg) exponent = -exponent;
+            } else if (status == STR_DEC_OK && p != end) {
+                status = STR_DEC_MALFORMED;
+            }
+
+            __int128 unscaled = 0;
+            if (status == STR_DEC_OK) {
+                // unscaled = mag * 10^(target_scale + exponent - frac_digits)
+                const int shift = target_scale + exponent - frac_digits;
+                if (mag == 0) {
+                    unscaled = 0;
+                } else if (shift > 38) {
+                    status = STR_DEC_OVERFLOW;
+                } else if (shift < -38) {
+                    status = STR_DEC_SCALE;
+                } else if (shift >= 0) {
+                    const __int128 factor = str_dec_pow10(shift);
+                    if (mag > (dec_lim - 1) / factor) status = STR_DEC_OVERFLOW;
+                    else unscaled = mag * factor;
+                } else {
+                    const __int128 factor = str_dec_pow10(-shift);
+                    // Exact only: digits that would be DROPPED are an error, trailing
+                    // zeros divide away cleanly.
+                    if (mag % factor != 0) status = STR_DEC_SCALE;
+                    else unscaled = mag / factor;
+                }
+            }
+            // unscaled is still the MAGNITUDE here (the sign is applied below), so
+            // only the upper bound can be crossed.
+            if (status == STR_DEC_OK && unscaled >= dec_lim) status = STR_DEC_OVERFLOW;
+
+            if (status != STR_DEC_OK) {
+                if (!is_safe) {
+                    draken_free(out);
+                    if (status == STR_DEC_OVERFLOW)
+                        return draken_error_sentinel_fmt(
+                            "cast string->decimal: value overflows DECIMAL(%d, %d)",
+                            (int)c->result_precision, (int)c->result_scale);
+                    if (status == STR_DEC_SCALE)
+                        return draken_error_sentinel_fmt(
+                            "cast string->decimal: value has more decimal places than "
+                            "the declared scale %d", (int)c->result_scale);
+                    return draken_error_sentinel("Invalid number in string literal");
+                }
+                std::memset(dst, 0, es); bad[j] = 1u; any_bad = true; continue;
+            }
+
+            if (negative) unscaled = -unscaled;
+            if (dst128) {
+                std::memcpy(dst, &unscaled, 16u);
+            } else {
+                int64_t w = static_cast<int64_t>(unscaled);
+                std::memcpy(dst, &w, 8u);
+            }
+        }
+
+        VecResult r;
+        r.data = out;
+        r.type = dst128 ? DRAKEN_DECIMAL128 : DRAKEN_DECIMAL;
+        r.validity_embedded = 0u;
+        r.ts_unit = 0xFFu;
+        r.dec_precision = c->result_precision;
+        r.dec_scale = c->result_scale;
+        kernel_preserve_shape(r, v);
+        if (any_bad) kernel_null_bad_rows(r, v, bad.data());
+        return r;
+    });
+}
+
 }  // extern "C"

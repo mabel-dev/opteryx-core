@@ -123,7 +123,7 @@ def test_membership_permissions():
         morsel.num_rows
         for morsel in session.execute_to_morsels(
             "SELECT * FROM testdata.astronauts "
-            "WHERE ARRAY_CONTAINS_ANY(missions, @@user_memberships)"
+            "WHERE missions @> @@user_memberships"
         )
     )
     assert rows == 3

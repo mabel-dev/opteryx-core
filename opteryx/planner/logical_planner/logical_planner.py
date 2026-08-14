@@ -130,6 +130,47 @@ class LogicalPlanNode(Node):
         return self.node_type.name
 
 
+def _set_operation_leg_columns(leg_plan: Graph) -> Optional[list]:
+    """The columns one leg of a set operation projects — its own EXIT node's columns.
+
+    Every leg plan ends in an EXIT whose `columns` are that leg's declared projection:
+    a plain SELECT sets it in inner_query_planner, and a NESTED set operation recurses
+    through plan_query, which sets its own. So this is the leg's true output list at
+    any nesting depth, syntactically, before any schema is fetched.
+
+    "The first Project node in the leg's graph" is NOT the same thing, and was the bug
+    this replaces: `SELECT id FROM (SELECT id, name FROM $planets) AS x UNION ALL
+    SELECT id FROM $planets` has two Project nodes in its left leg, and graph order put
+    the SUBQUERY's (id, name) first — so the union declared two columns for a leg that
+    projects one, and the query died at compile time with "a UNION leg narrower than
+    the union schema", blaming the leg for the union's own declaration.
+
+    Returns None when the leg has no single locatable exit, or an exit with no columns.
+    """
+    exit_points = leg_plan.get_exit_points()
+    if len(exit_points) != 1:
+        return None
+    return leg_plan[exit_points[0]].columns or None
+
+
+def _set_operation_leg_arity(leg_plan: Graph) -> Optional[int]:
+    """How many columns one leg of a set operation projects, or None when only the
+    binder can say.
+
+    None means "not knowable here", never "no columns": a wildcard stands for however
+    many columns the relation turns out to have, which is the binder's business
+    (`_validate_set_operation_types` counts those from the bound schemas). A leg with
+    no locatable single exit is unknown for the same reason. Callers must treat None as
+    "do not check", never as zero.
+    """
+    columns = _set_operation_leg_columns(leg_plan)
+    if columns is None:
+        return None
+    if any(column.node_type == NodeType.WILDCARD for column in columns):
+        return None
+    return len(columns)
+
+
 def get_subplan_schemas(sub_plan: Graph) -> List[str]:
     """
     Collects all schema aliases used within a given sub-plan.
@@ -395,6 +436,51 @@ def _table_name(branch):
     if branch["relation"][key]["alias"]:
         return branch["relation"][key]["alias"]["name"]["value"]
     return ".".join(part["Identifier"]["value"] for part in branch["relation"][key]["name"])
+
+
+def _strip_outer_nesting(node):
+    """Drop redundant `NESTED` wrappers from the OUTERMOST node of a clause expression.
+
+    Parentheses parse to a `NESTED` wrapper, and that wrapper is part of the
+    expression's rendering — which IS its identity (the binder resolves an
+    expression by looking its rendering up in the schemas). So `(id + 1)` and
+    `id + 1` were two different columns, and `SELECT (id + 1) AS u ... GROUP BY
+    id + 1` planned an aggregate emitting one identity under a projection asking
+    for the other; the compiler then tried to recompute the projection from `id`,
+    which the aggregate no longer carries.
+
+    Strip only at the TOP. Inside an expression the wrapper is load-bearing:
+    `BINARY_OPERATOR` renders without parentheses of its own, so `(id + 2) * 3`
+    and `id + (2 * 3)` are told apart by nothing else, and collapsing them onto
+    one identity is a wrong answer, not a naming wrinkle. At the top of a clause
+    expression there is no enclosing operator, so the parentheses cannot be
+    disambiguating anything and dropping them is provably meaning-preserving.
+
+    This must happen BEFORE binding. Doing it afterwards — as the optimizer does
+    for ORDER BY and GROUP BY in constant_folding.py — is too late: both nodes
+    have already been minted their own separate identities, which is the divergence
+    itself.
+
+    The alias rides down onto the centre, because the binder names a projection
+    from the outermost node.
+
+    Applied at every clause top: SELECT, WHERE, GROUP BY, HAVING, QUALIFY,
+    ORDER BY, DISTINCT ON, JOIN ON / ASOF, and a window's PARTITION BY and
+    ORDER BY. Uniformly, not only where a break was observed — a clause that
+    tolerates the wrapper today does so by accident of what its consumers happen
+    to look through, and each one that does not was its own distinct failure:
+    ORDER BY raised the compiler KeyError, a window's PARTITION BY raised
+    `'NoneType' object has no attribute 'lower'`, and `JOIN ... ON (a = b)`
+    reported "INNER JOIN has no valid conditions, did you mean CROSS JOIN?".
+    """
+    if not isinstance(node, Node):
+        return node
+    while node.node_type == NodeType.NESTED and node.centre is not None:
+        centre = node.centre
+        if node.alias and not centre.alias:
+            centre.alias = node.alias
+        node = centre
+    return node
 
 
 def _validate_where_clause_expression(
@@ -887,10 +973,13 @@ def _window_spec_nodes(over: Optional[dict]) -> Tuple[list, list]:
     handed back named apart, rather than by a loop variable that can shadow the other.
     """
     _over = over or {}
-    _partition_by = [logical_planner_builders.build(pb) for pb in _over.get("partition_by", [])]
+    _partition_by = [
+        _strip_outer_nesting(logical_planner_builders.build(pb))
+        for pb in _over.get("partition_by", [])
+    ]
     _window_order_by = [
         (
-            logical_planner_builders.build(item["expr"]),
+            _strip_outer_nesting(logical_planner_builders.build(item["expr"])),
             True if item["options"]["asc"] is None else item["options"]["asc"],
         )
         for item in _over.get("order_by", [])
@@ -1136,7 +1225,9 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         inner_plan += sub_plan
 
     # selection
-    _selection = logical_planner_builders.build(ast_branch["Select"].get("selection"))
+    _selection = _strip_outer_nesting(
+        logical_planner_builders.build(ast_branch["Select"].get("selection"))
+    )
     if _selection:
         if len(_relations) == 0:
             raise UnsupportedSyntaxError("Statement has a **WHERE** clause but no **FROM** clause.")
@@ -1149,7 +1240,10 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             inner_plan.add_edge(previous_step_id, step_id)
 
     # groups
-    _projection = logical_planner_builders.build(ast_branch["Select"].get("projection")) or []
+    _projection = [
+        _strip_outer_nesting(p)
+        for p in (logical_planner_builders.build(ast_branch["Select"].get("projection")) or [])
+    ]
     if len(_projection) > 1 and any(
         p.node_type == NodeType.WILDCARD for p in _projection if p.value is None
     ):
@@ -1211,7 +1305,9 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # Until this existed, `ast_branch["Select"]["qualify"]` was read by nothing:
     # the clause parsed, bound, and then vanished, so QUALIFY silently returned
     # the unfiltered relation.
-    _qualify = logical_planner_builders.build(ast_branch["Select"].get("qualify"))
+    _qualify = _strip_outer_nesting(
+        logical_planner_builders.build(ast_branch["Select"].get("qualify"))
+    )
     _qualify_window_slots: list = []  # (index into _projection, original node)
     # The minted names of window columns a clause OTHER than the SELECT list needed —
     # QUALIFY's and ORDER BY's. Removing them from `_projection` is enough for a
@@ -1291,7 +1387,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if _order_by and _order_by.get("kind") and _order_by["kind"].get("Expressions"):
         _order_by = [
             (
-                logical_planner_builders.build(item["expr"]),
+                _strip_outer_nesting(logical_planner_builders.build(item["expr"])),
                 True if item["options"]["asc"] is None else item["options"]["asc"],
             )
             for item in _order_by["kind"]["Expressions"]
@@ -1383,7 +1479,9 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # only, so a decomposed HAVING aggregate would leave the condition tree referencing
     # an expression that nothing computes. Undecomposed aggregates over expressions are
     # supported by the aggregate operator directly.
-    _having = logical_planner_builders.build(ast_branch["Select"].get("having"))
+    _having = _strip_outer_nesting(
+        logical_planner_builders.build(ast_branch["Select"].get("having"))
+    )
     _having_passthrough: list = []
     if _having:
         # Before the aggregates below are collected — that walk cannot tell a window from
@@ -1434,6 +1532,11 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 _having_passthrough.append(_identifier)
 
     _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
+    if isinstance(_groups, list):
+        # Both sides of the match have to be stripped, or the projection and the
+        # group key still disagree — `SELECT (id + 1) ... GROUP BY id + 1` is the
+        # case where only one side carries the wrapper.
+        _groups = [_strip_outer_nesting(g) for g in _groups]
 
     # Resolve positional and aliased GROUP BY into the actual projection
     # expression, mirroring the ORDER BY resolution below:
@@ -1880,9 +1983,10 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     if ast_branch["Select"].get("distinct"):
         distinct_step = LogicalPlanNode(node_type=LogicalPlanStepType.Distinct)
         if isinstance(ast_branch["Select"]["distinct"], dict):
-            distinct_step.on = logical_planner_builders.build(
-                ast_branch["Select"]["distinct"]["On"]
-            )
+            distinct_step.on = [
+                _strip_outer_nesting(c)
+                for c in logical_planner_builders.build(ast_branch["Select"]["distinct"]["On"])
+            ]
         elif project_step is not None and project_step.passthrough_columns:
             # the ORDER BY value is ambiguous once rows collapse into a DISTINCT
             # group - the column must appear in the SELECT list so the ordering
@@ -1991,8 +2095,10 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
         join_operator = next(iter(join_operator))
         join_condition = next(iter(join["join_operator"][join_operator]))
         if join_condition == "On":
-            join_on = logical_planner_builders.build(
-                join["join_operator"][join_operator][join_condition]
+            join_on = _strip_outer_nesting(
+                logical_planner_builders.build(
+                    join["join_operator"][join_operator][join_condition]
+                )
             )
             # A conjunct with no column reference at all (a bare literal like
             # `AND FALSE`, anywhere in the AND-tree) has no join key to extract
@@ -2054,10 +2160,14 @@ def process_join_tree(join: dict) -> LogicalPlanNode:
 
     if join_step.type == "asof":
         asof_payload = join["join_operator"]["AsOf"]
-        join_step.asof_condition = logical_planner_builders.build(asof_payload["match_condition"])
+        join_step.asof_condition = _strip_outer_nesting(
+            logical_planner_builders.build(asof_payload["match_condition"])
+        )
         constraint = asof_payload.get("constraint", "None")
         if isinstance(constraint, dict) and "On" in constraint:
-            join_step.on = logical_planner_builders.build(constraint["On"])
+            join_step.on = _strip_outer_nesting(
+                logical_planner_builders.build(constraint["On"])
+            )
         elif isinstance(constraint, dict) and "Using" in constraint:
             join_step.using = [logical_planner_builders.build(i[0]) for i in constraint["Using"]]
     else:
@@ -2316,6 +2426,29 @@ def plan_query(statement: dict) -> LogicalPlan:
         plan.remove_node(subquery_entry_id, heal=True)
 
         right_plan = inner_query_planner(set_operation["right"])
+
+        # Both sides must present the same number of columns. The binder checks this
+        # too (binder/set_ops.py `_validate_set_operation_types`), but only UNION ever
+        # reaches it: plan_rewriter rewrites non-wildcard INTERSECT/EXCEPT into semi-
+        # and anti-joins BEFORE binding, and that rewrite builds its ON condition from
+        # the LEFT side's column names alone — so a wider right side simply had its
+        # extra columns ignored, and `SELECT id FROM $planets INTERSECT SELECT id, name
+        # FROM $planets` answered 9 rows instead of refusing.
+        #
+        # Checking here rather than in the two rewrite strategies keeps ONE rule for
+        # all three operators, and puts it where the node still exists whatever runs
+        # later. The binder's check is not redundant: it is the only one that can count
+        # a WILDCARD leg, which is exactly what this cannot (see
+        # `_set_operation_leg_arity` — None is "ask the binder", not zero).
+        left_arity = _set_operation_leg_arity(left_plan)
+        right_arity = _set_operation_leg_arity(right_plan)
+        if left_arity is not None and right_arity is not None and left_arity != right_arity:
+            # Same class and wording as the binder's check, so one rule reads as one
+            # rule no matter which phase catches it.
+            raise ValueError(
+                f"{op_type.upper()}: column count mismatch — left has {left_arity}, right has {right_arity}"
+            )
+
         right_plan = rename_relations(right_plan, prefix=UNION_ALIAS_PREFIX)
         plan += right_plan
         subquery_entry_id = right_plan.get_exit_points()[0]
@@ -2352,20 +2485,21 @@ def plan_query(statement: dict) -> LogicalPlan:
 
         # add the exit node
         exit_node = LogicalPlanNode(node_type=LogicalPlanStepType.Exit)
-        _projection_nodes = [
-            left_plan[nid]
-            for nid in left_plan.nodes()
-            if left_plan[nid].node_type in (LogicalPlanStepType.Project,)
-        ]
+        # A set operation's output shape is its LEFT leg's — taken from that leg's own
+        # EXIT node, which is what the leg declares it projects. This used to take the
+        # first Project node found in the leg's GRAPH, which is a different node as
+        # soon as the leg contains a subquery: `SELECT id FROM (SELECT id, name FROM
+        # $planets) AS x UNION ALL ...` picked the subquery's two columns for a leg
+        # that projects one, and the query died at compile time with "a UNION leg
+        # narrower than the union schema" — the union's own declaration blamed on the
+        # leg. See `_set_operation_leg_columns`.
+        #
         # A BARE wildcard: `value` MUST be None. A non-None `value` marks a QUALIFIED
         # wildcard (`rel.*`) and binder.visit_exit then expands only columns whose
         # origin matches `value[0]` — `(None,)` matches no relation, so the EXIT bound
-        # to zero columns and the set operation failed with a misleading "UNION leg
-        # narrower than the union schema". Reached whenever the left leg has no
-        # Project node, i.e. a bare `SELECT *` leg.
-        columns = [LogicalPlanNode(NodeType.WILDCARD)]
-        if _projection_nodes:
-            columns = _projection_nodes[0].columns
+        # to zero columns and the set operation failed with that same misleading error.
+        # Reached when the left leg declares no columns at all.
+        columns = _set_operation_leg_columns(left_plan) or [LogicalPlanNode(NodeType.WILDCARD)]
         exit_node.columns = columns
         head_nid, step_id = step_id, random_string()
         plan.add_node(step_id, exit_node)

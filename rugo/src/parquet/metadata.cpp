@@ -918,7 +918,16 @@ static void EmitSchemaEntry(const SchemaElement &elem, bool ancestor_optional,
 
   std::string logical = elem.logical_type;
   if (logical.empty()) {
-    if (elem.type_length > 0 && elem.physical_type == "fixed_len_byte_array") {
+    if (elem.physical_type == "int96") {
+      // INT96 has exactly one meaning in the Parquet spec: a nanosecond
+      // timestamp (Impala/Hive legacy). It carries no ConvertedType/LogicalType
+      // annotation, so without this the schema reports logical "int96" and the
+      // timestamp never gets retagged. The decoder converts the 12-byte wire
+      // value to int64 nanos, so the logical type it advertises must match what
+      // consumers will receive. Mirrored by the WalkLeaves fallback below —
+      // this map entry is what WalkLeaves actually finds, so the two must agree.
+      logical = "timestamp[ns]";
+    } else if (elem.type_length > 0 && elem.physical_type == "fixed_len_byte_array") {
       logical =
           "fixed_len_byte_array[" + std::to_string(elem.type_length) + "]";
     } else if (elem.physical_type == "byte_array") {

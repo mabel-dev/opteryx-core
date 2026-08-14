@@ -573,13 +573,18 @@ def array(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def between(branch, alias: Optional[List[str]] = None, key=None):
+    # BETWEEN is LOWERED to a pair of comparisons, so the node returned here renders
+    # as the rewrite (`(id >= 1 AND id <= 2)`), not as the SQL the user wrote. The
+    # alias must reach that outermost AND/OR node — without it the binder names the
+    # column after the rewrite, and CREATE TABLE ... AS stores that name.
     expr = build(branch["expr"])
     low = build(branch["low"])
     high = build(branch["high"])
     inverted = branch["negated"]
 
     if inverted:
-        # LEFT <= LOW AND LEFT >= HIGH (not between)
+        # NOT BETWEEN: expr < low OR expr > high — the negation of the inclusive
+        # form below, so the bounds are STRICT here and the connective is OR.
         left_node = Node(
             NodeType.COMPARISON_OPERATOR,
             value="Lt",
@@ -593,9 +598,9 @@ def between(branch, alias: Optional[List[str]] = None, key=None):
             right=high,
         )
 
-        return Node(NodeType.OR, left=left_node, right=right_node)
+        return Node(NodeType.OR, left=left_node, right=right_node, alias=alias)
     else:
-        # LEFT > LOW and LEFT < HIGH (between)
+        # BETWEEN: expr >= low AND expr <= high — INCLUSIVE at both ends.
         left_node = Node(
             NodeType.COMPARISON_OPERATOR,
             value="GtEq",
@@ -609,7 +614,7 @@ def between(branch, alias: Optional[List[str]] = None, key=None):
             right=high,
         )
 
-        return Node(NodeType.AND, left=left_node, right=right_node)
+        return Node(NodeType.AND, left=left_node, right=right_node, alias=alias)
 
 
 def binary_op(branch, alias: Optional[List[str]] = None, key=None):
@@ -1228,20 +1233,42 @@ def _cast_literal_value(literal_node, target_type: str, kind: str, alias, params
         # at the compiler gate for the same reason. A typed null constant is a
         # normal operand of its own type, so both become ordinary promotions.
         #
+        # BOOLEAN is stamped for the same reason, and more sharply: BOOLEAN is where
+        # a CONDITION comes from, and every path that consumes one type-checks it
+        # rather than short-circuiting. `CAST(NULL AS BOOLEAN)` as a sort key was
+        # refused ("ORDER BY on *null* (type `NULL`)"), as an IIF or FILTER
+        # condition it was refused ("IIF arg1 (NULL): expected BOOLEAN"), as a CASE
+        # condition it raised a raw Cython `TypeError: Argument 'bv' has incorrect
+        # type`, `MAX(CAST(NULL AS BOOLEAN))` was refused over "type `NULL`", and
+        # `CAST(NULL AS BOOLEAN) = TRUE` DECLARED NULL for a comparison that returns
+        # BOOLEAN. Every one of those works for a BOOLEAN COLUMN, which is the test
+        # of whether a typed null is behaving like its type.
+        #
+        # Consequence, and intended: `CONCAT(CAST(NULL AS BOOLEAN), 'x')` now fails
+        # like `CONCAT(b_value, 'x')` already does ("expected VARCHAR") instead of
+        # quietly returning VARCHAR nulls. The untyped null was passing a
+        # type-invalid query, not supporting one.
+        #
+        # Pairs with the BOOL arm in `_materialise_constant_literal`
+        # (compiled_expression.pyx): without it the stamp here would be undone at
+        # materialization, which is where every BOOL null became DRAKEN_NULL again.
+        #
         # `logical is None` deliberately excludes IPV4, whose category is INTEGER
         # (so ordering/grouping/joins run on the raw uint32) but which carries a
         # descriptor — stamping that onto a folded null is the attach-vs-skip
         # question that path answers separately, and this is not the place to
         # re-answer it. VARBINARY and temporal targets are likewise untouched: a
         # VARBINARY null reaching the string-concat closure would be stringified
-        # (VARBINARY is not in its string allow-list).
+        # (VARBINARY is not in its string allow-list). Those two, plus VECTOR, are
+        # the same shape as the BOOLEAN gap above and are still open.
         from opteryx.types.logical_type import try_parse_column_type as _try_parse_ct
 
         _null_ct = _try_parse_ct(target_type.replace("TRY_", ""))
         if (
             _null_ct is not None
             and _null_ct.logical is None
-            and _null_ct.category in (LogicalCategory.INTEGER, LogicalCategory.FLOAT)
+            and _null_ct.category
+            in (LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.BOOLEAN)
         ):
             return Node(NodeType.LITERAL, value=None, type=_null_ct, alias=alias)
         return Node(NodeType.LITERAL, type=_CT_NULL, alias=alias)
@@ -1871,23 +1898,6 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         node.qualified_name = format_expression(node)
         return node
 
-    # ARRAY_CONTAINS(arr, item) → item = ANY(arr). A single-item membership test
-    # is exactly the native AnyOpEq operator (the same `= ANY` / `@>` family),
-    # so lower it at plan-build time instead of routing through a Python kernel.
-    if func == "ARRAY_CONTAINS":
-        if len(args) != 2:
-            raise SqlError("ARRAY_CONTAINS expects exactly two arguments. Write `ARRAY_CONTAINS(array, value)`.")
-        array_node, item_node = args[0], args[1]
-        node = Node(
-            NodeType.COMPARISON_OPERATOR,
-            value="AnyOpEq",
-            left=item_node,
-            right=array_node,
-            alias=alias,
-        )
-        node.qualified_name = format_expression(node)
-        return node
-
     node = Node(
         node_type=node_type,
         value=func,
@@ -1987,6 +1997,7 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
         value=operator,
         left=left_node,
         right=right_node,
+        alias=alias,
     )
 
 
@@ -2161,8 +2172,11 @@ def overlay_string(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def is_compare(branch, alias: Optional[List[str]] = None, key=None):
+    # The alias belongs to the UNARY node, not to its operand — the binder names a
+    # projection from the OUTERMOST node (`node.alias or <rendered text>`), so
+    # dropping it here named `x IS NOT NULL AS y` after its own SQL text.
     centre = build(branch)
-    return Node(NodeType.UNARY_OPERATOR, value=key, centre=centre)
+    return Node(NodeType.UNARY_OPERATOR, value=key, centre=centre, alias=alias)
 
 
 def json_access(branch, alias: Optional[List[str]] = None, key=None):
@@ -2339,9 +2353,17 @@ def match_against(branch, alias: Optional[List[str]] = None, key=None):
 
 
 def nested(branch, alias: Optional[List[str]] = None, key=None):
+    # The alias belongs on the wrapper, not the centre: the binder names the
+    # projection from the outermost node (`query_column = alias or rendered
+    # text`), and NESTED is that node for a parenthesised select item. Dropping
+    # it here silently named `(<expr>) AS x` after the expression's SQL text —
+    # a name containing quotes and parentheses, so the column was unaddressable
+    # downstream, and CREATE TABLE/MATERIALIZED VIEW baked that text into the
+    # stored schema.
     return Node(
         node_type=NodeType.NESTED,
         centre=build(branch),
+        alias=alias,
     )
 
 
@@ -2485,7 +2507,7 @@ def tuple_literal(branch, alias: Optional[List[str]] = None, key=None):
     # tuple") — strictly worse than the bracket form `[1.0,2.0]`, which is an ARRAY
     # and fails cleanly at bind time. Nothing constructs a VECTOR_FP16 column, so no
     # reachable path consumed this. Both literal syntaxes now agree, and a numeric
-    # tuple can reach the ARRAY-typed functions (ARRAY_CONTAINS_ANY/ALL) that a
+    # tuple can reach the ARRAY-typed containment operators (`@>` / `@>>`) that a
     # VECTOR-typed one was rejected by.
     literal_type = _CT_ARRAY(element_ct if element_ct is not None else _CT_VARIANT)
 
@@ -2520,8 +2542,9 @@ def typed_string(branch, alias: Optional[List[str]] = None, key=None):
 
 def unary_op(branch, alias: Optional[List[str]] = None, key=None):
     if branch["op"] == "Not":
+        # As in is_compare: the alias names the NOT node, never its operand.
         centre = build(branch["expr"])
-        return Node(node_type=NodeType.NOT, centre=centre)
+        return Node(node_type=NodeType.NOT, centre=centre, alias=alias)
     if branch["op"] == "Minus":
         centre = build(branch["expr"], alias=alias)
         # Constant-fold numeric literals (e.g. `-5`). An INTEGER literal must be
@@ -2550,7 +2573,9 @@ def unary_op(branch, alias: Optional[List[str]] = None, key=None):
         return build(branch["expr"], alias=alias)
     if branch["op"] == "BitwiseNot":
         centre = build(branch["expr"])
-        return Node(node_type=NodeType.UNARY_OPERATOR, value="BitwiseNot", centre=centre)
+        return Node(
+            node_type=NodeType.UNARY_OPERATOR, value="BitwiseNot", centre=centre, alias=alias
+        )
 
 
 def wildcard_filter(branch, alias: Optional[List[str]] = None, key=None):

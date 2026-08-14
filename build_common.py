@@ -458,6 +458,7 @@ include_dirs = [
     "third_party/mabel/base85",  # standalone rugo wheel can use them); opteryx's own
                                  # Cython wrappers stay under opteryx/third_party/mabel.
     "third_party/mabel/carchar",
+    "third_party/mabel/medius",
     "third_party/mabel/parvi",
     "third_party/mabel/perfect_hash",
     "third_party/fastfloat",

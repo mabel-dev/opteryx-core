@@ -319,6 +319,33 @@ STATEMENTS = [
         ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 1", 1, 1, None),
         # Mixed distinct / ALL in a chain: (id=1 UNION id=1) -> 1 row, then UNION ALL id=2.
         ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 1 UNION ALL SELECT name FROM $planets WHERE id = 2", 2, 1, None),
+        # A UNION leg KEEPS its Project (a lone aggregate's is folded away), so a
+        # computed GROUP BY key is the one shape where the key's own identity has to
+        # survive projection_pushdown's liveness set. Under-collecting it ruled the key
+        # dead, the groupby sink dropped its value store, and the surviving Project
+        # tried to recompute TRUNC over an `id` the aggregate no longer carried. Only
+        # the SECOND leg failed — the first escaped because the union's output
+        # identities ARE the first leg's, so its key looked live by accident.
+        ("SELECT name AS k, TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY ALL UNION ALL SELECT name AS k, TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY ALL", 18, 3, None),
+        ("SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY TRUNC(id, 1) UNION ALL SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY TRUNC(id, 1)", 18, 2, None),
+        # Distinct UNION over the same shape, and a third leg (the second leg is not a
+        # special case — every non-first leg has independently-minted identities).
+        ("SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY 1 UNION SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY 1", 9, 2, None),
+        ("SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY 1 UNION ALL SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY 1 UNION ALL SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY 1", 27, 2, None),
+        # UNION legs whose types differ only in WIDTH. Every integer width shares
+        # LogicalCategory.INTEGER (and FLOAT32/FLOAT64 share FLOAT), and the leg-cast
+        # guard compared CATEGORY — so the correct target was computed and then no cast
+        # was inserted, leaving draken's concat to reject two different physical tags.
+        ("SELECT id AS n FROM $planets UNION ALL SELECT CAST(id AS INT64) AS n FROM $planets", 18, 1, None),
+        ("SELECT density AS n FROM $planets UNION ALL SELECT id AS n FROM $planets", 18, 1, None),
+        ("SELECT diameter AS n FROM $planets UNION ALL SELECT density AS n FROM $planets", 18, 1, None),
+        ("SELECT perihelion AS n FROM $planets UNION ALL SELECT mass AS n FROM $planets", 18, 1, None),
+        # The everyday shape of the same bug: COUNT(*) is always INT64, MAX/MIN keep
+        # the source column's width.
+        ("SELECT name AS k, COUNT(*) AS n FROM $planets GROUP BY name UNION ALL SELECT name AS k, MAX(id) AS n FROM $planets GROUP BY name", 18, 2, None),
+        ("SELECT COUNT(*) AS n FROM $planets UNION ALL SELECT MIN(id) AS n FROM $planets", 2, 1, None),
+        # BOOL promotes to INT64, so the INT8 leg needed the same widening cast.
+        ("SELECT id AS n FROM $planets UNION ALL SELECT id > 3 AS n FROM $planets", 18, 1, None),
         # Chained UNION with a trailing ORDER BY / LIMIT.
         ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3 ORDER BY name LIMIT 2", 2, 1, None),
         # FROM-less chained UNION (legs collapse $no_table into $project): distinct + ALL.
@@ -329,6 +356,31 @@ STATEMENTS = [
         ("SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4", 4, 1, None),
         # Chained UNION with mismatched column counts must still raise.
         ("SELECT id, name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3", None, None, ValueError),
+        # A leg whose SUBQUERY is wider than the leg itself. The set op takes its output
+        # shape from the left leg, which used to mean "the first Project node in that
+        # leg's graph" — the subquery's, once a leg has one. The union then declared two
+        # columns for a leg projecting one and died with "a UNION leg narrower than the
+        # union schema". Both operand positions, both operators, and a nested subquery,
+        # because only the OUTERMOST projection is the leg's output.
+        ("SELECT id FROM (SELECT id, name FROM $planets) AS x UNION ALL SELECT id FROM $planets", 18, 1, None),
+        ("SELECT id FROM $planets UNION ALL SELECT id FROM (SELECT id, name FROM $planets) AS x", 18, 1, None),
+        ("SELECT id FROM (SELECT id, name FROM $planets) AS x INTERSECT SELECT id FROM $planets", 9, 1, None),
+        ("SELECT id FROM (SELECT id, name FROM $planets) AS x EXCEPT SELECT id FROM $planets WHERE id > 4", 4, 1, None),
+        ("SELECT id FROM (SELECT id FROM (SELECT id, name FROM $planets) AS a) AS b UNION ALL SELECT id FROM $planets", 18, 1, None),
+        ("SELECT id, name FROM (SELECT id, name, mass FROM $planets) AS x UNION ALL SELECT id, name FROM $planets", 18, 2, None),
+        # Mismatched column counts must raise for EVERY set operator, not just UNION.
+        # Only UNION reached the binder's check: plan_rewriter turns non-wildcard
+        # INTERSECT/EXCEPT into semi/anti joins pre-bind, and that rewrite builds its ON
+        # condition from the LEFT side's names alone — so the wider right side's extra
+        # columns were silently ignored and the query ANSWERED (9 rows, and 0 for
+        # EXCEPT) instead of refusing. Both operand orders, and the ALL forms, which
+        # take a different path again.
+        ("SELECT id FROM $planets INTERSECT SELECT id, name FROM $planets", None, None, ValueError),
+        ("SELECT id, name FROM $planets INTERSECT SELECT id FROM $planets", None, None, ValueError),
+        ("SELECT id FROM $planets EXCEPT SELECT id, name FROM $planets", None, None, ValueError),
+        ("SELECT id, name FROM $planets EXCEPT SELECT id FROM $planets", None, None, ValueError),
+        ("SELECT id FROM $planets INTERSECT ALL SELECT id, name FROM $planets", None, None, ValueError),
+        ("SELECT id FROM $planets EXCEPT ALL SELECT id, name FROM $planets", None, None, ValueError),
 
         # Set operations - INTERSECT (SQL92 compatibility) - NEW, BLOCKED: Operators not compiled
         # INTERSECT keeps only rows in both inputs
@@ -622,6 +674,11 @@ STATEMENTS = [
         # column "could not be found".
         ("SELECT SUM(x) OVER (PARTITION BY number_of_moons) FROM (SELECT number_of_moons, COUNT(*) OVER () AS x FROM $planets) AS t", 9, 1, None),
         ("SELECT SUM(c) OVER (PARTITION BY number_of_moons) FROM (SELECT number_of_moons, COUNT(*) OVER (PARTITION BY gravity) AS c FROM $planets) AS t", 9, 1, None),
+        # The same partition key on BOTH sides, and the partition column projected
+        # through the boundary — the single-table fuzzer's repro for this, in both
+        # spellings, deleted from single_table_known_gaps once it stopped reproducing.
+        ("SELECT gravity, COUNT(w) OVER (PARTITION BY gravity) AS w2 FROM (SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w FROM $planets) AS s", 9, 2, None),
+        ("WITH c AS (SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w FROM $planets) SELECT gravity, COUNT(w) OVER (PARTITION BY gravity) AS w2 FROM c", 9, 2, None),
         # More than one spec in the inner scope — a chain of length > 1 BELOW another chain.
         ("SELECT SUM(a + b) OVER () FROM (SELECT COUNT(*) OVER () AS a, COUNT(*) OVER (PARTITION BY number_of_moons) AS b FROM $planets) AS t", 9, 1, None),
 
@@ -875,6 +932,369 @@ def test_bool_group_by_key_values():
     assert counts == {False: 99335, True: 665}, (
         f"BOOL group-by keys reconstructed wrong: {counts} "
         "(expected {False: 99335, True: 665})"
+    )
+
+
+def test_union_leg_width_coercion():
+    """
+    VALUE-level regression: UNION legs whose types differ only in WIDTH must be cast to
+    one common type, and legs that ALREADY agree must not be widened.
+
+    `find_compatible_type` picked the right target all along; `_cast_leg_columns_to`
+    then skipped the cast whenever the leg's CATEGORY already matched the target's.
+    Every integer width shares LogicalCategory.INTEGER, so `INT8 ∪ INT64` computed
+    INT64 and cast neither leg. Shape-only coverage is enough to catch the failure
+    itself (it raised), but not to catch the two ways of "fixing" it wrongly: casting
+    to a NARROWER type would silently truncate values, and widening legs that already
+    agree costs 8x the memory for nothing. Both are asserted here.
+    """
+    session = opteryx.session()
+
+    # Widen to the wider leg, preserving values from BOTH legs. 9999 does not fit in
+    # the INT8 leg's type, so a narrowing coercion would corrupt it.
+    values = []
+    for morsel in session.execute_to_morsels(
+        "SELECT id AS n FROM $planets UNION ALL SELECT CAST(9999 AS INT64) AS n"
+    ):
+        result_type = morsel.column("n").type
+        values += morsel.column("n").to_pylist()
+    assert sorted(values) == list(range(1, 10)) + [9999], (
+        f"UNION of INT8 and INT64 legs lost or truncated values: {sorted(values)}"
+    )
+    assert "INT64" in str(result_type), f"expected the wider INT64, got {result_type}"
+
+    # Legs that already agree must keep their own type — find_compatible_type widens
+    # INT8/16/32 to INT64 when resolving a MIXED set, which must not fire here.
+    for morsel in session.execute_to_morsels(
+        "SELECT id AS n FROM $planets UNION ALL SELECT id AS n FROM $planets"
+    ):
+        assert "INT8" in str(morsel.column("n").type), (
+            f"UNION of two identical INT8 legs was widened to {morsel.column('n').type}"
+        )
+        break
+
+
+def test_chained_union_coerces_every_leg_and_declares_what_it_delivers():
+    """
+    VALUE-level regression: a CHAINED (3+ leg) UNION must coerce every leg, and a
+    set-op must DECLARE the type it delivers.
+
+    `A UNION B UNION C` is nested binary unions. `_cast_leg_columns_to` rewrote each
+    leg's Project but left the union node's own output column bound to the FIRST
+    leg's ORIGINAL, pre-cast type — so when the outer union reconciled C against
+    `union(A, B)` it read that stale type, picked its target from it, and skipped the
+    cast the legs actually needed. draken's concat then refused the mismatched legs
+    ("all inputs must share one type").
+
+    The stale type was never only a chaining problem: the two-leg form below RAN,
+    while reporting INT8 for a column it delivered as FLOAT64 — a lie to anything
+    reading the declared shape (an editor's `check`, or an enclosing query binding
+    an expression over it). Both forms are asserted, shape and values, because
+    getting the declared type right by widening the DATA to match the lie would
+    satisfy a type-only assertion while corrupting every row.
+    """
+    session = opteryx.session()
+
+    gravities = []
+    for morsel in session.execute_to_morsels(
+        "SELECT CAST(gravity AS FLOAT64) AS g FROM $planets"
+    ):
+        gravities += morsel.column("g").to_pylist()
+
+    chained = (
+        "SELECT id AS n FROM $planets "
+        "UNION ALL SELECT CAST(id AS INT64) AS n FROM $planets "
+        "UNION ALL SELECT CAST(gravity AS FLOAT64) AS n FROM $planets"
+    )
+    values = []
+    result_type = None
+    for morsel in session.execute_to_morsels(chained):
+        result_type = morsel.column("n").type
+        values += morsel.column("n").to_pylist()
+
+    expected = sorted([float(i) for i in range(1, 10)] * 2 + gravities)
+    assert sorted(values) == expected, (
+        f"chained UNION lost or corrupted values: {sorted(values)} != {expected}"
+    )
+    assert "FLOAT64" in str(result_type), (
+        f"chained UNION of INT8, INT64 and FLOAT64 legs delivered {result_type}"
+    )
+
+    # What the binder DECLARES has to be what the query delivers — the same lie is
+    # reachable with two legs, where it never raised.
+    two_leg = (
+        "SELECT id AS n FROM $planets "
+        "UNION ALL SELECT CAST(gravity AS FLOAT64) AS n FROM $planets"
+    )
+    for statement in (chained, two_leg):
+        checked = session.check(statement)
+        assert checked.ok, f"{statement} failed to bind: {checked.error}"
+        assert [(column.name, column.type) for column in checked.columns] == [("n", "FLOAT64")], (
+            "UNION declared a type it does not deliver: "
+            f"{[(column.name, column.type) for column in checked.columns]}"
+        )
+
+
+def test_literals_are_not_interned_across_types():
+    """
+    VALUE-level regression: two literals that render the same and hold the same value
+    must not share one ConstantColumn when their TYPES differ.
+
+    `inner_binder` interns literals by rendered name, guarded on value being
+    byte-identical and on the alias agreeing — neither of which separates two NULLs.
+    `COUNT(*) FILTER (WHERE p)` lowers to `COUNT(IIF(p, 1, NULL))` with a deliberately
+    UNTYPED else-NULL, so when `p` was a BOOL-typed null the else adopted its column
+    and came back BOOL: "IIF: literal 1 is INT64 but literal None is BOOL", refusing a
+    query whose branches are really INT64 and untyped NULL.
+
+    Asserted as answers, not just as "does not raise": FILTER admits a row only when
+    the predicate is TRUE, so an all-UNKNOWN predicate admits none — COUNT is 0 and
+    SUM over no rows is NULL. The TRUE/column-predicate forms are pinned alongside so
+    a fix that broke interning generally would show up here.
+    """
+    session = opteryx.session()
+
+    def one_value(statement):
+        produced = []
+        for morsel in session.execute_to_morsels(statement):
+            produced += morsel.column("x").to_pylist()
+        return produced[0]
+
+    assert one_value("SELECT COUNT(*) FILTER (WHERE CAST(NULL AS BOOLEAN)) AS x FROM $planets") == 0
+    assert one_value("SELECT SUM(id) FILTER (WHERE CAST(NULL AS BOOLEAN)) AS x FROM $planets") is None
+    assert one_value("SELECT IIF(CAST(NULL AS BOOLEAN), 1, NULL) AS x FROM $planets") is None
+    # Interning itself must still work — these never went through the new guard.
+    assert one_value("SELECT COUNT(*) FILTER (WHERE TRUE) AS x FROM $planets") == 9
+    assert one_value("SELECT COUNT(*) FILTER (WHERE id > 3) AS x FROM $planets") == 6
+
+    # Two same-valued nulls of different declared types stay two columns.
+    declared = [column.type for column in session.check(
+        "SELECT CAST(NULL AS BOOLEAN) AS a, CAST(NULL AS INTEGER) AS b FROM $planets"
+    ).columns]
+    assert declared == ["BOOL", "INT64"], f"typed nulls collapsed onto one column: {declared}"
+
+
+def test_case_when_condition_is_never_a_raw_type_error():
+    """
+    VALUE-level regression: a CASE condition that is not a live BOOLEAN vector must
+    give an ANSWER when it has one, and a sentence when it does not — never a raw
+    Cython `TypeError: Argument 'bv' has incorrect type`.
+
+    `case_helpers.decide_one_branch` is declared `BoolVector bv` and reads the
+    bit-packed layout through it. Every BOOL producer returns that wrapper except the
+    constant materialiser, which returned a plain Vector — so `CASE WHEN CAST(NULL AS
+    BOOLEAN)` and `CASE WHEN NULL` died in the argument conversion, as did `CASE WHEN
+    1` and `CASE WHEN 'x'`, while the same conditions over a COLUMN were refused with
+    a sentence naming the type.
+
+    UNKNOWN never matches, so a NULL condition takes the ELSE branch — asserted as a
+    value, because "does not raise" would also be satisfied by wrongly taking THEN.
+    """
+    session = opteryx.session()
+
+    for statement, expected in (
+        ("SELECT CASE WHEN CAST(NULL AS BOOLEAN) THEN 'a' ELSE 'b' END AS x FROM $planets", "b"),
+        ("SELECT CASE WHEN NULL THEN 'a' ELSE 'b' END AS x FROM $planets", "b"),
+        # A NULL condition must not swallow a later WHEN that does match.
+        ("SELECT CASE WHEN CAST(NULL AS BOOLEAN) THEN 'a' WHEN TRUE THEN 'b' ELSE 'c' END AS x FROM $planets", "b"),
+        # ... and the live-row bookkeeping must survive it: id 1 fails `id > 3`, so it
+        # falls past the NULL condition to ELSE.
+        ("SELECT CASE WHEN id > 3 THEN 'a' WHEN CAST(NULL AS BOOLEAN) THEN 'b' ELSE 'c' END AS x FROM $planets WHERE id = 1", "c"),
+        ("SELECT CASE WHEN id > 3 THEN 'a' WHEN CAST(NULL AS BOOLEAN) THEN 'b' ELSE 'c' END AS x FROM $planets WHERE id = 5", "a"),
+    ):
+        produced = []
+        for morsel in session.execute_to_morsels(statement):
+            produced += morsel.column("x").to_pylist()
+        assert produced[0] == expected, f"{statement} produced {produced[0]!r}, expected {expected!r}"
+
+    # A condition that is neither BOOLEAN nor NULL is refused, by name and by type.
+    for statement, named_type in (
+        ("SELECT CASE WHEN 1 THEN 'a' ELSE 'b' END AS x FROM $planets", "INT64"),
+        ("SELECT CASE WHEN 'x' THEN 'a' ELSE 'b' END AS x FROM $planets", "VARCHAR"),
+    ):
+        with pytest.raises(Exception) as raised:  # noqa: PT011 - the message IS the assertion
+            list(session.execute_to_morsels(statement))
+        message = str(raised.value)
+        assert "incorrect type" not in message, (
+            f"a raw Cython argument error reached the caller: {message}"
+        )
+        assert "BOOLEAN" in message and named_type in message, (
+            f"{statement} refused without naming the type: {message}"
+        )
+
+
+def test_cast_null_as_boolean_behaves_like_a_boolean():
+    """
+    VALUE-level regression: `CAST(NULL AS BOOLEAN)` must declare and carry BOOLEAN.
+
+    The plan-time literal fold stamps the target type onto a folded NULL for VARCHAR,
+    ARRAY and the INTEGER/FLOAT categories, and dropped every other target to an
+    untyped NULL. BOOLEAN was not an exclusion with a reason — it was simply absent,
+    and BOOLEAN is where a CONDITION comes from, so the paths that consume one
+    type-check it rather than short-circuiting: as a sort key it was refused
+    ("ORDER BY on *null* (type `NULL`)"), as an IIF condition refused, `MAX(...)`
+    refused, and `CAST(NULL AS BOOLEAN) = TRUE` DECLARED NULL for a comparison that
+    returns BOOLEAN.
+
+    The measure of a typed null is that it behaves like its type, so each assertion
+    pins the BOOLEAN-COLUMN behaviour: every one of these runs for `b_value`. Values
+    are asserted, not just the absence of a raise — a null sort key must stay NULL,
+    and an IIF on an UNKNOWN condition must take the ELSE branch.
+    """
+    session = opteryx.session()
+
+    statement = "SELECT CAST(NULL AS BOOLEAN) AS x, id FROM $planets ORDER BY x DESC"
+    assert [column.type for column in session.check(statement).columns] == ["BOOL", "INT8"], (
+        f"CAST(NULL AS BOOLEAN) declared {[c.type for c in session.check(statement).columns]}"
+    )
+    values = []
+    sort_key_type = None
+    for morsel in session.execute_to_morsels(statement):
+        sort_key_type = morsel.column("x").type
+        values += morsel.column("x").to_pylist()
+    assert values == [None] * 9, f"a NULL sort key stopped being NULL: {values}"
+    assert "BOOL" in str(sort_key_type), f"sort key materialised as {sort_key_type}"
+
+    # An UNKNOWN condition takes the ELSE branch, and MAX over an all-null BOOLEAN
+    # column is NULL — both were refusals while the null was untyped.
+    for expression, expected in (
+        ("IIF(CAST(NULL AS BOOLEAN), 1, 2)", 2),
+        ("MAX(CAST(NULL AS BOOLEAN))", None),
+        ("(CAST(NULL AS BOOLEAN) = TRUE)", None),
+        ("COALESCE(CAST(NULL AS BOOLEAN), TRUE)", True),
+    ):
+        produced = []
+        for morsel in session.execute_to_morsels(f"SELECT {expression} AS x FROM $planets"):
+            produced += morsel.column("x").to_pylist()
+        assert produced[0] == expected, f"{expression} produced {produced[0]}, expected {expected}"
+
+
+def test_filtered_aggregate_over_a_constant_folded_null_condition():
+    """
+    VALUE-level regression: a BOOL-typed NULL literal must materialise as a BOOL
+    constant, not as an untyped DRAKEN_NULL.
+
+    `AGG(x) FILTER (WHERE p)` lowers to `AGG(IIF(p, x, NULL))`, and `draken_iif`
+    type-checks its CONDITION rather than short-circuiting on it — the one argument
+    position where an untyped null is not interchangeable with a typed one. A `p`
+    the optimizer can decide at plan time, whose surviving branch is NULL, folds to
+    exactly that: `CASE WHEN ('beta' <= '0') THEN TRUE ELSE NULL END` is a BOOL null
+    literal, and the query died with `draken_iif: condition must be BOOLEAN`.
+
+    Found by the single-table fuzzer, so the assertion is on the ANSWER as well as
+    on not raising: FILTER admits a row only when `p` is TRUE, and an all-UNKNOWN
+    condition admits none — the same 0 the FALSE-condition form returns, which is
+    asserted alongside it so a fix that made the query run by admitting rows would
+    still fail here.
+    """
+    session = opteryx.session()
+
+    for statement, expected in (
+        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN ('beta' <= '0') THEN TRUE ELSE NULL END)) AS c FROM $planets", 0),
+        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN ('beta' <= '0') THEN TRUE ELSE FALSE END)) AS c FROM $planets", 0),
+        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN ('0' <= 'beta') THEN TRUE ELSE NULL END)) AS c FROM $planets", 9),
+        # The same shape with a COLUMN condition, which never folded and so never
+        # broke — here to keep the two paths' answers pinned together.
+        ("SELECT COUNT(*) FILTER (WHERE (CASE WHEN (name <= 'M') THEN TRUE ELSE NULL END)) AS c FROM $planets", 2),
+    ):
+        counted = []
+        for morsel in session.execute_to_morsels(statement):
+            counted += morsel.column("c").to_pylist()
+        assert counted == [expected], f"{statement} counted {counted}, expected [{expected}]"
+
+
+def test_union_output_columns_that_share_one_source_column():
+    """
+    VALUE-level regression: two UNION output positions fed by ONE source column must
+    stay two columns when the legs make them diverge.
+
+    `SELECT id AS a, id AS b` is one column named twice, and the binder deliberately
+    folds both onto a single SchemaColumn — which is right until a set operation gives
+    the two positions different types. Identity is the engine's column key, so the
+    union's `column_ids` named both legs' columns the same and the second resolved to
+    the first: `b` came back holding `a`'s data, INT64 where the query says FLOAT64.
+
+    Shape-only coverage cannot see this — the result has the right number of rows and
+    columns, and the wrong VALUES in one of them. Asserted over both legs' rows,
+    because the first leg's values alone would look right for `a` either way.
+    """
+    session = opteryx.session()
+
+    statement = (
+        "SELECT id AS a, id AS b FROM $planets "
+        "UNION ALL "
+        "SELECT CAST(id AS INT64) AS a, CAST(gravity AS FLOAT64) AS b FROM $planets"
+    )
+    a_values = []
+    b_values = []
+    b_type = None
+    for morsel in session.execute_to_morsels(statement):
+        b_type = morsel.column("b").type
+        a_values += morsel.column("a").to_pylist()
+        b_values += morsel.column("b").to_pylist()
+
+    gravities = []
+    for morsel in session.execute_to_morsels(
+        "SELECT CAST(gravity AS FLOAT64) AS g FROM $planets"
+    ):
+        gravities += morsel.column("g").to_pylist()
+
+    assert sorted(a_values) == sorted(list(range(1, 10)) * 2), (
+        f"UNION column `a` lost values: {sorted(a_values)}"
+    )
+    # `b` is the one that used to be handed `a`'s data: one leg's ids as FLOAT64, the
+    # other leg's gravities.
+    assert sorted(b_values) == sorted([float(i) for i in range(1, 10)] + gravities), (
+        f"UNION column `b` delivered the wrong column: {sorted(b_values)}"
+    )
+    assert "FLOAT64" in str(b_type), f"UNION column `b` delivered {b_type}"
+
+    # The benign form must NOT be disturbed: both positions really are the same column,
+    # and folding them onto one identity is what makes that work.
+    values = []
+    for morsel in session.execute_to_morsels(
+        "SELECT id AS a, id AS b FROM $planets UNION ALL SELECT id AS a, id AS b FROM $planets"
+    ):
+        assert morsel.column("a").to_pylist() == morsel.column("b").to_pylist(), (
+            "UNION of one column projected twice returned two different columns"
+        )
+        values += morsel.column("a").to_pylist()
+    assert sorted(values) == sorted(list(range(1, 10)) * 2)
+
+
+def test_union_of_aggregates_with_a_computed_group_key():
+    """
+    VALUE-level regression: each leg of a UNION over aggregates with a COMPUTED
+    GROUP BY key must emit that key's VALUES, not just hash on it.
+
+    A lone aggregate has its Project folded away by redundant_operators, so nothing
+    above it ever asks for the derived key as a column; a UNION leg KEEPS its Project,
+    which is the only shape where the question is asked. projection_pushdown's
+    collect_columns recorded a computed column's INPUT identifiers but not the computed
+    column's own identity, so _group_key_emit ruled the key dead and the groupby sink
+    dropped its per-group value store.
+
+    The first leg escaped by accident — the union's output identities ARE the first
+    leg's — so this must assert over BOTH legs' values, which is why the shape entries
+    in the battery above are not sufficient on their own.
+    """
+    statement = (
+        "SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY 1 "
+        "UNION ALL "
+        "SELECT TRUNC(id, 1) AS d, COUNT(*) AS n FROM $planets GROUP BY 1"
+    )
+    session = opteryx.session()
+
+    counts = {}
+    for morsel in session.execute_to_morsels(statement):
+        for key, val in zip(morsel.column("d").to_pylist(), morsel.column("n").to_pylist()):
+            counts[key] = counts.get(key, 0) + val
+
+    # $planets has 9 rows with distinct ids 1..9; TRUNC(id, 1) is the identity here, so
+    # every group is a single row, seen once per leg.
+    assert counts == {float(i): 2 for i in range(1, 10)}, (
+        f"UNION of aggregates over a computed GROUP BY key returned {counts} "
+        f"(expected each of ids 1-9 counted twice)"
     )
 
 
@@ -1749,6 +2169,22 @@ def test_chained_windows_across_a_subquery():
     )
     assert sorted(partitioned) == sorted(planets * per_partition[m] for m in moons), partitioned
 
+    # An aggregate window PARTITIONED BY THE SAME KEY on both sides of the boundary,
+    # with that key projected through it — the single-table fuzzer's own repro, in both
+    # spellings. `w` is a MIN over the partition, so it is non-null on every row and
+    # COUNT(w) is the partition's size; a broadcast that attached the wrong partition's
+    # row, or one that multiplied, changes those numbers.
+    gravities = _values("SELECT gravity AS s FROM $planets")
+    per_gravity = {g: gravities.count(g) for g in gravities}
+    for statement in (
+        "SELECT COUNT(w) OVER (PARTITION BY gravity) AS s "
+        "FROM (SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w FROM $planets) AS d",
+        "WITH c AS (SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w FROM $planets) "
+        "SELECT COUNT(w) OVER (PARTITION BY gravity) AS s FROM c",
+    ):
+        got = _values(statement)
+        assert sorted(got) == sorted(per_gravity[g] for g in gravities), f"{statement}\n  {got!r}"
+
     # The qualified-wildcard half of the same fix, with no window anywhere: the copy a
     # CTE expansion takes renamed the relation but not the `p.*` naming it, so the
     # wildcard expanded to nothing and the whole body silently lost its columns.
@@ -2323,6 +2759,35 @@ if __name__ == "__main__":  # pragma: no cover
     print("RUNNING VALUE-LEVEL REGRESSIONS")
     for name, fn in (
         ("bool group-by key values", test_bool_group_by_key_values),
+        (
+            "union of aggregates with a computed group key",
+            test_union_of_aggregates_with_a_computed_group_key,
+        ),
+        ("union leg width coercion", test_union_leg_width_coercion),
+        (
+            "chained union coerces every leg",
+            test_chained_union_coerces_every_leg_and_declares_what_it_delivers,
+        ),
+        (
+            "union columns sharing one source column",
+            test_union_output_columns_that_share_one_source_column,
+        ),
+        (
+            "filtered aggregate over a folded null condition",
+            test_filtered_aggregate_over_a_constant_folded_null_condition,
+        ),
+        (
+            "cast null as boolean behaves like a boolean",
+            test_cast_null_as_boolean_behaves_like_a_boolean,
+        ),
+        (
+            "case when condition is never a raw type error",
+            test_case_when_condition_is_never_a_raw_type_error,
+        ),
+        (
+            "literals are not interned across types",
+            test_literals_are_not_interned_across_types,
+        ),
         ("window aggregate respects WHERE", test_window_aggregate_respects_where),
         ("window aggregate over a subquery source", test_window_aggregate_over_subquery_source),
         (

@@ -11,7 +11,7 @@ import pytest
 import opteryx
 from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector
-from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import ColumnNotFoundError, UnsupportedSyntaxError
 from opteryx.models.manifest_io import read_manifest_file_entries
 
 
@@ -143,15 +143,23 @@ def test_insert_explicit_columns_reorder(tmp_path):
 
 
 def test_insert_explicit_columns_unknown_name(tmp_path):
+    """A name in the column list that the target does not have is a
+    ColumnNotFoundError, naming the column and suggesting the near miss - not
+    the blanket UnsupportedSyntaxError this asserted before the binder started
+    raising the specific error. Nothing about the statement is unsupported; one
+    named column simply is not there."""
     _setup_workspace(tmp_path)
     session = opteryx.session()
     list(session.execute_to_morsels("CREATE TABLE ws.t (a BIGINT, b VARCHAR)"))
-    with pytest.raises(UnsupportedSyntaxError, match="does not exist"):
+    with pytest.raises(ColumnNotFoundError, match="z") as excinfo:
         list(
             session.execute_to_morsels(
                 "INSERT INTO ws.t (z, a) VALUES (1, 2)"
             )
         )
+    # The suggestion is the reason this error is worth preferring; assert it
+    # survives so a future refactor cannot quietly drop back to a bare message.
+    assert "a" in str(excinfo.value)
 
 
 def test_insert_explicit_columns_partial_rejected(tmp_path):

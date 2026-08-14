@@ -246,8 +246,8 @@ Evaluates a column bloom filter at the given byte offset/length for a candidate 
 
 | Area        | Support                                                                                             |
 |-------------|-----------------------------------------------------------------------------------------------------|
-| Physical types  | `int32`, `int64`, `float32`, `float64`, `boolean`, `byte_array`                                    |
-| Compression    | `UNCOMPRESSED`, `SNAPPY`, `ZSTD`                                                                   |
+| Physical types  | `int32`, `int64`, `float32`, `float64`, `boolean`, `byte_array`, `int96` (→ `TIMESTAMP` ns), `fixed_len_byte_array` (DECIMAL, width 1..16) |
+| Compression    | `UNCOMPRESSED`, `SNAPPY`, `GZIP`, `ZSTD`, `LZ4_RAW`                                                |
 | Encodings      | `PLAIN`, dictionary pages (`PLAIN_DICTIONARY` / `RLE_DICTIONARY`), `DELTA_BINARY_PACKED`, `DELTA_BYTE_ARRAY` |
 | Input          | Path, or in-memory `bytes` / `memoryview`, with column selection                                   |
 
@@ -281,9 +281,8 @@ Unsupported column types fail loud (no silent skip). Nested LIST/MAP/STRUCT and 
 ### Limitations
 
 - Not a full Parquet replacement reader; decode support is intentionally narrow.
-- `GZIP`, `LZO`, `BROTLI`, `LZ4`, and `LZ4_RAW` compression codecs are not implemented in the decode path.
-- `INT96` is not supported for value decoding in `read_parquet(...)`.
-- `FIXED_LEN_BYTE_ARRAY` value decoding is not implemented.
+- `LZO`, `BROTLI`, and legacy Hadoop-framed `LZ4` (parquet codec 5) are not implemented in the decode path. A file using one raises with the codec named — it is never read as zero rows. Rewrite with `ZSTD` or `LZ4_RAW` (codec 7).
+- `FIXED_LEN_BYTE_ARRAY` decodes only as `DECIMAL` (width 1..16); other FLBA uses (UUID, fixed-width hashes) raise.
 - Decode logic is built around `DATA_PAGE` (V1); `DATA_PAGE_V2` is not handled.
 - Decode reads from a single data-page path per column chunk; files requiring full multi-page streaming decode may return partial or failed column results.
 - Nested, list, and map-heavy files are not a primary decode target; flat primitive columns are the intended shape.

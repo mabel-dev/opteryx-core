@@ -140,13 +140,15 @@ def _contains_any_eq(array, item):
 
 
 def test_array_contains_projection_matches_any_semantics():
-    # ARRAY_CONTAINS(missions, 'Apollo 11') lowers to `'Apollo 11' = ANY(missions)`
-    # and is now native. NULL array row -> NULL (not False), matching `= ANY`.
+    # `'Apollo 11' = ANY(missions)` is native. NULL array row -> NULL (not False).
+    # Read positionally: bare `= ANY` names the column after the expression, not
+    # the alias.
     raw = _fetch("SELECT missions FROM testdata.astronauts")
-    d = _fetch("SELECT ARRAY_CONTAINS(missions, 'Apollo 11') AS c FROM testdata.astronauts")
-    assert d, "ARRAY_CONTAINS projection returned no rows (was it refused?)"
+    d = _fetch("SELECT 'Apollo 11' = ANY(missions) FROM testdata.astronauts")
+    assert d, "`= ANY` projection returned no rows (was it refused?)"
     expected = [_contains_any_eq(a, "Apollo 11") for a in raw["missions"]]
-    assert d["c"] == expected
+    (values,) = d.values()
+    assert values == expected
 
 
 def test_array_contains_in_filter():
@@ -155,7 +157,7 @@ def test_array_contains_in_filter():
     expected = sorted(
         n for n, m in zip(raw["name"], raw["missions"]) if _contains_any_eq(m, "Apollo 11")
     )
-    d = _fetch("SELECT name FROM testdata.astronauts WHERE ARRAY_CONTAINS(missions, 'Apollo 11')")
+    d = _fetch("SELECT name FROM testdata.astronauts WHERE 'Apollo 11' = ANY(missions)")
     assert sorted(d.get("name", [])) == expected
     assert expected, "expected at least one Apollo 11 astronaut"
 

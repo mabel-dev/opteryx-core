@@ -31,9 +31,9 @@ from opteryx.compiled.nanobind.vectors import vector_in_list
 from opteryx.compiled.nanobind.vectors import vector_ipv4_in_cidr
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.utils.vector_types import VectorType, get_vector_type, is_draken_vector, is_scalar
-# Note: _json_at_arrow, _json_array_contains_all, _json_at_question,
-# _coerce_date32, _coerce_float, _coerce_int64, _coerce_timestamp are textually
-# included via __init__.pyx (json_ops.pyx, type_coercion.pyx) before this file.
+# Note: _json_at_arrow, _json_array_contains_all, _coerce_date32, _coerce_float,
+# _coerce_int64, _coerce_timestamp are textually included via __init__.pyx
+# (json_ops.pyx, type_coercion.pyx) before this file.
 
 
 cdef inline object _nb_vec_unwrap(object v):
@@ -336,8 +336,17 @@ cpdef draken_compare_int(int op_code, left, right, int16_t left_schema_type=0, i
         return _json_at_arrow(left, right)
     if op_code == OP_ARRAY_CONTAINS_ALL:
         return _json_array_contains_all(left, right)
+    # `@?` (AtQuestion) is compiled to draken_json_path_exists, whose path is a
+    # bind-time literal in an extraction_ctx — it never reaches this evaluator.
+    # The arm stays as a REFUSAL rather than being deleted outright: without it
+    # op 29 falls through to the generic compare below, which would hand the code
+    # to _string_compare and answer with something. Same shape as the LIKE ANY
+    # guard above — an unported path fails loud, it does not improvise.
     if op_code == OP_AT_QUESTION:
-        return _json_at_question(left, right)
+        raise NotImplementedError(
+            "@? is compiled to draken_json_path_exists (native); it has no Python "
+            "evaluator path."
+        )
     # IPv4 CIDR containment. `>>=` is the same predicate with the operands the
     # other way round (network on the left), so it reuses the one kernel rather
     # than duplicating the scan — there is no separate "contains" kernel to keep

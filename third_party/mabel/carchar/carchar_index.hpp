@@ -43,11 +43,14 @@ class CarcharIndex {
         return static_cast<std::size_t>((key & (capacity_ - 1U)) / kGroupWidth);
     }
 
-    // Prefetch the control-array cache line a probe for `key` would touch first.
-    // Callers that know future keys (precomputed morsel hashes) issue the miss
-    // ahead of the dependent find_or_insert_id, raising memory-level parallelism
-    // on the latency-bound probe. Semantically a no-op. Helps high-cardinality
-    // (all-miss) probes ~10%; negligible overhead when the table is cache-resident.
+    // ⛔ DEAD — kept only so the measurement is not repeated a third time.
+    // Compute-path software prefetch is banned (architect, 2026-07-02). The call
+    // site in native_group_sinks.hpp pass B was removed then, on Apple Silicon
+    // measurements. Re-tested on x86 2026-08-14, prefetching this line 8/16 rows
+    // ahead of the dependent probe (and in a variant the hashes_ line too):
+    // 8% SLOWER on a cache-resident 9k-group table, flat at 6M, 2.8% (ranges
+    // barely separating) at 17.6M, noise at 18.3M. Net negative on both
+    // architectures. If the probe is slow, restructure the passes.
     void prefetch(std::uint64_t key) const noexcept {
         if (capacity_ == 0) {
             return;
@@ -96,7 +99,7 @@ class CarcharIndex {
         if (!result.found) {
             return false;
         }
-        payload_ref_out = payload_refs_[result.slot];
+        payload_ref_out = slots_[result.slot].payload;
         return true;
     }
 
@@ -105,7 +108,7 @@ class CarcharIndex {
         if (!result.found) {
             return false;
         }
-        payload_ref_out = payload_refs_[result.slot];
+        payload_ref_out = slots_[result.slot].payload;
         return true;
     }
 
@@ -132,7 +135,7 @@ class CarcharIndex {
             record_insert_probe_length(result.probes);
         }
         if (result.found) {
-            return {payload_refs_[result.slot], false};
+            return {slots_[result.slot].payload, false};
         }
         const std::int64_t payload_ref = std::forward<PayloadFactory>(payload_factory)();
         insert_at(result.slot, key, payload_ref);
@@ -151,7 +154,7 @@ class CarcharIndex {
     bool find_or_insert_id(std::uint64_t key, std::int64_t new_id, std::int64_t& payload_out) {
         auto result = find_slot(key);
         if (result.found) {
-            payload_out = payload_refs_[result.slot];
+            payload_out = slots_[result.slot].payload;
             return false;
         }
         // Miss: ensure capacity (may resize, invalidating the slot), then re-probe.
@@ -173,7 +176,7 @@ class CarcharIndex {
         out.reserve(size_);
         for (std::size_t i = 0; i < capacity_; ++i) {
             if (control_[i] != kEmpty) {
-                out.emplace_back(hashes_[i], payload_refs_[i]);
+                out.emplace_back(slots_[i].hash, slots_[i].payload);
             }
         }
         return out;
@@ -197,7 +200,7 @@ class CarcharIndex {
     }
 
    protected:
-    std::size_t estimated_bytes() const noexcept { return capacity_ * (1U + 8U + 8U); }
+    std::size_t estimated_bytes() const noexcept { return capacity_ * (1U + sizeof(Slot)); }
 
    private:
     struct FindResult {
@@ -219,10 +222,8 @@ class CarcharIndex {
         // them was a dead memset of 16 bytes/slot on every alloc AND every
         // doubling — GB-scale on high-cardinality GROUP BY, never read once.
         control_.assign(capacity_ + (kGroupWidth - 1U), kEmpty);
-        hashes_.clear();
-        hashes_.resize(capacity_);
-        payload_refs_.clear();
-        payload_refs_.resize(capacity_);
+        slots_.clear();
+        slots_.resize(capacity_);
         size_ = 0;
         // Integer threshold computed once per (re)size so the per-insert
         // capacity check is a single integer compare, not an int→double
@@ -244,8 +245,8 @@ class CarcharIndex {
         if (slot < (kGroupWidth - 1U)) {
             control_[capacity_ + slot] = tag;
         }
-        hashes_[slot] = key;
-        payload_refs_[slot] = payload_ref;
+        slots_[slot].hash = key;
+        slots_[slot].payload = payload_ref;
         ++size_;
     }
 
@@ -286,8 +287,9 @@ class CarcharIndex {
     // below, which every existing caller already used — behaviour unchanged.
     FindResult find_slot_nothrow(std::uint64_t key) const noexcept {
         const std::uint8_t tag = key_tag(key);
-        const auto result = detail::probe_find_slot_direct(
-            control_.data(), hashes_.data(), capacity_, key, tag);
+        const auto result = detail::probe_find_slot_direct<2>(
+            control_.data(), reinterpret_cast<const std::uint64_t*>(slots_.data()),
+            capacity_, key, tag);
         return {result.slot, result.found, result.probes};
     }
 
@@ -303,8 +305,7 @@ class CarcharIndex {
         new_capacity = std::max(kMinCapacity, next_power_of_two(new_capacity));
 
         auto old_control      = std::move(control_);
-        auto old_hashes       = std::move(hashes_);
-        auto old_payload_refs = std::move(payload_refs_);
+        auto old_slots        = std::move(slots_);
         const auto old_capacity = capacity_;
 
         initialize_storage(new_capacity);
@@ -314,9 +315,8 @@ class CarcharIndex {
             if (old_control[slot] == kEmpty) {
                 continue;
             }
-            insert_at(
-                find_empty_slot_for_resize(old_hashes[slot]), old_hashes[slot], old_payload_refs[slot]
-            );
+            insert_at(find_empty_slot_for_resize(old_slots[slot].hash),
+                      old_slots[slot].hash, old_slots[slot].payload);
         }
     }
 
@@ -324,8 +324,20 @@ class CarcharIndex {
     std::vector<std::uint8_t> control_;
     // Uninitialized-allocator vectors: allocated but never pre-filled, because
     // an empty slot's hash/payload are never read (see initialize_storage).
-    std::vector<std::uint64_t, detail::uninitialized_allocator<std::uint64_t>> hashes_;
-    std::vector<std::int64_t, detail::uninitialized_allocator<std::int64_t>> payload_refs_;
+    // H16 (2026-08-14): hashes_ and payload_refs_ were SEPARATE allocations, so a
+    // probe hit cost two random accesses at the same index into two arrays (plus
+    // control_) — three dependent misses across ~544 MB at 17.6M groups. Merged
+    // into one 16-byte slot so the confirm (hash) and the fetch (payload) land on
+    // the SAME cache line: one random access instead of two. This is what DuckDB
+    // (salt packed into the pointer word) and ClickHouse (key+mapped in one cell)
+    // both do. The SIMD probe reads it as a uint64 array with HStride = 2.
+    struct Slot {
+        std::uint64_t hash;
+        std::int64_t  payload;
+    };
+    static_assert(sizeof(Slot) == 16, "Slot must be exactly two 64-bit words");
+    static_assert(alignof(Slot) >= 8, "Slot must be 8-byte aligned for the probe");
+    std::vector<Slot, detail::uninitialized_allocator<Slot>> slots_;
     std::size_t size_ = 0;
     std::size_t resize_threshold_ = 0;
     double load_factor_ = 0.80;

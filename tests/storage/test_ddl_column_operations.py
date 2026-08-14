@@ -1022,3 +1022,94 @@ def test_superseded_files_are_left_byte_for_byte_alone(tmp_path, planets):
 
     # and each operation really did add a file rather than reusing one
     assert len(_data_files(tmp_path, "planets")) == len(frozen) + 4
+
+
+# ---------------------------------------------------------------------------
+# LIST columns
+#
+# A LIST is one leaf column chunk however deep it nests, so DROP and RENAME can
+# carry it with the same verbatim copy they give a primitive. What differs is
+# the chunk's num_values: it counts LEVELS, not rows, because one row expands
+# into as many entries as it has elements. Re-declaring that count from the row
+# count instead of from the source would truncate every row holding more than
+# one element - equal-looking schema, silently shorter lists.
+# ---------------------------------------------------------------------------
+
+
+_LIST_ROWS = "(1, ['a','b','c']), (2, []), (3, ['x']), (4, ['p','q'])"
+_LIST_EXPECTED = [["a", "b", "c"], [], ["x"], ["p", "q"]]
+
+
+def _list_rows(session, column, relation="ws.events"):
+    rows = sorted(_rows(session, f"SELECT id, {column} FROM {relation}"),
+                  key=lambda r: r["id"])
+    return [r[column] for r in rows]
+
+
+def test_drop_column_preserves_multi_element_lists(tmp_path):
+    """Seven elements across four rows must all survive the drop. A num_values
+    taken from the row count would give back four one-element lists."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64, tags ARRAY<VARCHAR>, victim INT64)")
+    session_exec(
+        session,
+        "INSERT INTO ws.events VALUES "
+        "(1, ['a','b','c'], 0), (2, [], 0), (3, ['x'], 0), (4, ['p','q'], 0)",
+    )
+    assert _list_rows(session, "tags") == _LIST_EXPECTED
+
+    session_exec(session, "ALTER TABLE ws.events DROP COLUMN victim")
+
+    assert _list_rows(session, "tags") == _LIST_EXPECTED
+
+
+def test_rename_column_preserves_multi_element_lists(tmp_path):
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64, tags ARRAY<VARCHAR>)")
+    session_exec(session, f"INSERT INTO ws.events VALUES {_LIST_ROWS}")
+    assert _list_rows(session, "tags") == _LIST_EXPECTED
+
+    session_exec(session, "ALTER TABLE ws.events RENAME COLUMN tags TO labels")
+
+    assert _list_rows(session, "labels") == _LIST_EXPECTED
+
+
+def test_rename_list_column_does_not_touch_a_single_data_byte(tmp_path):
+    """The verbatim-copy property has to hold for a LIST too - its rep/def
+    levels and element bytes are exactly what must not be rewritten."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64, tags ARRAY<VARCHAR>)")
+    session_exec(session, f"INSERT INTO ws.events VALUES {_LIST_ROWS}")
+    paths = _data_files(tmp_path)
+    original = _parquet_data_region(paths[0])
+
+    session_exec(session, "ALTER TABLE ws.events RENAME COLUMN tags TO labels")
+
+    assert _parquet_data_region(_new_data_file(tmp_path, paths)) == original
+
+
+def test_drop_a_list_column_itself(tmp_path):
+    """Dropping the LIST leaves the primitives alone."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64, tags ARRAY<VARCHAR>)")
+    session_exec(session, f"INSERT INTO ws.events VALUES {_LIST_ROWS}")
+
+    session_exec(session, "ALTER TABLE ws.events DROP COLUMN tags")
+
+    assert [c["name"] for c in _stored_schema(tmp_path)] == ["id"]
+    assert [r["id"] for r in sorted(_rows(session, "SELECT id FROM ws.events"),
+                                    key=lambda r: r["id"])] == [1, 2, 3, 4]
+
+
+def test_list_of_int_column_survives_a_patch(tmp_path):
+    """The leaf annotation is rebuilt from the source schema, so a non-string
+    element type has to come back as itself."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64, nums ARRAY<INT64>, victim INT64)")
+    session_exec(session, "INSERT INTO ws.events VALUES (1, [10,20,30], 0), (2, [40], 0)")
+    before = _list_rows(session, "nums")
+    assert before == [[10, 20, 30], [40]]
+
+    session_exec(session, "ALTER TABLE ws.events DROP COLUMN victim")
+
+    assert _list_rows(session, "nums") == before

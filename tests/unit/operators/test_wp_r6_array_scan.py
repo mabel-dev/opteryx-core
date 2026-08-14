@@ -166,7 +166,7 @@ def test_array_role3_filter_only_parity(monkeypatch):
 
 
 @pytest.mark.parametrize("sql", [
-    "SELECT id, ARRAY_CONTAINS(ints, 5) FROM '%s'" % _ARRAY_TYPES,
+    "SELECT id, 5 = ANY(ints) FROM '%s'" % _ARRAY_TYPES,
     "SELECT id, LENGTH(strs) FROM '%s'" % _ARRAY_TYPES,
     "SELECT id, u FROM '%s' CROSS JOIN UNNEST(ints) AS u" % _ARRAY_TYPES,
     "SELECT id, s FROM '%s' CROSS JOIN UNNEST(strs) AS s" % _ARRAY_TYPES,
@@ -174,7 +174,7 @@ def test_array_role3_filter_only_parity(monkeypatch):
 ])
 def test_array_consuming_sql_parity(monkeypatch, sql):
     """The natively-decoded vector has to survive the operators that actually read
-    a list — UNNEST gathers the child through the parent's offsets, ARRAY_CONTAINS
+    a list — UNNEST gathers the child through the parent's offsets, `= ANY`
     and LENGTH read it in place. A child owned or offset wrongly shows up here even
     when a plain projection round-trips."""
     _assert_parity(monkeypatch, sql)

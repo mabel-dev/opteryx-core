@@ -1742,14 +1742,14 @@ class ParquetIOPipeline {
             std::string url = gcs_to_https(path);
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            bytes = tl_http_client().get(url, {{"Range", range_hdr}},
+            bytes = tl_http_client().get(url, http_headers_(range_hdr),
                                           http_tuning_set_ ? &http_tuning_ : nullptr);
 
         } else if (path.substr(0, 7) == "http://" || path.substr(0, 8) == "https://") {
             is_remote = true;
             std::string range_hdr = "bytes=" + std::to_string(offset) +
                                     "-" + std::to_string(offset + size - 1);
-            bytes = tl_http_client().get(path, {{"Range", range_hdr}},
+            bytes = tl_http_client().get(path, http_headers_(range_hdr),
                                           http_tuning_set_ ? &http_tuning_ : nullptr);
 
         } else
@@ -2108,9 +2108,9 @@ class ParquetIOPipeline {
                 std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
                 reqs.reserve(groups.size());
                 for (const auto& g : groups) {
-                    reqs.emplace_back(url, std::map<std::string, std::string>{
-                        {"Range", "bytes=" + std::to_string(g.start) +
-                                  "-" + std::to_string(g.end - 1)}});
+                    reqs.emplace_back(url, http_headers_(
+                        "bytes=" + std::to_string(g.start) +
+                        "-" + std::to_string(g.end - 1)));
                 }
                 auto t_fetch = std::chrono::steady_clock::now();
                 remote_buffers = tl_http_client().get_many(
@@ -2195,7 +2195,27 @@ class ParquetIOPipeline {
                 }
 
                 DecodedColumn& decoded = scratch;   // reused; reset at decode entry
-                if (mmap_base != MAP_FAILED) {
+                // H15 (2026-08-14, unratified): a SMALL column chunk is cheaper to
+                // pread than to fault in. MEASURED (x86 cold, `SUM(AdvEngineID)` over
+                // 100 files, column = 0.96 MB total): bytes requested via syscalls are
+                // IDENTICAL to a zero-column COUNT(*) (11.3 MB both), yet the device
+                // delivers 42 MB more — all of it arriving through mmap page faults,
+                // ~170 KB faulted per mapping to read a ~3 KB chunk. That is
+                // fault-around (filemap_map_pages / fault_around_bytes), which is why
+                // the rejected MADV_RANDOM attempt did nothing: MADV_RANDOM suppresses
+                // readahead, not fault-around. A pread asks for exactly the bytes we
+                // want, at the cost of one copy into a heap buffer — a good trade only
+                // while the chunk is small, so large chunks keep the zero-copy slice.
+                // Threshold in bytes; RUGO_PREAD_SMALL_CHUNKS=0 disables (A/B arm).
+                static const size_t pread_below = []() -> size_t {
+                    const char* v = getenv("RUGO_PREAD_SMALL_CHUNKS");
+                    if (v != nullptr && *v != '\0') return strtoull(v, nullptr, 10);
+                    return 256u * 1024u;
+                }();
+                const bool small_chunk_pread =
+                    is_local && pread_below > 0 &&
+                    static_cast<size_t>(chunk_size) < pread_below;
+                if (mmap_base != MAP_FAILED && !small_chunk_pread) {
                     // Zero-copy: slice directly into the mmap — no heap allocation.
                     const uint8_t* chunk_ptr =
                         static_cast<const uint8_t*>(mmap_base) + (base_offset - mmap_offset);
@@ -2238,7 +2258,8 @@ class ParquetIOPipeline {
                     total_decode_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t_dec).count();
                 } else {
-                    // Local file whose mmap failed: per-column pread fallback.
+                    // Local file, reached either because the mmap failed OR because
+                    // H15 chose a pread for a small chunk (see small_chunk_pread).
                     auto [raw_bytes, read_ns] = read_range(item.path, base_offset, chunk_size);
                     result.bytes_fetched += chunk_size;
                     total_read_ns += read_ns;
@@ -2541,6 +2562,37 @@ class ParquetIOPipeline {
     HttpTuning http_tuning_;
     bool http_tuning_set_ = false;
     void set_http_tuning(const HttpTuning& t) { http_tuning_ = t; http_tuning_set_ = true; }
+
+    // Query-scoped Authorization header for the remote fetches. Same lifecycle as
+    // http_tuning_ above and for the same reason: HttpClient is thread_local and
+    // outlives any one query, so the credential travels with each request rather
+    // than being stashed on shared client state.
+    //
+    // This is the alternative to pre-signing every object. A signed URL carries
+    // its credential in the query string, which costs one IAM signBlob RPC PER
+    // FILE on Compute Engine / Cloud Run — there is no local private key on those,
+    // so the client library delegates to the IAM API (measured ~63ms each, ~6.3s
+    // for a 100-file scan). A bearer token is one credential for the caller,
+    // minted once per query, covering every object it touches.
+    //
+    // Empty (the default) means no Authorization header is sent, which is correct
+    // ONLY while the caller is still pre-signing: the URL then carries its own
+    // credential. Leaving this unset on an unsigned URL yields a 401, never an
+    // anonymous read.
+    std::string auth_header_;
+    bool auth_header_set_ = false;
+    void set_auth_header(const std::string& v) { auth_header_ = v; auth_header_set_ = true; }
+
+    // All three remote-GET sites build their header map here so they cannot drift
+    // apart: a site that silently omitted the credential would 401, and only on
+    // the deployments that lack a local signing key.
+    std::map<std::string, std::string> http_headers_(const std::string& range_hdr) const {
+        std::map<std::string, std::string> h{{"Range", range_hdr}};
+        if (auth_header_set_ && !auth_header_.empty()) {
+            h.emplace("Authorization", auth_header_);
+        }
+        return h;
+    }
 
     // ── Remote range coalescing (see the merge loop in decode_row_group) ─────
     // Parquet stores a row group's column chunks CONTIGUOUSLY, so a wide

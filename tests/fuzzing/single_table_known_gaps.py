@@ -266,7 +266,7 @@ REGISTER: List[RegisteredDefect] = [
     # it is empty is worth recording, because "no entries" and "nobody looked"
     # look identical from here.
     #
-    # Seven entries lived here. Four were fixed in the ENGINE, so the register
+    # Seven entries lived here. Five were fixed in the ENGINE, so the register
     # went red and they were deleted:
     #   shift-operators-unparseable          the dialect gained an infix parse for
     #                                        `<<` / `>>`. draken's bitwise_shl /
@@ -291,12 +291,17 @@ REGISTER: List[RegisteredDefect] = [
     #                                        to a date parser, and now floor-divides
     #                                        by the source unit's ticks-per-day like
     #                                        the kernel does.
+    #   at-question-has-no-native-kernel     `@?` has a kernel now
+    #                                        (draken_json_path_exists), so it runs
+    #                                        in a filter and in a projection. It
+    #                                        spent a while recorded as a CATALOG
+    #                                        fix — `implemented: false` — which was
+    #                                        an honest declaration of a hole, not a
+    #                                        closing of one. The hole is closed.
     #
-    # Three were fixed in the CATALOG, which is why they are not simply "still
+    # Two were fixed in the CATALOG, which is why they are not simply "still
     # open with a nicer excuse" — the engine behaviour is unchanged, but it is
     # now DECLARED, so a generator reading `reference/` does not emit it:
-    #   at-question-has-no-native-kernel     operators.json records
-    #                                        `implemented: false` for `@?`.
     #   array-agg-global-claimed-but-rejected aggregates.json records
     #                                        `support.global: false`, the same
     #                                        shape ANY_VALUE already had.
@@ -363,22 +368,34 @@ REGISTER: List[RegisteredDefect] = [
     # now reads `node.node_type`. `SELECT PI() AS a, PI() AS b` runs.
     # ─────────────────────────────────────────────────────────────────────────
     # REDUNDANT SYNTAX CHANGES THE OUTCOME — semantically identical spellings
-    # where one works and the other does not. These share a root: redundant
-    # parentheses are not normalised away before the plan is built.
+    # where one works and the other does not.
+    #
+    # The section used to say these SHARE a root, "redundant parentheses are not
+    # normalised away before the plan is built". That root is gone with the entry
+    # below, and the one that survives it never had it: a redundant paren pair is
+    # only one of four spellings that nest a FLOAT IN-list, and what refuses it is
+    # the c-native kernel set, not the wrapper.
     # ─────────────────────────────────────────────────────────────────────────
-    RegisteredDefect(
-        id="parenthesised-expression-loses-its-alias",
-        repro="SELECT x FROM (SELECT (id + 1) AS x FROM testdata.planets) AS s",
-        error_type="ColumnNotFoundError",
-        signature="cannot be found",
-        detail=(
-            "An alias on a PARENTHESISED expression is not registered, so the column cannot be "
-            "referenced from ORDER BY or from an enclosing query. Without the parentheses the "
-            "identical query works (`SELECT id + 1 AS x ...`), and `LENGTH(name) AS x` works — it "
-            "is the redundant parentheses specifically. Also reproduces as "
-            "`SELECT (id + 1) AS x FROM testdata.planets ORDER BY x`."
-        ),
-    ),
+    # `parenthesised-expression-loses-its-alias` was registered here. It is FIXED —
+    # `_strip_outer_nesting` (planner/logical_planner/logical_planner.py) drops the
+    # NodeType.NESTED wrapper at the top of a clause expression, before binding.
+    # Parentheses parse to a `Nested` node and the wrapper is part of the
+    # expression's RENDERING, which IS its identity to the binder, so `(id + 1)`
+    # was a different column from `id + 1` and `nested()` dropped the alias it was
+    # handed. Stripped at the OUTERMOST level only: `BINARY_OPERATOR` renders
+    # without parentheses of its own, so an inner wrapper is the only thing telling
+    # `(id + 2) * 3` apart from `id + (2 * 3)`, and stripping those would make two
+    # different expressions render alike and resolve to one column — a wrong
+    # answer, not a naming wrinkle.
+    #
+    # Pinned by tests/sql/test_parenthesised_expression_alias.py, which asserts
+    # this entry's repro directly (`test_alias_is_addressable_from_an_enclosing_
+    # scope` covers both the derived-table and the ORDER BY spelling), every other
+    # clause top, and the inner-paren guard above.
+    #
+    # `_unparenthesise` in single_table_grammar.py was emitting the UNPARENTHESISED
+    # spelling of every aliased projection expression on the strength of this
+    # entry. It is gone with the entry, so the generator writes what it built.
     RegisteredDefect(
         id="float-in-list-only-works-at-top-level",
         repro=(
@@ -386,7 +403,7 @@ REGISTER: List[RegisteredDefect] = [
             "WHERE (mass <> -1.0) OR (orbital_eccentricity IN (-1.0, -2.0))"
         ),
         error_type="NotSupportedError",
-        signature="filter predicate outside the c-native kernel set",
+        signature="in a filter predicate",
         detail=(
             "An IN-list on a FLOAT column has a native kernel only when it is the entire "
             "predicate. Every one of these fails while the bare form runs:\n"
@@ -459,40 +476,33 @@ REGISTER: List[RegisteredDefect] = [
     # INTERNAL ERRORS REACHING THE CALLER — raw Python exceptions, and internal
     # mangled column names, escaping as the user-facing diagnostic.
     # ─────────────────────────────────────────────────────────────────────────
-    RegisteredDefect(
-        id="stacked-aggregate-windows-across-a-derived-boundary",
-        repro=(
-            "SELECT gravity, COUNT(w) OVER (PARTITION BY gravity) AS w2 FROM "
-            "(SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w "
-            "FROM testdata.planets) AS s"
-        ),
-        error_type="InvalidInternalStateError",
-        signature="an aggregate Window node was left below a window chain",
-        detail=(
-            "An aggregate window in BOTH an inner derived table and the query reading it "
-            "trips a plan-rewriter invariant. `_rewrite_window_chain` "
-            "(planner/plan_rewriter/strategies/window_to_join.py) refuses to proceed if any "
-            "aggregate Window node survives below the chain it is rewriting, on the stated "
-            "ground that 'the logical planner emits every aggregate Window node for one "
-            "SELECT as one unbroken stack'. That premise holds WITHIN a SELECT, but the "
-            "check is applied to the whole source sub-plan, which reaches THROUGH the "
-            "subquery boundary and finds the INNER select's Window node — a different "
-            "SELECT, legitimately below. The CTE spelling fails identically:\n"
-            "  WITH c AS (SELECT gravity, MIN(mass) OVER (PARTITION BY gravity) AS w\n"
-            "             FROM testdata.planets)\n"
-            "  SELECT gravity, COUNT(w) OVER (PARTITION BY gravity) AS w2 FROM c\n"
-            "A SINGLE aggregate window over a derived table is fine, and a ranking window in "
-            "either position is fine. It takes one aggregate window on each side.\n"
-            "\n"
-            "Found 2026-08-13, when `aggregate-window-over-a-derived-table` was deleted from "
-            "this register as fixed. THAT entry had been justifying two outright suppressions "
-            "in single_table_grammar.py — `Relation.derived` withheld aggregate windows from "
-            "anything reading a derived relation, and `allow_aggregate_window=False` withheld "
-            "them from CTE bodies — so this narrower shape had never been generated at all. "
-            "Both suppressions are gone and this entry replaces them, which is the whole point "
-            "of deleting a stale entry rather than leaving it to keep the generator blind."
-        ),
-    ),
+    # `stacked-aggregate-windows-across-a-derived-boundary` was registered here. It
+    # is FIXED — and the entry had the diagnosis right: the invariant was sound and
+    # the ORDER it was checked in was not. `_rewrite_window_chain`
+    # (planner/plan_rewriter/strategies/window_to_join.py) COPIES a chain's whole
+    # source sub-plan once per partition spec, so it refuses to copy a source that
+    # still holds an un-rewritten aggregate Window — copying one would duplicate
+    # that window's own source per copy, which is the exponential duplication the
+    # chain rewrite exists to remove. Windows in different SCOPES are different
+    # chains, and the inner scope's chain sits INSIDE the outer chain's source, so
+    # the refusal fired on legal SQL purely because the outer chain was rewritten
+    # first. `_innermost_chain_first` orders chains by the size of their source
+    # sub-plan — a topological order for "nested inside", since every node in a
+    # logical plan has exactly one consumer, so a nested chain's source is a strict
+    # subset and therefore strictly smaller. The inner chain is a join by the time
+    # the outer one copies it, and the refusal goes back to being an invariant
+    # check rather than a limit. It is still raised, not softened: if the plan
+    # shape ever stops satisfying the ordering the failure is loud.
+    #
+    # Pinned by test_chained_windows_across_a_subquery
+    # (tests/integration/sql_battery/test_shapes_basic.py, and in `make q`), which
+    # asserts VALUES derived from the fixture rather than row counts — the counts
+    # alone would pass on a broadcast that attached the wrong partition's row. It
+    # covers the derived-table and CTE spellings, three scopes deep, a chain of
+    # length > 1 in the inner scope, a WHERE inside the subquery (the axis where a
+    # wrong answer keeps the shape), and this entry's own repro: the same
+    # PARTITION BY key on both sides, in both spellings. The shape battery in the
+    # same file carries them too, under "TWO AGGREGATE WINDOWS IN A CHAIN".
     RegisteredDefect(
         id="aggregate-window-over-a-grouped-source-filtered-on-its-aggregate",
         repro=(
@@ -523,10 +533,11 @@ REGISTER: List[RegisteredDefect] = [
             "    `MAX(n) OVER ()` fails the same way, so it is not about PARTITION BY.\n"
             "\n"
             "Found 2026-08-13 alongside "
-            "`stacked-aggregate-windows-across-a-derived-boundary`, by the same deletion of "
-            "the stale `aggregate-window-over-a-derived-table` entry and the two generator "
-            "suppressions it was justifying. Two distinct defects were hiding behind that one "
-            "suppression; this is the second."
+            "`stacked-aggregate-windows-across-a-derived-boundary` (since fixed and deleted — "
+            "see the note above this entry), by the same deletion of the stale "
+            "`aggregate-window-over-a-derived-table` entry and the two generator suppressions "
+            "it was justifying. Two distinct defects were hiding behind that one suppression; "
+            "this is the second, and it is the one still open."
         ),
     ),
     RegisteredDefect(
@@ -590,21 +601,21 @@ REGISTER: List[RegisteredDefect] = [
             "evaluation failed (err_op=15)' — an opcode number, which is the form recorded here."
         ),
     ),
-    RegisteredDefect(
-        id="order-by-a-boolean-expression-has-no-sort-key",
-        repro=(
-            "SELECT NULLIF((b'0' <= b'eta'), (TRUE = TRUE)) AS x FROM testdata.fuzzing.mixed "
-            "ORDER BY x DESC"
-        ),
-        error_type="RuntimeError",
-        signature="SortSink: unsupported ORDER BY key column type",
-        detail=(
-            "Sorting on a BOOLEAN-valued EXPRESSION fails, while sorting on a BOOLEAN COLUMN "
-            "works: `SELECT b_value FROM t ORDER BY b_value DESC` runs. types.json does not "
-            "record BOOLEAN as unsortable, and the engine sorts the column form, so the two "
-            "disagree. The error is at least loud — 'fail loud, never a silent wrong order'."
-        ),
-    ),
+    # `order-by-a-boolean-expression-has-no-sort-key` was registered here. It is
+    # FIXED — and it was never about BOOLEAN sorting. The entry read its repro as
+    # "a BOOLEAN-valued EXPRESSION cannot be a sort key, while a BOOLEAN COLUMN
+    # can", but `SELECT (name <= 'M') AS x FROM $planets ORDER BY x DESC` sorted
+    # correctly the whole time. What its repro actually had in common with nothing
+    # else in that description is that BOTH NULLIF arguments fold at plan time, so
+    # the sort key folds to a BOOL-typed NULL literal — and
+    # `_materialise_constant_literal` (compiled_expression.pyx) had no BOOL arm, so
+    # every BOOL null constant became an untyped DRAKEN_NULL vector and the sort
+    # key arrived with no type the SortSink could take. Any expression folding to a
+    # BOOL null hit it (`NULLIF(TRUE, TRUE)` alone does), and no expression that
+    # did not, ever did. Same one-line gap as `draken_iif: condition must be
+    # BOOLEAN` on `COUNT(*) FILTER (WHERE <folds to a BOOL null>)`, which is what
+    # led back to it; draken has `vector_from_bool_constant`, spelled on the other
+    # naming pattern, which is why it was believed not to exist.
     # `window-plus-folded-literal-concat-filter-raises-typeerror` was registered
     # here. It is FIXED — and it was never about the window, the ORDER BY or the
     # parentheses. CONCAT is REWRITE-ONLY: it has no callable_ref of its own and is
@@ -720,33 +731,36 @@ REGISTER: List[RegisteredDefect] = [
     # it runs — so the two collided and the DISTINCT one was dropped without a word.
     # Nothing then computed the column the projection asked for. The key now carries
     # every modifier that changes the value.
-    RegisteredDefect(
-        id="outer-filter-on-a-limited-grouped-cte-column",
-        repro=(
-            "WITH c AS (SELECT grp_wide, val_special, COUNT(cat) AS a2 "
-            "FROM testdata.fuzzing.wide WHERE val_special IN (-830422.625879) "
-            "GROUP BY grp_wide, val_special HAVING COUNT(*) <= 1 LIMIT 1) "
-            "SELECT a2 AS e FROM c WHERE val_special BETWEEN -260351.4 AND 271709.7"
-        ),
-        error_type="NotSupportedError",
-        signature="projecting a column the engine could not resolve",
-        detail=(
-            "An outer WHERE on a column of a CTE that GROUPs, HAVINGs and LIMITs fails with "
-            "'projecting a column the engine could not resolve here'. Every ingredient is "
-            "load-bearing — dropping ANY ONE of the inner WHERE, the HAVING, the LIMIT, or "
-            "either GROUP BY key makes it run — and none of the obvious suspects matter: "
-            "DISTINCT on the aggregate, the CAST the fuzzer wrapped the result in, and "
-            "projecting `val_special` in the outer SELECT all make no difference.\n"
-            "\n"
-            "REGISTERED AFTER a same-message entry was DELETED, and deliberately not folded "
-            "into it. The old entry (cte-projecting-a-column-the-stream-does-not-carry) named "
-            "COUNT + COUNT_DISTINCT over one column, which is fixed — its dedup key ignored "
-            "DISTINCT. This is a different defect that produced the same sentence, and it was "
-            "invisible for exactly as long as that entry sat in front of it. Confirmed "
-            "independent of the fix by re-running it against the old de-duplication key: it "
-            "fails identically."
-        ),
-    ),
+    # `outer-filter-on-a-limited-grouped-cte-column` was registered here. It is
+    # FIXED — in `ProjectionPushdownStrategy.collect_columns`
+    # (planner/optimizer/strategies/projection_pushdown.py), which is where the
+    # whole "projecting a column the engine could not resolve here" class lives:
+    # the strategy prunes on `pre_update_columns`, and that set is only as honest
+    # as the collection that builds it. Under-collect and a node below is told a
+    # live column is dead.
+    #
+    # BOTH halves of that collection are load-bearing for this repro, measured by
+    # reverting each one in-process and re-running it — either alone brings the
+    # identical NotSupportedError back:
+    #   * a Project emits `columns ∪ passthrough_columns`, and the outer WHERE's
+    #     `val_special` is a passthrough — the outer SELECT projects only `a2`.
+    #   * a COMPUTED column's OWN identity is live as well as its inputs, because
+    #     which of the two the compiler uses (recompute, or read the materialised
+    #     column off the stream) is decided later.
+    # The LIMIT is what makes the shape need either: a predicate cannot push below
+    # a LIMIT without changing the answer, so the outer Filter is stranded above
+    # the CTE's Limit and has to read a column across that boundary.
+    #
+    # Pinned by tests/sql/test_outer_filter_on_a_limited_grouped_cte.py, which
+    # asserts VALUES against the flat equivalent rather than just that it runs —
+    # the entry's own repro filters on a literal no row carries, so "it returns
+    # nothing" is green whether the outer filter ran or was lost.
+    #
+    # This is the SECOND entry deleted from under that message, after
+    # `cte-projecting-a-column-the-stream-does-not-carry`. The register's honest
+    # limitation (see the module docstring) is exactly this: a broad signature
+    # hides the next defect behind it, and each one is only visible once the one
+    # in front is gone.
     # `subquery-alias-filtered-but-not-projected-raises-keyerror` was registered
     # here. It is FIXED — and it was a real pruning bug, as the entry read it.
     # PredicatePushdownStrategy moves a predicate onto the scan and deletes the

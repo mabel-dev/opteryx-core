@@ -18,15 +18,20 @@ Internal architecture reference for the Parquet, JSONL, and CSV readers.
 
 | Area | Support |
 |------|---------|
-| Physical types | int32, int64, float32, float64, boolean, byte_array |
-| Compression | UNCOMPRESSED, SNAPPY, ZSTD |
+| Physical types | int32, int64, float32, float64, boolean, byte_array, int96 (→ TIMESTAMP ns), fixed_len_byte_array (DECIMAL, width 1..16) |
+| Compression | UNCOMPRESSED, SNAPPY, GZIP, ZSTD, LZ4_RAW |
 | Encodings | PLAIN, dictionary pages (PLAIN_DICTIONARY / RLE_DICTIONARY), DELTA_BINARY_PACKED, DELTA_BYTE_ARRAY |
 | Input | in-memory bytes / memoryview, with column selection |
 
 ### Design notes
 
 - DATA_PAGE (V1) is the primary decode path. DATA_PAGE_V2 is not handled.
-- INT96 and FIXED_LEN_BYTE_ARRAY value decoding not implemented.
+- INT96 is converted to int64 nanoseconds at decode (the spec assigns it exactly one
+  meaning) and the schema reports it as `timestamp[ns]`. FIXED_LEN_BYTE_ARRAY decodes
+  only as DECIMAL (width 1..16).
+- An unsupported codec, encoding, or physical type is a hard, reason-carrying failure.
+  A column is never silently dropped from a Morsel — that produced zero-row morsels
+  for non-empty files (BROTLI, INT96; fixed 2026-08-14).
 - Nested / list / map columns are not a primary decode target.
 - On partial decode failure, an individual column within a Morsel may be None.
 - `can_decode()` is a compatibility signal, not a strict guarantee.

@@ -286,6 +286,26 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             if column.node_type == NodeType.IDENTIFIER and column.schema_column:
                 identities.add(column.schema_column.identity)
             else:
+                # A COMPUTED column has TWO possible sources, and which one is used is
+                # decided later, by the compiler: recompute it from its inputs, or read
+                # it already-materialized off the stream (_add_computed skips an
+                # identity the layout already carries). So BOTH the inputs and the
+                # computed column's OWN identity are potentially live below this node,
+                # and collecting only the inputs is the under-count this docstring
+                # warns about.
+                #
+                # It bites where a computed column is materialized by the node below:
+                # a GROUP BY key. `SELECT TRUNC(id,1) AS d, COUNT(*) ... GROUP BY ALL`
+                # normally has its Project folded away by redundant_operators, so
+                # nothing asked the question — but a UNION leg KEEPS its Project.
+                # Missing the derived identity made _group_key_emit rule that key dead,
+                # the groupby sink then dropped its value store, and the surviving
+                # Project tried to recompute TRUNC over an `id` the aggregate no longer
+                # carried: "expression references column ... which the stream does not
+                # carry". The first leg escaped only by accident (union output identity
+                # == first leg's identity); the second leg failed.
+                if column.schema_column:
+                    identities.add(column.schema_column.identity)
                 identities.update(
                     col.schema_column.identity
                     for col in get_all_nodes_of_type(column, (NodeType.IDENTIFIER,))
