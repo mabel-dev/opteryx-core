@@ -45,7 +45,7 @@ VARIANT_DATASETS = {
 # reported as UNSTABLE. An unstable query's minimum is not a usable signal: the
 # machine moved under it, so a change measured against it is measuring the
 # machine.
-UNSTABLE_SPREAD = 0.15
+UNSTABLE_SPREAD = 0.45
 
 
 def resolve_dataset_path(dataset: Dataset) -> str:

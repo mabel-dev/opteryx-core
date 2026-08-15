@@ -400,17 +400,83 @@ def test_add_duplicate_column_rejected(tmp_path):
         session_exec(session, "ALTER TABLE ws.events ADD COLUMN name VARCHAR")
 
 
-def test_add_column_if_not_exists_is_not_expressible(tmp_path):
-    """`ADD COLUMN IF NOT EXISTS` does not parse in this dialect, even though
-    sqlparser's AST carries the flag and the planner reads it. Recorded rather
-    than assumed: the planner's `if_not_exists` is therefore unreachable-True
-    today, and this test is what will notice if the grammar ever gains the form.
+def test_add_column_if_not_exists_on_existing_column_is_a_noop(tmp_path):
+    """The guard makes the statement re-runnable: the second ADD of a column
+    that is already there does nothing and does not raise. This is the whole
+    point of the clause - a migration script can be applied twice."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64, name VARCHAR)")
+    session_exec(session, "INSERT INTO ws.events VALUES (1, 'a')")
+
+    session_exec(session, "ALTER TABLE ws.events ADD COLUMN IF NOT EXISTS name VARCHAR")
+
+    # Not added twice, and the existing column keeps its type and its values.
+    assert [c["name"] for c in _stored_schema(tmp_path)] == ["id", "name"]
+    assert _rows(session, "SELECT name FROM ws.events") == [{"name": "a"}]
+
+
+def test_add_column_if_not_exists_on_new_column_adds_it(tmp_path):
+    """The guard is a guard, not a skip: a column that is NOT there is added,
+    with its DEFAULT backfilled into the rows that already exist."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64)")
+    session_exec(session, "INSERT INTO ws.events VALUES (1)")
+
+    session_exec(
+        session, "ALTER TABLE ws.events ADD COLUMN IF NOT EXISTS extra VARCHAR DEFAULT 'x'"
+    )
+
+    assert [c["name"] for c in _stored_schema(tmp_path)] == ["id", "extra"]
+    assert _rows(session, "SELECT extra FROM ws.events") == [{"extra": "x"}]
+
+
+def test_add_column_if_not_exists_repeated_is_stable(tmp_path):
+    """Re-runnable means re-runnable more than once - three applications of the
+    same statement leave the table in the state the first one produced."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64)")
+
+    for _ in range(3):
+        session_exec(session, "ALTER TABLE ws.events ADD COLUMN IF NOT EXISTS extra INT64")
+
+    assert [c["name"] for c in _stored_schema(tmp_path)] == ["id", "extra"]
+
+
+def test_add_column_if_not_exists_before_column_keyword(tmp_path):
+    """`ADD IF NOT EXISTS COLUMN` is the other spelling of the same clause, and
+    it must carry the guard too. It already PARSED before the guard was
+    implemented - upstream reads the flag there and then overwrites it with
+    False for this dialect - so a script written this way was silently
+    unguarded, which is worse than one that fails to parse.
     """
     session = _setup(tmp_path)
     session_exec(session, "CREATE TABLE ws.events (id INT64, name VARCHAR)")
 
-    with pytest.raises((QueryParseError, UnsupportedSyntaxError, ValueError)):
-        session_exec(session, "ALTER TABLE ws.events ADD COLUMN IF NOT EXISTS name VARCHAR")
+    session_exec(session, "ALTER TABLE ws.events ADD IF NOT EXISTS COLUMN name VARCHAR")
+
+    assert [c["name"] for c in _stored_schema(tmp_path)] == ["id", "name"]
+
+
+def test_add_column_if_not_exists_still_needs_the_table(tmp_path):
+    """The column guard says nothing about the table. Without `IF EXISTS` on the
+    ALTER, a missing table is still an error - the two guards are independent."""
+    session = _setup(tmp_path)
+
+    with pytest.raises(DatasetNotFoundError):
+        session_exec(session, "ALTER TABLE ws.absent ADD COLUMN IF NOT EXISTS extra INT64")
+
+    session_exec(session, "ALTER TABLE IF EXISTS ws.absent ADD COLUMN IF NOT EXISTS extra INT64")
+
+
+def test_add_column_first_after_rejected_with_guard(tmp_path):
+    """FIRST/AFTER is refused whether or not the guard is written - the guarded
+    form takes its own parse path, so it needs its own check that the path did
+    not quietly start accepting a position."""
+    session = _setup(tmp_path)
+    session_exec(session, "CREATE TABLE ws.events (id INT64)")
+
+    with pytest.raises((QueryParseError, UnsupportedSyntaxError)):
+        session_exec(session, "ALTER TABLE ws.events ADD COLUMN IF NOT EXISTS extra INT64 FIRST")
 
 
 def test_add_eighteen_columns(tmp_path):

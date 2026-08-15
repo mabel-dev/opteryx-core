@@ -5,8 +5,8 @@
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "ALTER TABLE [IF EXISTS] table_name ADD COLUMN column_name data_type [DEFAULT literal]",
-            "ALTER TABLE [IF EXISTS] table_name DROP COLUMN column_name",
+            "ALTER TABLE [IF EXISTS] table_name ADD COLUMN [IF NOT EXISTS] column_name data_type [DEFAULT literal]",
+            "ALTER TABLE [IF EXISTS] table_name DROP COLUMN [IF EXISTS] column_name",
             "ALTER TABLE [IF EXISTS] table_name RENAME COLUMN column_name TO new_column_name",
             "ALTER TABLE [IF EXISTS] table_name ALTER COLUMN column_name TYPE data_type",
             "ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column, ...)",
@@ -14,7 +14,7 @@
         ],
         "summary": "Change a table's columns, its clustering columns, or its name.",
         "documentation": "ADD/DROP/RENAME COLUMN and ALTER COLUMN ... TYPE change the table's shape, rewriting each data file's footer and copying the columns they do not touch byte-for-byte. ADD COLUMN ... DEFAULT fills the rows that already exist with a literal; it is a backfill value, not stored state a later INSERT consults. ALTER COLUMN ... TYPE only widens within a type family. CLUSTER BY records the columns a catalog-backed table is sorted by, in priority order. RENAME TO renames the relation and may move it between collections.",
-        "notes": "One operation per statement. CLUSTER BY takes column names, not expressions. RENAME TO cannot cross workspaces. DROP COLUMN takes one column and rejects CASCADE/RESTRICT. ADD COLUMN accepts only a literal DEFAULT. ALTER COLUMN ... TYPE rejects narrowing, integer-to-float, cross-family changes, no-ops and USING. SET DEFAULT, DROP DEFAULT, SET NOT NULL and ADD CONSTRAINT are rejected at plan time - the engine enforces no constraints, so accepting them would imply behaviour it does not have."
+        "notes": "One operation per statement. CLUSTER BY takes column names, not expressions. RENAME TO cannot cross workspaces. DROP COLUMN takes one column and rejects CASCADE/RESTRICT. ADD COLUMN accepts only a literal DEFAULT, and rejects FIRST/AFTER - a new column is always appended. The two guards are independent: IF EXISTS on the ALTER makes a missing TABLE a no-op, IF NOT EXISTS on ADD COLUMN (and IF EXISTS on DROP COLUMN) makes an already-settled COLUMN a no-op, which is what makes a migration script re-runnable. ALTER COLUMN ... TYPE rejects narrowing, integer-to-float, cross-family changes, no-ops and USING. SET DEFAULT, DROP DEFAULT, SET NOT NULL and ADD CONSTRAINT are rejected at plan time - the engine enforces no constraints, so accepting them would imply behaviour it does not have."
     },
     "alter_view": {
         "canonical_name": "ALTER VIEW",

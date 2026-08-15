@@ -44,6 +44,13 @@ class ExecutionContext:
         billing_account: str, optional
             Account usage from this execution is billed to. Distinct from `user`:
             many users can bill to one account.
+        workspace: str, optional
+            The single workspace this execution is on behalf of, when there is
+            one. Left None for caller-submitted SQL, which can read several
+            workspaces and write another - there is no single answer to record.
+            Set only by the platform's own single-target work (a materialized
+            view refresh, an OPTIMIZE), where the submitting service knows the
+            one workspace involved and bills against it.
     """
 
     query_id: str = None
@@ -57,6 +64,7 @@ class ExecutionContext:
     variables: SystemVariablesContainer = field(init=False)
     access_policies: List[dict] = field(default_factory=list)
     billing_account: str = None
+    workspace: str = None
 
     def __post_init__(self):
         """

@@ -409,6 +409,16 @@ def test_parse_alter_table_reports_its_target():
     assert info["tables"] == ["users"]
 
 
+def test_parse_guarded_alter_table_reports_its_target():
+    """`ADD COLUMN IF NOT EXISTS` is built by the Opteryx dialect itself rather
+    than by upstream's ALTER TABLE production, so it gets its own check that the
+    statement it produces is read exactly like the unguarded one."""
+    info = opteryx.analyze_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname VARCHAR")
+
+    assert info["tables"] == ["users"]
+    assert info["is_ddl"] is True
+
+
 def test_parse_show_columns_reports_the_table_it_describes():
     info = opteryx.analyze_query("SHOW COLUMNS FROM users")
 

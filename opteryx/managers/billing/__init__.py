@@ -17,13 +17,37 @@ class BillingEventType(Enum):
     DATA_STORAGE_BYTES = "DATA_STORAGE_BYTES"
 
 
-def write_billing_event(billing_event: BillingEventType, billing_account: str, event_details: dict):
+def write_billing_event(
+    billing_event: BillingEventType,
+    billing_account: str,
+    event_details: dict,
+    actor: str = None,
+    workspace: str = None,
+):
+    """Emit one billing event.
+
+    Three fields answer three different questions and must not be conflated -
+    the `billing_account` column used to hold whichever of them the emitter
+    happened to know, which made it unusable as a payer:
+
+      billing_account  WHO PAYS. Always resolved by the time it gets here.
+      actor            WHO DID IT. The identity the session runs as; None for
+                       usage with no actor at all (the storage sampler).
+      workspace        WHERE IT HAPPENED, but only where that is a SINGLE
+                       value. A query can read four workspaces and write a
+                       fifth, so it is None for caller-submitted SQL and set
+                       only for single-target platform work (a materialized
+                       view refresh, an OPTIMIZE) where the submitting path
+                       knows the one workspace involved.
+    """
     structured_log = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z",
         "logName": "projects/opteryx/logs/billing_events",
         "severity": "BILLING",
         "billing_account": billing_account,
         "billing_event": billing_event.value,
+        "actor": actor,
+        "workspace": workspace,
     }
 
     if billing_event == BillingEventType.QUERY_EXECUTION:

@@ -75,6 +75,7 @@ class Session(DataFrame):
         schema: Optional[str] = None,
         access_policies: Optional[Iterable[dict]] = None,
         billing_account: Optional[str] = None,
+        workspace: Optional[str] = None,
         query_id: Optional[str] = None,
         **kwargs,
     ):
@@ -95,6 +96,8 @@ class Session(DataFrame):
             raise ProgrammingError("Session access_policies must all be dictionaries.")
         if billing_account and not isinstance(billing_account, str):
             raise ProgrammingError("A Session billing_account must be a string.")
+        if workspace and not isinstance(workspace, str):
+            raise ProgrammingError("A Session workspace must be a string.")
         if memberships is None:
             # `public` — the group every caller is in by virtue of being a caller.
             # NOT a product/tenant name: a caller who supplied no memberships holds
@@ -117,6 +120,10 @@ class Session(DataFrame):
             # means "holds none", never a house default.
             entitlements=entitlements,
             billing_account=billing_account,
+            # NOT defaulted: an unsupplied workspace means "this execution is not
+            # on behalf of one workspace", which is the normal case for caller
+            # SQL. Defaulting it would assert a single target where there is none.
+            workspace=workspace,
         )
 
         # Initialize cursor-like state (merged from previous Cursor implementation)
@@ -203,6 +210,12 @@ class Session(DataFrame):
         write_billing_event(
             billing_event=BillingEventType.QUERY_EXECUTION,
             billing_account=self.context.billing_account,
+            # The identity this session runs as. Not the same question as
+            # `billing_account`, which is who pays for what it does - a
+            # materialized view refresh acts as its owner and bills the target
+            # workspace's account.
+            actor=self.context.user,
+            workspace=self.context.workspace,
             event_details={
                 "user": self.context.user,
                 "query_id": self.query_id,
@@ -224,6 +237,8 @@ class Session(DataFrame):
         write_billing_event(
             billing_event=BillingEventType.DATA_PROCESSED_BYTES,
             billing_account=self.context.billing_account,
+            actor=self.context.user,
+            workspace=self.context.workspace,
             event_details={
                 "user": self.context.user,
                 "query_id": self.query_id,

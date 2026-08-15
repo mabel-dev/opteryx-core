@@ -14,8 +14,8 @@ CLAUSE_DEFINITIONS = {
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "ALTER TABLE [IF EXISTS] table_name ADD COLUMN column_name data_type [DEFAULT literal]",
-            "ALTER TABLE [IF EXISTS] table_name DROP COLUMN column_name",
+            "ALTER TABLE [IF EXISTS] table_name ADD COLUMN [IF NOT EXISTS] column_name data_type [DEFAULT literal]",
+            "ALTER TABLE [IF EXISTS] table_name DROP COLUMN [IF EXISTS] column_name",
             "ALTER TABLE [IF EXISTS] table_name RENAME COLUMN column_name TO new_column_name",
             "ALTER TABLE [IF EXISTS] table_name ALTER COLUMN column_name TYPE data_type",
             "ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column, ...)",
@@ -36,7 +36,12 @@ CLAUSE_DEFINITIONS = {
             "One operation per statement. CLUSTER BY takes column names, not "
             "expressions. RENAME TO cannot cross workspaces. DROP COLUMN takes one "
             "column and rejects CASCADE/RESTRICT. ADD COLUMN accepts only a literal "
-            "DEFAULT. ALTER COLUMN ... TYPE rejects narrowing, integer-to-float, "
+            "DEFAULT, and rejects FIRST/AFTER - a new column is always appended. "
+            "The two guards are independent: IF EXISTS on the ALTER makes a missing "
+            "TABLE a no-op, IF NOT EXISTS on ADD COLUMN (and IF EXISTS on DROP "
+            "COLUMN) makes an already-settled COLUMN a no-op, which is what makes a "
+            "migration script re-runnable. "
+            "ALTER COLUMN ... TYPE rejects narrowing, integer-to-float, "
             "cross-family changes, no-ops and USING. SET DEFAULT, DROP DEFAULT, SET "
             "NOT NULL and ADD CONSTRAINT are rejected at plan time - the engine "
             "enforces no constraints, so accepting them would imply behaviour it "

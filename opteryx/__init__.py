@@ -103,6 +103,7 @@ def session(
     schema: Optional[str] = None,
     access_policies: Optional[Iterable[str]] = None,
     billing_account: Optional[str] = None,
+    workspace: Optional[str] = None,
     query_id: Optional[str] = None,
 ) -> "Session":
     """
@@ -112,6 +113,12 @@ def session(
     not the same thing as `user` — many users may bill to one account. Callers
     holding a caller identity (e.g. a service handling an authenticated request)
     should supply it; omitting it attributes usage to the house account.
+
+    `workspace` is the single workspace this session acts on behalf of, and is
+    for the platform's own single-target work only — a materialized view
+    refresh, an OPTIMIZE. Leave it unset for caller-submitted SQL: a query may
+    read several workspaces and write another, so there is no one value to
+    record and a guess would be recorded as fact.
 
     Example:
         session = opteryx.session(user="alice", memberships=["finance"])
@@ -127,6 +134,7 @@ def session(
         schema=schema,
         access_policies=access_policies,
         billing_account=billing_account,
+        workspace=workspace,
         query_id=query_id,
     )
 

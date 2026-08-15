@@ -12,7 +12,10 @@
 
 use std::boxed::Box;
 
-use sqlparser::ast::{BinaryOperator, Expr};
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{
+    AlterTable, AlterTableOperation, BinaryOperator, Expr, ObjectName, Statement,
+};
 use sqlparser::dialect::{Dialect, Precedence};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
@@ -98,7 +101,130 @@ fn parse_opteryx_trim(parser: &mut Parser) -> Result<Expr, ParserError> {
     })
 }
 
+/// What `parse_guarded_add_column_prefix` recovered before the column definition:
+/// everything from `ALTER` up to and including the `IF NOT EXISTS` guard.
+struct GuardedAddColumn {
+    name: ObjectName,
+    if_exists: bool,
+    only: bool,
+    column_keyword: bool,
+}
+
+/// `ALTER TABLE [IF EXISTS] [ONLY] name ADD [COLUMN] IF NOT EXISTS`, or nothing.
+///
+/// Errors mean "this is not that statement" and are discarded by the caller's
+/// `maybe_parse`, which rewinds the parser so upstream sees an untouched token
+/// stream. Nothing here is a diagnostic anyone reads.
+fn parse_guarded_add_column_prefix(parser: &mut Parser) -> Result<GuardedAddColumn, ParserError> {
+    parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
+    let if_exists = parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+    let only = parser.parse_keyword(Keyword::ONLY);
+    let name = parser.parse_object_name(false)?;
+    parser.expect_keyword(Keyword::ADD)?;
+
+    // Both orderings are accepted, because upstream accepts both and Postgres
+    // writes the second: `ADD IF NOT EXISTS COLUMN x` already parsed here (the
+    // guard was then silently dropped, see the `parse_statement` note), and
+    // `ADD COLUMN IF NOT EXISTS x` is the documented form.
+    let guard_before_column = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+    let column_keyword = parser.parse_keyword(Keyword::COLUMN);
+    let guard_after_column = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+    if !guard_before_column && !guard_after_column {
+        return Err(ParserError::ParserError(
+            "not a guarded ADD COLUMN".to_string(),
+        ));
+    }
+
+    Ok(GuardedAddColumn {
+        name,
+        if_exists,
+        only,
+        column_keyword,
+    })
+}
+
+/// The rest of a guarded `ADD COLUMN`, once the guard has been seen and the
+/// statement can no longer be anything else. Errors from here ARE diagnostics -
+/// they name the column definition that failed to parse.
+fn parse_guarded_add_column(
+    parser: &mut Parser,
+    prefix: GuardedAddColumn,
+) -> Result<Statement, ParserError> {
+    let column_def = parser.parse_column_def()?;
+
+    // Same rule upstream's `parse_alter_table` uses: the statement ends at its
+    // semicolon when it has one, otherwise at the last token consumed.
+    let end_token = if parser.peek_token_ref().token == Token::SemiColon {
+        parser.peek_token_ref().clone()
+    } else {
+        parser.get_current_token().clone()
+    };
+
+    // The statement ends with its column definition: no `column_position`, no
+    // comma-separated second operation. Both are refused by the planner anyway
+    // (a column is always appended; one operation per statement), so leaving
+    // their tokens unconsumed costs nothing and gets them refused - `ADD COLUMN
+    // IF NOT EXISTS x INT FIRST` gets the parser's own "expected end of
+    // statement" rather than a silent acceptance. Only the message differs from
+    // the unguarded path, never the outcome.
+    Ok(Statement::AlterTable(AlterTable {
+        name: prefix.name,
+        if_exists: prefix.if_exists,
+        only: prefix.only,
+        operations: vec![AlterTableOperation::AddColumn {
+            column_keyword: prefix.column_keyword,
+            if_not_exists: true,
+            column_def,
+            column_position: None,
+        }],
+        location: None,
+        on_cluster: None,
+        table_type: None,
+        end_token: AttachedToken(end_token),
+    }))
+}
+
 impl Dialect for OpteryxDialect {
+    /// Opteryx owns `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` - see
+    /// `parse_guarded_add_column_prefix`.
+    ///
+    /// Upstream gates the column-level guard on `dialect_of!(self is PostgreSql |
+    /// BigQuery | DuckDb | Generic)` with no trait flag to opt into, so a custom
+    /// dialect cannot have it any other way. The gate does two things to a
+    /// dialect outside that list, and BOTH are wrong here:
+    ///
+    ///   ADD COLUMN IF NOT EXISTS x INT   fails to parse ("expected a data type,
+    ///                                    found: NOT"), though every layer below
+    ///                                    the parser implements the guard - the
+    ///                                    planner reads `if_not_exists`, the
+    ///                                    operator passes it, both connectors
+    ///                                    honour it.
+    ///   ADD IF NOT EXISTS COLUMN x INT   parses, and the guard is DISCARDED:
+    ///                                    upstream parses it, then overwrites the
+    ///                                    flag with `false`. A re-run of a
+    ///                                    migration script written that way fails
+    ///                                    on the duplicate column exactly as if
+    ///                                    the guard had not been written.
+    ///
+    /// The hook takes over only statements that carry the guard; every other
+    /// `ALTER TABLE` rewinds and parses upstream, unchanged.
+    fn parse_statement(&self, parser: &mut Parser) -> Option<Result<Statement, ParserError>> {
+        // Cheap gate: this runs in front of EVERY statement, so anything not
+        // opening with ALTER is rejected on one peek, before `maybe_parse`.
+        match &parser.peek_token_ref().token {
+            Token::Word(word) if word.keyword == Keyword::ALTER => {}
+            _ => return None,
+        }
+
+        match parser.maybe_parse(parse_guarded_add_column_prefix) {
+            Ok(Some(prefix)) => Some(parse_guarded_add_column(parser, prefix)),
+            Ok(None) => None,
+            // Only RecursionLimitExceeded reaches here; it is not recoverable by
+            // handing the statement to another parser.
+            Err(err) => Some(Err(err)),
+        }
+    }
+
     fn is_identifier_start(&self, ch: char) -> bool {
         // Identifiers which begin with a digit are recognized while tokenizing numbers,
         // so they can be distinguished from exponent numeric literals.
