@@ -12,31 +12,56 @@ on:
       - 'ci-*'        # CI / dry-run builds
 
 jobs:
-  # ── Release floor: the absolute minimum operational proof, run BEFORE any
-  # wheel is built or published. rugo and skene have had this since their
-  # pipelines were written (release-rugo.yaml / release-skene.yaml `floor`);
-  # opteryx_core — the component that bundles both — had no test gate at all:
-  # it went straight from a tag to building and publishing wheels, with only
-  # the post-build import check standing between a broken tree and PyPI.
+  # ── Release floor: the absolute minimum operational proof. rugo and skene
+  # have had this since their pipelines were written (release-rugo.yaml /
+  # release-skene.yaml `floor`); opteryx_core — the component that bundles both
+  # — had no test gate at all: it went straight from a tag to building and
+  # publishing wheels, with only the post-build import check standing between a
+  # broken tree and PyPI.
   #
   # The four suites are the sanctioned local floor from the engineering
   # contract, run here exactly as a developer runs them:
   #   make q   — minimum SQL regression battery (shapes)
   #   make rt  — rugo unit tests
   #   make dt  — draken unit tests
-  #   make st  — skene native C++ suite + Python binding/scan/dispatch tests
+  #   make st  — skene native C++ suite
   #
-  # None of them need cloud credentials, so this job needs no secrets.
+  # None of them need cloud credentials, so these jobs need no secrets.
   #
-  # Every suite runs even after an earlier one fails (`if: '!cancelled()'`) so
-  # one red suite does not hide the state of the other three — but the job is
-  # still red, and build-manylinux/build-macos `needs: floor`, so the publish
-  # is blocked. This is a hard gate: never make a step continue-on-error.
+  # ── Shape. This was ONE job (`floor`) that compiled the tree and then ran the
+  # four suites in series, with build-manylinux/build-macos `needs: floor`. That
+  # made ~20 minutes of compile-and-test the exclusive prefix of every wheel
+  # build: nothing else in the workflow could start until it finished. It is now
+  # split so the work that can overlap does:
+  #
+  #   compile ──┬─→ test-python (q, rt, dt in parallel)  ─┐
+  #             │                                         │
+  #   test-skene ───────────────────────────────────────  ├─→ upload → PyPI
+  #   build-manylinux (×8) ───────────────────────────────┤
+  #   build-macos ────────────────────────────────────────┘
+  #
+  # `compile` builds the tree once and publishes it; the Python suites consume
+  # that artifact rather than each rebuilding. `make st` is pure native C++
+  # (skene/Makefile `test` → `check-draken` + TEST_BINS, no Python, no compiled
+  # opteryx tree) so it needs nothing and starts immediately.
+  #
+  # The publish guarantee is UNCHANGED: `upload` needs every suite and every
+  # wheel job, so a red suite still blocks PyPI absolutely. Only the scheduling
+  # moved. This is a hard gate: never make a step continue-on-error.
+  #
+  # Wheels deliberately do NOT wait on the suites. A red suite therefore costs
+  # the wheel legs' CI minutes — that is the accepted trade for wall-clock, and
+  # it can never cost a bad publish. If you ever want the minutes back instead,
+  # add `needs: [test-python, test-skene]` to the two build jobs and accept that
+  # the whole matrix goes back to idling behind the floor.
+  #
+  # Splitting also retires the old `if: !cancelled()` dance: separate jobs
+  # cannot hide each other's result, so one red suite no longer masks three.
   #
   # This is the floor, not the ceiling — sqllogictest (`make slt`) and the wider
   # battery are the next things to fold in.
-  floor:
-    name: opteryx floor
+  compile:
+    name: compile tree
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -69,24 +94,98 @@ jobs:
       - name: Compile
         run: make compile
 
-      - name: make q — SQL shape regression battery
-        if: ${{ !cancelled() }}
-        run: make q
+      # ~60 .so / ~36MB, including the Rust-built opteryx.compute. The suites
+      # consume exactly these binaries instead of rebuilding, so what is tested
+      # is what `make compile` produced.
+      #
+      # build/ is excluded deliberately: build_ext --inplace links into
+      # build/lib.* and then COPIES into the package dirs, so every .so exists
+      # twice. Without the exclusion the artifact doubles and the download
+      # restores a stale second copy alongside the real one.
+      - name: Archive compiled tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-tree
+          path: |
+            **/*.so
+            !build/**
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: make rt — rugo unit tests
-        if: ${{ !cancelled() }}
-        run: make rt
+  test-python:
+    needs: compile
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Every suite reports independently — one red suite must not cancel the
+      # others, or a single failure hides the state of the rest.
+      fail-fast: false
+      matrix:
+        include:
+          - target: q
+            name: make q — SQL shape regression battery
+          - target: rt
+            name: make rt — rugo unit tests
+          - target: dt
+            name: make dt — draken unit tests
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
 
-      - name: make dt — draken unit tests
-        if: ${{ !cancelled() }}
-        run: make dt
+      # MUST match the interpreter `compile` used. The artifact is a set of
+      # cpython-314 ABI .so files; a different minor here fails to import them.
+      # The Makefile invokes `python3.14` by name (Makefile PYTHON ?=), so this
+      # is also what `make q/rt/dt` will actually run.
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
 
-      - name: make st — skene native suite + Python bindings
-        if: ${{ !cancelled() }}
+      # Runtime libssl/libcrypto only — the extensions link them dynamically.
+      # No Rust, no cython, no setuptools-rust: these jobs never compile.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m uv pip install --upgrade numpy
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
+          python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+
+      # Restores the .so files over the fresh checkout at their original paths.
+      # Nothing in these jobs recompiles, so this is the only thing standing
+      # between the checkout and an importable tree.
+      - name: Restore compiled tree
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: compiled-tree
+
+      - name: Verify the compiled tree imports
+        run: python -c "import opteryx; print(opteryx.__version__)"
+
+      - name: ${{ matrix.name }}
+        run: make ${{ matrix.target }}
+
+  test-skene:
+    name: make st — skene native suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.1.7
+
+      # No `needs`, no Python, no artifact: skene/Makefile `test` builds and
+      # runs C++ TEST_BINS, and `check-draken` only asserts the draken/xxhash
+      # HEADERS are present in the checkout. This starts at t=0.
+      - name: make st — skene native suite
         run: make st
 
+  # No `needs:` — wheels build concurrently with the floor suites. `upload` is
+  # the gate that keeps a red suite off PyPI.
   build-manylinux:
-    needs: floor
     strategy:
       fail-fast: false
       max-parallel: 8
@@ -342,8 +441,8 @@ jobs:
           path: io/dist/*manylinux2014_${{ matrix.arch }}*.whl
           if-no-files-found: error
 
+  # No `needs:` — see build-manylinux. `upload` is the gate.
   build-macos:
-    needs: floor
     # macos-14 = Apple Silicon (arm64) only, Python 3.14 GIL build only.
     # Mirrors rugo's macOS build (release-rugo.yaml) but opteryx_core
     # additionally needs Rust (opteryx.compute) and libcurl.
@@ -373,7 +472,11 @@ jobs:
           path: dist/delocated/*.whl
 
   upload:
-    needs: [build-manylinux, build-macos]
+    # THE release gate. Every floor suite and every wheel job is listed here,
+    # so nothing reaches PyPI unless all of them are green — the same guarantee
+    # the old single `floor` job gave by blocking the builds, now enforced at
+    # the publish step instead. Never trim this list to make a release go out.
+    needs: [test-python, test-skene, build-manylinux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python

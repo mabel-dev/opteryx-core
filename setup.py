@@ -86,6 +86,15 @@ def build_vendored_libcurl():
         f"--prefix={curl_build}",
         "--disable-shared",
         "--enable-static",
+        # REQUIRED, not cosmetic. libtool compiles a static-only build without
+        # -fPIC, and every consumer of this archive is a shared object. On
+        # x86_64 that survives because the toolchain defaults to PIE; on
+        # aarch64 devtoolset-10 it does not, and the link dies with
+        #   relocation R_AARCH64_ADR_PREL_PG_HI21 against `malloc@@GLIBC_2.17'
+        #   ... recompile with -fPIC
+        # taking http_client, _operators and pool_reader with it. Removing this
+        # breaks the aarch64 wheels only — x86_64 will keep building green.
+        "--with-pic",
         "--with-openssl",  # Enable SSL/TLS via OpenSSL for HTTPS support
         "--without-zlib",
         "--without-libpsl",
