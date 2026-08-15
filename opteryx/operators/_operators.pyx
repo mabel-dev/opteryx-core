@@ -148,6 +148,17 @@ cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_te
     long long gb_tel_distinct_parvi_promotes "opteryx::engine::groupby_tel::distinct_parvi_promotes_count" ()
     void gb_tel_reset "opteryx::engine::groupby_tel::reset" ()
 
+cdef extern from "engine/scan_tel.hpp" namespace "opteryx::engine::scan_tel" nogil:
+    long long sc_tel_str_dict_cols "opteryx::engine::scan_tel::str_dict_cols_count" ()
+    long long sc_tel_str_dense_cols "opteryx::engine::scan_tel::str_dense_cols_count" ()
+    long long sc_tel_str_pool_cols "opteryx::engine::scan_tel::str_pool_cols_count" ()
+    long long sc_tel_str_dict_rows "opteryx::engine::scan_tel::str_dict_rows_count" ()
+    long long sc_tel_str_dense_rows "opteryx::engine::scan_tel::str_dense_rows_count" ()
+    long long sc_tel_str_pool_rows "opteryx::engine::scan_tel::str_pool_rows_count" ()
+    long long sc_tel_str_dict_entries "opteryx::engine::scan_tel::str_dict_entries_count" ()
+    long long sc_tel_other_cols "opteryx::engine::scan_tel::other_cols_count" ()
+    void sc_tel_reset "opteryx::engine::scan_tel::reset" ()
+
 # The bridge is the ONLY correct way to reach the shared execution tracer
 # state from this .so — see draken/core/trace_bridge_c.h's header comment.
 # Do NOT `cdef extern from "engine/trace.hpp"` any of draken_trace's own
@@ -552,6 +563,36 @@ def get_groupby_telemetry():
         "mid_promotes": gb_tel_mid_promotes(),
         "distinct_parvi_sinks":    gb_tel_distinct_parvi_sinks(),
         "distinct_parvi_promotes": gb_tel_distinct_parvi_promotes(),
+    }
+
+
+def reset_scan_telemetry():
+    """Zero the native parquet scan's per-column shape counters (scan_tel.hpp).
+
+    Diagnostic only — call before a traced query to attribute the reading to it."""
+    sc_tel_reset()
+
+
+def get_scan_telemetry():
+    """Return the SHAPE the native parquet scan handed the engine, since the last
+    reset: how many string columns arrived dict-shaped (DK_VARCHAR_DICT), plain
+    dense (DK_VARCHAR) or via the MemoryPool wire format (DK_POOL), with logical
+    row counts and the total unique-value slots on dict arrivals.
+
+    Pairs with rugo's `get_cpp_telemetry()` ba_* counters, which report what the
+    DECODER emitted: these report what survived direct_kind_for()'s classification
+    to reach an operator. Read here rather than by inspecting morsels from
+    `execute_to_morsels`, which merges and splits to an output row target and so
+    reports a shape the engine never saw."""
+    return {
+        "str_dict_cols":   sc_tel_str_dict_cols(),
+        "str_dense_cols":  sc_tel_str_dense_cols(),
+        "str_pool_cols":   sc_tel_str_pool_cols(),
+        "str_dict_rows":   sc_tel_str_dict_rows(),
+        "str_dense_rows":  sc_tel_str_dense_rows(),
+        "str_pool_rows":   sc_tel_str_pool_rows(),
+        "str_dict_entries": sc_tel_str_dict_entries(),
+        "other_cols":      sc_tel_other_cols(),
     }
 
 

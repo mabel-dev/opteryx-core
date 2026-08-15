@@ -37,6 +37,32 @@ inline std::atomic<long long> mask_filter_ns   {0};  // post-loop row-mask filte
 inline std::atomic<long long> validity_bmp_ns  {0};  // validity bitmap construction
 inline std::atomic<long long> calls            {0};  // DecodeColumnFromChunk calls
 
+// ── byte_array dictionary-shape outcome counters ────────────────────────────
+// Why: `InternByteArrayToDictionary` is the top CPU consumer in a string scan
+// (profile, 2026-08-15), and the shape it produces is discarded for some column
+// chunks and kept for others. Nothing between "page decoded" and "vector
+// emitted" was measurable, so which branch fires — and on what numbers — could
+// only be guessed at from the outside. These counters make the decision
+// observable. Counts are per COLUMN CHUNK unless the name says values/rows.
+//
+// Invariant worth checking when reading these: every chunk counted in
+// ba_chunks lands in exactly one of ba_emit_dict / ba_emit_dense, and each drop
+// counter attributes one of the three routes out of dict mode.
+inline std::atomic<long long> ba_chunks            {0};  // byte_array chunks entering WITH a dict page
+inline std::atomic<long long> ba_intern_values     {0};  // values pushed through InternByteArrayToDictionary
+inline std::atomic<long long> ba_drop_no_rederive  {0};  // rederive gate off (rugo writer / DELTA_BYTE_ARRAY)
+inline std::atomic<long long> ba_drop_cap          {0};  // intern table outgrew dict_cap mid-page
+inline std::atomic<long long> ba_drop_rle_dense    {0};  // RLE skip-dense materialisation (bypasses drop_to_dense)
+inline std::atomic<long long> ba_emit_dict         {0};  // chunk emitted dict-shaped (matches DK_VARCHAR_DICT)
+inline std::atomic<long long> ba_emit_dense        {0};  // chunk emitted dense
+// Sums, so the mean at each drop/emit is recoverable without per-event storage.
+inline std::atomic<long long> ba_drop_cap_entries  {0};  // dict entries held at the moment of a cap drop
+inline std::atomic<long long> ba_drop_cap_limit    {0};  // the dict_cap that was exceeded
+inline std::atomic<long long> ba_drop_cap_values   {0};  // target_col->num_values at those drops
+inline std::atomic<long long> ba_emit_dict_entries {0};  // dict entries on dict-shaped emits
+inline std::atomic<long long> ba_emit_dict_rows    {0};  // logical rows on dict-shaped emits
+inline std::atomic<long long> ba_emit_dense_rows   {0};  // logical rows on dense emits
+
 inline void reset() {
     metadata_ns.store(0, std::memory_order_relaxed);
     decompress_ns.store(0, std::memory_order_relaxed);
@@ -48,6 +74,19 @@ inline void reset() {
     mask_filter_ns.store(0, std::memory_order_relaxed);
     validity_bmp_ns.store(0, std::memory_order_relaxed);
     calls.store(0, std::memory_order_relaxed);
+    ba_chunks.store(0, std::memory_order_relaxed);
+    ba_intern_values.store(0, std::memory_order_relaxed);
+    ba_drop_no_rederive.store(0, std::memory_order_relaxed);
+    ba_drop_cap.store(0, std::memory_order_relaxed);
+    ba_drop_rle_dense.store(0, std::memory_order_relaxed);
+    ba_emit_dict.store(0, std::memory_order_relaxed);
+    ba_emit_dense.store(0, std::memory_order_relaxed);
+    ba_drop_cap_entries.store(0, std::memory_order_relaxed);
+    ba_drop_cap_limit.store(0, std::memory_order_relaxed);
+    ba_drop_cap_values.store(0, std::memory_order_relaxed);
+    ba_emit_dict_entries.store(0, std::memory_order_relaxed);
+    ba_emit_dict_rows.store(0, std::memory_order_relaxed);
+    ba_emit_dense_rows.store(0, std::memory_order_relaxed);
 }
 
 using Clock = std::chrono::steady_clock;
@@ -70,6 +109,21 @@ inline double val_expand_s()    { return val_expand_ns.load(std::memory_order_re
 inline double mask_filter_s()   { return mask_filter_ns.load(std::memory_order_relaxed)   * 1e-9; }
 inline double validity_bmp_s()  { return validity_bmp_ns.load(std::memory_order_relaxed)  * 1e-9; }
 inline long long calls_count()  { return calls.load(std::memory_order_relaxed); }
+
+// byte_array dictionary-shape counters (plain counts, not seconds).
+inline long long ba_chunks_count()            { return ba_chunks.load(std::memory_order_relaxed); }
+inline long long ba_intern_values_count()     { return ba_intern_values.load(std::memory_order_relaxed); }
+inline long long ba_drop_no_rederive_count()  { return ba_drop_no_rederive.load(std::memory_order_relaxed); }
+inline long long ba_drop_cap_count()          { return ba_drop_cap.load(std::memory_order_relaxed); }
+inline long long ba_drop_rle_dense_count()    { return ba_drop_rle_dense.load(std::memory_order_relaxed); }
+inline long long ba_emit_dict_count()         { return ba_emit_dict.load(std::memory_order_relaxed); }
+inline long long ba_emit_dense_count()        { return ba_emit_dense.load(std::memory_order_relaxed); }
+inline long long ba_drop_cap_entries_sum()    { return ba_drop_cap_entries.load(std::memory_order_relaxed); }
+inline long long ba_drop_cap_limit_sum()      { return ba_drop_cap_limit.load(std::memory_order_relaxed); }
+inline long long ba_drop_cap_values_sum()     { return ba_drop_cap_values.load(std::memory_order_relaxed); }
+inline long long ba_emit_dict_entries_sum()   { return ba_emit_dict_entries.load(std::memory_order_relaxed); }
+inline long long ba_emit_dict_rows_sum()      { return ba_emit_dict_rows.load(std::memory_order_relaxed); }
+inline long long ba_emit_dense_rows_sum()     { return ba_emit_dense_rows.load(std::memory_order_relaxed); }
 
 } // namespace rugo_tel
 

@@ -116,7 +116,21 @@ def visit_aggregate_and_group(
                 )
                 seen_identities.add(schema_col.identity)
     node.columns = list(node.aggregates) + identifier_columns
-    all_identifiers = [node.schema_column.identity for node in node.columns]
+    # Every column reaching here has been through the binder, so an unbound one is an
+    # internal fault, not a user error — but reading `.identity` off it blindly reported
+    # that fault as `AttributeError: 'NoneType' object has no attribute 'identity'`,
+    # naming nothing the reader could act on and looking, to anything catching broadly,
+    # like a crash rather than a query that never ran. Name the expression instead.
+    for column in node.columns:
+        if column.schema_column is None:
+            from opteryx.exceptions import InvalidInternalStateError
+            from opteryx.expression import format_expression
+
+            raise InvalidInternalStateError(
+                f"Aggregate could not resolve `{format_expression(column)}` - "
+                "this is an error binding the query, please report it."
+            )
+    all_identifiers = [column.schema_column.identity for column in node.columns]
     columns_to_keep = columns_to_keep.union(all_identifiers)
     # Columns an operator BELOW reads structurally rather than by name — today, a
     # CROSS JOIN UNNEST source. `SELECT COUNT(*) FROM t CROSS JOIN UNNEST(arr) AS v`

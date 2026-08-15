@@ -104,6 +104,32 @@ class InsertNode(BasePlanNode):
 
         return resolve("external_user", self.properties.variables, None) or None
 
+    @property
+    def _commit_message(self):
+        """What the snapshot history should say this write WAS, or None to let
+        the store describe it however it describes the mechanism.
+
+        Only the two statements that own a materialized view have something to
+        add: without this a view's history reads as a run of anonymous appends
+        and overwrites, indistinguishable from someone writing the backing table
+        by hand. The message carries no identity - `author` is the attribution,
+        and a principal named here would be whoever wrote this line rather than
+        whoever ran the statement.
+
+        A refresh is told only THAT a refresh ran: which source changed is known
+        to the service that fired the trigger and never reaches the engine, so
+        the message claims no more than the engine knows.
+
+        CREATE OR REPLACE over a view that already exists gets no message - it
+        replaces contents rather than populating them, so "initial population"
+        would be false, and the store's own replace wording is at least true.
+        """
+        if self.is_refresh:
+            return "materialized view refreshed"
+        if self.is_materialized_view and not self.is_replace:
+            return "initial population of materialized view"
+        return None
+
     def _push_impl(self, morsel):
         if self.is_noop:
             if morsel is _EOS_SENTINEL:
@@ -122,13 +148,15 @@ class InsertNode(BasePlanNode):
                 self.connector.replace_relation(
                     self.relation_name, self.target_schema, self._file_entries,
                     author=self._author,
+                    commit_message=self._commit_message,
                 )
             elif self.create_target:
                 self.connector.create_relation(
                     self.relation_name, self.target_schema, author=self._author
                 )
                 self.connector.insert(
-                    self.relation_name, self._file_entries, author=self._author
+                    self.relation_name, self._file_entries, author=self._author,
+                    commit_message=self._commit_message,
                 )
             else:
                 self.connector.insert(

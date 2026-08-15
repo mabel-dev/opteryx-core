@@ -123,6 +123,7 @@ class Writable:
         relation_name: str,
         file_entries: "List[FileEntry]",
         author: Optional[str] = None,
+        commit_message: Optional[str] = None,
     ) -> None:
         """Commit pre-written data files into a new snapshot, appending to
         whatever the relation already contains.
@@ -134,6 +135,13 @@ class Writable:
             relation_name: Fully-qualified relation name
             file_entries: List of FileEntry objects to commit
             author: session user this append is attributed to (see create_relation)
+            commit_message: what the reader of the snapshot history should be
+                told this append WAS. Carries no identity - attribution is
+                `author`'s job, and a message that named a principal would
+                record whoever wrote the code, not whoever ran the statement.
+                None means the statement has nothing to add beyond the
+                mechanism, and the store describes it however it describes any
+                append.
 
         Raises:
             ValueError: If relation doesn't exist
@@ -147,6 +155,7 @@ class Writable:
         schema: "RelationSchema",
         file_entries: "List[FileEntry]",
         author: Optional[str] = None,
+        commit_message: Optional[str] = None,
     ) -> None:
         """Atomically replace all of a relation's data with the given files,
         as a single new snapshot (CREATE OR REPLACE ... AS SELECT).
@@ -162,6 +171,10 @@ class Writable:
             schema: RelationSchema the new data conforms to (unchanged from current)
             file_entries: List of FileEntry objects that become the relation's entire contents
             author: session user this replace is attributed to (see create_relation)
+            commit_message: what the reader of the snapshot history should be told
+                this replace WAS. None means the statement has nothing to add
+                beyond the mechanism, and the store describes it however it
+                describes any replace.
 
         Raises:
             ValueError: If relation doesn't exist

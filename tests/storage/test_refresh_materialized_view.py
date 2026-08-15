@@ -131,6 +131,74 @@ def test_refresh_of_anything_else_is_named_not_a_parse_error(tmp_path):
         list(session.execute_to_morsels("REFRESH TABLE ws.src"))
 
 
+class _RecordingStore(LocalStoreConnector):
+    """A local store that records the commit message each write carries.
+
+    The local store's snapshots hold neither author nor message (see `_commit`),
+    so the message these statements compose can only be observed where it is
+    handed over. The catalog connector is where it is actually recorded.
+    """
+
+    commits = []
+
+    def insert(self, relation_name, file_entries, author=None, commit_message=None):
+        _RecordingStore.commits.append((relation_name, commit_message))
+        super().insert(
+            relation_name, file_entries, author=author, commit_message=commit_message
+        )
+
+    def replace_relation(
+        self, relation_name, schema, file_entries, author=None, commit_message=None
+    ):
+        _RecordingStore.commits.append((relation_name, commit_message))
+        super().replace_relation(
+            relation_name, schema, file_entries, author=author, commit_message=commit_message
+        )
+
+
+def _setup_recording(tmp_path):
+    _RecordingStore.commits = []
+    register_workspace("ws", _RecordingStore, store_root=str(tmp_path))
+    return opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+
+
+def test_creating_a_view_names_its_first_write(tmp_path):
+    """The snapshot that first fills a view is where its history starts, so it
+    says so rather than reading as an anonymous append."""
+    session = _setup_recording(tmp_path)
+    _seed_view(session)
+
+    assert _RecordingStore.commits[-1] == ("ws.mv", "initial population of materialized view")
+
+
+def test_a_refresh_names_itself_in_the_commit_message(tmp_path):
+    """A view's snapshot history should say a refresh happened, rather than
+    reading as a series of anonymous overwrites indistinguishable from someone
+    replacing the backing table by hand."""
+    session = _setup_recording(tmp_path)
+    _seed_view(session)
+    _RecordingStore.commits = []
+
+    list(session.execute_to_morsels("REFRESH MATERIALIZED VIEW ws.mv"))
+
+    assert _RecordingStore.commits == [("ws.mv", "materialized view refreshed")]
+
+
+def test_ordinary_table_writes_leave_the_message_to_the_store(tmp_path):
+    """Only the statements that own a view have something to add - an INSERT
+    and a CTAS pass None so the store describes them however it describes any
+    append or replace, rather than every write claiming to be a view's."""
+    session = _setup_recording(tmp_path)
+    _seed_view(session)
+    _RecordingStore.commits = []
+
+    list(session.execute_to_morsels("INSERT INTO ws.src VALUES (5)"))
+    list(session.execute_to_morsels("CREATE TABLE ws.plain (a BIGINT)"))
+    list(session.execute_to_morsels("CREATE OR REPLACE TABLE ws.plain AS SELECT a FROM ws.src"))
+
+    assert _RecordingStore.commits == [("ws.src", None), ("ws.plain", None)]
+
+
 # --- a materialized view is not a table ---------------------------------
 
 

@@ -1015,25 +1015,46 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         return catalog.dataset_exists(relative_id)
 
     def insert(
-        self, relation_name: str, file_entries, author: Optional[str] = None
+        self,
+        relation_name: str,
+        file_entries,
+        author: Optional[str] = None,
+        commit_message: Optional[str] = None,
     ) -> None:
         """Commit pre-written parquet files into the catalog as a new snapshot,
-        appended to whatever the dataset already contains."""
+        appended to whatever the dataset already contains.
+
+        `commit_message` is passed through as given, including None: the catalog
+        composes its own default ("add files by <author>") for an append that
+        has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
-        catalog.load_dataset(relative_id).add_files(file_paths, author=author)
+        catalog.load_dataset(relative_id).add_files(
+            file_paths, author=author, commit_message=commit_message
+        )
 
     def replace_relation(
-        self, relation_name: str, schema, file_entries, author: Optional[str] = None
+        self,
+        relation_name: str,
+        schema,
+        file_entries,
+        author: Optional[str] = None,
+        commit_message: Optional[str] = None,
     ) -> None:
         """Atomically replace a dataset's entire contents with the given files,
         as a single new snapshot (CREATE OR REPLACE ... AS SELECT). Schema is
-        unchanged - this does not evolve the dataset's schema."""
+        unchanged - this does not evolve the dataset's schema.
+
+        `commit_message` is passed through as given, including None: the catalog
+        composes its own default ("truncate and add files by <author>") for a
+        replace that has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
-        catalog.load_dataset(relative_id).truncate_and_add_files(file_paths, author=author)
+        catalog.load_dataset(relative_id).truncate_and_add_files(
+            file_paths, author=author, commit_message=commit_message
+        )
 
     def relation_column_names(self, relation_name: str):
         """Return the dataset's current column names only (not full type fidelity)."""

@@ -535,6 +535,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_name: str,
         file_entries: List[FileEntry],
         author: Optional[str] = None,
+        commit_message: Optional[str] = None,
     ) -> None:
         """Commit pre-written data files into a new snapshot.
 
@@ -542,6 +543,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             relation_name: Fully-qualified relation name
             file_entries: List of FileEntry objects to append to the relation
             author: session user, unused by this store (see create_relation)
+            commit_message: what this append was, unused by this store - its
+                snapshot records carry no author or message (see `_commit`)
 
         Raises:
             ValueError: If relation doesn't exist
@@ -566,6 +569,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         schema: RelationSchema,
         file_entries: List[FileEntry],
         author: Optional[str] = None,
+        commit_message: Optional[str] = None,
     ) -> None:
         """Atomically replace a relation's entire contents with the given files,
         as a single new snapshot (CREATE OR REPLACE ... AS SELECT).
@@ -579,6 +583,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             schema: RelationSchema the new data conforms to (may differ from current)
             file_entries: List of FileEntry objects that become the relation's entire contents
             author: session user, unused by this store (see create_relation)
+            commit_message: what this replace was, unused by this store - its
+                snapshot records carry no author or message (see `_commit`)
 
         Raises:
             ValueError: If relation doesn't exist

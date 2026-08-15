@@ -2090,6 +2090,176 @@ def test_window_in_having_is_refused_by_name():
     assert plain == [9], plain
 
 
+def test_alias_shadowing_the_column_it_aggregates():
+    """
+    VALUE-level regression: `AGG(col) AS col` — an output alias spelled the same as the
+    column being aggregated — beside a SECOND reference to that column.
+
+    `$derived` holds what the scope is computing, and the projection registers each alias
+    there AS IT BINDS. Counting that alias as a relation made the name self-ambiguous: by
+    the time the second reference to `mass` bound, `mass` matched both `$planets` and the
+    alias just minted from it, and name resolution refused a statement with exactly one
+    relation in it ("more than one relation in this query has a column with that name").
+
+    Two spellings reached it by different routes, so both are asserted:
+
+      * a second aggregate over the same column (`MAX(mass) AS mass, MIN(mass)`) binds by
+        the mint-a-new-column path and RAISED the ambiguity, and
+      * the same aggregate repeated in HAVING or ORDER BY (`MAX(mass) AS mass ... HAVING
+        MAX(mass) > 1`) matches an already-bound expression, and `inner_binder`'s fast
+        path for that re-binds sub-trees under `suppress(Exception)`. The ambiguity was
+        swallowed there, leaving the aggregate's OPERAND with no schema_column, and the
+        aggregate binder then read `.identity` off it: `AttributeError: 'NoneType' object
+        has no attribute 'identity'` — an internal crash, on legal SQL, that named
+        nothing. Reported through a view over a window function; both were incidental.
+
+    An alias is not a relation, so a name it shares with a real column is not ambiguous:
+    it binds to the INPUT column, which is what PostgreSQL does when an output name and
+    an input name collide. The values are therefore checked against the same statements
+    written with a non-colliding alias — the answer the collision must not change.
+    """
+    session = opteryx.session()
+
+    def _rows(statement):
+        """Rows as tuples of values — the output NAMES are what differs between the two
+        spellings, so they are deliberately not compared."""
+        out = []
+        for morsel in session.execute_to_morsels(statement):
+            morsel.materialize()
+            columns = [morsel.column(name).to_pylist() for name in morsel.column_names]
+            out.extend(zip(*columns))
+        return out
+
+    # (statement with the shadowing alias, same statement with a safe alias)
+    for shadowed_sql, safe_sql in (
+        # HAVING repeats the aggregate whose alias shadows its operand.
+        (
+            "SELECT gravity, MAX(mass) AS mass FROM $planets GROUP BY gravity HAVING MAX(mass) > 1",
+            "SELECT gravity, MAX(mass) AS mx FROM $planets GROUP BY gravity HAVING MAX(mass) > 1",
+        ),
+        # ORDER BY repeats it instead — same fast path, same swallowed error.
+        (
+            "SELECT gravity, MAX(mass) AS mass FROM $planets GROUP BY gravity ORDER BY MAX(mass)",
+            "SELECT gravity, MAX(mass) AS mx FROM $planets GROUP BY gravity ORDER BY MAX(mass)",
+        ),
+        # HAVING names a DIFFERENT aggregate over the shadowed column: no fast path, so
+        # this one surfaced the ambiguity as an error rather than as a crash.
+        (
+            "SELECT gravity, MAX(mass) AS mass FROM $planets GROUP BY gravity HAVING MIN(mass) > 1",
+            "SELECT gravity, MAX(mass) AS mx FROM $planets GROUP BY gravity HAVING MIN(mass) > 1",
+        ),
+        # No HAVING and no ORDER BY at all — the projection alone is enough.
+        (
+            "SELECT MAX(mass) AS mass, MIN(mass) AS smallest FROM $planets",
+            "SELECT MAX(mass) AS mx, MIN(mass) AS smallest FROM $planets",
+        ),
+        # The shadowed column read BARE beside the alias that shadows it: `gravity` here
+        # is the input column and the group key, not a reference to the aggregate.
+        (
+            "SELECT gravity, MAX(mass) AS gravity_max FROM $planets GROUP BY gravity",
+            "SELECT gravity, MAX(mass) AS mx FROM $planets GROUP BY gravity",
+        ),
+    ):
+        shadowed_rows = _rows(shadowed_sql)
+        safe_rows = _rows(safe_sql)
+        assert shadowed_rows, f"no rows: {shadowed_sql}"
+        assert len(shadowed_rows) == len(safe_rows), (
+            f"row count changed with the alias: {shadowed_sql} -> "
+            f"{len(shadowed_rows)} vs {len(safe_rows)}"
+        )
+        # Same values, whatever the output column is called.
+        assert sorted(map(str, shadowed_rows)) == sorted(
+            map(str, safe_rows)
+        ), f"values changed with the alias: {shadowed_sql}"
+
+    # A name that really IS ambiguous — two relations providing it — must still be
+    # refused. The fix narrows what counts as a relation; it does not stop counting.
+    with pytest.raises(AmbiguousIdentifierError):
+        for _ in session.execute_to_morsels(
+            "SELECT name FROM $planets INNER JOIN testdata.satellites ON planetId = $planets.id"
+        ):
+            pass
+
+
+def test_having_over_an_ungrouped_aggregate():
+    """
+    VALUE-level regression: HAVING over an aggregate with a COLUMN operand and no
+    GROUP BY — `SELECT MAX(mass) FROM $planets HAVING MAX(mass) > 1`.
+
+    Predicate pushdown had an arm for AggregateAndGroup (the grouped aggregate, where
+    it folds the condition on as `having_condition`) and NO arm at all for Aggregate,
+    the UNGROUPED one. With no arm, the HAVING predicate kept flowing down and was
+    parked above the Scan — because the only identity its condition resolves against
+    down there is the aggregate's OPERAND (`mass`), which is what let it match the
+    scan in the first place. The compile then died on the aggregate's own output
+    identity: `KeyError: expression references column b'$derived_...' which the stream
+    does not carry`.
+
+    `HAVING COUNT(*) > 1` escaped it only because COUNT(*) references no column at
+    all, so the Scan had nothing to match and the predicate was restored above the
+    aggregate — the shape every statement here now gets.
+
+    An ungrouped aggregate collapses every input row into one and emits only its
+    results, so a filter above it can never be pushed below it. The counts alone would
+    not catch that: `MIN(mass) > 1` is FALSE ($planets' lightest is 0.0146) and must
+    return no rows, but the same predicate applied pre-aggregation keeps only the
+    heavy planets and MIN over those IS greater than 1 — one row, wrong answer. Both
+    halves are asserted, and the values are derived from the data rather than written
+    as literals.
+    """
+    session = opteryx.session()
+
+    def _rows(statement):
+        out = []
+        for morsel in session.execute_to_morsels(statement):
+            morsel.materialize()
+            columns = [morsel.column(name).to_pylist() for name in morsel.column_names]
+            out.extend(zip(*columns))
+        return out
+
+    masses = [row[0] for row in _rows("SELECT mass FROM $planets")]
+    heaviest = max(masses)
+    lightest = min(masses)
+    assert lightest < 1 < heaviest, "test data no longer straddles the threshold"
+
+    # The aggregate is named in HAVING as well as in the SELECT list. Every spelling
+    # crashed: aliased, unaliased, and a different aggregate over the same column.
+    for statement in (
+        "SELECT MAX(mass) AS m FROM $planets HAVING MAX(mass) > 1",
+        "SELECT MAX(mass) FROM $planets HAVING MAX(mass) > 1",
+        "SELECT MAX(mass) AS m FROM $planets HAVING m > 1",
+    ):
+        assert _rows(statement) == [(heaviest,)], statement
+
+    # TRUE post-aggregation, and the value is the whole-relation minimum.
+    assert _rows("SELECT MIN(mass) FROM $planets HAVING MIN(mass) < 1") == [(lightest,)]
+
+    # FALSE post-aggregation. Pushed below the aggregate each of these becomes a
+    # per-row predicate the relation partly satisfies, and the query returns a row.
+    for statement in (
+        "SELECT MIN(mass) FROM $planets HAVING MIN(mass) > 1",
+        "SELECT MAX(mass) AS m FROM $planets HAVING MAX(mass) > 100000",
+        "SELECT COUNT(DISTINCT gravity) AS c FROM $planets HAVING COUNT(DISTINCT gravity) > 100",
+    ):
+        assert _rows(statement) == [], statement
+
+    # A HAVING naming two aggregates, and one combined with a WHERE below it — the
+    # WHERE belongs under the aggregate, the HAVING above it, and the two must not
+    # collapse into each other.
+    assert _rows("SELECT COUNT(*) AS s FROM $planets HAVING COUNT(*) > 1 AND MAX(mass) > 1") == [
+        (len(masses),)
+    ]
+    heavy = [mass for mass in masses if mass > 1]
+    assert _rows("SELECT COUNT(*) AS s FROM $planets WHERE mass > 1 HAVING COUNT(*) > 1") == [
+        (len(heavy),)
+    ]
+
+    # The grouped aggregate keeps its own (folded) HAVING path — unchanged by this.
+    assert len(
+        _rows("SELECT gravity, MAX(mass) FROM $planets GROUP BY gravity HAVING MAX(mass) > 1")
+    ) == len({row for row in _rows("SELECT gravity FROM $planets WHERE mass > 1")})
+
+
 def test_chained_windows_across_a_subquery():
     """
     VALUE-level regression: a window over a subquery that itself computes a window.
@@ -2819,6 +2989,14 @@ if __name__ == "__main__":  # pragma: no cover
         (
             "window in HAVING is refused by name",
             test_window_in_having_is_refused_by_name,
+        ),
+        (
+            "alias shadowing the column it aggregates",
+            test_alias_shadowing_the_column_it_aggregates,
+        ),
+        (
+            "having over an ungrouped aggregate",
+            test_having_over_an_ungrouped_aggregate,
         ),
         (
             "chained windows across a subquery",

@@ -509,6 +509,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             LogicalPlanStepType.Limit,
             LogicalPlanStepType.Union,
             LogicalPlanStepType.Window,
+            LogicalPlanStepType.Aggregate,
         ):
             # A barrier: filters never cross a Limit (row-count semantics), a
             # Union (a filter placed inside one leg would not apply to the
@@ -517,6 +518,25 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # pushed through it answers a different question. (A filter on the
             # partition keys alone would be safe, but no current producer needs
             # that distinction — barrier conservatively.)
+            #
+            # Aggregate is the UNGROUPED aggregate (`SELECT MAX(mass) FROM t`);
+            # the grouped one is AggregateAndGroup and has its own arm below.
+            # It collapses every input row into one output row and emits ONLY
+            # its aggregate results, so nothing arriving from above can be
+            # pushed below it: a HAVING predicate reads a value that does not
+            # exist until the aggregate has run. Without this arm the node had
+            # no arm at all, so `HAVING MAX(mass) > 1` kept flowing down and
+            # landed above the Scan — where the condition's only resolvable
+            # identity is the aggregate's OPERAND (`mass`), which is how the
+            # predicate got there and why the compile then died on the
+            # aggregate's own output identity ("stream does not carry").
+            # `HAVING COUNT(*) > 1` escaped only because COUNT(*) references
+            # no column at all, so there was nothing for the Scan to match.
+            #
+            # Unlike AggregateAndGroup, the condition is NOT folded onto the
+            # node as `having_condition` — a Filter above an aggregate that
+            # emits exactly one row costs nothing, and the ungrouped aggregate
+            # operator has no HAVING support to fold onto.
             # Placement directly above the barrier is only valid for a
             # predicate whose every referenced column is carried by the
             # barrier's output stream. A predicate referencing a column defined

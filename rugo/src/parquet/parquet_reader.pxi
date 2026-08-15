@@ -92,6 +92,19 @@ cdef extern from "telemetry.hpp" namespace "rugo_tel":
     double mask_filter_s()
     double validity_bmp_s()
     long long calls_count()
+    long long ba_chunks_count()
+    long long ba_intern_values_count()
+    long long ba_drop_no_rederive_count()
+    long long ba_drop_cap_count()
+    long long ba_drop_rle_dense_count()
+    long long ba_emit_dict_count()
+    long long ba_emit_dense_count()
+    long long ba_drop_cap_entries_sum()
+    long long ba_drop_cap_limit_sum()
+    long long ba_drop_cap_values_sum()
+    long long ba_emit_dict_entries_sum()
+    long long ba_emit_dict_rows_sum()
+    long long ba_emit_dense_rows_sum()
     void reset() nogil
 
 
@@ -114,6 +127,21 @@ def get_cpp_telemetry():
         "mask_filter_s":    mask_filter_s(),
         "validity_bmp_s":   validity_bmp_s(),
         "calls":            calls_count(),
+        # byte_array dictionary-shape outcomes (counts, not seconds). Keys are
+        # prefixed ba_ so callers that sum "*_s" timing keys skip them.
+        "ba_chunks":            ba_chunks_count(),
+        "ba_intern_values":     ba_intern_values_count(),
+        "ba_drop_no_rederive":  ba_drop_no_rederive_count(),
+        "ba_drop_cap":          ba_drop_cap_count(),
+        "ba_drop_rle_dense":    ba_drop_rle_dense_count(),
+        "ba_emit_dict":         ba_emit_dict_count(),
+        "ba_emit_dense":        ba_emit_dense_count(),
+        "ba_drop_cap_entries":  ba_drop_cap_entries_sum(),
+        "ba_drop_cap_limit":    ba_drop_cap_limit_sum(),
+        "ba_drop_cap_values":   ba_drop_cap_values_sum(),
+        "ba_emit_dict_entries": ba_emit_dict_entries_sum(),
+        "ba_emit_dict_rows":    ba_emit_dict_rows_sum(),
+        "ba_emit_dense_rows":   ba_emit_dense_rows_sum(),
     }
 
 cimport parquet_reader

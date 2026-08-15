@@ -99,6 +99,7 @@
 
 #include "operator.hpp"
 #include "trace.hpp"              // TC_IO_WAIT / trace_begin / trace_end
+#include "scan_tel.hpp"           // scan_tel::str_* — shape the ENGINE receives
 #include "io_pipeline.hpp"        // rugo::ParquetIOPipeline, MorselRef, ColumnOut, DK_*
 #include "metadata.hpp"           // FileStats, RowGroupStats, ColumnStats
 #include "core/vector_alloc.h"    // draken_vector_from_dense / draken_vector_from_dict
@@ -378,6 +379,35 @@ struct NativeScanColumnBuilder {
     // logical_type descriptor (draken's own `require_decimal_descriptor` contract).
     bool build_column(rugo::MorselRef& result, size_t i, CxxColumn& out, ErrCtx& err) {
         int dk = result.columns[i].direct_kind;
+        // Diagnostic (scan_tel): the shape the ENGINE receives, recorded before any
+        // of the branches below can transform it. Paired with rugo_tel's ba_*
+        // counters — those say what the decoder emitted, these say what survived
+        // direct_kind_for()'s classification to reach an operator. Counted here
+        // rather than read back through Python because execute_to_morsels merges
+        // and splits to an output row target, which changes the observed shape.
+        {
+            const bool is_str = (string_types != nullptr && i < string_types->size() &&
+                                 (*string_types)[i] != 0);
+            const long long nrows = static_cast<long long>(result.columns[i].length);
+            if (!is_str) {
+                scan_tel::other_cols.fetch_add(1, std::memory_order_relaxed);
+            } else if (dk == rugo::DK_VARCHAR_DICT) {
+                scan_tel::str_dict_cols.fetch_add(1, std::memory_order_relaxed);
+                scan_tel::str_dict_rows.fetch_add(nrows, std::memory_order_relaxed);
+                // data_length = unique-value slots, so entries/rows is the achieved
+                // compression at the engine boundary — the number that says whether
+                // a surviving dictionary is actually worth anything downstream.
+                scan_tel::str_dict_entries.fetch_add(
+                    static_cast<long long>(result.columns[i].data_length),
+                    std::memory_order_relaxed);
+            } else if (dk == rugo::DK_POOL) {
+                scan_tel::str_pool_cols.fetch_add(1, std::memory_order_relaxed);
+                scan_tel::str_pool_rows.fetch_add(nrows, std::memory_order_relaxed);
+            } else {
+                scan_tel::str_dense_cols.fetch_add(1, std::memory_order_relaxed);
+                scan_tel::str_dense_rows.fetch_add(nrows, std::memory_order_relaxed);
+            }
+        }
         // R6: an ARRAY column has repetition levels, so direct_kind_for routes it
         // to the pool unconditionally. Anything else means the plan's schema and
         // the decoded data disagree — a direct-kind buffer read as a list would be

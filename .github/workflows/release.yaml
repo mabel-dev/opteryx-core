@@ -92,19 +92,60 @@ jobs:
       max-parallel: 8
       matrix:
         include:
-          - runner-python: "3.11"
+          # ── x86_64: native Intel/AMD runner.
+          - arch: x86_64
+            runner: ubuntu-latest
+            runner-python: "3.11"
             pybuild: "3.11"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
-          - runner-python: "3.12"
+          - arch: x86_64
+            runner: ubuntu-latest
+            runner-python: "3.12"
             pybuild: "3.12"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
-          - runner-python: "3.13"
+          - arch: x86_64
+            runner: ubuntu-latest
+            runner-python: "3.13"
             pybuild: "3.13"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
-          - runner-python: "3.14"
+          - arch: x86_64
+            runner: ubuntu-latest
+            runner-python: "3.14"
             pybuild: "3.14"
             manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
-    runs-on: ubuntu-latest
+          # ── aarch64: NATIVE ARM runner, no QEMU. `docker/setup-qemu-action`
+          # would let ubuntu-latest build these, but emulating a manylinux
+          # Rust + C++ + LTO build costs hours and risks the job time limit.
+          # release-rugo.yaml and release-skene.yaml already build aarch64 on
+          # ubuntu-24.04-arm natively; this matches them.
+          #
+          # Motivation: without these, `pip install opteryx-core` on any Linux
+          # ARM host (AWS Graviton, Ampere) falls through to the sdist and
+          # attempts an on-box Rust/C++ build. That blocks ClickBench's two
+          # Graviton machines (c8g.4xlarge, c8g.metal-48xl), which cannot run
+          # a source build in the benchmark harness.
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            runner-python: "3.11"
+            pybuild: "3.11"
+            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            runner-python: "3.12"
+            pybuild: "3.12"
+            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            runner-python: "3.13"
+            pybuild: "3.13"
+            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            runner-python: "3.14"
+            pybuild: "3.14"
+            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+    name: linux ${{ matrix.arch }} py${{ matrix.pybuild }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Set up Python (runner)
         uses: actions/setup-python@v5
@@ -125,30 +166,66 @@ jobs:
         run: |
           set -euo pipefail
 
+          ARCH="${{ matrix.arch }}"
           DESIRED_IMAGE="${{ matrix.manylinux_image }}"
           echo "Attempting to pull ${DESIRED_IMAGE}..."
 
-          # Try the configured image first; if it fails, try known fallbacks.
-          if docker pull "${DESIRED_IMAGE}" 2>/dev/null; then
-            IMAGE="${DESIRED_IMAGE}"
-          else
-            echo "Failed to pull ${DESIRED_IMAGE}; trying GHCR fallback..."
-            if docker pull ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 2>/dev/null; then
-              IMAGE=ghcr.io/pypa/manylinux/manylinux_2_31_x86_64
-            elif docker pull quay.io/pypa/manylinux2014_x86_64 2>/dev/null; then
-              IMAGE=quay.io/pypa/manylinux2014_x86_64
-            else
-              echo "ERROR: no manylinux image available to run tests. Tried: ${DESIRED_IMAGE}, ghcr.io/pypa/manylinux/manylinux_2_31_x86_64, quay.io/pypa/manylinux2014_x86_64"
-              echo "Available /opt/python in runner for debugging:"
-              ls -1 /opt/python || true
-              exit 125
+          # Fallbacks are per-arch and MUST stay per-arch: `docker pull` of a
+          # foreign-arch image succeeds, so a hardcoded x86_64 fallback on an
+          # ARM runner would resolve happily and then either die with an exec
+          # format error or (with binfmt registered) quietly build an x86 wheel
+          # in the aarch64 job. The arch assertion below is the backstop.
+          #
+          # aarch64 deliberately does NOT mirror x86_64's manylinux_2_31
+          # fallback: that image tags wheels manylinux_2_31, which the archive
+          # glob (*manylinux2014_<arch>*) does not match, so it would upload an
+          # empty artifact. See the note on the x86_64 fallback below.
+          case "${ARCH}" in
+            x86_64)
+              # NOTE (pre-existing): this 2_31 fallback produces wheels the
+              # Archive glob cannot match. Left as-is to avoid changing x86_64
+              # behaviour in an aarch64 change — flagged, not fixed.
+              FALLBACKS="ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 quay.io/pypa/manylinux2014_x86_64"
+              ;;
+            aarch64)
+              FALLBACKS="ghcr.io/pypa/manylinux2014_aarch64"
+              ;;
+            *)
+              echo "ERROR: unsupported matrix arch '${ARCH}'" >&2
+              exit 1
+              ;;
+          esac
+
+          IMAGE=""
+          for CANDIDATE in "${DESIRED_IMAGE}" ${FALLBACKS}; do
+            if docker pull "${CANDIDATE}" 2>/dev/null; then
+              IMAGE="${CANDIDATE}"
+              break
             fi
+            echo "Failed to pull ${CANDIDATE}; trying next candidate..."
+          done
+
+          if [ -z "${IMAGE}" ]; then
+            echo "ERROR: no manylinux image available for ${ARCH}. Tried: ${DESIRED_IMAGE} ${FALLBACKS}"
+            echo "Available /opt/python in runner for debugging:"
+            ls -1 /opt/python || true
+            exit 125
           fi
 
-          echo "Using container image: ${IMAGE}"
+          # Hard gate: the container MUST be the arch this matrix leg claims to
+          # build. Without this a wrong-arch image silently produces a wheel
+          # tagged for the other arch, which then collides with (or is dropped
+          # by) the arch-keyed artifact and glob downstream.
+          CONTAINER_ARCH="$(docker run --rm "${IMAGE}" uname -m)"
+          if [ "${CONTAINER_ARCH}" != "${ARCH}" ]; then
+            echo "ERROR: image ${IMAGE} reports arch '${CONTAINER_ARCH}', expected '${ARCH}'." >&2
+            exit 1
+          fi
+
+          echo "Using container image: ${IMAGE} (${CONTAINER_ARCH})"
 
           docker run --rm \
-            -e PLAT=manylinux2014_x86_64 \
+            -e PLAT=manylinux2014_${ARCH} \
             -e PACKAGE_NAME=opteryx \
             -e PYTHON_VERSION=${{ matrix.pybuild }} \
             -e OPTERYX_ENABLE_LTO=1 \
@@ -203,15 +280,35 @@ jobs:
         run: |
           set -euo pipefail
 
+          ARCH="${{ matrix.arch }}"
           DESIRED_IMAGE="${{ matrix.manylinux_image }}"
-          if docker pull "${DESIRED_IMAGE}" 2>/dev/null; then
-            IMAGE="${DESIRED_IMAGE}"
-          elif docker pull ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 2>/dev/null; then
-            IMAGE=ghcr.io/pypa/manylinux/manylinux_2_31_x86_64
-          elif docker pull quay.io/pypa/manylinux2014_x86_64 2>/dev/null; then
-            IMAGE=quay.io/pypa/manylinux2014_x86_64
-          else
-            echo "ERROR: no manylinux image available to verify the wheel." >&2
+
+          # Arch-scoped, for the same reason as the build step: verifying an
+          # aarch64 wheel inside an x86_64 container cannot install it, and this
+          # step is a hard release gate — it must fail for the real reason, not
+          # because it reached for the wrong container.
+          case "${ARCH}" in
+            x86_64)  FALLBACKS="ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 quay.io/pypa/manylinux2014_x86_64" ;;
+            aarch64) FALLBACKS="ghcr.io/pypa/manylinux2014_aarch64" ;;
+            *) echo "ERROR: unsupported matrix arch '${ARCH}'" >&2; exit 1 ;;
+          esac
+
+          IMAGE=""
+          for CANDIDATE in "${DESIRED_IMAGE}" ${FALLBACKS}; do
+            if docker pull "${CANDIDATE}" 2>/dev/null; then
+              IMAGE="${CANDIDATE}"
+              break
+            fi
+          done
+
+          if [ -z "${IMAGE}" ]; then
+            echo "ERROR: no manylinux image available for ${ARCH} to verify the wheel." >&2
+            exit 1
+          fi
+
+          CONTAINER_ARCH="$(docker run --rm "${IMAGE}" uname -m)"
+          if [ "${CONTAINER_ARCH}" != "${ARCH}" ]; then
+            echo "ERROR: image ${IMAGE} reports arch '${CONTAINER_ARCH}', expected '${ARCH}'." >&2
             exit 1
           fi
 
@@ -233,8 +330,17 @@ jobs:
       - name: Archive Wheels
         uses: actions/upload-artifact@v4
         with:
-          name: dist-linux-${{ matrix.pybuild }}
-          path: io/dist/*manylinux2014_x86_64*.whl
+          # Artifact name carries the ARCH as well as the Python version: with
+          # both x86_64 and aarch64 in one matrix, `dist-linux-3.14` alone is
+          # ambiguous and the second job to upload it would fail (or clobber).
+          # Every "Stage linux" step in the `upload` job matches this exactly.
+          name: dist-linux-${{ matrix.arch }}-${{ matrix.pybuild }}
+          # auditwheel emits e.g. ...-manylinux_2_17_aarch64.manylinux2014_aarch64.whl,
+          # so this glob must track the matrix arch — the old hardcoded
+          # *_x86_64* matched nothing on ARM and would have uploaded an EMPTY
+          # artifact, publishing an incomplete set without failing.
+          path: io/dist/*manylinux2014_${{ matrix.arch }}*.whl
+          if-no-files-found: error
 
   build-macos:
     needs: floor
@@ -285,33 +391,66 @@ jobs:
       - name: Create source dist
         run: python setup.py sdist
 
-      - name: Stage linux 3.11 (GIL)
+      # Artifact names below MUST match `dist-linux-<arch>-<pybuild>` from
+      # build-manylinux's Archive step exactly. download-artifact fails hard on
+      # a name it cannot find, so a mismatch here is loud, not silent — that is
+      # deliberate, and is why these stay enumerated rather than being replaced
+      # by a single download-all + `find -exec mv`.
+      - name: Stage linux x86_64 3.11 (GIL)
         uses: actions/download-artifact@v4.1.7
         with:
-          name: dist-linux-3.11
-          path: dist-linux-3.11
-      - run: mv -v dist-linux-3.11/* dist/
+          name: dist-linux-x86_64-3.11
+          path: dist-linux-x86_64-3.11
+      - run: mv -v dist-linux-x86_64-3.11/* dist/
 
-      - name: Stage linux 3.12 (GIL)
+      - name: Stage linux x86_64 3.12 (GIL)
         uses: actions/download-artifact@v4.1.7
         with:
-          name: dist-linux-3.12
-          path: dist-linux-3.12
-      - run: mv -v dist-linux-3.12/* dist/
+          name: dist-linux-x86_64-3.12
+          path: dist-linux-x86_64-3.12
+      - run: mv -v dist-linux-x86_64-3.12/* dist/
 
-      - name: Stage linux 3.13 (GIL)
+      - name: Stage linux x86_64 3.13 (GIL)
         uses: actions/download-artifact@v4.1.7
         with:
-          name: dist-linux-3.13
-          path: dist-linux-3.13
-      - run: mv -v dist-linux-3.13/* dist/
+          name: dist-linux-x86_64-3.13
+          path: dist-linux-x86_64-3.13
+      - run: mv -v dist-linux-x86_64-3.13/* dist/
 
-      - name: Stage linux 3.14 (GIL)
+      - name: Stage linux x86_64 3.14 (GIL)
         uses: actions/download-artifact@v4.1.7
         with:
-          name: dist-linux-3.14
-          path: dist-linux-3.14
-      - run: mv -v dist-linux-3.14/* dist/
+          name: dist-linux-x86_64-3.14
+          path: dist-linux-x86_64-3.14
+      - run: mv -v dist-linux-x86_64-3.14/* dist/
+
+      - name: Stage linux aarch64 3.11 (GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-aarch64-3.11
+          path: dist-linux-aarch64-3.11
+      - run: mv -v dist-linux-aarch64-3.11/* dist/
+
+      - name: Stage linux aarch64 3.12 (GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-aarch64-3.12
+          path: dist-linux-aarch64-3.12
+      - run: mv -v dist-linux-aarch64-3.12/* dist/
+
+      - name: Stage linux aarch64 3.13 (GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-aarch64-3.13
+          path: dist-linux-aarch64-3.13
+      - run: mv -v dist-linux-aarch64-3.13/* dist/
+
+      - name: Stage linux aarch64 3.14 (GIL)
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: dist-linux-aarch64-3.14
+          path: dist-linux-aarch64-3.14
+      - run: mv -v dist-linux-aarch64-3.14/* dist/
 
       - name: Stage macos 3.14 (arm64, GIL)
         uses: actions/download-artifact@v4.1.7
@@ -319,6 +458,39 @@ jobs:
           name: dist-macos-3.14
           path: dist-macos-3.14
       - run: mv -v dist-macos-3.14/* dist/
+
+      # Last gate before PyPI. Staging is 10 independent artifact downloads; if
+      # any leg silently produced nothing the publish would still succeed and
+      # ship an incomplete set, which is only discoverable by a user hitting a
+      # missing wheel. Assert the exact expected matrix instead.
+      - name: Verify the full artifact set is staged
+        run: |
+          set -euo pipefail
+          echo "=== staged dist/ ===" && ls -1 dist/
+
+          MISSING=0
+          for ARCH in x86_64 aarch64; do
+            for PY in 311 312 313 314; do
+              if ! ls dist/*cp${PY}-cp${PY}-*manylinux2014_${ARCH}*.whl >/dev/null 2>&1; then
+                echo "MISSING: linux ${ARCH} cp${PY} wheel"
+                MISSING=1
+              fi
+            done
+          done
+          if ! ls dist/*cp314-cp314-*macosx*arm64*.whl >/dev/null 2>&1; then
+            echo "MISSING: macos arm64 cp314 wheel"
+            MISSING=1
+          fi
+          if ! ls dist/*.tar.gz >/dev/null 2>&1; then
+            echo "MISSING: sdist"
+            MISSING=1
+          fi
+
+          if [ "${MISSING}" -ne 0 ]; then
+            echo "ERROR: refusing to publish an incomplete artifact set." >&2
+            exit 1
+          fi
+          echo "All 8 linux wheels + macOS arm64 wheel + sdist present."
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

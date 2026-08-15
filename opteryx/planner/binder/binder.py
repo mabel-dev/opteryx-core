@@ -454,15 +454,40 @@ def locate_identifier_in_loaded_schemas(
     """
     found_source_relation = None
     column = None
+    derived_column = None
+    derived_relation = None
 
-    for schema in schemas.values():
+    for name, schema in schemas.items():
         found = schema.find_column(value, case_insensitive=True)
-        if found:
-            if column and found_source_relation:
-                # test for duplicates
-                raise AmbiguousIdentifierError(identifier=value)
-            found_source_relation = schema
-            column = found  # don't exit here, so we can test for duplicates
+        if not found:
+            continue
+        if name == "$derived":
+            # `$derived` holds what THIS scope is computing — including the aliases the
+            # projection being bound has already minted. An alias is NOT a relation, so a
+            # name it shares with a real column is not ambiguous: it binds to the input
+            # column, which is what PostgreSQL does when an output name and an input name
+            # collide. Held aside rather than counted, and used only if nothing real
+            # matched (that is how `HAVING <alias>` still resolves).
+            #
+            # Counting it as a relation made an alias that shadows the column it is
+            # computed from self-ambiguous: `SELECT MAX(mass) AS mass, MIN(mass) AS mn`
+            # raised AmbiguousIdentifierError on the operand of its own second aggregate.
+            # Worse, `inner_binder`'s already-seen-expression fast path binds sub-trees
+            # under `suppress(Exception)`, so where that path hit this the error was
+            # swallowed and the operand was left with no schema_column at all —
+            # surfacing much later as `AttributeError: 'NoneType' object has no attribute
+            # 'identity'` when the aggregate binder read the identities of its columns.
+            derived_column = found
+            derived_relation = schema
+            continue
+        if column and found_source_relation:
+            # test for duplicates
+            raise AmbiguousIdentifierError(identifier=value)
+        found_source_relation = schema
+        column = found  # don't exit here, so we can test for duplicates
+
+    if column is None:
+        return derived_column, derived_relation
 
     return column, found_source_relation
 

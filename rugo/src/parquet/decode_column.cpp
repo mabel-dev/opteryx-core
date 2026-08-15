@@ -875,6 +875,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
     // When true, byte_array values are kept dictionary-encoded. Mixed dict/plain
     // pages are unified into a synthetic per-chunk dictionary via unified_dict_map.
     bool byte_array_dict_mode = (result.type == "byte_array" && dict_size > 0);
+    // Diagnostic only (rugo_tel::ba_*): a byte_array chunk that arrives WITH a
+    // dictionary page is one that COULD emit dict-shaped. Counting entries here
+    // is what makes the emit counters at the tail interpretable as a rate.
+    if (byte_array_dict_mode) rugo_tel::ba_chunks.fetch_add(1, std::memory_order_relaxed);
     bool int32_dict_mode = (result.type == "int32" && dict_size > 0);
     bool int64_dict_mode = (result.type == "int64" && dict_size > 0);
     bool float32_dict_mode = (result.type == "float32" && dict_size > 0);
@@ -1946,6 +1950,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             result.string_dict_offsets.clear();
             result.string_dict_lens.clear();
             byte_array_dict_mode = false;
+            // Route C out of dict mode. Note this path does NOT go through
+            // drop_dictionary_to_dense() — it materialises RLE runs directly —
+            // so a counter placed only on that lambda would miss it entirely.
+            rugo_tel::ba_drop_rle_dense.fetch_add(1, std::memory_order_relaxed);
           } else if ((int32_dict_mode || int64_dict_mode) &&
                      !result.rle_int64_values.empty()) {
             const size_t n_runs = result.rle_run_lengths.size();
@@ -2285,7 +2293,13 @@ void DecodeColumnFromChunk(DecodedColumn &result,
           const bool rederive = byte_array_dict_mode &&
                                 !target_col->writer_is_rugo &&
                                 page_encoding != 7;
-          if (byte_array_dict_mode && !rederive) drop_dictionary_to_dense();
+          // Route B of three out of dict mode (A = cap overflow below,
+          // C = RLE skip-dense materialisation upstream). Counted before the
+          // call, because drop_dictionary_to_dense clears the flag it tests.
+          if (byte_array_dict_mode && !rederive) {
+            rugo_tel::ba_drop_no_rederive.fetch_add(1, std::memory_order_relaxed);
+            drop_dictionary_to_dense();
+          }
 
           if (page_encoding == 7) {
             std::vector<std::string> page_strs;
@@ -2324,6 +2338,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               // that stayed flat (0.041s both arms), so there was no arm offset —
               // the effect is simply too small to justify the knob.
             }
+            // Diagnostic: interned values are counted in a LOCAL, flushed once
+            // after the loop. A relaxed fetch_add per row would be ~100M atomic
+            // RMWs on a ClickBench string scan — enough to move the very number
+            // the counter exists to explain.
+            long long _interned_here = 0;
             for (int32_t i = 0; i < present_count && data_ptr + 4 <= data_end; i++) {
               int32_t length = ReadLE32(data_ptr);
               data_ptr += 4;
@@ -2336,10 +2355,24 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                     result.string_dict_offsets,
                     result.string_dict_lens);
                 result.dict_indices.push_back(code);
+                ++_interned_here;
                 if (result.string_dict_lens.size() > dict_cap) {
                   // Outgrew our own gate: this column is genuinely high-cardinality.
                   // Abandon the re-derivation, flush what was interned (including
                   // this value) to dense, and finish the page dense.
+                  //
+                  // Diagnostic (route A): record entries-at-drop against the cap
+                  // and the chunk's value count. Every value interned before this
+                  // point is work that produced nothing — these three numbers are
+                  // what say whether the cap is mis-set or the column is simply
+                  // unsuited to re-derivation.
+                  rugo_tel::ba_drop_cap.fetch_add(1, std::memory_order_relaxed);
+                  rugo_tel::ba_drop_cap_entries.fetch_add(
+                      (long long)result.string_dict_lens.size(), std::memory_order_relaxed);
+                  rugo_tel::ba_drop_cap_limit.fetch_add(
+                      (long long)dict_cap, std::memory_order_relaxed);
+                  rugo_tel::ba_drop_cap_values.fetch_add(
+                      (long long)target_col->num_values, std::memory_order_relaxed);
                   drop_dictionary_to_dense();
                   interning = false;
                 }
@@ -2348,6 +2381,8 @@ void DecodeColumnFromChunk(DecodedColumn &result,
               }
               data_ptr += length;
             }
+            if (_interned_here)
+              rugo_tel::ba_intern_values.fetch_add(_interned_here, std::memory_order_relaxed);
           }
         } else if (result.type == "boolean") {
           if (page_encoding == 3) {
@@ -2504,6 +2539,10 @@ void DecodeColumnFromChunk(DecodedColumn &result,
                 result.string_dict_lens);
           }
           result.dict_indices.reserve(result.dict_indices.size() + total);
+          // Second intern site: once per RUN, not per row, so the atomic is
+          // added once for the whole run set rather than inside the loop.
+          rugo_tel::ba_intern_values.fetch_add(
+              (long long)result.rle_run_lengths.size(), std::memory_order_relaxed);
           for (size_t r = 0; r < result.rle_run_lengths.size(); ++r) {
             const uint32_t off = result.rle_str_offsets[r];
             const int32_t  len = result.rle_str_lens[r];
@@ -2797,6 +2836,29 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       result.success = (total_rows_all_pages == total_needed);
     } else {
       result.success = (total_collected > 0);
+    }
+
+    // Diagnostic: the shape this chunk actually emits, for byte_array only.
+    // The predicate is copied verbatim from io_pipeline.hpp's direct_kind_for
+    // DK_VARCHAR_DICT test — deliberately, so the counter reports what the
+    // CONSUMER will conclude rather than what the decoder believes it built.
+    // If the two ever drift, that drift is itself the bug, and a counter with
+    // its own private definition of "dict" would hide it.
+    if (result.type == "byte_array") {
+      const bool emits_dict = !result.string_dict_lens.empty() &&
+                              result.rle_str_lens.empty() &&
+                              (!result.dict_indices.empty() ||
+                               !result.dict_codes_array.empty());
+      const long long rows = (long long)total_rows_all_pages;
+      if (emits_dict) {
+        rugo_tel::ba_emit_dict.fetch_add(1, std::memory_order_relaxed);
+        rugo_tel::ba_emit_dict_entries.fetch_add(
+            (long long)result.string_dict_lens.size(), std::memory_order_relaxed);
+        rugo_tel::ba_emit_dict_rows.fetch_add(rows, std::memory_order_relaxed);
+      } else {
+        rugo_tel::ba_emit_dense.fetch_add(1, std::memory_order_relaxed);
+        rugo_tel::ba_emit_dense_rows.fetch_add(rows, std::memory_order_relaxed);
+      }
     }
 
   } catch (const std::exception &e) {
