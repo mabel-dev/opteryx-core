@@ -24,7 +24,7 @@ jobs:
   #   make q   — minimum SQL regression battery (shapes)
   #   make rt  — rugo unit tests
   #   make dt  — draken unit tests
-  #   make st  — skene native C++ suite
+  #   make st  — skene native C++ suite + Python binding/scan/dispatch tests
   #
   # None of them need cloud credentials, so these jobs need no secrets.
   #
@@ -34,16 +34,21 @@ jobs:
   # build: nothing else in the workflow could start until it finished. It is now
   # split so the work that can overlap does:
   #
-  #   compile ──┬─→ test-python (q, rt, dt in parallel)  ─┐
-  #             │                                         │
-  #   test-skene ───────────────────────────────────────  ├─→ upload → PyPI
-  #   build-manylinux (×8) ───────────────────────────────┤
-  #   build-macos ────────────────────────────────────────┘
+  #   compile ──→ test-python (q, rt, dt, st in parallel) ─┐
+  #                                                        │
+  #   build-manylinux (×8) ────────────────────────────────┼─→ upload → PyPI
+  #   build-macos ─────────────────────────────────────────┘
   #
-  # `compile` builds the tree once and publishes it; the Python suites consume
-  # that artifact rather than each rebuilding. `make st` is pure native C++
-  # (skene/Makefile `test` → `check-draken` + TEST_BINS, no Python, no compiled
-  # opteryx tree) so it needs nothing and starts immediately.
+  # `compile` builds the tree once and publishes it; all four suites consume
+  # that artifact rather than each rebuilding.
+  #
+  # All four are in one matrix because all four need the same thing: a Python
+  # 3.14 interpreter and the compiled tree. `st` looks like it should be the
+  # exception — most of it is skene's native C++ suite, which it builds in-job
+  # from source — but its second half (Makefile `st`, after `$(MAKE) -C skene
+  # test`) runs pytest over tests/unit/skene, the latmat scan test and two
+  # dataset-format suites. Split it out as a bare-checkout job and it dies on
+  # `python3.14: command not found` after the native half has already passed.
   #
   # The publish guarantee is UNCHANGED: `upload` needs every suite and every
   # wheel job, so a red suite still blocks PyPI absolutely. Only the scheduling
@@ -52,7 +57,7 @@ jobs:
   # Wheels deliberately do NOT wait on the suites. A red suite therefore costs
   # the wheel legs' CI minutes — that is the accepted trade for wall-clock, and
   # it can never cost a bad publish. If you ever want the minutes back instead,
-  # add `needs: [test-python, test-skene]` to the two build jobs and accept that
+  # add `needs: test-python` to the two build jobs and accept that
   # the whole matrix goes back to idling behind the floor.
   #
   # Splitting also retires the old `if: !cancelled()` dance: separate jobs
@@ -94,9 +99,23 @@ jobs:
       - name: Compile
         run: make compile
 
-      # ~60 .so / ~36MB, including the Rust-built opteryx.compute. The suites
-      # consume exactly these binaries instead of rebuilding, so what is tested
-      # is what `make compile` produced.
+      # `make compile` produces TWO kinds of runtime output, and both must be
+      # here. Shipping only the .so gets you a tree that imports far enough to
+      # be confusing and then dies on:
+      #   ModuleNotFoundError: No module named 'opteryx._draken_abi'
+      #
+      #   1. ~60 .so / ~36MB — the Cython/C++ extensions plus the Rust-built
+      #      opteryx.compute.
+      #   2. Four GENERATED .py modules, written by
+      #      build_common.write_draken_abi_modules() (called from setup.py) on
+      #      every build: the draken stamp and one consumer check per package
+      #      the wheel ships. They are not tracked in git, so a fresh checkout
+      #      does not have them — they exist only in a compiled tree.
+      #
+      # If a new generated-at-build-time module ever appears, it must be added
+      # here too. The `Verify the compiled tree imports` step in test-python is
+      # the guard: it fails immediately and legibly rather than surfacing as a
+      # confusing mid-suite error.
       #
       # build/ is excluded deliberately: build_ext --inplace links into
       # build/lib.* and then COPIES into the package dirs, so every .so exists
@@ -108,6 +127,10 @@ jobs:
           name: compiled-tree
           path: |
             **/*.so
+            draken/_abi_stamp.py
+            opteryx/_draken_abi.py
+            rugo/_draken_abi.py
+            skene/_draken_abi.py
             !build/**
           if-no-files-found: error
           retention-days: 1
@@ -128,6 +151,8 @@ jobs:
             name: make rt — rugo unit tests
           - target: dt
             name: make dt — draken unit tests
+          - target: st
+            name: make st — skene native suite + Python bindings
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.1.7
@@ -169,19 +194,6 @@ jobs:
 
       - name: ${{ matrix.name }}
         run: make ${{ matrix.target }}
-
-  test-skene:
-    name: make st — skene native suite
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4.1.7
-
-      # No `needs`, no Python, no artifact: skene/Makefile `test` builds and
-      # runs C++ TEST_BINS, and `check-draken` only asserts the draken/xxhash
-      # HEADERS are present in the checkout. This starts at t=0.
-      - name: make st — skene native suite
-        run: make st
 
   # No `needs:` — wheels build concurrently with the floor suites. `upload` is
   # the gate that keeps a red suite off PyPI.
@@ -476,7 +488,7 @@ jobs:
     # so nothing reaches PyPI unless all of them are green — the same guarantee
     # the old single `floor` job gave by blocking the builds, now enforced at
     # the publish step instead. Never trim this list to make a release go out.
-    needs: [test-python, test-skene, build-manylinux, build-macos]
+    needs: [test-python, build-manylinux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Set up Python
