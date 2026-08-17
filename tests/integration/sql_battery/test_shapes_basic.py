@@ -357,12 +357,14 @@ STATEMENTS = [
         # category instead of its element type, and predicate_rewriter's
         # single-element IN->Eq rewrite left a stale ARRAY-typed schema_column
         # behind it - both rejected an already-cast IN-list as an uncast literal).
-        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN (CAST('2000-06-30' AS DATE))", 1, 1, None),
-        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN (CAST('2000-06-30' AS DATE), CAST('2000-07-01' AS DATE))", 1, 1, None),
-        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN ('2000-06-30'::DATE, '2000-07-01'::DATE, '2000-07-02'::DATE)", 1, 1, None),
+        # date_dim is unscaled in TPC-DS - the SF0.01 and SF1 files are byte-identical
+        # (73,049 rows both), so these read the committed tpcds_001 fixture.
+        ("SELECT COUNT(*) FROM testdata.tpcds_001.date_dim WHERE d_date IN (CAST('2000-06-30' AS DATE))", 1, 1, None),
+        ("SELECT COUNT(*) FROM testdata.tpcds_001.date_dim WHERE d_date IN (CAST('2000-06-30' AS DATE), CAST('2000-07-01' AS DATE))", 1, 1, None),
+        ("SELECT COUNT(*) FROM testdata.tpcds_001.date_dim WHERE d_date IN ('2000-06-30'::DATE, '2000-07-01'::DATE, '2000-07-02'::DATE)", 1, 1, None),
         # A bare, uncast literal in the list must still be refused - the explicit-cast
         # requirement is not loosened for IN-lists.
-        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN ('2000-06-30')", None, None, IncompatibleTypesError),
+        ("SELECT COUNT(*) FROM testdata.tpcds_001.date_dim WHERE d_date IN ('2000-06-30')", None, None, IncompatibleTypesError),
 
         # Set operations - UNION (SQL92 compatibility) - NEW
         # NOTE: Opteryx requires dataset aliases in set operations when the same dataset is referenced
@@ -1438,6 +1440,84 @@ def test_union_of_aggregates_with_a_computed_group_key():
         f"UNION of aggregates over a computed GROUP BY key returned {counts} "
         f"(expected each of ids 1-9 counted twice)"
     )
+
+
+def test_union_leg_computed_alias_matching_source_column_name():
+    """
+    VALUE-level regression: a UNION leg's OWN computed expression, aliased to the SAME
+    name as a real column of the relation every leg reads FROM, must not make the
+    union's declared output ambiguous — TPC-DS Q36's `results_rollup` CTE, verbatim
+    shape: `results_rollup AS (SELECT gross_margin FROM results UNION SELECT
+    (sum(...)/sum(...)) AS gross_margin FROM results ...)`, then `SELECT gross_margin
+    FROM results_rollup` outside — one relation in the outer FROM clause, so this must
+    not be ambiguous.
+
+    Leg 1 passes `stats.ratio` straight through; leg 2 computes a NEW expression under
+    the same alias. Once leg 2's own Project finishes, its alias lives in
+    `context.schemas["$project"]` (`$derived` renamed at Project-exit — see
+    project.py), and that scratch schema was not exempted the way `$derived` is when
+    `visit_union` re-binds the union's own declared output columns (borrowed from leg
+    1's shape — see `logical_planner.py`'s `plan_query`). So `stats`' real `ratio`
+    column and leg 2's `$project` copy of `ratio` both showed up in one
+    `context.schemas` dict, and `locate_identifier_in_loaded_schemas` raised
+    AmbiguousIdentifierError even though the outer query's FROM clause names only
+    `stats_rollup`.
+    """
+    session = opteryx.session()
+
+    statement = """
+        WITH stats AS (
+            SELECT id AS grp, SUM(mass) AS mass_sum, SUM(mass) / SUM(gravity) AS ratio
+            FROM $planets
+            GROUP BY id
+        ),
+        stats_rollup AS (
+            SELECT ratio, grp FROM stats
+            UNION ALL
+            SELECT SUM(mass_sum) / 1.0 AS ratio, NULL AS grp FROM stats
+        )
+        SELECT ratio, grp FROM stats_rollup
+    """
+
+    ratios = []
+    grps = []
+    for morsel in session.execute_to_morsels(statement):
+        ratios += morsel.column("ratio").to_pylist()
+        grps += morsel.column("grp").to_pylist()
+
+    assert len(ratios) == 10, f"expected 9 per-planet rows + 1 rollup row, got {len(ratios)}"
+    assert sorted(g for g in grps if g is not None) == list(range(1, 10)), (
+        f"UNION leg 1's passthrough of `stats.grp` lost values: {grps}"
+    )
+    assert grps.count(None) == 1, f"UNION leg 2's `NULL AS grp` did not survive: {grps}"
+
+    mass = []
+    gravity = []
+    for morsel in session.execute_to_morsels("SELECT id, mass, gravity FROM $planets ORDER BY id"):
+        mass += morsel.column("mass").to_pylist()
+        gravity += morsel.column("gravity").to_pylist()
+
+    expected_per_planet = sorted(float(m) / float(g) for m, g in zip(mass, gravity))
+    expected_rollup = sum(float(m) for m in mass) / 1.0
+
+    rollup_idx = grps.index(None)
+    per_planet_ratios = ratios[:rollup_idx] + ratios[rollup_idx + 1 :]
+
+    assert sorted(per_planet_ratios) == pytest.approx(expected_per_planet), (
+        f"UNION leg 1's passthrough of `stats.ratio` returned wrong values: {per_planet_ratios}"
+    )
+    assert ratios[rollup_idx] == pytest.approx(expected_rollup), (
+        f"UNION leg 2's own computed `ratio` returned the wrong value: {ratios[rollup_idx]}"
+    )
+
+    # A name that really IS ambiguous — two relations providing it — must still be
+    # refused. The fix narrows what counts as a relation ($project scratch does not
+    # count); it does not stop counting relations that genuinely both provide the name.
+    with pytest.raises(AmbiguousIdentifierError):
+        for _ in session.execute_to_morsels(
+            "SELECT name FROM $planets INNER JOIN testdata.satellites ON planetId = $planets.id"
+        ):
+            pass
 
 
 def test_chained_union_of_having_filtered_aggregates():
@@ -3226,6 +3306,87 @@ def test_correlated_scalar_subquery_or_factored_equality():
         )
 
 
+def test_comma_join_equality_buried_in_or():
+    """
+    VALUE-level regression for `DisjunctionSimplificationStrategy` reaching an
+    OR that is not the top-level node of a Filter's condition.
+
+    TPC-DS Q13/Q48 comma-join `store_sales` to `household_demographics` /
+    `customer_address` through equalities buried inside three-way ORs, each
+    ANDed with unrelated per-branch filters and themselves ANDed alongside
+    other top-level predicates:
+
+        d_year = 2001 AND (
+            (ss_hdemo_sk=hd_demo_sk AND cd_marital_status='M' AND ...)
+            OR (ss_hdemo_sk=hd_demo_sk AND cd_marital_status='S' AND ...)
+            OR (ss_hdemo_sk=hd_demo_sk AND cd_marital_status='W' AND ...)
+        )
+
+    `DisjunctionSimplificationStrategy` already implements exactly this
+    factoring — `(J AND A) OR (J AND B) OR (J AND C)` -> `J AND (A OR B OR
+    C)` — but ran BEFORE `SplitConjunctivePredicatesStrategy` and only ever
+    inspected whether a Filter's WHOLE condition was an OR, so it silently
+    no-opped whenever the OR sat inside a top-level AND instead (as it does
+    here, and in Q13/Q48). The join-key equality then stayed invisible to
+    every downstream join-key-detection site (`cross_join_chain_reorder`,
+    the DPccp adapter, `cross_join_filter_pushdown`), and the comma join fell
+    back to a genuine, unfiltered cross join — a 20+ minute hang on TPC-DS
+    Q13 at SF1 (see tests/performance/tpcds/runner.py's docstring).
+
+    $planets x testdata.satellites, comma-joined with the connecting equality
+    (`p.id = s.planetId`) buried inside a three-branch OR (mirroring Q13's
+    shape), each branch ANDed with a different, mutually-exclusive-and-
+    exhaustive `s.id` band, and the whole OR ANDed alongside an unrelated
+    top-level predicate. Since the three bands partition every satellite,
+    this is logically equivalent to the plain join `p.id = s.planetId`.
+    """
+    session = opteryx.session()
+    or_buried_sql = (
+        "SELECT p.name AS planet_name, COUNT(*) AS n FROM $planets p, testdata.satellites s "
+        "WHERE 1 = 1 AND ("
+        "(p.id = s.planetId AND s.id < 60) "
+        "OR (p.id = s.planetId AND s.id >= 60 AND s.id < 120) "
+        "OR (p.id = s.planetId AND s.id >= 120)"
+        ") GROUP BY p.name ORDER BY p.name"
+    )
+
+    def _rows(sess, sql):
+        collected = []
+        for morsel in sess.execute_to_morsels(sql):
+            collected.extend(
+                zip(morsel.column("planet_name").to_pylist(), morsel.column("n").to_pylist())
+            )
+        return sorted(collected)
+
+    or_buried_rows = _rows(session, or_buried_sql)
+
+    telemetry = dict(session.telemetry)
+    assert telemetry.get("optimization_disjunction_simplification", 0) >= 1, (
+        "disjunction simplification did not fire — this shape no longer "
+        "exercises the OR-buried join-key detection path, and the test "
+        "proves nothing"
+    )
+
+    reference_session = opteryx.session()
+    reference_rows = _rows(
+        reference_session,
+        "SELECT p.name AS planet_name, COUNT(*) AS n FROM $planets p, testdata.satellites s "
+        "WHERE p.id = s.planetId GROUP BY p.name ORDER BY p.name",
+    )
+
+    assert or_buried_rows == reference_rows
+    assert or_buried_rows, "join produced no rows — this shape is not actually testing a join"
+
+    # Sanity: a plain top-level AND (no OR to factor) is unaffected.
+    plain_session = opteryx.session()
+    plain_rows = _rows(
+        plain_session,
+        "SELECT p.name AS planet_name, COUNT(*) AS n FROM $planets p, testdata.satellites s "
+        "WHERE p.id = s.planetId AND s.id >= 0 GROUP BY p.name ORDER BY p.name",
+    )
+    assert plain_rows == reference_rows
+
+
 def test_window_topk_fusion_parity():
     """
     The fused `rank <= K` path must answer exactly what the unfused path answers.
@@ -3490,6 +3651,10 @@ if __name__ == "__main__":  # pragma: no cover
             "union of aggregates with a computed group key",
             test_union_of_aggregates_with_a_computed_group_key,
         ),
+        (
+            "union leg computed alias matching source column name",
+            test_union_leg_computed_alias_matching_source_column_name,
+        ),
         ("union leg width coercion", test_union_leg_width_coercion),
         (
             "chained union coerces every leg",
@@ -3588,6 +3753,10 @@ if __name__ == "__main__":  # pragma: no cover
         (
             "correlated scalar subquery OR-factored equality",
             test_correlated_scalar_subquery_or_factored_equality,
+        ),
+        (
+            "comma join equality buried in OR",
+            test_comma_join_equality_buried_in_or,
         ),
         ("window top-k fusion parity", test_window_topk_fusion_parity),
         (

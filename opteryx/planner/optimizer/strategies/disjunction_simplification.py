@@ -171,10 +171,45 @@ def _simplify_disjunction(condition: Node) -> Optional[Node]:
     return _build_or(rebuilt_branches)
 
 
+def _unwrap_nested(node: Optional[Node]) -> Optional[Node]:
+    while node is not None and node.node_type == NodeType.NESTED:
+        node = node.centre
+    return node
+
+
+def _simplify_or_conjunct(condition: Node) -> Optional[Node]:
+    """`_simplify_disjunction`, plus the CNF-flattening fallback `visit` used to
+    apply only at the top level. Returns None if nothing changed."""
+    simplified = _simplify_disjunction(condition)
+    if simplified is None:
+        # No logical simplification, but flatten nested binary OR to CNF
+        # when there are 3+ branches for efficient n-ary evaluation.
+        branches = _split_or(condition)
+        if len(branches) >= 3:
+            cnf = Node(node_type=NodeType.CNF)
+            cnf.parameters = branches
+            simplified = cnf
+    return simplified
+
+
 class DisjunctionSimplificationStrategy(OptimizationStrategy):
     """
     Global DNF normalisation: within-clause dedup, cross-clause dedup, absorption,
     and common-predicate factoring across the OR branches of a filter condition.
+
+    Runs before `SplitConjunctivePredicatesStrategy`, so a Filter's condition at
+    this point is still the whole WHERE clause — an OR this strategy needs to
+    reach is not always the top-level node itself; it is at least as often one
+    top-level-AND conjunct alongside others (`d_year = 2001 AND (a AND x OR a
+    AND y) AND (...)`, TPC-DS Q13/Q48's shape). `DisjunctiveDomainPushdownStrategy`,
+    which runs immediately after this one for the same reason, already walks
+    every top-level-AND conjunct looking for an OR to work on — this strategy
+    must do the same, or a common equi-join key ANDed into every branch of a
+    non-top-level OR is invisible to every join-key-detection site downstream
+    (`cross_join_chain_reorder`, the DPccp adapter, `cross_join_filter_pushdown`),
+    silently degrading the comma join into a real, unfiltered cross join — a
+    20+ minute hang on TPC-DS Q13 at SF1 (see runner.py's TPC-DS smoke suite
+    docstring).
     """
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
@@ -182,34 +217,30 @@ class DisjunctionSimplificationStrategy(OptimizationStrategy):
             context.optimized_plan = context.pre_optimized_tree.copy()
 
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
-            condition = node.condition
-            while condition is not None and condition.node_type == NodeType.NESTED:
-                condition = condition.centre
+            conjuncts = _split_and(node.condition)
+            changed = False
+            new_conjuncts: List[Node] = []
+            for conjunct in conjuncts:
+                unwrapped = _unwrap_nested(conjunct)
+                if unwrapped is not None and unwrapped.node_type == NodeType.OR:
+                    simplified = _simplify_or_conjunct(unwrapped)
+                    if simplified is not None:
+                        new_conjuncts.append(simplified)
+                        changed = True
+                        continue
+                new_conjuncts.append(conjunct)
 
-            if condition is not None and condition.node_type == NodeType.OR:
-                simplified = _simplify_disjunction(condition)
-                if simplified is None:
-                    # No logical simplification, but flatten nested binary OR to CNF
-                    # when there are 3+ branches for efficient n-ary evaluation.
-                    branches = _split_or(condition)
-                    if len(branches) >= 3:
-                        cnf = Node(node_type=NodeType.CNF)
-                        cnf.parameters = branches
-                        simplified = cnf
-
-                if simplified is not None:
-                    new_node = context.optimized_plan[context.node_id]
-                    new_node.condition = simplified
-                    new_node.columns = get_all_nodes_of_type(
-                        simplified, select_nodes=(NodeType.IDENTIFIER,)
-                    )
-                    context.optimized_plan[context.node_id] = new_node
-                    self.telemetry.optimization_disjunction_simplification = (
-                        getattr(
-                            self.telemetry, "optimization_disjunction_simplification", 0
-                        )
-                        + 1
-                    )
+            if changed:
+                new_condition = _build_and(new_conjuncts)
+                new_node = context.optimized_plan[context.node_id]
+                new_node.condition = new_condition
+                new_node.columns = get_all_nodes_of_type(
+                    new_condition, select_nodes=(NodeType.IDENTIFIER,)
+                )
+                context.optimized_plan[context.node_id] = new_node
+                self.telemetry.optimization_disjunction_simplification = (
+                    getattr(self.telemetry, "optimization_disjunction_simplification", 0) + 1
+                )
 
         return context
 
@@ -219,9 +250,8 @@ class DisjunctionSimplificationStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         for node in plan._nodes.values():
             if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
-                cond = node.condition
-                while cond is not None and cond.node_type == NodeType.NESTED:
-                    cond = cond.centre
-                if cond is not None and cond.node_type == NodeType.OR:
-                    return True
+                for conjunct in _split_and(node.condition):
+                    unwrapped = _unwrap_nested(conjunct)
+                    if unwrapped is not None and unwrapped.node_type == NodeType.OR:
+                        return True
         return False

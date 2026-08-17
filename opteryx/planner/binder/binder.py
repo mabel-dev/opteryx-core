@@ -476,7 +476,7 @@ def locate_identifier_in_loaded_schemas(
         found = schema.find_column(value, case_insensitive=True)
         if not found:
             continue
-        if name == "$derived":
+        if name in ("$derived", "$project"):
             # `$derived` holds what THIS scope is computing — including the aliases the
             # projection being bound has already minted. An alias is NOT a relation, so a
             # name it shares with a real column is not ambiguous: it binds to the input
@@ -492,6 +492,19 @@ def locate_identifier_in_loaded_schemas(
             # swallowed and the operand was left with no schema_column at all —
             # surfacing much later as `AttributeError: 'NoneType' object has no attribute
             # 'identity'` when the aggregate binder read the identities of its columns.
+            #
+            # `$project` is `$derived` after a Project's own exit renames it (see
+            # project.py) — the same scope-local aliases, just past the point where this
+            # level's projection is considered "settled". A set operation's leg-combining
+            # visitors (visit_union/_intersect/_except) merge sibling leg contexts
+            # directly, with no subquery-style "sack and rebuild" step to re-home a leg's
+            # `$project` under a proper relation name — so one leg's finished scratch
+            # (e.g. a UNION branch's own `(...) AS ratio`) rides into the set operation's
+            # own exit-column resolution alongside the legs' real relation schemas.
+            # Counting it as a competing relation there raised AmbiguousIdentifierError
+            # for `results.gross_margin` vs a sibling UNION branch's freshly computed
+            # `... AS gross_margin` even though the branch's own `FROM` only names one
+            # relation — TPC-DS Q36's `results_rollup` CTE.
             derived_column = found
             derived_relation = schema
             continue

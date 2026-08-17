@@ -10,7 +10,7 @@ Coverage per §4 test matrix:
   6. Null propagation — at least one null on each side.
   7. All-null inputs — degenerate case.
   8. Overflow case — int128→int64 overflow path asserts raise.
-  9. Division by zero — asserts raise.
+  9. Division / modulo by zero — asserts NULL result row (not a raise).
  10. neg(INT64_MIN as decimal) — overflow corner.
 
 For each op: add / sub / mul / div / mod / neg.
@@ -368,11 +368,14 @@ class TestDecimalDiv:
         r = a.div(b)
         assert pylist(r) == [None, None]
 
-    def test_division_by_zero_raises(self):
-        a = dec([Decimal('5.00')])
-        b = dec([Decimal('0.00')])
-        with pytest.raises((ZeroDivisionError, Exception)):
-            pylist(a.div(b))
+    def test_division_by_zero_is_null(self):
+        # Zero divisor yields NULL, not a raise (decimal_arith.h header ruling,
+        # 2026-08-17): CASE/IIF evaluate every branch, so a SQL-level zero guard
+        # cannot stop the division running on the zero row.
+        a = dec([Decimal('5.00'), Decimal('6.00')])
+        b = dec([Decimal('0.00'), Decimal('3.00')])
+        r = a.div(b)
+        assert pylist(r) == [None, Decimal('2')]
 
     def test_half_even_rounding(self):
         # 1.00 / 8.00 = 0.125 — the "half" case at 2 decimal places
@@ -454,11 +457,13 @@ class TestDecimalMod:
         r = a.mod(b)
         assert pylist(r) == [None, None]
 
-    def test_mod_by_zero_raises(self):
-        a = dec([Decimal('5.00')])
-        b = dec([Decimal('0.00')])
-        with pytest.raises(Exception):
-            pylist(a.mod(b))
+    def test_mod_by_zero_is_null(self):
+        # Zero modulus yields NULL, not a raise — same ruling as div (see
+        # decimal_arith.h header, 2026-08-17).
+        a = dec([Decimal('5.00'), Decimal('10.00')])
+        b = dec([Decimal('0.00'), Decimal('3.00')])
+        r = a.mod(b)
+        assert pylist(r) == [None, Decimal('1.00')]
 
     def test_result_type_is_decimal(self):
         a = dec([Decimal('7.00')])
