@@ -35,6 +35,10 @@ cdef class GroupedAggregateHashedNode(BasePlanNode):
     cdef public list groups
     cdef public list aggregates
     cdef public list group_by_columns
+    # GROUP BY ROLLUP(...): one bitmask per grouping set, bit k referring to
+    # group_by_columns[k] and SET meaning that key is rolled up (NULL) in that set.
+    # None for a plain GROUP BY, which is the single set naming every key.
+    cdef public object grouping_set_masks
     cdef public object _having_condition
     # Planner distinct-group-count estimate (int or None) — consumed by the
     # native plan compiler to gate GroupBySink's per-partition parvi maps.
@@ -58,6 +62,24 @@ cdef class GroupedAggregateHashedNode(BasePlanNode):
         ]
 
         self.group_by_columns = list({node.schema_column.identity for node in self.groups})
+
+        # The binder resolved GROUP BY ROLLUP's sets to key IDENTITIES; turn them into
+        # bitmasks over group_by_columns, which is the order the native sink keys on.
+        # A key that is not named by a set is rolled up, so its bit is set — including
+        # a key the set named that the de-duplication above collapsed away, which is
+        # why membership is tested by identity and not by position.
+        grouping_sets = parameters.get("grouping_set_identities")
+        if grouping_sets is None:
+            self.grouping_set_masks = None
+        else:
+            self.grouping_set_masks = [
+                sum(
+                    1 << position
+                    for position, identity in enumerate(self.group_by_columns)
+                    if identity not in set(one_set)
+                )
+                for one_set in grouping_sets
+            ]
 
         self.groupby_ndv_estimate = parameters.get("groupby_ndv_estimate")
 

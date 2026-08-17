@@ -17,11 +17,15 @@
 // (not DRAKEN_INT64) itself, so the old failure mode cannot recur here — this
 // consumer never mistakes the column for plain INT64.
 //
-// Scope (fail loud, not silently, outside it): only the two wire tags an
-// int64-backed DECIMAL column can actually produce — TAG_INT64 (1, plain) and
-// TAG_INT64_DICT (8, dictionary-encoded). Any other tag (string/array/int128/
-// bool/etc.) reaching here means a non-decimal column was misrouted by the
-// caller; this is treated as a hard error, never guessed at.
+// Scope (fail loud, not silently, outside it): only the three wire tags an
+// int64-backed DECIMAL column can actually produce — TAG_INT64 (1, plain or
+// RLE-widened), TAG_INT64_DICT (8, dictionary-encoded), and TAG_INT32 (2,
+// rugo's unwidened plain encoding for int32-*physical* DECIMAL columns —
+// e.g. TPC-DS's DECIMAL(7,2), too narrow-precision for parquet to store as
+// INT64; see rugo/src/parquet/ipc_serialize.hpp's serialize_int32). Any other
+// tag (string/array/int128/bool/etc.) reaching here means a non-decimal
+// column was misrouted by the caller; this is treated as a hard error, never
+// guessed at.
 //
 // Scale handling: NOT read from this buffer — int64-backed DECIMAL's wire
 // format (ipc_serialize.hpp's serialize_int64) carries no precision/scale
@@ -65,7 +69,11 @@ inline bool build_pool_decimal_column(MemoryPool* pool, int64_t ref_id, CxxColum
     const uint8_t* p = static_cast<const uint8_t*>(r.ptr);
     uint8_t tag = p[0];
 
-    if (tag == kTagInt64) {
+    if (tag == kTagInt64 || tag == kTagInt32) {
+        // deserialize_fixed_column already widens TAG_INT32's raw int32 payload
+        // into the same int64-shaped DecodedFixedColumn::data as TAG_INT64
+        // (ipc_deserialize.cpp's kTagInt32 case sets IpcKind::Int64) — this
+        // branch doesn't need to know which tag it got past this point.
         DecodedFixedColumn dc;
         deserialize_fixed_column(p, r.length, dc);
         pool->unlatch(ref_id);

@@ -35,13 +35,20 @@
 //   - The output row's validity is the CHOSEN branch's validity; a row with no
 //     chosen branch is null.
 //
-// DECIMAL is deliberately rejected: DrakenVector carries no scale (it is an
-// out-of-band logical descriptor, buffers.h), so a kernel cannot see that two
-// DECIMAL branches differ in scale, and blending raw unscaled int64s across
-// differing scales is silently wrong. CASE gets away with the same raw blend only
-// because the plan compiler quantizes its literal branches first; COALESCE/IIF
-// have no such rewrite. Failing loud keeps these queries refused exactly as they
-// are today rather than answering them incorrectly.
+// DECIMAL/DECIMAL128: DrakenVector carries no scale (it is an out-of-band
+// logical descriptor, buffers.h), so this kernel cannot itself detect — let
+// alone correct — two DECIMAL branches differing in scale; blending raw
+// unscaled int64/int128s across differing scales is silently wrong. Unlike
+// the plain fixed family above (nc_promote_fixed), there is no promotion
+// path here: the DECIMAL/DECIMAL128 arm in nc_dispatch requires every real
+// branch to already share the EXACT SAME physical type (tier included). That
+// invariant is established at BIND TIME, not here — the binder
+// (opteryx/planner/binder/binder.py, the null-conditional "Descriptor
+// coercion" pass) CAST-aligns every COALESCE/IFNULL/IFNOTNULL/IIF value
+// branch to one resolved ColumnType before the plan ever reaches this kernel,
+// the same move CASE's own bind-time coercion makes. A mismatched pair that
+// somehow still reaches here (a bind-time gap, not the normal case) is
+// refused loud by nc_promote_fixed's fallthrough rather than blended wrong.
 
 #include <cstdint>
 #include <cstring>
@@ -67,19 +74,15 @@ inline bool nc_is_string(DrakenType t) {
     return t == DRAKEN_VARCHAR || t == DRAKEN_NVARCHAR || t == DRAKEN_VARBINARY;
 }
 
-// Byte width of the fixed-width types this file blends. DECIMAL/DECIMAL128 are
-// absent on purpose (see the header note) and report 0 == "not supported here".
+// Byte width of the fixed-width types this file blends — THE canonical width
+// (core/buffers.h), not a private table. draken_type_fixed_itemsize also
+// reports DECIMAL (8) and DECIMAL128/INTERVAL (16); INTERVAL is not reachable
+// here (the registrar's bind-time family check, __init__.pyx's _NC_FIXED /
+// _NC_DECIMAL_FAMILY, never admits it), and DECIMAL/DECIMAL128 are handled by
+// the EXACT-MATCH contract below, not by nc_promote_fixed's cross-type
+// widening rules — see the header note.
 inline size_t nc_fixed_size(DrakenType t) {
-    switch (t) {
-        case DRAKEN_INT8:  case DRAKEN_UINT8:                       return 1;
-        case DRAKEN_INT16: case DRAKEN_UINT16:                      return 2;
-        case DRAKEN_INT32: case DRAKEN_UINT32:
-        case DRAKEN_FLOAT32: case DRAKEN_DATE32: case DRAKEN_TIME32: return 4;
-        case DRAKEN_INT64: case DRAKEN_UINT64:
-        case DRAKEN_FLOAT64: case DRAKEN_TIMESTAMP64:
-        case DRAKEN_TIME64:                                          return 8;
-        default:                                                     return 0;
-    }
+    return draken_type_fixed_itemsize(t);
 }
 
 inline bool nc_is_fixed(DrakenType t) { return nc_fixed_size(t) != 0; }
@@ -463,8 +466,11 @@ VecResult nc_dispatch(const DrakenVector* const* srcs, uint32_t nargs,
         return nc_blend_fixed<Chooser>(srcs, nargs, n, out_type, who);
     }
 
-    // DECIMAL/DECIMAL128 land here: scale is out-of-band, so a correct blend is
-    // not expressible on this signature (see the header note).
+    // ARRAY, VARIANT, VECTOR_FP16 land here — no flat per-element width, nothing
+    // this signature can read uniformly. (INTERVAL also has one, per
+    // draken_type_fixed_itemsize, and would blend correctly via the branch
+    // above if it ever arrived — but the registrar's bind-time family check
+    // never admits it, so in practice it is refused before reaching here too.)
     return draken_error_sentinel_fmt("%s: unsupported branch type %d", who, (int)t0);
 }
 

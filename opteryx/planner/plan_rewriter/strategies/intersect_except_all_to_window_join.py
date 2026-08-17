@@ -39,8 +39,8 @@ from opteryx.models import LogicalColumn, Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.plan_rewriter.strategies._set_op_join_common import column_names as _column_names
 from opteryx.planner.plan_rewriter.strategies._set_op_join_common import live_relations
-from opteryx.planner.plan_rewriter.strategies.intersect_to_inner_join import _column_names
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewriteContext
 from opteryx.planner.plan_rewriter.strategies.rewrite_strategy import PlanRewriteStrategy
 from opteryx.types import logical_type as _lt

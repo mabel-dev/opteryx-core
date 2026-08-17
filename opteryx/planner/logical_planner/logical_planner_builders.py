@@ -1625,6 +1625,58 @@ def exists(branch, alias: Optional[List[str]] = None, key=None):
     return node
 
 
+class GroupingConstruct:
+    """One `GROUP BY` grouping construct — `ROLLUP (...)`, `CUBE (...)`, `GROUPING SETS (...)`.
+
+    NOT an expression, and deliberately not a `Node`: it is a clause construct that
+    describes WHICH SETS of keys to group by, and it only ever appears as a member of
+    the GROUP BY list. `expand_grouping_elements` in the logical planner is its one
+    consumer, which turns it into the flat key list plus the grouping-set index tuples
+    the aggregate carries. Anything else that receives one has a bug — every other
+    consumer of a GROUP BY member expects an expression and will fail on the attribute
+    access, loudly, at the point of the mistake.
+
+    `elements` is a list of grouping ELEMENTS, each itself a list of expressions, which
+    is the shape sqlparser produces (`Vec<Vec<Expr>>`). The nesting is load-bearing:
+    `ROLLUP((a, b), c)` has two elements, the first a composite of two columns, and
+    rolls up to `(a,b,c)`, `(a,b)`, `()` — three sets, not four.
+    """
+
+    __slots__ = ("kind", "elements")
+
+    def __init__(self, kind: str, elements: List[List]):
+        self.kind = kind
+        self.elements = elements
+
+    def grouping_sets(self) -> List[List]:
+        """The ordered list of grouping sets this construct denotes, each a list of
+        expressions. Coarsest-last, matching the standard's presentation order."""
+        if self.kind == "ROLLUP":
+            # (e1..en), (e1..en-1), ..., (e1), ()
+            return [
+                [expr for element in self.elements[:depth] for expr in element]
+                for depth in range(len(self.elements), -1, -1)
+            ]
+        raise SqlError(f"Unhandled grouping construct `{self.kind}`")
+
+
+def rollup(branch, alias: Optional[List[str]] = None, key=None):
+    return GroupingConstruct("ROLLUP", [[build(part) for part in element] for element in branch])
+
+
+def unsupported_grouping_construct(branch, alias: Optional[List[str]] = None, key=None):
+    """`CUBE` and `GROUPING SETS` parse — they are in the same family as `ROLLUP` and the
+    dialect enables the whole production — but nothing lowers them yet. Refuse them here,
+    named, rather than let a half-understood construct reach the aggregate: the internal
+    representation (an explicit list of grouping sets) already accommodates both, so this
+    is a lowering gap, not a design one."""
+    spelling = {"Cube": "CUBE", "GroupingSets": "GROUPING SETS"}[key]
+    raise UnsupportedSyntaxError(
+        f"**{spelling}** is not implemented. **ROLLUP** is the supported "
+        f"**GROUP BY** grouping construct."
+    )
+
+
 def expressions(branch, alias: Optional[List[str]] = None, key=None):
     return [build(part) for part in branch]
 
@@ -1724,6 +1776,28 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         elif args:
             raise UnsupportedSyntaxError(
                 f"{func}() takes no arguments — the window's **ORDER BY** is its input."
+            )
+    elif func == "GROUPING":
+        # GROUPING(col) — GROUP BY ROLLUP's companion: 1 when `col` was rolled up
+        # (NULL) to produce this row's subtotal, 0 when it is a real per-group
+        # value. Parsed as AGGREGATOR, the same way window functions are above, so
+        # the aggregate-hoist sweep in the logical planner pulls it up to the
+        # AggregateAndGroup node alongside SUM/COUNT/etc — that hoist is what lets
+        # it appear in ORDER BY and a window's PARTITION BY, where it is otherwise
+        # bound as an ordinary column reference. It is NOT in AGGREGATORS
+        # (opteryx/operators/aggregate/helpers.py): it is not a per-group
+        # reduction — its value is a lookup against the grouping set that produced
+        # the row — so it is deliberately routed around `_parse_aggregates` /
+        # `_AGG_FNS` in the physical compiler instead of through them. Requiring
+        # ROLLUP/CUBE/GROUPING SETS in scope, and that the argument is one of this
+        # query's GROUP BY keys, is validated at bind time
+        # (opteryx/planner/binder/aggregate.py), once the GROUP BY keys are known.
+        node_type = NodeType.AGGREGATOR
+        if filter_condition is not None:
+            raise UnsupportedSyntaxError("Filters are not supported with GROUPING().")
+        if len(args) != 1:
+            raise UnsupportedSyntaxError(
+                "GROUPING() takes exactly one argument: the GROUP BY column to test."
             )
     elif _is_function(func):
         node_type = NodeType.FUNCTION
@@ -1942,7 +2016,11 @@ _NULL_IGNORING_AGGREGATES = frozenset(
         "MEDIAN",
         "MIN",
         "STDDEV",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
         "SUM",
+        "VAR_POP",
+        "VAR_SAMP",
     }
 )
 
@@ -1982,6 +2060,34 @@ def identifier(branch, alias: Optional[List[str]] = None, key=None):
 def in_list(branch, alias: Optional[List[str]] = None, key=None):
     left_node = build(branch["expr"])
     value_nodes = [build(v) for v in branch["list"]]
+
+    # A list element is usually already a LITERAL, but templates like TPC-DS
+    # write adjacent values as arithmetic — `d_year IN (1999, 1999+1, 1999+2)`.
+    # binary_op() builds that element as an untyped BINARY_OPERATOR (it sets
+    # left/right/value but no `.type`), so the type/value reads below would
+    # see `.type is None` and either crash building the array or read a false
+    # "mixed types" mismatch against the literal beside it. Fold each
+    # non-literal element to a concrete literal now, reusing the optimizer's
+    # constant folder — there's no schema/binder context yet for its usual
+    # (later) pass to run against, but every element here is a closed constant
+    # subtree by construction: the IN-list grammar admits no column
+    # references (`x IN (SELECT ...)` is the separate in_subquery() builder).
+    if any(v.node_type != NodeType.LITERAL for v in value_nodes):
+        from opteryx.models.query_telemetry import _QueryTelemetry
+        from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
+
+        _telemetry = _QueryTelemetry()
+        value_nodes = [
+            v if v.node_type == NodeType.LITERAL else fold_constants(v, _telemetry)
+            for v in value_nodes
+        ]
+        not_literal = [v for v in value_nodes if v.node_type != NodeType.LITERAL]
+        if not_literal:
+            raise UnsupportedSyntaxError(
+                "IN-list values must be constant — every element has to fold to a literal, "
+                f"but `{format_expression(not_literal[0])}` does not."
+            )
+
     element_ct_set = {v.type for v in value_nodes}
     if len(element_ct_set) > 1:
         raise ArrayWithMixedTypesError("Array in IN condition has values with mixed types. Every element has to share one type; cast them so they match.")
@@ -2642,6 +2748,9 @@ BUILDERS = {
     "Cast": cast,
     "Ceil": ceiling,
     "CompoundIdentifier": compound_identifier,
+    "Cube": unsupported_grouping_construct,
+    "GroupingSets": unsupported_grouping_construct,
+    "Rollup": rollup,
     "DoubleQuotedString": literal_string,
     "Exists": exists,
     "Expr": build,

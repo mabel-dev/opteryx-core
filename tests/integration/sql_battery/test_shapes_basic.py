@@ -43,6 +43,7 @@ from opteryx.exceptions import (
     InvalidFunctionParameterError,
     InvalidTemporalRangeFilterError,
     MissingSqlStatement,
+    NotSupportedError,
     ParameterError,
     PermissionsError,
     QueryParseError,
@@ -182,6 +183,29 @@ STATEMENTS = [
         ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId", 7, 2, None),
         ("SELECT planetId, COUNT(*), MAX(id) FROM testdata.satellites GROUP BY planetId", 7, 3, None),
 
+        # GROUP BY ROLLUP — the grouping-set chain `(a,b), (a), ()`. Row counts are the
+        # per-set group counts summed: satellites has 7 planetIds, 7+1 for ROLLUP(planetId).
+        # Value-level assertions (which rows, where the NULLs land, data-NULL vs
+        # rolled-up NULL) live in tests/sql/test_group_by_rollup.py — these pin the shape.
+        # Confirmed against DuckDB reading the same parquet file.
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY ROLLUP(planetId)", 8, 2, None),
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY ROLLUP(planetId) HAVING COUNT(*) > 5", 5, 2, None),
+        ("SELECT i_category, i_class, COUNT(*) FROM testdata.tpcds_001.item GROUP BY ROLLUP(i_category, i_class)", 83, 3, None),
+        # GROUPING(col) — ROLLUP's companion, 1 on the row where `col` was rolled up
+        # (the grand total) and 0 everywhere else. Value-level assertions (including
+        # the data-NULL-vs-rolled-up-NULL split) live in tests/sql/test_group_by_rollup.py.
+        ("SELECT planetId, COUNT(*), GROUPING(planetId) FROM testdata.satellites GROUP BY ROLLUP(planetId)", 8, 3, None),
+        # GROUPING() outside ROLLUP/CUBE/GROUPING SETS, and over a non-key column,
+        # are both refused rather than answered.
+        ("SELECT planetId, GROUPING(planetId) FROM testdata.satellites GROUP BY planetId", None, None, UnsupportedSyntaxError),
+        ("SELECT planetId, GROUPING(id) FROM testdata.satellites GROUP BY ROLLUP(planetId)", None, None, UnsupportedSyntaxError),
+        # A no-aggregate ROLLUP would collapse onto a DISTINCT, losing the rows two
+        # different grouping sets produce identically — refused, not answered short.
+        ("SELECT planetId FROM testdata.satellites GROUP BY ROLLUP(planetId)", None, None, NotSupportedError),
+        # Same family, no lowering yet: refused by name rather than half-understood.
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY CUBE(planetId, id)", None, None, UnsupportedSyntaxError),
+        ("SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY GROUPING SETS ((planetId), ())", None, None, UnsupportedSyntaxError),
+
         # HAVING — a HAVING clause may reference aggregates and group keys that never
         # appear in the SELECT list (SQL-92). These shapes silently failed with
         # ColumnNotFoundError until the aggregate/pass-through hoist landed; every row
@@ -249,6 +273,50 @@ STATEMENTS = [
         ("SELECT * FROM (SELECT id, name FROM $planets) AS subquery", 9, 2, None),
         ("SELECT COUNT(*) FROM (SELECT * FROM $planets WHERE id > 5) AS subquery", 1, 1, None),
 
+        # RELATION ALIASES ARE SCOPED TO THE DERIVED TABLE THAT DECLARES THEM.
+        # `d` below is private to each subquery, so the two are not in conflict — this
+        # raised a false AmbiguousDatasetError and took seven TPC-DS queries with it
+        # (Q02, Q28, Q59, Q61, Q65, Q88, Q90). Values are pinned in
+        # tests/sql/test_derived_table_alias_scope.py; these are the shapes.
+        ("SELECT y.a, x.a FROM (SELECT p.id AS a FROM $planets p, $planets d WHERE d.id = p.id) y, (SELECT p.id AS a FROM $planets p, $planets d WHERE d.id = p.id) x", 81, 2, None),
+        ("SELECT a1.a FROM (SELECT d.id AS a FROM $planets d) a1, (SELECT d.id AS a FROM $planets d) a2, (SELECT d.id AS a FROM $planets d) a3", 729, 1, None),
+        ("SELECT y.a FROM (SELECT d.id AS a FROM $planets d) y INNER JOIN (SELECT d.id AS a FROM $planets d) x ON y.a = x.a", 9, 1, None),
+        ("SELECT o.a FROM (SELECT i.a FROM (SELECT d.id AS a FROM $planets d) i, (SELECT d.id AS a FROM $planets d) j WHERE i.a = j.a) o", 9, 1, None),
+        # An enclosing alias is not visible inside a derived table, so the inner `p`
+        # shadows the outer one rather than colliding with it.
+        ("SELECT p.name FROM $planets p, (SELECT p.id AS i FROM $planets p) q WHERE p.id = q.i", 9, 1, None),
+        ("SELECT y.id FROM (SELECT y.id FROM $planets y) y", 9, 1, None),
+        # Union legs are independent scopes too — the planner gives each leg's scans
+        # its own `$union-` alias, so the aliases written here never meet.
+        ("SELECT y.a FROM (SELECT p.id AS a FROM $planets p, $planets d WHERE d.id = p.id) y UNION ALL SELECT y.a FROM (SELECT p.id AS a FROM $planets p, $planets d WHERE d.id = p.id) y", 18, 1, None),
+        ("SELECT a.id FROM $planets a INNER JOIN $planets b ON a.id = b.id UNION ALL SELECT a.id FROM $planets a INNER JOIN $planets b ON a.id = b.id", 18, 1, None),
+        # A subquery in WHERE is its own scope as well - twice over, and reusing the
+        # outer name.
+        ("SELECT p.name FROM $planets p WHERE p.id IN (SELECT d.id FROM $planets d) AND p.id IN (SELECT d.id FROM $planets d WHERE d.id < 5)", 4, 1, None),
+        ("SELECT p.name FROM $planets p WHERE p.id IN (SELECT p.id FROM $planets p WHERE p.id < 4)", 3, 1, None),
+        ("SELECT p.name FROM $planets p, $planets d WHERE d.id = p.id AND EXISTS (SELECT d.id FROM $planets d WHERE d.id = p.id)", 9, 1, None),
+        # A SET-OPERATION leg is not one relation, and its columns are matched by
+        # POSITION. Any INTERSECT/EXCEPT with a leg over more than one relation used
+        # to fail to bind — the ON was the cross product of the two sides' relation
+        # names (TPC-DS Q87). Values and the every-column-compared property are
+        # pinned in tests/sql/test_set_operation_multi_relation_legs.py.
+        ("SELECT p.id AS i FROM $planets p, $planets d WHERE d.id = p.id INTERSECT SELECT p.id AS i FROM $planets p, $planets d WHERE d.id = p.id", 9, 1, None),
+        ("SELECT p.id AS i FROM $planets p, $planets d WHERE d.id = p.id EXCEPT SELECT p.id AS i FROM $planets p, $planets d WHERE d.id = p.id AND p.id > 4", 4, 1, None),
+        ("SELECT p.id AS i, d.name AS n FROM $planets p, $planets d WHERE d.id = p.id INTERSECT SELECT p.id AS i, d.name AS n FROM $planets p, $planets d WHERE d.id = p.id", 9, 2, None),
+        ("SELECT p.id AS i FROM $planets p, $planets d, $planets e WHERE d.id = p.id AND e.id = p.id EXCEPT SELECT id FROM $planets WHERE id > 4", 4, 1, None),
+        ("SELECT p.id AS i FROM $planets p, $planets d WHERE d.id = p.id INTERSECT SELECT id FROM $planets", 9, 1, None),
+        # Legs are paired by position, so differing column names are not a barrier.
+        ("SELECT id AS a FROM $planets WHERE id < 5 INTERSECT SELECT id AS b FROM $planets WHERE id > 2", 2, 1, None),
+        # ...and an unequal pairing is still refused.
+        ("SELECT id, name FROM $planets INTERSECT SELECT id FROM $planets", None, None, ValueError),
+
+        # ...and what is still genuinely ambiguous: one scope, one name, two relations.
+        ("SELECT * FROM $planets, $planets", None, None, AmbiguousDatasetError),
+        ("SELECT * FROM $planets AS a, $planets AS a", None, None, AmbiguousDatasetError),
+        ("SELECT y.a FROM (SELECT id AS a FROM $planets) y, (SELECT id AS a FROM $planets) y", None, None, AmbiguousDatasetError),
+        ("SELECT p.name FROM $planets p, (SELECT id AS a FROM $planets) p", None, None, AmbiguousDatasetError),
+        ("WITH c AS (SELECT id FROM $planets) SELECT * FROM c, c", None, None, AmbiguousDatasetError),
+
         # Mixed case identifiers
         ("SELECT ID FROM $planets", 9, 1, None),
         ("SELECT Id, NAME FROM $planets", 9, 2, None),
@@ -282,6 +350,19 @@ STATEMENTS = [
         # Different temporal types but literal is cast - should pass
         ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '1957-10-04'::DATE", 1, 1, None),
         ("SELECT COUNT(*) FROM testdata.missions WHERE Lauched_at >= '2024-12-31'::TIMESTAMP[ms]", 1, 1, None),
+
+        # IN-list against a DATE column - each element individually cast should pass,
+        # same as the scalar `=`/BETWEEN cases above (TPC-DS Q83 regression: the
+        # temporal-cast validator was reading the IN-list literal's own ARRAY
+        # category instead of its element type, and predicate_rewriter's
+        # single-element IN->Eq rewrite left a stale ARRAY-typed schema_column
+        # behind it - both rejected an already-cast IN-list as an uncast literal).
+        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN (CAST('2000-06-30' AS DATE))", 1, 1, None),
+        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN (CAST('2000-06-30' AS DATE), CAST('2000-07-01' AS DATE))", 1, 1, None),
+        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN ('2000-06-30'::DATE, '2000-07-01'::DATE, '2000-07-02'::DATE)", 1, 1, None),
+        # A bare, uncast literal in the list must still be refused - the explicit-cast
+        # requirement is not loosened for IN-lists.
+        ("SELECT COUNT(*) FROM testdata.tpcds_1.date_dim WHERE d_date IN ('2000-06-30')", None, None, IncompatibleTypesError),
 
         # Set operations - UNION (SQL92 compatibility) - NEW
         # NOTE: Opteryx requires dataset aliases in set operations when the same dataset is referenced
@@ -472,8 +553,12 @@ STATEMENTS = [
         ("SELECT ROW_NUMBER(id) OVER (ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
         # Unsupported: ORDER BY inside window spec
         ("SELECT id, SUM(gravity) OVER (PARTITION BY id ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
-        # Unsupported: window function combined with GROUP BY
-        ("SELECT id, SUM(gravity) OVER (PARTITION BY id) FROM $planets GROUP BY id", None, None, UnsupportedSyntaxError),
+        # A window IS supported over a GROUP BY, but only over the grouped result — and
+        # `gravity` is read raw inside the window, at a level where only the group keys
+        # and the aggregates exist. DuckDB and PostgreSQL refuse it in the same terms.
+        ("SELECT id, SUM(gravity) OVER (PARTITION BY id) FROM $planets GROUP BY id", None, None, SqlError),
+        # The same statement with the column aggregated is the supported idiom.
+        ("SELECT id, SUM(SUM(gravity)) OVER (PARTITION BY id) FROM $planets GROUP BY id", 9, 2, None),
         # Window over a CTE / derived table. The source is a Subquery relation, not a
         # Scan: the CTE the rewrite builds is a copy of that sub-plan, and until
         # rename_relations re-aliased Subquery nodes the copy kept the original's alias
@@ -532,29 +617,36 @@ STATEMENTS = [
         ("SELECT name FROM $planets QUALIFY COUNT(*) OVER () > 5", 9, 1, None),
         ("SELECT name FROM $planets QUALIFY COUNT(*) OVER () > 500", 0, 1, None),
         # The refusals still apply to OVER () — it is a window like any other.
-        ("SELECT id, SUM(gravity) OVER () FROM $planets GROUP BY id", None, None, UnsupportedSyntaxError),
+        ("SELECT id, SUM(gravity) OVER () FROM $planets GROUP BY id", None, None, SqlError),
+        ("SELECT id, SUM(SUM(gravity)) OVER () FROM $planets GROUP BY id", 9, 2, None),
         ("SELECT ROW_NUMBER() OVER () FROM $planets", None, None, UnsupportedSyntaxError),
 
-        # WINDOW BESIDE A PLAIN AGGREGATE — refused, for the same reason a window beside
-        # an explicit GROUP BY is: the Window step is planned UNDER the aggregate, so the
-        # window is computed over the rows the aggregate collapses and can never see the
-        # aggregated result. A bare aggregate is an implicit single group, so it hits the
-        # same wall — it just had no guard of its own and fell through to the generic
-        # "must appear in the GROUP BY clause" error, which named the MINTED `$win_` key.
-        # The message is asserted in test_window_beside_aggregate_is_refused_by_name.
-        ("SELECT COUNT(*), COUNT(*) OVER () FROM $planets", None, None, UnsupportedSyntaxError),
-        ("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets", None, None, UnsupportedSyntaxError),
-        ("SELECT MAX(id) OVER (PARTITION BY gravity), COUNT(*) FROM $planets", None, None, UnsupportedSyntaxError),
-        # The ranking path mints the same way and is refused the same way.
-        ("SELECT COUNT(*), ROW_NUMBER() OVER (ORDER BY id) FROM $planets", None, None, UnsupportedSyntaxError),
+        # WINDOW BESIDE A PLAIN AGGREGATE — a bare aggregate is an implicit single group,
+        # so the window runs over that ONE grouped row. These used to be refused wholesale
+        # (the Window step was planned UNDER the aggregate, so the window would have been
+        # computed over the rows the aggregate collapses); the grouped-window lowering
+        # plans the aggregate first and the window over its output, so the arrangement is
+        # now answered rather than refused. Every value below is DuckDB's.
+        #
+        # One row out, and the window over it counts ONE row, not nine.
+        ("SELECT COUNT(*), COUNT(*) OVER () FROM $planets", 1, 2, None),
+        # Still refused, and this is the rule that always governed it: `mass` is read raw
+        # beside an aggregate, so it must be grouped by or aggregated. DuckDB refuses this
+        # one too, in the same words.
+        ("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets", None, None, SqlError),
+        ("SELECT MAX(id) OVER (PARTITION BY gravity), COUNT(*) FROM $planets", None, None, SqlError),
+        # The aggregated spellings of those two run.
+        ("SELECT SUM(SUM(mass)) OVER () + SUM(mass) FROM $planets", 1, 1, None),
+        # The ranking path takes the same route — over one grouped row, ROW_NUMBER is 1.
+        ("SELECT COUNT(*), ROW_NUMBER() OVER (ORDER BY id) FROM $planets", None, None, SqlError),
+        ("SELECT COUNT(*), ROW_NUMBER() OVER (ORDER BY COUNT(*)) FROM $planets", 1, 2, None),
         # The aggregate need not be SELECTed — ORDER BY puts one in `_aggregates` too.
-        ("SELECT COUNT(*) OVER () FROM $planets ORDER BY COUNT(*)", None, None, UnsupportedSyntaxError),
-        # QUALIFY is refused on the same terms: its Filter is planned below the aggregate
-        # step too, so these filtered the PRE-aggregation rows and then counted them —
-        # and ran without complaint.
-        ("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER () > 1", None, None, UnsupportedSyntaxError),
-        ("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER (PARTITION BY gravity) > 1", None, None, UnsupportedSyntaxError),
-        ("SELECT COUNT(*) FROM $planets QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1", None, None, UnsupportedSyntaxError),
+        ("SELECT COUNT(*) OVER () FROM $planets ORDER BY COUNT(*)", 1, 1, None),
+        # QUALIFY filters the grouped rows on the window's value: one row, whose
+        # COUNT(*) OVER () is 1, so `> 1` keeps nothing.
+        ("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER () > 1", 0, 1, None),
+        ("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER (PARTITION BY gravity) > 1", None, None, SqlError),
+        ("SELECT COUNT(*) FROM $planets QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1", None, None, SqlError),
         # NOT refused: the aggregate under the window is the window's own, not a plain
         # one, so these stay legal and must not be caught by the guard above.
         ("SELECT COUNT(*) OVER (), SUM(mass) OVER () FROM $planets", 9, 2, None),
@@ -610,9 +702,9 @@ STATEMENTS = [
         # `$derived_` column.
         ("SELECT name FROM $planets QUALIFY SUM(COUNT(*) OVER ()) > 1", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $planets QUALIFY MAX(ROW_NUMBER() OVER (ORDER BY id)) > 1", None, None, UnsupportedSyntaxError),
-        # NOT this shape: siblings, not ancestor-and-descendant. These must still be
-        # caught by the BESIDE guard, whose remedy is the opposite one.
-        ("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets", None, None, UnsupportedSyntaxError),
+        # NOT this shape: siblings, not ancestor-and-descendant. The nesting guard must
+        # not claim them — they are governed by the GROUP BY rule instead.
+        ("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets", None, None, SqlError),
         # NOT refused at all: an aggregate window is not an aggregate ancestral to itself,
         # and a non-aggregate wrapper is not an aggregate.
         ("SELECT CAST(COUNT(*) OVER () AS VARCHAR) FROM $planets", 9, 1, None),
@@ -711,10 +803,11 @@ STATEMENTS = [
         ("SELECT name FROM $planets ORDER BY ROW_NUMBER() OVER ()", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $planets ORDER BY RANK()", None, None, UnsupportedSyntaxError),
         ("SELECT name FROM $planets ORDER BY SUM(COUNT(*) OVER ()) OVER ()", None, None, UnsupportedSyntaxError),
-        ("SELECT COUNT(*) FROM $planets GROUP BY gravity ORDER BY ROW_NUMBER() OVER (ORDER BY gravity)", None, None, UnsupportedSyntaxError),
-        # Beside a plain aggregate — refused, and the refusal must name ORDER BY, not
-        # QUALIFY. The message is asserted in test_window_beside_aggregate_is_refused_by_name.
-        ("SELECT COUNT(*) FROM $planets ORDER BY COUNT(*) OVER ()", None, None, UnsupportedSyntaxError),
+        # A window in ORDER BY over a GROUPED result: eight groups, ordered by a ranking
+        # window computed over those eight rows.
+        ("SELECT COUNT(*) FROM $planets GROUP BY gravity ORDER BY ROW_NUMBER() OVER (ORDER BY gravity)", 8, 1, None),
+        # Beside a plain aggregate: one grouped row, and the window over it.
+        ("SELECT COUNT(*) FROM $planets ORDER BY COUNT(*) OVER ()", 1, 1, None),
         # DISTINCT makes the ordering value ambiguous once rows collapse — the existing
         # rule applies to a window exactly as it does to any other unselected sort key.
         ("SELECT DISTINCT name FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)", None, None, UnsupportedSyntaxError),
@@ -806,8 +899,10 @@ STATEMENTS = [
         ("SELECT -SUM(mass) OVER () FROM $planets", 9, 1, None),
         # A nested window in QUALIFY, which hoists by the same mechanism.
         ("SELECT name FROM $planets QUALIFY ROW_NUMBER() OVER (ORDER BY mass) + 0 = 1", 1, 1, None),
+        # A nested window over a GROUPED result: eight groups, each its own partition, so
+        # the count within each is 1.
+        ("SELECT COUNT(*) OVER (PARTITION BY gravity) + 0 FROM $planets GROUP BY gravity", 8, 1, None),
         # The refusals reach a nested window too — they used to be internal errors there.
-        ("SELECT COUNT(*) OVER (PARTITION BY gravity) + 0 FROM $planets GROUP BY gravity", None, None, UnsupportedSyntaxError),
         ("SELECT SUM(mass) OVER (ORDER BY id) + 1 FROM $planets", None, None, UnsupportedSyntaxError),
         ("SELECT ROW_NUMBER() + 1 FROM $planets", None, None, UnsupportedSyntaxError),
 
@@ -1262,6 +1357,53 @@ def test_union_output_columns_that_share_one_source_column():
     assert sorted(values) == sorted(list(range(1, 10)) * 2)
 
 
+def test_union_leg_aliases_its_own_derived_table_case_insensitively():
+    """
+    VALUE-level regression: a UNION leg that aliases its OWN derived table and
+    references that alias — in a DIFFERENT case — from its own SELECT list and WHERE
+    clause must resolve and return the right values.
+
+    `FROM (SELECT ...) AS Alias ... WHERE alias.col` is ordinary unquoted-identifier
+    case folding, the same folding column names already get
+    (`RelationSchema.find_column(..., case_insensitive=True)`). Relation ALIASES were
+    exact-string matched everywhere instead of folded — reproducible with no UNION at
+    all (`SELECT p.name FROM $planets P` raised `UnexpectedDatasetReferenceError`) —
+    and a UNION leg additionally runs through `rename_relations`
+    (relation_resolver/__init__.py), which remaps every reference in a spliced leg to
+    a freshly minted synthetic alias; that remap was ALSO keyed by exact string, so a
+    leg's own declaration (`AS CATALOG`) and its own reference (`catalog.x`) landed on
+    two different synthetic names and the leg's WHERE clause failed to resolve its own
+    FROM-clause alias — TPC-DS Q49's catalog leg, verbatim.
+    """
+    session = opteryx.session()
+
+    statement = """
+        SELECT chan, x FROM (
+            SELECT 'a' AS chan, t.x
+            FROM (SELECT id AS x FROM $planets WHERE id <= 3) t
+            WHERE t.x > 0
+            UNION
+            SELECT 'b' AS chan, catalog.x
+            FROM (SELECT id AS x FROM $planets WHERE id BETWEEN 4 AND 6) CATALOG
+            WHERE catalog.x > 0
+        ) sq1
+        ORDER BY chan, x
+    """
+
+    chans = []
+    xs = []
+    for morsel in session.execute_to_morsels(statement):
+        chans += morsel.column("chan").to_pylist()
+        xs += morsel.column("x").to_pylist()
+
+    assert chans == ["a", "a", "a", "b", "b", "b"], (
+        f"UNION leg's own-case-mismatched alias reference lost rows: {chans}"
+    )
+    assert xs == [1, 2, 3, 4, 5, 6], (
+        f"UNION leg's own-case-mismatched alias reference returned wrong values: {xs}"
+    )
+
+
 def test_union_of_aggregates_with_a_computed_group_key():
     """
     VALUE-level regression: each leg of a UNION over aggregates with a COMPUTED
@@ -1296,6 +1438,72 @@ def test_union_of_aggregates_with_a_computed_group_key():
         f"UNION of aggregates over a computed GROUP BY key returned {counts} "
         f"(expected each of ids 1-9 counted twice)"
     )
+
+
+def test_chained_union_of_having_filtered_aggregates():
+    """
+    VALUE-level regression: a 3+-leg `UNION ALL` whose legs each end
+    `GROUP BY ... HAVING ...` must resolve every leg's OWN projection, not the
+    HAVING predicate's operand columns.
+
+    `A UNION ALL B UNION ALL C` parses as nested binary unions, so the OUTER union's
+    left child is the INNER union `A UNION ALL B` — and when a leg's top node is a
+    HAVING Filter sitting directly below the set-op (no Project in between), the
+    binder's `_branch_project_columns` (opteryx/planner/binder/set_ops.py) walked
+    UP from that Filter and accepted the FIRST node with a non-empty `.columns` list
+    as "the leg's projection". A Filter's `.columns` are the identifiers its
+    predicate REFERENCES (here, `mass`, from `HAVING sum(mass) > 0`), not an output
+    list — so a 6-column leg reported as 1 column, and the outer union's arity check
+    against a correctly-resolved sibling raised "UNION: column count mismatch".
+    Found via TPC-DS Q14, whose `y` derived table has exactly this shape (three
+    `GROUP BY ... HAVING ...` legs chained with `UNION ALL`); this reproduces the
+    defect without TPC-DS data or ROLLUP, which turned out to be unrelated to the
+    root cause. Guards the same restriction to `_PROJECTING_STEPS` that its sibling
+    `_setop_leg_columns` already applied.
+    """
+    statement = (
+        "SELECT 'a' AS channel, name, id, gravity, SUM(mass) AS total_mass, COUNT(*) AS n "
+        "FROM $planets GROUP BY name, id, gravity HAVING SUM(mass) > 0 "
+        "UNION ALL "
+        "SELECT 'b' AS channel, name, id, gravity, SUM(mass) AS total_mass, COUNT(*) AS n "
+        "FROM $planets GROUP BY name, id, gravity HAVING SUM(mass) > 0 "
+        "UNION ALL "
+        "SELECT 'c' AS channel, name, id, gravity, SUM(mass) AS total_mass, COUNT(*) AS n "
+        "FROM $planets GROUP BY name, id, gravity HAVING SUM(mass) > 0"
+    )
+    session = opteryx.session()
+
+    by_channel: dict = {}
+    for morsel in session.execute_to_morsels(statement):
+        for channel, name, total_mass, n in zip(
+            morsel.column("channel").to_pylist(),
+            morsel.column("name").to_pylist(),
+            morsel.column("total_mass").to_pylist(),
+            morsel.column("n").to_pylist(),
+        ):
+            by_channel.setdefault(channel, {})[name] = (total_mass, n)
+
+    # Every leg is the SAME query over $planets (9 rows, distinct name/id/gravity, so
+    # each row is its own group and HAVING keeps all of them): three channels, each
+    # with exactly the 9 planets, each planet's own mass as its group total.
+    assert set(by_channel) == {"a", "b", "c"}, (
+        f"expected channels a/b/c, got {sorted(by_channel)} "
+        "(a wrong leg-column count either raises at bind time or silently drops/misaligns a leg)"
+    )
+    expected_masses = {}
+    for morsel in session.execute_to_morsels("SELECT name, mass FROM $planets"):
+        for name, mass in zip(morsel.column("name").to_pylist(), morsel.column("mass").to_pylist()):
+            expected_masses[name] = mass
+
+    for channel, rows in by_channel.items():
+        assert set(rows) == set(expected_masses), (
+            f"channel {channel!r} has planets {sorted(rows)}, expected {sorted(expected_masses)}"
+        )
+        for name, (total_mass, n) in rows.items():
+            assert n == 1, f"channel {channel!r} planet {name!r}: expected count 1, got {n}"
+            assert total_mass == expected_masses[name], (
+                f"channel {channel!r} planet {name!r}: total_mass {total_mass} != mass {expected_masses[name]}"
+            )
 
 
 def test_window_aggregate_respects_where():
@@ -1607,99 +1815,173 @@ def test_window_functions_are_named_for_their_expression():
     ) == ["name", "t", "MAX(id) OVER (PARTITION BY gravity)"]
 
 
-def test_window_beside_aggregate_is_refused_by_name():
+def test_window_beside_an_aggregate_runs_over_the_grouped_rows():
     """
-    MESSAGE-level regression: mixing a window function with a plain aggregate is refused,
-    and the refusal names the window the caller WROTE.
+    VALUE-level regression: a window written beside a plain aggregate is computed over the
+    GROUPED rows, and answers what the standard says it should.
 
-    The rejection itself is architectural and deliberate — the Window step is planned
-    UNDER the aggregate step, so the window is computed over the rows the aggregate
-    collapses and can never see the aggregated result. That is already refused by name
-    for an explicit GROUP BY ("Window functions cannot be combined with GROUP BY"). A
-    bare aggregate is an implicit single group and hits the same wall, but had no guard:
-    it fell through to the generic "must appear in the `GROUP BY` clause" error, which
-    printed the MINTED `$win_<random>` join key — a column the caller never wrote, and
-    random per execution, so the message was not even stable across runs.
+    This arrangement used to be refused outright, and for a real reason: the Window step
+    was planned UNDER the aggregate step, so the window would have been computed over the
+    rows the aggregate collapses and could never see the aggregated result. A bare
+    aggregate is an implicit single group and hit the same wall. The grouped-window
+    lowering plans the aggregate first and the windows over its output, so the answer is
+    now the one the refusal used to tell the caller to get by hand.
 
-    Both halves are asserted, because either alone can regress: the shape battery above
-    sees only that SOMETHING raised, and the display split guarded by
-    test_window_functions_are_named_for_their_expression is about column names, not
-    messages.
+    Values are DuckDB's, on the same nine rows.
+
+    The refusal that DID govern the raw-column half of these statements is still here, and
+    is now the only one: a column read beside an aggregate must be grouped by or
+    aggregated. `SUM(mass) OVER () + SUM(mass)` reads `mass` at a level where only the
+    aggregates exist, and DuckDB refuses it in the same terms.
     """
     session = opteryx.session()
 
+    def _rows(statement):
+        out = []
+        for morsel in session.execute_to_morsels(statement):
+            morsel.materialize()
+            names = list(morsel.column_names)
+            out.extend(zip(*(morsel.column(name).to_pylist() for name in names)))
+        return out
+
     def _message(statement):
-        with pytest.raises(UnsupportedSyntaxError) as raised:
+        with pytest.raises(SqlError) as raised:
             for _ in session.execute_to_morsels(statement):
                 pass
         return str(raised.value)
 
-    # (statement, the window's display form that must be named)
-    for statement, window in (
-        ("SELECT COUNT(*), COUNT(*) OVER () FROM $planets", "COUNT(*) OVER ()"),
-        ("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets", "SUM(mass) OVER ()"),
-        (
-            "SELECT MAX(id) OVER (PARTITION BY gravity), COUNT(*) FROM $planets",
-            "MAX(id) OVER (PARTITION BY gravity)",
-        ),
-        # The ranking path mints the same way, so it leaked the same way.
-        (
-            "SELECT COUNT(*), ROW_NUMBER() OVER (ORDER BY id) FROM $planets",
-            "ROW_NUMBER() OVER (ORDER BY id)",
-        ),
-        # The aggregate reaches `_aggregates` from ORDER BY, not the SELECT list.
-        ("SELECT COUNT(*) OVER () FROM $planets ORDER BY COUNT(*)", "COUNT(*) OVER ()"),
+    # One group, one row, and the window counts THAT row — not the nine below it.
+    assert _rows("SELECT COUNT(*), COUNT(*) OVER () FROM $planets") == [(9, 1)]
+    # The aggregate reaches `_aggregates` from ORDER BY, not the SELECT list.
+    assert _rows("SELECT COUNT(*) OVER () FROM $planets ORDER BY COUNT(*)") == [(1,)]
+    assert _rows("SELECT COUNT(*) FROM $planets ORDER BY COUNT(*) OVER ()") == [(9,)]
+    # The ranking path takes the same route: rank 1 of one grouped row.
+    assert _rows("SELECT COUNT(*), ROW_NUMBER() OVER (ORDER BY COUNT(*)) FROM $planets") == [
+        (9, 1)
+    ]
+    # QUALIFY filters the grouped rows on the window's value. The one row has
+    # COUNT(*) OVER () = 1, so `> 1` keeps nothing and `>= 1` keeps it.
+    assert _rows("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER () > 1") == []
+    assert _rows("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER () >= 1") == [(9,)]
+    # An aggregate nested in the window's argument is the group-level aggregate, and the
+    # window's own call is the aggregate over the group results. Over one group they are
+    # the same number, and the arithmetic around them still runs.
+    assert _rows("SELECT SUM(id), SUM(SUM(id)) OVER () FROM $planets") == [(45, 45)]
+    assert _rows("SELECT SUM(SUM(id)) OVER () + SUM(id) FROM $planets") == [(90,)]
+
+    # Still refused, by the rule that always governed it. `mass`/`id`/`gravity` are read
+    # RAW at a level where only the aggregates exist.
+    for statement, column in (
+        ("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets", "mass"),
+        ("SELECT MAX(id) OVER (PARTITION BY gravity), COUNT(*) FROM $planets", "id"),
+        ("SELECT COUNT(*), ROW_NUMBER() OVER (ORDER BY id) FROM $planets", "id"),
+        ("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER (PARTITION BY gravity) > 1", "gravity"),
+        ("SELECT COUNT(*) FROM $planets QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1", "id"),
+        ("SELECT id, SUM(gravity) OVER (PARTITION BY id) FROM $planets GROUP BY id", "gravity"),
     ):
         message = _message(statement)
         assert "$win_" not in message, f"minted alias leaked: {statement} -> {message}"
-        assert window in message, f"window not named: {statement} -> {message}"
-        assert "**SELECT**" in message, f"clause not named: {statement} -> {message}"
+        assert f"Column '{column}' must appear in the `GROUP BY` clause" in message, (
+            f"{statement} -> {message}"
+        )
 
-    # QUALIFY reaches the same wall — its Filter is planned below the aggregate too, so
-    # these filtered the PRE-aggregation rows and then counted them, and ran clean. The
-    # refusal must name QUALIFY, not SELECT: the window is not in the caller's SELECT
-    # list, and it must offer the remedy that fits (window and filter together in the
-    # subquery, aggregate outside) rather than the SELECT one, which does not apply.
-    for statement, window in (
-        ("SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER () > 1", "COUNT(*) OVER ()"),
-        (
-            "SELECT COUNT(*) FROM $planets QUALIFY COUNT(*) OVER (PARTITION BY gravity) > 1",
-            "COUNT(*) OVER (PARTITION BY gravity)",
-        ),
-        (
-            "SELECT COUNT(*) FROM $planets QUALIFY ROW_NUMBER() OVER (ORDER BY id) = 1",
-            "ROW_NUMBER() OVER (ORDER BY id)",
-        ),
-    ):
-        message = _message(statement)
-        assert "$win_" not in message, f"minted alias leaked: {statement} -> {message}"
-        assert window in message, f"window not named: {statement} -> {message}"
-        assert "**QUALIFY**" in message, f"clause not named: {statement} -> {message}"
-        assert "in the same **SELECT**" not in message, f"wrong clause: {statement}"
-
-    # ORDER BY is the THIRD clause a window can be written in, and it needs its own
-    # wording for the same reason QUALIFY does — the remedies are not variations on one
-    # rewrite. While the branch was an `if SELECT ... else QUALIFY`, a window written in
-    # ORDER BY was reported as being in QUALIFY, with QUALIFY's remedy.
-    _ordered = _message("SELECT COUNT(*) FROM $planets ORDER BY COUNT(*) OVER ()")
-    assert "COUNT(*) OVER ()" in _ordered, _ordered
-    assert "**ORDER BY**" in _ordered, _ordered
-    assert "**QUALIFY**" not in _ordered, f"wrong clause named: {_ordered}"
-    assert "order its result by the window" in _ordered, f"wrong remedy: {_ordered}"
-
-    # A statement carrying BOTH names the SELECT one — the caller can see that window in
-    # their output list, where the QUALIFY one is invisible to them.
-    _both = _message(
-        "SELECT COUNT(*), SUM(id) OVER () FROM $planets QUALIFY COUNT(*) OVER () > 1"
+    # The same error still fires for a plain un-grouped column, with no window in sight —
+    # the lowering reuses the rule, it does not replace it.
+    assert "Column 'name' must appear in the `GROUP BY` clause" in _message(
+        "SELECT name, COUNT(*) FROM $planets"
     )
-    assert "SUM(id) OVER ()" in _both and "in the same **SELECT**" in _both, _both
 
-    # The generic error this used to fall through to still fires for a real column, and
-    # names it — the fix narrows WHICH name it prints, it does not remove the error.
-    with pytest.raises(SqlError) as raised:
-        for _ in session.execute_to_morsels("SELECT name, COUNT(*) FROM $planets"):
+
+def test_window_over_group_by_result():
+    """
+    VALUE-level regression: a window computed over the GROUPED rows answers the numbers
+    the standard says it should, not merely "does not raise".
+
+    This is the idiom ten TPC-DS queries are written in and Opteryx refused wholesale
+    ("Window functions cannot be combined with GROUP BY"): GROUP BY collapses the rows,
+    the aggregates are computed per group, and the window then runs over those group
+    results. An aggregate NESTED inside the window's argument is the crux, not an oddity —
+    in `SUM(SUM(x)) OVER (PARTITION BY k)` the inner SUM is the GROUP BY aggregate and the
+    outer one is the window over the group results.
+
+    Every expected value below was taken from DuckDB on the same nine rows.
+
+    Rows are sorted before comparison: the grouped result reaches the windows through a
+    join, which does not promise an order, and the statements that pin an order do so with
+    an explicit ORDER BY.
+    """
+    session = opteryx.session()
+
+    def _rows(statement):
+        out = []
+        for morsel in session.execute_to_morsels(statement):
+            morsel.materialize()
+            names = list(morsel.column_names)
+            out.extend(zip(*(morsel.column(name).to_pylist() for name in names)))
+        return out
+
+    def _rounded(statement, places=4):
+        return sorted(
+            tuple(round(value, places) if isinstance(value, float) else value for value in row)
+            for row in _rows(statement)
+        )
+
+    # FLAVOUR (a) — ratio to the partition total. Three buckets of three planets; each
+    # planet's mass as a percentage of its bucket's total. This is TPC-DS Q12/Q20/Q98.
+    assert _rounded(
+        "SELECT id % 3 AS bucket, name, SUM(mass) AS m, "
+        "SUM(SUM(mass)) OVER (PARTITION BY id % 3) AS bucket_total, "
+        "SUM(mass) * 100.0 / SUM(SUM(mass)) OVER (PARTITION BY id % 3) AS pct "
+        "FROM $planets GROUP BY id % 3, name"
+    ) == [
+        (0, "Earth", 5.97, 573.9846, 1.0401),
+        (0, "Pluto", 0.0146, 573.9846, 0.0025),
+        (0, "Saturn", 568.0, 573.9846, 98.9574),
+        (1, "Mars", 0.642, 87.7720, 0.7314),
+        (1, "Mercury", 0.33, 87.7720, 0.376),
+        (1, "Uranus", 86.8, 87.7720, 98.8926),
+        (2, "Jupiter", 1898.0, 2004.87, 94.6695),
+        (2, "Neptune", 102.0, 2004.87, 5.0876),
+        (2, "Venus", 4.87, 2004.87, 0.2429),
+    ]
+
+    # AVG over the group results — TPC-DS Q47/Q53/Q57/Q63/Q89's spelling. One partition,
+    # so every row carries the mean of the three bucket totals.
+    assert _rounded(
+        "SELECT id % 3 AS bucket, SUM(mass) AS m, AVG(SUM(mass)) OVER () AS avg_group "
+        "FROM $planets GROUP BY id % 3"
+    ) == [(0, 573.9846, 888.8755), (1, 87.772, 888.8755), (2, 2004.87, 888.8755)]
+
+    # A RANKING window over the grouped rows — the other half of Q47/Q57. The ORDER BY
+    # is over the AGGREGATE, which only exists after the grouping.
+    assert _rows(
+        "SELECT number_of_moons, COUNT(*) AS c, "
+        "RANK() OVER (ORDER BY COUNT(*) DESC, number_of_moons) AS r "
+        "FROM $planets GROUP BY number_of_moons ORDER BY r"
+    ) == [(0, 2, 1), (1, 1, 2), (2, 1, 3), (5, 1, 4), (14, 1, 5), (27, 1, 6), (79, 1, 7), (82, 1, 8)]
+
+    # HAVING is evaluated BEFORE the window functions, so the window sees only the groups
+    # that survived it. Planned above the windows instead, this answered 45 — the total
+    # over ALL nine groups — where DuckDB and the standard say 35.
+    assert _rows(
+        "SELECT number_of_moons, SUM(id) AS s, SUM(SUM(id)) OVER () AS t "
+        "FROM $planets GROUP BY number_of_moons HAVING SUM(id) > 4 ORDER BY number_of_moons"
+    ) == [(5, 9, 35), (14, 8, 35), (27, 7, 35), (79, 5, 35), (82, 6, 35)]
+
+    # FLAVOUR (b) — a CUMULATIVE window over the grouped rows (TPC-DS Q51) needs a window
+    # FRAME, which Opteryx does not have in any arrangement, GROUP BY or not. It is
+    # refused, not silently wrong. Named here so the day frames land, this test is the
+    # one that says what to replace it with: the running total per partition, in the
+    # window's ORDER BY order.
+    with pytest.raises(UnsupportedSyntaxError) as raised:
+        for _ in session.execute_to_morsels(
+            "SELECT number_of_moons, SUM(SUM(id)) OVER ("
+            "PARTITION BY number_of_moons ORDER BY number_of_moons "
+            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
+            "FROM $planets GROUP BY number_of_moons"
+        ):
             pass
-    assert "Column 'name' must appear in the `GROUP BY` clause" in str(raised.value)
+    assert "not supported" in str(raised.value), raised.value
 
 
 def test_aggregate_over_window_is_refused_by_name():
@@ -1794,11 +2076,16 @@ def test_aggregate_over_window_is_refused_by_name():
         values.extend(morsel.column("s").to_pylist())
     assert values == [81], f"the advised rewrite does not answer the question: {values!r}"
 
-    # The BESIDE guard must still own the sibling arrangement — the two refusals describe
-    # opposite shapes and give opposite remedies, so neither may swallow the other.
-    beside = _message("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets")
-    assert "cannot be combined with" in beside, beside
-    assert "Compute the aggregate in a subquery" in beside, beside
+    # The nesting guard must NOT claim the sibling arrangement. `SUM(mass) OVER () +
+    # SUM(mass)` is two calls side by side, not one inside the other; it is refused by the
+    # GROUP BY rule (`mass` is read raw beside an aggregate) and must say so, with no
+    # mention of nesting. See test_window_beside_an_aggregate_runs_over_the_grouped_rows.
+    with pytest.raises(SqlError) as raised:
+        for _ in session.execute_to_morsels("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets"):
+            pass
+    beside = str(raised.value)
+    assert "Column 'mass' must appear in the `GROUP BY` clause" in beside, beside
+    assert "cannot appear inside" not in beside, f"nesting guard claimed a sibling: {beside}"
 
 
 def test_nested_window_is_refused_by_name():
@@ -2006,6 +2293,104 @@ def test_window_in_order_by():
     columns, _ = _run("SELECT * FROM $planets ORDER BY ROW_NUMBER() OVER (ORDER BY id)")
     planets = _run("SELECT * FROM $planets")[0]
     assert columns == planets, f"wildcard leaked the ordering column: {columns}"
+
+
+def test_positional_order_by_over_select_star():
+    """
+    VALUE-level regression: positional ORDER BY (`ORDER BY 2`) over a bare `SELECT *`.
+
+    `_projection` is a single WILDCARD placeholder at plan time -- `SELECT *` has no
+    fixed column list until the source schema is bound -- so validating a position
+    against `len(_projection)` there rejects every position but 1. That miscount was a
+    genuine regression from making windows work alongside GROUP BY: resolving ORDER BY
+    early enough to collect a window/GROUP BY aggregate from it (see the comment on
+    `_order_by` in `inner_query_planner`) moved the positional check ahead of the point
+    where a bare wildcard used to be left alone. `SELECT * FROM v ... ORDER BY 1, 2, ...,
+    9` is exactly the shape TPC-DS Q47/Q57/Q89 write, and all three raised
+    "ORDER BY position 2 is out of range - SELECT has 1 column(s)" even though the real
+    output is far wider than one column.
+
+    The fix defers a wildcard's positions to bind time (`binder/order.py`), where the
+    schema is real, rather than trying to validate them against a placeholder.
+
+    A window computed OVER a GROUP BY result is included because that is the exact
+    plan shape (Aggregate -> Project -> Subquery -> Window) the regression came from --
+    a plain, non-windowed `SELECT *` alone would not have exercised the code path that
+    broke.
+
+    NOTE: `ORDER BY <expr>, 1, 2` (an expression ahead of the positions, TPC-DS's own
+    spelling) is deliberately NOT exercised here for the CTE case. That combination
+    reaches a separate, pre-existing defect: a `SELECT *` whose ORDER BY needs a
+    pass-through column, over the window-over-GROUP-BY Subquery boundary, crashes the
+    native Sort operator (`gather_rows`, draken/morsels/sort.hpp) with a column/name
+    count mismatch. It reproduces with zero positional references, so it is unrelated
+    to the miscount this test targets, and is tracked separately.
+    """
+    session = opteryx.session()
+
+    def _run(statement):
+        columns, values = None, {}
+        for morsel in session.execute_to_morsels(statement):
+            morsel.materialize()
+            columns = [name.decode() for name in morsel.column_names]
+            for name in morsel.column_names:
+                values.setdefault(name.decode(), []).extend(morsel.column(name).to_pylist())
+        return columns, values
+
+    # Plain table, no CTE, no window -- this alone used to fail identically, since the
+    # miscount has nothing to do with windows or GROUP BY.
+    expected_columns, expected_values = _run(
+        "SELECT name, mass FROM $planets ORDER BY name, mass"
+    )
+    columns, values = _run("SELECT * FROM $planets ORDER BY 2, 3")
+    assert values["name"] == expected_values["name"], values["name"]
+    assert values["mass"] == expected_values["mass"], values["mass"]
+
+    # A position past the real (bound) column count must still be refused -- the fix
+    # defers the check, it does not remove it.
+    try:
+        _run("SELECT * FROM $planets ORDER BY 999")
+        raise AssertionError("out-of-range position over SELECT * did not raise")
+    except UnsupportedSyntaxError as err:
+        assert "out of range" in str(err), err
+
+    # Explicit projections are untouched: positional ORDER BY still resolves at plan
+    # time, and a genuinely out-of-range position still raises.
+    explicit_columns, explicit_values = _run("SELECT name, mass FROM $planets ORDER BY 2 DESC")
+    reference_columns, reference_values = _run("SELECT name, mass FROM $planets ORDER BY mass DESC")
+    assert explicit_values["mass"] == reference_values["mass"], explicit_values["mass"]
+    try:
+        _run("SELECT id, name FROM $planets ORDER BY 5")
+        raise AssertionError("out-of-range position over an explicit projection did not raise")
+    except UnsupportedSyntaxError as err:
+        assert "out of range" in str(err), err
+
+    # The regression's actual shape: `SELECT *` over a CTE whose window runs OVER a
+    # GROUP BY result (Aggregate -> Project -> Subquery -> Window), ordered positionally.
+    window_group_by_cte = """
+        WITH v1 AS (
+            SELECT id, name, sum(gravity) sg, avg(sum(gravity)) OVER (PARTITION BY id) avg_g
+            FROM $planets GROUP BY id, name
+        )
+        SELECT {select_list} FROM v1 ORDER BY {order_by}
+    """
+    explicit_columns, explicit_values = _run(
+        window_group_by_cte.format(select_list="id, name, sg, avg_g", order_by="1, 2")
+    )
+    star_columns, star_values = _run(
+        window_group_by_cte.format(select_list="*", order_by="1, 2")
+    )
+    assert star_columns == ["id", "name", "sg", "avg_g"], star_columns
+    assert star_values["id"] == explicit_values["id"], star_values["id"]
+    assert star_values["sg"] == explicit_values["sg"], star_values["sg"]
+    assert star_values["avg_g"] == explicit_values["avg_g"], star_values["avg_g"]
+    # Positions actually sort, they are not merely accepted: `2, 1` (name-major,
+    # id-minor) must differ in ORDER from `1, 2` (id-major) for this dataset.
+    reordered_columns, reordered_values = _run(
+        window_group_by_cte.format(select_list="*", order_by="2, 1")
+    )
+    assert reordered_values["name"] == sorted(star_values["name"]), reordered_values["name"]
+    assert reordered_values["id"] != star_values["id"], "position order was not honoured"
 
 
 def test_window_in_having_is_refused_by_name():
@@ -2714,6 +3099,133 @@ def test_navigation_window_values():
     assert lagged["Saturn"] == "Neptune" and lagged["Uranus"] == "Saturn", lagged
 
 
+def test_uncorrelated_scalar_subquery_single_row_proofs():
+    """
+    VALUE-level regression for the uncorrelated-scalar-subquery single-row guard
+    in `decorrelate_subquery.py` (`_uncorrelated_single_row_proof`).
+
+    An uncorrelated scalar subquery decorrelates into a CROSS JOIN of one value
+    against every outer row — sound only if the subquery is PROVABLY at most one
+    row, or the join silently multiplies outer rows instead of the "more than one
+    row returned by a subquery" SQL requires. Originally only an ungrouped
+    aggregate was accepted; TPC-DS Q06/Q44/Q54/Q58 hit the guard on three other
+    shapes, of which two are actually provable and one is not:
+
+      - accepted: AggregateAndGroup whose only GROUP BY key is pinned to a single
+        value by a `col = literal` equality filter below it (Q44's shape) — at
+        most one group can exist;
+      - accepted: the subquery's own exit step is `LIMIT 1` — caps output to at
+        most one row regardless of what feeds it;
+      - still refused: DISTINCT and a bare unaggregated/unlimited SELECT (Q06's
+        and Q58's shape) — the planner has no uniqueness metadata (no declared
+        PK/UNIQUE constraints) to prove either returns one row, and TPC-DS's
+        date_dim just happens to have one row per (year, month) — coincidental,
+        not provable. Accepting these would trade a compile-time refusal for a
+        silent wrong answer the day that coincidence stops holding.
+    """
+    session = opteryx.session()
+
+    def _names(statement):
+        collected = []
+        for morsel in session.execute_to_morsels(statement):
+            collected.extend(morsel.column("name").to_pylist())
+        return collected
+
+    # Jupiter (id=5) has 79 moons; Saturn is the only planet with more (82).
+    # GROUP BY id, filtered by `id = 5` — one possible group, now accepted.
+    assert _names(
+        "SELECT name FROM $planets WHERE number_of_moons > "
+        "(SELECT avg(number_of_moons) FROM $planets WHERE id = 5 GROUP BY id)"
+    ) == ["Saturn"]
+
+    # Saturn (82 moons) is also the top row by this ordering — LIMIT 1 with no
+    # GROUP BY or aggregate at all, now accepted purely on the exit-step cap.
+    assert _names(
+        "SELECT name FROM $planets WHERE number_of_moons >= "
+        "(SELECT number_of_moons FROM $planets ORDER BY number_of_moons DESC LIMIT 1)"
+    ) == ["Saturn"]
+
+    # Still refused: `mass > 1` matches several planets, so GROUP BY id has
+    # several possible groups — nothing pins it to exactly one.
+    with pytest.raises(UnsupportedSyntaxError, match="must return exactly one row"):
+        _names(
+            "SELECT name FROM $planets WHERE number_of_moons > "
+            "(SELECT avg(number_of_moons) FROM $planets WHERE mass > 1 GROUP BY id)"
+        )
+
+    # Still refused: DISTINCT over `number_of_moons` with no filter that pins
+    # THAT column — every planet has a different moon count, so this DISTINCT
+    # returns nine rows. Coincidentally-one-row DISTINCT subqueries (TPC-DS
+    # Q06/Q54) are refused for the identical reason: unprovable, not untrue.
+    with pytest.raises(UnsupportedSyntaxError, match="must return exactly one row"):
+        _names(
+            "SELECT name FROM $planets WHERE number_of_moons = "
+            "(SELECT DISTINCT number_of_moons FROM $planets WHERE mass > 0)"
+        )
+
+
+def test_correlated_scalar_subquery_or_factored_equality():
+    """
+    VALUE-level regression for `_factor_common_or_correlation` in
+    `decorrelate_subquery.py`.
+
+    TPC-DS Q41 correlates a scalar subquery like this:
+
+        (i_manufact = i1.i_manufact AND <local A>)
+        OR (i_manufact = i1.i_manufact AND <local B>)
+
+    The correlation is a plain equality, but it sits inside a top-level OR, not
+    a top-level AND — `_split_correlations`'s AND-only walk never saw it, so
+    the whole OR was treated as an unresolvable residual and the query was
+    rejected as a "non-equality correlation" even though every occurrence of
+    the outer column is inside an `=`. The fix factors an equality correlation
+    that is common to EVERY branch of the OR out of it: `(A AND X) OR (A AND
+    Y)` becomes `A AND (X OR Y)`, which the existing AND walk handles.
+
+    $planets ids are unique (1..9), so `id = p1.id` inside the subquery pins
+    it to exactly the outer row itself: the correlated COUNT(*) is 1 when that
+    planet's own moon count is 0 or > 50, else 0. Mercury/Venus have 0 moons;
+    Jupiter/Saturn have 79/82 — the only planets `> 0` should select.
+    """
+    session = opteryx.session()
+
+    def _names(statement):
+        collected = []
+        for morsel in session.execute_to_morsels(statement):
+            collected.extend(morsel.column("name").to_pylist())
+        return sorted(collected)
+
+    # The Q41 shape: same equality correlation common to both OR branches.
+    assert _names(
+        "SELECT name FROM $planets p1 WHERE ("
+        "SELECT COUNT(*) FROM $planets "
+        "WHERE (id = p1.id AND number_of_moons = 0) "
+        "OR (id = p1.id AND number_of_moons > 50)"
+        ") > 0"
+    ) == ["Jupiter", "Mercury", "Saturn", "Venus"]
+
+    # Sanity: the already-working plain-AND equality correlation (no OR) is
+    # unaffected — same predicate, no OR to factor.
+    assert _names(
+        "SELECT name FROM $planets p1 WHERE ("
+        "SELECT COUNT(*) FROM $planets WHERE id = p1.id AND number_of_moons = 0"
+        ") > 0"
+    ) == ["Mercury", "Venus"]
+
+    # Still refused: the two OR branches correlate through DIFFERENT
+    # predicates (`id = p1.id` vs `id > p1.id`), so no equality is common to
+    # every branch and there is nothing to factor — the non-equality
+    # correlation in the second branch is the genuine, still-unsupported case.
+    with pytest.raises(UnsupportedSyntaxError, match="non-equality"):
+        _names(
+            "SELECT name FROM $planets p1 WHERE ("
+            "SELECT COUNT(*) FROM $planets "
+            "WHERE (id = p1.id AND number_of_moons = 0) "
+            "OR (id > p1.id AND number_of_moons > 50)"
+            ") > 0"
+        )
+
+
 def test_window_topk_fusion_parity():
     """
     The fused `rank <= K` path must answer exactly what the unfused path answers.
@@ -2943,6 +3455,14 @@ if __name__ == "__main__":  # pragma: no cover
             test_union_output_columns_that_share_one_source_column,
         ),
         (
+            "union leg aliases its own derived table case-insensitively",
+            test_union_leg_aliases_its_own_derived_table_case_insensitively,
+        ),
+        (
+            "chained union of having-filtered aggregates",
+            test_chained_union_of_having_filtered_aggregates,
+        ),
+        (
             "filtered aggregate over a folded null condition",
             test_filtered_aggregate_over_a_constant_folded_null_condition,
         ),
@@ -2971,8 +3491,12 @@ if __name__ == "__main__":  # pragma: no cover
         ),
         ("window nested inside an expression", test_window_nested_in_expression),
         (
-            "window beside an aggregate is refused by name",
-            test_window_beside_aggregate_is_refused_by_name,
+            "window beside an aggregate runs over the grouped rows",
+            test_window_beside_an_aggregate_runs_over_the_grouped_rows,
+        ),
+        (
+            "window over a GROUP BY result",
+            test_window_over_group_by_result,
         ),
         (
             "aggregate over a window is refused by name",
@@ -2985,6 +3509,10 @@ if __name__ == "__main__":  # pragma: no cover
         (
             "window in ORDER BY",
             test_window_in_order_by,
+        ),
+        (
+            "positional ORDER BY over SELECT *",
+            test_positional_order_by_over_select_star,
         ),
         (
             "window in HAVING is refused by name",
@@ -3008,6 +3536,14 @@ if __name__ == "__main__":  # pragma: no cover
         ),
         ("ranking window values", test_ranking_window_values),
         ("navigation window values", test_navigation_window_values),
+        (
+            "uncorrelated scalar subquery single-row proofs",
+            test_uncorrelated_scalar_subquery_single_row_proofs,
+        ),
+        (
+            "correlated scalar subquery OR-factored equality",
+            test_correlated_scalar_subquery_or_factored_equality,
+        ),
         ("window top-k fusion parity", test_window_topk_fusion_parity),
         ("humanize scale systems", test_humanize_modes),
     ):

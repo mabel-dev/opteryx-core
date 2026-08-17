@@ -28,12 +28,18 @@ schema columns and identities, so the decorrelated relation can simply be
 joined to: no schema has to be synthesized and no re-binding is needed.
 
 An UNCORRELATED scalar subquery is the same rewrite with no keys: it is one value
-attached to every outer row, i.e. a cross join. It must provably yield one row
-(an ungrouped aggregate), or cross-joining it would multiply the outer rows
-instead of raising SQL's "more than one row returned by a subquery".
+attached to every outer row, i.e. a cross join. It must provably yield one row, or
+cross-joining it would multiply the outer rows instead of raising SQL's "more than
+one row returned by a subquery". `_uncorrelated_single_row_proof` recognises three
+shapes that establish this statically: an ungrouped aggregate; AggregateAndGroup
+whose only GROUP BY keys are pinned to a single value by an equality filter below
+it; and a subquery whose own exit step is `LIMIT n` (n <= 1). DISTINCT and a bare
+unaggregated/unlimited SELECT do NOT qualify — no uniqueness metadata exists to
+prove either returns one row, however likely that looks for the data at hand.
 
 NOT handled here (each raises, never silently wrong):
-  - subqueries with no aggregate (use EXISTS/IN)
+  - subqueries with no aggregate, no equality-pinned GROUP BY, and no LIMIT 1
+    (use EXISTS/IN, or add a LIMIT 1)
   - an uncorrelated subquery that could return several rows
   - correlations that are not equalities
 
@@ -113,11 +119,16 @@ from opteryx.expression import NodeType, binary_operands
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.optimizer.strategies.filter_implied_group_key_reduction import (
+    _collect_equality_predicates,
+)
 from opteryx.planner.optimizer.strategies.optimization_strategy import (
+    FILTER_REFERENCED_NODE_TYPES,
     OptimizationStrategy,
     OptimizerContext,
 )
 from opteryx.types import logical_type as _lt
+from opteryx.types.schema import RelationSchema
 from opteryx.types.schema import SchemaColumn, mint_column_identity
 from opteryx.utils import random_string
 
@@ -321,7 +332,117 @@ def _split_correlations(condition):
         if _is_outer(eq_left) != _is_outer(eq_right):
             return [condition], None
 
+    if condition.node_type == NodeType.OR:
+        factored = _factor_common_or_correlation(condition)
+        if factored is not None:
+            return factored
+
     return [], condition
+
+
+def _flatten_or(condition):
+    """Flatten a left/right-nested OR chain into its individual branches."""
+    condition = _unwrap(condition)
+    if condition is not None and condition.node_type == NodeType.OR:
+        or_left, or_right = binary_operands(condition)
+        return _flatten_or(or_left) + _flatten_or(or_right)
+    return [condition]
+
+
+def _correlation_key(node):
+    """
+    `(outer_identity, inner_identity)` for an equality correlation node, or None
+    if either side has no schema identity to compare (e.g. a computed
+    expression) — such a correlation can never be proven common to another
+    branch, so callers must treat None as "cannot factor".
+    """
+    eq_left, eq_right = binary_operands(node)
+    outer, inner = (eq_left, eq_right) if _is_outer(eq_left) else (eq_right, eq_left)
+    outer_id, inner_id = _column_identity(outer), _column_identity(inner)
+    if outer_id is None or inner_id is None:
+        return None
+    return (outer_id, inner_id)
+
+
+def _factor_common_or_correlation(condition):
+    """
+    Factor an equality correlation common to every branch of a top-level OR out
+    of the OR: `(k = outer.k AND X) OR (k = outer.k AND Y)` is the same
+    predicate as `k = outer.k AND (X OR Y)`, and only the second form is
+    reachable by the top-down AND walk `_split_correlations` otherwise does —
+    a bare OR falls straight to its final `return [], condition`.
+
+    TPC-DS Q41 correlates exactly this way: the same `i_manufact =
+    i1.i_manufact` equality is ANDed into both arms of a top-level OR alongside
+    unrelated local filters. Without this, the OR hides the correlation and the
+    subquery is rejected as a "non-equality correlation" even though every
+    occurrence of the outer column sits inside a plain equality.
+
+    Returns (correlations, remaining) — the same shape `_split_correlations`
+    returns — or None when no correlation is common to every branch, so the
+    caller falls through to its existing behaviour (the OR is left as `remaining`,
+    and rejected downstream if it still touches the outer scope).
+
+    A correlation unique to one branch is never lifted: doing so would change
+    which rows the OTHER branches match (they no longer depend on it at all),
+    so it is left inside its own branch instead — and stays a residual
+    non-equality correlation if that branch cannot resolve it another way.
+    """
+    branches = _flatten_or(condition)
+    if len(branches) < 2:
+        return None
+
+    per_branch = [_split_correlations(branch) for branch in branches]
+    if any(not corr for corr, _rest in per_branch):
+        return None
+
+    keyed_branches = []
+    for corr, rest in per_branch:
+        keyed = {}
+        for node in corr:
+            key = _correlation_key(node)
+            if key is None:
+                return None
+            keyed[key] = node
+        keyed_branches.append((keyed, rest))
+
+    common_keys = set(keyed_branches[0][0])
+    for keyed, _rest in keyed_branches[1:]:
+        common_keys &= keyed.keys()
+    if not common_keys:
+        return None
+
+    common = [keyed_branches[0][0][key] for key in common_keys]
+
+    new_branches = []
+    for keyed, rest in keyed_branches:
+        branch_condition = rest
+        for key, node in keyed.items():
+            if key in common_keys:
+                continue
+            if branch_condition is None:
+                branch_condition = node
+            else:
+                joined = Node(node_type=NodeType.AND, do_not_create_column=True)
+                joined.left = node
+                joined.right = branch_condition
+                branch_condition = joined
+        if branch_condition is None:
+            # The branch was ENTIRELY the common correlation — lifting it out
+            # would make this arm of the OR (and so the whole OR) vacuously
+            # true, which is not what the written predicate means. Decline
+            # rather than guess.
+            return None
+        new_branches.append(branch_condition)
+
+    remaining = new_branches[0]
+    for branch in new_branches[1:]:
+        joined = Node(node_type=NodeType.OR, do_not_create_column=True)
+        joined.left = remaining
+        joined.right = branch
+        remaining = joined
+
+    return common, remaining
 
 
 def _find_outer_reference(node):
@@ -410,6 +531,86 @@ def _aggregate_node(plan: LogicalPlan):
         ):
             return nid, node
     return None, None
+
+
+def _group_keys_pinned_by_equality(inner_plan: LogicalPlan, aggregate_nid, aggregate) -> bool:
+    """
+    Every GROUP BY key forced to a single value by a `col = literal` equality in a
+    Filter below the aggregate means AggregateAndGroup can produce AT MOST ONE
+    group — the same guarantee an ungrouped aggregate gives for free, just proven
+    a different way.
+
+    Same walk FilterImpliedGroupKeyReductionStrategy uses to strip such keys, but
+    that strategy runs at optimizer position ~22; decorrelation is position 1, so
+    the proof has to be redone here rather than assumed from its output. Only
+    bare-identifier keys are recognised (mirrors that strategy's own restriction)
+    — an expression key (`GROUP BY a + 1`) is not chased through the equality set.
+    """
+    groups = getattr(aggregate, "groups", None)
+    if not groups:
+        return False
+    if any(g.node_type != NodeType.IDENTIFIER for g in groups):
+        return False
+    equalities = _collect_equality_predicates(inner_plan, aggregate_nid)
+    if not equalities:
+        return False
+    return all(g.qualified_name in equalities for g in groups)
+
+
+def _terminates_in_limit_one(inner_plan: LogicalPlan) -> bool:
+    """
+    Does the subquery's own final step cap it to at most one row?
+
+    A bare `LIMIT n` (n <= 1) as the plan's exit node is sufficient on its own —
+    it bounds total output regardless of what feeds it (DISTINCT, GROUP BY, a
+    plain projection, an ORDER BY or none at all). OFFSET does not weaken this:
+    it only chooses which row survives, never how many can.
+
+    Deliberately narrower than `_rewrite_order_limit_to_row_number`: that rewrite
+    exists for the CORRELATED case, where a global LIMIT 1 is wrong post-join and
+    must become a per-partition top-1 window. Here there is no correlation key to
+    partition by — the subquery is a single value for the whole query — so a
+    plain LIMIT 1 is already the proof, nothing to rewrite.
+    """
+    exit_points = inner_plan.get_exit_points()
+    if len(exit_points) != 1:
+        return False
+    exit_node = inner_plan[exit_points[0]]
+    return (
+        exit_node.node_type == LogicalPlanStepType.Limit
+        and exit_node.limit is not None
+        and exit_node.limit <= 1
+    )
+
+
+def _uncorrelated_single_row_proof(inner_plan: LogicalPlan) -> bool:
+    """
+    Can the uncorrelated subquery's plan prove — statically, from structure alone
+    — that it emits at most one row?
+
+    Three shapes qualify, each sufficient on its own:
+      - an ungrouped aggregate: always exactly one row, even over zero input rows;
+      - AggregateAndGroup whose every key is pinned constant by an equality filter
+        below it (`_group_keys_pinned_by_equality`): at most one group can exist;
+      - the plan's own exit step is `LIMIT n` with n <= 1
+        (`_terminates_in_limit_one`): caps output regardless of what is beneath.
+
+    DISTINCT and a bare (ungrouped, unaggregated, unlimited) projection do NOT
+    qualify: nothing in the plan bounds how many distinct values, or how many
+    rows, the filtered relation can produce — the planner has no uniqueness
+    metadata (no declared PK/UNIQUE constraints) to lean on. Accepting either
+    would trade a compile-time refusal for a silent wrong answer the moment the
+    underlying data stops being coincidentally single-valued — exactly the bug
+    class this guard exists to prevent.
+    """
+    aggregate_nid, aggregate = _aggregate_node(inner_plan)
+    if aggregate is not None:
+        if aggregate.node_type == LogicalPlanStepType.Aggregate:
+            return True
+        if aggregate.node_type == LogicalPlanStepType.AggregateAndGroup:
+            if _group_keys_pinned_by_equality(inner_plan, aggregate_nid, aggregate):
+                return True
+    return _terminates_in_limit_one(inner_plan)
 
 
 def _is_restricted(plan: LogicalPlan) -> bool:
@@ -1165,7 +1366,7 @@ def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPla
     "simplified" to a plain anti join.
     """
     filter_node = plan[filter_nid]
-    in_node, _replace = _find_in(filter_node.condition)
+    in_node, replace_fn = _find_in(filter_node.condition)
     if in_node is None:
         return plan
 
@@ -1189,6 +1390,7 @@ def _decorrelate_in(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPla
         filter_nid,
         inner_plan,
         remove=in_node,
+        replace_fn=replace_fn,
         join_type="left anti null-aware" if negated else "left semi",
         key_pairs=key_pairs,
         residual=residual,
@@ -1208,7 +1410,7 @@ def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry) -> Logica
     EXISTS node is simply removed from the predicate.
     """
     filter_node = plan[filter_nid]
-    exists_node, _replace = _find_exists(filter_node.condition)
+    exists_node, replace_fn = _find_exists(filter_node.condition)
     if exists_node is None:
         return plan
 
@@ -1230,6 +1432,7 @@ def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry) -> Logica
         filter_nid,
         inner_plan,
         remove=exists_node,
+        replace_fn=replace_fn,
         join_type="left anti" if negated else "left semi",
         key_pairs=key_pairs,
         residual=residual,
@@ -1239,11 +1442,44 @@ def _decorrelate_exists(plan: LogicalPlan, filter_nid: str, telemetry) -> Logica
     )
 
 
+def _not_top_level_error(remove) -> UnsupportedSyntaxError:
+    """
+    The shared refusal for an EXISTS/IN that neither the SEMI/ANTI top-level
+    rewrite nor the boolean-value materialization (see
+    `_materialize_boolean_value`) can express. Both callers surface the SAME
+    message: from the query author's side these are one failure ("this shape
+    is not supported"), and which of the two lowerings declined is an
+    implementation detail, not something they can act on.
+    """
+    if _is_in_subquery(remove):
+        keyword = "**IN**"
+        example = (
+            "**WHERE** x **NOT IN** (**SELECT** ...) rather than "
+            "**WHERE** **NOT** (x **IN** (**SELECT** ...))"
+        )
+    else:
+        keyword = "**EXISTS**"
+        example = (
+            "**WHERE** **NOT EXISTS** (**SELECT** ...) rather than "
+            "**WHERE** **NOT** (**EXISTS** (**SELECT** ...))"
+        )
+    return UnsupportedSyntaxError(
+        f"An {keyword} subquery is only supported as a top-level condition of the "
+        f"**WHERE** clause, alone or **AND**ed with other conditions — or nested under "
+        f"**OR**/**NOT**/a comparison, provided it correlates only by equality to the "
+        f"immediately enclosing query (no **NOT IN**, no non-equality correlation, no "
+        f"correlation reaching past the immediate enclosing scope). Here it sits inside "
+        f"another expression - under **NOT**, **OR**, **IS NULL**, or a comparison - and "
+        f"neither decorrelation lowers that. Write it at the top level instead ({example})."
+    )
+
+
 def _build_filter_join(
     plan: LogicalPlan,
     filter_nid: str,
     inner_plan: LogicalPlan,
     remove,
+    replace_fn,
     join_type: str,
     key_pairs,
     residual,
@@ -1260,8 +1496,13 @@ def _build_filter_join(
     filter_node = plan[filter_nid]
 
     # The existence test BECOMES the join, so it has to come out of the predicate
-    # — and `_split_out` can only take it out of a top-level AND chain. Refuse
-    # here, before any graph surgery, when it cannot.
+    # — and `_split_out` can only take it out of a top-level AND chain. When it
+    # cannot, the test is not gone from the tree — it is nested under NOT / OR /
+    # IS NULL / a comparison — so the alternative lowering applies instead:
+    # `_materialize_boolean_value` turns the SAME key pairs into a boolean VALUE
+    # (a LEFT JOIN + COUNT, substituted in place) rather than a filtering join.
+    # That function raises `_not_top_level_error` itself when its own, narrower
+    # set of preconditions is not met.
     #
     # This is not a nicety. `_rewrite_filters` drives this rewrite with
     # `while finder(condition) is not None`, so a target that survives the
@@ -1269,24 +1510,18 @@ def _build_filter_join(
     # inserting another join node each time, with no error and no result. That
     # is what this guard replaces.
     if not _is_removable_conjunct(filter_node.condition, remove):
-        if _is_in_subquery(remove):
-            keyword = "**IN**"
-            example = (
-                "**WHERE** x **NOT IN** (**SELECT** ...) rather than "
-                "**WHERE** **NOT** (x **IN** (**SELECT** ...))"
-            )
-        else:
-            keyword = "**EXISTS**"
-            example = (
-                "**WHERE** **NOT EXISTS** (**SELECT** ...) rather than "
-                "**WHERE** **NOT** (**EXISTS** (**SELECT** ...))"
-            )
-        raise UnsupportedSyntaxError(
-            f"An {keyword} subquery is only supported as a top-level condition of the "
-            f"**WHERE** clause, alone or **AND**ed with other conditions. Here it sits inside "
-            f"another expression - under **NOT**, **OR**, **IS NULL**, or a comparison - and "
-            f"decorrelation turns the test into a join, which cannot express that. "
-            f"Write it at the top level instead ({example})."
+        return _materialize_boolean_value(
+            plan,
+            filter_nid,
+            inner_plan,
+            remove,
+            replace_fn,
+            join_type,
+            key_pairs,
+            residual,
+            telemetry,
+            counter,
+            replace_projection,
         )
 
     # The subquery must emit the join keys, and anything the residual reads (it is
@@ -1496,6 +1731,245 @@ def _build_filter_join(
     return plan
 
 
+def _materialize_boolean_value(
+    plan: LogicalPlan,
+    filter_nid: str,
+    inner_plan: LogicalPlan,
+    remove,
+    replace_fn,
+    join_type: str,
+    key_pairs,
+    residual,
+    telemetry,
+    counter: str,
+    replace_projection: bool,
+) -> LogicalPlan:
+    """
+    Turn a non-removable EXISTS/IN into a boolean VALUE, substituted in place.
+
+    `_build_filter_join`'s SEMI/ANTI rewrite can only replace a TOP-LEVEL AND'd
+    conjunct: the existence test IS the join, and a join filters rows, so it
+    cannot sit under OR / NOT / a comparison. This is the lowering for exactly
+    that remaining shape (TPC-DS Q10/Q35: `AND (EXISTS (...) OR EXISTS (...))`;
+    Q45: `(x IN (...) OR y IN (subquery))`):
+
+        outer WHERE ... (EXISTS (SELECT ... WHERE inner.k = outer.k) OR ...)
+    ->  outer LEFT OUTER JOIN (SELECT k, COUNT(*) c FROM inner GROUP BY k)
+          ON outer.k = k
+        WHERE ... (c IS NOT NULL OR ...)
+
+    The correlation key(s) are grouped and counted, then reached by a LEFT
+    JOIN rather than the SEMI/ANTI join the top-level rewrite uses: a LEFT
+    JOIN lets a non-matching outer row SURVIVE (with `c` NULL) so the rest of
+    the boolean expression still gets to evaluate it, instead of the whole
+    row silently vanishing the way an INNER or SEMI/ANTI join would drop it —
+    which is exactly the mistake this path exists to avoid making. `c IS NOT
+    NULL` is then substituted for the EXISTS/IN node, in place, via
+    `replace_fn` (`c IS NULL` for NOT EXISTS). GROUP BY is what makes the
+    join not multiply the outer row: without it, a correlation key matching N
+    inner rows would duplicate the outer row N times, corrupting every OTHER
+    clause of the surrounding query, not just this one boolean test.
+
+    Deliberately narrower than the SEMI/ANTI path, because none of it can be
+    proven sound without support this rewrite does not build:
+      - NOT IN (`join_type == "left anti null-aware"`) is refused. Its
+        NULL-aware "any NULL in the list makes every row UNKNOWN" semantics
+        has no equivalent expressed here — COUNT(*) cannot distinguish "zero
+        matching rows" from "zero matching rows because one was NULL".
+      - A correlated non-equality (`residual`) is refused. It used to ride
+        the SEMI/ANTI probe as a per-candidate-pair test
+        (`SemiAntiProbeOperator`); there is no such probe once this is a
+        plain GROUP BY + JOIN.
+      - A correlation reaching past the immediate enclosing scope (a key
+        pair whose outer side names a relation this Filter's own inputs do
+        not supply) is refused. `_defer_existence_to_ancestor`'s
+        SEMI→INNER absorption argument
+        (`EXISTS(o: P ∧ EXISTS(l: Q)) ≡ EXISTS((o,l): P ∧ Q)`) is proved for
+        SEMI/ANTI only, not for a LEFT JOIN carrying a COUNT.
+    Each refusal raises the SAME error `_build_filter_join` would have — from
+    the query author's side this is one failure, and which lowering declined
+    is not theirs to know.
+    """
+    filter_node = plan[filter_nid]
+
+    if join_type == "left anti null-aware":
+        raise _not_top_level_error(remove)
+    if residual is not None:
+        raise _not_top_level_error(remove)
+
+    negated = join_type == "left anti"
+
+    outer_relations: set = set()
+    outer_schemas: dict = {}
+    for provider, _target, _relation in plan.ingoing_edges(filter_nid):
+        found_relations, found_schemas = _collect_relations(plan, provider)
+        outer_relations |= found_relations
+        outer_schemas.update(found_schemas)
+
+    if any(outer_key.source not in outer_relations for _inner_key, outer_key in key_pairs):
+        raise _not_top_level_error(remove)
+
+    # The correlation key(s) have to survive the subquery's OWN projection to reach
+    # the aggregate below — EXISTS's `SELECT 1` (or `SELECT *`) is a real Project
+    # node that narrows the stream to whatever it lists, same as `_build_filter_join`
+    # handles for the SEMI/ANTI path (see `replace_projection` there). Skipping this
+    # is what "a GROUP BY key the engine could not resolve here" looks like: the key
+    # is bound and correctly identified, but the physical Project already dropped it
+    # before the (also physical) aggregate below ever saw it.
+    projection_node = _projecting_node(inner_plan)
+    if projection_node is not None and projection_node.node_type == LogicalPlanStepType.Project:
+        wanted = [_local_copy(inner_key) for inner_key, _ in key_pairs]
+        if replace_projection:
+            # EXISTS projects `SELECT 1`/`SELECT *`; nothing above reads it (the
+            # materialized value substitutes the whole EXISTS node), so the keys
+            # replace the projection outright — same as the SEMI/ANTI path.
+            projection_node.columns = wanted
+        else:
+            # IN already projects the membership column (`_output_column`, above);
+            # only ADD what correlation contributes beyond it.
+            existing = {
+                column.schema_column.identity
+                for column in (projection_node.columns or [])
+                if column.schema_column is not None
+            }
+            projection_node.columns = list(projection_node.columns or []) + [
+                column
+                for column in wanted
+                if column.schema_column is not None
+                and column.schema_column.identity not in existing
+            ]
+
+    # --- synthesize COUNT(*) GROUP BY <correlation key(s)> ---------------------
+    # This is post-bind construction, same as `_rewrite_order_limit_to_row_number`'s
+    # ROW_NUMBER window above: nothing re-runs the binder over a node built here, so
+    # `schema_column` / `.schema` have to be laid down in their already-bound shape.
+    groups = []
+    seen_identities = set()
+    for inner_key, _outer_key in key_pairs:
+        identity = inner_key.schema_column.identity
+        if identity in seen_identities:
+            continue
+        seen_identities.add(identity)
+        groups.append(inner_key)
+
+    count_relation = f"$exists-{random_string(6)}"
+    count_schema_column = SchemaColumn(
+        name="$count",
+        column_type=_lt.INT64,
+        identity=mint_column_identity(count_relation, "$count"),
+    )
+
+    def _count_reference() -> LogicalColumn:
+        return LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=count_schema_column.name,
+            source=count_relation,
+            schema_column=count_schema_column,
+        )
+
+    count_node = Node(
+        node_type=NodeType.AGGREGATOR,
+        value="COUNT",
+        parameters=[Node(node_type=NodeType.WILDCARD)],
+        schema_column=count_schema_column,
+        do_not_create_column=True,
+    )
+
+    aggregate = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+    aggregate.aggregates = [count_node]
+    aggregate.groups = groups
+    aggregate.projection = [count_node] + groups
+    aggregate.columns = [count_node] + groups
+    aggregate.schema = RelationSchema(name=count_relation, columns=[count_schema_column])
+
+    inner_exit = inner_plan.get_exit_points()[0]
+    agg_nid = random_string()
+    inner_plan.insert_node_after(agg_nid, aggregate, inner_exit)
+
+    # --- ON condition: every key pair is local by construction (checked above) -
+    on_condition = None
+    for inner_key, outer_key in key_pairs:
+        equals = Node(
+            node_type=NodeType.COMPARISON_OPERATOR, value="Eq", do_not_create_column=True
+        )
+        equals.left = _local_copy(outer_key)
+        equals.right = _local_copy(inner_key)
+        if on_condition is None:
+            on_condition = equals
+        else:
+            conjunction = Node(node_type=NodeType.AND, do_not_create_column=True)
+            conjunction.left = on_condition
+            conjunction.right = equals
+            on_condition = conjunction
+
+    # --- graft the subquery in as a LEFT OUTER join's right leg ---------------
+    plan += inner_plan
+    inner_relations, inner_schemas = _collect_relations(plan, agg_nid)
+    inner_relations.add(count_relation)
+    # An IN's membership key can be a computed inner expression minted with a
+    # synthetic `$in-...` origin (see `_decorrelate_in`) rather than a plain
+    # column of a scanned relation — that origin has to be a known name of this
+    # leg too, or the key resolves to neither side (mirrors `_build_filter_join`).
+    for inner_key, _outer_key in key_pairs:
+        origin = getattr(inner_key.schema_column, "origin", None)
+        if origin:
+            inner_relations.update(origin)
+
+    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    join.type = "left outer"
+    join.on = on_condition
+    join.using = None
+    join.columns = [
+        column
+        for pair in key_pairs
+        for column in (_local_copy(pair[1]), _local_copy(pair[0]))
+    ] + [_count_reference()]
+    join.left_relation_names = sorted(outer_relations)
+    join.right_relation_names = sorted(inner_relations)
+    join.all_relations = outer_relations | inner_relations
+    join.schemas = {**outer_schemas, **inner_schemas}
+    join.left_columns, join.right_columns = extract_join_fields(
+        on_condition, join.left_relation_names, join.right_relation_names
+    )
+    if len(join.left_columns) != len(key_pairs):
+        raise InvalidInternalStateError(
+            "decorrelation built a join key naming a relation that is on neither leg"
+        )
+
+    join_nid = random_string()
+    plan.insert_node_before(join_nid, join, filter_nid)
+    plan.add_edge(agg_nid, join_nid)
+
+    # --- substitute the EXISTS/IN node with the boolean value, in place -------
+    # A LEFT JOIN's own "no match" NULL already encodes non-existence, so the
+    # count's value is never read — only its NULL-ness — and no separate
+    # COALESCE is needed. Reuses `remove`'s own (already bound, already BOOL)
+    # schema_column rather than minting one: constant_folding.py's `LIKE '%'`
+    # -> `IsNotNull` rewrite does the same for the same reason — this node
+    # slots into a general boolean expression exactly where `remove` sat.
+    substituted = Node(node_type=NodeType.UNARY_OPERATOR)
+    substituted.type = _lt.BOOLEAN
+    substituted.value = "IsNull" if negated else "IsNotNull"
+    substituted.schema_column = remove.schema_column
+    substituted.centre = _count_reference()
+    substituted.query_column = getattr(remove, "query_column", None)
+    substituted.alias = getattr(remove, "alias", None)
+
+    filter_node.condition = replace_fn(substituted)
+    filter_node.columns = [
+        column
+        for column in (filter_node.columns or [])
+        if column.node_type in FILTER_REFERENCED_NODE_TYPES
+    ] + [_count_reference()]
+
+    setattr(
+        telemetry,
+        f"{counter}_materialized",
+        getattr(telemetry, f"{counter}_materialized", 0) + 1,
+    )
+    return plan
+
+
 def _all_columns_of(node):
     """Every identifier under `node`, from either side of the correlation."""
     if node is None:
@@ -1558,7 +2032,16 @@ def _is_removable_conjunct(condition, target) -> bool:
     A subquery nested under NOT / OR / IS NULL / a comparison does not, because
     the rewrite it feeds turns the test into a JOIN, and a join cannot express a
     disjunct or a negation of a row-level test.
+
+    `_unwrap` runs at every level of the recursion, not just the top: parentheses
+    are purely presentational (`(A AND B)` is the same conjunction as `A AND B`),
+    so a user-written `x AND (y AND EXISTS (...))` must be seen as one flat
+    AND chain. Without this, TPC-DS Q69's `AND (NOT EXISTS (...) AND NOT EXISTS
+    (...))` was refused as "nested under NOT/OR" — it is neither, it is AND'ed,
+    just parenthesized — because the NESTED node sat between the outer AND and
+    the inner one and neither function's node_type check saw through it.
     """
+    condition = _unwrap(condition)
     if condition is None:
         return False
     if condition is target:
@@ -1579,7 +2062,13 @@ def _split_out(condition, target):
     predicate. `_is_removable_conjunct` answers the `found` question without
     mutating, and `_build_filter_join` asks it up front — a caller that ignores
     `found` and loops until the target is gone will never terminate.
+
+    Unwraps NESTED at every recursion level, same reasoning as
+    `_is_removable_conjunct` above — a parenthesized AND-of-ANDs is one flat
+    chain, and the returned tree drops the now-meaningless parens rather than
+    preserving them (nothing downstream renders SQL text from this tree).
     """
+    condition = _unwrap(condition)
     if condition is None:
         return False, None
     if condition is target:
@@ -1629,11 +2118,12 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
         # yields exactly one row, but a GROUP BY (or no aggregate at all) can yield
         # many, and cross-joining that would silently MULTIPLY the outer rows rather
         # than raise the "more than one row returned by a subquery" that SQL requires.
-        _, aggregate = _aggregate_node(inner_plan)
-        if aggregate is None or aggregate.node_type != LogicalPlanStepType.Aggregate:
+        # See `_uncorrelated_single_row_proof` for the full set of shapes this proves.
+        if not _uncorrelated_single_row_proof(inner_plan):
             raise UnsupportedSyntaxError(
                 "An uncorrelated scalar subquery must return exactly one row; only an "
-                "ungrouped aggregate is supported here."
+                "ungrouped aggregate, a GROUP BY whose keys are pinned to a single value "
+                "by an equality filter, or a LIMIT 1 is supported here."
             )
 
     # A correlated subquery with no aggregate can still be provably one-row-per-
@@ -1671,7 +2161,9 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # --- the subquery's value becomes an ordinary column ----------------------
     filter_node.condition = replace_subquery(_reference_to(value_column))
     filter_node.columns = [
-        column for column in (filter_node.columns or []) if column.node_type == NodeType.IDENTIFIER
+        column
+        for column in (filter_node.columns or [])
+        if column.node_type in FILTER_REFERENCED_NODE_TYPES
     ] + [_reference_to(value_column)]
 
     # --- graft the subquery in as a joined relation ---------------------------

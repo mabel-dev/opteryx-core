@@ -16,6 +16,7 @@ from enum import Enum, auto
 from typing import List, Optional, Tuple
 
 from opteryx.exceptions import (
+    InvalidInternalStateError,
     UnnamedColumnError,
     UnsupportedSyntaxError,
     compose,
@@ -483,6 +484,56 @@ def _strip_outer_nesting(node):
     return node
 
 
+def _expand_grouping_elements(elements: list):
+    """Lower a GROUP BY list containing grouping constructs into `(keys, grouping_sets)`.
+
+    `keys` is the flat, de-duplicated list of key expressions in first-appearance order —
+    exactly the shape a plain GROUP BY produces, so everything downstream of here treats
+    it identically. `grouping_sets` is a list of index tuples into `keys`, one per set;
+    a key whose index is absent from a set is NULL for that set's rows.
+
+    The GROUP BY list is a sequence of grouping ELEMENTS combined by CROSS PRODUCT — the
+    standard's rule, and the reason `GROUP BY a, ROLLUP(b, c)` means
+    `(a,b,c), (a,b), (a)` rather than anything simpler. A plain expression is the element
+    that denotes exactly one set (itself), which is why a GROUP BY with no construct in
+    it falls out of the same code as a single set over all its keys.
+
+    De-duplication is by rendered expression, the same identity the binder resolves on,
+    so `ROLLUP(a, a)` collapses to one key column with the sets still distinct by depth.
+    """
+    key_positions: dict = {}
+    keys: list = []
+
+    def _position(expr):
+        rendered = format_expression(expr).lower()
+        if rendered not in key_positions:
+            key_positions[rendered] = len(keys)
+            keys.append(expr)
+        return key_positions[rendered]
+
+    # Each element contributes its list of alternative sets; the running product is the
+    # concatenation of one alternative from each element, in element order.
+    combined: list = [[]]
+    for element in elements:
+        if isinstance(element, logical_planner_builders.GroupingConstruct):
+            alternatives = element.grouping_sets()
+        else:
+            alternatives = [[element]]
+        combined = [prefix + alternative for prefix in combined for alternative in alternatives]
+
+    # Positions, not expressions: the aggregate masks key COLUMNS, and two spellings that
+    # render the same are one column. Repeats WITHIN a set collapse — grouping by `a`
+    # twice is grouping by `a` once — but DUPLICATE SETS are kept. `ROLLUP(a, a)` denotes
+    # `(a,a), (a), ()`, whose first two sets group identically yet are still two sets, and
+    # the standard says each set contributes its own rows. Collapsing them dropped three
+    # rows of a seven-row answer.
+    grouping_sets = [
+        tuple(dict.fromkeys(_position(expr) for expr in one_set)) for one_set in combined
+    ]
+
+    return keys, grouping_sets
+
+
 def _validate_where_clause_expression(
     node: Node,
     clause_label: str = "WHERE clause",
@@ -682,6 +733,30 @@ def _find_base_scan(plan: LogicalPlan) -> "LogicalPlanNode":
     return scans[0]
 
 
+def _expression_children(tree) -> list:
+    """Every child expression of `tree`, in the shape the expression walkers agree on.
+
+    `get_all_nodes_of_type`, `_replace_node` and the walks below all have to reach the
+    same set of children, or a node one of them can find is a node another silently
+    walks past. Held in one place so they cannot drift.
+    """
+    children: list = []
+    if tree.parameters:
+        children.extend(p for p in tree.parameters if isinstance(p, (Node, LogicalColumn)))
+    for _side in ("left", "centre", "right"):
+        _child = getattr(tree, _side, None)
+        if isinstance(_child, (Node, LogicalColumn)):
+            children.append(_child)
+    if tree.node_type == NodeType.CASE:
+        if tree.conditions:
+            children.extend(c for c in tree.conditions if isinstance(c, (Node, LogicalColumn)))
+        if tree.results:
+            children.extend(r for r in tree.results if isinstance(r, (Node, LogicalColumn)))
+        if isinstance(tree.else_result, (Node, LogicalColumn)):
+            children.append(tree.else_result)
+    return children
+
+
 def _enclosing_aggregator(tree, target, nearest=None):
     """The aggregate or window call `target` is written INSIDE, or None.
 
@@ -721,22 +796,7 @@ def _enclosing_aggregator(tree, target, nearest=None):
     if tree.node_type == NodeType.AGGREGATOR:
         nearest = tree
 
-    children = []
-    if tree.parameters:
-        children.extend(p for p in tree.parameters if isinstance(p, (Node, LogicalColumn)))
-    for _side in ("left", "centre", "right"):
-        _child = getattr(tree, _side, None)
-        if isinstance(_child, (Node, LogicalColumn)):
-            children.append(_child)
-    if tree.node_type == NodeType.CASE:
-        if tree.conditions:
-            children.extend(c for c in tree.conditions if isinstance(c, (Node, LogicalColumn)))
-        if tree.results:
-            children.extend(r for r in tree.results if isinstance(r, (Node, LogicalColumn)))
-        if isinstance(tree.else_result, (Node, LogicalColumn)):
-            children.append(tree.else_result)
-
-    for _child in children:
+    for _child in _expression_children(tree):
         found = _enclosing_aggregator(_child, target, nearest)
         if found is not None:
             return found
@@ -989,10 +1049,8 @@ def _window_spec_nodes(over: Optional[dict]) -> Tuple[list, list]:
 
 def _hoist_windows(
     item,
-    clause: str,
     window_specs: list,
     ranking_specs: list,
-    window_displays: list,
     minted: dict,
     newly_minted: list,
 ):
@@ -1013,10 +1071,6 @@ def _hoist_windows(
     A ranking function is a candidate even with NO over clause, so the missing-OVER
     refusal fires wherever it is written; a nested `ROW_NUMBER() + 1` used to die with an
     internal IndexError instead.
-
-    `clause` is the clause the window was WRITTEN in. It travels with the display name
-    because the window-beside-aggregate refusal has to name both, and it offers a
-    different remedy for each.
 
     `minted` maps a window's canonical rendering to the (internal alias, display name)
     already minted for it, so the SAME window written twice is computed once and every
@@ -1114,7 +1168,6 @@ def _hoist_windows(
                 window_specs.append((_window, _partition_by))
             minted[_canonical] = (_win_alias, _win_display)
             newly_minted.append(_win_alias)
-            window_displays.append((_win_display, clause))
         else:
             _win_alias, _win_display = _already
 
@@ -1140,6 +1193,215 @@ def _hoist_windows(
     for _ref, _minted_alias in _hoisted:
         _ref.source_column = _minted_alias
     return item
+
+
+# The relation the aggregate step is presented as when a window is computed OVER the
+# grouped result. Minted, never typed.
+GROUPED_AGGREGATE_ALIAS_PREFIX = "$grouped-"
+
+
+def _outermost_aggregates(tree) -> list:
+    """Every aggregate call in `tree` that is NOT written inside another aggregate.
+
+    `get_all_nodes_of_type` returns the nested ones too, and for the aggregate step
+    below the grouped result they are the wrong answer: the inner call of
+    `SUM(SUM(x))` is the group-level aggregate and the outer one is the window over
+    those group results, so registering both would compute `SUM(x)` twice and give
+    the second copy no meaning.
+    """
+    if tree is None or not isinstance(tree, (Node, LogicalColumn)):
+        return []
+    if tree.node_type == NodeType.AGGREGATOR:
+        return [tree]
+    found: list = []
+    for _child in _expression_children(tree):
+        found.extend(_outermost_aggregates(_child))
+    return found
+
+
+def _grouped_output_name(node) -> str:
+    """The name the grouped result exposes `node` under.
+
+    The grouped rows become a RELATION (a Subquery node, see the lowering in
+    `inner_query_planner`), so every group key and every aggregate needs a name the
+    expressions above the grouping can address it by.
+
+    That name is the SCHEMA column's, which is not the caller's alias: `visit_project`
+    records an `AS` as an extra alias on the schema column rather than renaming it, and
+    the boundary (`visit_subquery`) publishes `schema_column.name` and drops the
+    aliases. So `SUM(x) AS revenue` is addressed across the boundary as `SUM(x)`, and
+    the alias is re-applied ABOVE it — the reference the caller's expression is rewritten
+    to carries `AS revenue`, so the output column is still named `revenue`.
+    """
+    if node.node_type == NodeType.IDENTIFIER:
+        return node.source_column
+    return format_expression(node)
+
+
+def _grouped_reference_keys(node) -> tuple:
+    """The spellings an expression above the grouping may use to name `node`.
+
+    An identifier is indexed by its bare column name as well as by its rendering,
+    because the two are not the same string once an alias is involved: `i_class AS c`
+    RENDERS as `c` (an identifier renders as its `current_name`) while the GROUP BY
+    that named it wrote `i_class`. Indexing only one of them left the other spelling
+    unmatched and the column unresolvable above the boundary.
+    """
+    _keys = [format_expression(node).lower()]
+    if node.node_type == NodeType.IDENTIFIER and node.source_column:
+        _keys.append(node.source_column.lower())
+    return tuple(_keys)
+
+
+def _refuse_ungrouped_column(node) -> None:
+    """The standard's rule, for a column read above a grouping that did not group by it.
+
+    Reached from the window-over-grouped-result lowering, where the offending column is
+    most often written inside the WINDOW rather than in the SELECT list —
+    `SUM(mass) OVER ()` beside `SUM(mass)` reads a raw `mass` at a level where only the
+    group keys and the aggregates exist. DuckDB and PostgreSQL both refuse it in the same
+    terms, and this is the wording Opteryx already uses for the un-windowed spelling.
+
+    Named by `query_column`, the display form every identifier carries from the builders:
+    `source_column` has already lost any qualifier the caller wrote.
+    """
+    from opteryx.exceptions import SqlError
+
+    _column = node.query_column or node.source_column
+    raise SqlError(
+        f"Column '{_column}' must appear in the `GROUP BY` clause or must be part of an "
+        f"aggregate function. Either add it to the `GROUP BY` list, or add an "
+        f"aggregation such as `MIN({_column})`."
+    )
+
+
+def _rebase_over_aggregate(tree, names: dict, skipped: set, passthrough: set, memo: dict):
+    """Re-point an expression written over the PRE-aggregation rows at the grouped rows.
+
+    Everything above the grouping — the SELECT list, HAVING, QUALIFY, ORDER BY, and a
+    window's own PARTITION BY / ORDER BY / arguments — is written in terms of the
+    source columns, but it runs over the grouped result, which is a relation exposing
+    one column per group key and one per aggregate. Each group key and each aggregate
+    is swapped for a reference to that column; everything else is left alone and
+    rebuilt above it, so `SUM(x) * 100 / SUM(SUM(x)) OVER (...)` keeps its arithmetic
+    and only its operands move.
+
+    References are UNQUALIFIED on purpose. The window rewrite copies the window's
+    source sub-plan and renames every relation in it (`window_to_join.rename_relations`)
+    but does NOT remap the window aggregate's own operands — a qualified reference
+    inside one therefore names a relation that no longer exists in the copy. An
+    unqualified one resolves by name in both scopes.
+
+    `skipped` holds the ids of the hoisted window nodes themselves: QUALIFY still
+    carries the original node in its predicate (it is re-pointed at the window's output
+    later, by identity), and it is the window, not a group-level aggregate.
+
+    `passthrough` holds the lower-cased names that resolve ABOVE the grouping rather
+    than against it — a window's output column, and a SELECT alias an ORDER BY names.
+    Every OTHER unmatched identifier is a column read at a level where it does not
+    exist, which is the standard's GROUP BY rule and is refused as such.
+
+    `memo` maps `id(node)` to what that node was rewritten to, so a node reachable from
+    two places — a HAVING aggregate is both inside the condition and in the Project's
+    pass-through list — is rewritten to the SAME reference object in both, as it was
+    the same object before.
+    """
+    if tree is None or not isinstance(tree, (Node, LogicalColumn)):
+        return tree
+    if id(tree) in skipped:
+        return tree
+    _cached = memo.get(id(tree))
+    if _cached is not None:
+        return _cached
+
+    _name = None
+    if tree.node_type == NodeType.IDENTIFIER and tree.source_column:
+        _name = names.get(tree.source_column.lower())
+    if _name is None:
+        _name = names.get(format_expression(tree).lower())
+
+    if _name is not None:
+        _reference = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=_name,
+            alias=tree.alias,
+            span=tree.span,
+        )
+        # The name the CALLER sees is the expression they wrote, not the grouped
+        # relation's internal column name — `SELECT SUM(x)` answers `SUM(x)` whether or
+        # not a window made the grouping a relation.
+        _reference.query_column = tree.query_column or format_expression(tree)
+        memo[id(tree)] = _reference
+        return _reference
+
+    if tree.node_type == NodeType.AGGREGATOR:
+        # Every aggregate above the grouping is registered as one of its outputs before
+        # this runs. One that is not means the collection missed a clause, which is a
+        # planning fault and not something the caller can act on.
+        raise InvalidInternalStateError(
+            f"aggregate `{format_expression(tree)}` is not an output of the grouping it "
+            "is computed by"
+        )
+
+    if tree.node_type == NodeType.IDENTIFIER:
+        # Not a group key. A window's output and a SELECT alias both resolve above the
+        # grouping and are left where they are; anything else is a column read at a
+        # level where only the group keys and the aggregates exist.
+        if (tree.source_column or "").lower() in passthrough:
+            return tree
+        _refuse_ungrouped_column(tree)
+
+    if tree.parameters:
+        tree.parameters = [
+            _rebase_over_aggregate(_parameter, names, skipped, passthrough, memo)
+            if isinstance(_parameter, (Node, LogicalColumn))
+            else _parameter
+            for _parameter in tree.parameters
+        ]
+    for _side in ("left", "centre", "right"):
+        _child = getattr(tree, _side, None)
+        if isinstance(_child, (Node, LogicalColumn)):
+            setattr(tree, _side, _rebase_over_aggregate(_child, names, skipped, passthrough, memo))
+    if tree.node_type == NodeType.CASE:
+        if tree.conditions:
+            tree.conditions = [
+                _rebase_over_aggregate(_condition, names, skipped, passthrough, memo)
+                for _condition in tree.conditions
+            ]
+        if tree.results:
+            tree.results = [
+                _rebase_over_aggregate(_result, names, skipped, passthrough, memo)
+                for _result in tree.results
+            ]
+        if isinstance(tree.else_result, (Node, LogicalColumn)):
+            tree.else_result = _rebase_over_aggregate(
+                tree.else_result, names, skipped, passthrough, memo
+            )
+    memo[id(tree)] = tree
+    return tree
+
+
+def _group_by_all_keys(projection: list, window_outputs: set) -> list:
+    """The keys `GROUP BY ALL` stands for — every projection expression that is neither
+    an aggregate nor a window's output.
+
+    A window is computed AFTER the grouping, so its value cannot be a grouping key. The
+    hoist has already replaced each window with an identifier reference to its output
+    column, and an identifier is exactly what this collects — so without the second test
+    `SELECT k, COUNT(*) OVER () FROM t GROUP BY ALL` grouped by a column that does not
+    exist until after the grouping.
+    """
+    _keys = []
+    for _column in projection:
+        if get_all_nodes_of_type(_column, select_nodes=(NodeType.AGGREGATOR,)):
+            continue
+        if window_outputs and any(
+            (_identifier.source_column or "") in window_outputs
+            for _identifier in get_all_nodes_of_type(_column, select_nodes=(NodeType.IDENTIFIER,))
+        ):
+            continue
+        _keys.append(_column)
+    return _keys
 
 
 def inner_query_planner(ast_branch: dict) -> LogicalPlan:
@@ -1277,18 +1539,6 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     _window_specs: list = []  # aggregate windows: (agg_node, partition_by_nodes)
     # ranking windows: (kind, partition_by_nodes, order_by_pairs, win_alias)
     _ranking_specs: list = []
-    # (display name, the clause it was WRITTEN in) for every window hoisted below, in
-    # projection order. The window-beside-aggregate refusal further down has to name the
-    # window the caller wrote, and by the time it runs the window node is gone from the
-    # projection — replaced by a reference whose `source_column` is the minted `$win_`
-    # join key. So the display form is captured here, where it is still in hand.
-    #
-    # The clause travels with it because the two are refused with different remedies:
-    # a SELECT window is escaped by aggregating in a subquery, a QUALIFY window by
-    # windowing-and-filtering in one. QUALIFY's windows are borrowed into `_projection`
-    # (see `_qualify_window_slots` below), so the index is what tells them apart.
-    _window_displays: list = []
-
     # QUALIFY is filtering on a window function's OUTPUT, so its window functions
     # have to be computed before the filter can run. They ride into `_projection`
     # here so the detection loop below treats them exactly like a window function
@@ -1348,20 +1598,17 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # Window output and rode a duplicate through the Project.
     _minted: dict = {}
     for _i, proj_col in enumerate(_projection):
-        _clause = "QUALIFY" if _i in _qualify_slot_indices else "SELECT"
         # Only the aliases THIS clause newly minted are hidden. A QUALIFY window that
         # dedups onto a window the caller also SELECTED must not hide the selected one.
         _newly_minted: list = []
         _projection[_i] = _hoist_windows(
             proj_col,
-            _clause,
             _window_specs,
             _ranking_specs,
-            _window_displays,
             _minted,
             _newly_minted,
         )
-        if _clause == "QUALIFY":
+        if _i in _qualify_slot_indices:
             _hidden_window_columns.extend(_newly_minted)
     # Collect aggregates in projection (SELECT) order. get_all_nodes_of_type uses a
     # LIFO stack, so passing the whole projection list scrambles cross-column order;
@@ -1396,6 +1643,20 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         # 1-based position in the SELECT list. Replace it with the projection
         # expression so downstream stages see a normal column reference.
         # Any other literal (string, float, NULL, ...) is rejected.
+        #
+        # A bare `SELECT *` is the one case this cannot do here: `_projection` is a
+        # single WILDCARD placeholder, not the columns it will actually expand to —
+        # that count is only known once the source schema is bound. Validating the
+        # position against `len(_projection)` in that case rejects every position but
+        # 1, which is exactly the TPC-DS shape `SELECT * FROM v ... ORDER BY expr, 1,
+        # 2, ..., 9`. The literal is left in place (flagged) and resolved positionally
+        # against the bound schema instead, in `binder/order.py`.
+        _is_bare_wildcard_projection = (
+            len(_projection) == 1
+            and _projection[0].node_type == NodeType.WILDCARD
+            and _projection[0].except_columns is None
+            and _projection[0].value is None
+        )
         rewritten = []
         for expr, ascending in _order_by:
             if expr.node_type == NodeType.LITERAL:
@@ -1403,11 +1664,18 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 if _expr_cat != LogicalCategory.INTEGER:
                     raise UnsupportedSyntaxError("Cannot **ORDER BY** constant values. Order by a column, or by an expression over one.")
                 position = int(expr.value)
-                if position < 1 or position > len(_projection):
+                if position < 1:
                     raise UnsupportedSyntaxError(
                         f"**ORDER BY** position {position} is out of range — **SELECT** has {len(_projection)} column(s). Positions count the **SELECT** columns and start at 1."
                     )
-                expr = _projection[position - 1]
+                if _is_bare_wildcard_projection:
+                    expr.is_wildcard_order_position = True
+                elif position > len(_projection):
+                    raise UnsupportedSyntaxError(
+                        f"**ORDER BY** position {position} is out of range — **SELECT** has {len(_projection)} column(s). Positions count the **SELECT** columns and start at 1."
+                    )
+                else:
+                    expr = _projection[position - 1]
             rewritten.append((expr, ascending))
         _order_by = rewritten
 
@@ -1440,10 +1708,8 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _newly_minted: list = []
             _expr = _hoist_windows(
                 _expr,
-                "ORDER BY",
                 _window_specs,
                 _ranking_specs,
-                _window_displays,
                 _minted,
                 _newly_minted,
             )
@@ -1532,6 +1798,24 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 _having_passthrough.append(_identifier)
 
     _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
+
+    # GROUP BY ROLLUP(...) — lower the construct to the flat key list plus an explicit
+    # list of GROUPING SETS over it, before any of the rewriting below runs. The flat
+    # list then takes exactly the same path a plain GROUP BY does (nesting strip,
+    # positional/alias resolution, binding), and `_grouping_sets` indexes into it
+    # positionally — every rewrite below replaces list members in place, so the indices
+    # stay valid.
+    #
+    # The sets are the representation the aggregate carries all the way to the native
+    # compiler. It is deliberately the general form (an arbitrary list of key subsets),
+    # not a rollup prefix-chain: CUBE and GROUPING SETS are the same object with a
+    # different set list, so adding them is a builder change, not a redesign.
+    _grouping_sets = None
+    if isinstance(_groups, list) and any(
+        isinstance(g, logical_planner_builders.GroupingConstruct) for g in _groups
+    ):
+        _groups, _grouping_sets = _expand_grouping_elements(_groups)
+
     if isinstance(_groups, list):
         # Both sides of the match have to be stripped, or the projection and the
         # group key still disagree — `SELECT (id + 1) ... GROUP BY id + 1` is the
@@ -1592,80 +1876,259 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             _rewritten_groups.append(_group_expr)
         _groups = _rewritten_groups
 
-    # A window function beside a plain aggregate is refused for exactly the reason an
-    # explicit GROUP BY beside one is (the two refusals immediately below): the Window
-    # step is planned UNDER the aggregate step, so the window is computed over the rows
-    # the aggregate then collapses. It can never see the grouped result the standard
-    # says it should be computed over.
+    # ---- a window computed OVER the grouped result -----------------------------------
     #
-    # A bare aggregate with no GROUP BY is still a group — the same wall — but it had no
-    # guard of its own and fell through to the generic "must appear in the `GROUP BY`
-    # clause" error below. That error names a column, and the only column it had to name
-    # was the hoisted window's reference, whose `source_column` is the MINTED `$win_` key:
-    # a column the caller never wrote, random per execution. Refused here instead, while
-    # the window's display form is in hand and the failure can be described in the
-    # window's own terms.
+    # `SELECT k, SUM(x), SUM(SUM(x)) OVER (PARTITION BY k) ... GROUP BY k` is standard
+    # SQL and the common analytics idiom: GROUP BY collapses the rows, the aggregates are
+    # computed per group, and the window then runs over the GROUPED rows — an aggregate
+    # nested inside a window's argument being the group-level aggregate, and the window's
+    # own call the aggregate over those group results.
     #
-    # QUALIFY is refused on the same terms (architect, 2026-08-13). Its Filter is planned
-    # below the aggregate step too, so `SELECT COUNT(*) ... QUALIFY w > 1` filters the
-    # PRE-aggregation rows and then counts — the same wall reached through a different
-    # clause, and it ran without complaint. Only the clause named and the remedy differ:
-    # a SELECT window is escaped by aggregating in a subquery, a QUALIFY window by doing
-    # the windowing and its filtering in one and aggregating the result. A QUALIFY window
-    # with no plain aggregate beside it is untouched — there is no collapse to lose it to.
+    # Both arrangements were refused, and for a real reason: the Window step is planned
+    # UNDER the aggregate step, so the window would have been computed over the rows the
+    # aggregate collapses and could never see the aggregated result. A bare aggregate
+    # with no GROUP BY is the same wall (it is still one group), and so is a window
+    # borrowed into the projection by QUALIFY or by ORDER BY.
     #
-    # Refused, not supported: computing the window above the aggregate is a plan-shape
-    # change (`window_to_join.py` copies the sub-plan BELOW the Window node as the
-    # window's input, which would have to become the aggregate's output). Tracked as
-    # follow-up, deliberately not smuggled in here.
-    if _window_displays and _aggregates and (_groups is None or _groups == []):
-        # SELECT windows are enumerated first, then QUALIFY's borrowed ones, then ORDER
-        # BY's — so a statement carrying more than one names the one the caller can see in
-        # their SELECT list.
-        _refused_window, _refused_clause = _window_displays[0]
-        _refused_aggregate = md_code(format_expression(_aggregates[0]))
-        # The clause is load-bearing in the MESSAGE, not just in the guard: the remedies
-        # are not variations on one rewrite, they put different things in the subquery.
-        # An `else` here was wrong the moment ORDER BY became a third clause — a window
-        # written in ORDER BY was reported as being in QUALIFY, with QUALIFY's remedy.
-        if _refused_clause == "SELECT":
-            _refusal = (
-                f"Window function {md_code(_refused_window)} cannot be combined with the "
-                f"aggregate {_refused_aggregate} in the same {md_syntax('select')}"
+    # The fix is the plan shape the refusals used to ADVISE the caller to write by hand:
+    # aggregate first, present the grouped rows as a relation, and run the windows over
+    # it —
+    #
+    #     <source> -> Aggregate[AndGroup] -> Project -> Subquery -> Window(s) -> ...
+    #
+    # The Subquery is not decoration. `window_to_join` copies the sub-plan below the
+    # Window node as the window's input and needs it to expose exactly ONE relation name
+    # (`_source_relation`) to rebuild the outer leg of its join as a qualified wildcard.
+    # An aggregate over a join exposes none, so the boundary is what makes the grouped
+    # rows addressable — and it is also what lets a window run over a multi-table join
+    # at all, which `_find_base_scan` refuses in every other arrangement.
+    #
+    # Everything above the grouping is then re-pointed at that relation's columns
+    # (`_rebase_over_aggregate`), because past the boundary the source columns are gone
+    # and only the group keys and the aggregates have names.
+    _window_output_aliases = {_alias for _alias, _display in _minted.values()}
+    if (_window_specs or _ranking_specs) and (
+        (_groups is not None and _groups != []) or _aggregates
+    ):
+        if _groups is not None and _groups != []:
+            if any(p.node_type == NodeType.WILDCARD for p in _projection):
+                raise UnsupportedSyntaxError(
+                    "`SELECT *` cannot be used with **GROUP BY** — did you mean `GROUP BY ALL`?"
+                )
+            if _groups == NodeType.WILDCARD:
+                _groups = _group_by_all_keys(_projection, _window_output_aliases)
+        _grouped_keys = list(_groups) if isinstance(_groups, list) else []
+
+        # The hoisted window nodes themselves. They are aggregates by node type, and
+        # QUALIFY still holds the original object in its predicate, so they have to be
+        # told apart from the group-level aggregates rather than walked into. A ranking
+        # window is here too — it is not in `_window_specs`, but `RANK()` is an
+        # AGGREGATOR node and collecting it as a group-level aggregate reported it as
+        # "the aggregate function RANK is not supported".
+        _hoisted_windows = {id(_agg_node) for _agg_node, _partition_by in _window_specs}
+        _hoisted_windows.update(id(_original) for _slot, _original in _qualify_window_slots)
+
+        # The aggregates the grouping must compute, gathered from every clause that can
+        # hold one. `_aggregates` already carries the SELECT list's, HAVING's and ORDER
+        # BY's; what it cannot carry is an aggregate written inside a WINDOW, because the
+        # hoist spliced the window out of the projection before the collection walk ran —
+        # so `SUM(SUM(x)) OVER (...)`'s inner SUM was computed by nothing at all.
+        _window_operands: list = []
+        for _agg_node, _partition_by in _window_specs:
+            _window_operands.extend(_agg_node.parameters or [])
+            _window_operands.extend(_partition_by)
+        for _kind, _partition_by, _window_order_by, _win_alias, _params in _ranking_specs:
+            _window_operands.extend(_partition_by)
+            _window_operands.extend(_column for _column, _ascending in _window_order_by)
+            _window_operands.extend(_params or [])
+        for _operand in _window_operands:
+            _aggregates.extend(_outermost_aggregates(_operand))
+        # A plain aggregate in QUALIFY (`QUALIFY RANK() OVER (...) = 1 AND SUM(x) > 5`).
+        # Its Filter sits above the windows but BELOW the Project, so it reads the
+        # grouped relation directly and needs no pass-through — only computing.
+        for _aggregate in _outermost_aggregates(_qualify):
+            if id(_aggregate) not in _hoisted_windows:
+                _aggregates.append(_aggregate)
+
+        # One aggregate, however many times it is written. `SUM(x) AS revenue` in the
+        # SELECT list, a bare `SUM(x)` inside a window's argument and a third in HAVING
+        # are ONE grouped column that all three read. Deduped on the RENDERING, which is
+        # also the name the column crosses the boundary under — the aliases are re-applied
+        # above it, on the references, so which spelling wins here does not name anything.
+        _grouped_aggregates: list = []
+        _seen_renderings: set = set()
+        for _aggregate in _aggregates:
+            _rendering = format_expression(_aggregate).lower()
+            if _rendering not in _seen_renderings:
+                _seen_renderings.add(_rendering)
+                _grouped_aggregates.append(_aggregate)
+
+        # The columns the grouped relation exposes, and the spellings that reach each.
+        # A literal group key is dropped: it forms one group and names no column (the
+        # binder strips it from `groups` for the same reason).
+        _grouped_columns: list = [
+            _key for _key in _grouped_keys if _key.node_type != NodeType.LITERAL
+        ] + _grouped_aggregates
+        _grouped_names: dict = {}
+        _grouped_taken: set = set()
+        for _column in _grouped_columns:
+            _output_name = _grouped_output_name(_column)
+            if _output_name in _grouped_taken:
+                raise UnsupportedSyntaxError(
+                    compose(
+                        f"The grouped result has two columns named {md_code(_output_name)}",
+                        "A window is computed over the grouped rows, which makes them a "
+                        "relation — and a relation cannot hold two columns of one name",
+                        f"Name one of them differently with {md_syntax('as')}",
+                    )
+                )
+            _grouped_taken.add(_output_name)
+            for _key in _grouped_reference_keys(_column):
+                _grouped_names[_key] = _output_name
+
+        # A SELECT alias standing for a group key or an aggregate reaches the grouped
+        # relation too. HAVING is planned BELOW the boundary (see the note where its
+        # Filter is emitted), which is below the Project that creates the alias, so
+        # `SUM(q) AS x ... HAVING x > 300` has to resolve `x` to the column `SUM(q)`
+        # rather than to a name that does not exist yet. Registered only where the
+        # projection IS one of the grouped columns, and never over an existing key — a
+        # real column of that name outranks an alias of it.
+        for _column in _projection:
+            if not _column.alias:
+                continue
+            _alias_key = _column.alias.lower()
+            if _alias_key in _grouped_names:
+                continue
+            _target = None
+            if _column.node_type == NodeType.IDENTIFIER and _column.source_column:
+                _target = _grouped_names.get(_column.source_column.lower())
+            if _target is None:
+                _target = _grouped_names.get(format_expression(_column).lower())
+            if _target is not None:
+                _grouped_names[_alias_key] = _target
+
+        # Names that resolve ABOVE the grouping rather than against it: a window's
+        # output column, and a SELECT alias the statement's ORDER BY names (the Project
+        # creates it, and the Order node sits above the Project).
+        _above_grouping = {_alias.lower() for _alias in _window_output_aliases}
+        _above_grouping.update(p.alias.lower() for p in _projection if p.alias)
+
+        # Re-point everything computed ABOVE the grouping. One memo across the whole
+        # statement, so a node reachable from two clauses stays one object.
+        _rebase_memo: dict = {}
+
+        def _rebase(_node):
+            return _rebase_over_aggregate(
+                _node, _grouped_names, _hoisted_windows, _above_grouping, _rebase_memo
             )
-            _remedy = "Compute the aggregate in a subquery and apply the window to its result"
-        elif _refused_clause == "QUALIFY":
-            _refusal = (
-                f"Window function {md_code(_refused_window)} in {md_syntax('qualify')} cannot "
-                f"be combined with the aggregate {_refused_aggregate}"
+
+        for _index, _column in enumerate(_projection):
+            _projection[_index] = _rebase(_column)
+        _having = _rebase(_having)
+        _qualify = _rebase(_qualify)
+        if isinstance(_order_by, list):
+            _order_by = [
+                (_rebase(_expression), _ascending) for _expression, _ascending in _order_by
+            ]
+            _order_by_columns = [_item[0] for _item in _order_by]
+        for _index, (_agg_node, _partition_by) in enumerate(_window_specs):
+            _agg_node.parameters = [
+                _rebase(_parameter) if isinstance(_parameter, (Node, LogicalColumn)) else _parameter
+                for _parameter in (_agg_node.parameters or [])
+            ]
+            _window_specs[_index] = (_agg_node, [_rebase(_pb) for _pb in _partition_by])
+        for _index, (
+            _kind,
+            _partition_by,
+            _window_order_by,
+            _win_alias,
+            _params,
+        ) in enumerate(_ranking_specs):
+            _ranking_specs[_index] = (
+                _kind,
+                [_rebase(_pb) for _pb in _partition_by],
+                [(_rebase(_column), _ascending) for _column, _ascending in _window_order_by],
+                _win_alias,
+                [_rebase(_parameter) for _parameter in (_params or [])],
             )
-            _remedy = (
-                f"Apply the window and its {md_syntax('qualify')} in a subquery, and "
-                "aggregate the result"
-            )
+
+        if _grouped_keys:
+            _grouped_step = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
+            _grouped_step.groups = _grouped_keys
+            _grouped_step.aggregates = _grouped_aggregates
+            _grouped_step.projection = list(_grouped_columns)
+            # None = one set over every key (a plain GROUP BY) — see the note on the
+            # ungrouped-window-free path below.
+            _grouped_step.grouping_sets = _grouping_sets
         else:
-            _refusal = (
-                f"Window function {md_code(_refused_window)} in {md_syntax('order by')} "
-                f"cannot be combined with the aggregate {_refused_aggregate}"
-            )
-            _remedy = "Compute the aggregate in a subquery and order its result by the window"
-        raise UnsupportedSyntaxError(
-            compose(
-                _refusal,
-                "The window is computed over the rows the aggregate collapses, so it cannot "
-                "see the aggregated result",
-                _remedy,
-            )
-        )
+            # No GROUP BY: one group holding every row, and the UNGROUPED node is the one
+            # that promises exactly one row out for any input. `AggregateAndGroup` over an
+            # empty key list makes no such promise, and the window above reads that one
+            # row as its whole partition.
+            _grouped_step = LogicalPlanNode(node_type=LogicalPlanStepType.Aggregate)
+            _grouped_step.groups = []
+            _grouped_step.aggregates = _grouped_aggregates
+        previous_step_id, step_id = step_id, random_string()
+        inner_plan.add_node(step_id, _grouped_step)
+        inner_plan.add_edge(previous_step_id, step_id)
+
+        # A Project between the aggregate and the boundary. The aggregate's outputs live
+        # in `$derived` until a Project renames them to `$project`, and the Subquery's
+        # `visit_exit` pops `$derived` — without this the aggregate columns never appear
+        # in the boundary's schema at all (the same requirement `window_to_join` has when
+        # it builds its own aggregate CTE).
+        _grouped_project = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        _grouped_project.columns = list(_grouped_columns)
+        _grouped_project.passthrough_columns = []
+        _grouped_project.except_columns = None
+        previous_step_id, step_id = step_id, random_string()
+        inner_plan.add_node(step_id, _grouped_project)
+        inner_plan.add_edge(previous_step_id, step_id)
+
+        if _having:
+            # HAVING is planned INSIDE the boundary, below the windows — SQL evaluates it
+            # before window functions, so the window runs over the groups that SURVIVED
+            # it. Left in its usual place above the Project (which is above the windows)
+            # it filtered nothing the window had not already counted:
+            # `GROUP BY k HAVING SUM(id) > 4` with `SUM(SUM(id)) OVER ()` answered the
+            # total over ALL groups, 45 where DuckDB and the standard say 35.
+            #
+            # It reads the Project's output, which is the same scope it reads today, and
+            # its aggregates and group keys are all grouped columns — so unlike the
+            # un-windowed path it needs no pass-through columns above.
+            _having_step = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
+            _having_step.condition = _having
+            previous_step_id, step_id = step_id, random_string()
+            inner_plan.add_node(step_id, _having_step)
+            inner_plan.add_edge(previous_step_id, step_id)
+            _having = None
+            _having_passthrough = []
+
+        _grouped_relation = LogicalPlanNode(node_type=LogicalPlanStepType.Subquery)
+        _grouped_relation.alias = f"{GROUPED_AGGREGATE_ALIAS_PREFIX}{random_string(6)}"
+        _grouped_relation.columns = [Node(node_type=NodeType.WILDCARD)]
+        previous_step_id, step_id = step_id, random_string()
+        inner_plan.add_node(step_id, _grouped_relation)
+        inner_plan.add_edge(previous_step_id, step_id)
+
+        # The grouping has been planned. Emptied so the aggregate steps further down do
+        # not plan it a second time, above the windows this time.
+        _groups = []
+        _aggregates = []
+        _grouped_window_source = True
+    else:
+        _grouped_window_source = False
 
     if _window_specs:
-        if _groups is not None and _groups != []:
-            raise UnsupportedSyntaxError("Window functions cannot be combined with **GROUP BY**.")
-        # Refuse a window with no base table, or with more than one, while the clause that
-        # wrote it is still in hand. The scan itself is NOT captured: the rewriter copies
-        # the whole sub-plan below the Window node instead, which is both the window's real
-        # input (WHERE included) and the post-resolution shape of it.
-        _find_base_scan(inner_plan)
+        if not _grouped_window_source:
+            # Refuse a window with no base table, or with more than one, while the clause
+            # that wrote it is still in hand. The scan itself is NOT captured: the rewriter
+            # copies the whole sub-plan below the Window node instead, which is both the
+            # window's real input (WHERE included) and the post-resolution shape of it.
+            #
+            # Skipped over a grouped result: the boundary above IS the single relation
+            # this is checking for, however many tables the grouping read.
+            _find_base_scan(inner_plan)
         # Group by distinct partition spec; same partition → one Window node (shared CTE).
         _by_partition: dict = {}
         for _agg_node, _partition_by in _window_specs:
@@ -1687,8 +2150,6 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             inner_plan.add_edge(previous_step_id, step_id)
 
     if _ranking_specs:
-        if _groups is not None and _groups != []:
-            raise UnsupportedSyntaxError("Window functions cannot be combined with **GROUP BY**.")
         from opteryx.types.schema import SchemaColumn, mint_column_identity
 
         # Group ranking functions that share the same PARTITION BY + ORDER BY into a
@@ -1774,16 +2235,15 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         # WILDCARD is used to represent GROUP BY ALL, we group by all columns in the projection
         # which aren't aggregates
         if _groups == NodeType.WILDCARD:
-            _groups = [
-                p
-                for p in _projection
-                if len(get_all_nodes_of_type(p, select_nodes=(NodeType.AGGREGATOR,))) == 0
-            ]
+            _groups = _group_by_all_keys(_projection, _window_output_aliases)
 
         group_step = LogicalPlanNode(node_type=LogicalPlanStepType.AggregateAndGroup)
         group_step.groups = _groups
         group_step.aggregates = _aggregates
         group_step.projection = _projection
+        # None = one set over every key (a plain GROUP BY). Otherwise the explicit set
+        # list, as index tuples into `groups` — see `_expand_grouping_elements`.
+        group_step.grouping_sets = _grouping_sets
         previous_step_id, step_id = step_id, random_string()
         inner_plan.add_node(step_id, group_step)
         if previous_step_id is not None:

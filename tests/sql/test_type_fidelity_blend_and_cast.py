@@ -314,8 +314,10 @@ def test_large_integer_to_blob_does_not_allocate_by_value():
 #
 # The pair form of each was ALREADY refused; these pin that the NULL-partnered
 # form agrees with it. ARRAY is the reported case, but the hole was per-family,
-# so DECIMAL and INTERVAL (both rejected by nc_dispatch — scale and unit are
-# out-of-band, so a raw blend would be silently wrong) are pinned with it.
+# so INTERVAL (rejected by nc_dispatch — its unit is out-of-band, so a raw
+# blend would be silently wrong) is pinned with it. DECIMAL was originally
+# pinned here too; nc_dispatch now blends it (bind-time CAST-aligned to a
+# single scale first) — see test_null_partnered_decimal_branch_now_works.
 # ---------------------------------------------------------------------------
 
 _ARRAY_BRANCH = "SPLIT(name,'a')"
@@ -332,15 +334,25 @@ _ARRAY_BRANCH = "SPLIT(name,'a')"
         f"SELECT COALESCE(NULL, {_ARRAY_BRANCH}) AS v FROM $planets",
         f"SELECT IFNULL(NULL, {_ARRAY_BRANCH}) AS v FROM $planets",
         f"SELECT IFNOTNULL(NULL, {_ARRAY_BRANCH}) AS v FROM $planets",
-        # DECIMAL and INTERVAL — same hole, different family.
-        "SELECT IIF(id > 2, NULL, CAST(id AS DECIMAL(10,2))) AS v FROM $planets",
-        "SELECT COALESCE(NULL, CAST(id AS DECIMAL(10,2))) AS v FROM $planets",
+        # INTERVAL — same hole, different family. (DECIMAL used to be pinned
+        # here too; nc_dispatch now blends it — see
+        # test_null_partnered_decimal_branch_now_works below.)
         "SELECT IIF(id > 2, NULL, INTERVAL '1' DAY) AS v FROM $planets",
     ],
 )
 def test_null_partnered_unblendable_branch_is_refused_at_bind(sql):
     with pytest.raises(IncompatibleTypesError):
         _values(sql)
+
+
+def test_null_partnered_decimal_branch_now_works():
+    """nc_dispatch (COALESCE/IFNULL/IFNOTNULL/IIF) now blends DECIMAL/DECIMAL128,
+    the same as CASE's draken_if_then_else — see function_null_conditional.cpp's
+    header note and binder.py's null-conditional "Descriptor coercion" pass,
+    which CAST-aligns every value branch to one resolved ColumnType (scale
+    included) before the kernel runs, since it cannot promote DECIMAL itself."""
+    assert len(_values("SELECT IIF(id > 2, NULL, CAST(id AS DECIMAL(10,2))) AS v FROM $planets")) == 9
+    assert len(_values("SELECT COALESCE(NULL, CAST(id AS DECIMAL(10,2))) AS v FROM $planets")) == 9
 
 
 @pytest.mark.parametrize(

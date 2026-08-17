@@ -5,6 +5,7 @@
 
 
 import copy
+import decimal
 from contextlib import suppress
 from typing import Any, Dict, Optional, Tuple
 
@@ -67,19 +68,33 @@ from opteryx.types.type_unification import NOT_LITERAL, compute_selection_result
 # still needs to know the result type so expressions like `0.2 * AVG(col)` and
 # downstream comparisons type-check correctly.
 _AGGREGATE_RESULT_INTEGER = frozenset(
-    {"COUNT", "COUNT_DISTINCT", "DISTINCT", "APPROX_COUNT_DISTINCT"}
+    {"COUNT", "COUNT_DISTINCT", "DISTINCT", "APPROX_COUNT_DISTINCT", "GROUPING"}
 )
 _AGGREGATE_RESULT_PASSTHROUGH = frozenset({"SUM", "MIN", "MAX", "ANY_VALUE"})
 # MEDIAN always returns DOUBLE — the runtime is MedianFloat64Aggregate (column) and
 # float(value) (literal), and non-numeric inputs are rejected outright. Typing it as
 # DOUBLE (not input-passthrough) keeps the binder honest with the runtime, the same
 # way AVG is forced to DOUBLE below.
-# STDDEV: population stddev, always DOUBLE regardless of input numeric type —
-# the native sink rejects DECIMAL input outright (native_group_sinks.hpp), so
-# there's no AVG-style decimal-passthrough case to handle.
+# STDDEV/STDDEV_POP/STDDEV_SAMP/VAR_POP/VAR_SAMP: always DOUBLE regardless of
+# input numeric type — the native sink rejects DECIMAL input outright
+# (native_group_sinks.hpp), so there's no AVG-style decimal-passthrough case to
+# handle. STDDEV_POP is a pure alias for STDDEV (population stddev, N
+# denominator); STDDEV_SAMP/VAR_POP/VAR_SAMP are new finalizations over the
+# same accumulated Σx/Σx²/count.
 # CORR: Pearson correlation over two numeric operand columns — always DOUBLE
 # (NULL when undefined), same DECIMAL rejection posture as STDDEV/MEDIAN.
-_AGGREGATE_RESULT_DOUBLE = frozenset({"APPROX_PERCENTILE", "CORR", "MEDIAN", "STDDEV"})
+_AGGREGATE_RESULT_DOUBLE = frozenset(
+    {
+        "APPROX_PERCENTILE",
+        "CORR",
+        "MEDIAN",
+        "STDDEV",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
+        "VAR_POP",
+        "VAR_SAMP",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # CASE THEN/ELSE branch-type validation.
@@ -593,11 +608,27 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         # carries `node.source = "partsupp"` while the schema is keyed by the
         # full path `testdata.tpch.partsupp`. Match the bare qualifier against
         # both the exact key and the trailing dotted segment.
-        suffix = f".{node.source}"
+        #
+        # Folded case: a relation ALIAS is an unquoted SQL identifier, and those
+        # are case-insensitive by the same rule that already makes column names
+        # case-insensitive (`find_column(..., case_insensitive=True)` below) —
+        # `FROM t AS P` addressed as `p.col` is ordinary folding, not a typo.
+        # `node.source` itself gets rewritten to the schema's own-cased spelling
+        # once a match is found (see the unconditional `node.source =
+        # found_source_relation.name` below), so this is the ONE place case gets
+        # folded — every `.source`-keyed structure built after this point
+        # (relation-name lists, `all_relations`, the optimizer) sees one
+        # consistent case, not a per-reference guess. Dataset/CTE *names* (as
+        # opposed to aliases) stay case-sensitive on purpose — they can resolve
+        # to a filesystem path, which is case-sensitive on POSIX.
+        source_lower = node.source.lower()
+        suffix = f".{source_lower}"
         return {
             name: schema
             for name, schema in schemas.items()
-            if name.startswith("$shared") or name == node.source or name.endswith(suffix)
+            if name.startswith("$shared")
+            or name.lower() == source_lower
+            or name.lower().endswith(suffix)
         }
 
     # get the list of candidate schemas
@@ -606,7 +637,7 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
     # if there are no candidates, we probably don't know the relation — unless an
     # enclosing scope does (a qualified correlated reference, `WHERE l.k = o.k`).
     if not candidate_schemas and not _candidates(context.outer_schemas):
-        if node.source in context.relations:
+        if node.source and node.source.lower() in {r.lower() for r in context.relations}:
             raise UnexpectedDatasetReferenceError(
                 dataset=node.source,
                 message=f"Dataset `{node.source}` is not available after being used on the right side of a ANTI or SEMI JOIN",
@@ -669,9 +700,13 @@ def locate_identifier(node: Node, context: Any) -> Tuple[Node, Dict]:
         )
         return new_node, context
 
-    # Update node.source to the found relation name
-    if not node.source:
-        node.source = found_source_relation.name
+    # Update node.source to the found relation name — ALWAYS, not just when empty.
+    # `_candidates` above matched the qualifier case-insensitively, so a query can
+    # type `p.col` against a relation aliased `P`; rewriting `node.source` to the
+    # relation's OWN spelling here is what keeps it canonical for every consumer
+    # built from `.source` after this point (relation-name lists, `all_relations`,
+    # the optimizer) — they compare by exact string and never fold case themselves.
+    node.source = found_source_relation.name
 
     # if we have an alias for a column not known about in the schema, add it
     if node.alias and node.alias not in column.all_names:
@@ -949,24 +984,81 @@ def inner_binder(
 
                 # Literal coercion: binder's job — mutate AST nodes to match the resolved type.
                 # This is NOT type inference; it's making literals consistent with the
-                # surrounding expression's type after the catalog has declared the return type.
-                if node.value in ("COALESCE", "IFNULL", "IFNOTNULL") and _result_type_lc not in (
+                # surrounding expression's type after the catalog has declared the return
+                # type. Runs over VALUE args only (_value_arg_start below excludes IIF's
+                # condition) so it now covers IIF's literal branches too, not just
+                # COALESCE/IFNULL/IFNOTNULL — those previously fell through to the
+                # descriptor-coercion pass below, which retypes but (for the non-DECIMAL
+                # case it was written for) never needed to re-quantize a value's digits.
+                #
+                # Builds a FRESH Node + ConstantColumn per coerced literal rather than
+                # mutating `param`/`param.schema_column` in place: a bare literal like
+                # `0` is commonly INTERNED — the same ConstantColumn object shared by
+                # every textually-identical "0" elsewhere in the query (found_column
+                # adoption above, and again downstream when other passes re-resolve a
+                # copied subtree by name). Retyping that SHARED object to this one
+                # call's result type silently retyped every OTHER "0" in the query too:
+                # `COALESCE(ws_qty, 0)` (INTEGER) picked up `COALESCE(ws_wc, 0)`'s
+                # DECIMAL(7,2) literal type from a later-bound copy, and
+                # `IFNULL(ws_qty,0) + IFNULL(cs_qty,0)` died with "not supported" for
+                # an INTEGER+DECIMAL mix that was never really there.
+                _fn_name = (
+                    _resolved.function_definition.name if _resolved is not None else node.value
+                )
+                _value_arg_start = _NULL_CONDITIONAL_VALUE_ARG.get(_fn_name)
+                if _value_arg_start is not None and _result_type_lc not in (
                     None,
                     LogicalCategory.NULL,
                 ):
-                    parameters = []
-                    for param in node.parameters:
-                        if (
+                    _params = list(node.parameters)
+                    for _i in range(_value_arg_start, len(_params)):
+                        param = _params[_i]
+                        if not (
                             param.node_type == NodeType.LITERAL
                             and param.value is not None
                             and param.value != set()
                         ):
-                            param.value = parse_value(_result_type_lc, param.value)
-                            param.type = result_type
-                            if param.schema_column is not None:
-                                param.schema_column.column_type = result_type
-                        parameters.append(param)
-                    node.parameters = parameters
+                            continue
+                        _new_value = parse_value(_result_type_lc, param.value)
+                        if _result_type_lc == LogicalCategory.DECIMAL and result_type.logical is not None:
+                            # A written literal's digits are not re-quantized to the
+                            # declared scale by parse_value/_parse_decimal (it keeps
+                            # whatever str(value) produced) — an inexact value would
+                            # silently misread at the wrong scale downstream:
+                            # _materialise_constant_literal derives its physical tier
+                            # from precision alone and never re-rounds. Quantize here
+                            # and fail loud instead of letting a wrong value through.
+                            # An explicit widened context: opteryx/__init__.py pins
+                            # getcontext().prec = 28 globally, but DECIMAL128 holds up
+                            # to 38 significant digits — quantizing under the ambient
+                            # (28) context would silently round/reject a legitimate
+                            # wide value before it ever reaches the engine.
+                            _quantum = decimal.Decimal(1).scaleb(-int(result_type.logical.scale))
+                            _rescaled = _new_value.quantize(_quantum, context=decimal.Context(prec=38))
+                            if _rescaled != _new_value:
+                                raise IncompatibleTypesError(
+                                    message=(
+                                        f"{node.value}: literal {param.value!r} cannot be "
+                                        f"represented exactly as {result_type} — CAST to "
+                                        "align the branches."
+                                    )
+                                )
+                            _new_value = _rescaled
+                        if _new_value == param.value and result_type == param.type:
+                            continue
+                        _new_param = param.copy()
+                        _new_param.value = _new_value
+                        _new_param.type = result_type
+                        _old_sc = param.schema_column
+                        _new_param.schema_column = ConstantColumn(
+                            name=_old_sc.name if _old_sc is not None else str(_new_value),
+                            column_type=result_type,
+                            aliases=list(_old_sc.aliases) if _old_sc is not None and _old_sc.aliases else [],
+                            value=_new_value,
+                            nullable=False,
+                        )
+                        _params[_i] = _new_param
+                    node.parameters = _params
 
                 # Descriptor coercion for the same family (plus IIF). These
                 # functions hand back one argument VERBATIM, so an argument whose
@@ -979,19 +1071,21 @@ def inner_binder(
                 # time — the same move as the CASE branch coercion below and the
                 # UNION-leg coercion in set_ops.
                 #
-                # Deliberately limited to same-physical descriptor mismatches: a
-                # CROSS-physical pair (narrow int vs INT64, int vs float) is the
-                # kernel's own promotion to make (nc_promote_fixed), and inserting
-                # casts there would take work off a path that is already correct.
-                _fn_name = (
-                    _resolved.function_definition.name if _resolved is not None else node.value
-                )
-                _value_arg_start = _NULL_CONDITIONAL_VALUE_ARG.get(_fn_name)
-                if (
-                    _value_arg_start is not None
-                    and result_type is not None
-                    and _descriptor_carries_meaning(result_type)
-                ):
+                # Two different rules, by family:
+                #   - DECIMAL/DECIMAL128 (either side): ALWAYS CAST on any mismatch,
+                #     regardless of whether the physical tag matches. DECIMAL cannot
+                #     self-promote — scale is out-of-band on the vector — so unlike
+                #     the plain-fixed family below, there is no kernel-side promotion
+                #     to defer to. This is what lets COALESCE(decimal_col, 0.0) reach
+                #     nc_dispatch with the decimal_col branch already rescaled/
+                #     retagged to the resolved result type (FLOAT64 once FLOAT wins,
+                #     find_compatible_type; or an exact DECIMAL(p,s) otherwise).
+                #   - everything else: limited to same-physical descriptor mismatches
+                #     (TIMESTAMP/TIME unit). A CROSS-physical pair (narrow int vs
+                #     INT64, int vs float) is the kernel's own promotion to make
+                #     (nc_promote_fixed), and inserting casts there would take work
+                #     off a path that is already correct.
+                if _value_arg_start is not None and result_type is not None:
                     _params = list(node.parameters)
                     for _i in range(_value_arg_start, len(_params)):
                         _arg = _params[_i]
@@ -1003,7 +1097,15 @@ def inner_binder(
                         # case in set_ops._cast_leg_columns_to).
                         if _arg_ct == result_type or _arg_ct == _CT_NULL:
                             continue
+                        if (
+                            _arg_ct.category == LogicalCategory.DECIMAL
+                            or result_type.category == LogicalCategory.DECIMAL
+                        ):
+                            _params[_i] = _bound_cast_node(_arg, result_type)
+                            continue
                         if _arg_ct.physical != result_type.physical:
+                            continue
+                        if not _descriptor_carries_meaning(result_type):
                             continue
                         _params[_i] = _bound_cast_node(_arg, result_type)
                     node.parameters = _params

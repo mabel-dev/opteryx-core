@@ -550,9 +550,44 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         if getattr(self, "_catalog_cache", None) is None:
             self._catalog_cache = {}
 
-        # Return cached instance when available
+        # Return cached instance when available - but not blindly. This
+        # connector (and the module-level cache in
+        # opteryx.connectors.connector_factory that hands connectors out) is
+        # process-long-lived, keyed by workspace name for the life of the
+        # process rather than per-query or per-request, and a production
+        # deployment runs many such processes at once. The catalog's own
+        # existence/deletion gate only ever runs in __init__ (see
+        # opteryx_catalog.OpteryxCatalog.__init__), which a cache hit skips
+        # entirely - so a workspace dropped by DROP WORKSPACE (run against
+        # some OTHER process, or even this one before this fix) would stay
+        # queryable from here indefinitely in every process that had already
+        # cached it, forever bypassing the drop. A cache hit gets one cheap
+        # re-check first: a single `$properties` doc read
+        # (get_workspace_properties(), which deliberately does not itself
+        # gate on deletion), not a full reconstruction. A cache miss already
+        # goes through __init__'s gate for free below.
+        #
+        # An empty result means the `$properties` doc is gone - DROP
+        # WORKSPACE removes it outright, it doesn't just flag it - and a
+        # cache entry only exists because construction succeeded once
+        # before, so "gone now" is unambiguous, not a workspace that merely
+        # hasn't been provisioned yet.
         if catalog_name in self._catalog_cache:
-            return self._catalog_cache[catalog_name]
+            cached = self._catalog_cache[catalog_name]
+            try:
+                props = cached.get_workspace_properties()
+                still_live = bool(props) and props.get("deleted-at-ms") is None
+            except Exception:
+                # A transient read failure here must not evict a perfectly
+                # good cached handle over a blip - same conservative
+                # direction the constructor's own read-failure handling
+                # takes (opteryx_catalog.py: "don't fail catalog init on
+                # transient Firestore errors, and don't claim a workspace is
+                # missing when we simply couldn't look").
+                still_live = True
+            if still_live:
+                return cached
+            del self._catalog_cache[catalog_name]
 
         factory = self.catalog_factory
 
@@ -943,6 +978,22 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """
         catalog = self._get_catalog(workspace_name)
         catalog.set_workspace_properties({property_name: value}, author=author)
+
+    def drop_workspace(self, workspace_name: str, author: Optional[str] = None) -> None:
+        """Permanently drop every dataset and view in the workspace, then the
+        workspace itself. Refuses (raises) if deletion_protection is on -
+        the catalog's own guard, checked inside OpteryxCatalog.drop_workspace,
+        same gate `soft_delete_workspace` used to enforce.
+
+        Evicts the connector's own cache entry for this workspace immediately
+        rather than waiting for the next call's re-check (see _get_catalog) -
+        this process's very next statement against the name should see it
+        gone without a further round trip, even though other processes still
+        need that re-check to catch up.
+        """
+        catalog = self._get_catalog(workspace_name)
+        catalog.drop_workspace(author=author)
+        self._catalog_cache.pop(workspace_name, None)
 
     def egress_verdict(
         self, target_relation: str, source_relations: "List[str]"

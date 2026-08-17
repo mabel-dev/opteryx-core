@@ -83,7 +83,7 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     # KEY, so the derived relation carried duplicates — invisible while `SELECT *`
     # deduped by identity, an AmbiguousIdentifierError from `s.*` once it stopped.
     emitted_identities: set = set()
-    for name, schema in context.schemas.items():
+    for schema in context.schemas.values():
         for schema_column in schema.columns:
             if schema_column.identity not in projected_identities:
                 continue
@@ -143,14 +143,23 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
                 # underlying column's aliases are not the derived relation's.
                 out_column.aliases = []
                 columns.append(out_column)
-        if name[0] != "$" and name in context.relations:
-            context.relations.pop(name)
-    context.relations[node.alias] = "subquery"
 
     schema = RelationSchema(name=node.alias, columns=columns)
 
+    # A derived relation exposes ONE name - its alias - and the relations it was
+    # built from are not among them. Both dicts are replaced wholesale for the same
+    # reason: `traverse` re-attaches the ENCLOSING scope's relations on the way out
+    # of the boundary (see traversal.py), so anything left here is an internal name
+    # escaping into a scope that cannot address it.
+    #
+    # This previously popped only the relations still present as `context.schemas`
+    # keys, which is not the same set: the Project below this node narrows schemas to
+    # the columns it emits, so a relation contributing NO projected column - the `d`
+    # of `(SELECT p.id FROM t p, t d WHERE d.id = p.id)` - had already lost its schema
+    # and survived the pop. It then collided with the identically-named private alias
+    # of a SIBLING derived table and raised a false AmbiguousDatasetError.
     context.schemas = {"$derived": derived.schema(), node.alias: schema}
-    context.relations[node.alias] = "subquery"
+    context.relations = {node.alias: "subquery"}
     node.schema = schema
     if context.schema_only:
         # What this boundary EXPOSES, before an enclosing projection narrows it. The

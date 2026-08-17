@@ -195,7 +195,10 @@ bench: check-draken $(BUILD)/libskene.a $(ZSTD_OBJS)
 
 # probe — what handoff form does rugo's decoder give each column of a Parquet
 # file? Decided at decode time, so the footer cannot answer it.
-RUGO_SRCS := $(wildcard $(DRAKEN_ROOT)/rugo/src/parquet/*.cpp)
+# Excludes *_test.cpp: rle_direct_dict_test.cpp is a standalone driver with its
+# own main() (see `make rle-dict-test`), not a library source — wildcarding it
+# in here collides with this file's own main() at link time.
+RUGO_SRCS := $(filter-out %_test.cpp,$(wildcard $(DRAKEN_ROOT)/rugo/src/parquet/*.cpp))
 
 probe: check-draken $(ZSTD_OBJS)
 	$(CXX) $(BENCH_FLAGS) -DRUGO_PARQUET_CREATED_BY='"skene-probe"' \
@@ -223,6 +226,7 @@ convert: check-draken $(BUILD)/libskene.a $(ZSTD_OBJS)
 	  -I$(DRAKEN_ROOT)/third_party/snappy \
 	  -I$(DRAKEN_ROOT)/third_party/lz4 \
 	  -I$(DRAKEN_ROOT)/third_party/miniz \
+	  -I$(DRAKEN_ROOT)/src/cpp \
 	  bench/convert_parquet.cpp $(RUGO_SRCS) \
 	  $(DRAKEN_ROOT)/src/cpp/ipc_deserialize.cpp \
 	  $(DRAKEN_ROOT)/src/cpp/memory_pool.cpp \

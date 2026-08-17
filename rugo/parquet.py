@@ -299,25 +299,31 @@ class _ParquetReader:
         return False
 
     def __iter__(self):
+        # stream_parquet[_from_path] decode and yield one row group at a time
+        # (DecodeRowGroupColumns), unlike read_parquet[_from_path] which decode
+        # and retain every row group of the file before returning anything —
+        # see decode.hpp's DecodeRowGroupColumns docstring. This is the actual
+        # streaming implementation behind this class's own "Decode is performed
+        # lazily on iteration" claim above.
         if self._path is not None:
             if self._predicates:
                 data = _to_bytes(self._path)
                 mask = _row_group_mask(data, self._path, self._predicates)
             else:
                 mask = None
-            morsels = _native.read_parquet_from_path(
+            morsels = _native.stream_parquet_from_path(
                 self._path, column_names=self._columns, row_group_mask=mask
             )
         else:
             mask = (_row_group_mask(self._data, None, self._predicates)
                     if self._predicates else None)
-            morsels = _native.read_parquet(
+            morsels = _native.stream_parquet(
                 self._data, column_names=self._columns, row_group_mask=mask
             )
 
         unit_map, date_set = _temporal_column_maps(self._path if self._path is not None else self._data)
 
-        for morsel in (morsels or []):
+        for morsel in morsels:
             morsel = _coerce_temporal_columns(morsel, unit_map, date_set)
             if self._predicates:
                 morsel = _row_filter(morsel, self._predicates)

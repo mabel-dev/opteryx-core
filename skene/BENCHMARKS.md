@@ -146,7 +146,7 @@ link (125 MB/s theoretical), total time is none 137.2 s, lz4 73.7 s, **zstd-7
 magnitude beyond the link — so deployed data takes `for_storage()`.
 
 **So the codec a corpus uses states where it is READ, not what it holds.** The
-benchmark mirrors (`make clickbench-skene`, `make tpch-skene`) are read locally
+benchmark mirrors (`make clickbench-skene`, `make tpch`) are read locally
 off NVMe and use lz4; the parquet corpora are written in the storage posture
 (zstd, per-type level, 95% keep floor) because they stand in for deployed data.
 

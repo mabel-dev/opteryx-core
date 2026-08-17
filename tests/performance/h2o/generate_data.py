@@ -319,8 +319,9 @@ def main() -> int:
     parser.add_argument(
         "--size",
         choices=list(SIZES.keys()),
-        default="small",
-        help="data scale (default: small ~0.5GB)",
+        default="medium",
+        help="data scale (default: medium ~5GB; `small` is retained for "
+             "regenerating historical fixtures but is no longer benchmarked)",
     )
     parser.add_argument(
         "--workload",

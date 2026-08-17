@@ -1,0 +1,8 @@
+{
+  "codec": "lz4",
+  "generator": "tpchgen-cli -s 1 --parts 16 -> parquet_to_skene lz4",
+  "listing_sha256": "a25c23bfc2b48bb84a8a87405455bb103a7f898484f893d1c24f5acc8f600955",
+  "name": "tpch_1_skene",
+  "object_count": 9,
+  "total_bytes": 405754050
+}

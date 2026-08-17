@@ -1,19 +1,25 @@
 #pragma once
 // src/cpp/engine/native_group_sinks.hpp — the engine's general aggregation and
 // dedup breakers: UngroupedAggSink (COUNT(*)/COUNT/SUM/AVG/MIN/MAX/STDDEV/
-// MEDIAN, any mix), GroupBySink (multi-key, string keys, NULL-key groups),
-// DistinctSink.
+// STDDEV_SAMP/VAR_POP/VAR_SAMP/MEDIAN, any mix), GroupBySink (multi-key,
+// string keys, NULL-key groups), DistinctSink.
 //
 // Semantics (SQL, not demo shortcuts):
 //   - COUNT(*) counts rows; COUNT(col) counts non-NULL values.
 //   - SUM over integer-family/DECIMAL operands accumulates EXACT int64 (never a
 //     double round-trip); float operands accumulate double. SUM/AVG/MIN/MAX over
 //     zero valid values is NULL. AVG is FLOAT64.
-//   - STDDEV is POPULATION stddev (N denominator, not N-1/sample), always
-//     FLOAT64, accumulated as Σx/Σx²/count (no exactness requirement, unlike
-//     SUM/AVG — always double regardless of int or float operand). DECIMAL
-//     operands are rejected (CAST to DOUBLE first): reading the unscaled raw
-//     integer as a double would silently compute the wrong numbers' variance.
+//   - STDDEV (== STDDEV_POP) is POPULATION stddev (N denominator); STDDEV_SAMP
+//     is SAMPLE stddev (N-1 denominator, Bessel's correction); VAR_POP/VAR_SAMP
+//     are their pre-sqrt variances. All four are always FLOAT64, accumulated
+//     from the SAME Σx/Σx²/count lanes (agg2_update_stddev — no exactness
+//     requirement, unlike SUM/AVG — always double regardless of int or float
+//     operand); only the finalize formula (emit_lane_column) differs. The N-1
+//     forms are undefined below 2 valid rows and emit NULL, matching DuckDB/the
+//     SQL standard — the N forms are instead defined (0) at exactly 1 valid row.
+//     DECIMAL operands are rejected on all four (CAST to DOUBLE first): reading
+//     the unscaled raw integer as a double would silently compute the wrong
+//     numbers' variance.
 //   - MEDIAN buffers every non-null value per group (MedianState — see
 //     _agg_kernels.hpp), bounded by a global 512MB byte budget across all
 //     groups (fails loud past the budget: use APPROX_PERCENTILE for larger
@@ -306,6 +312,23 @@ enum class AggFn : uint8_t {
                                // rather than rows. Operand must be UINT32
                                // carrying LogicalKind::IPV4 — see
                                // cidr_operand_supported.
+    StddevSamp = 15,           // STDDEV_SAMP(col): sample stddev (N-1 denominator,
+                               // Bessel's correction). Shares STDDEV's accumulation
+                               // (agg2_update_stddev/agg2_merge — Σx, Σx², count);
+                               // only the finalize divisor differs. NULL for a
+                               // group with fewer than 2 valid rows (N-1 == 0 is
+                               // undefined, matching DuckDB/the SQL standard) —
+                               // STDDEV_POP/STDDEV is instead defined for N==1
+                               // (variance 0). STDDEV_POP is a pure alias for
+                               // AggFn::Stddev, not a separate value here.
+    VarPop = 16,               // VAR_POP(col): population variance — STDDEV's
+                               // finalize formula minus the final sqrt. Same
+                               // accumulation and NULL rule as STDDEV (only
+                               // NULL when zero valid rows).
+    VarSamp = 17,              // VAR_SAMP(col): sample variance — STDDEV_SAMP's
+                               // finalize formula minus the final sqrt. Same
+                               // accumulation and NULL rule as STDDEV_SAMP
+                               // (NULL below 2 valid rows).
 };
 
 // AggSpec2.col_idx sentinels — named so a bare -1/-2 is never left for a future
@@ -585,6 +608,16 @@ inline void agg2_update(AggCell& c, const DrakenVector& v, uint32_t row, bool is
     if (c.valid == 0 || k < c.min_key) { c.min_key = k; c.min_raw = raw; }
     if (c.valid == 0 || k > c.max_key) { c.max_key = k; c.max_raw = raw; }
     c.valid += 1;
+}
+
+// STDDEV/STDDEV_SAMP/VAR_POP/VAR_SAMP all accumulate the identical Σx/Σx²/count
+// lanes (agg2_update_stddev/agg2_merge below) — only their finalize formula
+// differs (emit_lane_column). Every dispatch site that only cares "is this the
+// STDDEV family" (accumulation, DECIMAL rejection) checks this instead of
+// enumerating all four AggFn values separately.
+inline bool agg_fn_is_stddev_family(AggFn fn) noexcept {
+    return fn == AggFn::Stddev || fn == AggFn::StddevSamp
+        || fn == AggFn::VarPop || fn == AggFn::VarSamp;
 }
 
 // STDDEV accumulation: always double (mean/variance are inherently non-exact,
@@ -887,6 +920,10 @@ enum class GBKind : uint8_t {
     ArrayAgg,        // per-group element list (capped); emits one ARRAY per group
     Stddev,      // population stddev — always double, one kind for int AND float
                  // operands (no exactness requirement, unlike Sum/Avg's I/F split)
+    StddevSamp,  // sample stddev (N-1 denominator) — same Σx/Σx² lanes as Stddev,
+                 // NULL below 2 valid rows (see AggFn::StddevSamp)
+    VarPop,      // population variance — Stddev's lanes/NULL rule, no final sqrt
+    VarSamp,     // sample variance — StddevSamp's lanes/NULL rule, no final sqrt
     Median,      // exact median — buffers per-group values (MedianState), sorts
                  // and interpolates at finalize; always double, numeric-only
     ApproxCountDistinct,  // HyperLogLog++ sketch per group; always INT64, never NULL
@@ -1171,6 +1208,12 @@ inline GBKind gb_kind_of(const AggSpec2& sp, const AggColMeta& m) {
             return GBKind::MinMaxNum;
         case AggFn::Stddev:
             return GBKind::Stddev;
+        case AggFn::StddevSamp:
+            return GBKind::StddevSamp;
+        case AggFn::VarPop:
+            return GBKind::VarPop;
+        case AggFn::VarSamp:
+            return GBKind::VarSamp;
         case AggFn::Median:
             return GBKind::Median;
         case AggFn::ApproxCountDistinct:
@@ -1591,6 +1634,45 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
             }
             return emit_fixed_column(raws.data(), okp, n, DRAKEN_FLOAT64, nullptr, err);
         }
+        case GBKind::VarPop: {
+            // Same population-variance formula as GBKind::Stddev, without the
+            // final sqrt — see that case for the clamp rationale.
+            std::vector<int64_t> raws(n, 0);
+            const uint8_t* okp = valid_ok();
+            for (uint32_t i = 0; i < n; ++i) {
+                if (okp[i] == 0) continue;
+                double cnt = static_cast<double>(L.valid[i]);
+                double mean = L.f64[i] / cnt;
+                double variance = (L.f64sq[i] / cnt) - (mean * mean);
+                if (variance < 0.0) variance = 0.0;
+                std::memcpy(&raws[i], &variance, sizeof(double));
+            }
+            return emit_fixed_column(raws.data(), okp, n, DRAKEN_FLOAT64, nullptr, err);
+        }
+        case GBKind::StddevSamp:
+        case GBKind::VarSamp: {
+            // Sample (Bessel-corrected) variance: N/(N-1) * population variance —
+            // algebraically identical to (Σx² - N·mean²)/(N-1), computed by
+            // scaling the already-clamped population variance so the clamp still
+            // holds. Undefined below 2 valid rows (N-1 == 0): NULL, not a
+            // divide-by-zero or 0 — matches DuckDB/the SQL standard, unlike
+            // GBKind::Stddev/VarPop, which ARE defined at N==1 (variance 0).
+            std::vector<int64_t> raws(n, 0);
+            std::vector<uint8_t> okp(n, 0);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (L.valid[i] < 2) continue;
+                okp[i] = 1;
+                double cnt = static_cast<double>(L.valid[i]);
+                double mean = L.f64[i] / cnt;
+                double variance = (L.f64sq[i] / cnt) - (mean * mean);
+                if (variance < 0.0) variance = 0.0;
+                double sample_variance = variance * (cnt / (cnt - 1.0));
+                double out_val = (kind == GBKind::StddevSamp) ? std::sqrt(sample_variance)
+                                                               : sample_variance;
+                std::memcpy(&raws[i], &out_val, sizeof(double));
+            }
+            return emit_fixed_column(raws.data(), okp.data(), n, DRAKEN_FLOAT64, nullptr, err);
+        }
         case GBKind::Corr: {
             // NULL-ness is NOT just valid==0: a group with pairs but zero
             // variance in either operand has no defined correlation — its own
@@ -1852,13 +1934,16 @@ struct UngroupedAggSink : Sink {
                           "Use `<column>::IPV4` to cast.";
                 return false;
             }
-            // STDDEV never descales DECIMAL's fixed-point unscaled integer — reading
-            // it as a raw double would compute the variance of the WRONG numbers,
-            // a silent wrong answer, not an approximation. CAST to DOUBLE first.
-            if (specs[s].fn == AggFn::Stddev && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
+            // STDDEV/STDDEV_SAMP/VAR_POP/VAR_SAMP never descale DECIMAL's fixed-point
+            // unscaled integer — reading it as a raw double would compute the
+            // variance of the WRONG numbers, a silent wrong answer, not an
+            // approximation. CAST to DOUBLE first.
+            if (agg_fn_is_stddev_family(specs[s].fn)
+                    && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
                 err.code = 1;
-                err.msg = "STDDEV does not support DECIMAL operands — "
-                          "CAST to DOUBLE first, never a silently mis-scaled variance";
+                err.msg = "STDDEV/STDDEV_SAMP/VAR_POP/VAR_SAMP do not support DECIMAL "
+                          "operands — CAST to DOUBLE first, never a silently "
+                          "mis-scaled variance";
                 return false;
             }
             // MEDIAN is numeric-only (see median_operand_supported) — DECIMAL
@@ -1969,7 +2054,7 @@ struct UngroupedAggSink : Sink {
                         if (sort_row_valid(v, i)) agg2_update_str(c, l.strs[s], v, i, want_max);
                     }
                 }
-            } else if (specs[s].fn == AggFn::Stddev) {
+            } else if (agg_fn_is_stddev_family(specs[s].fn)) {
                 bool is_f = l.meta[s].is_float;
                 for (uint32_t i = 0; i < v.length; ++i) {
                     if (sort_row_valid(v, i)) agg2_update_stddev(c, v, i, is_f);
@@ -2255,8 +2340,8 @@ struct UngroupedAggSink : Sink {
 struct GBLanes {
     std::vector<int64_t>  valid;   // non-NULL operand rows (every kind but Rows)
     std::vector<int64_t>  i64;     // SumI/AvgI exact sums; MinMaxNum raw containers
-    std::vector<double>   f64;     // SumF/AvgF sums; Stddev/Corr Σx
-    std::vector<double>   f64sq;   // Stddev/Corr Σx²
+    std::vector<double>   f64;     // SumF/AvgF sums; Stddev family/Corr Σx
+    std::vector<double>   f64sq;   // Stddev family/Corr Σx²
     std::vector<double>   f64y;    // Corr Σy
     std::vector<double>   f64yy;   // Corr Σy²
     std::vector<double>   f64xy;   // Corr Σxy
@@ -2285,6 +2370,9 @@ inline void gb_lanes_resize(GBLanes& L, GBKind k, size_t n) {
             L.valid.resize(n); L.f64.resize(n);
             return;
         case GBKind::Stddev:
+        case GBKind::StddevSamp:
+        case GBKind::VarPop:
+        case GBKind::VarSamp:
             L.valid.resize(n); L.f64.resize(n); L.f64sq.resize(n);
             return;
         case GBKind::Corr:
@@ -2704,13 +2792,16 @@ struct GroupBySink : Sink {
                           "loud, never a silent wrong answer";
                 return false;
             }
-            // STDDEV never descales DECIMAL's fixed-point unscaled integer — reading
-            // it as a raw double would compute the variance of the WRONG numbers,
-            // a silent wrong answer, not an approximation. CAST to DOUBLE first.
-            if (specs[s].fn == AggFn::Stddev && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
+            // STDDEV/STDDEV_SAMP/VAR_POP/VAR_SAMP never descale DECIMAL's fixed-point
+            // unscaled integer — reading it as a raw double would compute the
+            // variance of the WRONG numbers, a silent wrong answer, not an
+            // approximation. CAST to DOUBLE first.
+            if (agg_fn_is_stddev_family(specs[s].fn)
+                    && (t == DRAKEN_DECIMAL || t == DRAKEN_DECIMAL128)) {
                 err.code = 1;
-                err.msg = "STDDEV does not support DECIMAL operands — "
-                          "CAST to DOUBLE first, never a silently mis-scaled variance";
+                err.msg = "STDDEV/STDDEV_SAMP/VAR_POP/VAR_SAMP do not support DECIMAL "
+                          "operands — CAST to DOUBLE first, never a silently "
+                          "mis-scaled variance";
                 return false;
             }
             // MEDIAN is numeric-only (see median_operand_supported) — DECIMAL
@@ -3088,6 +3179,11 @@ struct GroupBySink : Sink {
                     }
                     break;
                 case GBKind::Stddev:
+                case GBKind::StddevSamp:
+                case GBKind::VarPop:
+                case GBKind::VarSamp:
+                    // Same Σx/Σx²/count accumulation for all four — only
+                    // emit_lane_column's finalize formula differs.
                     for (uint32_t i = 0; i < rows; ++i) {
                         if (!row_ok(i)) continue;
                         GBLanes& L = *lp[l.mk_hash[i] >> kGBPartShift];
@@ -3410,6 +3506,9 @@ struct GroupBySink : Sink {
                         }
                         break;
                     case GBKind::Stddev:
+                    case GBKind::StddevSamp:
+                    case GBKind::VarPop:
+                    case GBKind::VarSamp:
                         for (uint32_t e = 0; e < sn; ++e) {
                             uint32_t m = ge[e];
                             D.f64[m] += S.f64[e];

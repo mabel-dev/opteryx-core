@@ -70,7 +70,23 @@ TABLES = [
     "name",
 ]
 
-DATASET_PREFIX = "testdata.job."
+# Dataset prefix, resolved from --variant. Skene is the default: JOB does not
+# stipulate a storage format (upstream ships the IMDB CSVs, not files), so the
+# choice was always ours, and it is made the same way here as in the weekly
+# suite so a laptop number and a CI number are the same measurement.
+DATASET_PREFIX = "testdata.job_skene."
+
+
+def _dataset_prefix(variant: str) -> str:
+    """`testdata.job_skene.` or `testdata.job.` — never a silent fallback.
+
+    An unknown variant is a hard failure: a run that quietly benchmarks a
+    different corpus than the one it names is exactly the defect this argument
+    exists to prevent.
+    """
+    if variant not in ("skene", "parquet"):
+        raise ValueError(f"unknown variant {variant!r}; expected 'skene' or 'parquet'")
+    return "testdata.job_skene." if variant == "skene" else "testdata.job."
 QUERY_RE = re.compile(r"^([0-9]+)([a-z])\.sql$")
 _TABLE_ALT = "|".join(re.escape(t) for t in TABLES)
 # Rewrite is scoped to the FROM clause: only tokens immediately following
@@ -90,9 +106,9 @@ def _query_sort_key(path: Path):
     return (int(m.group(1)), m.group(2))
 
 
-def _rewrite_query(sql: str) -> str:
+def _rewrite_query(sql: str, prefix: str = DATASET_PREFIX) -> str:
     return _FROM_TABLE_RE.sub(
-        lambda m: m.group("lead") + DATASET_PREFIX + m.group("tbl"),
+        lambda m: m.group("lead") + prefix + m.group("tbl"),
         sql,
     )
 
@@ -141,6 +157,13 @@ def main() -> int:
         type=Path,
         default=HERE / "results",
         help="directory for the output CSV",
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="skene",
+        choices=("skene", "parquet"),
+        help="dataset format: runs against testdata/job_skene or testdata/job (default: skene)",
     )
     parser.add_argument(
         "--timeout",
@@ -202,6 +225,7 @@ def main() -> int:
             ("Queries", str(len(queries))),
             ("Iterations", f"{args.iterations} per query"),
             ("Timeout", f"{args.timeout:.0f}s/query"),
+            ("Format", args.variant),
         ],
         duckdb_machine=duckdb_machine if duckdb_min else None,
         duckdb_query_count=len(duckdb_min) if duckdb_min else None,
@@ -231,7 +255,7 @@ def main() -> int:
     try:
         for path in queries:
             stem = path.stem
-            sql = _rewrite_query(path.read_text())
+            sql = _rewrite_query(path.read_text(), _dataset_prefix(args.variant))
             d_ms = duckdb_min.get(stem) if duckdb_min else None
             run_times: list[float] = []
             had_failure = False

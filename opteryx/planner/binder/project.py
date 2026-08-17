@@ -69,7 +69,10 @@ def visit_exit(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                         if isinstance(origin, str):
                             origin = [origin]
                             schema_col.origin = origin
-                        if origin and qualifier in origin:
+                        # Case-folded: `origin` holds the relation's own-cased alias
+                        # (from dataset.py/subquery.py), `qualifier` is the user's
+                        # typed qualifier - same fold as `_candidates` in binder.py.
+                        if origin and qualifier.lower() in (o.lower() for o in origin):
                             output_columns.append(
                                 LogicalColumn(
                                     node_type=NodeType.IDENTIFIER,
@@ -200,20 +203,42 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
             found_match = False
             shared_schema_names = []
+            table_name_lower = table_name.lower()
+
+            # Two passes. `canonical_name` — the re-key target below
+            # (`context.schemas[canonical_name]`) and the `source` stamped onto
+            # every matched column — must be SETTLED before any column is built:
+            # it defaults to the qualifier as typed (the qualified-path/shared
+            # cases aren't a relation ALIAS, so there's no other-cased spelling to
+            # prefer) but an exact alias match overwrites it with the schema's OWN
+            # key, so a case-folded qualifier (`p.*` against `FROM t P`) re-keys
+            # onto the EXISTING "P" entry instead of adding a second "p" one - two
+            # entries for one relation would then both satisfy `_candidates`'s
+            # case-insensitive match and every later reference would misreport as
+            # ambiguous. Doing this within a single pass would stamp `source` from
+            # whatever `canonical_name` happened to be BEFORE the exact match was
+            # found, if a qualified/shared match was iterated first.
+            canonical_name = table_name
+            for name in context.schemas:
+                if name.lower() == table_name_lower:
+                    canonical_name = name
+                    break
 
             for name, schema in list(context.schemas.items()):
-                # Check if this schema matches the qualified wildcard
-                # Match by:
+                # Check if this schema matches the qualified wildcard. Case-folded
+                # for the same reason as `_candidates` in binder.py — a relation
+                # alias is an unquoted SQL identifier. Match by:
                 # 1. Exact key match (e.g., "supplier" == "supplier")
                 # 2. Ends with .table_name (e.g., "testdata.tpch_001.supplier" ends with ".supplier")
                 # 3. Shared schema pattern (e.g., "$view-ABC" with matching schema.name)
-                is_exact_match = name == table_name
-                is_qualified_match = name.endswith(f".{table_name}") or (
+                name_lower = name.lower()
+                is_exact_match = name_lower == table_name_lower
+                is_qualified_match = name_lower.endswith(f".{table_name_lower}") or (
                     name.startswith("$view") and schema.name.endswith(f"/{table_name}.parquet")
                 )
                 is_shared_match = (
                     name.startswith("$shared")
-                    and f"^{table_name}#" in schema.name
+                    and f"^{table_name_lower}#" in schema.name.lower()
                 )
 
                 if is_exact_match or is_qualified_match or is_shared_match:
@@ -223,7 +248,7 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
                         column_reference = LogicalColumn(
                             node_type=NodeType.IDENTIFIER,  # column type
                             source_column=schema_column.name,  # the source column
-                            source=table_name,  # the source relation
+                            source=canonical_name,  # the source relation
                             schema_column=schema_column,
                         )
                         columns.append(column_reference)
@@ -238,8 +263,8 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
             # Update the schema mapping if we found a match
             if found_match and columns:
-                context.schemas[table_name] = RelationSchema(
-                    name=table_name, columns=[col.schema_column for col in columns]
+                context.schemas[canonical_name] = RelationSchema(
+                    name=canonical_name, columns=[col.schema_column for col in columns]
                 )
 
     projected_column_count = len(columns)

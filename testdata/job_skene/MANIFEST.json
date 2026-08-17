@@ -1,0 +1,8 @@
+{
+  "codec": "lz4",
+  "generator": "job fetch_data.py -> parquet_to_skene lz4",
+  "listing_sha256": "8d08408fc5ee5bf1480ddf11d5abba843def41f905313ab43753ad38228109e1",
+  "name": "job_skene",
+  "object_count": 33,
+  "total_bytes": 2083547650
+}

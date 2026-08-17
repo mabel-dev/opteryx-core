@@ -17,7 +17,21 @@ def visit_filter(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     # We don't update the context, otherwise we'd be adding the predicates as columns
     original_context = context.copy()
     node.condition, context = inner_binder(node.condition, context)
-    node.columns = get_all_nodes_of_type(node.condition, (NodeType.IDENTIFIER,))
+    # AGGREGATOR alongside IDENTIFIER: a WHERE condition can never legally contain
+    # one (aggregates aren't allowed pre-GROUP BY), so this only bites a HAVING that
+    # stayed a standalone Filter instead of fusing onto its aggregate — e.g. one that
+    # also needs a column from a later JOIN (a decorrelated `HAVING SUM(x) > (SELECT
+    # ...)`). The compiler treats an AGGREGATOR node exactly like an IDENTIFIER —
+    # "already resolved, load its own identity from the stream" (see compiler.py's
+    # array-hoist gate: IDENTIFIER/EVALUATED/AGGREGATOR all "already lower to
+    # BC_LOAD_COL"), never "recompute from its operand". Collecting only IDENTIFIER
+    # leaves walked PAST the aggregate into its pre-aggregation operand (e.g. `mass`
+    # under `SUM(mass)`), so downstream column-liveness (projection_pushdown) never
+    # saw the aggregate's OWN identity as demanded and pruned it — the leg's own
+    # aggregate output vanished before the filter could read it.
+    node.columns = get_all_nodes_of_type(
+        node.condition, (NodeType.IDENTIFIER, NodeType.AGGREGATOR)
+    )
     node.relations = node.condition.relations or {}
 
     # Verify the predicate evaluates to a boolean — non-boolean expressions (e.g.

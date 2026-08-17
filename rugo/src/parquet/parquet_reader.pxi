@@ -1521,6 +1521,138 @@ cdef Vector _make_array_vector(
     return Vector(_dn.vector_array_from_sequence(out, el_type, D))
 
 
+cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_group_columns, list col_names):
+    """Build one Morsel from one row group's already-decoded columns.
+
+    Shared by the eager (whole-file list, _decode_from_buffer) and streaming
+    (one-row-group-at-a-time generator, stream_parquet/stream_parquet_from_path)
+    decode paths below. The only difference between those two callers is how
+    many row groups' worth of DecodedColumn buffers are resident in memory
+    when this runs — this function itself only ever touches one row group's.
+    Caller skips calling this for an empty (pruned, or zero-column-projection)
+    row group.
+    """
+    cdef list vectors = []
+    cdef list successful_col_names = []
+    cdef int32_t num_rows = 0
+    cdef Py_ssize_t col_idx
+    cdef parquet_reader.DecodedColumn column
+    cdef str col_type
+    cdef Vector vec
+    cdef double _t0
+
+    # Get the logical row count from the first successful NON-REPEATED column.
+    # A repeated (LIST) column's `num_rows` is the leaf-level value/level-pair
+    # count (accumulated per page as page_header.num_values), NOT the logical
+    # record count — for a list averaging >1 element/row it overshoots. That
+    # count is only correct for flat columns, and it is what sizes every
+    # scalar/string materializer below (arrays build their own length via
+    # _make_array_vector). Picking it off a leading ARRAY column made the flat
+    # columns over-read by the element surplus, so the derived filter mask then
+    # indexed past the (correctly sized) array column — "take: array index out
+    # of range". Skip repeated columns here; if every projected column is
+    # repeated, no materializer consumes num_rows so 0 is harmless.
+    for col_idx in range(<Py_ssize_t>row_group_columns.size()):
+        if (row_group_columns[col_idx].success
+                and row_group_columns[col_idx].rep_levels.size() == 0):
+            num_rows = row_group_columns[col_idx].num_rows
+            if num_rows > 0:
+                break
+
+    _TEL["row_groups"] += 1
+
+    for col_idx in range(<Py_ssize_t>row_group_columns.size()):
+        column = row_group_columns[col_idx]
+        if not column.success:
+            continue
+
+        _t0 = _time.perf_counter()
+
+        if column.rep_levels.size() > 0:
+            # Repeated (LIST) column — reconstruct nested vector from
+            # rep/def levels. Must precede the scalar type branches so a
+            # list<int64> / list<float64> etc. is never flattened.
+            vec = _make_array_vector(column)
+            if column.string_dict_lens.size() > 0:
+                _TEL["parquet_dict_materialize_fallbacks"] += 1
+            _TEL["cython_str_s"] += _time.perf_counter() - _t0
+        elif column.is_decimal:
+            # DECIMAL (any tier): real DECIMAL/DECIMAL128 vector, not a bare
+            # int — and never drop the int128 tier.
+            vec = _make_decimal_vector(column, num_rows)
+            _TEL["cython_other_s"] += _time.perf_counter() - _t0
+        elif column.type == b"int64":
+            if _should_emit_constant_vector(column, num_rows):
+                vec = _make_typed_constant_vector(column, num_rows)
+            elif _should_emit_dictionary_vector(column, num_rows):
+                vec = _make_typed_int64_dictionary_vector(column, num_rows)
+            else:
+                if _decoded_has_dictionary(column):
+                    _TEL["parquet_dict_materialize_fallbacks"] += 1
+                vec = _make_int64_vector(column, num_rows)
+            _TEL["cython_int64_s"] += _time.perf_counter() - _t0
+        elif column.type == b"int32":
+            if _should_emit_constant_vector(column, num_rows):
+                vec = _make_typed_constant_vector(column, num_rows)
+            elif _should_emit_dictionary_vector(column, num_rows):
+                vec = _make_typed_int64_from_int32_dictionary_vector(column, num_rows)
+            else:
+                if _decoded_has_dictionary(column):
+                    _TEL["parquet_dict_materialize_fallbacks"] += 1
+                vec = _make_int64_from_int32_vector(column, num_rows)
+            _TEL["cython_int64_s"] += _time.perf_counter() - _t0
+        elif column.type == b"byte_array":
+            if _should_emit_constant_vector(column, num_rows):
+                vec = _make_typed_constant_vector(column, num_rows)
+            elif _should_emit_dictionary_vector(column, num_rows):
+                vec = _make_typed_string_dictionary_vector(column, num_rows)
+            else:
+                if _decoded_has_dictionary(column):
+                    _TEL["parquet_dict_materialize_fallbacks"] += 1
+                vec = _make_string_vector(column, num_rows)
+            _TEL["cython_str_s"] += _time.perf_counter() - _t0
+        elif column.type == b"boolean":
+            vec = _make_bool_vector(column, num_rows)
+            _TEL["cython_bool_s"] += _time.perf_counter() - _t0
+        elif column.type == b"float32":
+            if _should_emit_constant_vector(column, num_rows):
+                vec = _make_typed_constant_vector(column, num_rows)
+            elif _should_emit_dictionary_vector(column, num_rows):
+                vec = _make_typed_float64_from_float32_dictionary_vector(column, num_rows)
+            else:
+                if _decoded_has_dictionary(column):
+                    _TEL["parquet_dict_materialize_fallbacks"] += 1
+                vec = _make_float64_from_float32_vector(column, num_rows)
+            _TEL["cython_float_s"] += _time.perf_counter() - _t0
+        elif column.type == b"float64":
+            if _should_emit_constant_vector(column, num_rows):
+                vec = _make_typed_constant_vector(column, num_rows)
+            elif _should_emit_dictionary_vector(column, num_rows):
+                vec = _make_typed_float64_dictionary_vector(column, num_rows)
+            else:
+                if _decoded_has_dictionary(column):
+                    _TEL["parquet_dict_materialize_fallbacks"] += 1
+                vec = _make_float64_vector(column, num_rows)
+            _TEL["cython_float_s"] += _time.perf_counter() - _t0
+        else:
+            # A column the C++ decoder accepted but no materializer here can
+            # build. Skipping it produced a morsel missing that column — for
+            # a single-column file, a zero-column morsel reporting zero rows
+            # for a file whose footer says otherwise. There is no honest
+            # partial answer: fail with the type we could not build.
+            raise NotImplementedError(
+                "rugo parquet reader: no vector materializer for column %r "
+                "of decoded physical type %r"
+                % (col_names[col_idx], column.type.decode("utf-8"))
+            )
+
+        _TEL["columns"] += 1
+        vectors.append(vec)
+        successful_col_names.append(col_names[col_idx])
+
+    return Morsel.from_vectors(successful_col_names, vectors)
+
+
 cdef _decode_from_buffer(const uint8_t* buf, size_t size, column_names, row_group_mask):
     """Shared decode core: takes a raw C pointer and decodes into Morsels."""
     cdef vector[string] cpp_column_names
@@ -1576,133 +1708,14 @@ cdef _decode_from_buffer(const uint8_t* buf, size_t size, column_names, row_grou
         return None
 
     cdef list all_morsels = []
-    cdef list vectors = []
-    cdef list successful_col_names = []
-    cdef int32_t num_rows
-    cdef Py_ssize_t col_idx, rg_idx
-    cdef parquet_reader.DecodedColumn column
-    cdef str col_type
-    cdef Vector vec
+    cdef Py_ssize_t rg_idx
 
     for rg_idx in range(<Py_ssize_t>result.row_groups.size()):
         # A row group pruned by row_group_mask is left with no columns — emit
         # no Morsel for it.
         if result.row_groups[rg_idx].size() == 0:
             continue
-        # Get the logical row count from the first successful NON-REPEATED column.
-        # A repeated (LIST) column's `num_rows` is the leaf-level value/level-pair
-        # count (accumulated per page as page_header.num_values), NOT the logical
-        # record count — for a list averaging >1 element/row it overshoots. That
-        # count is only correct for flat columns, and it is what sizes every
-        # scalar/string materializer below (arrays build their own length via
-        # _make_array_vector). Picking it off a leading ARRAY column made the flat
-        # columns over-read by the element surplus, so the derived filter mask then
-        # indexed past the (correctly sized) array column — "take: array index out
-        # of range". Skip repeated columns here; if every projected column is
-        # repeated, no materializer consumes num_rows so 0 is harmless.
-        num_rows = 0
-        for col_idx in range(<Py_ssize_t>result.row_groups[rg_idx].size()):
-            if (result.row_groups[rg_idx][col_idx].success
-                    and result.row_groups[rg_idx][col_idx].rep_levels.size() == 0):
-                num_rows = result.row_groups[rg_idx][col_idx].num_rows
-                if num_rows > 0:
-                    break
-
-        vectors = []
-        successful_col_names = []
-
-        _TEL["row_groups"] += 1
-
-        for col_idx in range(<Py_ssize_t>result.row_groups[rg_idx].size()):
-            column = result.row_groups[rg_idx][col_idx]
-            if not column.success:
-                continue
-
-            _t0 = _time.perf_counter()
-
-            if column.rep_levels.size() > 0:
-                # Repeated (LIST) column — reconstruct nested vector from
-                # rep/def levels. Must precede the scalar type branches so a
-                # list<int64> / list<float64> etc. is never flattened.
-                vec = _make_array_vector(column)
-                if column.string_dict_lens.size() > 0:
-                    _TEL["parquet_dict_materialize_fallbacks"] += 1
-                _TEL["cython_str_s"] += _time.perf_counter() - _t0
-            elif column.is_decimal:
-                # DECIMAL (any tier): real DECIMAL/DECIMAL128 vector, not a bare
-                # int — and never drop the int128 tier.
-                vec = _make_decimal_vector(column, num_rows)
-                _TEL["cython_other_s"] += _time.perf_counter() - _t0
-            elif column.type == b"int64":
-                if _should_emit_constant_vector(column, num_rows):
-                    vec = _make_typed_constant_vector(column, num_rows)
-                elif _should_emit_dictionary_vector(column, num_rows):
-                    vec = _make_typed_int64_dictionary_vector(column, num_rows)
-                else:
-                    if _decoded_has_dictionary(column):
-                        _TEL["parquet_dict_materialize_fallbacks"] += 1
-                    vec = _make_int64_vector(column, num_rows)
-                _TEL["cython_int64_s"] += _time.perf_counter() - _t0
-            elif column.type == b"int32":
-                if _should_emit_constant_vector(column, num_rows):
-                    vec = _make_typed_constant_vector(column, num_rows)
-                elif _should_emit_dictionary_vector(column, num_rows):
-                    vec = _make_typed_int64_from_int32_dictionary_vector(column, num_rows)
-                else:
-                    if _decoded_has_dictionary(column):
-                        _TEL["parquet_dict_materialize_fallbacks"] += 1
-                    vec = _make_int64_from_int32_vector(column, num_rows)
-                _TEL["cython_int64_s"] += _time.perf_counter() - _t0
-            elif column.type == b"byte_array":
-                if _should_emit_constant_vector(column, num_rows):
-                    vec = _make_typed_constant_vector(column, num_rows)
-                elif _should_emit_dictionary_vector(column, num_rows):
-                    vec = _make_typed_string_dictionary_vector(column, num_rows)
-                else:
-                    if _decoded_has_dictionary(column):
-                        _TEL["parquet_dict_materialize_fallbacks"] += 1
-                    vec = _make_string_vector(column, num_rows)
-                _TEL["cython_str_s"] += _time.perf_counter() - _t0
-            elif column.type == b"boolean":
-                vec = _make_bool_vector(column, num_rows)
-                _TEL["cython_bool_s"] += _time.perf_counter() - _t0
-            elif column.type == b"float32":
-                if _should_emit_constant_vector(column, num_rows):
-                    vec = _make_typed_constant_vector(column, num_rows)
-                elif _should_emit_dictionary_vector(column, num_rows):
-                    vec = _make_typed_float64_from_float32_dictionary_vector(column, num_rows)
-                else:
-                    if _decoded_has_dictionary(column):
-                        _TEL["parquet_dict_materialize_fallbacks"] += 1
-                    vec = _make_float64_from_float32_vector(column, num_rows)
-                _TEL["cython_float_s"] += _time.perf_counter() - _t0
-            elif column.type == b"float64":
-                if _should_emit_constant_vector(column, num_rows):
-                    vec = _make_typed_constant_vector(column, num_rows)
-                elif _should_emit_dictionary_vector(column, num_rows):
-                    vec = _make_typed_float64_dictionary_vector(column, num_rows)
-                else:
-                    if _decoded_has_dictionary(column):
-                        _TEL["parquet_dict_materialize_fallbacks"] += 1
-                    vec = _make_float64_vector(column, num_rows)
-                _TEL["cython_float_s"] += _time.perf_counter() - _t0
-            else:
-                # A column the C++ decoder accepted but no materializer here can
-                # build. Skipping it produced a morsel missing that column — for
-                # a single-column file, a zero-column morsel reporting zero rows
-                # for a file whose footer says otherwise. There is no honest
-                # partial answer: fail with the type we could not build.
-                raise NotImplementedError(
-                    "rugo parquet reader: no vector materializer for column %r "
-                    "of decoded physical type %r"
-                    % (col_names[col_idx], column.type.decode("utf-8"))
-                )
-
-            _TEL["columns"] += 1
-            vectors.append(vec)
-            successful_col_names.append(col_names[col_idx])
-
-        all_morsels.append(Morsel.from_vectors(successful_col_names, vectors))
+        all_morsels.append(_morsel_from_row_group(result.row_groups[rg_idx], col_names))
 
     return all_morsels
 
@@ -1798,6 +1811,122 @@ def read_parquet_from_path(str path, column_names=None, row_group_mask=None):
         # This is a zero-copy view — no Python bytes object is created.
         mem_view = <const uint8_t[:mapped_len:1]>mapped_ptr
         return _decode_from_buffer(&mem_view[0], mapped_len, column_names, row_group_mask)
+    finally:
+        with nogil:
+            unmap_memory_c(mapped_ptr, mapped_len)
+
+
+def stream_parquet(data, column_names=None, row_group_mask=None):
+    """Read parquet data from memory, yielding ONE row group's Morsel at a time.
+
+    Unlike read_parquet() (which decodes and retains every row group into a
+    Python list before returning anything — see its docstring's "Returns"),
+    this decodes one row group via DecodeRowGroupColumns(), converts it to a
+    Morsel, yields it, and only then decodes the next — peak native decode
+    memory is bounded by one row group rather than the whole file. Semantics
+    otherwise match read_parquet(): column selection, row_group_mask pruning,
+    and the same RuntimeError on a genuine per-column decode failure.
+    """
+    cdef const uint8_t[::1] mem_view
+    cdef parquet_reader.FileStats fs
+    cdef vector[string] cpp_column_names
+    cdef vector[uint8_t] cpp_mask
+    cdef vector[parquet_reader.DecodedColumn] row_group_columns
+    cdef list col_names
+    cdef Py_ssize_t rg_idx
+    cdef uint8_t _mbit
+
+    if isinstance(data, (bytes, bytearray)):
+        mem_view = memoryview(data).cast('B')
+    elif isinstance(data, memoryview):
+        mem_view = data.cast('B')
+    else:
+        raise TypeError("data must be bytes, bytearray, or memoryview")
+
+    fs = parquet_reader.ReadParquetMetadataFromBuffer(&mem_view[0], <size_t>mem_view.shape[0])
+
+    if column_names is None:
+        col_names = []
+        if fs.row_groups.size() > 0:
+            for col in fs.row_groups[0].columns:
+                col_names.append(col.name.decode("utf-8"))
+    else:
+        col_names = [str(name) for name in column_names]
+    for name in col_names:
+        cpp_column_names.push_back(name.encode("utf-8"))
+
+    if row_group_mask is not None:
+        for m in row_group_mask:
+            _mbit = 1 if m else 0
+            cpp_mask.push_back(_mbit)
+
+    for rg_idx in range(<Py_ssize_t>fs.row_groups.size()):
+        if <size_t>rg_idx < cpp_mask.size() and cpp_mask[rg_idx] == 0:
+            continue
+        with nogil:
+            row_group_columns = parquet_reader.DecodeRowGroupColumns(
+                &mem_view[0], <size_t>mem_view.shape[0], cpp_column_names,
+                fs.row_groups[rg_idx], <int>rg_idx)
+        if row_group_columns.size() == 0:
+            continue
+        yield _morsel_from_row_group(row_group_columns, col_names)
+
+
+def stream_parquet_from_path(str path, column_names=None, row_group_mask=None):
+    """Read a Parquet file from disk via mmap, yielding ONE row group's Morsel
+    at a time — see stream_parquet()'s docstring for why. The mmap is held for
+    the lifetime of the generator, released in `finally`: an early break out of
+    the caller's `for morsel in reader:` loop, or the generator simply being
+    garbage-collected before exhaustion, still triggers `finally` (Python runs
+    a suspended generator's pending `finally` blocks via GeneratorExit when the
+    generator is closed or collected), so the mapping is never leaked.
+    """
+    cdef bytes path_bytes = path.encode("utf-8")
+    cdef const char* c_path = path_bytes
+    cdef uint8_t* mapped_ptr = NULL
+    cdef size_t mapped_len = 0
+    cdef int rc
+    cdef parquet_reader.FileStats fs
+    cdef vector[string] cpp_column_names
+    cdef vector[uint8_t] cpp_mask
+    cdef vector[parquet_reader.DecodedColumn] row_group_columns
+    cdef list col_names
+    cdef Py_ssize_t rg_idx
+    cdef uint8_t _mbit
+
+    with nogil:
+        rc = read_all_mmap(c_path, &mapped_ptr, &mapped_len)
+    if rc != 0:
+        raise OSError(-rc, f"read_all_mmap failed for {path!r}")
+
+    try:
+        fs = parquet_reader.ReadParquetMetadataFromBuffer(mapped_ptr, mapped_len)
+
+        if column_names is None:
+            col_names = []
+            if fs.row_groups.size() > 0:
+                for col in fs.row_groups[0].columns:
+                    col_names.append(col.name.decode("utf-8"))
+        else:
+            col_names = [str(name) for name in column_names]
+        for name in col_names:
+            cpp_column_names.push_back(name.encode("utf-8"))
+
+        if row_group_mask is not None:
+            for m in row_group_mask:
+                _mbit = 1 if m else 0
+                cpp_mask.push_back(_mbit)
+
+        for rg_idx in range(<Py_ssize_t>fs.row_groups.size()):
+            if <size_t>rg_idx < cpp_mask.size() and cpp_mask[rg_idx] == 0:
+                continue
+            with nogil:
+                row_group_columns = parquet_reader.DecodeRowGroupColumns(
+                    mapped_ptr, mapped_len, cpp_column_names,
+                    fs.row_groups[rg_idx], <int>rg_idx)
+            if row_group_columns.size() == 0:
+                continue
+            yield _morsel_from_row_group(row_group_columns, col_names)
     finally:
         with nogil:
             unmap_memory_c(mapped_ptr, mapped_len)

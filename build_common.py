@@ -930,8 +930,6 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/jsonl/core/field_span.cpp",
                     "rugo/src/jsonl/core/jsonl_reader.cpp",
                     "rugo/src/jsonl/core/column_builder.cpp",
-                    # column_builder.cpp's parse_array_column parses array elements with yyjson.
-                    "third_party/yyjson/src/yyjson.c",
                     "draken/simd/simd_env.cpp",
                     "src/cpp/simd_search.cpp",
                     # csv reader C++ sources
@@ -983,6 +981,7 @@ def draken_rugo_extensions(parquet_created_by):
                 "rugo/src/jsonl/core/jsonl_reader.hpp",
                 "rugo/src/jsonl/core/column_builder.hpp",
                 "rugo/src/jsonl/core/fast_parsers.hpp",
+                "rugo/src/jsonl/core/json_array_walker.hpp",
                 "rugo/src/csv/core/csv_parse_context.hpp",
                 "rugo/src/csv/core/csv_scan.hpp",
                 "rugo/src/csv/core/csv_row_map.hpp",

@@ -39,6 +39,7 @@
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "native_cidr_unnest.hpp"   // CidrUnnestOperator — CROSS JOIN CIDR_UNNEST
+#include "native_grouping_expand.hpp"  // GroupingExpandOperator — GROUP BY ROLLUP
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
 #include "native_queue_sink.hpp"    // QueueSink/Global — the terminal output edge
 #include "streaming_scan_source.hpp"
@@ -690,6 +691,22 @@ public:
                     bool drop_source) {
         add_op_(p, std::make_unique<UnnestOperator>(array_idx, std::move(target_name),
                                                     drop_source));
+    }
+    // GROUP BY ROLLUP(...): replicate each morsel once per grouping set, masking the
+    // keys that set does not name and appending the grouping_id key. Sits directly
+    // below an ordinary GROUP BY sink — see native_grouping_expand.hpp.
+    void add_grouping_expand(size_t p, std::vector<size_t> key_idx,
+                             std::vector<uint64_t> set_masks, std::string id_name) {
+        add_op_(p, std::make_unique<GroupingExpandOperator>(
+                       std::move(key_idx), std::move(set_masks), std::move(id_name)));
+    }
+    // GROUPING(col): 0/1 per output row, read back from the sink's emitted
+    // grouping_id key via a plan-time ordinal->bit lookup table — see
+    // native_grouping_expand.hpp::GroupingBitOperator.
+    void add_grouping_bit(size_t p, size_t grouping_id_idx,
+                          std::vector<uint8_t> bit_by_ordinal, std::string out_name) {
+        add_op_(p, std::make_unique<GroupingBitOperator>(
+                       grouping_id_idx, std::move(bit_by_ordinal), std::move(out_name)));
     }
     // CROSS JOIN UNNEST with a WHERE on the unnested column folded in. The program
     // is bool-final and resolved against a ONE-COLUMN layout holding the target: it

@@ -55,6 +55,42 @@ def load_duckdb_baseline(path: str) -> tuple[dict[str, float], Optional[str]]:
     return by_name, data.get("machine")
 
 
+def load_duckdb_shapes(path: str) -> dict[str, tuple[int, int]]:
+    """Return {name: (rows, cols)} — the result shape DuckDB recorded for each
+    query, from the same JSON load_duckdb_baseline reads timings out of.
+
+    A DuckDB baseline is a TIMING calibration by default; this is a separate,
+    optional correctness cross-check some runners opt into — a query that
+    regresses to an empty or malformed result can still be "fast", and a pure
+    timing comparison would not catch that.
+
+    Returns {} if the file doesn't exist, doesn't have the expected shape, or
+    a query recorded the [0, 0] placeholder (its warm iteration never ran, so
+    there is nothing to compare against).
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    by_shape: dict[str, tuple[int, int]] = {}
+    for entry in data.get("result", []):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        shape = entry.get("shape")
+        if name is None or not isinstance(shape, list) or len(shape) != 2:
+            continue
+        rows, cols = shape
+        if rows == 0 and cols == 0:
+            continue
+        by_shape[str(name)] = (int(rows), int(cols))
+    return by_shape
+
+
 # ---------------------------------------------------------------------------
 # Colour-coded ratio formatting
 # ---------------------------------------------------------------------------

@@ -192,6 +192,13 @@ def _live_positions(layout, live):
     return [i for i, identity in enumerate(layout) if identity in live]
 
 
+# The synthetic GROUP BY ROLLUP key: which grouping set a result row belongs to, as a
+# bitmask over the key list. Created by the native grouping-expand operator, so it is a
+# stream identity the planner never mints and nothing below the aggregate can collide
+# with. See src/cpp/engine/native_grouping_expand.hpp.
+_GROUPING_ID_IDENTITY = "$grouping_id"
+
+
 def _unsupported(what: str, remedy: str = None):
     """Refuse a query the engine cannot run, saying what and - where we know it - how.
 
@@ -1288,7 +1295,14 @@ class _Compiler:
 
     _AGG_FNS = {"COUNT", "SUM", "AVG", "MIN", "MAX", "ARRAY_AGG", "STDDEV", "MEDIAN",
                 "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "CORR",
-                "CIDR_AGG"}
+                "CIDR_AGG", "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP"}
+    # STDDEV_POP is a pure alias for STDDEV (population stddev, N denominator);
+    # STDDEV_SAMP/VAR_POP/VAR_SAMP are real new finalizations, but all five
+    # accumulate the identical Σx/Σx²/count lanes (agg2_update_stddev in
+    # native_group_sinks.hpp) and share its DECIMAL rejection below.
+    _STDDEV_FAMILY_FUNCS = frozenset(
+        {"STDDEV", "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP"}
+    )
     # MEDIAN is numeric-only (native_group_sinks.hpp's median_operand_supported) —
     # narrower than _AGG_OPERAND_TYPES (which also allows DECIMAL/BOOL/temporal for
     # SUM/AVG/MIN/MAX/STDDEV). Matches the legacy Cython median collectors exactly.
@@ -1582,15 +1596,17 @@ class _Compiler:
                     _unsupported(
                         f"{md_syntax(func)} over a column of type {md_code(_type_name(psc, pt))}"
                     )
-            if func == "STDDEV" and pt in (DrakenType.DECIMAL, DrakenType.DECIMAL128):
-                # The sink never descales DECIMAL's unscaled integer for STDDEV —
-                # reading it as a raw double would compute the wrong numbers'
-                # variance. CAST to DOUBLE first (same posture as the sink's own
-                # fail-loud guard — this is just the friendlier plan-time version).
+            if func in self._STDDEV_FAMILY_FUNCS and pt in (
+                    DrakenType.DECIMAL, DrakenType.DECIMAL128):
+                # The sink never descales DECIMAL's unscaled integer for the
+                # STDDEV family — reading it as a raw double would compute the
+                # wrong numbers' variance. CAST to DOUBLE first (same posture as
+                # the sink's own fail-loud guard — this is just the friendlier
+                # plan-time version).
                 _unsupported(
-                    f"{md_syntax('STDDEV')} over a column of type {md_code(_type_name(psc, pt))}",
+                    f"{md_syntax(func)} over a column of type {md_code(_type_name(psc, pt))}",
                     f"Cast the column to {md_code('DOUBLE')} first, for example "
-                    f"{md_code('STDDEV(column::DOUBLE)')}",
+                    f"{md_code(f'{func}(column::DOUBLE)')}",
                 )
             if func == "MEDIAN" and pt not in self._MEDIAN_OPERAND_TYPES:
                 # MEDIAN is numeric-only — narrower than the generic operand-type
@@ -1602,7 +1618,10 @@ class _Compiler:
                     _NUMERIC_ONLY,
                 )
             fn = {"SUM": "Sum", "AVG": "Avg", "MIN": "Min", "MAX": "Max",
-                  "STDDEV": "Stddev", "MEDIAN": "Median", "ANY_VALUE": "AnyValue"}[func]
+                  "STDDEV": "Stddev", "STDDEV_POP": "Stddev",
+                  "STDDEV_SAMP": "StddevSamp", "VAR_POP": "VarPop",
+                  "VAR_SAMP": "VarSamp",
+                  "MEDIAN": "Median", "ANY_VALUE": "AnyValue"}[func]
             specs.append((sc.identity, fn, idx))
         return specs
 
@@ -1732,8 +1751,59 @@ class _Compiler:
                 key_idx.append(layout.index(key_identity))
             # GROUP BY with NO aggregate functions is a DISTINCT over the keys —
             # route to the DistinctSink (emits the distinct key rows unchanged).
-            aggs = getattr(node, "aggregates", None) or []
+            raw_aggs = getattr(node, "aggregates", None) or []
+            set_masks = getattr(node, "grouping_set_masks", None)
+            # GROUPING(col) is not a per-group REDUCTION (it has no entry in
+            # AGGREGATORS / _AGG_FNS) — it is a lookup against the grouping set
+            # that produced the row, so it is split out here and lowered
+            # separately below, once grouping_id is known to be emitted.
+            # `group_cols` (unmutated at this point) is the SAME list, in the
+            # SAME order, _grouped_agg.pyx used to build grouping_set_masks's
+            # bits — see the comment there — so a key's position in it here IS
+            # its bit position in every entry of set_masks.
+            grouping_calls = [agg for agg in raw_aggs if agg.value == "GROUPING"]
+            aggs = [agg for agg in raw_aggs if agg.value != "GROUPING"]
+            grouping_bits = []
+            for call in grouping_calls:
+                if not set_masks:
+                    raise InvalidInternalStateError(
+                        "GROUPING() reached the physical compiler without a GROUP "
+                        "BY ROLLUP/CUBE/GROUPING SETS in scope — this should have "
+                        "been refused at bind time."
+                    )
+                operand = call.parameters[0]
+                identity = getattr(getattr(operand, "schema_column", None), "identity", None)
+                if identity is None or identity not in group_cols:
+                    _unsupported(
+                        "GROUPING() over a column that is not a GROUP BY key of "
+                        "this query")
+                bit_pos = group_cols.index(identity)
+                # $grouping_id carries the grouping SET's ordinal (its position in
+                # set_masks), not the mask itself — two different sets can share one
+                # mask (ROLLUP(a, a)'s first two), and the ordinal is what keeps them
+                # apart (see GroupingExpandOperator). So the bit can't be recovered by
+                # shifting grouping_id directly; precompute it per ordinal instead —
+                # one 0/1 entry per grouping set — and hand the native side a lookup
+                # table, not a shift amount.
+                bit_by_ordinal = [(mask >> bit_pos) & 1 for mask in set_masks]
+                grouping_bits.append((call.schema_column.identity, bit_by_ordinal))
+            if grouping_bits:
+                # Registers each GROUPING() output identity's type (INT64) for
+                # _layout_type/_check_key_type, same as _add_computed does for a
+                # computed column — without it, e.g. `ORDER BY GROUPING(x)`
+                # resolves to an unknown type and skips its key-type gate.
+                self._remember_types(grouping_calls)
             if not aggs:
+                if set_masks:
+                    # A no-aggregate GROUP BY is a DISTINCT over the keys, and the
+                    # DistinctSink has no key beyond the columns themselves — it would
+                    # collapse two grouping sets that produce the same key row (the
+                    # rolled-up NULLs of `(a)` and of `()`) into one, losing a row the
+                    # standard says is there. Refused rather than answered wrongly.
+                    _unsupported(
+                        "GROUP BY ROLLUP with no aggregate function",
+                        "add an aggregate, or list the grouping columns without ROLLUP",
+                    )
                 if getattr(node, "_having_condition", None) is not None:
                     _unsupported("a HAVING on a no-aggregate GROUP BY")
                 buf = self.nplan.new_buffer()
@@ -1748,10 +1818,35 @@ class _Compiler:
             layout = self._project_agg_operands(p, node, layout)
             specs = self._parse_aggregates(aggs, layout)
             key_emit = self._group_key_emit(node, group_cols)
-            buf = self.nplan.new_buffer()
             # Planner NDV estimate for the grouped keys (hash_map_variant strategy);
             # -1 = unknown. Gates the sink's per-partition parvi front maps.
             ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
+            if set_masks:
+                # GROUP BY ROLLUP(...): expand each morsel into one morsel per grouping
+                # set — keys the set does not name masked to NULL, plus the grouping_id
+                # key — and let an ORDINARY grouped aggregate consume the result. The
+                # sink is not told that grouping sets exist; below it, the scan and the
+                # joins still run exactly once.
+                #
+                # This must come AFTER _project_agg_operands and _parse_aggregates: both
+                # index into `layout`, and the expand only APPENDS grouping_id, so every
+                # index resolved above stays valid.
+                self.nplan.add_grouping_expand(p, key_idx, set_masks, _GROUPING_ID_IDENTITY)
+                layout = list(layout) + [_GROUPING_ID_IDENTITY]
+                key_idx = list(key_idx) + [len(layout) - 1]
+                # grouping_id is a KEY, not a passenger: without it the rolled-up NULLs
+                # of two different sets are one group. Emitted only when a GROUPING()
+                # call needs to read it back post-aggregate (see below) — otherwise the
+                # sink still has to hash it to keep the sets apart, which costs its
+                # hash and nothing else.
+                group_cols = list(group_cols) + [_GROUPING_ID_IDENTITY]
+                key_emit = list(key_emit) + [bool(grouping_bits)]
+                if ndv_estimate is not None:
+                    # Every set gets its own groups, so the group count is up to the
+                    # per-set estimate times the number of sets. Under-stating it here
+                    # would gate the sink's small-map front onto a map that overflows.
+                    ndv_estimate = int(ndv_estimate) * len(set_masks)
+            buf = self.nplan.new_buffer()
             self.nplan.set_groupby_sink(
                 p, key_idx, group_cols, key_emit, specs, buf,
                 -1 if ndv_estimate is None else int(ndv_estimate))
@@ -1759,6 +1854,21 @@ class _Compiler:
             self.nplan.set_buffer_source(p2, buf)
             out_layout = [identity for identity, emit in zip(group_cols, key_emit) if emit]
             out_layout += [spec[0] for spec in specs]
+            if grouping_bits:
+                # One GroupingBitOperator per GROUPING() call — same "one op per
+                # computed expression, appended in order" shape as _add_computed —
+                # reading the sink's now-emitted $grouping_id key back as a plain
+                # post-aggregate column.
+                gid_idx = out_layout.index(_GROUPING_ID_IDENTITY)
+                for out_identity, bit_by_ordinal in grouping_bits:
+                    self.nplan.add_grouping_bit(p2, gid_idx, bit_by_ordinal, out_identity)
+                    out_layout.append(out_identity)
+                # $grouping_id itself is internal-only — nothing above this node can
+                # name it — so drop it before returning the layout upward.
+                keep = [i for i, identity in enumerate(out_layout)
+                       if identity != _GROUPING_ID_IDENTITY]
+                self.nplan.add_select(p2, keep, [out_layout[i] for i in keep])
+                out_layout = [out_layout[i] for i in keep]
             self._apply_having(p2, node, out_layout)
             return p2, out_layout
 

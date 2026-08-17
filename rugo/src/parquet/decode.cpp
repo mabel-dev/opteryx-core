@@ -15,6 +15,7 @@
 #include "telemetry.hpp"
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 #include <string>
 
@@ -119,26 +120,13 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size,
       if (rg_idx < row_group_mask.size() && row_group_mask[rg_idx] == 0)
         continue; // leave this row group empty
 
-      const RowGroupStats &row_group = metadata.row_groups[rg_idx];
-      size_t ncols = column_names.size();
-      table.row_groups[rg_idx].resize(ncols);
-
-      for (size_t col_idx = 0; col_idx < ncols; col_idx++) {
-        DecodedColumn col = DecodeColumnFromMemory(
-            data, size, column_names[col_idx], row_group, (int)rg_idx);
-        // A column that failed with a specific reason (decompression error,
-        // corruption) is a hard error — fail loud with that reason rather than
-        // reporting table success with a silently-dropped column. A reason-less
-        // success==false (e.g. a column absent from this row group) is an honest
-        // outcome this API tolerates, so it does not fail the table.
-        if (!col.success && !col.error_message.empty()) {
-          table.success = false;
-          table.error = "row group " + std::to_string(rg_idx) + ", column '" +
-                        column_names[col_idx] + "': " + col.error_message;
-          return table;
-        }
-        table.row_groups[rg_idx][col_idx] = std::move(col);
-      }
+      // DecodeRowGroupColumns throws std::runtime_error, carrying the same
+      // "row group N, column 'X': reason" message this used to build inline;
+      // the catch below converts it to table.success=false/table.error,
+      // matching the early-return-on-first-hard-error behaviour this had
+      // before the row-group decode was factored out for the streaming API.
+      table.row_groups[rg_idx] = DecodeRowGroupColumns(
+          data, size, column_names, metadata.row_groups[rg_idx], (int)rg_idx);
     }
     table.success = true;
   } catch (const std::exception &e) {
@@ -149,6 +137,29 @@ DecodedTable ReadParquet(const uint8_t *data, size_t size,
     table.error = "unknown error decoding parquet";
   }
   return table;
+}
+
+std::vector<DecodedColumn> DecodeRowGroupColumns(
+    const uint8_t *data, size_t size,
+    const std::vector<std::string> &column_names,
+    const RowGroupStats &row_group, int row_group_index) {
+  std::vector<DecodedColumn> out(column_names.size());
+  for (size_t col_idx = 0; col_idx < column_names.size(); col_idx++) {
+    DecodedColumn col = DecodeColumnFromMemory(
+        data, size, column_names[col_idx], row_group, row_group_index);
+    // A column that failed with a specific reason (decompression error,
+    // corruption) is a hard error — fail loud with that reason rather than
+    // silently dropping the column. A reason-less success==false (e.g. a
+    // column absent from this row group) is an honest outcome this API
+    // tolerates, so it does not throw.
+    if (!col.success && !col.error_message.empty()) {
+      throw std::runtime_error(
+          "row group " + std::to_string(row_group_index) + ", column '" +
+          column_names[col_idx] + "': " + col.error_message);
+    }
+    out[col_idx] = std::move(col);
+  }
+  return out;
 }
 
 DecodedTable ReadParquet(const uint8_t *data, size_t size) {

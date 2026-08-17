@@ -1,0 +1,330 @@
+"""A window function is computed OVER the grouped rows, not under them.
+
+    SELECT i_class, SUM(x) AS revenue,
+           SUM(x) * 100 / SUM(SUM(x)) OVER (PARTITION BY i_class) AS ratio
+    FROM ... GROUP BY i_item_id, i_class
+
+was refused outright — "Window functions cannot be combined with **GROUP BY**" —
+along with the same arrangement beside a bare aggregate, in QUALIFY, and in ORDER
+BY. Ten of the 99 TPC-DS queries are written this way (Q12, Q20, Q47, Q51, Q53,
+Q57, Q63, Q70, Q89, Q98), the largest single failure bucket in that suite.
+
+The refusal was NOT arbitrary. The Window step was planned UNDER the aggregate
+step, so the window would have been computed over the rows the aggregate
+collapses and could never see the aggregated result — and a wrong number is worse
+than a refusal. What was missing was the plan shape, which is the one the refusal
+used to advise the caller to write by hand:
+
+    <source> -> Aggregate[AndGroup] -> Project -> Subquery -> Window(s) -> ...
+
+The Subquery boundary is load-bearing twice over. `window_to_join` copies the
+sub-plan below the Window node as the window's input and requires it to expose
+exactly ONE relation name, which an aggregate over a join does not; and past the
+boundary only the group keys and the aggregates have names, which is what makes
+the standard's rule enforceable — a column read there that was neither grouped by
+nor aggregated is refused, in the same words DuckDB and PostgreSQL use.
+
+THE NESTED AGGREGATE IS THE CRUX, not an oddity. In `SUM(SUM(x)) OVER (...)` the
+inner SUM is the GROUP BY aggregate and the outer SUM is the window over those
+group results. The inner one reached `_aggregates` from nowhere — the hoist had
+already spliced the window out of the projection before the collection walk ran —
+so it had to be gathered from the window's own arguments, and from a window's
+PARTITION BY and ORDER BY too.
+
+Every expected value in this file was taken from DuckDB on the same rows.
+
+Run as a script (CLAUDE.md §10) or under pytest.
+"""
+
+import os
+import sys
+
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+import pytest
+
+import opteryx
+from opteryx.exceptions import SqlError
+from opteryx.exceptions import UnsupportedSyntaxError
+
+
+def rows(statement):
+    """Every row of `statement`, as tuples in column order."""
+    session = opteryx.session()
+    out = []
+    for morsel in session.execute_to_morsels(statement):
+        morsel.materialize()
+        names = list(morsel.column_names)
+        out.extend(zip(*(morsel.column(name).to_pylist() for name in names)))
+    return out
+
+
+def names(statement):
+    """The output column names, as strings."""
+    session = opteryx.session()
+    for morsel in session.execute_to_morsels(statement):
+        return [n.decode() if isinstance(n, bytes) else n for n in morsel.column_names]
+    return []
+
+
+def rounded(statement, places=4):
+    """Rows sorted and rounded — the grouped result reaches the windows through a join,
+    which promises no order, so a statement without an explicit ORDER BY has none."""
+    return sorted(
+        tuple(round(value, places) if isinstance(value, float) else value for value in row)
+        for row in rows(statement)
+    )
+
+
+def test_ratio_to_partition_total():
+    """FLAVOUR (a): each group's share of its partition's total. TPC-DS Q12/Q20/Q98.
+
+    Three buckets of three planets; `SUM(SUM(mass)) OVER (PARTITION BY id % 3)` is the
+    bucket total against which each planet's mass is measured.
+    """
+    assert rounded(
+        "SELECT id % 3 AS bucket, name, SUM(mass) AS m, "
+        "SUM(SUM(mass)) OVER (PARTITION BY id % 3) AS bucket_total, "
+        "SUM(mass) * 100.0 / SUM(SUM(mass)) OVER (PARTITION BY id % 3) AS pct "
+        "FROM $planets GROUP BY id % 3, name"
+    ) == [
+        (0, "Earth", 5.97, 573.9846, 1.0401),
+        (0, "Pluto", 0.0146, 573.9846, 0.0025),
+        (0, "Saturn", 568.0, 573.9846, 98.9574),
+        (1, "Mars", 0.642, 87.7720, 0.7314),
+        (1, "Mercury", 0.33, 87.7720, 0.376),
+        (1, "Uranus", 86.8, 87.7720, 98.8926),
+        (2, "Jupiter", 1898.0, 2004.87, 94.6695),
+        (2, "Neptune", 102.0, 2004.87, 5.0876),
+        (2, "Venus", 4.87, 2004.87, 0.2429),
+    ]
+
+
+def test_average_over_the_group_results():
+    """The Q47/Q53/Q57/Q63/Q89 spelling: `AVG(SUM(x)) OVER (...)`.
+
+    With no PARTITION BY there is one partition, so every row carries the mean of the
+    three bucket totals — 888.8755, not the mean of the nine underlying masses (98.76).
+    Getting the second number would mean the window had been computed under the
+    aggregate, which is exactly the failure the old refusal existed to prevent.
+    """
+    assert rounded(
+        "SELECT id % 3 AS bucket, SUM(mass) AS m, AVG(SUM(mass)) OVER () AS avg_group "
+        "FROM $planets GROUP BY id % 3"
+    ) == [(0, 573.9846, 888.8755), (1, 87.772, 888.8755), (2, 2004.87, 888.8755)]
+
+
+def test_ranking_window_over_the_group_results():
+    """A RANKING window over the grouped rows, ordered by an aggregate.
+
+    The other half of TPC-DS Q47/Q57. `ORDER BY COUNT(*)` inside the OVER clause names a
+    value that only exists after the grouping, so the ranking Window node has to be
+    planned above the aggregate exactly as the aggregate windows are.
+    """
+    assert rows(
+        "SELECT number_of_moons, COUNT(*) AS c, "
+        "RANK() OVER (ORDER BY COUNT(*) DESC, number_of_moons) AS r "
+        "FROM $planets GROUP BY number_of_moons ORDER BY r"
+    ) == [
+        (0, 2, 1),
+        (1, 1, 2),
+        (2, 1, 3),
+        (5, 1, 4),
+        (14, 1, 5),
+        (27, 1, 6),
+        (79, 1, 7),
+        (82, 1, 8),
+    ]
+
+
+def test_having_is_applied_before_the_window():
+    """HAVING filters GROUPS, and the standard evaluates it BEFORE window functions.
+
+    Planned in its usual place — a Filter above the Project, which is above the windows —
+    it filtered nothing the window had not already counted: this answered 45, the total
+    over all nine groups, where DuckDB and the standard say 35. The lowering plans it
+    inside the boundary instead, below the windows.
+    """
+    assert rows(
+        "SELECT number_of_moons, SUM(id) AS s, SUM(SUM(id)) OVER () AS t "
+        "FROM $planets GROUP BY number_of_moons HAVING SUM(id) > 4 ORDER BY number_of_moons"
+    ) == [(5, 9, 35), (14, 8, 35), (27, 7, 35), (79, 5, 35), (82, 6, 35)]
+
+
+def test_having_may_name_a_select_alias():
+    """`SUM(id) AS s ... HAVING s > 4` means the same as `HAVING SUM(id) > 4`.
+
+    HAVING is planned BELOW the Project that creates the alias, so the alias has to be
+    resolved to the grouped column it stands for rather than left to bind against a name
+    that does not exist yet.
+    """
+    assert rows(
+        "SELECT number_of_moons, SUM(id) AS s, SUM(SUM(id)) OVER () AS t "
+        "FROM $planets GROUP BY number_of_moons HAVING s > 4 ORDER BY number_of_moons"
+    ) == [(5, 9, 35), (14, 8, 35), (27, 7, 35), (79, 5, 35), (82, 6, 35)]
+
+
+def test_qualify_filters_the_grouped_rows():
+    """QUALIFY filters on a window's value, and here that window is over the groups."""
+    assert rows(
+        "SELECT number_of_moons, SUM(id) AS s FROM $planets GROUP BY number_of_moons "
+        "QUALIFY RANK() OVER (ORDER BY SUM(id) DESC) <= 3 ORDER BY s DESC"
+    ) == [(5, 9), (14, 8), (27, 7)]
+
+
+def test_window_in_order_by_over_the_grouped_rows():
+    """A window written only in ORDER BY is hoisted the same way and ordered on."""
+    assert rows(
+        "SELECT number_of_moons, SUM(id) AS s FROM $planets GROUP BY number_of_moons "
+        "ORDER BY RANK() OVER (ORDER BY SUM(id) DESC) LIMIT 3"
+    ) == [(5, 9), (14, 8), (27, 7)]
+
+
+def test_window_over_a_grouped_join():
+    """The window's source is a multi-table join.
+
+    Every other window arrangement refuses that (`_find_base_scan`, and
+    `window_to_join._source_relation` behind it) because the rewrite rebuilds the outer
+    leg of its join as a qualified wildcard and needs one relation to qualify it with.
+    The grouped result IS one relation however many tables the grouping read — and TPC-DS
+    needs this: all ten of those queries join.
+    """
+    assert rows(
+        "SELECT p.name, COUNT(*) AS c, SUM(COUNT(*)) OVER (PARTITION BY p.name) AS t "
+        "FROM $planets AS p INNER JOIN testdata.satellites AS s ON s.planetId = p.id "
+        "GROUP BY p.name HAVING COUNT(*) > 20 ORDER BY p.name"
+    ) == [("Jupiter", 67, 67), ("Saturn", 61, 61), ("Uranus", 27, 27)]
+
+
+def test_two_partition_specs_over_one_grouping():
+    """Two windows with different partitions are two CTEs joined onto one grouped result,
+    not two copies of the grouping."""
+    assert rows(
+        "SELECT number_of_moons AS m, SUM(id) AS s, "
+        "SUM(SUM(id)) OVER (PARTITION BY number_of_moons) AS by_moons, "
+        "SUM(SUM(id)) OVER () AS overall "
+        "FROM $planets GROUP BY number_of_moons ORDER BY m"
+    ) == [
+        (0, 3, 3, 45),
+        (1, 3, 3, 45),
+        (2, 4, 4, 45),
+        (5, 9, 9, 45),
+        (14, 8, 8, 45),
+        (27, 7, 7, 45),
+        (79, 5, 5, 45),
+        (82, 6, 6, 45),
+    ]
+
+
+def test_output_names_survive_the_boundary():
+    """The grouped rows become a relation, and a relation renames things.
+
+    `visit_project` records an `AS` as an extra alias on the schema column rather than
+    renaming it, and the boundary publishes `schema_column.name` and drops the aliases —
+    so the boundary is crossed under the EXPRESSION's name and the caller's alias is
+    re-applied above it. Named `s` here, not `SUM(id)`; and an unaliased aggregate still
+    answers to its rendering.
+    """
+    assert names(
+        "SELECT number_of_moons AS m, SUM(id) AS s, SUM(SUM(id)) OVER () AS t "
+        "FROM $planets GROUP BY number_of_moons"
+    ) == ["m", "s", "t"]
+    assert names(
+        "SELECT number_of_moons, SUM(id), SUM(SUM(id)) OVER (PARTITION BY number_of_moons) "
+        "FROM $planets GROUP BY number_of_moons"
+    ) == [
+        "number_of_moons",
+        "SUM(id)",
+        "SUM(SUM(id)) OVER (PARTITION BY number_of_moons)",
+    ]
+
+
+def test_one_aggregate_however_many_spellings():
+    """`SUM(mass) AS m` and the bare `SUM(mass)` inside the window are ONE grouped column.
+
+    Deduped on the rendering, with the aliased spelling winning — the relation exposes it
+    once and every reference reads that column.
+    """
+    assert rounded(
+        "SELECT id % 3 AS bucket, SUM(mass) AS m, SUM(SUM(mass)) OVER () AS t "
+        "FROM $planets GROUP BY id % 3"
+    ) == [(0, 573.9846, 2666.6266), (1, 87.772, 2666.6266), (2, 2004.87, 2666.6266)]
+
+
+@pytest.mark.parametrize(
+    "statement, column",
+    [
+        # The window's ARGUMENT is where this most often hides: `mass` is read raw at a
+        # level where only the group keys and the aggregates exist.
+        ("SELECT SUM(mass) OVER () + SUM(mass) FROM $planets", "mass"),
+        ("SELECT id, SUM(gravity) OVER (PARTITION BY id) FROM $planets GROUP BY id", "gravity"),
+        # A window's PARTITION BY and ORDER BY are read at that level too.
+        ("SELECT MAX(id) OVER (PARTITION BY gravity), COUNT(*) FROM $planets", "id"),
+        ("SELECT COUNT(*), ROW_NUMBER() OVER (ORDER BY id) FROM $planets", "id"),
+        # And so is the SELECT list beside the window.
+        (
+            "SELECT name, SUM(SUM(id)) OVER () FROM $planets GROUP BY number_of_moons",
+            "name",
+        ),
+    ],
+)
+def test_ungrouped_column_is_refused_by_name(statement, column):
+    """The standard's rule still governs, and names the column the caller wrote.
+
+    DuckDB and PostgreSQL refuse every one of these in the same terms. The minted
+    `$win_<random>` join key must never appear: it is a column nobody typed and it is
+    different on every execution.
+    """
+    with pytest.raises(SqlError) as raised:
+        rows(statement)
+    message = str(raised.value)
+    assert f"Column '{column}' must appear in the `GROUP BY` clause" in message, message
+    assert "$win_" not in message, message
+
+
+def test_cumulative_window_over_groups_is_refused():
+    """FLAVOUR (b) — TPC-DS Q51 — is NOT delivered, and does not pretend to be.
+
+        SELECT ws_item_sk, d_date,
+               SUM(SUM(ws_sales_price)) OVER (PARTITION BY ws_item_sk ORDER BY d_date
+                                              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        FROM ... GROUP BY ws_item_sk, d_date
+
+    needs a window FRAME and an ordered running aggregate, which Opteryx has in NO
+    arrangement — with a GROUP BY or without one. That is a separate capability in the
+    native WindowSink, not part of this lowering, and it is refused rather than answered
+    wrongly.
+
+    Pinned here so that when frames land, this is the test that says what to replace it
+    with: the running total per partition, in the window's ORDER BY order.
+    """
+    with pytest.raises(UnsupportedSyntaxError) as raised:
+        rows(
+            "SELECT number_of_moons, SUM(SUM(id)) OVER ("
+            "PARTITION BY number_of_moons ORDER BY number_of_moons "
+            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
+            "FROM $planets GROUP BY number_of_moons"
+        )
+    assert "not supported" in str(raised.value), raised.value
+    # The same refusal without a GROUP BY anywhere — the frame is what is missing, not
+    # the combination.
+    with pytest.raises(UnsupportedSyntaxError):
+        rows(
+            "SELECT SUM(id) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
+            "FROM $planets"
+        )
+
+
+def test_a_window_in_having_is_still_refused():
+    """HAVING filters groups and windows are computed after that filter, so a window in
+    HAVING asks for a value that does not exist yet. Unchanged by this work, and asserted
+    here because the lowering moved HAVING's Filter next to the windows."""
+    with pytest.raises(UnsupportedSyntaxError) as raised:
+        rows("SELECT COUNT(*) FROM $planets HAVING COUNT(*) OVER () > 100")
+    assert "cannot appear in **HAVING**" in str(raised.value), raised.value
+
+
+if __name__ == "__main__":  # pragma: no cover
+    from tests import run_tests
+
+    run_tests()

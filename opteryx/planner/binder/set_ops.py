@@ -26,44 +26,177 @@ def visit_set(self, node: Node, context: BindingContext) -> Tuple[Node, BindingC
     return node, context
 
 
-def _build_setop_on_condition(
-    left_relations: List[str],
-    right_relations: List[str],
-    col_names: List[str],
-) -> Node:
-    """AND-tree of equality conditions covering every (left_rel, right_rel, col)
-    triple, unbound (source/source_column only) — mirrors
-    plan_rewriter.strategies.intersect_to_inner_join._build_on_condition /
-    except_to_anti_join._build_on_condition exactly, so that delegating to
-    visit_join below resolves it exactly as it would a hand-written ON clause.
+# The node types whose `.columns` are an OUTPUT projection. Everything else states
+# columns for its own purposes — a Filter's predicate, a Join's ON condition, a
+# Scan's read set — and none of those describe what the leg above them emits.
+_PROJECTING_STEPS = (
+    LogicalPlanStepType.Project,
+    LogicalPlanStepType.Union,
+    LogicalPlanStepType.Intersect,
+    LogicalPlanStepType.Except,
+)
 
-    Not imported from plan_rewriter: binder and plan_rewriter are sibling
-    planning phases with no existing cross-import in either direction (plan_rewriter
-    runs BEFORE binding; reaching backward into it here would be a new, backwards
-    layering dependency for one small helper). The two plan_rewriter copies
-    already don't share this with each other either, so a third copy here follows
-    the codebase's existing convention for this specific helper, not a new one.
+
+def _setop_leg_columns(self, node: Node, relation_names: List[str], context: BindingContext):
+    """One set-op leg's OUTPUT columns, in order, as (relation, SchemaColumn) pairs.
+
+    THE ONE DEFINITION of what a leg produces. INTERSECT and EXCEPT match their legs
+    POSITIONALLY - column i of the left against column i of the right - so order is
+    the point, and the only node that states the leg's order is the leg's own top
+    projection. Summing `context.schemas[rel]` across `relation_names` cannot: that
+    list is not in projection order (it is collected by walking down to the scans),
+    and for a leg over two relations it interleaves columns the projection never
+    named.
+
+    Returns None when any output column cannot be tied to a relation on this side -
+    a computed or literal projection (`SELECT id + 1`, `SELECT 1`) is bound into the
+    shared `$project` key and carries no source, and `extract_join_fields` keys the
+    join by relation name. The caller then leaves the node alone rather than
+    building a join whose keys silently do not resolve.
+
+    ONLY a node that states a PROJECTION counts. Most nodes carry a `.columns` list
+    and almost none of them are an output list: a Filter's is the predicate's
+    identifiers, a Join's is its ON condition's. Accepting the first node that had
+    any columns made `SELECT * FROM t WHERE ... INTERSECT SELECT * FROM t WHERE ...`
+    compare the two legs on the FILTER's column alone and call the rest equal.
+    """
+    graph = getattr(self, "graph", None)
+    if graph is None:
+        return None
+
+    set_op_nid = None
+    for nid, candidate in graph.nodes(True):
+        if candidate is node:
+            set_op_nid = nid
+            break
+    if set_op_nid is None:
+        return None
+
+    names = set(relation_names)
+    for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
+        if not _branch_owns_a_relation(graph, child_nid, names):
+            continue
+
+        descent = [child_nid]
+        descended = set()
+        while descent:
+            current = descent.pop(0)
+            if current in descended:
+                continue
+            descended.add(current)
+            branch_node = graph[current]
+
+            # A nested set operation this function already rewrote records what it
+            # exports (see `_rewrite_setop_to_join`). Read it rather than
+            # re-deriving: the rewritten node is a Join, whose `.columns` are the
+            # identifiers of its ON condition - both legs' keys, not an output list.
+            carried = getattr(branch_node, "setop_leg_columns", None)
+            if carried is not None:
+                return carried
+
+            if branch_node.node_type in _PROJECTING_STEPS and branch_node.columns:
+                leg_columns = []
+                for column in branch_node.columns:
+                    schema_column = getattr(column, "schema_column", None)
+                    if schema_column is None:
+                        # An unexpanded wildcard, or anything else not yet bound to
+                        # a column: this IS the leg's projection, so there is
+                        # nothing further down to consult.
+                        return None
+                    source = getattr(column, "source", None)
+                    if source not in names:
+                        # A column can reach the projection without its `source`
+                        # set (`SELECT id` over a single relation); its origin
+                        # names the relation it came from.
+                        origins = [o for o in (schema_column.origin or []) if o in names]
+                        source = origins[-1] if origins else None
+                    if source is None:
+                        # A computed projection (`SUBSTRING(ca_zip, 1, 5) AS ca_zip`)
+                        # has no `.source` of its own, and its schema_column (an
+                        # ExpressionColumn/FunctionColumn) carries no `.origin` either
+                        # — that field is populated for aggregate outputs, not plain
+                        # projected expressions. `.relations` (binder.py's
+                        # `inner_binder`, "node.relations = set(sources)") is the
+                        # general answer: every relation an identifier inside the
+                        # expression resolves to. Only trust it when it names exactly
+                        # ONE relation on this side — a bare `SELECT 1` (no
+                        # identifiers) leaves it empty, and a genuinely cross-relation
+                        # computed column leaves it ambiguous; both must still decline
+                        # rather than guess.
+                        relations = [r for r in (getattr(column, "relations", None) or ()) if r in names]
+                        source = relations[0] if len(relations) == 1 else None
+                    if source is None:
+                        return None
+                    leg_columns.append((source, schema_column))
+                return leg_columns or None
+
+            for upstream_nid, _, _ in graph.ingoing_edges(current):
+                descent.append(upstream_nid)
+
+    # No projection anywhere in the branch: `SELECT * FROM t`, whose wildcard the
+    # planner resolves at the scan. The leg is then the relation itself, in schema
+    # order. Only for a SINGLE relation — `SELECT * FROM a, b` outputs both, and
+    # this function has no way to say which order they arrive in, so it declines
+    # rather than compare one relation's columns and report the other's as equal.
+    if len(relation_names) == 1:
+        schema = context.schemas.get(relation_names[0])
+        if schema is not None and schema.columns:
+            return [(relation_names[0], schema_column) for schema_column in schema.columns]
+
+    return None
+
+
+def _branch_owns_a_relation(graph, start_nid: str, relation_names: set) -> bool:
+    """Does the branch rooted at `start_nid` contain one of these relations?"""
+    stack = [start_nid]
+    seen: set = set()
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if getattr(graph[current], "alias", None) in relation_names:
+            return True
+        for upstream_nid, _, _ in graph.ingoing_edges(current):
+            stack.append(upstream_nid)
+    return False
+
+
+def _positional_setop_on_condition(left_columns, right_columns) -> Node:
+    """AND-tree of `left[i] = right[i]`, one equality per output position.
+
+    The identifiers are handed over ALREADY BOUND - `inner_binder` returns early on
+    a node that has a `schema_column`, so nothing here is resolved by name. That is
+    the point: a name is not a reliable handle on a leg's output column (two legs
+    can both offer `id`, and a leg's own alias may have renamed it), whereas the
+    bound column is the thing itself.
+
+    `source` is still set, because it is not decoration: `extract_join_fields`
+    decides which side of the join each key belongs to by testing the identifier's
+    source against the join's relation-name lists.
     """
     conditions = []
-    for left_rel in left_relations:
-        for right_rel in right_relations:
-            for col_name in col_names:
-                eq = Node(
-                    node_type=NodeType.COMPARISON_OPERATOR,
-                    value="Eq",
-                    do_not_create_column=True,
-                )
-                eq.left = LogicalColumn(
-                    node_type=NodeType.IDENTIFIER,
-                    source=left_rel,
-                    source_column=col_name,
-                )
-                eq.right = LogicalColumn(
-                    node_type=NodeType.IDENTIFIER,
-                    source=right_rel,
-                    source_column=col_name,
-                )
-                conditions.append(eq)
+    for (left_relation, left_column), (right_relation, right_column) in zip(
+        left_columns, right_columns
+    ):
+        equality = Node(
+            node_type=NodeType.COMPARISON_OPERATOR,
+            value="Eq",
+            do_not_create_column=True,
+        )
+        equality.left = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source=left_relation,
+            source_column=left_column.name,
+            schema_column=left_column,
+        )
+        equality.right = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source=right_relation,
+            source_column=right_column.name,
+            schema_column=right_column,
+        )
+        conditions.append(equality)
 
     while len(conditions) > 1:
         paired = []
@@ -80,53 +213,52 @@ def _build_setop_on_condition(
     return conditions[0]
 
 
-def _rewrite_wildcard_setop_to_join(
-    self, node: Node, context: BindingContext, join_type: str
-) -> Tuple[Node, BindingContext]:
-    """Convert a wildcard (`SELECT * INTERSECT/EXCEPT SELECT *`) set-op node to a
-    `left semi` / `left anti` Join, at bind time, then delegate to visit_join.
+def _rewrite_setop_to_join(self, node: Node, context: BindingContext, join_type: str):
+    """Convert an INTERSECT/EXCEPT node to a `left semi` / `left anti` Join.
 
-    plan_rewriter.strategies.intersect_to_inner_join / except_to_anti_join already
-    perform this exact rewrite, but only pre-bind, and explicitly skip wildcard
-    projections: column names aren't resolvable before the binder has fetched each
-    relation's schema (see those modules' docstrings — "The binder expands
-    wildcards and handles those nodes directly"). That claim was only half true:
-    visit_intersect/visit_except previously expanded the wildcard's `.columns`
-    but left `node.node_type` as Intersect/Except, which physical_planner has no
-    builder for — `SELECT * INTERSECT SELECT *` reached physical planning and
-    failed with `InvalidInternalStateError: Unexpected logical node encountered`.
+    THE set-op -> join rewrite, and the only one for the DISTINCT forms. It lives at
+    bind time because the ON condition needs to know which column each leg produces
+    at each output position, and that is knowable only once the legs are bound.
 
-    Runs BEFORE this function pops `right_relation_names`' schemas (unlike the
-    ordinary wildcard-expansion path below) because visit_join's own
-    inner_binder(node.on, ...) call needs both sides' schemas present to resolve
-    the ON condition, exactly as it would for a hand-written ON clause.
+    It replaces three pre-bind constructions (plan_rewriter's
+    `intersect_to_inner_join` and `except_to_anti_join`, deleted, and this module's
+    own wildcard-only builder) which all built the ON as the CROSS PRODUCT of
+    `left_relation_names x right_relation_names x projected column names`. That is
+    only correct when each leg is exactly ONE relation. A leg that joins two -
+    `... FROM store_sales, date_dim, customer ... EXCEPT ...`, TPC-DS Q87 - got a
+    predicate per relation PAIR, referencing relations whose columns the leg's own
+    projection had already narrowed away, and failed to bind. Positional matching is
+    also what SQL actually specifies, so it additionally retires those modules'
+    documented "column matching is by name" limitation.
 
-    Known gap: uses `node.left_relation_names`/`right_relation_names` directly,
-    not reduced via `_set_op_join_common.live_relations` the way the pre-bind
-    rewrite is (that reduction exists for CHAINED/nested set-ops, where a nested
-    set-op's own legs must not be double-counted). A single non-nested wildcard
-    set-op is unaffected; a chained wildcard case
-    (`SELECT * FROM a INTERSECT SELECT * FROM b INTERSECT SELECT * FROM c`) is not
-    verified against this path and may misbehave — flagged rather than solved
-    speculatively, matching how the parallel UNION-side gap was handled.
+    Returns None when the legs cannot be paired - an unequal column count (the
+    validator has already refused that), or a leg whose output cannot be tied to a
+    relation (see `_setop_leg_columns`). The caller then leaves the node exactly as
+    it was: a set op the physical planner has no builder for still fails loud there,
+    which is what it did before this path existed.
+
+    Runs BEFORE the caller pops `right_relation_names`' schemas: visit_join binds
+    the ON against both sides, exactly as it would a hand-written one.
     """
-    col_names = []
-    for schema_name in node.left_relation_names:
-        col_names.extend(schema_column.name for schema_column in context.schemas[schema_name].columns)
-
-    on_condition = _build_setop_on_condition(
-        node.left_relation_names,
-        node.right_relation_names,
-        col_names,
-    )
+    left_columns = _setop_leg_columns(self, node, node.left_relation_names, context)
+    right_columns = _setop_leg_columns(self, node, node.right_relation_names, context)
+    if left_columns is None or right_columns is None:
+        return None
+    if len(left_columns) != len(right_columns):
+        return None
 
     join_node = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
     join_node.type = join_type
-    join_node.on = on_condition
+    join_node.on = _positional_setop_on_condition(left_columns, right_columns)
     join_node.using = None
     join_node.left_relation_names = node.left_relation_names
     join_node.right_relation_names = node.right_relation_names
     join_node.columns = []
+    # What this node exports, for an ENCLOSING set operation to read instead of
+    # re-deriving it from a node that is no longer a projection. A semi/anti join
+    # emits its left leg and nothing else, so the left leg's columns ARE the output
+    # of the set operation this node replaces.
+    join_node.setop_leg_columns = left_columns
 
     from opteryx.planner.binder.join import visit_join
 
@@ -230,21 +362,7 @@ def _branch_project_columns(self, node: Node, relation_names: List[str], context
 
     rel_set = set(relation_names)
     for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
-        stack = [child_nid]
-        seen = set()
-        matched = False
-        while stack:
-            cur = stack.pop()
-            if cur in seen:
-                continue
-            seen.add(cur)
-            cur_node = graph[cur]
-            if getattr(cur_node, "alias", None) in rel_set:
-                matched = True
-                break
-            for upstream_nid, _, _ in graph.ingoing_edges(cur):
-                stack.append(upstream_nid)
-        if matched:
+        if _branch_owns_a_relation(graph, child_nid, rel_set):
             # The branch's output columns live on its top node — usually the
             # direct Project child. With chained set operations the direct child
             # is a column-less wrapper (e.g. DISTINCT over a nested set op), so
@@ -258,13 +376,29 @@ def _branch_project_columns(self, node: Node, relation_names: List[str], context
                     continue
                 descent_seen.add(cur)
                 cur_node = graph[cur]
-                branch_columns = []
-                for col in (cur_node.columns or []):
-                    schema_column = getattr(col, "schema_column", None)
-                    if schema_column is not None:
-                        branch_columns.append(schema_column)
-                if branch_columns:
-                    return branch_columns
+                # A nested set operation, already rewritten to a semi/anti Join by
+                # `_rewrite_setop_to_join`, states what it exports. A Join's own
+                # `.columns` are the identifiers of its ON condition — BOTH legs'
+                # keys — so reading them here counts a two-column output for a
+                # one-column set operation.
+                carried = getattr(cur_node, "setop_leg_columns", None)
+                if carried is not None:
+                    return [schema_column for _, schema_column in carried]
+                # Only a node that STATES a projection counts — same restriction
+                # `_setop_leg_columns` applies via `_PROJECTING_STEPS`. Without it, a
+                # HAVING Filter sitting directly below the set-op (any leg ending
+                # `GROUP BY ... HAVING ...`) is mistaken for the leg's own Project:
+                # a Filter's `.columns` are its predicate's referenced identifiers
+                # (e.g. `sum(mass) > 0` -> `[mass]`), not an output list, and that
+                # short leg-arity got reported as the branch's true column count.
+                if cur_node.node_type in _PROJECTING_STEPS:
+                    branch_columns = []
+                    for col in (cur_node.columns or []):
+                        schema_column = getattr(col, "schema_column", None)
+                        if schema_column is not None:
+                            branch_columns.append(schema_column)
+                    if branch_columns:
+                        return branch_columns
                 for upstream_nid, _, _ in graph.ingoing_edges(cur):
                     descent.append(upstream_nid)
 
@@ -292,21 +426,7 @@ def _branch_project_node(self, node: Node, relation_names: List[str]):
 
     rel_set = set(relation_names)
     for child_nid, _, _ in graph.ingoing_edges(set_op_nid):
-        stack = [child_nid]
-        seen = set()
-        matched = False
-        while stack:
-            cur = stack.pop()
-            if cur in seen:
-                continue
-            seen.add(cur)
-            cur_node = graph[cur]
-            if getattr(cur_node, "alias", None) in rel_set:
-                matched = True
-                break
-            for upstream_nid, _, _ in graph.ingoing_edges(cur):
-                stack.append(upstream_nid)
-        if matched:
+        if _branch_owns_a_relation(graph, child_nid, rel_set):
             descent = [child_nid]
             descent_seen = set()
             while descent:
@@ -315,7 +435,12 @@ def _branch_project_node(self, node: Node, relation_names: List[str]):
                     continue
                 descent_seen.add(cur)
                 cur_node = graph[cur]
-                if any(getattr(col, "schema_column", None) is not None for col in (cur_node.columns or [])):
+                # Skipped for the same reason as in `_branch_project_columns`: a
+                # Join's `.columns` are its ON condition's identifiers, so it is
+                # never the node whose column list a caller wants to read or cast.
+                if cur_node.node_type != LogicalPlanStepType.Join and any(
+                    getattr(col, "schema_column", None) is not None for col in (cur_node.columns or [])
+                ):
                     return cur_node
                 for upstream_nid, _, _ in graph.ingoing_edges(cur):
                     descent.append(upstream_nid)
@@ -658,19 +783,29 @@ def visit_union(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
 
 
 def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    # Every non-ALL INTERSECT is a semi join, and the rewrite runs here rather than
+    # pre-bind because the ON condition pairs the legs' output columns positionally
+    # — see `_rewrite_setop_to_join`. The wildcard case is not special any more; it
+    # takes the same path as every other projection.
+    #
+    # INTERSECT ALL has no join-based rewrite here: multiset semantics need each
+    # row's occurrence index, which plan_rewriter's
+    # `intersect_except_all_to_window_join` supplies by inserting a ROW_NUMBER
+    # Window into the plan — a structural change the binder cannot make mid-
+    # traversal (it visits bottom-up; a node inserted below it is never bound).
+    #
+    # AHEAD of the column-count check, which resolves each leg the older, less
+    # direct way (`_columns_for_side`, summing per-relation schemas). The rewrite
+    # declines an unequal pairing rather than zipping it short, so a genuine
+    # mismatch still lands on the validator and is still reported there.
+    if node.modifier != "All":
+        rewritten = _rewrite_setop_to_join(self, node, context, "left semi not-distinct")
+        if rewritten is not None:
+            return rewritten
+
     _validate_set_operation_types(self, node, context, "INTERSECT")
 
     is_wildcard = len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD
-
-    # Delegate wildcard, non-ALL INTERSECT to the semi-join rewrite BEFORE popping
-    # right_relation_names' schemas below — visit_join needs both sides present to
-    # resolve the ON condition. INTERSECT ALL has no join-based rewrite (multiset
-    # semantics; matches plan_rewriter.strategies.intersect_to_inner_join's own
-    # exclusion) — it falls through unchanged and still fails loud at physical
-    # planning, exactly as before this fix, by design, not a regression.
-    if is_wildcard and node.modifier != "All":
-        return _rewrite_wildcard_setop_to_join(self, node, context,
-                                              "left semi not-distinct")
 
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)
@@ -696,16 +831,17 @@ def visit_intersect(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
 
 
 def visit_except(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    # See the matching comment in visit_intersect — same reasoning, and the same
+    # ordering ahead of the count check. "left anti" instead of "left semi", and
+    # EXCEPT ALL falls through for the same reason INTERSECT ALL does.
+    if node.modifier != "All":
+        rewritten = _rewrite_setop_to_join(self, node, context, "left anti not-distinct")
+        if rewritten is not None:
+            return rewritten
+
     _validate_set_operation_types(self, node, context, "EXCEPT")
 
     is_wildcard = len(node.columns) == 1 and node.columns[0].node_type == NodeType.WILDCARD
-
-    # See the matching comment in visit_intersect — same reasoning, "left anti"
-    # instead of "left semi". EXCEPT ALL falls through unchanged for the same
-    # multiset-semantics reason.
-    if is_wildcard and node.modifier != "All":
-        return _rewrite_wildcard_setop_to_join(self, node, context,
-                                              "left anti not-distinct")
 
     for relation in node.right_relation_names:
         context.schemas.pop(relation, None)

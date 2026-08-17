@@ -916,10 +916,19 @@ def find_compatible_type(types: list) -> Optional["ColumnType"]:
     if len(set(non_null)) == 1:
         result_lc = non_null[0]
     elif all(t in _NUMERIC_TYPES or t == LogicalCategory.BOOLEAN for t in non_null):
-        if LogicalCategory.DECIMAL in non_null:
-            result_lc = LogicalCategory.DECIMAL
-        elif LogicalCategory.FLOAT in non_null:
+        # FLOAT beats DECIMAL: OPERATOR_MAP already resolves every FLOAT x DECIMAL
+        # binary op to FLOAT, and the architect's literal-typing ruling (unsuffixed
+        # decimals bind as FLOAT64, exactness is opt-in via CAST) makes FLOAT the
+        # default real interpretation. DECIMAL-beats-FLOAT here contradicted both:
+        # find_compatible_type([DECIMAL(3,1), FLOAT64]) produced a DECIMAL(38,18)
+        # fallback (no ColumnType survives the ct_inputs filter below, since it
+        # only looks at DECIMAL/INTEGER inputs) that silently coerced a FLOAT
+        # column's values and overflowed outright for ordinary float literals
+        # (`CASE WHEN ... THEN 9.8 ELSE decimal_col END`).
+        if LogicalCategory.FLOAT in non_null:
             result_lc = LogicalCategory.FLOAT
+        elif LogicalCategory.DECIMAL in non_null:
+            result_lc = LogicalCategory.DECIMAL
         elif LogicalCategory.INTEGER in non_null:
             result_lc = LogicalCategory.INTEGER
         else:

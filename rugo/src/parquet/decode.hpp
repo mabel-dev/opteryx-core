@@ -281,6 +281,20 @@ DecodedColumn DecodeColumnFromMemory(const uint8_t* data, size_t size,
                                    int32_t* ext_int32   = nullptr,
                                    float*   ext_float32 = nullptr);
 
+// Decode every requested column for exactly ONE row group. Same underlying
+// DecodeColumnFromMemory primitive ReadParquet uses internally, but scoped to
+// a single row group so a streaming caller can consume and release it before
+// decoding the next one. ReadParquet decodes and retains every row group of
+// the file in one DecodedTable before returning anything (see its comment
+// above) — unbounded memory on a large file; this is the primitive a real
+// streaming reader is built on. Throws std::runtime_error on a genuine
+// per-column decode failure, with the same "row group N, column 'X': reason"
+// message ReadParquet raises for the equivalent failure.
+std::vector<DecodedColumn> DecodeRowGroupColumns(
+    const uint8_t* data, size_t size,
+    const std::vector<std::string>& column_names,
+    const RowGroupStats& row_group, int row_group_index);
+
 // Legacy file-based functions (kept for backward compatibility)
 DecodedColumn DecodeColumn(const std::string &path, const std::string &column_name, 
                            const RowGroupStats &row_group, int row_group_index);

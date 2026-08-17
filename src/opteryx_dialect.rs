@@ -274,6 +274,22 @@ impl Dialect for OpteryxDialect {
         true
     }
 
+    // GROUP BY ROLLUP(a, b) / CUBE(...) / GROUPING SETS (...).
+    //
+    // Without this the grouping-set productions never run and `ROLLUP(a, b)` parses as
+    // an ordinary scalar function call, which then fails catalog lookup with the
+    // misleading "Function **ROLLUP** cannot be found". ROLLUP is a GROUP BY modifier,
+    // not a function, and has to be recognised as one at the parser rather than be left
+    // to fall through to function resolution.
+    //
+    // This is the `GROUP BY <construct>(...)` spelling only. The `GROUP BY x WITH ROLLUP`
+    // spelling is a separate MySQL-heritage flag (`supports_group_by_with_modifier`) and
+    // stays OFF - it is a different production with different semantics for the modifier
+    // list, and nothing asks for it.
+    fn supports_group_by_expr(&self) -> bool {
+        true
+    }
+
     // The accessor / containment family (`->`, `->>`, `@>`, `@>>`, `@?`) binds tighter
     // than everything except member access (`.`).
     //

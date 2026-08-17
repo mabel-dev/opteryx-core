@@ -31,7 +31,6 @@ from typing import Set
 from typing import Tuple
 
 from opteryx.expression import NodeType
-from opteryx.expression import get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -39,6 +38,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
+from .optimization_strategy import filter_referenced_columns
 from .optimization_strategy import get_nodes_of_type_from_logical_plan
 
 
@@ -383,7 +383,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
             filter_node = optimized_plan[filter_nid]
             filter_node.condition = new_condition
 
-            identifiers = get_all_nodes_of_type(new_condition, (NodeType.IDENTIFIER,))
+            identifiers = filter_referenced_columns(new_condition)
             filter_node.columns = identifiers
 
             relations: Set[str] = set()

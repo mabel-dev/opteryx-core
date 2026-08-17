@@ -14,6 +14,40 @@ from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
 
+# A Filter's `.columns` is documented elsewhere (set_ops.py, projection_pushdown.py)
+# as "the predicate's referenced identifiers" — but a HAVING clause that could not
+# fuse onto its own aggregate (predicate_pushdown normally folds HAVING directly
+# onto the aggregate node; this is the one shape that can't — e.g. it also needs a
+# column from a decorrelated subquery's join, so it stays a standalone Filter ABOVE
+# that join) still has its AGGREGATOR nodes (`SUM(x)`) sitting in `.condition`. The
+# compiler treats AGGREGATOR exactly like IDENTIFIER — an atomic, already-resolved
+# "load this identity from the stream" reference, never "recompute from its operand"
+# (see compiler.py's array-hoist gate: IDENTIFIER/EVALUATED/AGGREGATOR all "already
+# lower to BC_LOAD_COL"). Walking a condition for IDENTIFIER alone descends PAST the
+# aggregate into its pre-aggregation operand (`mass` under `SUM(mass)`) instead of
+# stopping at the aggregate's own identity — the identity the filter actually reads
+# and the one every rebuild of `.columns` from `.condition` must therefore keep.
+FILTER_REFERENCED_NODE_TYPES = (NodeType.IDENTIFIER, NodeType.AGGREGATOR)
+"""Node types a Filter's `.columns` must preserve when rebuilt from `.condition` —
+see `filter_referenced_columns`. Exported so a strategy filtering an ALREADY-BUILT
+`.columns` list (rather than re-walking `.condition`) keys on the same set instead
+of hand-rolling `column.node_type == NodeType.IDENTIFIER`."""
+
+
+def filter_referenced_columns(condition: Node) -> list:
+    """The atomic, already-resolved column references a Filter's condition reads.
+
+    THE ONE DEFINITION for rebuilding a Filter node's `.columns` from its
+    `.condition` — every optimizer strategy that does this (splitting conjuncts,
+    pushing/inlining/compacting predicates, decorrelating a subquery) must use this,
+    not a bare `get_all_nodes_of_type(condition, (NodeType.IDENTIFIER,))`, or it
+    silently drops a standalone HAVING's own aggregate identity and a later stage
+    prunes the column the filter needs: "expression references column ... which the
+    stream does not carry".
+    """
+    return get_all_nodes_of_type(condition, FILTER_REFERENCED_NODE_TYPES)
+
+
 def predicate_key(pred: Node) -> str:
     """Canonical dedup/factoring key for one predicate.
 

@@ -158,7 +158,8 @@ REGISTER: List[RegisteredDefect] = [
     # OUTER demand as `pre_update_columns` on every node below a Distinct. A
     # Distinct with no ON dedups on every column that reaches it, and COUNT(*)
     # demands none, so the semi/anti join a DISTINCT set operation is rewritten
-    # to (except_to_anti_join / intersect_to_inner_join) pruned its EMIT set to
+    # to (binder/set_ops._rewrite_setop_to_join — then two pre-bind strategies,
+    # since replaced by that one bind-time path) pruned its EMIT set to
     # ZERO columns — the Distinct then dedupped on nothing and collapsed the
     # whole set operation into one bucket. The ALL variants and both UNIONs were
     # unaffected because neither carries that Distinct-straight-onto-a-join

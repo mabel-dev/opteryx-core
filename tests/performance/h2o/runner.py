@@ -58,13 +58,28 @@ def _query_sort_key(path: Path):
     return (m.group(1), int(m.group(2)))
 
 
-def _rewrite_query(sql: str, size: str, workload: str) -> str:
-    """Replace bare table names with `testdata.h2o.<size>.<table>`.
+def _dataset_prefix(variant: str, size: str) -> str:
+    """`testdata.h2o_skene.` or `testdata.h2o.<size>.` — never a silent fallback.
+
+    The skene mirror is built at one size (medium), so it carries no size level:
+    `testdata.h2o_skene.<table>`. The parquet tree keeps its per-size layout.
+    An unknown variant is a hard failure rather than a fallback to the other
+    corpus.
+    """
+    if variant not in ("skene", "parquet"):
+        raise ValueError(f"unknown variant {variant!r}; expected 'skene' or 'parquet'")
+    return "testdata.h2o_skene." if variant == "skene" else f"testdata.h2o.{size}."
+
+
+def _rewrite_query(sql: str, size: str, workload: str, variant: str = "skene") -> str:
+    """Replace bare table names with the dataset-qualified form.
 
     Group-by queries use `x_groupby` (string ids first); join queries use
-    the join schema tables (`x`, `small`, `medium`, `big`).
+    the join schema tables (`x`, `small`, `medium`, `big`). The two workloads
+    have different schemas behind the same bare `x`, so the prefix alone is not
+    enough — the workload decides which table `x` means.
     """
-    prefix = f"testdata.h2o.{size}."
+    prefix = _dataset_prefix(variant, size)
     if workload == "groupby":
         return re.sub(r"(?<![\w.])x\b", prefix + "x_groupby", sql)
     out = sql
@@ -115,8 +130,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--size",
-        choices=["small", "medium", "large"],
-        default="small",
+        # `small` is gone. At 1e7 rows it is 630MB, which sits entirely in page
+        # cache on any development machine, so it measured compute with the
+        # storage layer removed — and the skene mirror is built at medium only.
+        choices=["medium", "large"],
+        default="medium",
     )
     parser.add_argument(
         "--queries-dir",
@@ -127,6 +145,14 @@ def main() -> int:
         "--results-dir",
         type=Path,
         default=HERE / "results",
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="skene",
+        choices=("skene", "parquet"),
+        help="dataset format: runs against testdata/h2o_skene or testdata/h2o/<size> "
+             "(default: skene)",
     )
     parser.add_argument(
         "--timeout",
@@ -229,7 +255,7 @@ def main() -> int:
                     d_ms = duckdb_min.get(stem)
 
                 raw_sql = path.read_text()
-                sql = _rewrite_query(raw_sql, args.size, workload)
+                sql = _rewrite_query(raw_sql, args.size, workload, args.variant)
 
                 run_times: list[float] = []
                 had_failure = False

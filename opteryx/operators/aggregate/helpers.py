@@ -23,6 +23,10 @@ AGGREGATORS: dict = {
     "ANY_VALUE": "any_value",
     "SUM": "sum",
     "STDDEV": "stddev",
+    "STDDEV_POP": "stddev",   # pure alias — STDDEV is already population stddev
+    "STDDEV_SAMP": "stddev_samp",
+    "VAR_POP": "var_pop",
+    "VAR_SAMP": "var_samp",
 }
 
 

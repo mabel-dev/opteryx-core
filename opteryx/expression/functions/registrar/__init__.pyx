@@ -172,6 +172,7 @@ def _make(
 def _coalesce_return_type(arg_nodes, func_name="COALESCE"):
     """Return the first non-null compatible ColumnType across all args."""
     from opteryx.types import find_compatible_type
+    from opteryx.types.type_unification import NOT_LITERAL, compute_selection_result_type
 
     branches = [
         (n, n.schema_column.column_type)
@@ -181,7 +182,26 @@ def _coalesce_return_type(arg_nodes, func_name="COALESCE"):
         and n.schema_column.column_type.category not in (LogicalCategory.NULL, None)
     ]
     _check_blend_compatible(branches, func_name)
-    return find_compatible_type([ct for _, ct in branches]) or _CT_NULL
+    cts = [ct for _, ct in branches]
+
+    # COALESCE/IFNULL/IFNOTNULL/IIF hand back one argument VERBATIM — a
+    # SELECTION, not a sum — so an all-DECIMAL/INTEGER mix uses the tighter
+    # selection-sizing rule, exactly like CASE (binder.py's
+    # _CASE_BLEND_FAMILIES resolution) does. find_compatible_type's Plus-style
+    # DECIMAL promotion sizes `COALESCE(decimal_col, 0)` as if computing
+    # decimal_col + 0, needlessly widening e.g. a DECIMAL(15,2) branch to
+    # DECIMAL(22,2) — sometimes across the int64/int128 tier boundary — for no
+    # representational reason. compute_selection_result_type returns None for
+    # anything outside an all-DECIMAL/INTEGER mix (strings, temporals, a FLOAT
+    # branch); find_compatible_type remains the fallback for those, unchanged.
+    # node_type 42 == NodeType.LITERAL (matches _nc_describe_branch above —
+    # the top-level NodeType import is circular from this package).
+    result_ct = compute_selection_result_type(
+        [(ct, n.value if n.node_type == 42 else NOT_LITERAL) for n, ct in branches]
+    )
+    if result_ct is None:
+        result_ct = find_compatible_type(cts)
+    return result_ct or _CT_NULL
 
 
 def _iif_return_type(arg_nodes):
@@ -221,6 +241,21 @@ _NC_FIXED = _NC_SIGNED_INT | _NC_FLOAT | _NC_UNSIGNED_INT | frozenset((
     DrakenType.DATE32, DrakenType.TIME32, DrakenType.TIME64, DrakenType.TIMESTAMP64,
 ))
 
+# DECIMAL/DECIMAL128 blend with each other and with signed INTEGER/FLOAT —
+# mirrors _CASE_BLEND_FAMILIES' (INTEGER, FLOAT, DECIMAL) group in binder.py.
+# This is a SEPARATE family from _NC_FIXED above, not a superset of it:
+# unsigned ints and DATE/TIME stay out — DECIMAL x UNSIGNED has no promotion
+# rule anywhere in the codebase (CASE included), and mixing it in here would
+# invent one. The nc_dispatch kernel cannot promote DECIMAL itself (scale is
+# out-of-band — a raw blend across differing scales is silently wrong), so
+# unlike _NC_FIXED's nc_promote_fixed, this family does not compute an output
+# type: find_compatible_type (FLOAT beats DECIMAL beats INTEGER,
+# logical_type.py) resolves the actual result, and the binder CAST-aligns
+# every branch (literal and column) to that exact ColumnType before the
+# kernel ever runs — the kernel then requires an EXACT physical match.
+_NC_DECIMAL_TYPES = frozenset((DrakenType.DECIMAL, DrakenType.DECIMAL128))
+_NC_DECIMAL_FAMILY = _NC_DECIMAL_TYPES | _NC_SIGNED_INT | _NC_FLOAT
+
 
 def _nc_promote_fixed(a, b):
     """Mirrors nc_promote_fixed; None is its DRAKEN_NULL "cannot promote" sentinel."""
@@ -259,8 +294,8 @@ def _check_blend_compatible(branches, func_name):
     the caller drops typed-NULL literals, so IIF(c, NULL, <array>) arrives here
     with one entry — and the family question ("can nc_dispatch blend this type at
     all?") is answered by that one branch alone, with no partner needed. Guarding
-    this on len >= 2 let every unblendable family (ARRAY, DECIMAL, INTERVAL,
-    VARIANT, VECTOR_FP16) reach the kernel and die mid-execution with only a type
+    this on len >= 2 let every unblendable family (ARRAY, INTERVAL, VARIANT,
+    VECTOR_FP16) reach the kernel and die mid-execution with only a type
     code — the exact failure this mirror exists to prevent, reached by pairing the
     branch with NULL instead of with a second real branch.
     """
@@ -291,6 +326,22 @@ def _check_blend_compatible(branches, func_name):
                 _fail(node_i, ct_i)
         return
 
+    # DECIMAL/DECIMAL128/signed-INTEGER/FLOAT: checked as one family (matching
+    # CASE's _CASE_BLEND_FAMILIES), not via _nc_promote_fixed's pairwise
+    # widening — DECIMAL's scale is out-of-band, so there is no "promoted type"
+    # this function can compute; find_compatible_type does that, and the
+    # binder CAST-aligns every branch to its exact answer. This branch must be
+    # checked BEFORE _NC_FIXED below: t0 in _NC_SIGNED_INT/_NC_FLOAT is also
+    # true for a plain int/float blend with no DECIMAL anywhere, and for that
+    # all-signed-or-float case membership here is equivalent to the pairwise
+    # check below (nc_promote_fixed never refuses two signed/float members) —
+    # so ordinary int/float COALESCE calls are unaffected.
+    if t0 in _NC_DECIMAL_FAMILY:
+        for node_i, ct_i in branches[1:]:
+            if ct_i.physical not in _NC_DECIMAL_FAMILY:
+                _fail(node_i, ct_i)
+        return
+
     if t0 in _NC_FIXED:
         out = t0
         for node_i, ct_i in branches[1:]:
@@ -303,8 +354,8 @@ def _check_blend_compatible(branches, func_name):
             out = promoted
         return
 
-    # t0 itself isn't in any blendable family (DECIMAL/DECIMAL128, ARRAY, INTERVAL,
-    # VARIANT, VECTOR_FP16) — the kernel rejects this regardless of the other
+    # t0 itself isn't in any blendable family (ARRAY, INTERVAL, VARIANT,
+    # VECTOR_FP16) — the kernel rejects this regardless of the other
     # branches, so fail here without even looking at them.
     raise IncompatibleTypesError(
         message=(

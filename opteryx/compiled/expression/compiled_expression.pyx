@@ -3602,10 +3602,20 @@ cdef _validate_temporal_at_bind(
 ):
     """Raise IncompatibleTypesError at bind time if a temporal comparison
     has an un-cast literal on one side. Runs once per COMPARISON node.
+
+    InList/NotInList carry the right-hand comparison type as an ARRAY
+    (ColumnType.category is ARRAY, never DATE/TIMESTAMP) — the per-element
+    type lives in ColumnType.element. Without unwrapping it here, every
+    `col IN (cast(lit AS DATE), ...)` reads as a DATE-vs-ARRAY mismatch even
+    though each element was explicitly cast, because this check inspects the
+    array's own category rather than what it is an array OF.
     """
     _ensure_sql_types()
     cdef object _lcat = left_type.category if left_type is not None else None
     cdef object _rcat = right_type.category if right_type is not None else None
+    if op == "InList" or op == "NotInList":
+        if _rcat is _LogicalCategory_ARRAY and right_type.element is not None:
+            _rcat = right_type.element.category
     cdef bint left_is_temporal = (_lcat is _LogicalCategory_DATE) or (_lcat is _LogicalCategory_TIMESTAMP)
     cdef bint right_is_temporal = (_rcat is _LogicalCategory_DATE) or (_rcat is _LogicalCategory_TIMESTAMP)
 

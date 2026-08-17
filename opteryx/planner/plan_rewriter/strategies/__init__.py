@@ -6,14 +6,8 @@
 # Rewrite strategies are applied in declaration order.
 # Strategies that must see the output of a prior strategy go after it.
 
-from opteryx.planner.plan_rewriter.strategies.except_to_anti_join import (
-    ExceptToAntiJoinStrategy,
-)
 from opteryx.planner.plan_rewriter.strategies.intersect_except_all_to_window_join import (
     IntersectExceptAllToWindowJoinStrategy,
-)
-from opteryx.planner.plan_rewriter.strategies.intersect_to_inner_join import (
-    IntersectToSemiJoinStrategy,
 )
 from opteryx.planner.plan_rewriter.strategies.window_to_join import WindowToJoinStrategy
 
@@ -22,9 +16,13 @@ from opteryx.planner.plan_rewriter.strategies.window_to_join import WindowToJoin
 # UnmatchedBuildSource tail pipeline; see native_join2.hpp). The old
 # FullOuterToUnionStrategy (LEFT OUTER ∪ LEFT ANTI, restricted to explicit
 # bare-identifier projections) was deleted with the wiring of that mode.
+# INTERSECT / EXCEPT (the DISTINCT forms) are NOT rewritten here. They become semi /
+# anti joins at BIND time — binder/set_ops._rewrite_setop_to_join — because their ON
+# condition pairs the legs' output columns positionally, and which column a leg
+# produces at each position is knowable only once the legs are bound. The two pre-bind
+# strategies that used to do it built the ON as a cross product over relation NAMES,
+# which was only ever correct for a leg over exactly one relation.
 STRATEGIES: list = [
     WindowToJoinStrategy,          # runs first — aggregate Window nodes must be eliminated before join planning
-    ExceptToAntiJoinStrategy,
-    IntersectToSemiJoinStrategy,
     IntersectExceptAllToWindowJoinStrategy,  # INTERSECT/EXCEPT ALL -> ROW_NUMBER + semi/anti join
 ]

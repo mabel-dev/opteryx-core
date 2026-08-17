@@ -209,6 +209,7 @@ cdef extern from "decode.hpp":
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size) nogil
     DecodedTable ReadParquet(const uint8_t* data, size_t size, const vector[string]& column_names, const vector[uint8_t]& row_group_mask) nogil
+    vector[DecodedColumn] DecodeRowGroupColumns(const uint8_t* data, size_t size, const vector[string]& column_names, const RowGroupStats& row_group, int row_group_index) except + nogil
 
 cdef extern from "type_widening.hpp" namespace "parquet_simd":
     # SIMD-accelerated type widening functions

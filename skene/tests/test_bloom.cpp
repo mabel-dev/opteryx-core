@@ -38,11 +38,14 @@ static std::vector<uint8_t> write_or_die(const CxxMorsel& m, const WriteOptions&
 // ─── The property that matters ──────────────────────────────────────────────
 
 static void test_never_rejects_a_present_value() {
-    std::vector<int64_t> values(5000);
+    // Bloom is string-only now (architect ruling), so the property is
+    // exercised on a string column — an int64 column no longer gets a filter
+    // at all (see test_non_string_types_get_no_filter).
+    std::vector<std::string> values(5000);
     for (size_t i = 0; i < values.size(); ++i)
-        values[i] = static_cast<int64_t>(i * 7919) - 1000000;
+        values[i] = "n-" + std::to_string(static_cast<int64_t>(i * 7919) - 1000000);
 
-    auto in = morsel_of({{"n", dense_column<int64_t>(values, DRAKEN_INT64)}});
+    auto in = morsel_of({{"n", string_column(values)}});
     auto bytes = write_or_die(in, with_bloom({"n"}));
 
     RowGroupMetadata meta;
@@ -52,9 +55,10 @@ static void test_never_rejects_a_present_value() {
     // EVERY present value must probe positive. A single false negative would
     // mean a query silently returning fewer rows than it should.
     size_t rejected = 0;
-    for (int64_t value : values) {
+    for (const std::string& value : values) {
         bool may = false;
-        CHECK(bloom_may_contain(meta.columns[0], &value, sizeof(value), &may).is_ok());
+        CHECK(bloom_may_contain(meta.columns[0], value.data(),
+                                static_cast<uint32_t>(value.size()), &may).is_ok());
         if (!may) ++rejected;
     }
     ++skene_test::g_checks;
@@ -64,10 +68,11 @@ static void test_never_rejects_a_present_value() {
 }
 
 static void test_rejects_most_absent_values() {
-    std::vector<int64_t> values(2000);
-    for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<int64_t>(i) * 2;
+    std::vector<std::string> values(2000);
+    for (size_t i = 0; i < values.size(); ++i)
+        values[i] = "even-" + std::to_string(static_cast<int64_t>(i) * 2);
 
-    auto in = morsel_of({{"even", dense_column<int64_t>(values, DRAKEN_INT64)}});
+    auto in = morsel_of({{"even", string_column(values)}});
     auto bytes = write_or_die(in, with_bloom({"even"}));
 
     RowGroupMetadata meta;
@@ -83,9 +88,10 @@ static void test_rejects_most_absent_values() {
     // sample size, still far tighter than the 10x it replaces.
     size_t accepted = 0;
     for (int64_t i = 0; i < 2000; ++i) {
-        const int64_t absent = i * 2 + 1;
+        const std::string absent = "even-" + std::to_string(i * 2 + 1);
         bool may = false;
-        CHECK(bloom_may_contain(meta.columns[0], &absent, sizeof(absent), &may).is_ok());
+        CHECK(bloom_may_contain(meta.columns[0], absent.data(),
+                                static_cast<uint32_t>(absent.size()), &may).is_ok());
         if (may) ++accepted;
     }
     ++skene_test::g_checks;
@@ -134,8 +140,8 @@ static void test_strings() {
 
 static void test_only_requested_columns_get_filters() {
     auto in = morsel_of({
-        {"a", dense_column<int64_t>({1, 2, 3, 4}, DRAKEN_INT64)},
-        {"b", dense_column<int64_t>({5, 6, 7, 8}, DRAKEN_INT64)},
+        {"a", string_column({"1", "2", "3", "4"})},
+        {"b", string_column({"5", "6", "7", "8"})},
     });
     auto bytes = write_or_die(in, with_bloom({"b"}));
 
@@ -146,34 +152,44 @@ static void test_only_requested_columns_get_filters() {
 
     // A column with no filter must answer "cannot rule out" rather than
     // "absent": a missing accelerator can cost speed, never rows.
-    const int64_t value = 999;
+    const std::string value = "999";
     bool may = false;
-    CHECK(bloom_may_contain(meta.columns[0], &value, sizeof(value), &may).is_ok());
+    CHECK(bloom_may_contain(meta.columns[0], value.data(),
+                            static_cast<uint32_t>(value.size()), &may).is_ok());
     CHECK(may);
 }
 
-static void test_types_without_hashable_bytes_are_skipped() {
-    // ARRAY has no flat byte representation, and BOOL has two values — a filter
-    // over them could not exclude anything min/max does not already.
+static void test_non_string_types_get_no_filter() {
+    // ARRAY has no flat byte representation; BOOL has two values (a filter
+    // over them could not exclude anything min/max does not already); and
+    // fixed-width numerics are excluded BY POLICY (architect ruling, not a
+    // byte-representation limit — int64 has hashable bytes) — zone maps
+    // already give them cheap range/equality pruning, and a numeric column
+    // that declined value ordering was paying a filter's full build cost
+    // (hash + distinct every row) for a benefit zone maps mostly deliver
+    // already. See value_bytes_at in bloom.cpp.
     auto in = morsel_of({
         {"arr", array_column({{1, 2}, {3}})},
         {"b",   bool_column({true, false})},
+        {"n",   dense_column<int64_t>({1, 2, 3, 4}, DRAKEN_INT64)},
     });
-    auto bytes = write_or_die(in, with_bloom({"arr", "b"}));
+    auto bytes = write_or_die(in, with_bloom({"arr", "b", "n"}));
 
     RowGroupMetadata meta;
     CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
     CHECK(meta.columns[0].bloom.empty());
     CHECK(meta.columns[1].bloom.empty());
+    CHECK(meta.columns[2].bloom.empty());
 }
 
 static void test_filter_is_built_over_distinct_values() {
     // 20000 rows, 40 distinct. Built over the deduplicated `data` array, the
     // filter is sized for 40 values — not 20000 — so it stays tiny.
-    std::vector<int64_t> values(20000);
-    for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<int64_t>(i % 40);
+    std::vector<std::string> values(20000);
+    for (size_t i = 0; i < values.size(); ++i)
+        values[i] = "code-" + std::to_string(i % 40);
 
-    auto in = morsel_of({{"code", dense_column<int64_t>(values, DRAKEN_INT64)}});
+    auto in = morsel_of({{"code", string_column(values)}});
     auto bytes = write_or_die(in, with_bloom({"code"}));
 
     RowGroupMetadata meta;
@@ -182,9 +198,11 @@ static void test_filter_is_built_over_distinct_values() {
     CHECK_EQ(meta.columns[0].data_length, uint32_t{40});
     CHECK(meta.columns[0].bloom.size() < 1024);
 
-    for (int64_t value = 0; value < 40; ++value) {
+    for (int i = 0; i < 40; ++i) {
+        const std::string value = "code-" + std::to_string(i);
         bool may = false;
-        CHECK(bloom_may_contain(meta.columns[0], &value, sizeof(value), &may).is_ok());
+        CHECK(bloom_may_contain(meta.columns[0], value.data(),
+                                static_cast<uint32_t>(value.size()), &may).is_ok());
         CHECK(may);
     }
 }
@@ -203,14 +221,14 @@ static void test_filter_is_built_over_distinct_values() {
 // Two dense vectors with IDENTICAL data_length and different distinct counts:
 // sized on data_length these came out byte-identical, which is the defect.
 static void test_sizing_tracks_distinct_not_data_length() {
-    std::vector<int64_t> repetitive(100000), distinct(100000);
+    std::vector<std::string> repetitive(100000), distinct(100000);
     for (size_t i = 0; i < repetitive.size(); ++i) {
-        repetitive[i] = static_cast<int64_t>(i % 5000);
-        distinct[i]   = static_cast<int64_t>(i);
+        repetitive[i] = "r-" + std::to_string(i % 5000);
+        distinct[i]   = "d-" + std::to_string(i);
     }
 
-    auto few  = dense_column<int64_t>(repetitive, DRAKEN_INT64);
-    auto many = dense_column<int64_t>(distinct, DRAKEN_INT64);
+    auto few  = string_column(repetitive);
+    auto many = string_column(distinct);
     CHECK_EQ(few.view.data_length, uint32_t{100000});
     CHECK_EQ(many.view.data_length, uint32_t{100000});
 
@@ -224,10 +242,11 @@ static void test_sizing_tracks_distinct_not_data_length() {
     CHECK(few_body.size() * 4 < many_body.size());
 
     // Smaller, and still a filter: the one inviolable property survives.
-    for (int64_t value = 0; value < 5000; ++value) {
+    for (int i = 0; i < 5000; ++i) {
+        const std::string value = "r-" + std::to_string(i);
         bool may = false;
         CHECK(bloom_probe(few_body.data(), few_body.size(),
-                          &value, sizeof(value), &may).is_ok());
+                          value.data(), static_cast<uint32_t>(value.size()), &may).is_ok());
         CHECK(may);
     }
 }
@@ -235,15 +254,15 @@ static void test_sizing_tracks_distinct_not_data_length() {
 // ─── Corruption ─────────────────────────────────────────────────────────────
 
 static void test_corrupt_filter_is_rejected_not_answered() {
-    std::vector<int64_t> values(1000);
-    for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<int64_t>(i);
-    auto in = morsel_of({{"n", dense_column<int64_t>(values, DRAKEN_INT64)}});
+    std::vector<std::string> values(1000);
+    for (size_t i = 0; i < values.size(); ++i) values[i] = "v-" + std::to_string(i);
+    auto in = morsel_of({{"n", string_column(values)}});
     auto bytes = write_or_die(in, with_bloom({"n"}));
 
     RowGroupMetadata meta;
     CHECK(read_row_group_metadata(bytes.data(), bytes.size(), 0, &meta).is_ok());
 
-    const int64_t value = 5;
+    const std::string value = "v-5";
     bool may = false;
 
     // A block count that is not a power of two would make block selection
@@ -252,16 +271,19 @@ static void test_corrupt_filter_is_rejected_not_answered() {
     ColumnMetadata broken = meta.columns[0];
     const uint32_t not_power_of_two = 3;
     std::memcpy(broken.bloom.data(), &not_power_of_two, sizeof(not_power_of_two));
-    CHECK(!bloom_may_contain(broken, &value, sizeof(value), &may).is_ok());
+    CHECK(!bloom_may_contain(broken, value.data(), static_cast<uint32_t>(value.size()),
+                             &may).is_ok());
 
     // A length that disagrees with the declared block count.
     ColumnMetadata truncated = meta.columns[0];
     truncated.bloom.resize(truncated.bloom.size() - 1);
-    CHECK(!bloom_may_contain(truncated, &value, sizeof(value), &may).is_ok());
+    CHECK(!bloom_may_contain(truncated, value.data(), static_cast<uint32_t>(value.size()),
+                             &may).is_ok());
 
     ColumnMetadata stub = meta.columns[0];
     stub.bloom.resize(4);
-    CHECK(!bloom_may_contain(stub, &value, sizeof(value), &may).is_ok());
+    CHECK(!bloom_may_contain(stub, value.data(), static_cast<uint32_t>(value.size()),
+                             &may).is_ok());
 }
 
 int main() {
@@ -269,7 +291,7 @@ int main() {
     test_rejects_most_absent_values();
     test_strings();
     test_only_requested_columns_get_filters();
-    test_types_without_hashable_bytes_are_skipped();
+    test_non_string_types_get_no_filter();
     test_filter_is_built_over_distinct_values();
     test_sizing_tracks_distinct_not_data_length();
     test_corrupt_filter_is_rejected_not_answered();

@@ -31,7 +31,23 @@
 namespace opteryx { namespace agg_budgets {
 
 // MEDIAN — buffers every non-null value as a double until finalize.
-constexpr int64_t kMedianBytes = 512LL * 1024 * 1024;   // 512MB, all groups
+//
+// TWO figures, because a single ceiling has to be wrong in one direction or the
+// other. Holding 2GB open for a query that needs 10MB is not a use of a shared
+// process's memory anyone would defend; refusing at 256MB a query that would
+// finish in 300MB is not either. So 256MB is what a query STARTS entitled to,
+// and the ceiling doubles on measured demand up to 2GB before the query is
+// refused. Almost nothing reaches the second step: the budget is charged only
+// by MEDIAN, and in the benchmark suite exactly one query in 193 uses it.
+//
+// The escalation is on MEASUREMENT, never on a plan-time estimate. That is the
+// same rule as before and for the same reason: what a buffering aggregate
+// retains depends on properties no planner statistic carries, and the group-by
+// cardinality estimator falls back to input_rows/2 per unknown key — on h2o g6
+// that predicts 47.7GB against a true 1.2GB, so an estimate in front of this
+// would refuse working queries 39x over.
+constexpr int64_t kMedianFloorBytes = 256LL * 1024 * 1024;    // where every query starts
+constexpr int64_t kMedianBytes      = 2048LL * 1024 * 1024;   // hard ceiling, after escalation
 
 // ARRAY_AGG — buffers every input row (NULLs included) as a list element.
 constexpr int64_t kArrayAggBytes = 512LL * 1024 * 1024;   // 512MB, all groups

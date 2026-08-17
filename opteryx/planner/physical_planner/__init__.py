@@ -213,7 +213,9 @@ def _create_aggregate_and_group_node(logical_node, query_properties, registry):
         # HASHED to separate the groups, but its values never have to be stored — the
         # grouping contract is 64-bit hash identity. Carrying the set here is what lets
         # the sink kill the key once it is hashed.
-        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "groupby_ndv_estimate", "pre_update_columns")},
+        # grouping_set_identities: GROUP BY ROLLUP's sets, as key identities (the binder
+        # resolved them from the planner's positions). Absent for a plain GROUP BY.
+        **{k: v for k, v in node_config.items() if k in ("aggregates", "groups", "projection", "all_relations", "having_condition", "groupby_ndv_estimate", "pre_update_columns", "grouping_set_identities")},
     )
 
 

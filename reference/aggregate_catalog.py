@@ -24,6 +24,10 @@ _GLOBAL_SUPPORTED = frozenset(
         "AVG",
         "MEDIAN",
         "STDDEV",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
+        "VAR_POP",
+        "VAR_SAMP",
         "COUNT_DISTINCT",
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
@@ -43,6 +47,10 @@ _STRICT_GROUPED_SUPPORTED = frozenset(
         "AVG",
         "MEDIAN",
         "STDDEV",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
+        "VAR_POP",
+        "VAR_SAMP",
         "COUNT_DISTINCT",
         "APPROX_COUNT_DISTINCT",
         "APPROX_PERCENTILE",
@@ -67,6 +75,10 @@ _FRIENDLY_NAMES = {
     "MIN": "Minimum",
     "SUM": "Sum",
     "STDDEV": "Standard Deviation",
+    "STDDEV_POP": "Population Standard Deviation",
+    "STDDEV_SAMP": "Sample Standard Deviation",
+    "VAR_POP": "Population Variance",
+    "VAR_SAMP": "Sample Variance",
 }
 
 _CATEGORIES = {
@@ -84,6 +96,10 @@ _CATEGORIES = {
     "MIN": "extrema",
     "SUM": "numeric",
     "STDDEV": "numeric",
+    "STDDEV_POP": "numeric",
+    "STDDEV_SAMP": "numeric",
+    "VAR_POP": "numeric",
+    "VAR_SAMP": "numeric",
 }
 
 _SUMMARIES = {
@@ -101,6 +117,10 @@ _SUMMARIES = {
     "MIN": "Returns the smallest non-null input value.",
     "SUM": "Sums the input values.",
     "STDDEV": "Computes the population standard deviation of the input values.",
+    "STDDEV_POP": "Computes the population standard deviation of the input values.",
+    "STDDEV_SAMP": "Computes the sample standard deviation of the input values.",
+    "VAR_POP": "Computes the population variance of the input values.",
+    "VAR_SAMP": "Computes the sample variance of the input values.",
 }
 
 _DOCUMENTATION = {
@@ -118,6 +138,10 @@ _DOCUMENTATION = {
     "MIN": "Returns the smallest comparable non-null value encountered.",
     "SUM": "Nulls are ignored; non-null values are accumulated.",
     "STDDEV": "Population standard deviation (N denominator, not N-1/sample). Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
+    "STDDEV_POP": "Population standard deviation (N denominator). Identical to STDDEV — an alternate SQL spelling of the same function. Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
+    "STDDEV_SAMP": "Sample standard deviation (N-1 denominator, Bessel's correction). Ignores nulls. NULL for a group with fewer than 2 non-null values (N-1 == 0 is undefined). DECIMAL inputs must be CAST to DOUBLE first.",
+    "VAR_POP": "Population variance (N denominator) — STDDEV_POP without the final square root. Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
+    "VAR_SAMP": "Sample variance (N-1 denominator, Bessel's correction) — STDDEV_SAMP without the final square root. Ignores nulls. NULL for a group with fewer than 2 non-null values. DECIMAL inputs must be CAST to DOUBLE first.",
 }
 
 _SQL_FORMS = {
@@ -140,6 +164,10 @@ _SQL_FORMS = {
     "MIN": ["MIN(expr)"],
     "SUM": ["SUM(expr)"],
     "STDDEV": ["STDDEV(expr)"],
+    "STDDEV_POP": ["STDDEV_POP(expr)"],
+    "STDDEV_SAMP": ["STDDEV_SAMP(expr)"],
+    "VAR_POP": ["VAR_POP(expr)"],
+    "VAR_SAMP": ["VAR_SAMP(expr)"],
 }
 
 
@@ -174,6 +202,10 @@ _INPUT_TYPES: dict[str, tuple[dict[str, Any], ...]] = {
     "AVG": ({"label": "value", "type": "number"},),
     "MEDIAN": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
     "STDDEV": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
+    "STDDEV_POP": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
+    "STDDEV_SAMP": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
+    "VAR_POP": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
+    "VAR_SAMP": ({"label": "value", "type": "number", "excludes": ["DECIMAL"]},),
     "CORR": (
         {"label": "x", "type": "number", "excludes": ["DECIMAL"]},
         {"label": "y", "type": "number", "excludes": ["DECIMAL"]},

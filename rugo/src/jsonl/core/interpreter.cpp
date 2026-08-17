@@ -246,7 +246,7 @@ inline ValueType classify_first(uint8_t c) {
 //
 // Value semantics mirror the top-level path exactly (END_STRING_VAL / emit_unquoted /
 // emit_container in MapBuilder), because a nested projection must be byte-identical to what
-// the downstream yyjson extraction would have produced for the same path:
+// the downstream column extraction would have produced for the same path:
 //   string    -> the content BETWEEN the quotes (unquoted), ValueType::String
 //   container -> the whole `{...}` / `[...]` slice as JSON text
 //   scalar    -> the ws-trimmed slice, coarse-classified by first byte

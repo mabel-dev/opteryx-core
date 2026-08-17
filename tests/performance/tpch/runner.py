@@ -36,6 +36,7 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests", "performance"))
 from _common import (  # noqa: E402
     load_duckdb_baseline,
+    load_duckdb_shapes,
     open_results_csv,
     print_banner,
     print_error_row,
@@ -80,17 +81,20 @@ def _load_queries(scale: str, variant: str = "") -> list[tuple[str, str]]:
     return queries
 
 
-def _run_query(sql: str) -> tuple[float, int]:
-    """Run one query, return (elapsed_ms, row_count)."""
+def _run_query(sql: str) -> tuple[float, int, int]:
+    """Run one query, return (elapsed_ms, row_count, col_count)."""
     gc.collect()
     session = opteryx.session()
     try:
         rows = 0
+        cols = 0
         t0 = time.monotonic_ns()
         for morsel in session.execute_to_morsels(sql):
             if morsel is not None and hasattr(morsel, "num_rows"):
                 rows += morsel.num_rows
-        return (time.monotonic_ns() - t0) / 1e6, rows
+                if cols == 0:
+                    cols = len(morsel.column_names)
+        return (time.monotonic_ns() - t0) / 1e6, rows, cols
     finally:
         session.close()
 
@@ -141,9 +145,9 @@ def main() -> int:
         print(f"ERROR: no .sql files found in {_QUERY_DIR}")
         return 1
 
-    duckdb_min, duckdb_machine = load_duckdb_baseline(
-        os.path.join(_DUCKDB_DIR, f"results.sf{args.scale}.json")
-    )
+    duckdb_baseline_path = os.path.join(_DUCKDB_DIR, f"results.sf{args.scale}.json")
+    duckdb_min, duckdb_machine = load_duckdb_baseline(duckdb_baseline_path)
+    duckdb_shapes = load_duckdb_shapes(duckdb_baseline_path)
 
     # Cold start
     print("Warming up (cold start)...")
@@ -188,7 +192,10 @@ def main() -> int:
             "status",
             "elapsed_ms",
             "row_count",
+            "col_count",
             "duckdb_min_ms",
+            "duckdb_rows",
+            "duckdb_cols",
             "error",
         ],
     )
@@ -204,14 +211,17 @@ def main() -> int:
     try:
         for name, sql in queries:
             d_ms = duckdb_min.get(name) if duckdb_min else None
+            d_shape = duckdb_shapes.get(name)
             times: list[float] = []
             row_count = 0
+            col_count = 0
             query_failed = False
             for run_ix in range(1, args.iterations + 1):
                 try:
-                    elapsed_ms, rows = _run_query(sql)
+                    elapsed_ms, rows, cols = _run_query(sql)
                     times.append(elapsed_ms)
                     row_count = rows
+                    col_count = cols
                     csv_writer.writerow(
                         {
                             "scale": args.scale,
@@ -221,7 +231,10 @@ def main() -> int:
                             "status": "ok",
                             "elapsed_ms": f"{elapsed_ms:.3f}",
                             "row_count": rows,
+                            "col_count": cols,
                             "duckdb_min_ms": f"{d_ms:.3f}" if d_ms is not None else "",
+                            "duckdb_rows": d_shape[0] if d_shape is not None else "",
+                            "duckdb_cols": d_shape[1] if d_shape is not None else "",
                             "error": "",
                         }
                     )
@@ -240,7 +253,10 @@ def main() -> int:
                             "status": "error",
                             "elapsed_ms": "",
                             "row_count": 0,
+                            "col_count": 0,
                             "duckdb_min_ms": f"{d_ms:.3f}" if d_ms is not None else "",
+                            "duckdb_rows": d_shape[0] if d_shape is not None else "",
+                            "duckdb_cols": d_shape[1] if d_shape is not None else "",
                             "error": msg,
                         }
                     )
@@ -250,6 +266,23 @@ def main() -> int:
 
             if query_failed or not times:
                 continue
+
+            # A DuckDB timing baseline only proves Opteryx was fast — not that
+            # it was RIGHT. When the baseline JSON also recorded a result shape
+            # (see load_duckdb_shapes), a mismatch here is a correctness
+            # regression wearing a passing benchmark: fail loud rather than
+            # report green on a wrong answer.
+            if d_shape is not None and (row_count, col_count) != d_shape:
+                failed += 1
+                shape_msg = (
+                    f"SHAPE MISMATCH: opteryx {row_count} rows/{col_count} cols "
+                    f"vs duckdb {d_shape[0]} rows/{d_shape[1]} cols"
+                )
+                failures.append((name, shape_msg))
+                print_row(name, times, args.iterations, d_ms)
+                print(f"          \033[38;2;255;69;69m⚠ {shape_msg}\033[0m")
+                continue
+
             passed += 1
             print_row(name, times, args.iterations, d_ms)
             if d_ms is not None:

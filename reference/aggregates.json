@@ -416,6 +416,68 @@
             "strict_grouped": true
         }
     },
+    "STDDEV_POP": {
+        "ast_symbol": "STDDEV_POP",
+        "friendly_name": "Population Standard Deviation",
+        "kernel_name": "stddev",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the population standard deviation of the input values.",
+        "description": "Computes the population standard deviation of the input values.",
+        "documentation": "Population standard deviation (N denominator). Identical to STDDEV \u2014 an alternate SQL spelling of the same function. Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
+        "sql_forms": [
+            "STDDEV_POP(expr)"
+        ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "STDDEV_SAMP": {
+        "ast_symbol": "STDDEV_SAMP",
+        "friendly_name": "Sample Standard Deviation",
+        "kernel_name": "stddev_samp",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the sample standard deviation of the input values.",
+        "description": "Computes the sample standard deviation of the input values.",
+        "documentation": "Sample standard deviation (N-1 denominator, Bessel's correction). Ignores nulls. NULL for a group with fewer than 2 non-null values (N-1 == 0 is undefined). DECIMAL inputs must be CAST to DOUBLE first.",
+        "sql_forms": [
+            "STDDEV_SAMP(expr)"
+        ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
     "SUM": {
         "ast_symbol": "SUM",
         "friendly_name": "Sum",
@@ -433,6 +495,68 @@
                 "label": "value",
                 "type": "number",
                 "excludes": [],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "VAR_POP": {
+        "ast_symbol": "VAR_POP",
+        "friendly_name": "Population Variance",
+        "kernel_name": "var_pop",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the population variance of the input values.",
+        "description": "Computes the population variance of the input values.",
+        "documentation": "Population variance (N denominator) \u2014 STDDEV_POP without the final square root. Ignores nulls. DECIMAL inputs must be CAST to DOUBLE first.",
+        "sql_forms": [
+            "VAR_POP(expr)"
+        ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
+                "constant_only": false,
+                "minimum": null,
+                "maximum": null
+            }
+        ],
+        "deterministic": true,
+        "support": {
+            "global": true,
+            "grouped": true,
+            "strict_grouped": true
+        }
+    },
+    "VAR_SAMP": {
+        "ast_symbol": "VAR_SAMP",
+        "friendly_name": "Sample Variance",
+        "kernel_name": "var_samp",
+        "category": "numeric",
+        "status": "active",
+        "summary": "Computes the sample variance of the input values.",
+        "description": "Computes the sample variance of the input values.",
+        "documentation": "Sample variance (N-1 denominator, Bessel's correction) \u2014 STDDEV_SAMP without the final square root. Ignores nulls. NULL for a group with fewer than 2 non-null values. DECIMAL inputs must be CAST to DOUBLE first.",
+        "sql_forms": [
+            "VAR_SAMP(expr)"
+        ],
+        "parameters": [
+            {
+                "label": "value",
+                "type": "number",
+                "excludes": [
+                    "DECIMAL"
+                ],
                 "constant_only": false,
                 "minimum": null,
                 "maximum": null

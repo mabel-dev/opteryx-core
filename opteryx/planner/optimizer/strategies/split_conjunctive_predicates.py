@@ -10,11 +10,11 @@ Type: Heuristic
 Goal: Break filters into units which are easier to handle
 """
 
-from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.utils import random_string
 
-from .optimization_strategy import OptimizationStrategy, OptimizerContext
+from .optimization_strategy import OptimizationStrategy, OptimizerContext, filter_referenced_columns
 
 
 def _inner_split(node):
@@ -68,9 +68,7 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
             for predicate in split_predicates:
                 new_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
                 new_node.condition = predicate
-                new_node.columns = get_all_nodes_of_type(
-                    predicate, select_nodes=(NodeType.IDENTIFIER,)
-                )
+                new_node.columns = filter_referenced_columns(predicate)
 
                 sources = []
                 for col in new_node.columns:

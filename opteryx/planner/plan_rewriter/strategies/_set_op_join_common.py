@@ -4,7 +4,15 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Shared helper for rewriting INTERSECT/EXCEPT set operations into semi/anti joins.
+Shared helpers for rewriting INTERSECT ALL / EXCEPT ALL into window + semi/anti joins.
+
+The DISTINCT forms are not rewritten here. They are rewritten at BIND time, by
+`binder/set_ops._rewrite_setop_to_join`, because their ON condition pairs the legs'
+output columns positionally and which column a leg produces at each position is
+knowable only once the legs are bound. The pre-bind rewrites that used to do it
+(`intersect_to_inner_join`, `except_to_anti_join`) were deleted with that move; the
+ALL forms stayed because they insert a ROW_NUMBER Window into the plan, which is a
+structural change the binder cannot make mid-traversal.
 
 `left_relation_names` / `right_relation_names` on a set-op node over-report: they
 are collected by walking down to every scan in the branch. When a branch contains
@@ -19,8 +27,30 @@ survive at the set-op node: it drops any relation consumed by a set operation or
 semi/anti join that lives *below* the node in that branch.
 """
 
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
+
+
+def column_names(columns) -> list | None:
+    """
+    Extract source column names from a projection column list.
+
+    Returns None when the projection is a wildcard or any column name cannot be
+    determined — both cases require schema information from the binder, which is
+    why the ALL rewrite (this is the last pre-bind set-op rewrite) declines them.
+    """
+    if not columns:
+        return None
+    if len(columns) == 1 and columns[0].node_type == NodeType.WILDCARD:
+        return None
+    names = []
+    for col in columns:
+        name = getattr(col, "source_column", None)
+        if name is None:
+            return None
+        names.append(name)
+    return names or None
 
 
 def _consumed_below(plan: LogicalPlan, set_op_nid: str) -> set:

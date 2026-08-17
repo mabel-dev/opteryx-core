@@ -15,7 +15,7 @@
 #include "alloc.h"          // draken_malloc
 #include "buffers.h"        // DrakenType, DRAKEN_VARCHAR
 #include "BS_thread_pool.hpp"
-#include "yyjson.h"         // per-row array element parsing (parse_array_column)
+#include "json_array_walker.hpp"  // per-row array element parsing (parse_array_column)
 
 // extract_column() pulls one column out as raw-byte slices (StringColumnResult);
 // build_typed_vector / build_varchar_vector materialise owned Draken vectors, and
@@ -558,41 +558,54 @@ namespace {
 // applied to the flattened set of every element across every row instead of one scalar
 // per row. Nested containers or a genuine mix of incompatible scalar kinds (e.g. a
 // number next to a string) put the WHOLE column out of v1 scope.
+//
+// Integers are split by what can HOLD them, not by their sign: an element past INT64_MAX
+// (a snowflake/Bluesky-style u64 id) makes the column UINT64 rather than silently
+// reinterpreting the bits as a negative int64. A column carrying both such a value and a
+// negative one fits neither integer width and widens to FLOAT64, the same escape the
+// int64 -> float64 step already uses.
 struct ArrayElementSurvey {
     bool saw_bool = false;
-    bool saw_int = false;
+    bool saw_int = false;      // integer that fits int64
+    bool saw_neg_int = false;  // ... and at least one was negative
+    bool saw_uint = false;     // integer in (INT64_MAX, UINT64_MAX]
     bool saw_real = false;
     bool saw_string = false;
     bool saw_nested = false;  // element itself is an array/object -> out of scope
 };
 
-// Classify one row's array text (yyjson_read + walk). Returns false on a JSON parse
-// failure (shouldn't happen — the structural scanner already bounded/typed this span —
-// but a parse fails safely into the varchar fallback rather than crashing).
+// Classify one row's array text. Returns false when the text is not a well-formed JSON
+// array — the caller falls back to varchar for the whole column rather than crashing.
+// Malformed array text is reachable: the structural scanner bounds a container by
+// balancing brackets, it does not validate what is inside one.
 static bool survey_array_row(const uint8_t* text, uint32_t len, ArrayElementSurvey& survey, size_t& elem_count) {
-    yyjson_doc* doc = yyjson_read(reinterpret_cast<const char*>(text), len, 0);
-    if (doc == nullptr) return false;
-    yyjson_val* root = yyjson_doc_get_root(doc);
-    if (root == nullptr || !yyjson_is_arr(root)) { yyjson_doc_free(doc); return false; }
-
-    yyjson_val* val;
-    yyjson_arr_iter iter = yyjson_arr_iter_with(root);
-    while ((val = yyjson_arr_iter_next(&iter)) != nullptr) {
+    return walk_json_array(text, len, [&](const JsonArrayElement& e) {
         ++elem_count;
-        if (yyjson_is_null(val)) continue;
-        if (yyjson_is_arr(val) || yyjson_is_obj(val)) { survey.saw_nested = true; break; }
-        if (yyjson_is_bool(val)) survey.saw_bool = true;
-        else if (yyjson_is_real(val)) survey.saw_real = true;
-        else if (yyjson_is_int(val)) survey.saw_int = true;
-        else if (yyjson_is_str(val)) survey.saw_string = true;
-        else { survey.saw_nested = true; break; }  // defensive: unknown yyjson value kind
-    }
-    yyjson_doc_free(doc);
-    return true;
+        switch (e.kind) {
+            case JsonElemKind::Null:   break;
+            case JsonElemKind::Bool:   survey.saw_bool = true; break;
+            case JsonElemKind::Int:
+                survey.saw_int = true;
+                if (e.int_value < 0) survey.saw_neg_int = true;
+                break;
+            case JsonElemKind::Uint:   survey.saw_uint = true; break;
+            case JsonElemKind::Real:   survey.saw_real = true; break;
+            case JsonElemKind::String: survey.saw_string = true; break;
+            case JsonElemKind::Nested: survey.saw_nested = true; return false;
+        }
+        return true;
+    });
+}
+
+// Widen one surveyed element to the column's resolved FLOAT64 child.
+static inline double array_elem_as_double(const JsonArrayElement& e) noexcept {
+    if (e.kind == JsonElemKind::Real) return e.real_value;
+    if (e.kind == JsonElemKind::Uint) return static_cast<double>(e.uint_value);
+    return static_cast<double>(e.int_value);
 }
 
 // Fill parent_offsets/child buffers for a resolved child_type. Returns false if a
-// row's array fails to re-parse (defensive only — survey_array_row already validated
+// row's array fails to re-walk (defensive only — survey_array_row already validated
 // every row once) or its content no longer matches child_type (can't happen barring a
 // concurrent-mutation bug, but this must never silently mis-type a value).
 static bool fill_numeric_array_column(
@@ -601,7 +614,7 @@ static bool fill_numeric_array_column(
 {
     int32_t* offsets = static_cast<int32_t*>(draken_malloc(static_cast<size_t>(n + 1) * sizeof(int32_t)));
     const bool is_bool = (child_type == DRAKEN_BOOL);
-    const size_t elem_width = is_bool ? 1 : (child_type == DRAKEN_FLOAT64 ? sizeof(double) : sizeof(int64_t));
+    const size_t elem_width = is_bool ? 1 : 8;  // INT64 / UINT64 / FLOAT64 are all 8 bytes
     uint8_t* child_data = nullptr;
     if (total_elements > 0) {
         if (is_bool) {
@@ -619,31 +632,35 @@ static bool fill_numeric_array_column(
 
     offsets[0] = 0;
     size_t cursor = 0;
-    for (uint32_t i = 0; i < n; ++i) {
+    bool ok = true;
+    for (uint32_t i = 0; i < n && ok; ++i) {
         offsets[i + 1] = offsets[i];
         if (!row_valid(scr, i)) continue;  // absent/null row: zero-length slice
-        const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-        yyjson_doc* doc = yyjson_read(reinterpret_cast<const char*>(base + off), len, 0);
-        if (doc == nullptr) { draken_free(offsets); draken_free(child_data); draken_free(child_validity); return false; }
-        yyjson_val* root = yyjson_doc_get_root(doc);
-        yyjson_val* val;
-        yyjson_arr_iter iter = yyjson_arr_iter_with(root);
-        while ((val = yyjson_arr_iter_next(&iter)) != nullptr) {
+        int32_t* const row_end = &offsets[i + 1];
+        ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
+                             [&](const JsonArrayElement& elem) {
             const size_t e = cursor++;
-            if (yyjson_is_null(val)) {
+            if (elem.kind == JsonElemKind::Null) {
                 any_child_null = true;
                 child_validity[e >> 3] &= static_cast<uint8_t>(~(1u << (e & 7)));
             } else if (is_bool) {
-                if (yyjson_get_bool(val)) child_data[e >> 3] |= static_cast<uint8_t>(1u << (e & 7));
+                if (elem.bool_value) child_data[e >> 3] |= static_cast<uint8_t>(1u << (e & 7));
             } else if (child_type == DRAKEN_FLOAT64) {
-                double d = yyjson_is_real(val) ? yyjson_get_real(val) : static_cast<double>(yyjson_get_sint(val));
-                reinterpret_cast<double*>(child_data)[e] = d;
+                reinterpret_cast<double*>(child_data)[e] = array_elem_as_double(elem);
+            } else if (child_type == DRAKEN_UINT64) {
+                reinterpret_cast<uint64_t*>(child_data)[e] =
+                    (elem.kind == JsonElemKind::Uint) ? elem.uint_value
+                                                      : static_cast<uint64_t>(elem.int_value);
             } else {  // DRAKEN_INT64
-                reinterpret_cast<int64_t*>(child_data)[e] = yyjson_get_sint(val);
+                reinterpret_cast<int64_t*>(child_data)[e] = elem.int_value;
             }
-            offsets[i + 1] += 1;
-        }
-        yyjson_doc_free(doc);
+            *row_end += 1;
+            return true;
+        });
+    }
+    if (!ok) {
+        draken_free(offsets); draken_free(child_data); draken_free(child_validity);
+        return false;
     }
 
     pc.array_parent_offsets = offsets;
@@ -670,64 +687,71 @@ static bool fill_string_array_column(
     std::memset(child_validity, 0xFF, child_bm_bytes ? child_bm_bytes : 1);
     bool any_child_null = false;
 
-    // Pass 1: walk every element, sizing the arena for long-form strings (re-walked
-    // via yyjson in pass 2 rather than staged in memory — keeps this a plain two-pass
-    // count-then-fill, mirroring parse_varchar_column).
+    // Pass 1: walk every element, sizing the arena for long-form strings. The walker
+    // reports each string's DECODED length (what it measures while validating the
+    // escapes), so sizing needs no staging buffer and no speculative decode — the raw
+    // span is longer than the decoded bytes whenever an escape is present, and sizing on
+    // the raw span would over-allocate and, worse, mis-place the inline/extern boundary.
     size_t arena_size = 0;
     offsets[0] = 0;
-    for (uint32_t i = 0; i < n; ++i) {
+    bool ok = true;
+    for (uint32_t i = 0; i < n && ok; ++i) {
         offsets[i + 1] = offsets[i];
         if (!row_valid(scr, i)) continue;
-        const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-        yyjson_doc* doc = yyjson_read(reinterpret_cast<const char*>(base + off), len, 0);
-        if (doc == nullptr) { draken_free(offsets); draken_free(child_validity); return false; }
-        yyjson_val* root = yyjson_doc_get_root(doc);
-        yyjson_val* val;
-        yyjson_arr_iter iter = yyjson_arr_iter_with(root);
-        while ((val = yyjson_arr_iter_next(&iter)) != nullptr) {
-            offsets[i + 1] += 1;
-            if (!yyjson_is_null(val) && yyjson_get_len(val) > STR_INLINE_MAX)
-                arena_size += yyjson_get_len(val);
-        }
-        yyjson_doc_free(doc);
+        int32_t* const row_end = &offsets[i + 1];
+        ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
+                             [&](const JsonArrayElement& elem) {
+            *row_end += 1;
+            if (elem.kind == JsonElemKind::String && elem.str_decoded_len > STR_INLINE_MAX)
+                arena_size += elem.str_decoded_len;
+            return true;
+        });
     }
+    if (!ok) { draken_free(offsets); draken_free(child_validity); return false; }
 
     DrakenStringSlot* slots = static_cast<DrakenStringSlot*>(
         draken_malloc(std::max<size_t>(total_elements, 1) * sizeof(DrakenStringSlot)));
     uint8_t* arena = arena_size ? static_cast<uint8_t*>(draken_malloc(arena_size)) : nullptr;
 
-    // Pass 2: populate slots (+ arena for long strings).
+    // Pass 2: populate slots (+ arena for long strings). An escape-free element is
+    // copied straight from the source span; an escaped one is decoded once, directly
+    // into its final home (the arena, or a stack buffer for an inline slot).
     size_t cursor = 0;
     uint32_t arena_offset = 0;
-    for (uint32_t i = 0; i < n; ++i) {
+    uint8_t inline_buf[STR_INLINE_MAX];
+    for (uint32_t i = 0; i < n && ok; ++i) {
         if (!row_valid(scr, i)) continue;
-        const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-        yyjson_doc* doc = yyjson_read(reinterpret_cast<const char*>(base + off), len, 0);
-        if (doc == nullptr) { draken_free(offsets); draken_free(child_validity); draken_free(slots); draken_free(arena); return false; }
-        yyjson_val* root = yyjson_doc_get_root(doc);
-        yyjson_val* val;
-        yyjson_arr_iter iter = yyjson_arr_iter_with(root);
-        while ((val = yyjson_arr_iter_next(&iter)) != nullptr) {
+        ok = walk_json_array(base + scr.offsets[i], scr.lengths[i],
+                             [&](const JsonArrayElement& elem) {
             const size_t e = cursor++;
-            if (yyjson_is_null(val)) {
+            if (elem.kind != JsonElemKind::String) {  // null element
                 any_child_null = true;
                 child_validity[e >> 3] &= static_cast<uint8_t>(~(1u << (e & 7)));
                 str_init_null(&slots[e]);
-                continue;
+                return true;
             }
-            const char* sbytes = yyjson_get_str(val);
-            const size_t slen = yyjson_get_len(val);
-            const uint8_t* bytes = slen ? reinterpret_cast<const uint8_t*>(sbytes)
-                                        : reinterpret_cast<const uint8_t*>("");
-            if (slen > STR_INLINE_MAX) {
-                std::memcpy(arena + arena_offset, bytes, slen);
-                draken_build_string_slot(&slots[e], bytes, static_cast<uint32_t>(slen), arena_offset);
-                arena_offset += static_cast<uint32_t>(slen);
+            const uint32_t slen = elem.str_decoded_len;
+            const bool extern_slot = slen > STR_INLINE_MAX;
+            uint8_t* const dst = extern_slot ? arena + arena_offset : inline_buf;
+            const uint8_t* bytes;
+            if (elem.str_escaped) {
+                jsonarr::decode_string(elem.str_raw, elem.str_raw_len, dst);
+                bytes = dst;
+            } else if (extern_slot) {
+                std::memcpy(dst, elem.str_raw, slen);
+                bytes = dst;
             } else {
-                draken_build_string_slot(&slots[e], bytes, static_cast<uint32_t>(slen), 0);
+                bytes = slen ? elem.str_raw : reinterpret_cast<const uint8_t*>("");
             }
-        }
-        yyjson_doc_free(doc);
+            draken_build_string_slot(&slots[e], bytes, slen, extern_slot ? arena_offset : 0);
+            if (extern_slot) arena_offset += slen;
+            return true;
+        });
+    }
+    if (!ok) {
+        draken_free(offsets); draken_free(child_validity);
+        draken_free(slots); draken_free(arena);
+        return false;
     }
 
     pc.array_parent_offsets = offsets;
@@ -763,7 +787,8 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
         parse_ok = survey_array_row(base + scr.offsets[i], scr.lengths[i], survey, total_elements);
     }
 
-    const int kinds = (survey.saw_bool ? 1 : 0) + ((survey.saw_int || survey.saw_real) ? 1 : 0) +
+    const bool saw_number = survey.saw_int || survey.saw_uint || survey.saw_real;
+    const int kinds = (survey.saw_bool ? 1 : 0) + (saw_number ? 1 : 0) +
                        (survey.saw_string ? 1 : 0);
     const bool out_of_scope = !parse_ok || survey.saw_nested || kinds > 1;
 
@@ -776,7 +801,16 @@ static ParsedColumn parse_array_column(const uint8_t* base, StringColumnResult& 
     DrakenType child_type = DRAKEN_VARCHAR;  // default when no scalar kind was ever seen
     bool as_string = true;
     if (survey.saw_bool) { child_type = DRAKEN_BOOL; as_string = false; }
-    else if (survey.saw_int || survey.saw_real) { child_type = survey.saw_real ? DRAKEN_FLOAT64 : DRAKEN_INT64; as_string = false; }
+    else if (saw_number) {
+        as_string = false;
+        // Widening ladder: int64 -> uint64 (a value past INT64_MAX) -> float64 (a real,
+        // or a column mixing a past-INT64_MAX value with a negative one, which no single
+        // integer width holds).
+        if (survey.saw_real)                            child_type = DRAKEN_FLOAT64;
+        else if (survey.saw_uint && survey.saw_neg_int) child_type = DRAKEN_FLOAT64;
+        else if (survey.saw_uint)                       child_type = DRAKEN_UINT64;
+        else                                            child_type = DRAKEN_INT64;
+    }
     else if (survey.saw_string) { child_type = DRAKEN_VARCHAR; as_string = true; }
 
     ParsedColumn pc;

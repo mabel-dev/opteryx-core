@@ -1132,7 +1132,13 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             f"'{node.relation}' cannot be queried directly; use `{surface}`."
         )
 
-    if node.alias in context.relations:
+    # Case-folded: a relation alias is an unquoted SQL identifier, so `FROM t P, t
+    # p` collides exactly as `FROM t p, t p` does — the same fold `locate_identifier`
+    # applies when resolving a reference (binder.py's `_candidates`). Without this,
+    # two same-name-different-case aliases would both register and a later
+    # case-insensitive reference to either would find both, raising
+    # AmbiguousIdentifierError somewhere downstream instead of this clearer error here.
+    if node.alias and node.alias.lower() in {r.lower() for r in context.relations}:
         raise AmbiguousDatasetError(dataset=node.alias)
 
     # External-IO instrumentation for the binder (a big, mostly-invisible chunk of

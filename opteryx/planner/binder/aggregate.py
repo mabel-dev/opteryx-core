@@ -78,6 +78,40 @@ def visit_aggregate_and_group(
         for col in tmp_groups:
             _reject_variant_key("GROUP BY", col)
         columns_to_keep = {col.schema_column.identity for col in tmp_groups}
+        if node.grouping_sets is not None:
+            # GROUP BY ROLLUP(...) arrives with its sets as POSITIONS into `groups`
+            # (the only handle the logical planner has, pre-binding). Resolve them to
+            # column IDENTITIES here, while the bound keys are still positionally
+            # aligned with what the planner indexed: the very next statement drops
+            # literal keys, and the physical node de-duplicates the key list, so a
+            # position means something different on the other side of either.
+            node.grouping_set_identities = [
+                tuple(tmp_groups[position].schema_column.identity for position in one_set)
+                for one_set in node.grouping_sets
+            ]
+    # GROUPING(col): requires GROUP BY ROLLUP/CUBE/GROUPING SETS in scope, and its
+    # argument must be one of THIS query's GROUP BY keys. Checked here, once the
+    # bound key set is known, rather than left to reach the physical compiler with
+    # a lookup it has no way to resolve.
+    _grouping_calls = [agg for agg in node.aggregates if agg.value == "GROUPING"]
+    if _grouping_calls:
+        if not node.groups or getattr(node, "grouping_sets", None) is None:
+            raise UnsupportedSyntaxError(
+                "**GROUPING**() requires **GROUP BY ROLLUP** (or **CUBE** / **GROUPING "
+                "SETS**) — a plain **GROUP BY** has one grouping set, so no key is ever "
+                "rolled up."
+            )
+        for _call in _grouping_calls:
+            _operand = _call.parameters[0]
+            _operand_sc = getattr(_operand, "schema_column", None)
+            _identity = getattr(_operand_sc, "identity", None) if _operand_sc is not None else None
+            if _identity is None or _identity not in columns_to_keep:
+                from opteryx.expression import format_expression
+
+                raise UnsupportedSyntaxError(
+                    f"**GROUPING**({format_expression(_operand)}) — "
+                    f"{format_expression(_operand)} is not a **GROUP BY** key of this query."
+                )
     # remove literals in the GROUP BY clause, they form one group
     node.groups = [g for g in node.groups if g.node_type != NodeType.LITERAL]
     # 2) the columns referenced in the SELECT

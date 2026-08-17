@@ -175,7 +175,7 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
     from opteryx.models import LogicalColumn
     from opteryx.utils import random_string
 
-    relations = {}  # old_alias -> new_alias
+    relations = {}  # old_alias.lower() -> new_alias
     uuid_remap = {}  # old_uuid -> new_uuid for updating join readers
 
     # first we collection the relations
@@ -200,7 +200,13 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
         if node.node_type in RELATION_STEP_TYPES and node.alias
     ]:
         alias = f"{prefix}{random_string(4)}"
-        relations[node.alias] = alias
+        # Keyed by folded case: a relation alias is an unquoted SQL identifier, so
+        # `FROM (SELECT ...) CATALOG ... WHERE catalog.x` (the declaration and its
+        # reference spelled differently) must remap to the SAME new alias — the
+        # same fold `locate_identifier` applies at bind time (binder.py's
+        # `_candidates`), done here too because this runs BEFORE binding, on a
+        # spliced CTE/view/set-op-leg copy the binder never sees pre-rename.
+        relations[node.alias.lower()] = alias
         # Only scan-like nodes are READERS: join_leg_preprocess walks Scan nodes and
         # collects their uuids into left_readers/right_readers, so those are the uuids
         # that have to be made unique per copy. A Subquery's uuid reaches no such list,
@@ -213,8 +219,10 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
         plan[nid] = node
 
     def _prop(property):
-        if isinstance(property, LogicalColumn) and property.source in relations:
-            property.source = relations[property.source]
+        if isinstance(property, LogicalColumn) and property.source is not None:
+            mapped = relations.get(property.source.lower())
+            if mapped is not None:
+                property.source = mapped
         # A QUALIFIED wildcard (`p.*`) names a relation too, and names it as a plain
         # string in `value` rather than as a LogicalColumn.source — so nothing above
         # reaches it, and the tuple branch below walks straight past a bare string. Left
@@ -229,7 +237,9 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
             and property.node_type == NodeType.WILDCARD
             and property.value
         ):
-            property.value = type(property.value)(relations.get(q, q) for q in property.value)
+            property.value = type(property.value)(
+                relations.get(q.lower(), q) for q in property.value
+            )
         if isinstance(property, list):
             return [_prop(p) for p in property]
         if isinstance(property, tuple):
@@ -262,9 +272,13 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
             LogicalPlanStepType.Except,
         ):
             if node.left_relation_names:
-                node.left_relation_names = [relations.get(n, n) for n in node.left_relation_names]
+                node.left_relation_names = [
+                    relations.get(n.lower(), n) for n in node.left_relation_names
+                ]
             if node.right_relation_names:
-                node.right_relation_names = [relations.get(n, n) for n in node.right_relation_names]
+                node.right_relation_names = [
+                    relations.get(n.lower(), n) for n in node.right_relation_names
+                ]
             if node.left_readers:
                 node.left_readers = [uuid_remap.get(u, u) for u in node.left_readers]
             if node.right_readers:

@@ -197,7 +197,23 @@
                 "over_empty": true,
                 "over_partition_by": true
             },
+            "STDDEV_POP": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "STDDEV_SAMP": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
             "SUM": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "VAR_POP": {
+                "over_empty": true,
+                "over_partition_by": true
+            },
+            "VAR_SAMP": {
                 "over_empty": true,
                 "over_partition_by": true
             }

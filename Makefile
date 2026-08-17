@@ -398,13 +398,12 @@ json-extract-bench: ## Build + run the draken `->`/`->>` kernel microbenchmark (
 	    -o json_extract_bench
 	@cd $(CURDIR) && $(JSON_BENCH_DIR)/json_extract_bench $(JSON_BENCH_ARGS)
 
-tpch: ## Run TPC-H benchmark vs DuckDB (defaults to SF=10)
+tpch: ## Run TPC-H benchmark vs DuckDB on the skene mirror (generates testdata/tpch_10_skene from testdata/tpch_10 on first run)
 	$(call print_blue,"Running TPC-H benchmark vs DuckDB...")
-	@clear || true
-	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py
-
-tpch-skene: ## Run TPC-H benchmark on the skene mirror of the dataset (generates testdata/tpch_10_skene from testdata/tpch_10 on first run)
-	$(call print_blue,"Running TPC-H benchmark on skene...")
+	@# skene-only: TPC-H is tested against the skene mirror exclusively — the
+	@# plain-parquet variant (this target's old name/body) was removed
+	@# 2026-08-16, and tpch-skene renamed to tpch in its place.
+	@#
 	@# Stamped on the LAYOUT, not just on the directory: the mirror generated
 	@# before row groups were packed into files is a different set of objects
 	@# with different names, and the converter refuses to write over it. A
@@ -420,6 +419,26 @@ tpch-skene: ## Run TPC-H benchmark on the skene mirror of the dataset (generates
 	@test -f testdata/tpch_10_skene.rg16 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene lz4 && touch testdata/tpch_10_skene.rg16; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --variant skene
+
+tpch-sf100: ## Run TPC-H benchmark on the skene mirror of SF100 (generates testdata/tpch_100 via tpchgen-cli, then testdata/tpch_100_skene, on first run)
+	$(call print_blue,Running TPC-H benchmark on skene SF100...)
+	@# testdata/tpch_100 is not vendored (SF100 parquet runs ~30GB) and has no
+	@# in-tree generator — same as every other scale here (tpch_1/_10/_001),
+	@# which were produced out-of-band by tpchgen-cli
+	@# (github.com/clflushopt/tpchgen-rs, `cargo install tpchgen-cli`). That's
+	@# why SF10 is 16 numbered files per table with nation/region only on file
+	@# .1 — that's tpchgen-cli's `--parts 16` convention, not ours, so this
+	@# target reproduces it with the same tool rather than a from-scratch
+	@# writer. The parquet here is an intermediate file only; the skene mirror
+	@# below is the actual benchmark artifact.
+	@command -v tpchgen-cli >/dev/null 2>&1 || { echo "tpchgen-cli not found on PATH — install with: cargo install tpchgen-cli"; exit 1; }
+	@test -d testdata/tpch_100 || { \
+		echo "Generating testdata/tpch_100 (SF100) via tpchgen-cli..."; \
+		tpchgen-cli -s 100 --format parquet --parts 16 --output-dir testdata/tpch_100; \
+	}
+	@test -f testdata/tpch_100_skene.rg16 || { rm -rf testdata/tpch_100_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_100 testdata/tpch_100_skene lz4 && touch testdata/tpch_100_skene.rg16; }
+	@clear || true
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 100 --variant skene
 
 b: check-python
 	@clear || true
@@ -467,9 +486,11 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@#     interleaved, min of 3: lz4 6041ms vs zstd-7 7153ms — 1.1s, 16%.
 	@#
 	@# ⛔ Because of that split, a skene number here and a parquet number from
-	@# `make tpch` / `make clickbench` are NOT a like-for-like format comparison:
-	@# they are different codecs by design. Comparing them measures the codec
-	@# choice as much as the format. Say which posture any quoted figure came from.
+	@# `make clickbench` are NOT a like-for-like format comparison: they are
+	@# different codecs by design. Comparing them measures the codec choice as
+	@# much as the format. Say which posture any quoted figure came from.
+	@# (`make tpch` is skene/lz4 now too — see its own target — so it IS
+	@# comparable to this one on codec, unlike `make clickbench`.)
 	@#
 	@# The stamp is named for the LAYOUT (rg16 = 16 row groups per file), not
 	@# just for "converted". A mirror written before row groups were packed into
@@ -491,6 +512,19 @@ clickbench-duckdb: ## Re-run DuckDB ClickBench calibration (regenerates duckdb/r
 jsonbench: ## Run JSONBench (Bluesky NDJSON) vs DuckDB via Opteryx SQL / READ_JSONL (JSONBENCH_SIZE=1|10|100, default 10)
 	@clear || true
 	@$(PYTHON) tests/performance/jsonbench/runner.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
+
+tpcds: ## Run the TPC-DS SF1 smoke suite (coverage, not performance — see runner.py docstring)
+	@# Data is generated via DuckDB's dsdgen (dev/tpcds/generate_data.py), not
+	@# vendored: gated on the dataset directory existing, regenerate by removing
+	@# testdata/tpcds_1 and re-running.
+	@test -d testdata/tpcds_1 || $(PYTHON) dev/tpcds/generate_data.py --scale 1
+	@clear || true
+	@$(PYTHON) tests/performance/tpcds/runner.py --scale 1
+
+tpcds-001: ## Run the TPC-DS suite at SF0.01 (fast iteration — same label convention as testdata/tpch_001)
+	@test -d testdata/tpcds_001 || $(PYTHON) dev/tpcds/generate_data.py --scale 001
+	@clear || true
+	@$(PYTHON) tests/performance/tpcds/runner.py --scale 001
 
 jsonbench-data: ## Fetch + decompress the JSONBench Bluesky dataset (JSONBENCH_SIZE=1|10|100, default 10)
 	@$(PYTHON) tests/performance/jsonbench/fetch_data.py --size $(if $(JSONBENCH_SIZE),$(JSONBENCH_SIZE),10)
@@ -515,19 +549,48 @@ tpch-bench: ## Run TPC-H performance benchmark (Opteryx)
 tpch-bench-duckdb: ## Re-run DuckDB TPC-H calibration (regenerates duckdb/results.sf*.json)
 	@$(PYTHON) tests/performance/tpch/duckdb/runner.py
 
-job: ## Run Join Order Benchmark (JOB) vs DuckDB
+job: ## Run Join Order Benchmark (JOB) on the skene mirror (generates testdata/job_skene from testdata/job on first run)
+	$(call print_blue,"Running JOB on skene...")
+	@# skene, not parquet. JOB does not stipulate a storage format — upstream
+	@# ships the IMDB CSVs, not files — so the choice was always ours, and it is
+	@# made the same way here as in the weekly suite (mabel-dev/wrenchy-bench)
+	@# so a laptop number and a CI number are the same measurement.
+	@#
+	@# The `lz4` argument is NOT optional: it is WriteOptions::for_fast_reads,
+	@# the local-benchmark posture every other skene mirror in this tree uses.
+	@# Dropping it rebuilds an UNCOMPRESSED mirror into the same path and
+	@# nothing downstream would say so.
+	@#
+	@# Gated on a completion stamp rather than on the directory: an interrupted
+	@# conversion leaves a partial tree that `test -d` would accept, silently
+	@# benchmarking a fraction of the dataset.
+	@test -f testdata/job_skene.rg16 || { rm -rf testdata/job_skene && $(PYTHON) dev/parquet_to_skene.py testdata/job testdata/job_skene lz4 && touch testdata/job_skene.rg16; }
 	@clear || true
-	@$(PYTHON) tests/performance/job/runner.py
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/job/runner.py --variant skene
 
 job-duckdb: ## Re-run DuckDB JOB calibration (regenerates duckdb/results.json)
 	@$(PYTHON) tests/performance/job/duckdb/runner.py
 
-h2o: ## Run H2O db-benchmark vs DuckDB (groupby + join, size=small)
+h2o: ## Run H2O db-benchmark on the skene mirror (groupby + join, medium; generates testdata/h2o_skene on first run)
+	$(call print_blue,"Running H2O on skene...")
+	@# medium (1e8 rows), not small. At 1e7 rows small is 630MB, which sits
+	@# entirely in page cache on any development machine — it measured compute
+	@# with the storage layer removed, and is no longer benchmarked.
+	@#
+	@# skene for the same reason as `job` above: H2O ships a data GENERATOR,
+	@# not files, so the storage format was always this repo's choice. See that
+	@# target for why `lz4` is not optional and why the stamp gates the build.
+	@#
+	@# The mirror is flat — testdata/h2o_skene/<table> — because it is built at
+	@# one size, so there is no size level to carry. The parquet tree keeps its
+	@# testdata/h2o/<size>/<table> layout.
+	@test -d testdata/h2o/medium || { echo "testdata/h2o/medium not found — generate it with: PYTHONPATH=. $(PYTHON) tests/performance/h2o/generate_data.py --size medium"; exit 1; }
+	@test -f testdata/h2o_skene.rg16 || { rm -rf testdata/h2o_skene && $(PYTHON) dev/parquet_to_skene.py testdata/h2o/medium testdata/h2o_skene lz4 && touch testdata/h2o_skene.rg16; }
 	@clear || true
-	@$(PYTHON) tests/performance/h2o/runner.py --size small --workload both
+	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant skene --size medium --workload both
 
 h2o-duckdb: ## Re-run DuckDB H2O calibration (regenerates duckdb/results.<size>.json)
-	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size small --workload both
+	@$(PYTHON) tests/performance/h2o/duckdb/runner.py --size medium --workload both
 
 signals: ## Run signals benchmark suite (synthetic security-findings dataset, no DuckDB baseline)
 	@clear || true

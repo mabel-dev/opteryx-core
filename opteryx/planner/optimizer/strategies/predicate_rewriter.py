@@ -86,6 +86,16 @@ def rewrite_in_to_eq(predicate):
         predicate.right.type = _arr_ct.element
     else:
         predicate.right.type = _lt.VARCHAR
+    # schema_column is the single source of truth downstream (e.g. the bind-time
+    # temporal-cast validator in compiled_expression.pyx reads
+    # schema_column.column_type, not .type). Left describing the ORIGINAL ARRAY
+    # literal, `col IN (cast(lit AS DATE))` folded to `col = cast(lit AS DATE)`
+    # here but the stale ARRAY-typed schema_column still read as a DATE-vs-ARRAY
+    # mismatch one stage later.
+    _right_sc = predicate.right.schema_column
+    if _right_sc is not None:
+        _right_sc.column_type = predicate.right.type
+        _right_sc.value = predicate.right.value
     return predicate
 
 

@@ -122,6 +122,9 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
         ApproxPercentile "opteryx::engine::AggFn::ApproxPercentile"
         Corr "opteryx::engine::AggFn::Corr"
         CidrAgg "opteryx::engine::AggFn::CidrAgg"
+        StddevSamp "opteryx::engine::AggFn::StddevSamp"
+        VarPop "opteryx::engine::AggFn::VarPop"
+        VarSamp "opteryx::engine::AggFn::VarSamp"
     cdef cppclass AggSpec2:
         AggFn fn
         int col_idx
@@ -285,6 +288,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                  ExprEvalFn fn, bint distinct)
         void add_cidr_unnest(size_t p, uint32_t cidr_idx, string target_name, bint drop_source)
         void add_unnest_literal(size_t p, shared_ptr[CxxMorsel] lit, string target_name)
+        void add_grouping_expand(size_t p, cppvector[size_t] key_idx,
+                                 cppvector[uint64_t] set_masks, string id_name)
+        void add_grouping_bit(size_t p, size_t grouping_id_idx,
+                              cppvector[uint8_t] bit_by_ordinal, string out_name)
         void add_buffer_morsel(size_t buf, shared_ptr[CxxMorsel] m)
         void set_pipeline_dop(size_t p, int dop)
         void add_select(size_t p, cppvector[size_t] indices, cppvector[string] names)
@@ -2638,6 +2645,48 @@ cdef class NativePlan:
                                   else (<str>target_name).encode("utf-8"))
         self._e.add_unnest(p, <uint32_t>array_idx, nm, drop_source)
 
+    def add_grouping_expand(self, size_t p, list key_idx, list set_masks, id_name):
+        """GROUP BY ROLLUP(...) on pipeline ``p``: emit one morsel per grouping set,
+        masking to NULL the keys that set does not name and appending the constant
+        ``id_name`` (grouping_id) key.
+
+        ``key_idx`` are the GROUP BY key positions in the stream layout; bit k of each
+        entry of ``set_masks`` refers to ``key_idx[k]`` and, when SET, means that key is
+        rolled up (NULL) in that set. grouping_id must be part of the sink's key set —
+        see native_grouping_expand.hpp for why a rolled-up NULL and a data NULL are
+        otherwise indistinguishable."""
+        if len(key_idx) > 64:
+            from opteryx.exceptions import InvalidInternalStateError
+            raise InvalidInternalStateError(
+                f"add_grouping_expand: {len(key_idx)} GROUP BY keys exceeds the 64 the "
+                "grouping_id bitmask can carry"
+            )
+        cdef cppvector[size_t] keys
+        cdef cppvector[uint64_t] masks
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for m in set_masks:
+            masks.push_back(<uint64_t>m)
+        cdef string nm = <string>(id_name if isinstance(id_name, bytes)
+                                  else (<str>id_name).encode("utf-8"))
+        self._e.add_grouping_expand(p, keys, masks, nm)
+
+    def add_grouping_bit(self, size_t p, size_t grouping_id_idx, list bit_by_ordinal, out_name):
+        """GROUPING(col) on pipeline ``p``: 0/1 per output row, extracted from the
+        ``grouping_id`` key at ``grouping_id_idx`` via a lookup table — one 0/1 entry
+        per grouping set, indexed by that key's ``grouping_id`` ORDINAL (grouping_id
+        is the set's position in the set list, not its bitmask — see
+        native_grouping_expand.hpp::GroupingBitOperator for why the two are not
+        interchangeable here). ``bit_by_ordinal[i]`` is
+        ``(set_masks[i] >> bit) & 1`` for this call's GROUP BY key, computed by the
+        caller from the same ``set_masks`` add_grouping_expand was given."""
+        cdef cppvector[uint8_t] table
+        for v in bit_by_ordinal:
+            table.push_back(<uint8_t>v)
+        cdef string nm = <string>(out_name if isinstance(out_name, bytes)
+                                  else (<str>out_name).encode("utf-8"))
+        self._e.add_grouping_bit(p, grouping_id_idx, table, nm)
+
     def add_unnest_filtered(self, size_t p, size_t array_idx, target_name,
                             bint drop_source, CompiledBytecode bc, list layout,
                             bint distinct=False):
@@ -2866,6 +2915,12 @@ cdef cppvector[AggSpec2] _agg_spec_from_list(list spec) except *:
             s.fn = AggFn.ArrayAgg
         elif fn == "Stddev":
             s.fn = AggFn.Stddev
+        elif fn == "StddevSamp":
+            s.fn = AggFn.StddevSamp
+        elif fn == "VarPop":
+            s.fn = AggFn.VarPop
+        elif fn == "VarSamp":
+            s.fn = AggFn.VarSamp
         elif fn == "Median":
             s.fn = AggFn.Median
         elif fn == "AnyValue":

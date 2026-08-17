@@ -295,11 +295,44 @@ struct CountState {
 // against it. A second .so including this header would get its own counter
 // and its own budget — check that before adding an includer.
 // ---------------------------------------------------------------------------
-constexpr int64_t kMedianBudgetBytes = opteryx::agg_budgets::kMedianBytes;   // 512MB
+constexpr int64_t kMedianBudgetFloorBytes = opteryx::agg_budgets::kMedianFloorBytes;  // 256MB
+constexpr int64_t kMedianBudgetBytes      = opteryx::agg_budgets::kMedianBytes;       // 2GB
 
 inline std::atomic<int64_t>& median_budget_used() noexcept {
     static std::atomic<int64_t> used{0};
     return used;
+}
+
+// The CURRENT ceiling, which starts at the floor and ratchets on demand.
+//
+// Process-wide, like the counter it guards — the two must have the same scope
+// or the guard means nothing. That has a consequence worth knowing: while two
+// MEDIAN queries overlap they share both the pool and the escalation, so a
+// large one raises the ceiling for a small one, and the small one is what dies
+// if the total blows 2GB. It resets to the floor whenever the counter returns
+// to zero (see _release), so the escalation is effectively per-query for
+// non-overlapping queries and shared only for genuinely concurrent ones.
+inline std::atomic<int64_t>& median_budget_ceiling() noexcept {
+    static std::atomic<int64_t> ceiling{kMedianBudgetFloorBytes};
+    return ceiling;
+}
+
+// Raise the ceiling by doubling until it covers `needed`, or refuse. Returns
+// false only when the hard ceiling genuinely cannot cover the demand — that is
+// the fail-loud path, and the caller latches `overflowed` on it.
+inline bool median_budget_escalate(int64_t needed) noexcept {
+    std::atomic<int64_t>& ceiling = median_budget_ceiling();
+    int64_t current = ceiling.load(std::memory_order_relaxed);
+    while (current < needed) {
+        if (current >= kMedianBudgetBytes) return false;
+        int64_t next = current * 2;
+        if (next > kMedianBudgetBytes) next = kMedianBudgetBytes;
+        // compare_exchange_weak reloads `current` on failure, so a losing
+        // racer re-tests against whatever the winner installed rather than
+        // doubling a second time on top of it.
+        ceiling.compare_exchange_weak(current, next, std::memory_order_relaxed);
+    }
+    return true;
 }
 
 struct MedianState {
@@ -332,18 +365,54 @@ struct MedianState {
     inline void _release() noexcept {
         if (buf) {
             std::free(buf);
-            median_budget_used().fetch_sub(
-                static_cast<int64_t>(cap) * static_cast<int64_t>(sizeof(double)));
+            const int64_t bytes =
+                static_cast<int64_t>(cap) * static_cast<int64_t>(sizeof(double));
+            if (median_budget_used().fetch_sub(bytes) - bytes == 0) {
+                // Last buffer gone: hand the next query the floor rather than
+                // whatever ceiling this one ratcheted to.
+                median_budget_ceiling().store(kMedianBudgetFloorBytes,
+                                              std::memory_order_relaxed);
+            }
             buf = nullptr; size = 0; cap = 0;
         }
     }
 
+    // Capacity growth. The budget charges CAPACITY, not values, so the growth
+    // curve IS the memory profile — and a 64-slot first allocation made the
+    // floor, not the data, the dominant cost whenever groups are small.
+    // GROUP BY over a high-cardinality key is the ordinary case that broke:
+    // 1e8 rows in 1e8 groups buffers 763MB of doubles and charged 47.7GB, a
+    // 64x multiplier on a query holding one value per group.
+    //
+    // So: start at ONE slot (a singleton group is charged for exactly what it
+    // holds), jump straight to 8 on the first growth to skip the churn a
+    // 1,2,4 ramp would cost every small group, double while small, then grow
+    // by a quarter past kMedianGeoLimit. Doubling is what overshoots large
+    // groups — h2o g6's ~10,000-value groups each took a 16,384-slot buffer,
+    // 39% waste — and a 1.25x tail bounds that without making small groups
+    // pay realloc traffic for it.
+    //
+    // Worst case across the shapes measured (g6, GROUP BY user_id at 500k/10M
+    // /100M distinct, one big group, 200 groups): 1.60x raw, against 64x for
+    // the previous curve. Still geometric, so appends stay amortized O(1);
+    // a 10-value group now takes 3 reallocs rather than 1, and a query that
+    // used to be refused outright now runs.
+    static constexpr size_t kMedianGeoLimit = 4096;
+
+    inline size_t _next_cap(size_t current) const noexcept {
+        if (current == 0) return 1;
+        if (current == 1) return 8;
+        return current < kMedianGeoLimit ? current * 2 : current + (current >> 2);
+    }
+
     inline bool _grow(size_t need) noexcept {
-        size_t new_cap = cap == 0 ? 64 : cap * 2;
-        while (new_cap < need) new_cap *= 2;
+        size_t new_cap = _next_cap(cap);
+        while (new_cap < need) new_cap = _next_cap(new_cap);
         int64_t delta = static_cast<int64_t>(new_cap - cap)
                         * static_cast<int64_t>(sizeof(double));
-        if (median_budget_used().fetch_add(delta) + delta > kMedianBudgetBytes) {
+        const int64_t used = median_budget_used().fetch_add(delta) + delta;
+        if (used > median_budget_ceiling().load(std::memory_order_relaxed)
+                && !median_budget_escalate(used)) {
             median_budget_used().fetch_sub(delta);
             overflowed = true;
             return false;
