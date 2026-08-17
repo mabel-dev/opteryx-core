@@ -342,6 +342,12 @@ def render_alter_workspace(node: LogicalPlanNode) -> str:
     return f"ALTER WORKSPACE ({node.workspace_name}) SET {node.property_name} = {node.property_value}"
 
 
+@register_render(LogicalPlanStepType.DropWorkspace)
+def render_drop_workspace(node: LogicalPlanNode) -> str:
+    if_exists = "IF EXISTS " if node.if_exists else ""
+    return f"DROP WORKSPACE {if_exists}({node.workspace_name})"
+
+
 @register_render(LogicalPlanStepType.Analyze)
 def render_analyze(node: LogicalPlanNode) -> str:
     return f"ANALYZE TABLE ({node.table_name})"

@@ -3303,6 +3303,51 @@ def test_window_topk_fusion_parity():
         assert fused, f"parity holds but the query returned nothing: {statement}"
 
 
+def test_cross_join_output_mixes_raw_and_computed_columns():
+    """
+    VALUE-level regression: `SELECT a, b, a + b FROM (leg1) x, (leg2) y` — a raw
+    passthrough column from EACH cross-joined leg plus an expression combining
+    both — must actually compute the expression, not silently drop it.
+
+    `ProjectionPushdownStrategy` rebuilds a Join node's `.columns` from
+    `node.schemas`, which `binder/join.py` sets to a REFERENCE to the live
+    binder `context.schemas` dict, not a snapshot. `context.schemas["$derived"]`
+    is the query-wide scratch registry every computed expression is minted
+    into as binding proceeds — so by the time the optimizer runs (after
+    binding finishes), it holds every derived column the WHOLE query minted,
+    including `a + b`, computed by the OUTER Project sitting ABOVE this join.
+    Treating "identity present in $derived" as "this join can emit this
+    column" pulled `a + b`'s identity onto the join, which made
+    RedundantOperationsStrategy think the Project computing `a + b` was a
+    no-op reselection (provider already produces every column asked for) and
+    deleted it — TPC-DS Q61's shape. compile_to_native then had no operator
+    left to compute `a + b` and refused with "an output column the engine
+    could not resolve here". Only fires with a column from EACH leg present
+    alongside the cross-leg expression; any two of the three alone compiled
+    fine, which is why the shape battery (shape-only, not value-level) never
+    caught it.
+    """
+    statement = (
+        "SELECT a, b, a + b FROM "
+        "(SELECT SUM(id) AS a FROM $planets) x, "
+        "(SELECT SUM(id) AS b FROM $planets) y"
+    )
+    session = opteryx.session()
+    morsels = list(session.execute_to_morsels(statement))
+
+    rows = []
+    for morsel in morsels:
+        rows.extend(
+            zip(
+                morsel.column("a").to_pylist(),
+                morsel.column("b").to_pylist(),
+                morsel.column("a + b").to_pylist(),
+            )
+        )
+
+    assert rows == [(45, 45, 90)], f"expected [(45, 45, 90)], got {rows}"
+
+
 def test_humanize_modes():
     """
     VALUE-level regression: HUMANIZE's scale systems and the two defects the
@@ -3545,6 +3590,10 @@ if __name__ == "__main__":  # pragma: no cover
             test_correlated_scalar_subquery_or_factored_equality,
         ),
         ("window top-k fusion parity", test_window_topk_fusion_parity),
+        (
+            "cross join output mixes raw and computed columns",
+            test_cross_join_output_mixes_raw_and_computed_columns,
+        ),
         ("humanize scale systems", test_humanize_modes),
     ):
         print(f"\033[38;2;255;184;108m{name}\033[0m ", end="", flush=True)

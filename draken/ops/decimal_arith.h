@@ -13,8 +13,21 @@
 //
 // Overflow semantics (per E.32 architect call §2.2 / §2.3):
 //   All overflow raises std::overflow_error — never silent wrap.
-//   div/mod by zero raises std::domain_error.
 //   neg(INT64_MIN) raises std::overflow_error.
+//
+// div/mod by zero (revised 2026-08-17, supersedes E.32 §2.3 "raises
+// std::domain_error" for this one case): the row's result is NULL, not a
+// raise. E.32's raise-on-zero was uniform across every numeric kind, but it
+// was the ONE case where DECIMAL didn't already match its siblings —
+// INT64/FLOAT64 true division never raises on a zero divisor (int div-by-zero
+// is 0, float div-by-zero is IEEE inf/nan), and CASE/IIF evaluate every
+// branch unconditionally before blending by the guard condition, so a
+// SQL-level guard like `CASE WHEN d = 0 THEN NULL ELSE n / d END` does not
+// stop the ELSE branch from running on the d = 0 row. DECIMAL raising there
+// crashed queries whose SQL correctly guards against a zero denominator
+// (TPC-DS Q90 at SF0.01, where an hourly bucket genuinely has zero rows).
+// NULL is the right substitute for "no representable result" here since
+// DECIMAL has no inf/NaN encoding to fall back on the way FLOAT64 does.
 //
 // Division rounding: half-even (banker's rounding) per draken-boost-math memory.
 //
@@ -445,6 +458,20 @@ static inline VecResult dec_mul(
     return make_decimal_result(dst, combine_validity(a.validity, b.validity, n), n);
 }
 
+// Lazily null out logical row `i` of a validity bitmap that may still be the
+// nullptr "everything valid" sentinel. Used by the DECIMAL/DECIMAL128 div/mod
+// kernels to NULL a zero-divisor row without raising (see file header) while
+// keeping the common all-valid, no-zero-divisor case allocation-free.
+static inline void dec_null_out_row(uint8_t*& validity, uint32_t n, uint32_t i) {
+    if (!validity) {
+        const uint32_t nb = (n + 7u) >> 3;
+        validity = static_cast<uint8_t*>(draken_malloc(nb));
+        if (!validity) throw std::bad_alloc();
+        memset(validity, 0xFF, nb);
+    }
+    validity[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+}
+
 // ---------------------------------------------------------------------------
 // DIV: result_scale = max(sa+6, 6) capped at 18 — computed and passed in by caller.
 //
@@ -458,7 +485,8 @@ static inline VecResult dec_mul(
 //   result_scale ≥ 6 ≥ 0 and any valid pair sa,sb yields e ≥ 0).
 //
 // Rounding: half-even.
-// Raises on div-by-zero, int128 overflow, or int64 result overflow.
+// Zero divisor: result row is NULL (does not raise — see file header).
+// Raises on int128 overflow or int64 result overflow.
 // ---------------------------------------------------------------------------
 static inline VecResult dec_div(
     const DrakenVector& a, uint8_t sa,
@@ -471,6 +499,7 @@ static inline VecResult dec_div(
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
+    uint8_t* validity = combine_validity(a.validity, b.validity, n);
 
     const int e = (int)sb - (int)sa + (int)result_scale;
     // e ≥ 0 by design (see header); e ≤ 18+18 = 36.
@@ -482,8 +511,7 @@ static inline VecResult dec_div(
         if (a_null || b_null) { dst[i] = 0; continue; }
 
         const int64_t bv = bd[b.selection[i]];
-        if (bv == 0)
-            throw std::domain_error("dec_div: division by zero");
+        if (bv == 0) { dst[i] = 0; dec_null_out_row(validity, n, i); continue; }
         __int128 num;
         if (!i128_scale((__int128)ad[a.selection[i]], e, num))
             throw std::overflow_error("dec_div: numerator overflows int128 during scaling");
@@ -492,7 +520,7 @@ static inline VecResult dec_div(
             throw std::overflow_error("dec_div: result overflows int64 storage");
         dst[i] = static_cast<int64_t>(rv);
     }
-    return make_decimal_result(dst, combine_validity(a.validity, b.validity, n), n);
+    return make_decimal_result(dst, validity, n);
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +529,8 @@ static inline VecResult dec_div(
 //   If sa >= sb: b_aligned = b_unscaled * 10^(sa - sb)
 //   If sa <  sb: b_aligned = b_unscaled / 10^(sb - sa)  (truncate)
 // result = a_unscaled % b_aligned, at scale sa.
-// Raises on mod-by-zero or int128/int64 overflow.
+// Zero modulus (after scale alignment): result row is NULL (does not raise —
+// see file header). Raises on int128/int64 overflow.
 // ---------------------------------------------------------------------------
 static inline VecResult dec_mod(
     const DrakenVector& a, uint8_t sa,
@@ -513,6 +542,7 @@ static inline VecResult dec_mod(
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
     int64_t* dst = alloc_i64(n);
+    uint8_t* validity = combine_validity(a.validity, b.validity, n);
 
     for (uint32_t i = 0; i < n; ++i) {
         // Skip computation for null rows — combine_validity marks output null.
@@ -532,14 +562,13 @@ static inline VecResult dec_mod(
             const int64_t div = (delta <= 18) ? kDecPow10[delta] : kDecPow10[18];
             b_aligned = (__int128)bv / (__int128)div;
         }
-        if (b_aligned == 0)
-            throw std::domain_error("dec_mod: modulus is zero after scale alignment");
+        if (b_aligned == 0) { dst[i] = 0; dec_null_out_row(validity, n, i); continue; }
         const __int128 rv = (__int128)ad[a.selection[i]] % b_aligned;
         if (!i128_fits_i64(rv))
             throw std::overflow_error("dec_mod: result overflows int64 storage");
         dst[i] = static_cast<int64_t>(rv);
     }
-    return make_decimal_result(dst, combine_validity(a.validity, b.validity, n), n);
+    return make_decimal_result(dst, validity, n);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,10 +663,11 @@ static inline bool udivmod_256_by_128(
 // DIV: result_scale passed in by caller (max(sa+6,6) capped at 38).
 //   result_unscaled = round(|a| * 10^e / |b|), e = sb - sa + result_scale.
 // The numerator |a|·10^e can need up to 256 bits, carried via umul128_256, then
-// reduced by the 256/128 divide above. Half-even rounding. Raises on div-by-zero,
-// on e outside [0,38] (numerator scaling would need >38 extra digits — beyond the
-// 256-bit intermediate; an honest scalar-tier limit, not a silent truncation), and
-// on int128 result overflow.
+// reduced by the 256/128 divide above. Half-even rounding. Zero divisor: result
+// row is NULL (does not raise — see file header). Raises on e outside [0,38]
+// (numerator scaling would need >38 extra digits — beyond the 256-bit
+// intermediate; an honest scalar-tier limit, not a silent truncation), and on
+// int128 result overflow.
 static inline VecResult dec128_div(
     const DrakenVector& a, uint8_t sa,
     const DrakenVector& b, uint8_t sb,
@@ -649,6 +679,7 @@ static inline VecResult dec128_div(
     const __int128* ad = static_cast<const __int128*>(a.data);
     const __int128* bd = static_cast<const __int128*>(b.data);
     __int128* dst = alloc_i128(n);
+    uint8_t* validity = combine_validity(a.validity, b.validity, n);
 
     const int e = (int)sb - (int)sa + (int)result_scale;
     if (e < 0 || e > 38)
@@ -664,8 +695,7 @@ static inline VecResult dec128_div(
 
         const __int128 av = ad[a.selection[i]];
         const __int128 bv = bd[b.selection[i]];
-        if (bv == 0)
-            throw std::domain_error("dec128_div: division by zero");
+        if (bv == 0) { dst[i] = 0; dec_null_out_row(validity, n, i); continue; }
 
         const bool neg = (av < 0) ^ (bv < 0);
         // |operand| < 10^38 < 2^127, so negation never hits INT128_MIN.
@@ -688,13 +718,14 @@ static inline VecResult dec128_div(
             throw std::overflow_error("dec128_div: result overflows int128 (DECIMAL128) storage");
         dst[i] = neg ? -static_cast<__int128>(q) : static_cast<__int128>(q);
     }
-    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+    return make_decimal128_result(dst, validity, n);
 }
 
 // MOD: result_scale = sa. b aligned to scale sa (C truncation semantics), then
 // `a % b_aligned`. Native int128 modulo — the result fits int128 (|r| < |b_aligned|),
-// so no 256-bit intermediate is needed. Raises on mod-by-zero or int128 overflow
-// during b's scale alignment.
+// so no 256-bit intermediate is needed. Zero modulus (after scale alignment):
+// result row is NULL (does not raise — see file header). Raises on int128
+// overflow during b's scale alignment.
 static inline VecResult dec128_mod(
     const DrakenVector& a, uint8_t sa,
     const DrakenVector& b, uint8_t sb)
@@ -705,6 +736,7 @@ static inline VecResult dec128_mod(
     const __int128* ad = static_cast<const __int128*>(a.data);
     const __int128* bd = static_cast<const __int128*>(b.data);
     __int128* dst = alloc_i128(n);
+    uint8_t* validity = combine_validity(a.validity, b.validity, n);
 
     for (uint32_t i = 0; i < n; ++i) {
         const bool a_null = a.validity && !((a.validity[i >> 3] >> (i & 7)) & 1u);
@@ -722,11 +754,10 @@ static inline VecResult dec128_mod(
             const __int128 div = dec_pow10_i128(delta <= 38 ? delta : 38);
             b_aligned = bv / div;
         }
-        if (b_aligned == 0)
-            throw std::domain_error("dec128_mod: modulus is zero after scale alignment");
+        if (b_aligned == 0) { dst[i] = 0; dec_null_out_row(validity, n, i); continue; }
         dst[i] = ad[a.selection[i]] % b_aligned;     // sign of dividend (a)
     }
-    return make_decimal128_result(dst, combine_validity(a.validity, b.validity, n), n);
+    return make_decimal128_result(dst, validity, n);
 }
 
 // E33 — scale-0 truncating integer divide, for the UINT64×INT64 promotion path

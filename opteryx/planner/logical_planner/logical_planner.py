@@ -91,6 +91,7 @@ class LogicalPlanStepType(int, Enum):
     CreateCollection = auto()
     DropCollection = auto()
     AlterWorkspace = auto()
+    DropWorkspace = auto()
 
     DropTrigger = auto()
     AlterMaterializedViewOwner = auto()
@@ -3941,6 +3942,47 @@ def plan_drop(statement, **kwargs):
         raise UnsupportedSyntaxError(f"DROP {object_type} is not supported")
 
 
+def plan_drop_workspace(statement, **kwargs):
+    """
+    Create a logical plan for DROP WORKSPACE statement.
+
+    DROP WORKSPACE [IF EXISTS] workspace
+
+    The parser has no WORKSPACE object type, so the SQL rewriter
+    (sql_rewriter._rewrite_object_types) turns this into DROP FUNCTION -
+    same trick ALTER WORKSPACE uses via ALTER FUNCTION (see
+    plan_alter_workspace). Unlike DROP TABLE/VIEW/SCHEMA, DROP FUNCTION is
+    its own top-level statement shape in the parser's AST (`DropFunction`,
+    not the generic `Drop` object_type dispatch plan_drop handles), keyed by
+    `func_desc` (a list of `{name, args}`) rather than `names` - hence a
+    dedicated plan function instead of another branch in plan_drop.
+    """
+    root_node = "DropFunction"
+    plan = LogicalPlan()
+
+    drop_statement = statement[root_node]
+
+    func_descs = drop_statement.get("func_desc") or []
+    if len(func_descs) != 1:
+        raise UnsupportedSyntaxError("DROP WORKSPACE takes exactly one workspace name.")
+
+    workspace_name = extract_variable(func_descs[0]["name"])
+    if isinstance(workspace_name, list):
+        workspace_name = ".".join(workspace_name)
+    if "." in workspace_name:
+        raise UnsupportedSyntaxError(
+            f"DROP WORKSPACE names a workspace, not a relation within one (got '{workspace_name}'). Give the workspace name on its own."
+        )
+
+    drop_workspace_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropWorkspace)
+    drop_workspace_node.workspace_name = workspace_name
+    drop_workspace_node.if_exists = drop_statement.get("if_exists", False)
+
+    plan.add_node(random_string(), drop_workspace_node)
+
+    return plan
+
+
 def plan_refresh_materialized_view(statement, **kwargs):
     """Plan REFRESH MATERIALIZED VIEW <name>.
 
@@ -4583,6 +4625,7 @@ QUERY_BUILDERS = {
     "AlterView": plan_alter_view,
     "AlterTable": plan_alter_table,
     "AlterFunction": plan_alter_workspace,  # ALTER WORKSPACE, rewritten by the SQL rewriter
+    "DropFunction": plan_drop_workspace,  # DROP WORKSPACE, rewritten by the SQL rewriter
     "Drop": plan_drop,  # handles DROP VIEW and DROP TABLE
     "CreateTable": plan_create_table,
     "Truncate": plan_truncate,

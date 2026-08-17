@@ -1871,8 +1871,19 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # CONCAT(x, y, z) → x || y || z. Each operand is stringified first
     # (_stringify_for_concat) — StringConcat is string-only natively, so a
     # non-string operand (CONCAT(id, name)) was refused family-wide before this.
+    #
+    # Operands are rewritten (_rewrite_predicate) BEFORE the chain is built.
+    # CONCAT/CONCAT_WS are rewrite-only — no native kernel — so a nested
+    # CONCAT/CONCAT_WS call used as one of THIS call's own arguments
+    # (CONCAT(CONCAT(a, b), c), the Q84 shape) must be desugared here too;
+    # the generic recursion in _rewrite_predicate only walks BINARY_OPERATOR
+    # trees (an already-parsed `||`), never a FUNCTION node's own parameters,
+    # so without this an inner CONCAT/CONCAT_WS reaches the bytecode builder
+    # unrewritten and is refused as a function call outside the c-native
+    # kernel set.
     if function.value == "CONCAT" and len(function.parameters) > 1:
         telemetry.optimization_predicate_rewriter_concat_to_double_pipe += 1
+        function.parameters = [_rewrite_predicate(param, telemetry) for param in function.parameters]
         _chain_ct = _concat_chain_type(function)
         left_node = _stringify_for_concat(function.parameters[0])
         for param in function.parameters[1:]:
@@ -1890,6 +1901,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # as CONCAT above, applied to the separator and every value.
     if function.value == "CONCAT_WS" and len(function.parameters) > 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
+        function.parameters = [_rewrite_predicate(param, telemetry) for param in function.parameters]
         _chain_ct = _concat_chain_type(function)
         separator = _stringify_for_concat(function.parameters[0])
         left_node = _stringify_for_concat(function.parameters[1])
@@ -1924,6 +1936,7 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
     # dependency (the architect's choice) rather than removing it with a kernel.
     if function.value == "CONCAT_WS" and len(function.parameters) == 2:
         telemetry.optimization_predicate_rewriter_concatws_to_double_pipe += 1
+        function.parameters = [_rewrite_predicate(param, telemetry) for param in function.parameters]
         _chain_ct = _concat_chain_type(function)
         value_node = _stringify_for_concat(function.parameters[1])
         # The empty literal must carry the CHAIN's string type, not a hardcoded

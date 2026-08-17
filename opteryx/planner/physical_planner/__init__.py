@@ -548,6 +548,10 @@ def _create_alter_workspace_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="alter_workspace", **logical_node.properties)
 
 
+def _create_drop_workspace_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="drop_workspace", **logical_node.properties)
+
+
 def _create_insert_node(logical_node, query_properties, registry):
     return registry.create("Insert", query_properties, **logical_node.properties)
 
@@ -604,6 +608,7 @@ _DISPATCH = {
     LogicalPlanStepType.AlterColumnType:  _create_alter_column_type_node,
     LogicalPlanStepType.OptimizeRelation: _create_optimize_relation_node,
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
+    LogicalPlanStepType.DropWorkspace:    _create_drop_workspace_node,
     LogicalPlanStepType.Insert:           _create_insert_node,
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
     LogicalPlanStepType.AlterMaterializedViewOwner: _create_alter_materialized_view_owner_node,

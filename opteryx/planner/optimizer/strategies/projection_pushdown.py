@@ -225,7 +225,26 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
         if node.node_type == LogicalPlanStepType.Join:
             node_columns = []
 
-            for schema in node.schemas.values():
+            # "$derived"/"$project" is the query-wide scratch registry every
+            # computed expression is minted into while binding (see
+            # binding_context.py's initial schemas and binder/project.py's
+            # rename). A Join's `.schemas` is a REFERENCE to that same live
+            # dict (binder/join.py: `node.schemas = context.schemas`), not a
+            # snapshot - so by the time this optimizer pass runs, well after
+            # binding has finished, it holds every derived column the WHOLE
+            # query minted, including ones computed by nodes ABOVE this join
+            # (e.g. the outer SELECT list's `a + b` over two single-column
+            # cross-joined subqueries) that this join cannot possibly emit.
+            # Treating membership there as "this join produces this column"
+            # pulled `a + b`'s identity onto a bare cross join, which made
+            # RedundantOperationsStrategy think the Project computing it was
+            # a no-op reselection and delete it - the compiled plan then had
+            # nothing left to actually compute `a + b`, and
+            # compile_to_native's Exit-column resolution failed with
+            # "an output column the engine could not resolve here".
+            for schema_name, schema in node.schemas.items():
+                if schema_name in ("$derived", "$project"):
+                    continue
                 node_columns.extend(
                     [
                         LogicalColumn(

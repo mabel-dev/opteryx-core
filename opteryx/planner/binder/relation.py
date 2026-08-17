@@ -538,6 +538,36 @@ def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[No
     return node, context
 
 
+def visit_drop_workspace(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """
+    Bind the DROP WORKSPACE node to determine which connector should handle
+    the drop, same shape as visit_alter_workspace.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_workspace_action
+
+    node.connector = connector_factory(node.workspace_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.workspace_name} does not support DROP WORKSPACE"
+        )
+
+    # Owner of the whole workspace, same tier as ALTER WORKSPACE - opteryx_access's
+    # ACTION_ROLES already requires "owner" for DROP, same as it does for a
+    # relation-level DROP TABLE/VIEW; this just applies it at workspace scope.
+    if not can_perform_workspace_action(
+        context.execution_context, node.workspace_name, action="DROP"
+    ):
+        raise PermissionError(
+            f"User does not have permission to drop workspace {node.workspace_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the TRUNCATE TABLE node to determine which connector should handle

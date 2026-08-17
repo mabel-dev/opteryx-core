@@ -114,6 +114,8 @@ class RelationManagementNode(BasePlanNode):
             return f"optimize {self.relation_name}"
         if self.action == "alter_workspace":
             return f"alter workspace {self.workspace_name} set {self.property_name} = {self.property_value}"
+        if self.action == "drop_workspace":
+            return f"drop workspace {self.workspace_name}"
         if self.action == "drop_trigger":
             return f"drop trigger {self.trigger_name} on {self.table_name}"
         if self.action == "alter_materialized_view_suspended":
@@ -333,6 +335,10 @@ class RelationManagementNode(BasePlanNode):
                 self.property_value,
                 author=self._author,
             )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_workspace":
+            self.connector.drop_workspace(self.workspace_name, author=self._author)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         else:

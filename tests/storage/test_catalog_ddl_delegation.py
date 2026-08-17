@@ -53,6 +53,9 @@ class _FakeCatalog:
     def set_workspace_properties(self, properties, author=None):
         _FakeCatalog.calls.append(("set_workspace_properties", properties, author))
 
+    def drop_workspace(self, author=None):
+        _FakeCatalog.calls.append(("drop_workspace", author))
+
     def collection_exists(self, collection):
         return True
 
@@ -219,6 +222,21 @@ def test_alter_workspace_unauthenticated_passes_none(catalog_workspace):
     assert catalog_workspace.calls == [
         ("set_workspace_properties", {"deletion_protection": False}, None)
     ]
+
+
+def test_drop_workspace_delegates_to_catalog_with_user(catalog_workspace):
+    """DROP WORKSPACE reaches the catalog carrying the session user as author."""
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("DROP WORKSPACE cat"))
+
+    assert catalog_workspace.calls == [("drop_workspace", "alice")]
+
+
+def test_drop_workspace_unauthenticated_passes_none(catalog_workspace):
+    session = opteryx.session(access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("DROP WORKSPACE cat"))
+
+    assert catalog_workspace.calls == [("drop_workspace", None)]
 
 
 def test_create_collection_delegates_to_catalog_with_user(catalog_workspace):

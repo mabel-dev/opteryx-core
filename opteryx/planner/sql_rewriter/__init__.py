@@ -19,9 +19,9 @@ Responsibilities:
   this dialect
 - Normalises EXPLAIN FORMAT MERMAID to FORMAT GRAPHVIZ so the parser accepts it;
   rejects FORMAT GRAPHVIZ and FORMAT JSON explicitly
-- Rewrites CREATE/DROP COLLECTION to CREATE/DROP SCHEMA, and ALTER WORKSPACE to
-  ALTER FUNCTION, so the parser accepts statements whose object types it has no
-  grammar for
+- Rewrites CREATE/DROP COLLECTION to CREATE/DROP SCHEMA, and ALTER/DROP WORKSPACE
+  to ALTER/DROP FUNCTION, so the parser accepts statements whose object types it
+  has no grammar for
 
 The rewriter does NOT parse SQL into an AST; it only manipulates the text.
 
@@ -233,6 +233,7 @@ _QUERY_BODY = re.compile(rf"(?P<quoted>{_QUOTED_SPAN})|\b(?:SELECT|WITH)\b", re.
 _CREATE_COLLECTION = re.compile(r"^(\s*CREATE\s+)COLLECTION\b", re.IGNORECASE)
 _DROP_COLLECTION = re.compile(r"^(\s*DROP\s+)COLLECTION\b", re.IGNORECASE)
 _ALTER_WORKSPACE = re.compile(r"^(\s*ALTER\s+)WORKSPACE\b", re.IGNORECASE)
+_DROP_WORKSPACE = re.compile(r"^(\s*DROP\s+)WORKSPACE\b", re.IGNORECASE)
 
 
 def _rewrite_escaped_breaks(text: str) -> Tuple[str, List[Edit]]:
@@ -332,11 +333,13 @@ def _rewrite_object_types(text: str) -> Tuple[str, List[Edit]]:
 
     sqlparser has no COLLECTION object type and no WORKSPACE statement, and both are
     Opteryx concepts rather than syntax any other engine would recognise, so there is
-    nothing to send upstream. SCHEMA and ALTER FUNCTION accept the same shapes and are
-    otherwise unused by opteryx, so the statements reach the planner as AST nodes that
-    plan_create_collection / plan_drop / plan_alter_workspace map onward.
+    nothing to send upstream. SCHEMA and ALTER/DROP FUNCTION accept the same shapes
+    and are otherwise unused by opteryx, so the statements reach the planner as AST
+    nodes that plan_create_collection / plan_drop / plan_alter_workspace map onward
+    (DROP WORKSPACE's own object_type=="Function" branch lives in plan_drop,
+    alongside DROP COLLECTION's object_type=="Schema" one).
 
-    All three anchor at the start of the statement, so nothing inside a literal, an
+    All four anchor at the start of the statement, so nothing inside a literal, an
     identifier or a subquery is at risk.
     """
     edits: List[Edit] = []
@@ -344,6 +347,7 @@ def _rewrite_object_types(text: str) -> Tuple[str, List[Edit]]:
         (_CREATE_COLLECTION, "SCHEMA"),
         (_DROP_COLLECTION, "SCHEMA"),
         (_ALTER_WORKSPACE, "FUNCTION"),
+        (_DROP_WORKSPACE, "FUNCTION"),
     ):
         match = pattern.match(text)
         if match is None:
@@ -351,7 +355,7 @@ def _rewrite_object_types(text: str) -> Tuple[str, List[Edit]]:
         start, end = match.end(1), match.end()
         text = text[:start] + replacement + text[end:]
         edits.append((start, len(replacement), start, end - start))
-        # The three are mutually exclusive - a statement cannot start with all of
+        # Mutually exclusive - a statement cannot start with more than one of
         # CREATE, DROP and ALTER - so the first hit is the only hit.
         break
     return text, edits

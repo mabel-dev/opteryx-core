@@ -95,6 +95,17 @@ def test_cnative_decimal_int8_divide():
     _assert_matches(got, [_quant(a / Decimal(i), 8) if i != 0 else None for a, i in zip(_GRAV2, _ID8)])
 
 
+def test_cnative_decimal_int8_divide_by_zero():
+    # (id - 1) is a genuine zero for Mercury (id=1) — dec_div must NULL that row
+    # rather than raise (decimal_arith.h div-by-zero convention, revised
+    # 2026-08-17 to match INT64/FLOAT64's non-raising division; see TPC-DS Q90).
+    # Every other row must still compute normally.
+    got, _ = _run("SELECT CAST(gravity AS DECIMAL(10,2)) / (id - 1) AS r FROM $planets")
+    divisors = [i - 1 for i in _ID8]
+    assert 0 in divisors, divisors  # sanity: the fixture actually exercises the zero row
+    _assert_matches(got, [_quant(a / Decimal(d), 8) if d != 0 else None for a, d in zip(_GRAV2, divisors)])
+
+
 # ---------------------------------------------------------------------------
 # Part 1 — native path: DECIMAL(10,2) × INT64 promotes to DECIMAL128.
 # ---------------------------------------------------------------------------
@@ -153,6 +164,17 @@ def test_cnative_decimal128_int64_divide():
     got, phys = _run("SELECT CAST(gravity AS DECIMAL(20,3)) / CAST(id AS INTEGER) AS r FROM $planets")
     assert "DECIMAL128" in phys, phys
     _assert_matches(got, [_quant(a / Decimal(i), 9) if i != 0 else None for a, i in zip(_GRAV3, _ID64)])
+
+
+def test_cnative_decimal128_int64_divide_by_zero():
+    # int128 tier of the same convention as test_cnative_decimal_int8_divide_by_zero
+    # — this is the exact kernel (dec128_div) TPC-DS Q90 crashed in at SF0.01,
+    # where an hourly bucket's row count genuinely denominates to zero.
+    got, phys = _run("SELECT CAST(gravity AS DECIMAL(20,3)) / (CAST(id AS INTEGER) - 1) AS r FROM $planets")
+    assert "DECIMAL128" in phys, phys
+    divisors = [i - 1 for i in _ID64]
+    assert 0 in divisors, divisors  # sanity: the fixture actually exercises the zero row
+    _assert_matches(got, [_quant(a / Decimal(d), 9) if d != 0 else None for a, d in zip(_GRAV3, divisors)])
 
 
 # ---------------------------------------------------------------------------

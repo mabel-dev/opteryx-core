@@ -44,6 +44,7 @@ from opteryx.planner.binder.relation import (
     visit_drop_column,
     visit_drop_relation,
     visit_drop_trigger,
+    visit_drop_workspace,
     visit_optimize_relation,
     visit_rename_column,
     visit_rename_relation,
@@ -298,6 +299,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_alter_workspace(self, node, context)
+
+    def visit_drop_workspace(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_drop_workspace(self, node, context)
 
     def visit_insert(
         self, node: Node, context: BindingContext
