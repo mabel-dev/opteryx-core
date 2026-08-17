@@ -115,7 +115,7 @@ testing = [
     "jellyfish",
 ]
 performance = [
-    'orjson==3.11.*',  # Faster JSON serialization (not available on free-threaded Python)
+    'orjson>=3.11,<3.13',  # Faster JSON serialization (not available on free-threaded Python)
 ]
 embeddings = [
     # The MiniLM EMBED capability is optional and NOT vendored (CLAUDE.md §4). To build it,
