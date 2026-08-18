@@ -7,6 +7,7 @@
 #include "core/alloc.h"
 #include "core/vector_alloc.h"
 #include "core/string_slot.h"
+#include "core/iso_datetime.h"
 #include "core/interval_slot.h"
 #include "logical_type.h"
 #include <cstring>
@@ -361,17 +362,10 @@ VecResult draken_cast_timestamp_to_string(void* ctx, const DrakenVector* v) {
     });
 }
 
-// Howard Hinnant civil-days, local copy for TIMESTAMP parsing (same algorithm as
-// cast_string.cpp's civil_to_days, kept as an internal-linkage duplicate per this
-// file's own days_to_ymd precedent above — no cross-TU header exists for it yet).
-static int64_t civil_to_days(int y, int m, int d) noexcept {
-    y -= (m <= 2);
-    const int64_t era = (y >= 0 ? y : y - 399) / 400;
-    const int64_t yoe = static_cast<int64_t>(y) - era * 400;
-    const int64_t doy = (153 * static_cast<int64_t>(m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097 + doe - 719468;
-}
+// civil_to_days and the ISO parse now live in core/iso_datetime.h — this file
+// and cast_string.cpp each carried their own internal-linkage copy, which is
+// exactly the drift this header removes.
+using draken::iso_datetime::civil_to_days;
 
 // VARCHAR/NVARCHAR/VARBINARY → TIMESTAMP64. ctx (format_ctx*) null or fmt_len==0
 // -> strict ISO-8601 parse ("YYYY-MM-DDTHH:MM:SS[.ffffff]" or with a space
@@ -379,71 +373,7 @@ static int64_t civil_to_days(int y, int m, int d) noexcept {
 // offset suffix is a parse error, matching the plan-time literal parser's
 // intent rather than silently discarding it). ctx->fmt_len > 0 -> FORMAT-driven
 // parse via sql_parse_exec. Always produces microsecond-unit TIMESTAMP64.
-static bool parse_iso_timestamp(const uint8_t* s, uint32_t len,
-                                 int* year, int* month, int* day,
-                                 int* hour, int* minute, int* second, int* usec) {
-    *hour = 0; *minute = 0; *second = 0; *usec = 0;
-    uint32_t k = 0;
-    int y = 0, m = 0, d = 0;
-    while (k < len && s[k] != '-') {
-        if (s[k] < '0' || s[k] > '9') return false;
-        y = y * 10 + (s[k] - '0'); ++k;
-    }
-    if (k >= len || s[k] != '-') return false;
-    ++k;
-    while (k < len && s[k] != '-') {
-        if (s[k] < '0' || s[k] > '9') return false;
-        m = m * 10 + (s[k] - '0'); ++k;
-    }
-    if (k >= len || s[k] != '-') return false;
-    ++k;
-    while (k < len && (s[k] >= '0' && s[k] <= '9')) {
-        d = d * 10 + (s[k] - '0'); ++k;
-    }
-    *year = y; *month = m; *day = d;
-    if (k == len) return (m >= 1 && m <= 12 && d >= 1 && d <= 31);
-    if (s[k] != 'T' && s[k] != ' ') return false;
-    ++k;
-
-    int hh = 0, mi = 0, ss = 0, us = 0;
-    uint32_t hstart = k;
-    while (k < len && s[k] != ':') {
-        if (s[k] < '0' || s[k] > '9') return false;
-        hh = hh * 10 + (s[k] - '0'); ++k;
-    }
-    if (k == hstart || k >= len || s[k] != ':') return false;
-    ++k;
-    uint32_t mstart = k;
-    while (k < len && s[k] != ':') {
-        if (s[k] < '0' || s[k] > '9') return false;
-        mi = mi * 10 + (s[k] - '0'); ++k;
-    }
-    if (k == mstart) return false;
-    if (k < len && s[k] == ':') {
-        ++k;
-        uint32_t sstart = k;
-        while (k < len && s[k] != '.') {
-            if (s[k] < '0' || s[k] > '9') return false;
-            ss = ss * 10 + (s[k] - '0'); ++k;
-        }
-        if (k == sstart) return false;
-        if (k < len && s[k] == '.') {
-            ++k;
-            int ndigits = 0;
-            while (k < len) {
-                if (s[k] < '0' || s[k] > '9') return false;
-                if (ndigits >= 6) return false;
-                us = us * 10 + (s[k] - '0'); ++ndigits; ++k;
-            }
-            if (ndigits == 0) return false;
-            for (int p = ndigits; p < 6; ++p) us *= 10;
-        }
-    }
-    if (k != len) return false;  // trailing offset/'Z' etc. -> not supported
-    if (hh > 23 || mi > 59 || ss > 59) return false;
-    *hour = hh; *minute = mi; *second = ss; *usec = us;
-    return m >= 1 && m <= 12 && d >= 1 && d <= 31;
-}
+using draken::iso_datetime::parse_iso_timestamp;
 
 VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({

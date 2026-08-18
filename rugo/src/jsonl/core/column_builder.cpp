@@ -16,6 +16,7 @@
 #include "buffers.h"        // DrakenType, DRAKEN_VARCHAR
 #include "BS_thread_pool.hpp"
 #include "json_array_walker.hpp"  // per-row array element parsing (parse_array_column)
+#include "declared_parse.hpp"     // explicit_schema strict per-value parse (shared with CSV)
 
 // extract_column() pulls one column out as raw-byte slices (StringColumnResult);
 // build_typed_vector / build_varchar_vector materialise owned Draken vectors, and
@@ -933,19 +934,44 @@ PyObject* wrap_column(ParsedColumn& pc) {
         return draken_vector_own_string(pc.slots, pc.arena, pc.arena_len,
                                         pc.validity, pc.length, pc.type,
                                         /*keyhash=*/nullptr);   // E37: jsonl producer = task #5
+    // A declared IPV4/TIMESTAMP/DECIMAL column carries a logical-type descriptor,
+    // which lives on the Vector's owner rather than in the frozen DrakenVector —
+    // so it has to be attached at construction. own_raw_logical is own_raw when
+    // the kind is NONE, which is every inferred column.
+    if (pc.logical_kind != 0)
+        return draken_vector_own_raw_logical(pc.data, pc.validity, pc.length, pc.type,
+                                             pc.logical_kind, pc.unit, pc.offset_minutes,
+                                             pc.precision, pc.scale, /*dimension=*/0u);
     return draken_vector_own_raw(pc.data, pc.validity, pc.length, pc.type);
 }
 
 // Parse a column STRICTLY as its explicit_schema-declared type: every non-null value must
 // parse as that type or this throws std::invalid_argument (a declared-schema mismatch is a
 // real data/schema error — unlike the speculative path, it must never silently fall back to
-// VARCHAR). "string" always succeeds (any JSON scalar's raw bytes are valid as a string).
-// The strict per-row loops below stay serial: each throws on the first bad value, and
-// reporting the FIRST offending row (not whichever chunk raced there first) is part of the
-// contract. The row walk in extract_column and the VARCHAR builder still parallelise.
+// VARCHAR). VARCHAR always succeeds (any JSON scalar's raw bytes are valid as a string).
+//
+// The vocabulary is the platform's canonical type names (declared_type.hpp) and the
+// per-value contract is declared_parse.hpp, shared with the CSV reader so a column declared
+// UINT8 means the same thing in both formats. Text forms route through draken's own parsers
+// — an address, a timestamp or a decimal read here parses byte-for-byte as the equivalent
+// CAST would.
+//
+// The strict per-row loop stays serial: it throws on the first bad value, and reporting the
+// FIRST offending row (not whichever chunk raced there first) is part of the contract. The
+// row walk in extract_column and the VARCHAR builder still parallelise.
 static ParsedColumn parse_column_explicit(
     const uint8_t* buffer, const RecordSet& records, const std::string& name,
     const std::string& declared, bool may_have_escapes, const RowExec& rows) {
+
+    DeclaredType dt;
+    if (!parse_declared_type(declared, &dt)) {
+        // The Cython edge validates the declared type string eagerly, through this
+        // same parser, before any reading starts. This is a defensive backstop for a
+        // non-Python caller, not a user-facing path.
+        throw std::invalid_argument(
+            "explicit_schema: unsupported type '" + declared + "' for column '" + name +
+            "'; supported types are " + std::string(declared_type_vocabulary()));
+    }
 
     OrdinalPredictor pred;
     StringColumnResult scr = extract_column(buffer, records, name, pred,
@@ -954,67 +980,61 @@ static ParsedColumn parse_column_explicit(
     const uint8_t* base = scr.data_owned ? scr.data_ptr() : buffer;
     const uint32_t n = static_cast<uint32_t>(scr.num_rows);
 
-    if (declared == "string") {
-        return parse_varchar_column(base, scr, rows);
-    }
-    if (declared == "int64") {
-        int64_t* data = static_cast<int64_t*>(draken_malloc(std::max<size_t>(n, 1) * sizeof(int64_t)));
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!row_valid(scr, i)) { data[i] = 0; continue; }
-            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-            if (len == 0 || !fast_parse_int64(base, off, off + len - 1, data[i])) {
-                draken_free(data);
-                throw std::invalid_argument(
-                    "explicit_schema: column '" + name + "' row " + std::to_string(i) +
-                    " is not a valid int64 (declared type mismatch)");
-            }
-        }
-        ParsedColumn pc; pc.type = DRAKEN_INT64; pc.length = n;
-        pc.data = data; pc.validity = own_validity_from_scr(scr, n);
+    if (declared_is_string(dt.type)) {
+        ParsedColumn pc = parse_varchar_column(base, scr, rows);
+        pc.type = dt.type;
         return pc;
     }
-    if (declared == "double") {
-        double* data = static_cast<double*>(draken_malloc(std::max<size_t>(n, 1) * sizeof(double)));
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!row_valid(scr, i)) { data[i] = 0.0; continue; }
-            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-            if (len == 0 || !fast_parse_float64(base, off, off + len - 1, data[i])) {
-                draken_free(data);
-                throw std::invalid_argument(
-                    "explicit_schema: column '" + name + "' row " + std::to_string(i) +
-                    " is not a valid double (declared type mismatch)");
-            }
-        }
-        ParsedColumn pc; pc.type = DRAKEN_FLOAT64; pc.length = n;
-        pc.data = data; pc.validity = own_validity_from_scr(scr, n);
-        return pc;
-    }
-    if (declared == "boolean") {
+
+    // BOOL is a 1-bit-per-row bitmap; everything else is fixed-width elements.
+    // Both are zero-filled so a NULL row carries a defined value rather than
+    // whatever draken_malloc last held there.
+    const bool is_bool = (dt.type == DRAKEN_BOOL);
+    size_t alloc;
+    if (is_bool) {
         const uint32_t bm = (n + 7u) >> 3;
         const uint32_t padded = ((bm + 7u) & ~7u);
-        const size_t alloc = padded ? padded : 8u;
-        uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc));
-        std::memset(data, 0, alloc);
-        for (uint32_t i = 0; i < n; ++i) {
-            if (!row_valid(scr, i)) continue;
-            const uint32_t off = scr.offsets[i], len = scr.lengths[i];
-            bool b;
-            if (len == 0 || !parse_bool(base, off, off + len - 1, b)) {
-                draken_free(data);
-                throw std::invalid_argument(
-                    "explicit_schema: column '" + name + "' row " + std::to_string(i) +
-                    " is not a valid boolean (declared type mismatch)");
-            }
-            if (b) data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-        }
-        ParsedColumn pc; pc.type = DRAKEN_BOOL; pc.length = n;
-        pc.data = data; pc.validity = own_validity_from_scr(scr, n);
-        return pc;
+        alloc = padded ? padded : 8u;
+    } else {
+        const size_t es = declared_elem_size(dt.type);
+        if (es == 0)
+            throw std::invalid_argument(
+                "explicit_schema: type '" + declared + "' for column '" + name +
+                "' has no fixed-width representation");
+        alloc = static_cast<size_t>(n > 0u ? n : 1u) * es;
     }
-    // Cython validates the declared type string eagerly before this ever runs; this is a
-    // defensive backstop, not a user-facing path.
-    throw std::invalid_argument(
-        "explicit_schema: unsupported type '" + declared + "' for column '" + name + "'");
+    void* data = draken_malloc(alloc);
+    if (!data)
+        throw std::invalid_argument(
+            "explicit_schema: allocation failed for column '" + name + "'");
+    std::memset(data, 0, alloc);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!row_valid(scr, i)) continue;          // NULL row keeps its zero
+        const uint32_t off = scr.offsets[i];
+        const uint32_t len = scr.lengths[i];
+        if (len == 0 || !declared_parse_into(dt, base + off, len, data, i)) {
+            std::string got(reinterpret_cast<const char*>(base + off),
+                            len < 64u ? len : 64u);
+            draken_free(data);
+            throw std::invalid_argument(
+                "explicit_schema: column '" + name + "' row " + std::to_string(i) +
+                " value '" + got + "' is not a valid " + declared +
+                " (declared type mismatch)");
+        }
+    }
+
+    ParsedColumn pc;
+    pc.type = dt.type;
+    pc.length = n;
+    pc.data = data;
+    pc.validity = own_validity_from_scr(scr, n);
+    pc.logical_kind = dt.logical_kind;
+    pc.unit = dt.unit;
+    pc.offset_minutes = dt.offset_minutes;
+    pc.precision = dt.precision;
+    pc.scale = dt.scale;
+    return pc;
 }
 
 // Parse all named columns in parallel — one task per column. Pure C++, no Python;

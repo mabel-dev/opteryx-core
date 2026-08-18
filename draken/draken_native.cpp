@@ -2465,6 +2465,75 @@ extern "C" PyObject* draken_vector_own_raw(
     }
 }
 
+// draken_vector_own_raw_logical — draken_vector_own_raw plus a logical-type
+// descriptor. See core/draken_bridge.h for the scalar-parameter contract.
+//
+// The descriptor is VALIDATED against the physical tag here rather than trusted:
+// this is the entry point an out-of-tree producer (rugo's declared-schema
+// readers) uses, and a TIMESTAMP64 whose descriptor says IPV4 is uninterpretable
+// data, not a cosmetic mismatch. Fail at construction, where the producer is
+// still on the stack, rather than deep in a kernel that reads the descriptor.
+extern "C" PyObject* draken_vector_own_raw_logical(
+    void* data, uint8_t* validity, uint32_t length, DrakenType type,
+    uint8_t logical_kind, uint8_t unit, int16_t offset_minutes,
+    uint8_t precision, uint8_t scale, uint32_t dimension)
+{
+    if (logical_kind == static_cast<uint8_t>(LogicalKind::NONE))
+        return draken_vector_own_raw(data, validity, length, type);
+    try {
+        if (logical_kind > static_cast<uint8_t>(LogicalKind::IPV4))
+            throw std::invalid_argument("own_raw_logical: unknown LogicalKind ordinal");
+        const LogicalKind kind = static_cast<LogicalKind>(logical_kind);
+
+        // Physical/logical agreement. Mirrors logical_type.h's own statement of
+        // which tags each kind may refine.
+        bool ok = false;
+        switch (kind) {
+            case LogicalKind::TIMESTAMP: ok = (type == DRAKEN_TIMESTAMP64); break;
+            case LogicalKind::TIME:      ok = (type == DRAKEN_TIME32 || type == DRAKEN_TIME64); break;
+            case LogicalKind::DECIMAL:   ok = (type == DRAKEN_DECIMAL || type == DRAKEN_DECIMAL128); break;
+            case LogicalKind::VECTOR:    ok = (type == DRAKEN_VECTOR_FP16); break;
+            case LogicalKind::IPV4:      ok = (type == DRAKEN_UINT32); break;
+            default: break;
+        }
+        if (!ok)
+            throw std::invalid_argument(
+                "own_raw_logical: logical kind is not valid for this physical type");
+        if (unit > static_cast<uint8_t>(TimestampUnit::NANOSECONDS))
+            throw std::invalid_argument("own_raw_logical: unknown TimestampUnit ordinal");
+        if (kind == LogicalKind::DECIMAL && (precision == 0u || precision > 38u || scale > precision))
+            throw std::invalid_argument("own_raw_logical: DECIMAL precision/scale out of range");
+        if (kind == LogicalKind::VECTOR && dimension == 0u)
+            throw std::invalid_argument("own_raw_logical: VECTOR requires a non-zero dimension");
+
+        DrakenVector v = draken_vector_from_dense(data, length, type, validity);
+        OwnedBuffer<void>    data_buf(data);
+        OwnedBuffer<uint8_t> val_buf(validity);
+        VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+        LogicalType lt;
+        lt.kind = kind;
+        lt.unit = static_cast<TimestampUnit>(unit);
+        lt.offset_minutes = offset_minutes;
+        lt.precision = precision;
+        lt.scale = scale;
+        lt.dimension = dimension;
+        owner.logical_type = logical_type_intern(lt);
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr();
+        Py_INCREF(result);
+        return result;
+    } catch (nb::python_error& e) {
+        e.restore();
+        return nullptr;
+    } catch (std::bad_alloc&) {
+        PyErr_NoMemory();
+        return nullptr;
+    } catch (std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+
 // draken_vector_own_dict_i64 — wrap hand-allocated dict-encoded int64 buffers in a new Vector.
 //
 // data: draken_malloc'd int64_t[data_length] unique values (dictionary).
@@ -10566,14 +10635,23 @@ NB_MODULE(draken_native, m) {
                 throw std::invalid_argument("DECIMAL precision must be in [1, 18]");
             if (scale < 0 || scale > precision)
                 throw std::invalid_argument("DECIMAL scale must be in [0, precision]");
-            const uint32_t n = src->length;
-            int64_t* dst = static_cast<int64_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(int64_t)));
+            const uint32_t n  = src->length;
+            const uint32_t dl = src->data_length;
+            // SHAPE-PRESERVING (CLAUDE.md §11, architect-approved 2026-08-18 for the
+            // decimal read path): the retag changes only the type tag and the logical
+            // descriptor, so it copies the dl PHYSICAL values and grafts src's encoding
+            // shape on — dense stays dense, constant stays constant, and a dict-encoded
+            // decimal column (rugo's prefer_dict now keeps int-backed DECIMAL dicts —
+            // see rugo/src/parquet/io_pipeline.hpp) survives coercion compressed instead
+            // of being expanded to one int64 per row here. Mirrors
+            // vector_reinterpret_as_date32 directly above.
+            int64_t* dst = static_cast<int64_t*>(draken_malloc((dl > 0 ? dl : 1u) * sizeof(int64_t)));
             if (!dst) throw std::bad_alloc();
             OwnedBuffer<void> data_buf(dst);
-            OwnedBuffer<uint8_t> val_buf(nullptr);
             const int64_t* src_data = static_cast<const int64_t*>(src->data);
-            for (uint32_t i = 0; i < n; ++i)
-                dst[i] = src_data[src->selection[i]];
+            std::memcpy(dst, src_data, static_cast<size_t>(dl) * sizeof(int64_t));
+            // Validity is 1-bit-per-LOGICAL-row for every shape: copy n bits, never dl.
+            OwnedBuffer<uint8_t> val_buf(nullptr);
             uint8_t* validity = nullptr;
             if (src->validity) {
                 const uint32_t nbytes = (n + 7u) / 8u;
@@ -10583,17 +10661,46 @@ NB_MODULE(draken_native, m) {
                 val_buf.reset(validity);
                 std::memcpy(validity, src->validity, nbytes);
             }
-            DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_DECIMAL, validity);
-            VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
             LogicalType lt;
             lt.kind      = LogicalKind::DECIMAL;
             lt.precision = static_cast<uint8_t>(precision);
             lt.scale     = static_cast<uint8_t>(scale);
+            // Branch on the SELECTION, not on draken_is_dense: `data_length ==
+            // length` is also true of a dense vector carrying a NON-identity
+            // permutation (buffers.h flags note), and rebuilding that as
+            // from_dense would silently install an identity selection and reorder
+            // every row. Only DRAKEN_SEL_IDENTITY licenses the identity rebuild;
+            // anything else keeps a copy of the source selection verbatim. Same
+            // three-way split as ops/int64_arithmetic.h::make_shaped_result.
+            if (src->flags & DRAKEN_SEL_IDENTITY) {
+                DrakenVector v = draken_vector_from_dense(dst, n, DRAKEN_DECIMAL, validity);
+                VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+                owner.logical_type = logical_type_intern(lt);
+                return owner;
+            }
+            if (draken_is_constant(src)) {
+                // dl == 1 ⟹ every selection entry is 0, so the shared global zero
+                // vector is byte-equivalent to src's selection.
+                DrakenVector v = draken_vector_from_constant(dst, n, DRAKEN_DECIMAL, validity);
+                VectorOwner owner(v, std::move(data_buf), std::move(val_buf));
+                owner.logical_type = logical_type_intern(lt);
+                return owner;
+            }
+            // Dict, or dense-with-permutation: own a copy of the per-row codes
+            // (src keeps its own). from_dict is a plain struct fill and imposes no
+            // data_length < length requirement, so it carries both cases.
+            uint32_t* codes = static_cast<uint32_t*>(draken_malloc((n > 0 ? n : 1u) * sizeof(uint32_t)));
+            if (!codes) throw std::bad_alloc();
+            OwnedBuffer<void> codes_buf(static_cast<void*>(codes));
+            std::memcpy(codes, src->selection, static_cast<size_t>(n) * sizeof(uint32_t));
+            DrakenVector v = draken_vector_from_dict(dst, dl, codes, n, DRAKEN_DECIMAL, validity);
+            VectorOwner owner(v, std::move(data_buf), std::move(val_buf), std::move(codes_buf));
             owner.logical_type = logical_type_intern(lt);
             return owner;
         },
         nb::arg("vec"), nb::arg("precision"), nb::arg("scale"),
-        "Reinterpret INT64 vector data as DECIMAL with given precision/scale. Returns new Vector.");
+        "Reinterpret INT64 vector data as DECIMAL with given precision/scale. "
+        "Shape-preserving (dense/constant/dict). Returns new Vector.");
 
     // _bridge_test_type_error() — verify draken_vector_unwrap raises TypeError on non-Vector.
     m.def("_bridge_test_type_error",

@@ -8,7 +8,7 @@
 
 
 
-from libc.stdint cimport uint8_t, int64_t, uint32_t, uint64_t
+from libc.stdint cimport uint8_t, int16_t, int64_t, uint32_t, uint64_t
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset, memcpy, memchr
 from libcpp.string cimport string
@@ -28,18 +28,39 @@ from draken.core.buffers cimport (
 
 import warnings
 
-# Type strings accepted by explicit_schema and reported in result['schema'] for inferred
-# columns. Deliberately narrower than the DrakenType universe: explicit_schema only ever
-# declares one of the first four (see parse_column_explicit); "array"/"variant" are
-# inference-only outcomes (parse_arrays/parse_objects — see parse_array_column /
-# ColumnType::Variant in column_builder.cpp) and are never valid explicit_schema entries.
-_JSONL_SCHEMA_TYPES = ("int64", "double", "boolean", "string")
+# Type names reported in result['schema'] for INFERRED columns. Deliberately narrower
+# than the DrakenType universe because inference itself is: the speculative path only
+# ever resolves to one of the first four, and "array"/"variant" are inference-only
+# outcomes (parse_arrays/parse_objects — see parse_array_column / ColumnType::Variant in
+# column_builder.cpp).
+#
+# This is NOT the explicit_schema vocabulary. A DECLARED column accepts the platform's
+# canonical type names (IPV4, UINT32, DECIMAL(18, 2), TIMESTAMP[us], DATE, …) and is
+# validated by rugo::parse_declared_type — the same C++ parser that then does the
+# parsing, so what validates and what parses cannot drift. Declared names are echoed
+# back into result['schema'] verbatim, which is why they need no entry here.
+_JSONL_INFERRED_SCHEMA_TYPES = ("int64", "double", "boolean", "string")
 
 # Typed-vector cimports removed as part of E.31 migration (same gap registry as E.28):
 #   E.28-gap-1: Integer64Vector dense constructor + ptr.data write access
 #   E.28-gap-2: Float64Vector dense constructor + ptr.data write access
 #   E.28-gap-3: StringVectorBuilder (constructors, append_bytes, append_null, finish)
 #   E.31-gap-1: BoolVector dense constructor + ptr.data write access
+
+
+cdef extern from "declared_type.hpp" namespace "rugo":
+    # explicit_schema's type vocabulary. Validation goes through the SAME parser the
+    # C++ reader uses, so a name that validates here is guaranteed to resolve there.
+    cdef struct DeclaredType:
+        DrakenType type
+        uint8_t    logical_kind
+        uint8_t    unit
+        int16_t    offset_minutes
+        uint8_t    precision
+        uint8_t    scale
+
+    bint parse_declared_type(const string& name, DeclaredType* out) nogil
+    const char* declared_type_vocabulary() nogil
 
 
 cdef extern from "core/parse_context.hpp" namespace "rugo::_jsonl":
@@ -297,6 +318,7 @@ def read_jsonl(
     cdef RecordSet records
     cdef size_t total_rows = 0
     cdef dict declared_schema = {}
+    cdef DeclaredType probe_type
     cdef const uint8_t* buf_data = NULL
     cdef size_t buf_len = 0
     cdef InterpreterResult interp_result
@@ -349,12 +371,22 @@ def read_jsonl(
 
     if explicit_schema:
         for col, declared_type in explicit_schema.items():
-            if declared_type not in _JSONL_SCHEMA_TYPES:
+            if not isinstance(declared_type, str):
                 raise ValueError(
                     f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r} is not a "
-                    f"supported type; must be one of {_JSONL_SCHEMA_TYPES}"
+                    f"type name; expected a string such as 'IPV4' or 'DECIMAL(18, 2)'"
                 )
-            context.explicit_schema[col.encode('utf-8')] = declared_type.encode('utf-8')
+            # Validated here, EAGERLY, through the same parser that will do the work —
+            # a bad type name must fail before any bytes are read, not part-way through
+            # a multi-gigabyte file.
+            declared_bytes = declared_type.encode('utf-8')
+            if not parse_declared_type(declared_bytes, &probe_type):
+                raise ValueError(
+                    f"read_jsonl: explicit_schema[{col!r}] = {declared_type!r} is not a "
+                    f"supported type; supported types are "
+                    f"{declared_type_vocabulary().decode('utf-8')}"
+                )
+            context.explicit_schema[col.encode('utf-8')] = declared_bytes
         declared_schema = dict(explicit_schema)
 
     # Guard before the cast to uint32_t: infer_sample_size bounds BOTH the type-inference

@@ -108,6 +108,31 @@ static inline VecResult make_dense_result(
     return r;
 }
 
+// Layout hints an elementwise VALUE transform may carry to its result. Shared by
+// the shape-preserving helpers here and in ops/decimal_arith.h.
+//
+// Deliberately EXCLUDES DRAKEN_DICT_KEYS_SORTED and DRAKEN_ROW_SORTED[_DESC]:
+// those are claims about VALUE ORDER, and an elementwise transform can break it.
+// Every producer in this file can — i64_neg and i64_div_scalar's `scalar == -1`
+// arm negate (ascending becomes descending), i64_mul_scalar by a negative scalar
+// reverses, i64_mod_scalar's sawtooth destroys order outright, and even
+// add/sub_scalar break monotonicity when they WRAP (this file's overflow rule is
+// silent wrap, see the header).
+//
+// This is not a lost optimisation. A consumer is entitled to collapse a range or
+// equality predicate to a code interval on the strength of KEYS_SORTED
+// (draken_dict_is_sorted), so a stale ordering hint changes the ANSWER, not just
+// the speed. The selection-shape bits and DICT_CODES_DENSE describe the CODES
+// rather than the values and survive any elementwise transform untouched.
+//
+// A pure widen (int64 -> int128) preserves every value and their order exactly, so
+// it may carry flags whole — that is why decimal_arith.h's shaped-result helpers
+// take the surviving flags as a parameter instead of masking internally. Every
+// caller of make_shaped_result below is a value transform, so it masks here and no
+// caller can forget.
+static const uint8_t kValueTransformFlags = static_cast<uint8_t>(
+    DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION | DRAKEN_DICT_CODES_DENSE);
+
 // Shape-preserving result (CLAUDE.md §11, architect-approved for arithmetic).
 // `values` holds src.data_length computed results (one per physical value);
 // this grafts src's encoding shape — selection + per-logical-row validity — onto
@@ -120,7 +145,9 @@ static inline VecResult make_shaped_result(int64_t* values, const DrakenVector& 
     r.type        = DRAKEN_INT64;
     r.length      = src.length;
     r.data_length = src.data_length;
-    r.flags       = src.flags;
+    // Only the code-shape hints survive the transform (see kValueTransformFlags).
+    // The SELECTION branch below still keys off src's own flags.
+    r.flags       = static_cast<uint8_t>(src.flags & kValueTransformFlags);
     r.validity    = copy_validity(src.validity, src.length);
     if (src.flags & DRAKEN_SEL_IDENTITY) {
         r.selection      = draken_identity_sel(src.length);   // dense: shared global

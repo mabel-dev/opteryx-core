@@ -1,5 +1,7 @@
 #include "ops/kernels/cast_kernels.h"
 #include "core/ipv4.h"
+#include "core/iso_datetime.h"
+#include "core/decimal_text.h"
 #include "ops/kernels/error_handling.h"
 #include "ops/kernels/kernel_context.h"
 #include "ops/kernels/result_helpers.h"
@@ -352,50 +354,12 @@ VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* v) {
 // "YYYY-MM-D", "YYYY-M-DD".  All such strings fit inline (≤ 12 bytes) so the
 // arena pointer is never chased.  Raises ValueError on any malformed row.
 //
-// Days-since-epoch uses Howard Hinnant's civil_to_days formula, which is exact
-// for all proleptic Gregorian dates and has no UB for the year range [0, 9999].
+// Days-since-epoch and the ISO parse both live in core/iso_datetime.h — the
+// single source shared with the string->TIMESTAMP kernel (which carried its own
+// copy of civil_to_days) and with rugo's declared-schema readers.
 // ---------------------------------------------------------------------------
-static inline int32_t civil_to_days(int y, int m, int d) noexcept {
-    y -= (m <= 2);
-    const int era = (y >= 0 ? y : y - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(y - era * 400);
-    const unsigned doy = (153u * static_cast<unsigned>(m + (m > 2 ? -3 : 9)) + 2u) / 5u
-                         + static_cast<unsigned>(d) - 1u;
-    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
-    return era * 146097 + static_cast<int>(doe) - 719468;
-}
-
-// Returns INT32_MIN on any parse error.
-static inline int32_t parse_iso_date(const uint8_t* s, uint32_t len) noexcept {
-    uint32_t k = 0;
-    int year = 0, month = 0, day = 0;
-
-    while (k < len && s[k] != '-') {
-        if (s[k] < '0' || s[k] > '9') return INT32_MIN;
-        year = year * 10 + (s[k] - '0');
-        ++k;
-    }
-    if (k >= len || s[k] != '-') return INT32_MIN;
-    ++k;
-
-    while (k < len && s[k] != '-') {
-        if (s[k] < '0' || s[k] > '9') return INT32_MIN;
-        month = month * 10 + (s[k] - '0');
-        ++k;
-    }
-    if (k >= len || s[k] != '-') return INT32_MIN;
-    ++k;
-
-    while (k < len) {
-        if (s[k] < '0' || s[k] > '9') return INT32_MIN;
-        day = day * 10 + (s[k] - '0');
-        ++k;
-    }
-
-    if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31)
-        return INT32_MIN;
-    return civil_to_days(year, month, day);
-}
+using draken::iso_datetime::parse_iso_date;
+using draken::iso_datetime::civil_to_days;
 
 VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
@@ -459,7 +423,7 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
                     }
                     out[j] = 0; bad[j] = 1u; any_bad = true; continue;
                 }
-                days = civil_to_days(year, month, day);
+                days = static_cast<int32_t>(civil_to_days(year, month, day));
             } else {
                 days = parse_iso_date(s, len);
                 if (days == INT32_MIN) {
@@ -771,19 +735,11 @@ VecResult draken_cast_string_to_nvarchar(void* ctx, const DrakenVector* v) {
 // dict-encoded string column would otherwise re-parse every repeat. Liveness-masked
 // like draken_cast_string_to_int64, so a dictionary value referenced only by NULL
 // rows can never raise on text SQL does not read.
-static __int128 str_dec_pow10(int k) noexcept {
-    __int128 r = 1;
-    while (k-- > 0) r *= 10;
-    return r;
-}
-
-// Parse dispositions. File scope, NOT inside the kernel body: an enum's brace list
-// commas would be parsed as DRAKEN_KERNEL_TRY macro argument separators (the same
-// trap the bool→string literals at the top of cast_numeric.cpp are hoisted for).
-#define STR_DEC_OK        0
-#define STR_DEC_MALFORMED 1
-#define STR_DEC_OVERFLOW  2
-#define STR_DEC_SCALE     3
+// The parse itself lives in core/decimal_text.h so a declared-schema reader
+// (rugo) applies byte-for-byte the same syntax and value policy as this CAST.
+// Its status codes are file-scope there for the same reason they were file-scope
+// here: an enum brace list inside DRAKEN_KERNEL_TRY would have its commas eaten
+// as macro argument separators.
 
 VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
     DRAKEN_KERNEL_TRY({
@@ -795,12 +751,6 @@ VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
         if (c->result_precision == 0u || c->result_precision > 38u)
             return draken_error_sentinel_fmt("cast string->decimal: bad target precision %d",
                                              (int)c->result_precision);
-
-        const int target_scale = static_cast<int>(c->result_scale);
-        const __int128 dec_lim = str_dec_pow10(static_cast<int>(c->result_precision));
-        // Accumulation ceiling: 10^38 is the widest DECIMAL, and __int128 holds it
-        // with room for the *10+d step below without ever wrapping.
-        const __int128 acc_lim = str_dec_pow10(38);
 
         const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v->data);
         const uint32_t k = v->data_length;
@@ -826,97 +776,18 @@ VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
             const uint8_t* sdata = str_data(slot, sa->arena);
             const uint32_t slen  = str_length(slot);
 
-            // Declared separately, NOT `uint32_t p = 0u, end = slen;` — the comma in a
-            // multi-declarator statement is a DRAKEN_KERNEL_TRY macro argument separator.
-            uint32_t p = 0u;
-            uint32_t end = slen;
-            while (p < end && cast_is_ascii_space(sdata[p])) ++p;
-            while (end > p && cast_is_ascii_space(sdata[end - 1u])) --end;
-
-            int status = STR_DEC_OK;
-            bool negative = false;
-            if (p < end && (sdata[p] == '+' || sdata[p] == '-')) {
-                negative = (sdata[p] == '-');
-                ++p;
-            }
-
-            __int128 mag = 0;
-            int frac_digits = 0;
-            uint32_t digits_seen = 0u;
-            bool seen_point = false;
-            for (; p < end; ++p) {
-                const uint8_t ch = sdata[p];
-                if (ch == '.') {
-                    if (seen_point) { status = STR_DEC_MALFORMED; break; }
-                    seen_point = true;
-                    continue;
-                }
-                if (ch == 'e' || ch == 'E') break;
-                if (ch < '0' || ch > '9') { status = STR_DEC_MALFORMED; break; }
-                ++digits_seen;
-                if (seen_point) ++frac_digits;
-                if (mag >= acc_lim) { status = STR_DEC_OVERFLOW; continue; }
-                mag = mag * 10 + static_cast<__int128>(ch - '0');
-            }
-            if (status == STR_DEC_OK && digits_seen == 0u) status = STR_DEC_MALFORMED;
-
-            int exponent = 0;
-            if (status == STR_DEC_OK && p < end && (sdata[p] == 'e' || sdata[p] == 'E')) {
-                ++p;
-                bool exp_neg = false;
-                if (p < end && (sdata[p] == '+' || sdata[p] == '-')) {
-                    exp_neg = (sdata[p] == '-');
-                    ++p;
-                }
-                uint32_t exp_digits = 0u;
-                for (; p < end; ++p) {
-                    const uint8_t ch = sdata[p];
-                    if (ch < '0' || ch > '9') { status = STR_DEC_MALFORMED; break; }
-                    ++exp_digits;
-                    // Clamped: any |exponent| past 1000 is already decided by the
-                    // precision/scale checks below, and this keeps the int bounded.
-                    if (exponent < 1000) exponent = exponent * 10 + (ch - '0');
-                }
-                if (exp_digits == 0u) status = STR_DEC_MALFORMED;
-                if (exp_neg) exponent = -exponent;
-            } else if (status == STR_DEC_OK && p != end) {
-                status = STR_DEC_MALFORMED;
-            }
-
             __int128 unscaled = 0;
-            if (status == STR_DEC_OK) {
-                // unscaled = mag * 10^(target_scale + exponent - frac_digits)
-                const int shift = target_scale + exponent - frac_digits;
-                if (mag == 0) {
-                    unscaled = 0;
-                } else if (shift > 38) {
-                    status = STR_DEC_OVERFLOW;
-                } else if (shift < -38) {
-                    status = STR_DEC_SCALE;
-                } else if (shift >= 0) {
-                    const __int128 factor = str_dec_pow10(shift);
-                    if (mag > (dec_lim - 1) / factor) status = STR_DEC_OVERFLOW;
-                    else unscaled = mag * factor;
-                } else {
-                    const __int128 factor = str_dec_pow10(-shift);
-                    // Exact only: digits that would be DROPPED are an error, trailing
-                    // zeros divide away cleanly.
-                    if (mag % factor != 0) status = STR_DEC_SCALE;
-                    else unscaled = mag / factor;
-                }
-            }
-            // unscaled is still the MAGNITUDE here (the sign is applied below), so
-            // only the upper bound can be crossed.
-            if (status == STR_DEC_OK && unscaled >= dec_lim) status = STR_DEC_OVERFLOW;
+            const int status = draken::decimal_text::parse(
+                sdata, slen, c->result_precision, c->result_scale, &unscaled);
 
-            if (status != STR_DEC_OK) {
+            if (status != draken::decimal_text::OK) {
                 if (!is_safe) {
                     draken_free(out);
-                    if (status == STR_DEC_OVERFLOW)
+                    if (status == draken::decimal_text::OVERFLOW_)
                         return draken_error_sentinel_fmt(
                             "cast string->decimal: value overflows DECIMAL(%d, %d)",
                             (int)c->result_precision, (int)c->result_scale);
-                    if (status == STR_DEC_SCALE)
+                    if (status == draken::decimal_text::SCALE)
                         return draken_error_sentinel_fmt(
                             "cast string->decimal: value has more decimal places than "
                             "the declared scale %d", (int)c->result_scale);
@@ -925,7 +796,6 @@ VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
                 std::memset(dst, 0, es); bad[j] = 1u; any_bad = true; continue;
             }
 
-            if (negative) unscaled = -unscaled;
             if (dst128) {
                 std::memcpy(dst, &unscaled, 16u);
             } else {

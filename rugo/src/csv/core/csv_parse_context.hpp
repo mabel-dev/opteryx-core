@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,21 @@ struct CsvParseContext {
     // Columns to extract. Empty = all columns. Names must match the header row
     // (or col_0 … col_{N-1} when has_header=false) byte-for-byte.
     std::vector<std::string> projected_columns;
+
+    // ---------------------------------------------------------------------------
+    // Declared schema
+    // ---------------------------------------------------------------------------
+
+    // column name -> platform-canonical type name (see rugo/src/declared_type.hpp).
+    // A column named here skips sniffing ENTIRELY and is parsed STRICTLY as the
+    // declared type: no sample window, no widening, no VARCHAR fallback.
+    //
+    // `ignore_errors` does NOT apply to these columns. It exists to soften a
+    // SNIFFED type — a guess made from the first `sniff_sample_size` values, which
+    // a later value is entitled to contradict. A DECLARED type is not a guess: the
+    // caller stated it, so a value that does not fit is a schema violation and
+    // fails the read regardless of that flag.
+    std::map<std::string, std::string> explicit_schema;
 
     // Predicates applied during span extraction. Rows that fail all predicates
     // for a given column are excluded from the typed column build.

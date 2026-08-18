@@ -8,9 +8,27 @@
 
 
 
-from libc.stdint cimport uint8_t, uint32_t, int64_t
+from libc.stdint cimport uint8_t, int16_t, uint32_t, int64_t
 from libcpp.string cimport string
 from libcpp.vector cimport vector
+from libcpp.map cimport map as cmap
+
+from draken.core.buffers cimport DrakenType
+
+
+cdef extern from "declared_type.hpp" namespace "rugo":
+    # explicit_schema's type vocabulary. Validation goes through the SAME parser the
+    # C++ builder uses, so a name that validates here is guaranteed to resolve there.
+    cdef struct DeclaredType:
+        DrakenType type
+        uint8_t    logical_kind
+        uint8_t    unit
+        int16_t    offset_minutes
+        uint8_t    precision
+        uint8_t    scale
+
+    bint parse_declared_type(const string& name, DeclaredType* out) nogil
+    const char* declared_type_vocabulary() nogil
 
 
 cdef extern from "core/csv_parse_context.hpp" namespace "rugo::_csv":
@@ -26,6 +44,7 @@ cdef extern from "core/csv_parse_context.hpp" namespace "rugo::_csv":
         bint    ignore_errors
         vector[string] projected_columns
         vector[CsvPredicate] predicates
+        cmap[string, string] explicit_schema
         size_t max_threads
         void rebuild_lut()
 
@@ -48,9 +67,10 @@ cdef extern from "core/csv_column_builder.hpp" namespace "rugo::_csv":
         vector[ParsedCsvColumn] columns
         uint32_t                num_rows
 
-    # except + : commit_row (post-sniff type mismatch, ignore_errors=false)
-    # throws std::runtime_error, which Cython translates to a Python
-    # RuntimeError -- see csv_column_builder.cpp.
+    # except + : commit_row throws std::runtime_error -- translated by Cython to a
+    # Python RuntimeError -- on a post-sniff type mismatch (ignore_errors=false) and
+    # on ANY value that does not fit an explicit_schema-declared type (where
+    # ignore_errors does not apply at all). See csv_column_builder.cpp.
     StreamResult build_columns_streaming(
         const uint8_t*          buffer,
         size_t                  length,
@@ -86,6 +106,7 @@ def read_csv(
     use_threads=True,
     infer_sample_size=128,
     fail_on_error=True,
+    explicit_schema=None,
 ):
     """
     Read CSV data into Draken vectors with projection and predicate pushdown.
@@ -114,6 +135,33 @@ def read_csv(
         the sniffed type raises RuntimeError, naming the column and value.
         False: that value is treated as NULL instead.
 
+        This governs SNIFFED columns only. A column declared in explicit_schema
+        is never softened by it — see below.
+    explicit_schema : dict[str, str] | None
+        Declared column types, keyed by column name. The type is a
+        PLATFORM-CANONICAL type name — the same string a stored schema holds —
+        so a caller that already knows the destination schema passes it straight
+        through with no translation table:
+
+            INT8 INT16 INT32 INT64 · UINT8 UINT16 UINT32 UINT64 · FLOAT32 FLOAT64
+            BOOL · VARCHAR · DATE · TIMESTAMP[s|ms|us|ns] · DECIMAL(p, s) · IPV4
+
+        matched case-insensitively, with the usual SQL aliases (INTEGER, BIGINT,
+        TINYINT, SMALLINT, DOUBLE, FLOAT, REAL, STRING, TEXT, BOOLEAN).
+
+        A declared column skips type sniffing entirely and is parsed STRICTLY as
+        that type: no sample window, no widening, no VARCHAR fallback. A value
+        that does not fit raises RuntimeError naming the column, the value and
+        the declared type — `fail_on_error=False` does NOT apply, because it
+        exists to soften a GUESS made from a sample and a declared type is not a
+        guess.
+
+        Text forms go through draken's own parsers, so a value read here means
+        exactly what the equivalent CAST would make it mean. IPV4 is dotted-quad
+        ONLY (a bare integer, inet_aton shorthand "10.1", and leading-zero forms
+        "010.1.1.1" all raise); DATE and TIMESTAMP are ISO-8601 text only, and
+        converting to a declared unit is exact-or-refuse.
+
     Returns
     -------
     dict with keys:
@@ -135,6 +183,7 @@ def read_csv(
     cdef size_t             buf_len
     cdef size_t             i
     cdef uint32_t           col_ord
+    cdef DeclaredType       probe_type
 
     cdef dict result = {
         'success': False,
@@ -153,6 +202,25 @@ def read_csv(
     ctx.sniff_sample_size  = <uint32_t>infer_sample_size
     ctx.ignore_errors      = not bool(fail_on_error)
     ctx.rebuild_lut()
+
+    if explicit_schema:
+        for col, declared_type in explicit_schema.items():
+            if not isinstance(declared_type, str):
+                raise ValueError(
+                    f"read_csv: explicit_schema[{col!r}] = {declared_type!r} is not a "
+                    f"type name; expected a string such as 'IPV4' or 'DECIMAL(18, 2)'"
+                )
+            # Validated EAGERLY, through the same parser that will do the work, so a
+            # bad type name fails before any bytes are read rather than part-way
+            # through a large file.
+            declared_bytes = declared_type.encode('utf-8')
+            if not parse_declared_type(declared_bytes, &probe_type):
+                raise ValueError(
+                    f"read_csv: explicit_schema[{col!r}] = {declared_type!r} is not a "
+                    f"supported type; supported types are "
+                    f"{declared_type_vocabulary().decode('utf-8')}"
+                )
+            ctx.explicit_schema[col.encode('utf-8')] = declared_bytes
 
     if columns:
         for col in columns:

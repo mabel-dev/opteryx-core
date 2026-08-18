@@ -48,7 +48,7 @@ class _CsvReader:
     """Context-managed reader that yields a single Morsel of all matching rows."""
 
     def __init__(self, source, columns, predicates, delimiter, has_header, use_threads,
-                 infer_sample_size, fail_on_error):
+                 infer_sample_size, fail_on_error, explicit_schema):
         self._source = source
         self._columns = columns
         self._predicates = predicates
@@ -57,6 +57,7 @@ class _CsvReader:
         self._use_threads = use_threads
         self._infer_sample_size = infer_sample_size
         self._fail_on_error = fail_on_error
+        self._explicit_schema = explicit_schema
         self._result = None
 
     def __enter__(self) -> "_CsvReader":
@@ -75,6 +76,7 @@ class _CsvReader:
             use_threads=self._use_threads,
             infer_sample_size=self._infer_sample_size,
             fail_on_error=self._fail_on_error,
+            explicit_schema=self._explicit_schema,
         )
         if not result["success"]:
             raise RuntimeError("CSV read failed")
@@ -91,6 +93,7 @@ def read_csv(
     use_threads: bool = True,
     infer_sample_size: int = 128,
     fail_on_error: bool = True,
+    explicit_schema: Optional[dict] = None,
 ) -> _CsvReader:
     """Open a CSV file or buffer for reading.
 
@@ -98,10 +101,16 @@ def read_csv(
     predicates: list of (column, op, value); op in ==, !=, <, <=, >, >=.
     infer_sample_size: non-null values per projected column sampled to sniff its type.
     fail_on_error: True (default) raises RuntimeError on a post-sample-window value that
-    doesn't fit its column's sniffed type; False treats that value as NULL instead.
+    doesn't fit its column's sniffed type; False treats that value as NULL instead. It
+    governs SNIFFED columns only.
+    explicit_schema: optional {column_name: type} dict declaring column types, so a caller
+    that already knows the destination schema parses straight into it instead of inferring
+    and then casting. The type is a platform-canonical name (IPV4, UINT32, DECIMAL(18, 2),
+    TIMESTAMP[us], DATE, …); a declared column skips sniffing and is parsed STRICTLY, and
+    fail_on_error does not soften it. See rugo_native.read_csv for the full contract.
     """
     return _CsvReader(source, columns, predicates, delimiter, has_header, use_threads,
-                       infer_sample_size, fail_on_error)
+                       infer_sample_size, fail_on_error, explicit_schema)
 
 
 def read_metadata(source: Source) -> CsvMetadata:

@@ -11,6 +11,7 @@
 #include "parse_context.hpp"
 #include "buffers.h"       // DrakenType
 #include "string_slot.h"   // DrakenStringSlot
+#include "declared_type.hpp"   // DeclaredType — explicit_schema's type vocabulary
 
 // PyObject forward declaration — lets this header declare a Vector-producing
 // function without forcing Python.h include-order onto every consumer.
@@ -136,6 +137,19 @@ struct ParsedColumn {
     // (Cython edge, under the GIL) surfaces this as a Python warning; C++ itself never
     // warns because parse_all_columns runs off the GIL.
     bool              array_fallback = false;
+
+    // Logical-type descriptor for a column parsed from an explicit_schema
+    // declaration. Ordinals from draken/logical_type.h, zero (LogicalKind::NONE)
+    // for everything else. IPV4 is the reason this exists: it shares UINT32's
+    // physical tag, so a vector carrying the right 32 bits and no descriptor is
+    // an ordinary unsigned column and every consumer that needs IPv4 either
+    // renders it as an integer or refuses outright. Carried through to
+    // wrap_column, which attaches it via draken_vector_own_raw_logical.
+    uint8_t           logical_kind   = 0;
+    uint8_t           unit           = 2;   // TimestampUnit: microseconds
+    int16_t           offset_minutes = 0;
+    uint8_t           precision      = 0;
+    uint8_t           scale          = 0;
 };
 
 // Parse every named column from the document map in parallel (one task per column,
@@ -143,11 +157,13 @@ struct ParsedColumn {
 // no Python — safe to call with the GIL released. Returns one ParsedColumn per name.
 //
 // context.explicit_schema: a column named here skips speculative type inference entirely
-// and is parsed STRICTLY as the declared type ("int64" | "double" | "boolean" | "string");
-// a value that doesn't fit throws std::invalid_argument (caller must catch/translate —
-// unlike the default speculative path, a declared-schema mismatch is a real data/schema
-// error, not something to silently fall back past). context.infer_sample_size bounds the
-// speculative-path type hint window for undeclared columns (see extract_column).
+// and is parsed STRICTLY as the declared type. The vocabulary is the platform's canonical
+// type names — see rugo/src/declared_type.hpp for the full list and rugo/src/declared_parse.hpp
+// for the per-value contract. A value that doesn't fit throws std::invalid_argument (caller
+// must catch/translate — unlike the default speculative path, a declared-schema mismatch is a
+// real data/schema error, not something to silently fall back past).
+// context.infer_sample_size bounds the speculative-path type hint window for undeclared
+// columns (see extract_column).
 std::vector<ParsedColumn> parse_all_columns(
     const uint8_t*                             buffer,
     const RecordSet& records,

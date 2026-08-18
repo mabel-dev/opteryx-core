@@ -104,11 +104,30 @@ def read_jsonl(
     Returns a context manager that yields one Morsel of the (projected, filtered) result.
     predicates: list of (column, op, value); op in ==, !=, <, <=, >, >=.
 
-    explicit_schema: optional {column_name: type} dict, type one of "int64", "double",
-        "boolean", "string". A named column is parsed STRICTLY as that type — no
-        speculative inference, no fallback — and raises ValueError if any value doesn't
-        fit. Declared columns are always reported back in the returned schema dict
-        (see read_metadata / get_jsonl_schema), independent of infer_schema.
+    explicit_schema: optional {column_name: type} dict. The type is a PLATFORM-CANONICAL
+        type name — the same string a stored schema holds — so a caller that already knows
+        the destination schema can pass it straight through with no translation table:
+
+            INT8 INT16 INT32 INT64 · UINT8 UINT16 UINT32 UINT64 · FLOAT32 FLOAT64 · BOOL
+            VARCHAR · DATE · TIMESTAMP[s|ms|us|ns] · DECIMAL(p, s) · IPV4
+
+        matched case-insensitively, with the usual SQL aliases (INTEGER, BIGINT, TINYINT,
+        SMALLINT, DOUBLE, FLOAT, REAL, STRING, TEXT, BOOLEAN). The four original names —
+        "int64", "double", "boolean", "string" — keep working unchanged through that table.
+
+        A named column is parsed STRICTLY as that type — no speculative inference, no
+        widening, no fallback — and raises ValueError naming the column, row and value if
+        anything doesn't fit. Declared columns are always reported back in the returned
+        schema dict (see read_metadata / get_jsonl_schema), independent of infer_schema.
+
+        Text forms go through draken's own parsers, so a value read here means exactly what
+        the equivalent CAST would make it mean. Two consequences worth knowing:
+          · IPV4 is DOTTED-QUAD ONLY. A bare integer raises, as do inet_aton shorthand
+            ("10.1") and leading-zero/octal forms ("010.1.1.1") — a reader and an access
+            rule disagreeing about which address a value denotes is a security bug.
+          · TIMESTAMP and DATE are ISO-8601 TEXT ONLY; an epoch integer raises. Converting
+            to a declared unit is exact-or-refuse, so TIMESTAMP[s] rejects a value carrying
+            sub-second precision rather than truncating it.
     infer_schema: whether non-declared columns appear in the returned schema dict at all
         (the underlying Draken vectors are always typed the same way regardless — this
         only gates the reported metadata). Declared (explicit_schema) columns are always

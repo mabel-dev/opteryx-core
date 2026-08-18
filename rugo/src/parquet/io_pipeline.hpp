@@ -2164,17 +2164,35 @@ class ParquetIOPipeline {
                 // gate (date/timestamp/decimal stay pool) is enforced via lt below.
                 const std::string& pt = col_stats.physical_type;
                 const std::string& cl = col_stats.logical_type;
-                // Roll-out: plain int + int-backed TIMESTAMP/DATE + float. Int/temporal
-                // coercions are shape-preserving (retag / dict-only reinterpret), so a
-                // Dict-shaped int64 stays Dict; float needs no coercion. int-backed
-                // DECIMAL stays pool (reinterpret trap). Phase 2 membership-skip stays
-                // int-only (decode gate) — float equality membership is out of scope.
+                // Roll-out: plain int + int-backed TIMESTAMP/DATE/DECIMAL + float.
+                // Int/temporal coercions are shape-preserving (retag / dict-only
+                // reinterpret), so a Dict-shaped int64 stays Dict; float needs no
+                // coercion. Phase 2 membership-skip stays int-only (decode gate) —
+                // float equality membership is out of scope.
+                //
+                // int-backed DECIMAL (physical int32/int64, precision <= 18 — an
+                // int128 decimal is FLBA/byte_array and so never matches `pt` here)
+                // joined this list on 2026-08-18. It is NOT a change to the Stage-4a
+                // gate below: such a column still leaves on the POOL path, because
+                // `safe_logical` requires int128_values for a decimal logical type.
+                // What changes is only WHICH pool encoding it leaves as —
+                // serialize_int64/serialize_int32 emit TAG_INT64_DICT (dictionary +
+                // per-row codes) instead of expanding the RLE runs to one int64 per
+                // row via serialize_rle_int_as_int64. Both consumers of that tag build
+                // a DECIMAL-tagged vector, never a bare INT64, so the historic
+                // "reinterpret trap" (tpch Q01 dec_mul type error, which came from a
+                // consumer taking a DIRECT DK_INT64 at face value) cannot recur:
+                // native scan -> build_pool_decimal_column's kTagInt64Dict branch
+                // (draken_vector_from_dict, DRAKEN_DECIMAL); trampoline scan ->
+                // INT64 dict vector + vector_reinterpret_as_decimal, which is
+                // shape-preserving and retags dict->dict.
                 const bool prefer_dict =
                     (mask_ptr == nullptr) &&
                     col_stats.dictionary_page_offset >= 0 &&
                     (((pt == "int64" || pt == "int32") &&
                       (cl.empty() || cl == "int64" || cl == "int32" ||
-                       cl.rfind("timestamp", 0) == 0 || cl.rfind("date", 0) == 0)) ||
+                       cl.rfind("timestamp", 0) == 0 || cl.rfind("date", 0) == 0 ||
+                       cl.rfind("decimal", 0) == 0)) ||
                      ((pt == "float64" || pt == "float32") &&
                       (cl.empty() || cl == "float64" || cl == "float32")));
 

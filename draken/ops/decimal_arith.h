@@ -76,6 +76,108 @@ static const int64_t kDecPow10[19] = {
     1000000000000000000LL,
 };
 
+// kValueTransformFlags — the hints an elementwise VALUE transform may keep — is
+// defined once in ops/int64_arithmetic.h (included above) and shared here, so the
+// two shape-preserving families cannot drift on which hints survive. Read its
+// comment there for why the value-order bits must be dropped. The shaped-result
+// helpers below take the surviving flags as an argument rather than masking
+// internally, because this file has BOTH kinds of producer: the arithmetic folds
+// (mask) and the int64->int128 widens (order- and value-preserving, keep whole).
+
+// Shape-preserving DECIMAL result (CLAUDE.md §11 — architect-approved 2026-08-18
+// together with the decimal read path that makes dict-shaped DECIMAL columns
+// reachable at all). `values` holds src.data_length computed results, one per
+// PHYSICAL value; this grafts src's encoding shape onto the result, so
+// dense→dense, constant→constant, dict→dict.
+//
+// It is the same ANSWER as the uniform data[selection[i]] loop because both
+// index the same physical slots through the same selection — the only change is
+// that each distinct value is computed once instead of once per row.
+//
+// `validity` is the caller's already-combined per-LOGICAL-row bitmap (length
+// bits, NOT data_length bits — validity is indexed by logical row for every
+// shape) and is taken by ownership. Mirrors ops/int64_arithmetic.h's
+// make_shaped_result; `values`/`validity` are freed on the error path.
+static inline VecResult make_decimal_shaped_result(
+    int64_t* values, const DrakenVector& src, uint8_t* validity, uint8_t out_flags)
+{
+    VecResult r;
+    r.data        = values;
+    r.type        = DRAKEN_DECIMAL;
+    r.length      = src.length;
+    r.data_length = src.data_length;
+    // `out_flags` is the caller's decision about which of src's hints survive its
+    // transform; the SELECTION branch below still keys off src's own flags.
+    r.flags       = out_flags;
+    r.validity    = validity;
+    // Branch on the SELECTION, not on draken_is_dense: `data_length == length`
+    // also holds for a dense vector carrying a NON-identity permutation, and
+    // handing that the shared identity array would silently reorder every row.
+    if (src.flags & DRAKEN_SEL_IDENTITY) {
+        r.selection      = draken_identity_sel(src.length);   // dense: shared global
+        r.owns_selection = false;
+    } else if (draken_is_constant(&src)) {
+        r.selection      = draken_zero_sel(src.length);       // constant: shared global
+        r.owns_selection = false;
+    } else {
+        // Dict, or dense-with-permutation: own a copy of the source codes.
+        const size_t cn = src.length > 0u ? src.length : 1u;
+        uint32_t* codes = static_cast<uint32_t*>(draken_malloc(cn * sizeof(uint32_t)));
+        if (!codes) { draken_free(values); draken_free(validity); throw std::bad_alloc(); }
+        memcpy(codes, src.selection, static_cast<size_t>(src.length) * sizeof(uint32_t));
+        r.selection      = codes;
+        r.owns_selection = true;
+    }
+    return r;
+}
+
+// Constant-operand fast path for a binary DECIMAL op, shape-preserving as above.
+// Applies when exactly one operand is a non-null constant; computes over the
+// OTHER operand's data_length physical values and preserves its shape. When both
+// are constant the result is constant. Returns true + fills `out` when applied.
+//
+// A NULL constant (validity != nullptr) is NOT folded — it falls through to the
+// uniform path, which propagates the all-null result correctly.
+//
+// OVERFLOW IS NOT AN ERROR HERE — it is a bail-out. `op` returns false instead of
+// throwing, and this abandons the whole fast path so the caller's uniform loop
+// runs and raises (or does not) exactly as it always did. That is required, not
+// tidiness: a dict `data` array may hold DEAD entries that no row references, and
+// a dead entry that overflows must not turn a working query into an
+// OverflowError. Deciding by re-running the uniform loop is the only rule that
+// cannot diverge from it — a live overflow raises there too, with the same
+// message.
+//
+// div/mod are deliberately NOT wired to this helper: both can NULL an individual
+// LOGICAL row (zero divisor), and a K-slot physical block cannot express a
+// per-logical-row null. They stay on the uniform path.
+template <typename Op>
+static inline bool dec_const_fold(const DrakenVector& a, const DrakenVector& b,
+                                  Op op, VecResult& out)
+{
+    const bool a_const = draken_is_constant(&a) && a.validity == nullptr;
+    const bool b_const = draken_is_constant(&b) && b.validity == nullptr;
+    if (!a_const && !b_const) return false;
+    const int64_t* ad = static_cast<const int64_t*>(a.data);
+    const int64_t* bd = static_cast<const int64_t*>(b.data);
+    const DrakenVector& src = b_const ? a : b;   // both const -> shape from a (also const)
+    const uint32_t k = src.data_length;
+    int64_t* dst = alloc_i64(k);
+    if (b_const) {
+        const int64_t sv = bd[0];
+        for (uint32_t j = 0; j < k; ++j)
+            if (!op(ad[j], sv, dst[j])) { draken_free(dst); return false; }
+    } else {
+        const int64_t sv = ad[0];
+        for (uint32_t j = 0; j < k; ++j)
+            if (!op(sv, bd[j], dst[j])) { draken_free(dst); return false; }
+    }
+    out = make_decimal_shaped_result(
+        dst, src, combine_validity(a.validity, b.validity, a.length),
+        static_cast<uint8_t>(src.flags & kValueTransformFlags));
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // int128 helpers
 // ---------------------------------------------------------------------------
@@ -125,6 +227,68 @@ static inline VecResult make_decimal128_result(
     return r;
 }
 
+// Shape-preserving DECIMAL128 result — the int128 twin of
+// make_decimal_shaped_result above; see that comment for the contract. `values`
+// holds src.data_length computed int128 results, `validity` is the caller's
+// per-LOGICAL-row bitmap (src.length bits), taken by ownership.
+static inline VecResult make_decimal128_shaped_result(
+    __int128* values, const DrakenVector& src, uint8_t* validity, uint8_t out_flags)
+{
+    VecResult r;
+    r.data        = values;
+    r.type        = DRAKEN_DECIMAL128;
+    r.length      = src.length;
+    r.data_length = src.data_length;
+    r.flags       = out_flags;
+    r.validity    = validity;
+    if (src.flags & DRAKEN_SEL_IDENTITY) {
+        r.selection      = draken_identity_sel(src.length);
+        r.owns_selection = false;
+    } else if (draken_is_constant(&src)) {
+        r.selection      = draken_zero_sel(src.length);
+        r.owns_selection = false;
+    } else {
+        const size_t cn = src.length > 0u ? src.length : 1u;
+        uint32_t* codes = static_cast<uint32_t*>(draken_malloc(cn * sizeof(uint32_t)));
+        if (!codes) { draken_free(values); draken_free(validity); throw std::bad_alloc(); }
+        memcpy(codes, src.selection, static_cast<size_t>(src.length) * sizeof(uint32_t));
+        r.selection      = codes;
+        r.owns_selection = true;
+    }
+    return r;
+}
+
+// Constant-operand fast path for a binary DECIMAL128 op — the int128 twin of
+// dec_const_fold; same gate, same overflow-is-a-bail-out rule (a dead dict entry
+// must not raise where the uniform per-row loop never reads it), same exclusion
+// of div/mod (both can NULL an individual logical row).
+template <typename Op>
+static inline bool dec128_const_fold(const DrakenVector& a, const DrakenVector& b,
+                                     Op op, VecResult& out)
+{
+    const bool a_const = draken_is_constant(&a) && a.validity == nullptr;
+    const bool b_const = draken_is_constant(&b) && b.validity == nullptr;
+    if (!a_const && !b_const) return false;
+    const __int128* ad = static_cast<const __int128*>(a.data);
+    const __int128* bd = static_cast<const __int128*>(b.data);
+    const DrakenVector& src = b_const ? a : b;
+    const uint32_t k = src.data_length;
+    __int128* dst = alloc_i128(k);
+    if (b_const) {
+        const __int128 sv = bd[0];
+        for (uint32_t j = 0; j < k; ++j)
+            if (!op(ad[j], sv, dst[j])) { draken_free(dst); return false; }
+    } else {
+        const __int128 sv = ad[0];
+        for (uint32_t j = 0; j < k; ++j)
+            if (!op(sv, bd[j], dst[j])) { draken_free(dst); return false; }
+    }
+    out = make_decimal128_shaped_result(
+        dst, src, combine_validity(a.validity, b.validity, a.length),
+        static_cast<uint8_t>(src.flags & kValueTransformFlags));
+    return true;
+}
+
 // Widen an int64-backed vector (DRAKEN_DECIMAL or DRAKEN_INT64 — both store int64
 // unscaled values) to a dense int128 DRAKEN_DECIMAL128 VecResult. Resolves the
 // selection (uniform data[selection[i]] access, §11) and copies the per-logical-row
@@ -132,12 +296,18 @@ static inline VecResult make_decimal128_result(
 // The unscaled value is widened verbatim — scale is unchanged, the caller supplies it
 // to the dec128_* kernel. Caller owns the returned data/validity buffers.
 static inline VecResult widen_i64_to_dec128(const DrakenVector& v) {
+    // SHAPE-PRESERVING (§11): widen the data_length PHYSICAL values and graft v's
+    // encoding shape onto the result. int64 -> int128 always fits, so unlike the
+    // arithmetic const-folds there is no overflow bail-out to consider. This is
+    // where the int64->int128 doubling used to be paid per ROW: a dict-shaped
+    // DECIMAL column with 11 distinct values now widens 11 slots, not `length`.
     const uint32_t n = v.length;
+    const uint32_t k = v.data_length;
     const int64_t* sd = static_cast<const int64_t*>(v.data);
-    __int128* dst = alloc_i128(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = static_cast<__int128>(sd[v.selection[i]]);
-    return make_decimal128_result(dst, copy_validity(v.validity, n), n);
+    __int128* dst = alloc_i128(k);
+    for (uint32_t j = 0; j < k; ++j)
+        dst[j] = static_cast<__int128>(sd[j]);
+    return make_decimal128_shaped_result(dst, v, copy_validity(v.validity, n), v.flags);
 }
 
 // Widen an INT8/INT16/INT32 vector to a dense int64 buffer (sign-extending),
@@ -187,12 +357,14 @@ static inline VecResult widen_narrow_int_to_i64(const DrakenVector& v) {
 // __int128 does, with room to spare). Mirrors widen_i64_to_dec128 exactly except
 // for the source type and the zero- vs sign-extension.
 static inline VecResult widen_u64_to_dec128(const DrakenVector& v) {
+    // Shape-preserving, exactly as widen_i64_to_dec128 above.
     const uint32_t n = v.length;
+    const uint32_t k = v.data_length;
     const uint64_t* sd = static_cast<const uint64_t*>(v.data);
-    __int128* dst = alloc_i128(n);
-    for (uint32_t i = 0; i < n; ++i)
-        dst[i] = static_cast<__int128>(sd[v.selection[i]]);
-    return make_decimal128_result(dst, copy_validity(v.validity, n), n);
+    __int128* dst = alloc_i128(k);
+    for (uint32_t j = 0; j < k; ++j)
+        dst[j] = static_cast<__int128>(sd[j]);
+    return make_decimal128_shaped_result(dst, v, copy_validity(v.validity, n), v.flags);
 }
 
 // Safely multiply v by 10, writing result to out. Returns false on int128 overflow.
@@ -255,6 +427,25 @@ static inline VecResult dec_add(
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
+    // §11 shape-preserving constant fold (see dec_const_fold). Placed before the
+    // scale deltas are used so the fast path and the uniform loop below compute
+    // the SAME alignment; on any physical-value overflow it bails and the uniform
+    // loop runs unchanged.
+    {
+        const int fa = (sa < sb) ? (int)sb - sa : 0;
+        const int fb = (sb < sa) ? (int)sa - sb : 0;
+        VecResult folded;
+        if (dec_const_fold(a, b, [fa, fb](int64_t x, int64_t y, int64_t& o) -> bool {
+                __int128 av, bv;
+                if (!i128_scale((__int128)x, fa, av)) return false;
+                if (!i128_scale((__int128)y, fb, bv)) return false;
+                const __int128 rv = av + bv;
+                if (!i128_fits_i64(rv)) return false;
+                o = static_cast<int64_t>(rv);
+                return true;
+            }, folded))
+            return folded;
+    }
     int64_t* dst = alloc_i64(n);
 
     const int delta_a = (sa < sb) ? (int)sb - sa : 0;
@@ -288,6 +479,25 @@ static inline VecResult dec_sub(
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
+    // §11 shape-preserving constant fold (see dec_const_fold). Placed before the
+    // scale deltas are used so the fast path and the uniform loop below compute
+    // the SAME alignment; on any physical-value overflow it bails and the uniform
+    // loop runs unchanged.
+    {
+        const int fa = (sa < sb) ? (int)sb - sa : 0;
+        const int fb = (sb < sa) ? (int)sa - sb : 0;
+        VecResult folded;
+        if (dec_const_fold(a, b, [fa, fb](int64_t x, int64_t y, int64_t& o) -> bool {
+                __int128 av, bv;
+                if (!i128_scale((__int128)x, fa, av)) return false;
+                if (!i128_scale((__int128)y, fb, bv)) return false;
+                const __int128 rv = av - bv;
+                if (!i128_fits_i64(rv)) return false;
+                o = static_cast<int64_t>(rv);
+                return true;
+            }, folded))
+            return folded;
+    }
     int64_t* dst = alloc_i64(n);
 
     const int delta_a = (sa < sb) ? (int)sb - sa : 0;
@@ -324,6 +534,24 @@ static inline VecResult dec128_add(
     const uint32_t n = a.length;
     const __int128* ad = static_cast<const __int128*>(a.data);
     const __int128* bd = static_cast<const __int128*>(b.data);
+    // §11 shape-preserving constant fold (see dec128_const_fold). Bails to the
+    // uniform loop below on any physical-value overflow, so the raise behaviour is
+    // decided there and cannot diverge.
+    {
+        const int fa = (sa < sb) ? (int)sb - sa : 0;
+        const int fb = (sb < sa) ? (int)sa - sb : 0;
+        VecResult folded;
+        if (dec128_const_fold(a, b, [fa, fb](__int128 x, __int128 y, __int128& o) -> bool {
+                __int128 av, bv;
+                if (!i128_scale(x, fa, av)) return false;
+                if (!i128_scale(y, fb, bv)) return false;
+                const __int128 rv = av + bv;
+                if (((av ^ rv) & (bv ^ rv)) < 0) return false;
+                o = rv;
+                return true;
+            }, folded))
+            return folded;
+    }
     __int128* dst = alloc_i128(n);
 
     const int delta_a = (sa < sb) ? (int)sb - sa : 0;
@@ -353,6 +581,22 @@ static inline VecResult dec128_sub(
     const uint32_t n = a.length;
     const __int128* ad = static_cast<const __int128*>(a.data);
     const __int128* bd = static_cast<const __int128*>(b.data);
+    // §11 shape-preserving constant fold (see dec128_const_fold).
+    {
+        const int fa = (sa < sb) ? (int)sb - sa : 0;
+        const int fb = (sb < sa) ? (int)sa - sb : 0;
+        VecResult folded;
+        if (dec128_const_fold(a, b, [fa, fb](__int128 x, __int128 y, __int128& o) -> bool {
+                __int128 av, bv;
+                if (!i128_scale(x, fa, av)) return false;
+                if (!i128_scale(y, fb, bv)) return false;
+                const __int128 rv = av - bv;
+                if (((av ^ bv) & (av ^ rv)) < 0) return false;
+                o = rv;
+                return true;
+            }, folded))
+            return folded;
+    }
     __int128* dst = alloc_i128(n);
 
     const int delta_a = (sa < sb) ? (int)sb - sa : 0;
@@ -410,6 +654,23 @@ static inline VecResult dec128_mul(
     const uint32_t n = a.length;
     const __int128* ad = static_cast<const __int128*>(a.data);
     const __int128* bd = static_cast<const __int128*>(b.data);
+    // §11 shape-preserving constant fold (see dec128_const_fold). The sa+sb>38
+    // scale check above has already run; this guards only the int128 fit, using
+    // the same umul128_256 magnitude test as the uniform loop below.
+    {
+        VecResult folded;
+        if (dec128_const_fold(a, b, [](__int128 x, __int128 y, __int128& o) -> bool {
+                const bool neg = (x < 0) ^ (y < 0);
+                const unsigned __int128 ua = (x < 0) ? (unsigned __int128)(-x) : (unsigned __int128)x;
+                const unsigned __int128 ub = (y < 0) ? (unsigned __int128)(-y) : (unsigned __int128)y;
+                unsigned __int128 hi, lo;
+                umul128_256(ua, ub, hi, lo);
+                if (hi != 0 || (lo >> 127) != 0) return false;
+                o = neg ? -static_cast<__int128>(lo) : static_cast<__int128>(lo);
+                return true;
+            }, folded))
+            return folded;
+    }
     __int128* dst = alloc_i128(n);
 
     for (uint32_t i = 0; i < n; ++i) {
@@ -446,6 +707,18 @@ static inline VecResult dec_mul(
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
     const int64_t* bd = static_cast<const int64_t*>(b.data);
+    // §11 shape-preserving constant fold (see dec_const_fold). The sa+sb>18 scale
+    // check above has already run, so this only has to guard the int64 fit.
+    {
+        VecResult folded;
+        if (dec_const_fold(a, b, [](int64_t x, int64_t y, int64_t& o) -> bool {
+                const __int128 rv = (__int128)x * (__int128)y;
+                if (!i128_fits_i64(rv)) return false;
+                o = static_cast<int64_t>(rv);
+                return true;
+            }, folded))
+            return folded;
+    }
     int64_t* dst = alloc_i64(n);
 
     for (uint32_t i = 0; i < n; ++i) {
@@ -578,8 +851,29 @@ static inline VecResult dec_mod(
 static inline VecResult dec_neg(const DrakenVector& a) {
     const uint32_t n = a.length;
     const int64_t* ad = static_cast<const int64_t*>(a.data);
-    int64_t* dst = alloc_i64(n);
 
+    // §11 shape-preserving unary path: negate the data_length PHYSICAL values and
+    // graft a's encoding shape onto the result. Same bail-out rule as
+    // dec_const_fold — an INT64_MIN in a DEAD dict slot must not raise where the
+    // uniform per-row loop would never have read it, so a physical INT64_MIN
+    // abandons the fast path and the uniform loop below decides.
+    {
+        const uint32_t k = a.data_length;
+        int64_t* kd = alloc_i64(k);
+        bool ok = true;
+        for (uint32_t j = 0; j < k; ++j) {
+            const int64_t v = ad[j];
+            if (v == INT64_MIN) { ok = false; break; }
+            kd[j] = -v;
+        }
+        if (ok)
+            return make_decimal_shaped_result(
+                kd, a, copy_validity(a.validity, n),
+                static_cast<uint8_t>(a.flags & kValueTransformFlags));
+        draken_free(kd);
+    }
+
+    int64_t* dst = alloc_i64(n);
     for (uint32_t i = 0; i < n; ++i) {
         const int64_t v = ad[a.selection[i]];
         if (v == INT64_MIN)

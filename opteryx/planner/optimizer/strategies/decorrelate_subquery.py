@@ -2307,13 +2307,27 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # ordering), so `provider.columns` is still whatever the binder declared —
     # a Project's own SELECT list, in its original order, before anything below
     # it has narrowed or reordered it.
+    #
+    # `.columns` ONLY means "declared output columns" on a Project. On a Join it
+    # is the join KEY list, on a Filter the columns the predicate references —
+    # neither describes the stream's shape. Reading it from those nodes builds a
+    # narrow-back that DROPS columns the consumer asked for: TPC-H Q20's filter
+    # sits directly on a LEFT SEMI JOIN, whose `.columns` is `[ps_partkey,
+    # p_partkey]`, so the narrow-back deleted the `ps_suppkey` its parent
+    # Project selects and the query died in the compiler ("projecting a column
+    # the engine could not resolve here"). Nodes carrying a bound `.schema`
+    # (Scan/Subquery/Aggregate) declare their shape there and are read below.
+    # Anything else contributes nothing and is left un-narrowed — the shape the
+    # rewrite had before the narrow-back existed.
     pre_decorrelation_columns: list = []
     for provider, _target, _relation in plan.ingoing_edges(filter_nid):
         found_relations, found_schemas = _collect_relations(plan, provider)
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
-        pre_decorrelation_columns.extend(plan[provider].columns or [])
-        provider_schema = plan[provider].schema
+        provider_node = plan[provider]
+        if provider_node.node_type == LogicalPlanStepType.Project:
+            pre_decorrelation_columns.extend(provider_node.columns or [])
+        provider_schema = provider_node.schema
         if provider_schema is not None:
             pre_decorrelation_columns.extend(
                 _reference_to(col) for col in provider_schema.columns

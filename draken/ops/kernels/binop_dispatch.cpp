@@ -311,6 +311,38 @@ static VecResult binop_string_concat(const DrakenVector* left, const DrakenVecto
 
 extern "C" {
 
+// Borrowed DrakenVector view over a VecResult from one of the widen_* helpers.
+//
+// Those helpers are SHAPE-PRESERVING (decimal_arith.h): a dict-shaped operand
+// widens its data_length physical values and keeps its codes. Rebuilding the view
+// with draken_vector_from_dense would not merely discard that — it would install
+// an identity selection over data that is indexed BY CODES, i.e. read the wrong
+// rows. VecResult already carries every DrakenVector field, so the view is a
+// straight field copy. Borrowed: the VecResult still owns data/validity/selection.
+static inline DrakenVector widened_view(const VecResult& r, DrakenType type) {
+    DrakenVector v;
+    v.data        = r.data;
+    v.selection   = r.selection;
+    v.data_length = r.data_length;
+    v.length      = r.length;
+    v.validity    = r.validity;
+    v.type        = type;
+    v.flags       = r.flags;
+    return v;
+}
+
+// Release a widen_* temporary, including a selection it owns (a dict-shaped widen
+// allocates its own codes copy — draken_free(data)+draken_free(validity) alone
+// would leak it).
+static inline void free_widen_temp(VecResult& r) {
+    draken_free(r.data);
+    draken_free(r.validity);
+    if (r.owns_selection) draken_free(const_cast<uint32_t*>(r.selection));
+    r.data = nullptr; r.validity = nullptr;
+    r.selection = nullptr; r.owns_selection = false;
+}
+
+
 VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* right) {
     DRAKEN_KERNEL_TRY({
         if (!left || !right) return draken_error_sentinel("draken_binop: null input vector");
@@ -511,17 +543,17 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
                 DrakenVector rv = *right;
                 if (lt != DRAKEN_DECIMAL128) {
                     lw = draken::ops::widen_i64_to_dec128(*left);
-                    lv = draken_vector_from_dense(lw.data, lw.length, DRAKEN_DECIMAL128, lw.validity);
+                    lv = widened_view(lw, DRAKEN_DECIMAL128);
                     lw_used = true;
                 }
                 if (rt != DRAKEN_DECIMAL128) {
                     rw = draken::ops::widen_i64_to_dec128(*right);
-                    rv = draken_vector_from_dense(rw.data, rw.length, DRAKEN_DECIMAL128, rw.validity);
+                    rv = widened_view(rw, DRAKEN_DECIMAL128);
                     rw_used = true;
                 }
                 auto free_temps = [&]() {
-                    if (lw_used) { draken_free(lw.data); draken_free(lw.validity); }
-                    if (rw_used) { draken_free(rw.data); draken_free(rw.validity); }
+                    if (lw_used) free_widen_temp(lw);
+                    if (rw_used) free_widen_temp(rw);
                 };
                 VecResult r;
                 try {
@@ -657,11 +689,11 @@ VecResult draken_binop(void* ctx, const DrakenVector* left, const DrakenVector* 
                 VecResult rw = (rt == DRAKEN_UINT64)
                     ? draken::ops::widen_u64_to_dec128(*right)
                     : draken::ops::widen_i64_to_dec128(*right);
-                DrakenVector lv = draken_vector_from_dense(lw.data, lw.length, DRAKEN_DECIMAL128, lw.validity);
-                DrakenVector rv = draken_vector_from_dense(rw.data, rw.length, DRAKEN_DECIMAL128, rw.validity);
+                DrakenVector lv = widened_view(lw, DRAKEN_DECIMAL128);
+                DrakenVector rv = widened_view(rw, DRAKEN_DECIMAL128);
                 auto free_temps = [&]() {
-                    draken_free(lw.data); draken_free(lw.validity);
-                    draken_free(rw.data); draken_free(rw.validity);
+                    free_widen_temp(lw);
+                    free_widen_temp(rw);
                 };
                 // PLUS/MINUS/MULTIPLY degenerate exactly to plain integer
                 // arithmetic in int128 space at scale 0, unambiguous.

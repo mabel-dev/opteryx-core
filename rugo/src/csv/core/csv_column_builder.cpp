@@ -1,6 +1,7 @@
 #include <Python.h>
 
 #include "csv_column_builder.hpp"
+#include "../../declared_parse.hpp"   // explicit_schema strict per-value parse (shared with JSONL)
 #include "csv_scan.hpp"
 
 #include <algorithm>
@@ -158,11 +159,23 @@ static std::vector<DrakenType> sniff_csv_column_types(
     const uint8_t*               body,
     size_t                       body_len,
     const std::vector<uint32_t>& proj_ordinals,
+    const std::vector<uint8_t>&  declared,   // 1 == caller declared this column's type
     const CsvParseContext&       ctx)
 {
     const size_t np = proj_ordinals.size();
     std::vector<DrakenType> types(np, DRAKEN_INT64);
     std::vector<uint32_t>   seen(np, 0);
+
+    // A declared column is not sniffed at all: its type is stated, so sampling it
+    // is work whose answer is thrown away. Marking it VARCHAR-with-a-full-sample
+    // makes it "decided" for the early-exit test below, and the caller overwrites
+    // the entry with the declared type.
+    for (size_t i = 0; i < np; ++i) {
+        if (declared[i]) {
+            types[i] = DRAKEN_VARCHAR;
+            seen[i]  = ctx.sniff_sample_size;
+        }
+    }
 
     if (np == 0 || body_len == 0) return types;
 
@@ -195,7 +208,8 @@ static std::vector<DrakenType> sniff_csv_column_types(
     auto process_field = [&](uint32_t value_end) {
         while (req_idx < np && proj_ordinals[req_idx] < current_col) ++req_idx;
 
-        if (req_idx < np && proj_ordinals[req_idx] == current_col && seen[req_idx] < ctx.sniff_sample_size) {
+        if (req_idx < np && proj_ordinals[req_idx] == current_col
+                && !declared[req_idx] && seen[req_idx] < ctx.sniff_sample_size) {
             uint32_t raw_len = (value_end > field_start) ? (value_end - field_start) : 0u;
             if (raw_len > UINT16_MAX) raw_len = UINT16_MAX;
             const bool is_null = (raw_len == 0 && !was_quoted);
@@ -321,6 +335,16 @@ struct ColBuf {
     DrakenType type;
     uint32_t   n = 0;
 
+    // Set when the column came from ctx.explicit_schema rather than the sniffer.
+    // `raw` then holds one fixed-width element per row (BOOL: one 0/1 BYTE per
+    // row, bit-packed later in finalize_col_buf — a per-thread bit stream cannot
+    // be concatenated at byte granularity, and rows land here one at a time).
+    bool                 declared_col = false;
+    rugo::DeclaredType   declared;
+    std::string          declared_name;   // as the caller spelled it, for errors
+    size_t               elem = 0;        // bytes per element in `raw`
+    std::vector<uint8_t> raw;
+
     std::vector<int64_t> i64;
     std::vector<double>  f64;
 
@@ -333,6 +357,12 @@ struct ColBuf {
 
     explicit ColBuf(DrakenType t) : type(t) {
         esc_scratch.resize(UINT16_MAX);
+    }
+
+    ColBuf(DrakenType t, const rugo::DeclaredType& dt, const std::string& spelling)
+        : type(t), declared_col(true), declared(dt), declared_name(spelling) {
+        esc_scratch.resize(UINT16_MAX);
+        elem = (dt.type == DRAKEN_BOOL) ? 1u : rugo::declared_elem_size(dt.type);
     }
 };
 
@@ -401,6 +431,45 @@ static void stream_build_range(
                 buf.null_bm.resize(bm_byte + 1, 0xFF);
             if (fp.is_null)
                 buf.null_bm[bm_byte] &= static_cast<uint8_t>(~(1u << bm_bit));
+
+            // A DECLARED column is parsed strictly, ahead of every sniffed arm.
+            // ctx.ignore_errors is deliberately NOT consulted: it softens a GUESS
+            // made from a sample window, and a declared type is not a guess.
+            if (buf.declared_col) {
+                if (rugo::declared_is_string(buf.declared.type)) {
+                    DrakenStringSlot slot;
+                    if (fp.is_null || fp.len == 0) {
+                        str_init_null(&slot);
+                    } else if (fp.len > STR_INLINE_MAX) {
+                        const uint32_t off = static_cast<uint32_t>(buf.arena.size());
+                        buf.arena.insert(buf.arena.end(), fp.ptr, fp.ptr + fp.len);
+                        draken_build_string_slot(&slot, fp.ptr, fp.len, off);
+                    } else {
+                        draken_build_string_slot(&slot, fp.ptr, fp.len, 0);
+                    }
+                    buf.slots.push_back(slot);
+                } else {
+                    const size_t at = buf.raw.size();
+                    buf.raw.resize(at + buf.elem, 0u);
+                    if (!fp.is_null) {
+                        // index 0 into a one-element window: BOOL writes bit 0 of
+                        // that byte, which finalize_col_buf packs down later.
+                        if (fp.len == 0 ||
+                            !rugo::declared_parse_into(buf.declared, fp.ptr, fp.len,
+                                                       buf.raw.data() + at, 0)) {
+                            throw std::runtime_error(
+                                "CSV column '" + proj_col_names[pi] + "' is declared " +
+                                buf.declared_name + " in explicit_schema, but the value '" +
+                                std::string(reinterpret_cast<const char*>(fp.ptr), fp.len) +
+                                "' is not a valid " + buf.declared_name +
+                                ". A declared type is parsed strictly; ignore_errors does "
+                                "not apply to it.");
+                        }
+                    }
+                }
+                ++buf.n;
+                continue;
+            }
 
             if (buf.type == DRAKEN_INT64) {
                 int64_t v = 0;
@@ -662,12 +731,27 @@ static ParsedCsvColumn finalize_col_buf(
     ParsedCsvColumn pc;
     pc.type = type;
 
+    // A declared column carries its logical descriptor onto the output column;
+    // every ColBuf for one column was constructed from the same declaration, so
+    // the first is representative.
+    const bool declared_col = !thread_bufs.empty() && thread_bufs[0].declared_col;
+    if (declared_col) {
+        pc.logical_kind   = thread_bufs[0].declared.logical_kind;
+        pc.unit           = thread_bufs[0].declared.unit;
+        pc.offset_minutes = thread_bufs[0].declared.offset_minutes;
+        pc.precision      = thread_bufs[0].declared.precision;
+        pc.scale          = thread_bufs[0].declared.scale;
+    }
+    const bool string_col = declared_col
+        ? rugo::declared_is_string(thread_bufs[0].declared.type)
+        : (type == DRAKEN_VARCHAR);
+
     uint32_t total = 0;
     for (const auto& b : thread_bufs) total += b.n;
     pc.length = total;
 
     if (total == 0) {
-        if (type == DRAKEN_VARCHAR) {
+        if (string_col) {
             pc.is_string = true;
             pc.slots = static_cast<DrakenStringSlot*>(draken_malloc(0));
         }
@@ -700,6 +784,35 @@ static ParsedCsvColumn finalize_col_buf(
             if (total & 7) v[nb - 1] &= static_cast<uint8_t>((1u << (total & 7)) - 1);
             pc.validity = v;
         }
+    }
+
+    if (declared_col && !string_col) {
+        if (type == DRAKEN_BOOL) {
+            // Per-thread streams hold one 0/1 BYTE per row; pack them into the
+            // 1-bit-per-row bitmap draken expects. Concatenating bit streams at
+            // byte granularity would silently misalign every thread but the first.
+            const size_t nb    = (static_cast<size_t>(total) + 7) >> 3;
+            const size_t alloc = std::max(static_cast<size_t>(8), (nb + 7u) & ~7u);
+            uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc));
+            std::memset(data, 0, alloc);
+            uint32_t row = 0;
+            for (const auto& b : thread_bufs)
+                for (uint32_t i = 0; i < b.n; ++i, ++row)
+                    if (b.raw[i]) data[row >> 3] |= static_cast<uint8_t>(1u << (row & 7));
+            pc.data = data;
+            return pc;
+        }
+        const size_t es = thread_bufs[0].elem;
+        uint8_t* data = static_cast<uint8_t*>(
+            draken_malloc(std::max<size_t>(static_cast<size_t>(total) * es, 1)));
+        size_t off = 0;
+        for (auto& b : thread_bufs) {
+            if (b.n == 0) continue;
+            std::memcpy(data + off, b.raw.data(), static_cast<size_t>(b.n) * es);
+            off += static_cast<size_t>(b.n) * es;
+        }
+        pc.data = data;
+        return pc;
     }
 
     if (type == DRAKEN_INT64) {
@@ -811,8 +924,30 @@ StreamResult build_columns_streaming(
     for (size_t i = 0; i < n_proj; ++i)
         proj_ordinals[i] = request_ordinals[proj_indices[i]];
 
-    const std::vector<DrakenType> col_types =
-        sniff_csv_column_types(body, body_len, proj_ordinals, ctx);
+    // Resolve ctx.explicit_schema against the projected columns BEFORE sniffing:
+    // a declared column is not sniffed and not widened, it is parsed as stated.
+    std::vector<uint8_t>          is_declared(n_proj, 0);
+    std::vector<rugo::DeclaredType> declared_types(n_proj);
+    std::vector<std::string>      declared_names(n_proj);
+    for (size_t i = 0; i < n_proj; ++i) {
+        const auto it = ctx.explicit_schema.find(column_names[proj_ordinals[i]]);
+        if (it == ctx.explicit_schema.end()) continue;
+        if (!rugo::parse_declared_type(it->second, &declared_types[i])) {
+            // The Cython edge validates every declared name eagerly through this
+            // same parser; this is a backstop for a non-Python caller.
+            throw std::runtime_error(
+                "explicit_schema: unsupported type '" + it->second + "' for column '" +
+                column_names[proj_ordinals[i]] + "'; supported types are " +
+                std::string(rugo::declared_type_vocabulary()));
+        }
+        is_declared[i]    = 1;
+        declared_names[i] = it->second;
+    }
+
+    std::vector<DrakenType> col_types =
+        sniff_csv_column_types(body, body_len, proj_ordinals, is_declared, ctx);
+    for (size_t i = 0; i < n_proj; ++i)
+        if (is_declared[i]) col_types[i] = declared_types[i].type;
 
     // Pre-parse predicate comparison values
     const size_t             n_pred = ctx.predicates.size();
@@ -861,8 +996,12 @@ StreamResult build_columns_streaming(
     std::vector<std::vector<ColBuf>> thread_bufs(nt);
     for (size_t t = 0; t < nt; ++t) {
         thread_bufs[t].reserve(n_proj);
-        for (size_t c = 0; c < n_proj; ++c)
-            thread_bufs[t].emplace_back(col_types[c]);
+        for (size_t c = 0; c < n_proj; ++c) {
+            if (is_declared[c])
+                thread_bufs[t].emplace_back(col_types[c], declared_types[c], declared_names[c]);
+            else
+                thread_bufs[t].emplace_back(col_types[c]);
+        }
     }
 
     // ColBuf index -> projected column name, for type-mismatch error messages.
@@ -931,6 +1070,14 @@ PyObject* wrap_csv_column(ParsedCsvColumn& pc) {
             pc.slots, pc.arena, pc.arena_len,
             pc.validity, pc.length, pc.type,
             /*keyhash=*/nullptr);   // E37: csv producer = task #5
+    // A declared IPV4/TIMESTAMP/DECIMAL column carries a logical-type descriptor,
+    // which lives on the Vector's owner rather than in the frozen DrakenVector, so
+    // it must be attached at construction. own_raw_logical is own_raw when the
+    // kind is NONE — every sniffed column.
+    if (pc.logical_kind != 0)
+        return draken_vector_own_raw_logical(pc.data, pc.validity, pc.length, pc.type,
+                                             pc.logical_kind, pc.unit, pc.offset_minutes,
+                                             pc.precision, pc.scale, /*dimension=*/0u);
     return draken_vector_own_raw(pc.data, pc.validity, pc.length, pc.type);
 }
 

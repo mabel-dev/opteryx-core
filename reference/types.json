@@ -16,6 +16,13 @@
             "description": "An ordered sequence of elements, all of the same type. Array columns appear when reading Parquet or JSONL files that contain repeated/array fields. The element type is declared as `ARRAY<type>` (e.g. `ARRAY<INTEGER>`, `ARRAY<VARCHAR>`).",
             "cast_to": [],
             "comparable_with": [],
+            "operators": [
+                "AtArrow",
+                "ArrayContainsAll",
+                "InList",
+                "NotInList",
+                "MapAccess"
+            ],
             "notes": "Individual elements are accessed with subscript notation: `arr[0]` returns the first element (zero-indexed, negative indices count from the end). Array literals (`[1, 2, 3]`) are valid as an operand of `IN`, `@>`, `@>>`, or `CAST(... AS VECTOR(n))` \u2014 just not as a bare item in the SELECT list.",
             "limitations": [
                 "There is no standalone array literal syntax in the SELECT list. `SELECT [1, 2, 3]` is not valid, though `[1, 2, 3]` is valid as an operand elsewhere (see notes).",
@@ -492,6 +499,10 @@
             "comparable_with": [
                 "ipv4",
                 "integer"
+            ],
+            "operators": [
+                "IPContainedBy",
+                "IPContains"
             ],
             "limitations": [
                 "IPv4 only. There is no IPv6 type.",

@@ -9,6 +9,7 @@
 
 #include "buffers.h"
 #include "string_slot.h"
+#include "../../declared_type.hpp"   // DeclaredType — explicit_schema's vocabulary
 
 #ifndef Py_PYTHON_H
 struct _object;
@@ -30,6 +31,18 @@ struct ParsedCsvColumn {
     DrakenStringSlot* slots     = nullptr;
     uint8_t*          arena     = nullptr;
     size_t            arena_len = 0;
+
+    // Logical-type descriptor for an explicit_schema-declared column (ordinals
+    // from draken/logical_type.h; 0 == LogicalKind::NONE for every sniffed
+    // column). IPV4 is why this is carried: it shares UINT32's physical tag, so
+    // without the descriptor the column is an ordinary unsigned integer and every
+    // consumer that needs IPv4 either renders integers or refuses. Attached by
+    // wrap_csv_column via draken_vector_own_raw_logical.
+    uint8_t           logical_kind   = 0;
+    uint8_t           unit           = 2;
+    int16_t           offset_minutes = 0;
+    uint8_t           precision      = 0;
+    uint8_t           scale          = 0;
 };
 
 // ---------------------------------------------------------------------------

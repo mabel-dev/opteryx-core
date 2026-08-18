@@ -37,6 +37,13 @@ _SQL_ALIASES: dict[str, list[str]] = {
 #   cast_to         — list of {type, example, note?} dicts: how to CAST TO this type
 #   comparable_with — list of type names that can be compared with this type
 #   arithmetic      — list of {expr, result, desc} showing arithmetic results
+#   operators       — operator catalog NAMES (keys of OPERATOR_DEFINITIONS) worth
+#                     reading beside this type. Names only: the symbol, summary and
+#                     accepted types are read back out of the operator catalog when
+#                     the page is rendered, so nothing is copied here. Needed where
+#                     the operator's declared operand types do not name the type —
+#                     IPV4's category is INTEGER, so `<<=` reads as an integer
+#                     operator in the matrix and no derivation can find it.
 #   limitations     — list of plain-text strings documenting known gaps
 #   notes           — additional detail (shown as a Notes section)
 _TYPE_METADATA: dict[str, dict[str, Any]] = {
@@ -49,6 +56,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             {"type": "uint32", "example": "CAST(ip AS UINT32)", "note": "Exposes the raw address as an integer; no bits change."},
         ],
         "comparable_with": ["ipv4", "integer"],
+        "operators": ["IPContainedBy", "IPContains"],
         "limitations": [
             "IPv4 only. There is no IPv6 type.",
             "Address text is parsed strictly: no shorthand forms such as `10.1` for `10.0.0.1`, and no leading zeros such as `010.0.0.1`. Both are rejected rather than guessed, because a parser and an access rule disagreeing about what an address means is a security bug.",
@@ -336,6 +344,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         ),
         "cast_to": [],
         "comparable_with": [],
+        "operators": ["AtArrow", "ArrayContainsAll", "InList", "NotInList", "MapAccess"],
         "notes": (
             "Individual elements are accessed with subscript notation: `arr[0]` returns the first element "
             "(zero-indexed, negative indices count from the end). Array literals (`[1, 2, 3]`) are valid as an "

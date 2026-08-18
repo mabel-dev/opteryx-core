@@ -101,6 +101,36 @@ const DrakenVector* draken_array_grandchild_unwrap(PyObject* obj);
 PyObject* draken_vector_own_raw(
     void* data, uint8_t* validity, uint32_t length, DrakenType type);
 
+// draken_vector_own_raw_logical — draken_vector_own_raw plus a logical-type
+// descriptor.
+//
+// Same ownership contract as draken_vector_own_raw in every respect; the only
+// addition is that the resulting Vector carries an interned LogicalType.
+//
+// The descriptor is passed as plain scalars rather than a `LogicalType` so this
+// header keeps its no-C++-dependency property (logical_type.h pulls in <deque>,
+// <mutex> and a process-global registry). The values are the enum ORDINALS from
+// draken/logical_type.h:
+//   logical_kind    — LogicalKind: 0 NONE, 1 TIMESTAMP, 2 TIME, 3 DECIMAL,
+//                     4 VECTOR, 5 IPV4. 0 makes this exactly draken_vector_own_raw.
+//   unit            — TimestampUnit: 0 s, 1 ms, 2 us, 3 ns (TIMESTAMP/TIME only).
+//   offset_minutes  — fixed UTC offset in minutes (TIMESTAMP only).
+//   precision/scale — DECIMAL only.
+//   dimension       — VECTOR only.
+//
+// This exists because the descriptor lives on the Vector's owner, NOT in the
+// frozen 40-byte DrakenVector — so a producer outside draken (rugo's readers)
+// had no way to emit an IPv4 / TIMESTAMP / DECIMAL column at all: it could build
+// the right bits and still hand back a bare UINT32, which §11's own note calls a
+// defect in the producer rather than something consumers should cope with.
+//
+// Returns a NEW reference to a Python Vector on success; NULL + exception on
+// failure (including a descriptor that is invalid for `type`).
+PyObject* draken_vector_own_raw_logical(
+    void* data, uint8_t* validity, uint32_t length, DrakenType type,
+    uint8_t logical_kind, uint8_t unit, int16_t offset_minutes,
+    uint8_t precision, uint8_t scale, uint32_t dimension);
+
 // draken_vector_take_buffer — native take over a raw int32 index buffer.
 //
 // vec_obj must be a draken.draken_native.Vector. `indices` is a caller-owned

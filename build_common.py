@@ -936,6 +936,9 @@ def draken_rugo_extensions(parquet_created_by):
                     "rugo/src/csv/core/csv_scan.cpp",
                     "rugo/src/csv/core/csv_row_map.cpp",
                     "rugo/src/csv/core/csv_column_builder.cpp",
+                    # explicit_schema's canonical type-name vocabulary, shared by
+                    # the JSONL and CSV readers (rugo/src/declared_type.hpp).
+                    "rugo/src/declared_type.cpp",
                 ]
                 + get_parquet_vendor_sources()
                 + get_lz4_vendor_sources()  # lz4.c: LZ4_RAW block decode (parquet codec 7)
@@ -990,6 +993,11 @@ def draken_rugo_extensions(parquet_created_by):
                 "draken/core/string_slot.h",
                 "draken/core/alloc.h",
                 "draken/core/buffers.h",
+                "draken/core/ipv4.h",
+                "draken/core/iso_datetime.h",
+                "draken/core/decimal_text.h",
+                "rugo/src/declared_type.hpp",
+                "rugo/src/declared_parse.hpp",
             ],
             define_macros=[
                 ("HAVE_SNAPPY", "1"),
