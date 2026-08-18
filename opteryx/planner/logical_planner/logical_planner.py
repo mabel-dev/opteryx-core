@@ -26,6 +26,9 @@ from opteryx.exceptions import (
 )
 from opteryx.expression import NodeType, format_expression, get_all_nodes_of_type
 from opteryx.models import LogicalColumn, Node
+from opteryx.operators.window.helpers import FRAME_BOUND_KIND
+from opteryx.operators.window.helpers import FRAME_UNITS
+from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import logical_planner_builders
@@ -67,6 +70,7 @@ class LogicalPlanStepType(int, Enum):
 
     Subquery = auto()
     Window = auto()  # OVER (PARTITION BY ...) — rewritten to join by plan rewriter
+    FramedWindow = auto()  # SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE BETWEEN ...) — native sink, never rewritten
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake
     DependentJoin = auto()  # Correlated subquery awaiting decorrelation
 
@@ -993,7 +997,34 @@ def _replace_node(tree, target, replacement):
     return tree
 
 
-def _window_display_name(function_node, partition_by: list, window_order_by: list) -> str:
+_FRAME_UNITS_NAMES = {_v: _k for _k, _v in FRAME_UNITS.items()}
+_FRAME_BOUND_NAMES = {_v: _k for _k, _v in FRAME_BOUND_KIND.items()}
+
+
+def _render_frame_bound(kind_code: int, offset: int) -> str:
+    _name = _FRAME_BOUND_NAMES[kind_code]
+    if _name == "UNBOUNDED_PRECEDING":
+        return "UNBOUNDED PRECEDING"
+    if _name == "PRECEDING":
+        return f"{offset} PRECEDING"
+    if _name == "CURRENT_ROW":
+        return "CURRENT ROW"
+    if _name == "FOLLOWING":
+        return f"{offset} FOLLOWING"
+    return "UNBOUNDED FOLLOWING"
+
+
+def _render_frame_clause(frame: tuple) -> str:
+    _units, _start_kind, _start_offset, _end_kind, _end_offset = frame
+    return (
+        f"{_FRAME_UNITS_NAMES[_units]} BETWEEN {_render_frame_bound(_start_kind, _start_offset)} "
+        f"AND {_render_frame_bound(_end_kind, _end_offset)}"
+    )
+
+
+def _window_display_name(
+    function_node, partition_by: list, window_order_by: list, frame: Optional[tuple] = None
+) -> str:
     """The user-facing name of an unaliased window function — what it renders to.
 
     Every unaliased projection expression is named by its rendering (see the binder's
@@ -1002,7 +1033,11 @@ def _window_display_name(function_node, partition_by: list, window_order_by: lis
     clause only exists as the parser's dict on the node; by the time the plan is built
     the spec has been lifted onto the Window node and `over` is cleared. The spec is
     part of what the column IS — two windows over the same aggregate but different
-    partitions are two different columns — so it is rendered too.
+    partitions (or, for a framed aggregate, different FRAMES) are two different
+    columns — so it is rendered too, and is also the dedup key `_hoist_windows` mints
+    against: leaving the frame out of it would fold `SUM(x) OVER (... ROWS BETWEEN
+    UNBOUNDED PRECEDING AND CURRENT ROW)` and the same aggregate with a different
+    frame onto the SAME minted column.
 
     `partition_by` and `window_order_by` are the already-built nodes, not the parser's
     branches; `window_order_by` is a list of (expression, ascending).
@@ -1018,6 +1053,8 @@ def _window_display_name(function_node, partition_by: list, window_order_by: lis
                 for _col, _ascending in window_order_by
             )
         )
+    if frame is not None:
+        _parts.append(_render_frame_clause(frame))
     return f"{format_expression(function_node)} OVER ({' '.join(_parts)})"
 
 
@@ -1046,6 +1083,108 @@ def _window_spec_nodes(over: Optional[dict]) -> Tuple[list, list]:
         for item in _over.get("order_by", [])
     ]
     return _partition_by, _window_order_by
+
+
+_FRAME_BOUND_RANK = {
+    "UNBOUNDED_PRECEDING": 0,
+    "PRECEDING": 1,
+    "CURRENT_ROW": 2,
+    "FOLLOWING": 3,
+    "UNBOUNDED_FOLLOWING": 4,
+}
+
+
+def _frame_offset_literal(expr_dict) -> int:
+    """A window FRAME's PRECEDING/FOLLOWING offset — a non-negative integer literal,
+    the same requirement LAG/LEAD's row offset already enforces (no column reference:
+    the frame shape must be known before any row is read)."""
+    node = logical_planner_builders.build(expr_dict)
+    offset = node.value if node.node_type == NodeType.LITERAL else None
+    if offset is None or isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise UnsupportedSyntaxError(
+            "A window **FRAME**'s **PRECEDING**/**FOLLOWING** offset must be a non-negative integer literal."
+        )
+    return offset
+
+
+def _parse_frame_bound(bound) -> Tuple[str, int]:
+    """One frame bound (the parser's `start_bound`/`end_bound`) to (kind name, offset)."""
+    if bound == "CurrentRow":
+        return "CURRENT_ROW", 0
+    if isinstance(bound, dict):
+        if "Preceding" in bound:
+            value = bound["Preceding"]
+            return ("UNBOUNDED_PRECEDING", 0) if value is None else ("PRECEDING", _frame_offset_literal(value))
+        if "Following" in bound:
+            value = bound["Following"]
+            return ("UNBOUNDED_FOLLOWING", 0) if value is None else ("FOLLOWING", _frame_offset_literal(value))
+    raise InvalidInternalStateError(f"unrecognised window frame bound: {bound!r}")
+
+
+def _build_window_frame(over: dict, has_order_by: bool) -> Optional[tuple]:
+    """A window's FrameSpec as (units, start_kind, start_offset, end_kind, end_offset)
+    — engine kind codes (FRAME_UNITS / FRAME_BOUND_KIND, native_window_frame.hpp's
+    mirror) — or None when the window has no ORDER BY and therefore no per-row
+    ordering to frame: it stays on the whole-partition broadcast-join path
+    (window_to_join.py), unchanged from before this function existed.
+
+    A frame clause REQUIRES an ORDER BY — the same rule Postgres/DuckDB enforce for
+    an explicit ROWS/RANGE clause, and there is no real query this refuses: a frame
+    with no ordering has no "current row" to be relative to. An ORDER BY with NO
+    explicit frame gets the standard's default frame, RANGE UNBOUNDED PRECEDING AND
+    CURRENT ROW — the shape a bare `SUM(x) OVER (ORDER BY d)` means.
+    """
+    frame = over.get("window_frame")
+    if not has_order_by:
+        if frame is not None:
+            raise UnsupportedSyntaxError(
+                "A window **FRAME** (**ROWS**/**RANGE BETWEEN** ...) requires an **ORDER BY** in its **OVER** (...) clause."
+            )
+        return None
+    if frame is None:
+        units, start_kind, start_offset, end_kind, end_offset = (
+            "RANGE",
+            "UNBOUNDED_PRECEDING",
+            0,
+            "CURRENT_ROW",
+            0,
+        )
+    else:
+        units_name = frame.get("units")
+        if units_name not in ("Rows", "Range"):
+            raise UnsupportedSyntaxError(
+                f"Window **FRAME** unit {md_code(str(units_name))} is not supported. Use **ROWS** or **RANGE**."
+            )
+        units = "ROWS" if units_name == "Rows" else "RANGE"
+        start_kind, start_offset = _parse_frame_bound(frame["start_bound"])
+        end_bound = frame.get("end_bound")
+        end_kind, end_offset = ("CURRENT_ROW", 0) if end_bound is None else _parse_frame_bound(end_bound)
+        if units == "RANGE" and (
+            start_kind in ("PRECEDING", "FOLLOWING") or end_kind in ("PRECEDING", "FOLLOWING")
+        ):
+            raise UnsupportedSyntaxError(
+                "**RANGE** frames with a numeric **PRECEDING**/**FOLLOWING** offset are not "
+                "supported — only **UNBOUNDED PRECEDING**, **CURRENT ROW** and **UNBOUNDED "
+                "FOLLOWING**. Use **ROWS** instead."
+            )
+        start_rank = _FRAME_BOUND_RANK[start_kind]
+        end_rank = _FRAME_BOUND_RANK[end_kind]
+        inverted = start_rank > end_rank
+        if not inverted and start_rank == end_rank == _FRAME_BOUND_RANK["PRECEDING"]:
+            inverted = start_offset < end_offset
+        if not inverted and start_rank == end_rank == _FRAME_BOUND_RANK["FOLLOWING"]:
+            inverted = start_offset > end_offset
+        if inverted:
+            raise UnsupportedSyntaxError(
+                "A window **FRAME**'s start bound cannot come after its end bound."
+            )
+    return (
+        FRAME_UNITS[units],
+        FRAME_BOUND_KIND[start_kind],
+        start_offset,
+        FRAME_BOUND_KIND[end_kind],
+        end_offset,
+    )
 
 
 def _hoist_windows(
@@ -1122,13 +1261,19 @@ def _hoist_windows(
                 raise UnsupportedSyntaxError(
                     f"{_window.value}() requires an **ORDER BY** in its **OVER** (...) clause. Add one, for example `OVER (ORDER BY column)`."
                 )
-        elif _over.get("order_by"):
+            if _over.get("window_frame") is not None:
+                raise UnsupportedSyntaxError(
+                    "Window frame specifications (**ROWS**/**RANGE BETWEEN**) are not supported "
+                    f"for {_window.value}() — ranking and navigation window functions are always "
+                    "computed over the whole ordered partition."
+                )
+        elif (_over.get("order_by") or _over.get("window_frame") is not None) and (
+            _window.value not in FRAMED_AGGREGATE_FUNCTIONS
+        ):
             raise UnsupportedSyntaxError(
-                "Window functions with **ORDER BY** are not supported. Use **PARTITION BY** only."
-            )
-        if _over.get("window_frame") is not None:
-            raise UnsupportedSyntaxError(
-                "Window functions with frame specifications (**ROWS/RANGE BETWEEN**) are not supported."
+                f"{_window.value}() cannot be used with a window **ORDER BY** or **FRAME** — only "
+                f"{', '.join(sorted(FRAMED_AGGREGATE_FUNCTIONS))} support a running/framed window. "
+                "Use **PARTITION BY** only, or compute the running aggregate in a subquery."
             )
         _partition_by, _window_order_by = _window_spec_nodes(_over)
         # A window in the SPEC is invisible to `_refuse_nested_window` — the spec is the
@@ -1137,11 +1282,16 @@ def _hoist_windows(
         _refuse_window_in_window_spec(_partition_by, "PARTITION BY")
         _refuse_window_in_window_spec([_col for _col, _asc in _window_order_by], "ORDER BY")
 
+        # A framed aggregate window's FrameSpec — see `_build_window_frame`. None
+        # (including for every ranking/navigation window) means "no ORDER BY, no
+        # frame": the whole-partition broadcast-join path, unchanged.
+        _frame = None if _is_ranking else _build_window_frame(_over, bool(_window_order_by))
+
         # Rendered before anything is mutated — the aggregate path clears `over`, and the
         # spec is part of what the column IS. Deliberately alias-independent, because this
         # is also the dedup key: `w OVER (...)` written in ORDER BY is the same column as
         # `w OVER (...) AS x` written in the SELECT list.
-        _canonical = _window_display_name(_window, _partition_by, _window_order_by)
+        _canonical = _window_display_name(_window, _partition_by, _window_order_by, _frame)
         _already = minted.get(_canonical)
         if _already is None:
             # Two different names for two different jobs: `_win_alias` is the INTERNAL
@@ -1161,12 +1311,13 @@ def _hoist_windows(
                 )
             else:
                 # `_win_alias` names the aggregate inside the CTE the window rewrite builds
-                # and the join-side reference to it, so it must be minted and must stay on
-                # the window node; only the OUTER reference carries the display name.
+                # (unframed) or the FramedWindow node's output (framed), and the reference
+                # to it, so it must be minted and must stay on the window node; only the
+                # OUTER reference carries the display name.
                 _window.alias = _win_alias
                 _window.query_column = _win_alias
                 _window.over = None  # clear so it acts as a plain aggregate inside the CTE
-                window_specs.append((_window, _partition_by))
+                window_specs.append((_window, _partition_by, _window_order_by, _frame))
             minted[_canonical] = (_win_alias, _win_display)
             newly_minted.append(_win_alias)
         else:
@@ -1521,23 +1672,41 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             "Qualified wild cards (`table.*`) must be the first column when used with additional columns. Move it to the start of the projection."
         )
 
-    # A subquery used as a SELECT-list value is not yet supported. Decorrelation
-    # (DecorrelateSubqueryStrategy) only inspects Filter conditions, so a SUBQUERY
-    # expression node in the projection would survive binding unresolved and fail
-    # deep in the planner with an internal error. Refuse it here, at the first
-    # walk of the projection, per the fail-fast contract: raise, never silently
-    # wrong. Full support needs a LEFT OUTER join decorrelation — see the
-    # "Known gaps" section of decorrelate_subquery.py.
-    if get_all_nodes_of_type(_projection, select_nodes=(NodeType.SUBQUERY,)):
-        raise UnsupportedSyntaxError(
-            "Scalar subqueries are supported in the **WHERE** clause but not yet in the **SELECT** list."
+    # EXISTS / IN subqueries used as a SELECT-list value are not yet supported —
+    # they are a boolean existence test, not a value, and decorrelating one needs
+    # a zero-key semi/anti join the join compiler does not admit (see the "Known
+    # gaps" section of decorrelate_subquery.py). A bare SCALAR subquery in the
+    # SELECT list (`SELECT (SELECT ...) ...`, including one nested in a CASE
+    # branch) is NOT refused here: correlation cannot be told apart from an
+    # uncorrelated single-row subquery until binding has resolved every name, so
+    # that decision is deferred to DecorrelateSubqueryStrategy, which rewrites the
+    # uncorrelated, provably-single-row case into a CROSS JOIN and raises,
+    # cleanly, for anything else (correlated, or not provably one row).
+    for _existence_node in get_all_nodes_of_type(
+        _projection, select_nodes=(NodeType.UNARY_OPERATOR, NodeType.COMPARISON_OPERATOR)
+    ):
+        is_select_exists = (
+            _existence_node.node_type == NodeType.UNARY_OPERATOR
+            and _existence_node.value == "Exists"
         )
+        is_select_in_subquery = (
+            _existence_node.node_type == NodeType.COMPARISON_OPERATOR
+            and _existence_node.value == "InSubQuery"
+        )
+        if is_select_exists or is_select_in_subquery:
+            raise UnsupportedSyntaxError(
+                "**EXISTS** and **IN** subqueries are supported in the **WHERE** clause "
+                "but not yet in the **SELECT** list."
+            )
 
     # Detect window functions (AGGREGATOR nodes with an OVER clause) before aggregate extraction.
     # Replace each window function in _projection with a plain column reference to its output alias,
     # so the regular aggregate path does not see them. Window logical nodes are inserted here so
     # they sit between the scan/filter chain and the project, ready for the plan rewriter.
-    _window_specs: list = []  # aggregate windows: (agg_node, partition_by_nodes)
+    # aggregate windows: (agg_node, partition_by_nodes, window_order_by_pairs|None, frame|None).
+    # order_by/frame are None for a whole-partition window (window_to_join broadcasts it);
+    # set for a framed aggregate (FramedWindow node, native_window_frame.hpp).
+    _window_specs: list = []
     # ranking windows: (kind, partition_by_nodes, order_by_pairs, win_alias)
     _ranking_specs: list = []
     # QUALIFY is filtering on a window function's OUTPUT, so its window functions
@@ -1926,7 +2095,7 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         # window is here too — it is not in `_window_specs`, but `RANK()` is an
         # AGGREGATOR node and collecting it as a group-level aggregate reported it as
         # "the aggregate function RANK is not supported".
-        _hoisted_windows = {id(_agg_node) for _agg_node, _partition_by in _window_specs}
+        _hoisted_windows = {id(_agg_node) for _agg_node, _partition_by, _wob, _frame in _window_specs}
         _hoisted_windows.update(id(_original) for _slot, _original in _qualify_window_slots)
 
         # The aggregates the grouping must compute, gathered from every clause that can
@@ -1935,9 +2104,11 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
         # hoist spliced the window out of the projection before the collection walk ran —
         # so `SUM(SUM(x)) OVER (...)`'s inner SUM was computed by nothing at all.
         _window_operands: list = []
-        for _agg_node, _partition_by in _window_specs:
+        for _agg_node, _partition_by, _wob, _frame in _window_specs:
             _window_operands.extend(_agg_node.parameters or [])
             _window_operands.extend(_partition_by)
+            if _wob:
+                _window_operands.extend(_column for _column, _ascending in _wob)
         for _kind, _partition_by, _window_order_by, _win_alias, _params in _ranking_specs:
             _window_operands.extend(_partition_by)
             _window_operands.extend(_column for _column, _ascending in _window_order_by)
@@ -2032,12 +2203,17 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 (_rebase(_expression), _ascending) for _expression, _ascending in _order_by
             ]
             _order_by_columns = [_item[0] for _item in _order_by]
-        for _index, (_agg_node, _partition_by) in enumerate(_window_specs):
+        for _index, (_agg_node, _partition_by, _wob, _frame) in enumerate(_window_specs):
             _agg_node.parameters = [
                 _rebase(_parameter) if isinstance(_parameter, (Node, LogicalColumn)) else _parameter
                 for _parameter in (_agg_node.parameters or [])
             ]
-            _window_specs[_index] = (_agg_node, [_rebase(_pb) for _pb in _partition_by])
+            _rebased_wob = (
+                [(_rebase(_column), _ascending) for _column, _ascending in _wob] if _wob else _wob
+            )
+            _window_specs[_index] = (
+                _agg_node, [_rebase(_pb) for _pb in _partition_by], _rebased_wob, _frame
+            )
         for _index, (
             _kind,
             _partition_by,
@@ -2130,25 +2306,89 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             # Skipped over a grouped result: the boundary above IS the single relation
             # this is checking for, however many tables the grouping read.
             _find_base_scan(inner_plan)
-        # Group by distinct partition spec; same partition → one Window node (shared CTE).
-        _by_partition: dict = {}
-        for _agg_node, _partition_by in _window_specs:
-            _key = tuple(
-                getattr(pb, "source_column", None)
-                or getattr(pb, "value", None)
-                or format_expression(pb)
-                for pb in _partition_by
-            )
-            if _key not in _by_partition:
-                _by_partition[_key] = (_partition_by, [])
-            _by_partition[_key][1].append(_agg_node)
-        for _key, (_partition_by, _agg_nodes) in _by_partition.items():
-            _window_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
-            _window_step.aggregates = _agg_nodes
-            _window_step.partition_by = _partition_by
-            previous_step_id, step_id = step_id, random_string()
-            inner_plan.add_node(step_id, _window_step)
-            inner_plan.add_edge(previous_step_id, step_id)
+
+        # Whole-partition aggregate windows (no ORDER BY/FRAME) still take the
+        # broadcast-join lowering (window_to_join.py, unchanged). A framed one
+        # (ORDER BY and/or FRAME present) needs a genuinely ordered, per-row
+        # computation instead — see FramedWindowSink — and is built below.
+        _unframed_specs = [
+            (_agg_node, _partition_by)
+            for _agg_node, _partition_by, _wob, _frame in _window_specs
+            if _frame is None
+        ]
+        _framed_specs = [
+            (_agg_node, _partition_by, _wob, _frame)
+            for _agg_node, _partition_by, _wob, _frame in _window_specs
+            if _frame is not None
+        ]
+
+        if _unframed_specs:
+            # Group by distinct partition spec; same partition → one Window node
+            # (shared CTE).
+            _by_partition: dict = {}
+            for _agg_node, _partition_by in _unframed_specs:
+                _key = tuple(
+                    getattr(pb, "source_column", None)
+                    or getattr(pb, "value", None)
+                    or format_expression(pb)
+                    for pb in _partition_by
+                )
+                if _key not in _by_partition:
+                    _by_partition[_key] = (_partition_by, [])
+                _by_partition[_key][1].append(_agg_node)
+            for _key, (_partition_by, _agg_nodes) in _by_partition.items():
+                _window_step = LogicalPlanNode(node_type=LogicalPlanStepType.Window)
+                _window_step.aggregates = _agg_nodes
+                _window_step.partition_by = _partition_by
+                previous_step_id, step_id = step_id, random_string()
+                inner_plan.add_node(step_id, _window_step)
+                inner_plan.add_edge(previous_step_id, step_id)
+
+        if _framed_specs:
+            from opteryx.types.schema import SchemaColumn, mint_column_identity
+
+            # Group by distinct PARTITION BY + window ORDER BY: functions that share
+            # both need only one sorted pass (FramedWindowSink computes every one of
+            # them from it), even when their FRAMES differ — the frame is per
+            # function, the sort is per (partition, order).
+            _by_fspec: dict = {}
+            for _agg_node, _partition_by, _wob, _frame in _framed_specs:
+                _pkey = tuple(format_expression(pb) for pb in _partition_by)
+                _okey = tuple((format_expression(c), bool(a)) for c, a in _wob)
+                _spec_key = (_pkey, _okey)
+                if _spec_key not in _by_fspec:
+                    _by_fspec[_spec_key] = (_partition_by, _wob, [])
+                _by_fspec[_spec_key][2].append((_agg_node, _frame))
+            for _spec_key, (_partition_by, _wob, _outs) in _by_fspec.items():
+                _win_rel = f"$framedwindow-{random_string(6)}"
+                # INT64 is a placeholder: the true output type depends on the
+                # aggregate AND its argument's type (SUM(int) is INT64, SUM(float)
+                # is FLOAT64, AVG is always FLOAT64, SUM/MIN/MAX(DECIMAL128) stays
+                # DECIMAL128, ...) and is not resolved until binding — the framed
+                # window binder overwrites `column_type` there, mirroring how the
+                # ranking window binder overwrites LAG/LEAD's placeholder.
+                _outputs = [
+                    (
+                        _agg_node.value,
+                        SchemaColumn(
+                            name=_agg_node.alias,
+                            column_type=_plt.INT64,
+                            identity=mint_column_identity(_win_rel, _agg_node.alias),
+                        ),
+                        list(_agg_node.parameters or []),
+                        _frame,
+                    )
+                    for _agg_node, _frame in _outs
+                ]
+                _win_step = LogicalPlanNode(node_type=LogicalPlanStepType.FramedWindow)
+                _win_step.partition_by = _partition_by
+                _win_step.order_by = _wob
+                _win_step.outputs = _outputs
+                _win_step.output_relation = _win_rel
+                _win_step.columns = []
+                previous_step_id, step_id = step_id, random_string()
+                inner_plan.add_node(step_id, _win_step)
+                inner_plan.add_edge(previous_step_id, step_id)
 
     if _ranking_specs:
         from opteryx.types.schema import SchemaColumn, mint_column_identity
@@ -2768,12 +3008,17 @@ def create_node_relation(relation: dict):
         )
         from_step.hints = [hint["Identifier"]["value"] for hint in table["with_hints"]]
 
-        # Extract and validate AT clause if present
+        # Extract and validate AT / VERSION clause if present
         version_clause = table.get("version")
         if version_clause is not None:
-            from_step.at_date = logical_planner_builders.extract_timetravel_timestamp(
-                version_clause
-            )
+            if logical_planner_builders.is_version_as_of_clause(version_clause):
+                from_step.version = logical_planner_builders.extract_timetravel_version(
+                    version_clause
+                )
+            else:
+                from_step.at_date = logical_planner_builders.extract_timetravel_timestamp(
+                    version_clause
+                )
 
         step_id = random_string()
         sub_plan.add_node(step_id, from_step)

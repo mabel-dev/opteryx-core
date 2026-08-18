@@ -123,6 +123,46 @@ def test_vertex_row_count_uses_manifest():
         assert v.row_count == 177
 
 
+def test_cte_leaf_in_chain_gets_a_real_row_count():
+    """A leaf that is a CTE/subquery reference (not a bare Scan) must still
+    produce a graph, not abort the whole chain.
+
+    Regression for TPC-DS Q64: `_gather_leaves`/DPccp's own bookkeeping
+    records a leaf's relation names as the FULL set folded into that side
+    (here: the CTE's own alias plus its two internal base-table aliases),
+    not just the CTE's outward-facing name. Resolving those internal names
+    to Scan nodes via a relation-name walk fails by design -- a Subquery/CTE
+    boundary is opaque to that walk -- which previously starved the leaf's
+    row-count of ANY scan to read and returned None for it, aborting graph
+    construction for the WHOLE chain (all leaves, not just this one): DPccp
+    then bailed out entirely, and TPC-DS Q64's `cs_ui` CTE fell back to a
+    naive left-deep cross-join ordering with two genuinely unfiltered cross
+    joins, ballooning its estimate from ~7K rows to 14+ trillion.
+    """
+    sql = """
+    WITH grp AS (
+        SELECT b.planetId AS planetId, COUNT(*) AS n
+        FROM testdata.satellites b, testdata.satellites c
+        WHERE b.id = c.id
+        GROUP BY b.planetId
+    )
+    SELECT a.id AS ai, d.name AS dn, grp.n AS n
+    FROM testdata.satellites a, testdata.planets d, grp
+    WHERE a.planetId = d.id AND a.planetId = grp.planetId
+    LIMIT 1
+    """
+    graphs = _capture_graphs(sql)
+    assert graphs, "adapter should have been called"
+    # The outer 3-leaf chain (a, d, grp) is the one that used to abort.
+    outer = [g for g in graphs if g is not None and g.n == 3]
+    assert outer, f"expected a 3-vertex graph for the outer chain, got {graphs}"
+    g = outer[0]
+    assert g.is_connected(g.full_mask)
+    assert len(g.edges) == 2
+    for v in g.vertices:
+        assert v.row_count is not None and v.row_count > 0
+
+
 def test_no_manifest_returns_none():
     """READ_JSONL relations are FunctionDataset nodes, not Scan nodes; the
     adapter can't find a manifest for them, so it bails."""

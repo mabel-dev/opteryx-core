@@ -37,3 +37,32 @@ RANK_VALUED: frozenset = frozenset({"ROW_NUMBER", "RANK", "DENSE_RANK"})
 # offset within the partition (in the window's ORDER BY order). They take
 # arguments; the ranking functions take none.
 NAVIGATION_FUNCTIONS: frozenset = frozenset({"LAG", "LEAD"})
+
+# name -> engine kind code (must match WinAggFn in src/cpp/engine/native_window_frame.hpp).
+# A SEPARATE registry from WINDOW_FUNCTIONS above, deliberately: a framed aggregate
+# (SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE BETWEEN ...)) is a different computation
+# — a sliding-window reduction with its own per-function OUTPUT TYPE — executed by a
+# separate native sink (FramedWindowSink), not WindowSink. See
+# native_window_frame.hpp's header comment for why the two are not unified.
+FRAMED_AGGREGATE_FUNCTIONS: dict[str, int] = {
+    "SUM": 0,
+    "COUNT": 1,
+    "AVG": 2,
+    "MIN": 3,
+    "MAX": 4,
+}
+
+# name -> engine kind code (must match FrameUnits in native_window_frame.hpp).
+FRAME_UNITS: dict[str, int] = {
+    "ROWS": 0,
+    "RANGE": 1,
+}
+
+# name -> engine kind code (must match FrameBoundKind in native_window_frame.hpp).
+FRAME_BOUND_KIND: dict[str, int] = {
+    "UNBOUNDED_PRECEDING": 0,
+    "PRECEDING": 1,
+    "CURRENT_ROW": 2,
+    "FOLLOWING": 3,
+    "UNBOUNDED_FOLLOWING": 4,
+}

@@ -53,6 +53,17 @@ inline uint64_t telem_cpu_now_ns() {
          + static_cast<uint64_t>(ts.tv_nsec);
 }
 
+// Whole-PROCESS CPU clock: the sum of every thread's running time. Read either side of
+// a pipeline (which run one at a time) it gives the CPU that pipeline burned, and
+// cpu/wall is then the mean number of cores it kept busy. Distinct from
+// telem_cpu_now_ns above, which is this THREAD only and cannot see an idle pool.
+inline uint64_t telem_process_cpu_now_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull
+         + static_cast<uint64_t>(ts.tv_nsec);
+}
+
 // rows * columns * 8 — the byte estimate the Python operator model reports (bytes_in/out).
 inline uint64_t telem_nbytes(const MorselPtr& m) {
     if (!m) return 0;

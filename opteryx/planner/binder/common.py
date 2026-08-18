@@ -19,6 +19,7 @@ from opteryx.planner.binder.order import visit_order
 from opteryx.planner.binder.project import visit_exit, visit_project
 from opteryx.planner.binder.set_ops import visit_except, visit_intersect, visit_set, visit_union, visit_unnest
 from opteryx.planner.binder.window import visit_window
+from opteryx.planner.binder.framed_window import visit_framed_window as _visit_framed_window
 from opteryx.planner.binder.subquery import visit_comment, visit_subquery
 from opteryx.planner.binder.traversal import post_bind, traverse
 from opteryx.planner.binder.view import (
@@ -183,6 +184,9 @@ class BinderVisitor:
 
     def visit_window(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         return visit_window(self, node, context)
+
+    def visit_framed_window(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        return _visit_framed_window(self, node, context)
 
     def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
         return visit_show(self, node, context)

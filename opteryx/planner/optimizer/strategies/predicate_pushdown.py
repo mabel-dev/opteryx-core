@@ -509,6 +509,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             LogicalPlanStepType.Limit,
             LogicalPlanStepType.Union,
             LogicalPlanStepType.Window,
+            LogicalPlanStepType.FramedWindow,
             LogicalPlanStepType.Aggregate,
         ):
             # A barrier: filters never cross a Limit (row-count semantics), a

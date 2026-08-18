@@ -115,7 +115,7 @@ def test_operator_catalog_includes_binder_matrix_metadata():
     assert eq_operator["category"] == "comparison"
     assert eq_operator["description"] == "Equality comparison."
     assert eq_operator["documentation"] == "Returns true when both operands compare equal."
-    assert eq_operator["signature_count"] == 23
+    assert eq_operator["signature_count"] == 24
     assert eq_operator["result_types"] == ["boolean"]
     assert {
         "left_type": "integer",
@@ -170,6 +170,54 @@ def test_operator_catalog_includes_binder_matrix_metadata():
         "result_type_is_dynamic": False,
         "cost_estimate": 100.0,
     } in xor_operator["signatures"]
+
+
+def test_operator_catalog_includes_documentation_metadata():
+    """The half of the operator reference the binder matrix cannot answer.
+
+    Operand names, syntax forms and examples are hand-written in
+    `opteryx/expression/operator_catalog.pyx`; the TYPES beside each operand are
+    derived from the binder matrix. This pins the join of the two, because it is
+    the join that reaches docs.opteryx.
+    """
+    catalog = export_operator_catalog()
+
+    like = catalog["Like"]
+    assert like["syntax_forms"] == ["<haystack> LIKE <pattern>"]
+    haystack, pattern = like["operands"]
+    assert haystack["name"] == "haystack"
+    assert haystack["types"] == ["nvarchar", "varbinary", "varchar"]
+    assert pattern["name"] == "pattern"
+    assert pattern["types"] == ["nvarchar", "varbinary", "varchar"]
+    # A LIKE pattern may be a column - the binder does not require a literal here,
+    # and saying otherwise would publish a restriction the engine does not have.
+    assert pattern["constant_only"] is False
+    assert like["examples"][0] == {
+        "sql": "SELECT name FROM $planets WHERE name LIKE 'Ma%';",
+        "result": ["Mars"],
+    }
+    assert like["see_also"] == ["NotLike", "ILike", "RLike"]
+
+    # `@?` is the one operator whose operand really must be a literal - the binder
+    # rejects a non-literal path in determine_type().
+    _, path = catalog["AtQuestion"]["operands"]
+    assert path["constant_only"] is True
+
+    # Two spellings of one operator, not two operators.
+    assert catalog["NotEq"]["syntax_forms"] == ["<left> != <right>", "<left> <> <right>"]
+
+    # Every operator carries the full set - a half-filled entry publishes a page
+    # with a missing section.
+    for name, operator in catalog.items():
+        assert operator["syntax_forms"], name
+        assert len(operator["operands"]) == 2, name
+        assert operator["examples"], name
+        for example in operator["examples"]:
+            assert example["sql"], name
+            # An example with no recorded result is one nothing verifies.
+            assert example["result"], (name, example["sql"])
+        for operand in operator["operands"]:
+            assert operand["types"], (name, operand["name"])
 
 
 def test_aggregate_catalog_includes_execution_support():

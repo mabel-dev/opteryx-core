@@ -38,6 +38,7 @@
 #include "native_skene_latmat_scan_source.hpp"  // NativeSkeneLatmatScanSource (two-pass skene)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
+#include "native_window_frame.hpp"  // FramedWindowSink — SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE ...)
 #include "native_cidr_unnest.hpp"   // CidrUnnestOperator — CROSS JOIN CIDR_UNNEST
 #include "native_grouping_expand.hpp"  // GroupingExpandOperator — GROUP BY ROLLUP
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
@@ -199,6 +200,15 @@ struct PipelineNode {
                               // consumers of a sorted buffer run at 1); 0 = engine dop
     std::atomic<bool> halt{false};   // set by LimitOperator when its quota is filled
     std::unique_ptr<GlobalSinkState> result;
+    // Filled by run(). Pipelines execute strictly one at a time, so a PROCESS-wide CPU
+    // clock read either side of run_pipeline() attributes all CPU burned in that window
+    // to this pipeline — which is what makes `cpu_ns / wall_ns` the average number of
+    // cores this pipeline actually kept busy. Per-operator OpStats cannot answer that:
+    // they measure the operators that DID run, and the question here is how much of the
+    // pool was doing nothing while they ran.
+    uint64_t wall_ns = 0;
+    uint64_t cpu_ns = 0;
+    int dop_used = 0;
 };
 
 class Engine {
@@ -212,7 +222,11 @@ public:
     // stable as the vectors grow.
     std::vector<std::unique_ptr<std::vector<int>>> latmat_owned_ints;
     std::vector<std::unique_ptr<std::vector<std::string>>> latmat_owned_names;
-    MorselQueue* out_q = nullptr;
+    // Shared, not raw: the engine writes to this during run() (see the drain at the
+    // bottom of this class), and the queue's lifetime must not depend on Python
+    // still holding its PyMorselQueue wrapper at that moment. See the ownership note
+    // in native_queue_sink.hpp.
+    std::shared_ptr<MorselQueue> out_q;
     std::vector<std::string> final_names;   // terminal schema, for the empty-result morsel
     std::vector<DrakenType>  final_types;
     std::vector<const LogicalType*> final_logical;  // parallel to final_types; nullptr = none
@@ -256,6 +270,33 @@ public:
             if (pn->source) emit(pn->source->stats, "source");
             for (const auto& op : pn->operators) emit(op->stats, "operator");
             if (pn->sink) emit(pn->sink->stats, "sink");
+        }
+        return out;
+    }
+
+    // Per-PIPELINE wall/CPU, one row per pipeline in creation (= execution) order.
+    // `cpu_ns / wall_ns` is the mean cores busy while that pipeline ran; comparing it
+    // against `dop` is how a phase that leaves the pool parked becomes visible, which
+    // no per-operator reading can show.
+    struct PipelineReading {
+        std::string label;      // the pipeline's source display name (what it reads)
+        uint64_t wall_ns, cpu_ns;
+        int dop;
+    };
+    std::vector<PipelineReading> collect_pipeline_stats() const {
+        std::vector<PipelineReading> out;
+        out.reserve(pipelines.size());
+        for (const auto& pn : pipelines) {
+            std::string label;
+            if (pn->source) {
+                const OpStats& s = pn->source->stats;
+                label = s.display_name.empty() ? s.identity : s.display_name;
+            }
+            if (label.empty() && pn->sink) {
+                const OpStats& s = pn->sink->stats;
+                label = s.display_name.empty() ? s.identity : s.display_name;
+            }
+            out.push_back(PipelineReading{label, pn->wall_ns, pn->cpu_ns, pn->dop_used});
         }
         return out;
     }
@@ -390,6 +431,35 @@ public:
         schema->zero_col_rows = 0;
         set_source_(p, std::make_unique<UnmatchedBuildSource>(
             join2_refs[ref].get(), std::move(schema)));
+    }
+    // RIGHT SEMI / RIGHT ANTI, half one: consume the STREAMED leg and mark the build
+    // rows it hits. Emits nothing — see Join2MarkSink. `key_idx` are the streamed
+    // leg's join keys; `payload_idx` is the streamed leg's payload in the PAIR layout
+    // the residual is lowered against (build payload, then streamed payload), exactly
+    // as add_join2_probe_residual uses it. A null `instrs`/`fn` is the no-residual
+    // case, where a key match alone proves existence.
+    void set_join2_mark_sink(size_t p, size_t ref, std::vector<size_t> key_idx,
+                             std::vector<size_t> payload_idx,
+                             void* instrs, int count, std::vector<int> col_idx,
+                             std::vector<void*> lit_dv, ExprEvalFn fn) {
+        ExprProgram prog;
+        prog.instrs = instrs;
+        prog.count = count;
+        prog.col_idx = std::move(col_idx);
+        prog.lit_dv = std::move(lit_dv);
+        set_sink_(p, std::make_unique<Join2MarkSink>(
+            std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
+            std::move(prog), fn));
+        pipelines[p]->fill_join2_ref = static_cast<int>(ref);
+    }
+    // RIGHT SEMI / RIGHT ANTI, half two: emit the build rows whose match flag has the
+    // requested polarity — `emit_matched` true for SEMI, false for ANTI. Unlike
+    // set_unmatched_build_source there is no probe half to type: an existence filter
+    // emits its own leg unchanged, so the only columns are the build payload the sink
+    // already retained.
+    void set_semi_anti_build_source(size_t p, size_t ref, bool emit_matched) {
+        set_source_(p, std::make_unique<SemiAntiBuildSource>(
+            join2_refs[ref].get(), emit_matched));
     }
     // SEMI/ANTI with a correlated NON-equality residual (TPC-H Q21's
     // `l2.l_suppkey <> l1.l_suppkey`). The residual is evaluated per candidate
@@ -793,13 +863,65 @@ public:
             std::move(part_idx), order_idx, ascending, k, std::move(out_name),
             buffers[buf].get()));
     }
+    // Framed aggregate window functions: SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE
+    // BETWEEN ...) — see native_window_frame.hpp. `sort_spec`/`n_part` are the same
+    // shape as set_window_sink's. Per function (parallel vectors, one entry each):
+    // fn_kinds = WinAggFn as int; fn_args = the argument column, -1 only for
+    // COUNT(*); fn_out_type = the DrakenType to emit; fn_out_lt_* decompose the
+    // output's LogicalType descriptor (kind==0 means "no logical type", mirroring
+    // add_expr_project's convention) — only DECIMAL/DECIMAL128 passthrough and AVG's
+    // decimal scale need it. fn_frame_* decompose each function's FrameSpec: units,
+    // start/end bound kind (FrameBoundKind as int) and start/end offset (meaningful
+    // only for Preceding/Following).
+    void set_framed_window_sink(size_t p, std::vector<SortKeySpec> sort_spec, size_t n_part,
+                                std::vector<int> fn_kinds, std::vector<std::string> fn_names,
+                                std::vector<int> fn_args,
+                                std::vector<int> fn_out_type,
+                                std::vector<int> fn_out_lt_kind, std::vector<int> fn_out_lt_unit,
+                                std::vector<int> fn_out_lt_precision,
+                                std::vector<int> fn_out_lt_scale,
+                                std::vector<int> fn_out_lt_dimension,
+                                std::vector<int> fn_frame_units,
+                                std::vector<int> fn_frame_start_kind,
+                                std::vector<long long> fn_frame_start_offset,
+                                std::vector<int> fn_frame_end_kind,
+                                std::vector<long long> fn_frame_end_offset,
+                                size_t buf, bool emit_prune, std::vector<uint32_t> emit_cols) {
+        std::vector<FramedAggFnSpec> funcs;
+        funcs.reserve(fn_kinds.size());
+        for (size_t i = 0; i < fn_kinds.size(); ++i) {
+            FramedAggFnSpec spec;
+            spec.kind = static_cast<WinAggFn>(fn_kinds[i]);
+            spec.name = fn_names[i];
+            spec.arg_col = fn_args[i];
+            spec.out_type = static_cast<DrakenType>(fn_out_type[i]);
+            if (fn_out_lt_kind[i] != 0) {
+                LogicalType lt;
+                lt.kind = static_cast<LogicalKind>(fn_out_lt_kind[i]);
+                lt.unit = static_cast<TimestampUnit>(fn_out_lt_unit[i]);
+                lt.precision = static_cast<uint8_t>(fn_out_lt_precision[i]);
+                lt.scale = static_cast<uint8_t>(fn_out_lt_scale[i]);
+                lt.dimension = static_cast<uint32_t>(fn_out_lt_dimension[i]);
+                spec.out_logical = logical_type_intern(lt);
+            }
+            spec.frame.units = static_cast<FrameUnits>(fn_frame_units[i]);
+            spec.frame.start.kind = static_cast<FrameBoundKind>(fn_frame_start_kind[i]);
+            spec.frame.start.offset = static_cast<int64_t>(fn_frame_start_offset[i]);
+            spec.frame.end.kind = static_cast<FrameBoundKind>(fn_frame_end_kind[i]);
+            spec.frame.end.offset = static_cast<int64_t>(fn_frame_end_offset[i]);
+            funcs.push_back(std::move(spec));
+        }
+        set_sink_(p, std::make_unique<FramedWindowSink>(
+            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get(),
+            131072, emit_prune, std::move(emit_cols)));
+    }
     void add_select(size_t p, std::vector<size_t> indices, std::vector<std::string> names) {
         add_op_(p,
             std::make_unique<ColumnSelectOperator>(std::move(indices), std::move(names)));
     }
-    void set_queue_sink(size_t p, MorselQueue* q) {
+    void set_queue_sink(size_t p, std::shared_ptr<MorselQueue> q) {
         set_sink_(p, std::make_unique<QueueSink>(q));
-        out_q = q;
+        out_q = std::move(q);
     }
     void set_agg_sink(size_t p, std::vector<AggSpec2> specs, size_t buf) {
         set_sink_(p,
@@ -850,7 +972,12 @@ public:
             p.halt = &pn->halt;
             int pdop = (pn->dop_override > 0 && pn->dop_override < dop)
                            ? pn->dop_override : dop;
+            pn->dop_used = pdop;
+            const uint64_t w0 = telem_now_ns();
+            const uint64_t c0 = telem_process_cpu_now_ns();
             pn->result = run_pipeline(p, pdop, err, pool);
+            pn->wall_ns = telem_now_ns() - w0;
+            pn->cpu_ns = telem_process_cpu_now_ns() - c0;
             if (err.code != 0) return;
             if (pn->fill_join2_ref >= 0) {
                 join2_refs[static_cast<size_t>(pn->fill_join2_ref)]->g =

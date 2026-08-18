@@ -52,17 +52,6 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
             return _CT_NULL
         return sc.column_type.element  # ColumnType
 
-    def _array_literal_return_type(arg_nodes):
-        """ARRAY(expr, type_name): return ARRAY<type_name> ColumnType."""
-        from opteryx.types.logical_type import parse_column_type
-        type_name = getattr(arg_nodes[1], "value", None) if len(arg_nodes) > 1 else None
-        if type_name:
-            ct = parse_column_type(f"ARRAY<{type_name}>")
-            # Return (ARRAY<X> ColumnType, element ColumnType) for catalog to split.
-            elem = ct.element if ct.element is not None else _CT_VARIANT
-            return (ct, elem)
-        return (_CT_ARRAY(_CT_VARIANT), _CT_VARIANT)
-
     _variadic_any = (
         ParameterSpec(name="arg0", type_family="any"),
         ParameterSpec(name="args", type_family="any", variadic=True, optional=True),
@@ -166,58 +155,6 @@ def get_builtin_utility_functions() -> List[FunctionDefinition]:
                         id="default",
                         callable_ref=_sort_kernel,
                         cost_us_per_million=4.92,
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="_ARRAY",
-            aliases=(),
-            category="utility",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Construct a typed array.",
-            documentation="Constructs an array of the specified element type.",
-            overloads=(
-                FunctionOverload(
-                    id="_ARRAY_2",
-                    parameters=(
-                        ParameterSpec(name="expr", type_family="any"),
-                        ParameterSpec(name="type_name", type_family="string", constant_only=True),
-                    ),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_array_literal_return_type),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=lambda *a: None,  # constructed inline by evaluator
-                        cost_us_per_million=0.25,
-                    ),
-                ),
-            ),
-        ),
-        FunctionDefinition(
-            name="_TRY_ARRAY",
-            aliases=(),
-            category="utility",
-            volatility="immutable",
-            deterministic=True,
-            lifecycle=LifecycleSpec(status="active"),
-            summary="Construct a typed array, returning null on failure.",
-            documentation="Like ARRAY but returns null on type conversion failure.",
-            overloads=(
-                FunctionOverload(
-                    id="_TRY_ARRAY_2",
-                    parameters=(
-                        ParameterSpec(name="expr", type_family="any"),
-                        ParameterSpec(name="type_name", type_family="string", constant_only=True),
-                    ),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_array_literal_return_type),
-                    kernel=KernelSpec(
-                        engine="draken",
-                        id="default",
-                        callable_ref=lambda *a: None,
-                        cost_us_per_million=0.31,
                     ),
                 ),
             ),
@@ -329,7 +266,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                     ),
                 ),
             ),
-            cost=111871.70,
+            cost=107778.29,
             summary="Format number in human-readable form.",
         ),
         FunctionDefinition(
@@ -390,7 +327,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_similarity,
-                        cost_us_per_million=1.33,
+                        cost_us_per_million=893647.14,
                     ),
                 ),
             ),
@@ -430,7 +367,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=other_functions.cosine_distance,
-                        cost_us_per_million=1.17,
+                        cost_us_per_million=884934.76,
                     ),
                 ),
             ),

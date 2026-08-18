@@ -52,14 +52,22 @@ inline bool vec_row_is_valid(const DrakenVector& v, uint32_t logical_row) {
 
 // ---- SINK: writes straight into the REAL production MorselQueue. No local/global merge
 //      needed (the queue itself is the thread-safe merge point — MPMC, real backpressure).
+// Ownership: SHARED, deliberately. This used to be a raw `MorselQueue*` whose
+// lifetime was decided by PyMorselQueue.__dealloc__ — i.e. by Python refcounting,
+// which cannot see these sinks or the consumer and does not count them. A producer
+// inside q_.enqueue(), or the consumer inside wait_dequeue_timed(), was therefore
+// standing on memory Python was entitled to free: close() sets a flag and drains,
+// but never waits for an in-flight caller to leave. Holding a shared_ptr makes the
+// queue outlive every real user regardless of when Python drops its reference —
+// last one out frees it.
 struct QueueSinkGlobal : GlobalSinkState {
-    MorselQueue* q;
+    std::shared_ptr<MorselQueue> q;
     std::atomic<long long> rows_out{0};
-    explicit QueueSinkGlobal(MorselQueue* qq) : q(qq) {}
+    explicit QueueSinkGlobal(std::shared_ptr<MorselQueue> qq) : q(std::move(qq)) {}
 };
 struct QueueSink : Sink {
-    MorselQueue* q;
-    explicit QueueSink(MorselQueue* qq) : q(qq) {}
+    std::shared_ptr<MorselQueue> q;
+    explicit QueueSink(std::shared_ptr<MorselQueue> qq) : q(std::move(qq)) {}
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<QueueSinkGlobal>(q);
     }

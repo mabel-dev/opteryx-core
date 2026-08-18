@@ -530,6 +530,43 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
     return _normalize_timetravel_value(value, value_type)
 
 
+def is_version_as_of_clause(version_clause) -> bool:
+    """True for `VERSION AS OF <n>`, which resolves to a snapshot id rather than a
+    timestamp and so is extracted by `extract_timetravel_version`, not
+    `extract_timetravel_timestamp`."""
+    return version_clause is not None and "VersionAsOf" in version_clause
+
+
+def extract_timetravel_version(version_clause) -> int:
+    """
+    Extract the requested snapshot id from a `VERSION AS OF <n>` clause.
+
+    The grammar only accepts a bare number literal here (`parse_number_value`, not
+    `parse_expr` - see sqlparser's `maybe_parse_table_version`), so there is no
+    expression to evaluate: the literal already is the answer.
+
+    0 is reserved. The SQL rewriter turns `VERSION AS OF PREVIOUS` into
+    `VERSION AS OF 0` and refuses a literal 0 from the reader before the parser ever
+    sees it (`_rewrite_version_as_of_previous`), so a 0 reaching here always means
+    "the parent of the current snapshot" - never a snapshot the reader named.
+
+    Raises:
+        UnsupportedSyntaxError: If the literal is not a non-negative whole number.
+    """
+    literal_node = build(version_clause["VersionAsOf"])
+    if (
+        literal_node is None
+        or literal_node.node_type != NodeType.LITERAL
+        or not isinstance(literal_node.value, int)
+        or literal_node.value < 0
+    ):
+        raise UnsupportedSyntaxError(
+            "VERSION AS OF must be a non-negative whole number (a snapshot id), "
+            "or `VERSION AS OF PREVIOUS`."
+        )
+    return literal_node.value
+
+
 def any_op(branch, alias: Optional[List[str]] = None, key=None):
     return Node(
         NodeType.COMPARISON_OPERATOR,

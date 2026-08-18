@@ -349,4 +349,22 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                     if col.schema_column:
                         identities.add(col.schema_column.identity)
 
+        # A FramedWindow node's argument columns (SUM/COUNT/AVG/MIN/MAX's operand)
+        # are read by the native sink at execution time even though they are not in
+        # node.columns — same reasoning as the ranking Window node above, and the
+        # same trap: harvest ONLY here misses them and the scan prunes them away.
+        if node.node_type == LogicalPlanStepType.FramedWindow:
+            for col in node.partition_by or []:
+                if col.schema_column:
+                    identities.add(col.schema_column.identity)
+            for col, _ in node.order_by or []:
+                if col.schema_column:
+                    identities.add(col.schema_column.identity)
+            for _kind, _identity, arg_node, _frame in node.window_functions or []:
+                if arg_node is None:
+                    continue
+                for col in get_all_nodes_of_type(arg_node, (NodeType.IDENTIFIER,)):
+                    if col.schema_column:
+                        identities.add(col.schema_column.identity)
+
         return identities

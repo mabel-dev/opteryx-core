@@ -117,3 +117,72 @@ cdef class WindowNode(BasePlanNode):
     @property
     def config(self):  # pragma: no cover
         return "window OVER (PARTITION BY ... ORDER BY ...)" if self._has_order_by else "ROW_NUMBER OVER (PARTITION BY ...)"
+
+
+from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
+
+cdef dict _AGG_KIND_CODES = dict(FRAMED_AGGREGATE_FUNCTIONS)
+
+
+cdef class FramedWindowNode(BasePlanNode):
+    """SUM/COUNT/AVG/MIN/MAX OVER (PARTITION BY ... ORDER BY ... ROWS|RANGE BETWEEN ...).
+
+    A separate node from WindowNode — see native_window_frame.hpp's header comment for
+    why a framed aggregate (a sliding-window reduction, per-function OUTPUT TYPE) is a
+    different computation from ranking/navigation (one value per row from the sorted
+    order itself, always INT64 or the LAG/LEAD argument's own type).
+
+    Plan-time config only; execution is 100% native (FramedWindowSink,
+    native_window_frame.hpp), read off this class by compiler.py's
+    FramedWindowNode branch (``._partition_columns``/``._order_columns``/
+    ``._order_ascending``/``._functions``).
+    """
+    cdef public list _partition_columns   # partition-key column identities (bytes)
+    cdef public list _order_columns       # order-key column identities (bytes)
+    cdef public list _order_ascending     # bool per order column
+    # _functions entries: (kind_code:int, output_identity:bytes, arg_node:Node|None,
+    # frame:tuple) — mirrors WindowNode's `_functions` shape (kind/identity/arg/extra).
+    # `arg_node` is kept as the NODE (not yet resolved to a column identity): a
+    # computed argument (e.g. `SUM(a + b) OVER (...)`) is projected to a stream
+    # column by the compiler, same as WindowNode's navigation argument. Each
+    # function's OUTPUT type is resolved by the compiler too (`_layout_type`/`_cts`,
+    # off `node.columns` — the pre-minted SchemaColumns the binder registered), not
+    # carried here: it depends on the ARGUMENT's bound type, which only the binder
+    # (via `_aggregate_return_type`) and the compiler's type-tracking machinery need
+    # to agree on, not this plan-time config class.
+    cdef public list _functions
+
+    def __init__(self, properties=None, **parameters):
+        BasePlanNode.__init__(self, properties=properties, **parameters)
+
+        partition_by = parameters.get("partition_by") or []
+        self._partition_columns = [col.schema_column.identity for col in partition_by]
+
+        order_by = parameters.get("order_by") or []
+        if not order_by:
+            raise UnsupportedSyntaxError(
+                "A window **FRAME** (ROWS/RANGE BETWEEN ...) requires an **ORDER BY** in its **OVER** (...) clause."
+            )
+        self._order_columns = [col.schema_column.identity for col, _ in order_by]
+        self._order_ascending = [bool(asc) for _, asc in order_by]
+
+        functions = parameters.get("window_functions") or []
+        self._functions = []
+        for kind, output_identity, arg_node, frame in functions:
+            if kind not in _AGG_KIND_CODES:
+                raise UnsupportedSyntaxError(
+                    f"Unsupported framed window function '{kind}'. **SUM**, **COUNT**, **AVG**, **MIN** and **MAX** are the supported window aggregate functions."
+                )
+            self._functions.append(
+                (_AGG_KIND_CODES[kind], output_identity, arg_node, frame)
+            )
+        if not self._functions:
+            raise UnsupportedSyntaxError("a framed window node with no functions")
+
+    @property
+    def name(self):  # pragma: no cover
+        return "Framed Window"
+
+    @property
+    def config(self):  # pragma: no cover
+        return "window OVER (PARTITION BY ... ORDER BY ... ROWS/RANGE BETWEEN ...)"

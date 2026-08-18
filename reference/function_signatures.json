@@ -41,7 +41,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 262.52
+                    "cost_us_per_million": 562.56
                 },
                 "parameters": [
                     {
@@ -169,7 +169,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 6998.99
+                    "cost_us_per_million": 5229.89
                 },
                 "parameters": [
                     {
@@ -297,7 +297,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 8774.93
+                    "cost_us_per_million": 7321.06
                 },
                 "parameters": [
                     {
@@ -363,7 +363,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 329.97
+                    "cost_us_per_million": 2525.34
                 },
                 "parameters": [
                     {
@@ -443,7 +443,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3386.42
+                    "cost_us_per_million": 3144.69
                 },
                 "parameters": [
                     {
@@ -1121,7 +1121,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 1.17
+                    "cost_us_per_million": 884934.76
                 },
                 "parameters": [
                     {
@@ -1255,7 +1255,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 1.33
+                    "cost_us_per_million": 893647.14
                 },
                 "parameters": [
                     {
@@ -1533,7 +1533,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 2705.21
+                    "cost_us_per_million": 2280.32
                 },
                 "parameters": [
                     {
@@ -1748,7 +1748,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 5950.78
+                    "cost_us_per_million": 4761.27
                 },
                 "parameters": [
                     {
@@ -1898,7 +1898,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 333.31
+                    "cost_us_per_million": 2577.53
                 },
                 "parameters": [
                     {
@@ -1980,7 +1980,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 31651.72
+                    "cost_us_per_million": 33455.82
                 },
                 "parameters": [
                     {
@@ -2059,7 +2059,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3.17
+                    "cost_us_per_million": 685.61
                 },
                 "parameters": [
                     {
@@ -2185,7 +2185,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 437424.69
+                    "cost_us_per_million": 27801.26
                 },
                 "parameters": [
                     {
@@ -2313,7 +2313,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 9353.05
+                    "cost_us_per_million": 6652.75
                 },
                 "parameters": [
                     {
@@ -2377,7 +2377,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 111871.7
+                    "cost_us_per_million": 107778.29
                 },
                 "parameters": [
                     {
@@ -2465,7 +2465,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3782.8
+                    "cost_us_per_million": 2822.13
                 },
                 "parameters": [
                     {
@@ -2548,7 +2548,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3737.57
+                    "cost_us_per_million": 3288.64
                 },
                 "parameters": [
                     {
@@ -2631,7 +2631,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3689.18
+                    "cost_us_per_million": 3589.92
                 },
                 "parameters": [
                     {
@@ -2731,7 +2731,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 13437.32
+                    "cost_us_per_million": 13268.63
                 },
                 "parameters": [
                     {
@@ -2994,7 +2994,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 9174.75
+                    "cost_us_per_million": 8227.49
                 },
                 "parameters": [
                     {
@@ -3076,7 +3076,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 264.95
+                    "cost_us_per_million": 483.89
                 },
                 "parameters": [
                     {
@@ -3122,7 +3122,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 296.23
+                    "cost_us_per_million": 338.01
                 },
                 "parameters": [
                     {
@@ -3186,7 +3186,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 2363.32
+                    "cost_us_per_million": 2276.09
                 },
                 "parameters": [
                     {
@@ -3265,7 +3265,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 4865.81
+                    "cost_us_per_million": 4113.33
                 },
                 "parameters": [
                     {
@@ -3346,7 +3346,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 6473.41
+                    "cost_us_per_million": 6415.14
                 },
                 "parameters": [
                     {
@@ -3410,7 +3410,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 318.0
+                    "cost_us_per_million": 3554.95
                 },
                 "parameters": [
                     {
@@ -3504,7 +3504,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3361.79
+                    "cost_us_per_million": 3552.05
                 },
                 "parameters": [
                     {
@@ -3663,7 +3663,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 70856.38
+                    "cost_us_per_million": 71082.66
                 },
                 "parameters": [
                     {
@@ -3727,7 +3727,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 86571.94
+                    "cost_us_per_million": 5355.11
                 },
                 "parameters": [
                     {
@@ -3774,7 +3774,7 @@
                 "execution": {
                     "kernel_id": "zero_arg",
                     "engine": "draken",
-                    "cost_us_per_million": 7397.25
+                    "cost_us_per_million": 5348.12
                 },
                 "parameters": [],
                 "notes": "This function is volatile. The integer argument controls how many values are generated, not a seed."
@@ -3908,7 +3908,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 266.96
+                    "cost_us_per_million": 414.54
                 },
                 "parameters": [
                     {
@@ -4068,7 +4068,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3317.72
+                    "cost_us_per_million": 3378.43
                 },
                 "parameters": [
                     {
@@ -4148,7 +4148,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 0.86
+                    "cost_us_per_million": 6247.94
                 },
                 "parameters": [
                     {
@@ -4229,7 +4229,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 85541.62
+                    "cost_us_per_million": 2742.84
                 },
                 "parameters": [
                     {
@@ -4276,7 +4276,7 @@
                 "execution": {
                     "kernel_id": "zero_arg",
                     "engine": "draken",
-                    "cost_us_per_million": 2824.05
+                    "cost_us_per_million": 2737.36
                 },
                 "parameters": [],
                 "notes": "This function is volatile. The integer argument controls how many values are generated, not a seed."
@@ -4325,7 +4325,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 372872.83
+                    "cost_us_per_million": 9189.69
                 },
                 "parameters": [
                     {
@@ -4582,7 +4582,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 5284.14
+                    "cost_us_per_million": 6277.98
                 },
                 "parameters": [
                     {
@@ -4646,7 +4646,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 8650.9
+                    "cost_us_per_million": 8458.26
                 },
                 "parameters": [
                     {
@@ -4725,7 +4725,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 357.87
+                    "cost_us_per_million": 862.39
                 },
                 "parameters": [
                     {
@@ -4772,7 +4772,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 557.87
+                    "cost_us_per_million": 2575.73
                 },
                 "parameters": [
                     {
@@ -4852,7 +4852,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 321.0
+                    "cost_us_per_million": 3595.49
                 },
                 "parameters": [
                     {
@@ -4946,7 +4946,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3178.18
+                    "cost_us_per_million": 3764.16
                 },
                 "parameters": [
                     {
@@ -5025,7 +5025,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 31113.37
+                    "cost_us_per_million": 34097.11
                 },
                 "parameters": [
                     {
@@ -5089,7 +5089,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 38132.87
+                    "cost_us_per_million": 39687.55
                 },
                 "parameters": [
                     {
@@ -5153,7 +5153,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 32147.72
+                    "cost_us_per_million": 32107.07
                 },
                 "parameters": [
                     {
@@ -5217,7 +5217,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 89807.05
+                    "cost_us_per_million": 91700.5
                 },
                 "parameters": [
                     {
@@ -5281,7 +5281,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 91033.24
+                    "cost_us_per_million": 92702.58
                 },
                 "parameters": [
                     {
@@ -5345,7 +5345,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 444.89
+                    "cost_us_per_million": 890.7
                 },
                 "parameters": [
                     {
@@ -5471,7 +5471,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 21737.77
+                    "cost_us_per_million": 21658.11
                 },
                 "parameters": [
                     {
@@ -5690,7 +5690,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 449.03
+                    "cost_us_per_million": 549.22
                 },
                 "parameters": [
                     {
@@ -5756,7 +5756,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 378.0
+                    "cost_us_per_million": 9236.83
                 },
                 "parameters": [
                     {
@@ -5818,7 +5818,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 9921.62
+                    "cost_us_per_million": 8114.72
                 },
                 "parameters": [
                     {
@@ -5915,7 +5915,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 2831.1
+                    "cost_us_per_million": 2331.7
                 },
                 "parameters": [
                     {
@@ -6102,7 +6102,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 6.8
+                    "cost_us_per_million": 493.54
                 },
                 "parameters": [
                     {
@@ -6168,7 +6168,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 8.2
+                    "cost_us_per_million": 3475.73
                 },
                 "parameters": [
                     {
@@ -6232,7 +6232,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 3529.82
+                    "cost_us_per_million": 4610.05
                 },
                 "parameters": [
                     {
@@ -6314,7 +6314,7 @@
                 "execution": {
                     "kernel_id": "numeric",
                     "engine": "draken",
-                    "cost_us_per_million": 333.89
+                    "cost_us_per_million": 2560.56
                 },
                 "parameters": [
                     {
@@ -6376,7 +6376,7 @@
                 "execution": {
                     "kernel_id": "date",
                     "engine": "draken",
-                    "cost_us_per_million": 1133.17
+                    "cost_us_per_million": 1126.66
                 },
                 "parameters": [
                     {
@@ -6447,7 +6447,7 @@
                 "execution": {
                     "kernel_id": "timestamp",
                     "engine": "draken",
-                    "cost_us_per_million": 1150.45
+                    "cost_us_per_million": 1035.01
                 },
                 "parameters": [
                     {
@@ -6538,7 +6538,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 521.87
+                    "cost_us_per_million": 517.15
                 },
                 "parameters": [
                     {
@@ -6604,7 +6604,7 @@
                 "execution": {
                     "kernel_id": "default",
                     "engine": "draken",
-                    "cost_us_per_million": 6236.7
+                    "cost_us_per_million": 6551.57
                 },
                 "parameters": [
                     {

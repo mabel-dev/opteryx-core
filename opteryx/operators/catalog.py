@@ -193,6 +193,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.jsonl_read import JsonlReadNode
     from opteryx.operators.skene_read import SkeneReadNode
     from opteryx.operators.limit import LimitNode
+    from opteryx.operators.window import FramedWindowNode
     from opteryx.operators.window import WindowNode
     from opteryx.operators.nested_loop_join import NestedLoopJoinNode
     from opteryx.operators.null_reader import NullReaderNode
@@ -337,6 +338,13 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         WindowNode,
         name="Window",
+        category=OperatorCategory.PROJECT,
+    )
+    # SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE BETWEEN ...) — sliding-window
+    # aggregate. A separate node/sink from Window — see native_window_frame.hpp.
+    r.register(
+        FramedWindowNode,
+        name="Framed Window",
         category=OperatorCategory.PROJECT,
     )
 

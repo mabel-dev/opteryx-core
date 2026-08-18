@@ -1993,6 +1993,15 @@ cdef int c_execute_dv_inner(
             err_op[0] = opcode
             if rc == 4:
                 err_msg[0] = vr.error_msg
+            elif rc == 3:
+                # rc 3 is _dv_compare_c's exclusive return (see its docstring) —
+                # the fast BC_COMPARE path declined (unsupported operand type or
+                # a cross-type/cross-scale pair). Without this, the raised error
+                # named the opcode but carried no message at all (see
+                # native_expression.hpp's format_kernel_error) — err_op=11 with
+                # nothing after the colon, on a path with no Python fallback to
+                # otherwise explain the failure.
+                err_msg[0] = "BC_COMPARE fast path declined (unsupported operand type or cross-type/cross-scale comparison)"
             return rc
     return 0
 

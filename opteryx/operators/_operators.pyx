@@ -203,11 +203,17 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         uint64_t bytes_out
         uint64_t exec_ns
         uint64_t cpu_ns
+    cdef cppclass PipelineReading "opteryx::engine::Engine::PipelineReading":
+        string label
+        uint64_t wall_ns
+        uint64_t cpu_ns
+        int dop
     cdef cppclass Engine:
         Engine() except +
         void set_current_identity(string s)
         void set_current_display_name(string s)
         cppvector[OpReading] collect_op_stats()
+        cppvector[PipelineReading] collect_pipeline_stats()
         cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
         size_t new_buffer()
@@ -295,7 +301,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void add_buffer_morsel(size_t buf, shared_ptr[CxxMorsel] m)
         void set_pipeline_dop(size_t p, int dop)
         void add_select(size_t p, cppvector[size_t] indices, cppvector[string] names)
-        void set_queue_sink(size_t p, MorselQueue* q)
+        void set_queue_sink(size_t p, shared_ptr[MorselQueue] q)
         void set_agg_sink(size_t p, cppvector[AggSpec2] specs, size_t buf)
         void set_groupby_sink(size_t p, cppvector[size_t] key_idx,
                               cppvector[string] key_names,
@@ -322,6 +328,11 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                         cppvector[int] lt_scale,
                                         cppvector[int] lt_dimension,
                                         cppvector[cppvector[int]] elem_chain)
+        void set_join2_mark_sink(size_t p, size_t ref, cppvector[size_t] key_idx,
+                                 cppvector[size_t] payload_idx,
+                                 void* instrs, int count, cppvector[int] col_idx,
+                                 cppvector[void*] lit_dv, ExprEvalFn fn)
+        void set_semi_anti_build_source(size_t p, size_t ref, bint emit_matched)
         void add_join2_probe_residual(size_t p, size_t ref, cppvector[size_t] key_idx,
                                       cppvector[size_t] payload_idx, int mode,
                                       void* instrs, int count, cppvector[int] col_idx,
@@ -351,6 +362,20 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                              bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_window_topk_sink(size_t p, cppvector[size_t] part_idx, size_t order_idx,
                                   bint ascending, size_t k, string out_name, size_t buf)
+        void set_framed_window_sink(size_t p, cppvector[SortKeySpec] sort_spec, size_t n_part,
+                                    cppvector[int] fn_kinds, cppvector[string] fn_names,
+                                    cppvector[int] fn_args,
+                                    cppvector[int] fn_out_type,
+                                    cppvector[int] fn_out_lt_kind, cppvector[int] fn_out_lt_unit,
+                                    cppvector[int] fn_out_lt_precision,
+                                    cppvector[int] fn_out_lt_scale,
+                                    cppvector[int] fn_out_lt_dimension,
+                                    cppvector[int] fn_frame_units,
+                                    cppvector[int] fn_frame_start_kind,
+                                    cppvector[long long] fn_frame_start_offset,
+                                    cppvector[int] fn_frame_end_kind,
+                                    cppvector[long long] fn_frame_end_offset,
+                                    size_t buf, bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_final_schema(cppvector[string] names, cppvector[DrakenType] types,
                               cppvector[int] lt_kind, cppvector[int] lt_unit,
                               cppvector[int] lt_precision, cppvector[int] lt_scale,
@@ -2173,6 +2198,25 @@ cdef class NativePlan:
             })
         return out
 
+    def collect_pipeline_stats(self):
+        """Per-PIPELINE wall and CPU, in creation (= execution) order.
+
+        ``cpu_time / wall_time`` is the mean number of cores that pipeline kept busy;
+        against ``dop`` it shows how much of the pool was parked while it ran. The
+        per-operator readings cannot answer that — they measure operators that ran,
+        not workers that did not. Valid only after the run has drained."""
+        cdef cppvector[PipelineReading] rows = self._e.collect_pipeline_stats()
+        cdef PipelineReading r
+        out = []
+        for r in rows:
+            out.append({
+                "label": r.label.decode("utf-8"),
+                "wall_time": int(r.wall_ns),
+                "cpu_time": int(r.cpu_ns),
+                "dop": int(r.dop),
+            })
+        return out
+
     def collect_trace_symbols(self):
         """node_id -> human-readable display name (e.g. "FilterNode", set via
         set_current_display_name) for this plan's operators/sources/sinks, resolving
@@ -2447,6 +2491,52 @@ cdef class NativePlan:
         _fill_payload_types(probe_types, probe_logical, probe_element,
                             ts, lk, lu, lp, lsc, ld, ec)
         self._e.set_unmatched_build_source(p, ref, ts, lk, lu, lp, lsc, ld, ec)
+
+    def set_join2_mark_sink(self, size_t p, size_t ref, list key_idx,
+                            list payload_idx, CompiledBytecode bc=None,
+                            list layout=None):
+        """RIGHT SEMI / RIGHT ANTI, half one: consume the STREAMED leg, mark the build
+        rows it hits, emit nothing.
+
+        This is the leg exchange a LEFT SEMI/ANTI cannot do for itself. compiler.py
+        pins the emitted leg to the probe, which also pins the OTHER leg into the hash
+        table — and at TPC-H SF100 Q21 that table is 82x the stream it serves. Building
+        the small leg and streaming the large one answers the same question with the
+        materialisation on the other side. See native_join2.hpp's Join2MarkSink for the
+        two consequences the planner owns (it is BLOCKING, and output is in build
+        order), and for why AntiNullAware and the NotDistinct modes are excluded.
+
+        ``bc``/``layout`` are the correlated residual, resolved against the PAIR layout
+        (build payload then streamed payload) exactly as in
+        :meth:`add_join2_probe_residual`. ``None`` is the no-residual case, where a key
+        match alone proves existence."""
+        cdef cppvector[size_t] keys
+        cdef cppvector[size_t] pay
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        if bc is None:
+            self._e.set_join2_mark_sink(p, ref, keys, pay, NULL, 0,
+                                        col_idx, lit_dv, NULL)
+            return
+        _resolve_bc_for_layout(bc, layout, col_idx, lit_dv)
+        self.held.append(bc)
+        self._e.set_join2_mark_sink(p, ref, keys, pay,
+                                    <void*>bc.instrs, <int>bc.count,
+                                    col_idx, lit_dv, _expr_eval_tramp)
+
+    def set_semi_anti_build_source(self, size_t p, size_t ref, bint emit_matched):
+        """RIGHT SEMI / RIGHT ANTI, half two: emit the build rows whose match flag has
+        the requested polarity — ``True`` for SEMI (emit matched), ``False`` for ANTI
+        (emit unmatched).
+
+        Unlike :meth:`set_unmatched_build_source` there are no probe types to pass: an
+        existence filter emits its own leg unchanged, so the output columns are exactly
+        the build payload the sink retained — there is no NULL half to type."""
+        self._e.set_semi_anti_build_source(p, ref, emit_matched)
 
     def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
                         int mode, list emit=None):
@@ -2828,6 +2918,54 @@ cdef class NativePlan:
         cdef string nm = <string>(out_name if isinstance(out_name, bytes)
                                   else (<str>out_name).encode("utf-8"))
         self._e.set_window_topk_sink(p, idx, order_idx, ascending, k, nm, buf)
+
+    def set_framed_window_sink(self, size_t p, list sort_spec, size_t n_part,
+                               list funcs, size_t buf, list emit=None):
+        """``sort_spec``/``n_part`` as in :meth:`set_window_sink` — a window FRAME
+        always has an ORDER BY, so ``n_part`` is strictly less than ``len(sort_spec)``.
+        ``funcs`` is a list of ``(kind, name, arg_idx, out_type, out_logical, frame)``
+        tuples: ``kind`` = WinAggFn int (0 SUM, 1 COUNT, 2 AVG, 3 MIN, 4 MAX);
+        ``arg_idx`` = the INPUT column the function reads, -1 only for COUNT(*);
+        ``out_type`` = the DrakenType to emit; ``out_logical`` = a
+        (kind, unit, precision, scale, dimension) int tuple or None — only
+        DECIMAL/DECIMAL128 passthrough and AVG's decimal scale need one (same shape
+        as :meth:`add_expr_project`'s ``logical``); ``frame`` =
+        (units, start_kind, start_offset, end_kind, end_offset) — FrameUnits /
+        FrameBoundKind int codes, offset meaningful only for Preceding/Following.
+        ``emit`` as in :meth:`set_sort_sink`, over the INPUT columns only — the
+        window-function columns are appended to whatever survives it."""
+        cdef cppvector[int] kinds
+        cdef cppvector[string] names
+        cdef cppvector[int] args
+        cdef cppvector[int] out_types
+        cdef cppvector[int] lt_kind, lt_unit, lt_precision, lt_scale, lt_dimension
+        cdef cppvector[int] frame_units, frame_start_kind, frame_end_kind
+        cdef cppvector[long long] frame_start_offset, frame_end_offset
+        for kind, name, arg_idx, out_type, out_logical, frame in funcs:
+            kinds.push_back(<int>kind)
+            names.push_back(<string>(name if isinstance(name, bytes) else (<str>name).encode("utf-8")))
+            args.push_back(<int>arg_idx)
+            out_types.push_back(<int>out_type)
+            if out_logical is None:
+                lt_kind.push_back(0); lt_unit.push_back(0); lt_precision.push_back(0)
+                lt_scale.push_back(0); lt_dimension.push_back(0)
+            else:
+                lk, lu, lp, ls, ld = out_logical
+                lt_kind.push_back(<int>lk); lt_unit.push_back(<int>lu)
+                lt_precision.push_back(<int>lp); lt_scale.push_back(<int>ls)
+                lt_dimension.push_back(<int>ld)
+            fu, fsk, fso, fek, feo = frame
+            frame_units.push_back(<int>fu)
+            frame_start_kind.push_back(<int>fsk)
+            frame_start_offset.push_back(<long long>fso)
+            frame_end_kind.push_back(<int>fek)
+            frame_end_offset.push_back(<long long>feo)
+        self._e.set_framed_window_sink(p, _sort_spec_from_list(sort_spec), n_part,
+                                       kinds, names, args, out_types,
+                                       lt_kind, lt_unit, lt_precision, lt_scale, lt_dimension,
+                                       frame_units, frame_start_kind, frame_start_offset,
+                                       frame_end_kind, frame_end_offset,
+                                       buf, emit is not None, _emit_cols_from_list(emit))
 
     def set_final_schema(self, list names, list types, list logical=None):
         """``names`` = final display names; ``types`` = DrakenType ints (physical);

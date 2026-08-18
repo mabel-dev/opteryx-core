@@ -30,7 +30,11 @@ cdef extern from "morsel_queue.hpp" nogil:
 
 
 cdef class PyMorselQueue:
-    cdef MorselQueue* _q
+    # Shared ownership, NOT a raw pointer. The C++ sinks and the engine each hold their
+    # own shared_ptr, so a Python refcount hitting zero can no longer free the queue out
+    # from under a producer inside enqueue() or the consumer inside wait_dequeue_timed().
+    # See the ownership note in native_queue_sink.hpp.
+    cdef shared_ptr[MorselQueue] _q
 
     cdef cbool _put_cxx(self, shared_ptr[CxxMorsel] m) noexcept nogil
     cdef MorselQueueStatus _get_cxx(self, shared_ptr[CxxMorsel]& out) noexcept nogil

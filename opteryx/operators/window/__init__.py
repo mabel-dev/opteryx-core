@@ -3,8 +3,9 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""Window operators (ranking functions)."""
+"""Window operators (ranking functions, and framed aggregate window functions)."""
 
+from opteryx.operators._operators import FramedWindowNode
 from opteryx.operators._operators import WindowNode
 
-__all__ = ["WindowNode"]
+__all__ = ["WindowNode", "FramedWindowNode"]

@@ -486,6 +486,11 @@ CLAUSE_DEFINITIONS = {
         "scope": "statement",
         "status": "supported",
         "syntax_forms": ["SHOW MANIFEST FOR table_name"],
+        # FOR is grammar-mandatory, not an optional suffix: the bare canonical
+        # name still parses (via the parser's generic SHOW catch-all) but is
+        # always rejected at plan time, so it must not be offered on its own
+        # as if it were a runnable statement. See generate_sql_language.py.
+        "bare_form_rejected": True,
         "summary": "Inspect a relation's file-level manifest and per-file statistics.",
         "documentation": (
             "Reached through the parser's generic SHOW catch-all and planned as a "
@@ -513,6 +518,8 @@ CLAUSE_DEFINITIONS = {
         "scope": "statement",
         "status": "supported",
         "syntax_forms": ["SHOW SNAPSHOTS FOR table_name"],
+        # See show_manifest's bare_form_rejected note above.
+        "bare_form_rejected": True,
         "summary": "List the commit history of a catalog-backed table.",
         "documentation": (
             "Reached through the parser's generic SHOW catch-all and planned as a "
@@ -538,6 +545,8 @@ CLAUSE_DEFINITIONS = {
         "scope": "statement",
         "status": "supported",
         "syntax_forms": ["SHOW TRIGGERS FOR table_name"],
+        # See show_manifest's bare_form_rejected note above.
+        "bare_form_rejected": True,
         "summary": "List the refresh triggers attached to a table.",
         "documentation": (
             "Reached through the parser's generic SHOW catch-all and planned as a "

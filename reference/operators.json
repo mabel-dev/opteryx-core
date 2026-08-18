@@ -7,7 +7,67 @@
         "category": "logical",
         "description": "Logical conjunction.",
         "documentation": "Returns true only when both boolean operands evaluate to true.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> AND <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "A boolean expression. A comparison that produced NULL counts as unknown here, not as false.",
+                "constant_only": false,
+                "types": [
+                    "boolean"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "A boolean expression, evaluated under the same rules.",
+                "constant_only": false,
+                "types": [
+                    "boolean"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE gravity > 5 AND number_of_moons = 0;",
+                "result": [
+                    "Venus"
+                ]
+            },
+            {
+                "sql": "SELECT FALSE AND NULL, TRUE AND NULL;",
+                "result": [
+                    "false | NULL"
+                ]
+            }
+        ],
+        "see_also": [
+            "Or",
+            "Xor"
+        ],
+        "left_types": [
+            "boolean"
+        ],
+        "right_types": [
+            "boolean"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "AND is three-valued. FALSE wins over an unknown - `FALSE AND NULL` is FALSE, because no value of the unknown side could make the pair true - while `TRUE AND NULL` is NULL. Only a TRUE result passes a WHERE clause, so a row whose condition is NULL is dropped exactly as a false one is."
     },
     "ArrayContainsAll": {
         "ast_symbol": "ArrayContainsAll",
@@ -17,7 +77,67 @@
         "category": "comparison",
         "description": "Array contains-all operator.",
         "documentation": "Returns true when the left array contains all values from the right array.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<array> @>> <values>"
+        ],
+        "operands": [
+            {
+                "name": "array",
+                "documentation": "The array to search.",
+                "constant_only": false,
+                "types": [
+                    "array"
+                ]
+            },
+            {
+                "name": "values",
+                "documentation": "The array of values that must ALL be present for the result to be true.",
+                "constant_only": false,
+                "types": [
+                    "array"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT ['a','b'] @>> ['a','b'];",
+                "result": [
+                    "true"
+                ]
+            },
+            {
+                "sql": "SELECT ['a','b'] @>> ['a','z'];",
+                "result": [
+                    "false"
+                ]
+            }
+        ],
+        "see_also": [
+            "AtArrow",
+            "InList"
+        ],
+        "left_types": [
+            "array"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "array",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "`@>>` is ALL, `@>` is ANY."
     },
     "Arrow": {
         "ast_symbol": "Arrow",
@@ -28,7 +148,147 @@
         "description": "JSON extraction operator.",
         "documentation": "Returns the selected JSON value from a document or JSON-like value.",
         "implemented": true,
-        "notes": "The result type is dynamic because the selected JSON value may be scalar, object, array, or null."
+        "syntax_forms": [
+            "<document> -> <path>"
+        ],
+        "operands": [
+            {
+                "name": "document",
+                "documentation": "The JSON document to read from.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar",
+                    "variant"
+                ]
+            },
+            {
+                "name": "path",
+                "documentation": "The key or path to select. A bare key (`'city'`), a JSONPath (`'$.contact.email'`) and an RFC 6901 pointer (`'/contact/email'`) all name the same thing. A path that is not present gives NULL, not an error.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT '{\"name\": \"Earth\", \"moons\": 1}' -> 'name';",
+                "result": [
+                    "\"Earth\""
+                ]
+            },
+            {
+                "sql": "SELECT '{\"a\": 1}' -> 'missing';",
+                "result": [
+                    "NULL"
+                ]
+            }
+        ],
+        "see_also": [
+            "LongArrow",
+            "AtQuestion",
+            "MapAccess"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar",
+            "variant"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "variant"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 11,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "variant",
+                "right_type": "nvarchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "variant",
+                "right_type": "varchar",
+                "result_type": "variant",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "`->` keeps the value as JSON, so a selected string arrives still quoted (`\"Earth\"`); `->>` is the form that gives the text itself (`Earth`). That is the difference between the two, and the usual cause of a comparison against a string literal not matching. The result type is dynamic because the selected JSON value may be scalar, object, array, or null."
     },
     "AtArrow": {
         "ast_symbol": "AtArrow",
@@ -38,7 +298,67 @@
         "category": "comparison",
         "description": "Array containment operator.",
         "documentation": "Returns true when the left array contains any of the values provided by the right array.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<array> @> <values>"
+        ],
+        "operands": [
+            {
+                "name": "array",
+                "documentation": "The array to search.",
+                "constant_only": false,
+                "types": [
+                    "array"
+                ]
+            },
+            {
+                "name": "values",
+                "documentation": "The array of values to look for. ANY one of them being present is enough; an empty array on this side matches nothing.",
+                "constant_only": false,
+                "types": [
+                    "array"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT ['a','b'] @> ['a'];",
+                "result": [
+                    "true"
+                ]
+            },
+            {
+                "sql": "SELECT ['a','b'] @> ['a','z'], ['a'] @> [];",
+                "result": [
+                    "true | false"
+                ]
+            }
+        ],
+        "see_also": [
+            "ArrayContainsAll",
+            "InList"
+        ],
+        "left_types": [
+            "array"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "array",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "`@>` is ANY, `@>>` is ALL - the pair is easy to mix up. `['a','b'] @> ['a','z']` is TRUE because one value matched; the same operands under `@>>` are FALSE."
     },
     "AtQuestion": {
         "ast_symbol": "AtQuestion",
@@ -49,6 +369,145 @@
         "description": "JSON path existence operator.",
         "documentation": "Returns true when the supplied JSON path expression matches within the left document.",
         "implemented": true,
+        "syntax_forms": [
+            "<document> @? <path>"
+        ],
+        "operands": [
+            {
+                "name": "document",
+                "documentation": "The JSON document to test.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar",
+                    "variant"
+                ]
+            },
+            {
+                "name": "path",
+                "documentation": "The path to look for. It is resolved to RFC 6901 tokens once, when the query is planned.",
+                "constant_only": true,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT '{\"contact\": {\"email\": \"a@b.c\"}}' @? '$.contact.email';",
+                "result": [
+                    "true"
+                ]
+            },
+            {
+                "sql": "SELECT '{\"a\": null}' @? '$.a', '{\"a\": 1}' @? '$.b';",
+                "result": [
+                    "true | false"
+                ]
+            }
+        ],
+        "see_also": [
+            "Arrow",
+            "LongArrow"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar",
+            "variant"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 11,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "variant",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "variant",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
         "notes": "The path must be a literal \u2014 it is resolved to RFC 6901 tokens once when the query is planned, using the same resolver `->` uses, so `doc @? 'city'`, `doc @? '$.contact.email'` and `doc @? '/contact/email'` all name the same thing. Existence is not extraction: a path whose value is JSON `null` is TRUE here, while `doc->'key' IS NOT NULL` is FALSE. A NULL document row is NULL; a row whose bytes are not valid JSON is an error, never a silent false."
     },
     "BitwiseAnd": {
@@ -59,7 +518,60 @@
         "category": "bitwise",
         "description": "Bitwise AND operator.",
         "documentation": "Combines integer operands using a bitwise AND operation.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> & <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "An integer value.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "An integer value. The result keeps the operands' integer width rather than widening to 64-bit.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 12 & 10;",
+                "result": [
+                    "8"
+                ]
+            }
+        ],
+        "see_also": [
+            "BitwiseOr",
+            "BitwiseXor"
+        ],
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
     },
     "BitwiseOr": {
         "ast_symbol": "BitwiseOr",
@@ -69,7 +581,60 @@
         "category": "bitwise",
         "description": "Bitwise OR operator.",
         "documentation": "Combines integer operands using a bitwise OR operation.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> | <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "An integer value.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "An integer value. The result keeps the operands' integer width rather than widening to 64-bit.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 12 | 10;",
+                "result": [
+                    "14"
+                ]
+            }
+        ],
+        "see_also": [
+            "BitwiseAnd",
+            "BitwiseXor"
+        ],
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
     },
     "BitwiseXor": {
         "ast_symbol": "BitwiseXor",
@@ -79,7 +644,61 @@
         "category": "bitwise",
         "description": "Bitwise XOR operator.",
         "documentation": "Combines integer operands using a bitwise exclusive OR operation.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> ^ <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "An integer value.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "An integer value.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 12 ^ 10;",
+                "result": [
+                    "6"
+                ]
+            }
+        ],
+        "see_also": [
+            "BitwiseAnd",
+            "BitwiseOr"
+        ],
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "`^` is exclusive OR, not exponentiation - a habit worth checking when porting SQL from systems where it raises to a power."
     },
     "Divide": {
         "ast_symbol": "Divide",
@@ -89,7 +708,133 @@
         "category": "binary",
         "description": "Division operator.",
         "documentation": "Returns the quotient of two numeric operands.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<dividend> / <divisor>"
+        ],
+        "operands": [
+            {
+                "name": "dividend",
+                "documentation": "The value to divide. Two integers still divide to a FLOAT - use `DIV` for integer division.",
+                "constant_only": false,
+                "types": [
+                    "decimal",
+                    "float",
+                    "integer"
+                ]
+            },
+            {
+                "name": "divisor",
+                "documentation": "The value to divide by. Dividing by zero yields infinity rather than raising, because the result is floating point.",
+                "constant_only": false,
+                "types": [
+                    "decimal",
+                    "float",
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 5 / 2;",
+                "result": [
+                    "2.5"
+                ]
+            },
+            {
+                "sql": "SELECT CAST(1 AS DECIMAL(10,2)) / 3;",
+                "result": [
+                    "0.33333333"
+                ]
+            }
+        ],
+        "see_also": [
+            "MyIntegerDivide",
+            "Modulo",
+            "Multiply"
+        ],
+        "left_types": [
+            "decimal",
+            "float",
+            "integer"
+        ],
+        "right_types": [
+            "decimal",
+            "float",
+            "integer"
+        ],
+        "result_types": [
+            "decimal",
+            "float"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "`/` is true division: `5 / 2` is 2.5, never 2. A DECIMAL operand keeps the result DECIMAL; every other combination gives FLOAT, and `1 / 0` is therefore `inf` rather than an error."
     },
     "Eq": {
         "ast_symbol": "Eq",
@@ -99,7 +844,264 @@
         "category": "comparison",
         "description": "Equality comparison.",
         "documentation": "Returns true when both operands compare equal.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> = <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to compare. Numeric types compare across the family, so `1 = 1.0` is true.",
+                "constant_only": false,
+                "types": [
+                    "boolean",
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to compare it against. It must be type-compatible with the left - a number and a string are rejected rather than coerced.",
+                "constant_only": false,
+                "types": [
+                    "boolean",
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name = 'Earth';",
+                "result": [
+                    "Earth"
+                ]
+            },
+            {
+                "sql": "SELECT 'Mars' = 'mars', 1 = 1.0, 1 = NULL;",
+                "result": [
+                    "false | true | NULL"
+                ]
+            }
+        ],
+        "see_also": [
+            "NotEq",
+            "InList"
+        ],
+        "left_types": [
+            "boolean",
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "boolean",
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 24,
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Comparison is three-valued: NULL on either side gives NULL, never true or false, and `NULL = NULL` is NULL too - `IS NULL` is the test for absence. String comparison is case-sensitive (`'Mars' = 'mars'` is false), unlike column NAMES, which are not."
     },
     "Gt": {
         "ast_symbol": "Gt",
@@ -109,7 +1111,251 @@
         "category": "comparison",
         "description": "Greater-than comparison.",
         "documentation": "Returns true when the left operand is greater than the right operand.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> > <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to compare. Strings order byte-by-byte, so uppercase sorts before lowercase.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to compare it against.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE number_of_moons > 10;",
+                "result": [
+                    "Jupiter",
+                    "Saturn",
+                    "Uranus",
+                    "Neptune"
+                ]
+            }
+        ],
+        "see_also": [
+            "GtEq",
+            "Lt",
+            "LtEq"
+        ],
+        "left_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 23,
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "GtEq": {
         "ast_symbol": "GtEq",
@@ -119,7 +1365,251 @@
         "category": "comparison",
         "description": "Greater-than-or-equal comparison.",
         "documentation": "Returns true when the left operand is greater than or equal to the right operand.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> >= <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to compare.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to compare it against.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE number_of_moons >= 10;",
+                "result": [
+                    "Jupiter",
+                    "Saturn",
+                    "Uranus",
+                    "Neptune"
+                ]
+            }
+        ],
+        "see_also": [
+            "Gt",
+            "Lt",
+            "LtEq"
+        ],
+        "left_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 23,
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "ILike": {
         "ast_symbol": "ILike",
@@ -129,7 +1619,131 @@
         "category": "comparison",
         "description": "Case-insensitive pattern match comparison.",
         "documentation": "Returns true when the left string matches the SQL ILIKE pattern on the right without case sensitivity.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<haystack> ILIKE <pattern>"
+        ],
+        "operands": [
+            {
+                "name": "haystack",
+                "documentation": "The value tested against the pattern.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "pattern",
+                "documentation": "A SQL LIKE pattern, matched without regard to case: `%` matches any run of characters, `_` matches exactly one.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name ILIKE 'ma%';",
+                "result": [
+                    "Mars"
+                ]
+            },
+            {
+                "sql": "SELECT 'ABC' ILIKE 'abc', '\u00c9COLE' ILIKE '\u00e9cole';",
+                "result": [
+                    "true | false"
+                ]
+            }
+        ],
+        "see_also": [
+            "Like",
+            "NotILike"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Case folding is ASCII-only: `'ABC' ILIKE 'abc'` is true, but `'\u00c9COLE' ILIKE '\u00e9cole'` is FALSE - accented and other non-ASCII letters are compared as written. Where that matters, fold explicitly with a function instead."
     },
     "IPContainedBy": {
         "ast_symbol": "IPContainedBy",
@@ -140,6 +1754,58 @@
         "description": "IPv4 CIDR containment operator.",
         "documentation": "Returns true when the left IPv4 address falls inside the network given on the right in CIDR notation, for example `ip <<= '10.0.0.0/8'`. Comparison is on the underlying 32-bit address, so it is a single mask-and-compare per row with no text parsing.",
         "implemented": true,
+        "syntax_forms": [
+            "<address> <<= <network>"
+        ],
+        "operands": [
+            {
+                "name": "address",
+                "documentation": "An IPv4 address. It is held as its 32-bit integer value, which is why the signature below reads INTEGER.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            },
+            {
+                "name": "network",
+                "documentation": "The network to test against, in CIDR notation. The prefix length is required: an address without one is rejected.",
+                "constant_only": false,
+                "types": [
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT CAST('10.0.0.1' AS IPV4) <<= '10.0.0.0/8';",
+                "result": [
+                    "true"
+                ]
+            }
+        ],
+        "see_also": [
+            "IPContains"
+        ],
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
         "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension. A NULL address is not contained by any network and yields false. An invalid or prefix-less CIDR raises rather than matching nothing."
     },
     "IPContains": {
@@ -151,6 +1817,58 @@
         "description": "IPv4 CIDR containment operator, reversed.",
         "documentation": "Returns true when the network on the left, in CIDR notation, contains the IPv4 address on the right, for example `'10.0.0.0/8' >>= ip`. The mirror of `<<=`.",
         "implemented": true,
+        "syntax_forms": [
+            "<network> >>= <address>"
+        ],
+        "operands": [
+            {
+                "name": "network",
+                "documentation": "The network to test against, in CIDR notation, with its prefix length.",
+                "constant_only": false,
+                "types": [
+                    "varchar"
+                ]
+            },
+            {
+                "name": "address",
+                "documentation": "An IPv4 address. It is held as its 32-bit integer value, which is why the signature below reads INTEGER.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT '10.0.0.0/8' >>= CAST('10.0.0.1' AS IPV4);",
+                "result": [
+                    "true"
+                ]
+            }
+        ],
+        "see_also": [
+            "IPContainedBy"
+        ],
+        "left_types": [
+            "varchar"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "varchar",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
         "notes": "Spelling follows PostgreSQL, CockroachDB and DuckDB's inet extension."
     },
     "InList": {
@@ -161,7 +1879,141 @@
         "category": "comparison",
         "description": "Membership comparison.",
         "documentation": "Returns true when the left operand matches any element in the right-hand list or array.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<value> IN (<item> [, ...])",
+            "<value> IN <array>"
+        ],
+        "operands": [
+            {
+                "name": "value",
+                "documentation": "The value to look for.",
+                "constant_only": false,
+                "types": [
+                    "boolean",
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "list",
+                "documentation": "The values to look in - a parenthesised list, or an array-valued expression. Every element must share one type; a mixed list, NULL included, is rejected at plan time rather than being silently skipped.",
+                "constant_only": false,
+                "types": [
+                    "array"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name IN ('Earth', 'Mars');",
+                "result": [
+                    "Earth",
+                    "Mars"
+                ]
+            },
+            {
+                "sql": "SELECT 2 IN (1, 2, 3), 9 IN (1, 2, 3);",
+                "result": [
+                    "true | false"
+                ]
+            }
+        ],
+        "see_also": [
+            "NotInList",
+            "Eq"
+        ],
+        "left_types": [
+            "boolean",
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "IN is a shorthand for a chain of `=`, and inherits its rules: the comparison is exact and case-sensitive. A list mixing types - `IN (NULL, 2)` among them - is an error, not a match against the elements that do share a type."
     },
     "Like": {
         "ast_symbol": "Like",
@@ -171,7 +2023,132 @@
         "category": "comparison",
         "description": "Pattern match comparison.",
         "documentation": "Returns true when the left string matches the SQL LIKE pattern on the right.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<haystack> LIKE <pattern>"
+        ],
+        "operands": [
+            {
+                "name": "haystack",
+                "documentation": "The value tested against the pattern. VARBINARY is accepted as well as text, and is matched as bytes.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "pattern",
+                "documentation": "A SQL LIKE pattern: `%` matches any run of characters including none, `_` matches exactly one, and every other character matches itself. The whole value must match, not part of it - `'abcd' LIKE 'a_c'` is false. A column is accepted here, not only a literal; a literal is what lets the planner fuse the match into the scan.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name LIKE 'Ma%';",
+                "result": [
+                    "Mars"
+                ]
+            },
+            {
+                "sql": "SELECT 'abc' LIKE 'a_c', 'abcd' LIKE 'a_c';",
+                "result": [
+                    "true | false"
+                ]
+            }
+        ],
+        "see_also": [
+            "NotLike",
+            "ILike",
+            "RLike"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Matching is case-sensitive; ILIKE is the case-insensitive form. A NULL on either side is not matched."
     },
     "LongArrow": {
         "ast_symbol": "LongArrow",
@@ -181,7 +2158,141 @@
         "category": "extraction",
         "description": "JSON text extraction operator.",
         "documentation": "Returns the selected JSON value encoded as a blob or text-like binary value.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<document> ->> <path>"
+        ],
+        "operands": [
+            {
+                "name": "document",
+                "documentation": "The JSON document to read from.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar",
+                    "variant"
+                ]
+            },
+            {
+                "name": "path",
+                "documentation": "The key or path to select, in the same spellings `->` accepts. A path that is not present gives NULL.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT '{\"name\": \"Earth\", \"moons\": 1}' ->> 'name';",
+                "result": [
+                    "Earth"
+                ]
+            }
+        ],
+        "see_also": [
+            "Arrow",
+            "AtQuestion"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar",
+            "variant"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "nvarchar"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 11,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "variant",
+                "right_type": "nvarchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "variant",
+                "right_type": "varchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Use `->>` when the value is going to be compared with a string literal: `->` would leave it JSON-quoted and the comparison would not match."
     },
     "Lt": {
         "ast_symbol": "Lt",
@@ -191,7 +2302,250 @@
         "category": "comparison",
         "description": "Less-than comparison.",
         "documentation": "Returns true when the left operand is less than the right operand.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> < <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to compare. Strings order byte-by-byte, so uppercase sorts before lowercase.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to compare it against.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE gravity < 5;",
+                "result": [
+                    "Mercury",
+                    "Mars",
+                    "Pluto"
+                ]
+            }
+        ],
+        "see_also": [
+            "LtEq",
+            "Gt",
+            "GtEq"
+        ],
+        "left_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 23,
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "LtEq": {
         "ast_symbol": "LtEq",
@@ -201,7 +2555,250 @@
         "category": "comparison",
         "description": "Less-than-or-equal comparison.",
         "documentation": "Returns true when the left operand is less than or equal to the right operand.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> <= <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to compare.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to compare it against.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE gravity <= 5;",
+                "result": [
+                    "Mercury",
+                    "Mars",
+                    "Pluto"
+                ]
+            }
+        ],
+        "see_also": [
+            "Lt",
+            "Gt",
+            "GtEq"
+        ],
+        "left_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 23,
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "NULL on either side gives NULL, so ordering comparisons never match an absent value."
     },
     "MapAccess": {
         "ast_symbol": "MapAccess",
@@ -212,6 +2809,103 @@
         "description": "Subscript access operator.",
         "documentation": "Returns the element at the requested index from an array, string, or blob-like value.",
         "implemented": true,
+        "syntax_forms": [
+            "<value>[<index>]"
+        ],
+        "operands": [
+            {
+                "name": "value",
+                "documentation": "The array, string or blob to read from.",
+                "constant_only": false,
+                "types": [
+                    "array",
+                    "nvarchar",
+                    "varbinary",
+                    "varchar",
+                    "vector"
+                ]
+            },
+            {
+                "name": "index",
+                "documentation": "The zero-based position to read. An index past the end gives NULL rather than raising.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT ARRAY['a','b','c'][0];",
+                "result": [
+                    "a"
+                ]
+            },
+            {
+                "sql": "SELECT ARRAY['a','b'][9];",
+                "result": [
+                    "NULL"
+                ]
+            }
+        ],
+        "see_also": [
+            "Arrow"
+        ],
+        "left_types": [
+            "array",
+            "nvarchar",
+            "varbinary",
+            "varchar",
+            "vector"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "float",
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "has_dynamic_result": true,
+        "signature_count": 5,
+        "signatures": [
+            {
+                "left_type": "array",
+                "right_type": "integer",
+                "result_type": null,
+                "result_type_is_dynamic": true,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "integer",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "integer",
+                "result_type": "varbinary",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "integer",
+                "result_type": "varchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "vector",
+                "right_type": "integer",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
         "notes": "Subcript access is zero-based, the first element is at index 0. For arrays the result type depends on the array element type, so the exported result type may be dynamic."
     },
     "Minus": {
@@ -222,7 +2916,213 @@
         "category": "binary",
         "description": "Subtraction operator.",
         "documentation": "Returns the difference between two numeric, date, timestamp, or interval-compatible operands.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> - <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to subtract from.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "timestamp"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to subtract. Subtracting one TIMESTAMP from another gives an INTERVAL; subtracting an INTERVAL from a timestamp gives a timestamp.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "timestamp"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name, aphelion - perihelion FROM $planets LIMIT 3;",
+                "result": [
+                    "Mercury | 23.800003051757812",
+                    "Venus | 1.4000015258789062",
+                    "Earth | 5.0"
+                ]
+            },
+            {
+                "sql": "SELECT CAST('2026-03-01' AS TIMESTAMP) - INTERVAL '1' MONTH;",
+                "result": [
+                    "2026-02-01 00:00:00+00:00"
+                ]
+            }
+        ],
+        "see_also": [
+            "Plus",
+            "Multiply",
+            "Divide"
+        ],
+        "left_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "result_types": [
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 18,
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "date",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "timestamp",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Unlike addition, subtraction is not symmetric across types: a timestamp minus an interval is a timestamp, but an interval minus a timestamp is not accepted."
     },
     "Modulo": {
         "ast_symbol": "Modulo",
@@ -232,7 +3132,71 @@
         "category": "binary",
         "description": "Modulo operator.",
         "documentation": "Returns the remainder after division of the left numeric operand by the right numeric operand.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<dividend> % <divisor>"
+        ],
+        "operands": [
+            {
+                "name": "dividend",
+                "documentation": "The value to divide. Its sign is the sign of the result.",
+                "constant_only": false,
+                "types": [
+                    "float",
+                    "integer"
+                ]
+            },
+            {
+                "name": "divisor",
+                "documentation": "The value to divide by.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 7 % 2, -7 % 2, 7 % -2;",
+                "result": [
+                    "1 | -1 | 1"
+                ]
+            }
+        ],
+        "see_also": [
+            "Divide",
+            "MyIntegerDivide"
+        ],
+        "left_types": [
+            "float",
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "float",
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 2,
+        "signatures": [
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "The remainder takes the sign of the DIVIDEND, not the divisor: `-7 % 2` is -1 and `7 % -2` is 1. That is C and Go's rule, not Python's, where `-7 % 2` is 1."
     },
     "Multiply": {
         "ast_symbol": "Multiply",
@@ -242,7 +3206,129 @@
         "category": "binary",
         "description": "Multiplication operator.",
         "documentation": "Returns the product of two numeric operands.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> * <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "A numeric value.",
+                "constant_only": false,
+                "types": [
+                    "decimal",
+                    "float",
+                    "integer"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "A numeric value. The result takes the wider of the two types - see Signatures.",
+                "constant_only": false,
+                "types": [
+                    "decimal",
+                    "float",
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name, diameter * 2 FROM $planets LIMIT 3;",
+                "result": [
+                    "Mercury | 9758",
+                    "Venus | 24208",
+                    "Earth | 25512"
+                ]
+            }
+        ],
+        "see_also": [
+            "Divide",
+            "Plus",
+            "Minus"
+        ],
+        "left_types": [
+            "decimal",
+            "float",
+            "integer"
+        ],
+        "right_types": [
+            "decimal",
+            "float",
+            "integer"
+        ],
+        "result_types": [
+            "decimal",
+            "float",
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
     },
     "MyIntegerDivide": {
         "ast_symbol": "MyIntegerDivide",
@@ -252,7 +3338,61 @@
         "category": "binary",
         "description": "Integer division operator.",
         "documentation": "Divides two integers and truncates the result toward zero.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<dividend> DIV <divisor>"
+        ],
+        "operands": [
+            {
+                "name": "dividend",
+                "documentation": "The integer to divide.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            },
+            {
+                "name": "divisor",
+                "documentation": "The integer to divide by.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 7 DIV 2, -7 DIV 2;",
+                "result": [
+                    "3 | -3"
+                ]
+            }
+        ],
+        "see_also": [
+            "Divide",
+            "Modulo"
+        ],
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Truncation is toward zero, not toward minus infinity: `-7 DIV 2` is -3, where a floor division would give -4."
     },
     "NotEq": {
         "ast_symbol": "NotEq",
@@ -262,7 +3402,267 @@
         "category": "comparison",
         "description": "Inequality comparison.",
         "documentation": "Returns true when the operands do not compare equal.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> != <right>",
+            "<left> <> <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to compare.",
+                "constant_only": false,
+                "types": [
+                    "boolean",
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to compare it against. It must be type-compatible with the left.",
+                "constant_only": false,
+                "types": [
+                    "boolean",
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name != 'Earth' LIMIT 3;",
+                "result": [
+                    "Mercury",
+                    "Venus",
+                    "Mars"
+                ]
+            },
+            {
+                "sql": "SELECT COUNT(*) FROM $planets WHERE surface_pressure != 0;",
+                "result": [
+                    "4"
+                ]
+            }
+        ],
+        "see_also": [
+            "Eq",
+            "NotInList"
+        ],
+        "left_types": [
+            "boolean",
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "boolean",
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 24,
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "date",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "timestamp",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "`!=` does not mean \"everything else\": a row whose value is NULL answers NULL, not true, so it is dropped by the WHERE clause. Of the nine planets one has a surface pressure of 0 and four have none recorded, so `surface_pressure != 0` returns four rows, not eight - `OR surface_pressure IS NULL` is how the unknown rows are kept."
     },
     "NotILike": {
         "ast_symbol": "NotILike",
@@ -272,7 +3672,127 @@
         "category": "comparison",
         "description": "Negated case-insensitive pattern match comparison.",
         "documentation": "Returns true when the left string does not match the SQL ILIKE pattern on the right.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<haystack> NOT ILIKE <pattern>"
+        ],
+        "operands": [
+            {
+                "name": "haystack",
+                "documentation": "The value tested against the pattern.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "pattern",
+                "documentation": "A SQL LIKE pattern, matched without regard to ASCII case.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name NOT ILIKE 'ma%' LIMIT 3;",
+                "result": [
+                    "Mercury",
+                    "Venus",
+                    "Earth"
+                ]
+            }
+        ],
+        "see_also": [
+            "ILike",
+            "NotLike"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Case folding is ASCII-only, exactly as for ILIKE."
     },
     "NotInList": {
         "ast_symbol": "NotInList",
@@ -282,7 +3802,136 @@
         "category": "comparison",
         "description": "Negated membership comparison.",
         "documentation": "Returns true when the left operand does not match any element in the right-hand list or array.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<value> NOT IN (<item> [, ...])",
+            "<value> NOT IN <array>"
+        ],
+        "operands": [
+            {
+                "name": "value",
+                "documentation": "The value to look for.",
+                "constant_only": false,
+                "types": [
+                    "boolean",
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "nvarchar",
+                    "timestamp",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "list",
+                "documentation": "The values to look in. Every element must share one type; a mixed list is rejected at plan time.",
+                "constant_only": false,
+                "types": [
+                    "array"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name NOT IN ('Earth', 'Mars') LIMIT 3;",
+                "result": [
+                    "Mercury",
+                    "Venus",
+                    "Jupiter"
+                ]
+            }
+        ],
+        "see_also": [
+            "InList",
+            "NotEq"
+        ],
+        "left_types": [
+            "boolean",
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "nvarchar",
+            "timestamp",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "array"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "date",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "array",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Like `!=`, a row whose value is NULL answers NULL rather than true, so it does not survive a WHERE clause."
     },
     "NotLike": {
         "ast_symbol": "NotLike",
@@ -292,7 +3941,127 @@
         "category": "comparison",
         "description": "Negated pattern match comparison.",
         "documentation": "Returns true when the left string does not match the SQL LIKE pattern on the right.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<haystack> NOT LIKE <pattern>"
+        ],
+        "operands": [
+            {
+                "name": "haystack",
+                "documentation": "The value tested against the pattern.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "pattern",
+                "documentation": "A SQL LIKE pattern: `%` matches any run of characters, `_` matches exactly one. The whole value must match for the row to be excluded.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name NOT LIKE 'Ma%' LIMIT 3;",
+                "result": [
+                    "Mercury",
+                    "Venus",
+                    "Earth"
+                ]
+            }
+        ],
+        "see_also": [
+            "Like",
+            "NotILike"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Case-sensitive, like `LIKE` itself. NOT ILIKE is the case-insensitive form."
     },
     "NotRLike": {
         "ast_symbol": "NotRLike",
@@ -302,7 +4071,126 @@
         "category": "comparison",
         "description": "Negated regular expression match comparison.",
         "documentation": "Returns true when the left string does not match the regular expression on the right.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<haystack> NOT RLIKE <regex>"
+        ],
+        "operands": [
+            {
+                "name": "haystack",
+                "documentation": "The value tested against the expression.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "regex",
+                "documentation": "The regular expression that must not match. It matches anywhere in the value unless anchored.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name NOT RLIKE '^M' LIMIT 3;",
+                "result": [
+                    "Venus",
+                    "Earth",
+                    "Jupiter"
+                ]
+            }
+        ],
+        "see_also": [
+            "RLike",
+            "NotLike"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ]
     },
     "Or": {
         "ast_symbol": "Or",
@@ -312,7 +4200,68 @@
         "category": "logical",
         "description": "Logical disjunction.",
         "documentation": "Returns true when either boolean operand evaluates to true.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> OR <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "A boolean expression. A comparison that produced NULL counts as unknown here, not as false.",
+                "constant_only": false,
+                "types": [
+                    "boolean"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "A boolean expression, evaluated under the same rules.",
+                "constant_only": false,
+                "types": [
+                    "boolean"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name = 'Earth' OR name = 'Mars';",
+                "result": [
+                    "Earth",
+                    "Mars"
+                ]
+            },
+            {
+                "sql": "SELECT TRUE OR NULL, FALSE OR NULL;",
+                "result": [
+                    "true | NULL"
+                ]
+            }
+        ],
+        "see_also": [
+            "And",
+            "Xor"
+        ],
+        "left_types": [
+            "boolean"
+        ],
+        "right_types": [
+            "boolean"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "OR is three-valued, and the mirror of AND: TRUE wins over an unknown - `TRUE OR NULL` is TRUE - while `FALSE OR NULL` is NULL, not FALSE."
     },
     "Plus": {
         "ast_symbol": "Plus",
@@ -322,7 +4271,185 @@
         "category": "binary",
         "description": "Addition operator.",
         "documentation": "Returns the sum of two numeric or interval-compatible operands.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> + <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to add to. A DATE or TIMESTAMP is accepted only with an INTERVAL on the other side - two dates cannot be added.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "timestamp"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to add. Mixing numeric types widens the result: INTEGER with FLOAT gives FLOAT, INTEGER with DECIMAL gives DECIMAL.",
+                "constant_only": false,
+                "types": [
+                    "date",
+                    "decimal",
+                    "float",
+                    "integer",
+                    "interval",
+                    "timestamp"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name, number_of_moons + 1 FROM $planets LIMIT 3;",
+                "result": [
+                    "Mercury | 1",
+                    "Venus | 1",
+                    "Earth | 2"
+                ]
+            },
+            {
+                "sql": "SELECT CAST('2026-01-01' AS DATE) + INTERVAL '1' MONTH;",
+                "result": [
+                    "2026-02-01 00:00:00+00:00"
+                ]
+            }
+        ],
+        "see_also": [
+            "Minus",
+            "Multiply",
+            "Divide"
+        ],
+        "left_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "right_types": [
+            "date",
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "result_types": [
+            "decimal",
+            "float",
+            "integer",
+            "interval",
+            "timestamp"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 14,
+        "signatures": [
+            {
+                "left_type": "date",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "decimal",
+                "right_type": "integer",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "decimal",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "float",
+                "right_type": "integer",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "decimal",
+                "result_type": "decimal",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "float",
+                "result_type": "float",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "date",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "interval",
+                "result_type": "interval",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "interval",
+                "right_type": "timestamp",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "timestamp",
+                "right_type": "interval",
+                "result_type": "timestamp",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Adding NULL gives NULL. Date arithmetic is only ever date-plus-interval, and the result is a TIMESTAMP even when the operand was a DATE - see Signatures."
     },
     "RLike": {
         "ast_symbol": "RLike",
@@ -332,7 +4459,125 @@
         "category": "comparison",
         "description": "Regular expression match comparison.",
         "documentation": "Returns true when the left string matches the regular expression on the right.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<haystack> RLIKE <regex>"
+        ],
+        "operands": [
+            {
+                "name": "haystack",
+                "documentation": "The value tested against the expression.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "regex",
+                "documentation": "The regular expression to match. Unlike LIKE, it matches anywhere in the value unless anchored with `^` and `$`.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE name RLIKE '^M.*s$';",
+                "result": [
+                    "Mars"
+                ]
+            }
+        ],
+        "see_also": [
+            "NotRLike",
+            "Like"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 9,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "nvarchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "nvarchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varbinary",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "A regular expression is more expressive than a LIKE pattern and more expensive to run; prefer LIKE when a prefix or suffix match is all that is needed."
     },
     "ShiftLeft": {
         "ast_symbol": "ShiftLeft",
@@ -343,6 +4588,59 @@
         "description": "Left shift operator.",
         "documentation": "Shifts the bits of the left integer operand left by the number of positions in the right operand.",
         "implemented": true,
+        "syntax_forms": [
+            "<value> << <count>"
+        ],
+        "operands": [
+            {
+                "name": "value",
+                "documentation": "The integer whose bits are shifted.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            },
+            {
+                "name": "count",
+                "documentation": "How many positions to shift by, 0..63.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 1 << 4;",
+                "result": [
+                    "16"
+                ]
+            }
+        ],
+        "see_also": [
+            "ShiftRight",
+            "BitwiseAnd"
+        ],
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
         "notes": "The shift count must be 0..63 - the operands are 64-bit integers, and a count outside that range fails loud ('bitwise_shl: shift count out of range') rather than wrapping or saturating."
     },
     "ShiftRight": {
@@ -354,7 +4652,60 @@
         "description": "Right shift operator.",
         "documentation": "Shifts the bits of the left integer operand right by the number of positions in the right operand.",
         "implemented": true,
-        "notes": "The shift count must be 0..63 - the operands are 64-bit integers, and a count outside that range fails loud ('bitwise_shr: shift count out of range') rather than wrapping or saturating."
+        "syntax_forms": [
+            "<value> >> <count>"
+        ],
+        "operands": [
+            {
+                "name": "value",
+                "documentation": "The integer whose bits are shifted. The shift is arithmetic, so the sign is preserved.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            },
+            {
+                "name": "count",
+                "documentation": "How many positions to shift by, 0..63.",
+                "constant_only": false,
+                "types": [
+                    "integer"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT 256 >> 4, -1 >> 1;",
+                "result": [
+                    "16 | -1"
+                ]
+            }
+        ],
+        "see_also": [
+            "ShiftLeft",
+            "BitwiseAnd"
+        ],
+        "left_types": [
+            "integer"
+        ],
+        "right_types": [
+            "integer"
+        ],
+        "result_types": [
+            "integer"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "integer",
+                "right_type": "integer",
+                "result_type": "integer",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Right shift is ARITHMETIC, not logical: the sign bit is copied, so `-1 >> 1` is -1 and a negative value never becomes positive by shifting. The shift count must be 0..63 - the operands are 64-bit integers, and a count outside that range fails loud ('bitwise_shr: shift count out of range') rather than wrapping or saturating."
     },
     "StringConcat": {
         "ast_symbol": "StringConcat",
@@ -364,7 +4715,92 @@
         "category": "binary",
         "description": "String concatenation operator.",
         "documentation": "Concatenates the left and right string or blob operands.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> || <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "The value to concatenate to.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "The value to append. It must be the SAME string type as the left - VARCHAR with VARCHAR, VARBINARY with VARBINARY - and a number must be cast first.",
+                "constant_only": false,
+                "types": [
+                    "nvarchar",
+                    "varbinary",
+                    "varchar"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name || ' (planet)' FROM $planets LIMIT 3;",
+                "result": [
+                    "Mercury (planet)",
+                    "Venus (planet)",
+                    "Earth (planet)"
+                ]
+            },
+            {
+                "sql": "SELECT 'a' || NULL;",
+                "result": [
+                    "NULL"
+                ]
+            }
+        ],
+        "see_also": [
+            "Plus"
+        ],
+        "left_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "right_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "result_types": [
+            "nvarchar",
+            "varbinary",
+            "varchar"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 3,
+        "signatures": [
+            {
+                "left_type": "nvarchar",
+                "right_type": "nvarchar",
+                "result_type": "nvarchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varbinary",
+                "right_type": "varbinary",
+                "result_type": "varbinary",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            },
+            {
+                "left_type": "varchar",
+                "right_type": "varchar",
+                "result_type": "varchar",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "The operands must be the same string type; mixing VARCHAR and VARBINARY is rejected rather than silently coerced. `x || NULL` is NULL for every row - it is not treated as an empty string - but the expression still carries the string operand's type."
     },
     "Xor": {
         "ast_symbol": "Xor",
@@ -374,6 +4810,67 @@
         "category": "logical",
         "description": "Logical exclusive OR.",
         "documentation": "Returns true when exactly one boolean operand evaluates to true.",
-        "implemented": true
+        "implemented": true,
+        "syntax_forms": [
+            "<left> XOR <right>"
+        ],
+        "operands": [
+            {
+                "name": "left",
+                "documentation": "A boolean expression.",
+                "constant_only": false,
+                "types": [
+                    "boolean"
+                ]
+            },
+            {
+                "name": "right",
+                "documentation": "A boolean expression.",
+                "constant_only": false,
+                "types": [
+                    "boolean"
+                ]
+            }
+        ],
+        "examples": [
+            {
+                "sql": "SELECT name FROM $planets WHERE (gravity > 5) XOR (number_of_moons > 10);",
+                "result": [
+                    "Venus",
+                    "Earth"
+                ]
+            },
+            {
+                "sql": "SELECT TRUE XOR NULL;",
+                "result": [
+                    "NULL"
+                ]
+            }
+        ],
+        "see_also": [
+            "And",
+            "Or"
+        ],
+        "left_types": [
+            "boolean"
+        ],
+        "right_types": [
+            "boolean"
+        ],
+        "result_types": [
+            "boolean"
+        ],
+        "has_dynamic_result": false,
+        "signature_count": 1,
+        "signatures": [
+            {
+                "left_type": "boolean",
+                "right_type": "boolean",
+                "result_type": "boolean",
+                "result_type_is_dynamic": false,
+                "cost_estimate": 100.0
+            }
+        ],
+        "notes": "Unlike AND and OR, XOR has no dominant value: the answer always depends on both sides, so NULL on either side gives NULL."
     }
 }

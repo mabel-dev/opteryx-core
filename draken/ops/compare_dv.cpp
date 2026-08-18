@@ -14,6 +14,7 @@
 #include "core/vector_alloc.h"   // draken_identity_sel
 #include "ops/vec_result.h"
 #include "ops/int64_compare.h"
+#include "ops/int128_compare.h"  // i128_compare_vector (DECIMAL128)
 #include "ops/float_ops.h"
 #include "ops/fixed_int_ops.h"   // i8/i16/i32 + u8/u16/u32 compare_vector
 #include "ops/uint64_compare.h"  // u64_compare_vector (UINT64)
@@ -154,6 +155,20 @@ extern "C" DrakenVector* draken_compare_dv(
                 // microseconds-since-epoch value is identical to int64
                 // ordering. Same kernel.
                 vr = draken::ops::i64_compare_vector(*left, *right, op_code);
+                break;
+            case DRAKEN_DECIMAL128:
+                // int128 unscaled ordering == DECIMAL128 ordering PROVIDED both
+                // operands share one scale — compiled_expression.pyx's mixed-
+                // numeric routing (draken_numeric_cmp) guarantees this: a
+                // same-type/same-scale DECIMAL128 pair is the only DECIMAL128
+                // input that ever reaches here (mismatched pairs route to
+                // draken_numeric_cmp instead, same as the DECIMAL case above).
+                // Until this case existed every DECIMAL128 comparison declined
+                // to nullptr, which on the native ExprFilter (no fallback)
+                // raised err_op=11 with no message — the TPC-DS Q04 year-over-
+                // year ratio predicate (a division of two DECIMAL128 aggregates
+                // compared to another) hit exactly this.
+                vr = draken::ops::i128_compare_vector(*left, *right, op_code);
                 break;
             case DRAKEN_INT8:
                 vr = draken::ops::i8_compare_vector(*left, *right, op_code);

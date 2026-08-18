@@ -93,7 +93,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=None,   # c-native: draken_coalesce
-                        cost_us_per_million=3386.42,
+                        cost_us_per_million=3144.69,
                     ),
                 ),
             ),
@@ -117,7 +117,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=None,   # c-native: draken_ifnull
-                        cost_us_per_million=3737.57,
+                        cost_us_per_million=3288.64,
                     ),
                 ),
             ),
@@ -141,7 +141,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=None,   # c-native: draken_ifnotnull
-                        cost_us_per_million=3782.80,
+                        cost_us_per_million=2822.13,
                     ),
                 ),
             ),
@@ -196,7 +196,7 @@ def get_builtin_logical_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=None,   # c-native: draken_iif
-                        cost_us_per_million=3689.18,
+                        cost_us_per_million=3589.92,
                     ),
                 ),
             ),

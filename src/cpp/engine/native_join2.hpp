@@ -246,6 +246,15 @@ struct Join2BuildGlobal : GlobalSinkState {
     std::vector<MorselPtr> morsels;    // every worker's retained views, concatenated
     std::vector<uint32_t> row_m;       // global build row id -> index into `morsels`
     std::vector<uint32_t> row_r;       // global build row id -> row within that morsel
+    // Per-worker row addresses, queued by combine() as an O(1) MOVE and concatenated
+    // into row_m/row_r above by merge_build_rows() in finalize(). Same reason the key
+    // hashes are queued rather than inserted (see combine()): the alternative is an
+    // O(rows) copy inside the global build mutex, which serialises every build row in
+    // the query through one critical section no matter how many workers there are.
+    // `chunk_morsel_off[c]` is the value to add to chunk c's morsel indices, captured
+    // at queue time because it depends on how many morsels were already present.
+    std::vector<std::vector<uint32_t>> row_m_chunks, row_r_chunks;
+    std::vector<uint32_t> chunk_morsel_off;
     // Zero-row, plan-typed payload columns. Used ONLY when no build morsel was ever
     // retained (a build side that streamed zero rows): gather_rows takes its column
     // count and types from ms.front(), so it needs a schema to emit a LEFT OUTER's
@@ -321,6 +330,71 @@ struct Join2BuildGlobal : GlobalSinkState {
     }
     size_t probe_row_count(uint64_t key) const { return csr.row_count_for(key); }
 };
+
+// Concatenate the queued per-worker row addresses into row_m/row_r, rebasing each
+// chunk's morsel indices as it goes. Called once from finalize(), before anything
+// reads the build address space.
+//
+// This is the other half of "queue, don't insert". combine() used to do this work
+// itself, inside the global mutex — an O(rows) push_back loop per worker, so the
+// build side of every join was funnelled through one serial critical section while
+// the other workers blocked on it. A 25s profile of TPC-H Q21 at SF100 put 62.5% of
+// all samples in thread-wait primitives against 15.6% in the join probe itself, with
+// 9.5% specifically in __psynch_mutexwait. The hashes were moved off this lock long
+// ago for exactly this reason; the row addresses were left behind.
+//
+// Chunks own disjoint output ranges, so the copy needs no coordination: each worker
+// claims whole chunks atomically and writes into its own slice. row_r is copied
+// verbatim (a row index WITHIN a morsel is unaffected by concatenation); only row_m
+// is rebased.
+inline void merge_build_rows(Join2BuildGlobal& g) {
+    const size_t nchunks = g.row_m_chunks.size();
+    if (nchunks == 0) return;
+
+    std::vector<size_t> base(nchunks, 0);
+    size_t running = 0;
+    for (size_t i = 0; i < nchunks; ++i) {
+        base[i] = running;
+        running += g.row_m_chunks[i].size();
+    }
+    g.row_m.resize(running);
+    g.row_r.resize(running);
+
+    unsigned hw = std::thread::hardware_concurrency();
+    unsigned nt = hw > 2 ? hw - 2 : 1;
+    if (nt > 16) nt = 16;
+    if (running < 65536) nt = 1;   // small build: the threads cost more than they save
+
+    std::atomic<size_t> next{0};
+    auto work = [&](unsigned) {
+        for (;;) {
+            const size_t ci = next.fetch_add(1);
+            if (ci >= nchunks) break;
+            const std::vector<uint32_t>& src_m = g.row_m_chunks[ci];
+            const std::vector<uint32_t>& src_r = g.row_r_chunks[ci];
+            const uint32_t morsel_off = g.chunk_morsel_off[ci];
+            const size_t n = src_m.size();
+            uint32_t* dst_m = g.row_m.data() + base[ci];
+            uint32_t* dst_r = g.row_r.data() + base[ci];
+            for (size_t r = 0; r < n; ++r) dst_m[r] = morsel_off + src_m[r];
+            if (n != 0) std::memcpy(dst_r, src_r.data(), n * sizeof(uint32_t));
+        }
+    };
+    std::vector<std::thread> th;
+    th.reserve(nt - 1);
+    for (unsigned t = 1; t < nt; ++t) th.emplace_back(work, t);
+    work(0);
+    for (auto& x : th) x.join();
+
+    // Release the per-worker buffers now rather than holding a second copy of the
+    // whole build address space alive until the sink is destroyed.
+    g.row_m_chunks.clear();
+    g.row_m_chunks.shrink_to_fit();
+    g.row_r_chunks.clear();
+    g.row_r_chunks.shrink_to_fit();
+    g.chunk_morsel_off.clear();
+    g.chunk_morsel_off.shrink_to_fit();
+}
 
 // Two-pass parallel CSR construction. Called once from finalize(), which the executor
 // runs single-threaded, so it spawns its own one-shot pool-let — the same pattern
@@ -590,12 +664,15 @@ struct Join2BuildSink : Sink {
         g.morsels.insert(g.morsels.end(),
                          std::make_move_iterator(l.morsels.begin()),
                          std::make_move_iterator(l.morsels.end()));
-        g.row_m.reserve(g.row_m.size() + l.next_row);
-        g.row_r.reserve(g.row_r.size() + l.next_row);
-        for (uint32_t r = 0; r < l.next_row; ++r) {
-            g.row_m.push_back(morsel_off + l.row_m[r]);
-            g.row_r.push_back(l.row_r[r]);
-        }
+        // Queue this worker's row addresses — three O(1) moves, NOT an O(rows) copy
+        // under the lock — and concatenate them once, in parallel, in finalize().
+        // `morsel_off` is captured here because it is a property of WHEN this chunk
+        // was queued; merge_build_rows() applies it. Chunks are queued in the same
+        // order as hash_chunks below, which is what keeps global build row id r
+        // meaning the same thing to both the CSR and the row addresses.
+        g.row_m_chunks.push_back(std::move(l.row_m));
+        g.row_r_chunks.push_back(std::move(l.row_r));
+        g.chunk_morsel_off.push_back(morsel_off);
         g.asof_keys.insert(g.asof_keys.end(), l.asof_keys.begin(), l.asof_keys.end());
         g.asof_str_ptr.insert(g.asof_str_ptr.end(),
                               l.asof_str_ptr.begin(), l.asof_str_ptr.end());
@@ -711,8 +788,13 @@ struct Join2BuildSink : Sink {
     }
 
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
-        // No-op for ASOF, whose combine() populated `index` instead of queuing chunks.
         auto& g = static_cast<Join2BuildGlobal&>(gs);
+        // Unconditional, and FIRST: every path below addresses build rows through
+        // row_m/row_r, and ASOF reads them too (its combine() populates `index`
+        // instead of queuing hash chunks, but it queues row addresses like everyone
+        // else). Nothing may touch the build address space before this returns.
+        merge_build_rows(g);
+        // No-op for ASOF, whose combine() populated `index` instead of queuing chunks.
         if (g.csr_active) build_join_csr(g);
         if (track_matches) {
             // The keyed row space [0, total_rows) is sealed (the CSR above was
@@ -1505,6 +1587,235 @@ struct UnmatchedBuildSource : Source {
             return SourceResult::HAVE_MORE;
         }
     }
+};
+
+// ---- RIGHT SEMI / RIGHT ANTI: build the SMALL side, stream the large one -----------
+//
+// The SAME logical answer as SemiAntiProbeOperator, with the two legs exchanged. A
+// LEFT SEMI/ANTI emits rows of its LEFT leg, and compiler.py's `_compile_join` pins
+// that leg to the PROBE ("the LEFT leg is the preserved/filtered side — it must be
+// the PROBE; the RIGHT leg builds the table"). That pin is a correctness rule about
+// which rows are EMITTED, but it also decides which side is MATERIALISED, and the two
+// questions are independent: TPC-H Q21 at SF100 probes 7,313,671 rows against a
+// 600,037,902-row build side, so the hash table is 82x the stream it serves.
+//
+// Exchanging them keeps the emitted rows identical and moves the materialisation onto
+// the smaller leg:
+//
+//   build pipeline   left leg  -> Join2BuildSink(track_matches=true)
+//   stream pipeline  right leg -> Join2MarkSink          (emits NOTHING)
+//   emit pipeline    SemiAntiBuildSource(emit_matched)   (emits the build rows)
+//
+// Two consequences the planner — not this file — must own, because they are the price
+// of the exchange and cannot be detected here:
+//
+//   * It is BLOCKING. Nothing is emitted until the streamed leg is exhausted, where
+//     the LEFT form emits each surviving probe row as it is found. A LIMIT that could
+//     have short-circuited the probe cannot short-circuit this.
+//   * Output arrives in BUILD order, not probe order.
+//
+// NOT valid for AntiNullAware (NOT IN) or the NotDistinct set-operation modes: both
+// derive their answer from a property of the BUILD side ("did it contain a NULL key",
+// Join2BuildSink::null_equal), and exchanging the legs changes which relation that
+// property is read from. Transposing them without re-deriving the rule would be the
+// silent-wrong-answer class this file's header warns about. The planner admits only
+// plain Semi and plain Anti.
+
+// Emits the build rows whose match flag has the requested polarity: SEMI emits the
+// MATCHED rows, ANTI the unmatched. Deliberately NOT a flag on UnmatchedBuildSource:
+// that source exists to complete a FULL OUTER row and pads a NULL probe half onto
+// every row it emits, which an existence filter must never do — it emits its own leg
+// unchanged. What the two share is the build-half gather, and that is `gather_rows`,
+// which both call directly.
+struct SemiAntiBuildSourceGlobal : GlobalSourceState {
+    std::atomic<uint32_t> next{0};
+};
+
+struct SemiAntiBuildSource : Source {
+    const Join2Ref* ref;
+    bool emit_matched;              // true = SEMI (emit matched), false = ANTI
+    static constexpr uint32_t kChunk = 65536;
+
+    SemiAntiBuildSource(const Join2Ref* r, bool matched) : ref(r), emit_matched(matched) {}
+
+    std::unique_ptr<GlobalSourceState> make_global() override {
+        return std::make_unique<SemiAntiBuildSourceGlobal>();
+    }
+    std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
+        return std::make_unique<LocalSourceState>();
+    }
+
+    SourceResult get_morsel(GlobalSourceState& gs_, LocalSourceState&,
+                            MorselPtr& out, ErrCtx& err) override {
+        auto& gsrc = static_cast<SemiAntiBuildSourceGlobal&>(gs_);
+        const Join2BuildGlobal& g = *ref->g;
+        const uint32_t keyed = g.total_rows;
+        // Rows [keyed, keyed + tail_null_rows) are the NULL-keyed build rows finalize()
+        // appended after the CSR was sealed. They are invisible to the CSR, so nothing
+        // can ever have marked them: they are unmatched by construction. ANTI must
+        // emit them (a NULL key equi-matches nothing, so NOT EXISTS holds); SEMI must
+        // not. That is the same rule SemiAntiProbeOperator applies to a NULL PROBE key,
+        // read from the side the exchange put them on.
+        const uint32_t domain = emit_matched ? keyed : keyed + g.tail_null_rows;
+        for (;;) {
+            const uint32_t start = gsrc.next.fetch_add(kChunk);
+            if (start >= domain) return SourceResult::FINISHED;
+            const uint32_t end = std::min(domain, start + kChunk);
+
+            std::vector<uint32_t> order;
+            order.reserve(end - start);
+            const std::atomic<uint8_t>* matched = g.matched.get();
+            for (uint32_t r = start; r < end; ++r) {
+                const bool hit = r < keyed
+                                 && matched[r].load(std::memory_order_relaxed) != 0;
+                if (hit == emit_matched) order.push_back(r);
+            }
+            if (order.empty()) continue;   // nothing of this polarity here — next chunk
+            const uint32_t n = static_cast<uint32_t>(order.size());
+
+            auto morsel = std::make_shared<CxxMorsel>();
+            morsel->zero_col_rows = n;
+            if (g.morsels.empty()) {   // build side streamed zero rows
+                out = std::move(morsel);
+                return SourceResult::HAVE_MORE;
+            }
+            MorselPtr half = gather_rows(g.morsels, order, 0, n, g.row_m, g.row_r,
+                                         g.morsels.front()->names, err);
+            if (err.code != 0 || half == nullptr) return SourceResult::FINISHED;
+            for (CxxColumn& c : half->columns) morsel->columns.push_back(std::move(c));
+
+            out = std::move(morsel);
+            return SourceResult::HAVE_MORE;
+        }
+    }
+};
+
+// Consumes the streamed leg and marks the build rows it hits. Emits nothing — the
+// pipeline's whole product is the mutation of g.matched, which SemiAntiBuildSource
+// then reads. A Sink rather than an Operator because that is what this is: a pipeline
+// terminator with no output, whose parallelism is already sound (`matched` is atomic
+// and every store is an idempotent 0->1, so workers need no coordination and combine()
+// has nothing to merge).
+//
+// `pair` is a Join2ProbeOperator held by COMPOSITION, purely to reuse `build_output`
+// for the residual path. Building the (build|probe) pair morsel is not trivial — it is
+// the gather that decides which types a join can carry — and a second copy of it here
+// would be the duplication §3 forbids.
+struct Join2MarkSink : Sink {
+    Join2ProbeOperator pair;
+    ExprProgram residual;
+    ExprEvalFn residual_fn = nullptr;
+
+    Join2MarkSink(std::vector<size_t> keys, std::vector<size_t> payload,
+                  const Join2Ref* r, ExprProgram res, ExprEvalFn res_fn)
+        : pair(std::move(keys), std::move(payload), r, /*outer=*/false,
+               /*track=*/false, /*null_eq=*/false),
+          residual(std::move(res)), residual_fn(res_fn) {}
+
+    std::unique_ptr<GlobalSinkState> make_global() override {
+        return std::make_unique<GlobalSinkState>();
+    }
+    std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
+        return std::make_unique<LocalSinkState>();
+    }
+
+    // Mark every build row in the batch that the residual accepts, then clear it.
+    // The mirror of SemiAntiProbeOperator::resolve_pairs, indexed by BUILD row
+    // instead of probe row — that index change IS the leg exchange.
+    bool resolve_pairs(const MorselPtr& in, std::vector<uint32_t>& build_rows,
+                       std::vector<uint32_t>& probe_rows, ErrCtx& err) {
+        if (build_rows.empty()) return true;
+        MorselPtr pairs = pair.build_output(in, build_rows, probe_rows, err);
+        if (err.code != 0 || pairs == nullptr) return false;
+
+        DrakenVector v;
+        void* data = nullptr;
+        uint8_t* validity = nullptr;
+        void* sel = nullptr;
+        int err_op = 0;
+        const char* kernel_msg = nullptr;
+        VecResult* child = nullptr;
+        int rc = residual_fn(residual.instrs, residual.count, pairs.get(),
+                             residual.col_idx.data(), residual.lit_dv.data(),
+                             &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
+        if (rc != 0) {
+            err.code = 1;
+            err.msg = format_kernel_error(
+                "Join2MarkSink: correlated residual evaluation failed", err_op, kernel_msg);
+            return false;
+        }
+        VectorOwner owner(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(validity),
+                          OwnedBuffer<void>(sel));
+        if (child != nullptr) { delete child; }
+        if (v.type != DRAKEN_BOOL) {
+            err.code = 1;
+            err.msg = "Join2MarkSink: correlated residual did not evaluate to BOOL — "
+                      "fail loud rather than guess at the existence test";
+            return false;
+        }
+        const uint8_t* bits = static_cast<const uint8_t*>(v.data);
+        const uint32_t* codes = v.selection;
+        std::atomic<uint8_t>* marks = pair.ref->g->matched.get();
+        uint32_t np = static_cast<uint32_t>(build_rows.size());
+        for (uint32_t k = 0; k < np; ++k) {
+            if (!sort_row_valid(v, k)) continue;   // UNKNOWN is not TRUE
+            uint32_t phys = codes[k];
+            if ((bits[phys >> 3] >> (phys & 7)) & 1u)
+                marks[static_cast<size_t>(build_rows[k])].store(
+                    1, std::memory_order_relaxed);
+        }
+        build_rows.clear();
+        probe_rows.clear();
+        return true;
+    }
+
+    SinkResult sink(const MorselPtr& in, GlobalSinkState&, LocalSinkState&,
+                    ErrCtx& err) override {
+        const Join2BuildGlobal& g = *pair.ref->g;
+        uint32_t n = in->num_rows();
+        if (n == 0 || g.total_rows == 0) return SinkResult::CONTINUE;
+
+        std::vector<uint64_t> rowh;
+        if (!compute_row_hashes(in, pair.probe_key_idx, rowh, err))
+            return SinkResult::CONTINUE;
+        const bool keys_nullable = probe_keys_nullable(in, pair.probe_key_idx);
+
+        std::vector<uint32_t> build_rows, probe_rows;
+        build_rows.reserve(Join2ProbeOperator::kBatch);
+        probe_rows.reserve(Join2ProbeOperator::kBatch);
+        std::atomic<uint8_t>* marks = g.matched.get();
+
+        for (uint32_t i = 0; i < n; ++i) {
+            if (keys_nullable) {
+                bool any_null = false;
+                for (size_t k : pair.probe_key_idx) {
+                    if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+                }
+                if (any_null) continue;   // NULL key never equi-matches
+            }
+            size_t before = build_rows.size();
+            g.probe_append(rowh[i], i, build_rows, probe_rows);
+            if (residual_fn == nullptr) {
+                // No residual: a key match IS the existence proof. Mark and drop the
+                // pairs immediately rather than accumulating a batch nothing reads.
+                for (size_t bi = before; bi < build_rows.size(); ++bi)
+                    marks[static_cast<size_t>(build_rows[bi])].store(
+                        1, std::memory_order_relaxed);
+                build_rows.clear();
+                probe_rows.clear();
+            } else if (build_rows.size() >= Join2ProbeOperator::kBatch
+                       && !resolve_pairs(in, build_rows, probe_rows, err)) {
+                return SinkResult::CONTINUE;
+            }
+        }
+        if (residual_fn != nullptr) resolve_pairs(in, build_rows, probe_rows, err);
+        return SinkResult::CONTINUE;
+    }
+
+    // Marks were written straight to the global atomics, so there is no per-worker
+    // state to merge and no result to produce. Both are deliberately empty.
+    void combine(GlobalSinkState&, LocalSinkState&, ErrCtx&) override {}
+    void finalize(GlobalSinkState&, ErrCtx&) override {}
 };
 
 // Deferred construction (build table exists only after the build pipeline runs).

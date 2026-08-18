@@ -240,6 +240,8 @@ def render_scan(node: LogicalPlanNode) -> str:
     date_range = ""
     if node.at_date is not None:
         date_range = f" AT ('{node.at_date.isoformat()}')"
+    elif node.version is not None:
+        date_range = " VERSION AS OF PREVIOUS" if node.version == 0 else f" VERSION AS OF {node.version}"
     alias = f" AS {node.alias}" if node.relation != node.alias else ""
 
     proj_names = [c.source_column for c in node.columns] if node.columns else []
@@ -374,3 +376,11 @@ def render_window(node: LogicalPlanNode) -> str:
     aggs = ", ".join(format_expression(a) for a in (node.aggregates or []))
     parts = ", ".join(format_expression(p) for p in (node.partition_by or []))
     return f"WINDOW [{aggs}] OVER (PARTITION BY [{parts}])"
+
+
+@register_render(LogicalPlanStepType.FramedWindow)
+def render_framed_window(node: LogicalPlanNode) -> str:
+    fns = ", ".join(kind for kind, *_rest in (node.outputs or []))
+    parts = ", ".join(format_expression(p) for p in (node.partition_by or []))
+    order = ", ".join(format_expression(c) for c, _asc in (node.order_by or []))
+    return f"FRAMED WINDOW [{fns}] OVER (PARTITION BY [{parts}] ORDER BY [{order}])"

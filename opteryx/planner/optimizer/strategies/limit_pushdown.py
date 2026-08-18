@@ -53,6 +53,10 @@ class LimitPushdownStrategy(OptimizationStrategy):
         # computes its per-partition value over a truncated partition. Both are wrong
         # answers, silently, so the LIMIT stays above the Window.
         LogicalPlanStepType.Window,
+        # Same reasoning, framed aggregate windows (SUM/COUNT/AVG/MIN/MAX OVER
+        # (... ROWS/RANGE BETWEEN ...)) — a running total over a truncated
+        # partition is a different (wrong) running total.
+        LogicalPlanStepType.FramedWindow,
     }
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:

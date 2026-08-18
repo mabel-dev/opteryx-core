@@ -79,6 +79,62 @@ def _find_scan_for_relation(
     return None
 
 
+def _walk_subplan_through_subqueries(
+    plan: LogicalPlan, root_id: str, visited: Optional[Set[str]] = None
+):
+    """Like `_walk_subplan`, but descends PAST Subquery/CTE boundaries.
+
+    `_walk_subplan` stops at a Subquery node by design (relation-NAME
+    resolution must not reach past an opaque boundary -- two subqueries can
+    legitimately share an inner alias). Verifying that every base source has
+    a real row count is a different question with the opposite answer: a
+    leaf whose `subplan_id` IS a CTE/subquery boundary (e.g. `cs_ui` in
+    TPC-DS Q64) has its real Scan nodes ONLY reachable by continuing past
+    it -- stopping there finds no source at all and reads as unbacked.
+    """
+    if visited is None:
+        visited = set()
+    if root_id in visited:
+        return
+    visited.add(root_id)
+    node = plan[root_id]
+    yield root_id, node
+    for child_id, _, _ in plan.ingoing_edges(root_id):
+        yield from _walk_subplan_through_subqueries(plan, child_id, visited)
+
+
+def _subtree_sources_are_backed(plan: LogicalPlan, root_id: str) -> bool:
+    """True iff every Scan/FunctionDataset reachable under `root_id` reports a
+    REAL row count (manifest or schema estimate) -- never the
+    `statistics_refresh._UNKNOWN_ROW_COUNT` placeholder substituted for one
+    that can't report a size.
+
+    Mirrors `result_size_guard._declared_row_count`'s precedence, which
+    exists for exactly this reason: once `_UNKNOWN_ROW_COUNT` is folded into
+    `.statistics.row_count`, nothing about that attribute distinguishes a
+    real count from a fabricated one -- this must be checked against the
+    same raw manifest/schema fields the guard reads, before that fold.
+    False when no source at all is found (an empty subtree proves nothing).
+    """
+    saw_a_source = False
+    for _, node in _walk_subplan_through_subqueries(plan, root_id):
+        if node.node_type not in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset):
+            continue
+        saw_a_source = True
+        manifest = getattr(node, "manifest", None)
+        if manifest is not None:
+            count = manifest.get_record_count()
+            if count is not None and count > 0:
+                continue
+        schema = getattr(node, "schema", None)
+        count = None
+        if schema is not None:
+            count = schema.row_count_metric or schema.row_count_estimate
+        if count is None or count <= 0:
+            return False
+    return saw_a_source
+
+
 def _key_stats(scan_node, column_name: Optional[str]) -> KeyStats:
     """Resolve KeyStats for a column by reading the refreshed Scan stats."""
     if scan_node is None or column_name is None:
@@ -104,50 +160,49 @@ def _leaf_relation_to_scan(
     return out
 
 
-def _leaf_row_count(
-    plan: LogicalPlan,
-    leaf_subplan_id: str,
-    leaf_rel_to_scan: Dict[str, Any],
-    leaf_local_above: List[Node],  # kept for signature stability; unused
-) -> Optional[int]:
-    """Estimate row count for a leaf by reading the refreshed Scan stats.
+def _leaf_row_count(plan: LogicalPlan, leaf_subplan_id: str) -> Optional[int]:
+    """Estimate row count for a leaf by reading ITS OWN refreshed statistics.
 
-    Returns None if any scan in the leaf is missing statistics (refresh
-    couldn't build them — typically because the scan has no manifest).
-
-    The ``plan``, ``leaf_subplan_id``, and ``leaf_local_above`` parameters
-    are preserved for signature stability with existing callers but are no
-    longer used: filter selectivity is folded into Scan.statistics by
-    statistics_refresh before any cost-based strategy runs.
+    Reads ``plan[leaf_subplan_id].statistics.row_count`` directly rather than
+    summing per-relation Scan stats. A leaf is not always a single bare Scan
+    -- a CTE or subquery reference used inside a cross-join chain (e.g.
+    ``cs_ui`` in TPC-DS Q64) is ONE leaf whose recorded relation names
+    include internally-scoped relations that ``_find_scan_for_relation``
+    cannot resolve (it stops at the opaque Subquery boundary by design).
+    Summing scans that were never found left ``leaf_rel_to_scan`` empty for
+    that leaf, returning None and aborting graph construction for the WHOLE
+    chain rather than just that leaf -- DPccp then bailed out entirely and
+    the chain fell back to naive left-deep cross-join ordering.
+    ``statistics_refresh`` already computes a correct ``row_count`` for this
+    exact subtree bottom-up, whatever shape it is; read that instead of
+    re-deriving one from possibly-unreachable Scan nodes -- but only once
+    ``_subtree_sources_are_backed`` confirms every source it was built from
+    reported a real size, preserving the original "no fabricated number"
+    refusal for a leaf like a manifest-less ``READ_JSONL`` FunctionDataset.
     """
-    if not leaf_rel_to_scan:
+    if not _subtree_sources_are_backed(plan, leaf_subplan_id):
         return None
-    total = 0
-    for _rel, scan in leaf_rel_to_scan.items():
-        stats = getattr(scan, "statistics", None)
-        if stats is None:
-            return None
-        total += stats.row_count
-    return max(1, total)
+    stats = getattr(plan[leaf_subplan_id], "statistics", None)
+    if stats is None:
+        return None
+    return max(1, int(stats.row_count))
 
 
-def _leaf_domain_row_count(leaf_rel_to_scan: Dict[str, Any]) -> Optional[int]:
+def _leaf_domain_row_count(plan: LogicalPlan, leaf_subplan_id: str) -> Optional[int]:
     """PRE-filter row count for a leaf — the ``_leaf_row_count`` counterpart.
 
     Reads ``RelationStatistics.domain_row_count`` (the base count refresh
-    recorded before any selectivity was folded in) rather than ``row_count``.
-    Returns None on the same terms as ``_leaf_row_count`` so the caller's
-    existing "no statistics → no graph" refusal is unchanged.
+    recorded before any selectivity was folded in) rather than ``row_count``,
+    off the same leaf-subtree statistics ``_leaf_row_count`` reads. Returns
+    None on the same terms so the caller's existing "no statistics → no
+    graph" refusal is unchanged.
     """
-    if not leaf_rel_to_scan:
+    if not _subtree_sources_are_backed(plan, leaf_subplan_id):
         return None
-    total = 0
-    for _rel, scan in leaf_rel_to_scan.items():
-        stats = getattr(scan, "statistics", None)
-        if stats is None:
-            return None
-        total += stats.domain_row_count
-    return max(1, total)
+    stats = getattr(plan[leaf_subplan_id], "statistics", None)
+    if stats is None:
+        return None
+    return max(1, int(stats.domain_row_count))
 
 
 def _classify_predicate(
@@ -323,7 +378,7 @@ def build_join_graph(
     # Build vertices.
     vertices: List[JoinVertex] = []
     for i, leaf in enumerate(leaves):
-        rows = _leaf_row_count(plan, leaf.subplan_id, per_leaf_scans[i], [])
+        rows = _leaf_row_count(plan, leaf.subplan_id)
         if rows is None:
             return None
         name = leaf.rel_names[0] if leaf.rel_names else f"leaf_{i}"
@@ -333,7 +388,7 @@ def build_join_graph(
                 name=name,
                 row_count=rows,
                 payload=leaf,
-                base_row_count=_leaf_domain_row_count(per_leaf_scans[i]),
+                base_row_count=_leaf_domain_row_count(plan, leaf.subplan_id),
             )
         )
 

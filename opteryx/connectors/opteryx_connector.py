@@ -75,6 +75,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
     # Capability declarations (for plan-time). Only the ones that differ from
     # the BaseTable defaults belong here.
     supports_diachronic = True  # Time-travel queries
+    supports_version_travel = True  # VERSION AS OF <snapshot id / PREVIOUS>
     supports_statistics = True  # Manifest provides stats
     supports_predicate_pushdown = True  # Allow optimizer to push predicates to reader
     supports_limit_pushdown = True  # Allow optimizer to push LIMIT to OpteryxTable
@@ -334,7 +335,38 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         the full-metadata reads so a statement cannot resolve to one snapshot when
         checked and a different one when run.
         """
-        if self.at_date is not None:
+        if self.version is not None:
+            # No history reload: the current snapshot is already in memory (set at
+            # construction), and a snapshot fetched by id is a single targeted
+            # lookup (Dataset.snapshot's own doc, not the whole history) - see
+            # Dataset.snapshot in opteryx_catalog. VERSION AS OF never needs every
+            # snapshot, only the one it names.
+            current = self.table.snapshot()
+            if current is None:
+                raise DatasetReadError(
+                    f"The dataset {self.dataset} exists, but no data has been committed to it yet."
+                )
+
+            if self.version == 0:
+                # The rewriter's sentinel for VERSION AS OF PREVIOUS.
+                target_id = current.parent_snapshot_id
+                if target_id is None:
+                    raise DatasetReadError(
+                        f"No previous version for {self.dataset} - snapshot {current.snapshot_id} is the first."
+                    )
+            else:
+                target_id = self.version
+
+            target = self.table.snapshot(target_id)
+            if target is None:
+                raise DatasetReadError(
+                    f"No snapshot {target_id} for dataset {self.dataset} - it may not exist, or may have expired."
+                )
+
+            self.snapshot_id = target.snapshot_id
+            self.snapshot = target
+
+        elif self.at_date is not None:
             # reload the dataset with history enabled
             self.table = self.catalog.load_dataset(self.dataset, load_history=True)
             snapshots = self.table.snapshots()
@@ -484,6 +516,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
     # Capability declarations - what OpteryxTable readers support
     supports_diachronic = True  # Time-travel via OpteryxTable
+    supports_version_travel = True  # VERSION AS OF <snapshot id / PREVIOUS>
     supports_predicate_pushdown = True  # Via FileSystemTable base
     supports_limit_pushdown = True  # Via FileSystemTable base
     supports_statistics = True  # Opteryx manifests provide stats

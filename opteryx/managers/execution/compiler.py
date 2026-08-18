@@ -2064,6 +2064,98 @@ class _Compiler:
             self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order
             return p2, list(layout) + list(fn_names)
 
+        if kind == "FramedWindowNode":
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
+            part_cols = list(getattr(node, "_partition_columns", None) or [])
+            order_cols = list(getattr(node, "_order_columns", None) or [])
+            order_asc = list(getattr(node, "_order_ascending", None) or [])
+            funcs = list(getattr(node, "_functions", None) or [])
+            if not funcs:
+                _unsupported("a framed window node with no functions")
+            if not order_cols:
+                _unsupported("a window FRAME with no ORDER BY")
+
+            # PARTITION BY / ORDER BY over a computed key, and a computed function
+            # ARGUMENT (`SUM(a + b) OVER (...)`): project each to a stream column
+            # first, then resolve by identity — mirrors WindowNode's identical need.
+            partition_by = list(node.parameters.get("partition_by") or [])
+            order_by = list(node.parameters.get("order_by") or [])
+            computed = [col for col in partition_by if col.node_type != NodeType.IDENTIFIER]
+            computed += [col for col, _asc in order_by if col.node_type != NodeType.IDENTIFIER]
+            computed += [
+                arg for _k, _out, arg, _frame in funcs
+                if arg is not None and arg.node_type != NodeType.IDENTIFIER
+            ]
+            if computed:
+                layout = self._add_computed(p, computed, layout)
+
+            sort_spec = []
+            for identity in part_cols:
+                if identity not in layout:
+                    _unsupported("a PARTITION BY column the engine could not resolve here")
+                self._check_key_type(
+                    "PARTITION BY", self._layout_name(identity),
+                    self._layout_type(None, identity))
+                sort_spec.append((layout.index(identity), True))
+            for identity, asc in zip(order_cols, order_asc):
+                if identity not in layout:
+                    _unsupported("a window ORDER BY column the engine could not resolve here")
+                self._check_key_type(
+                    "window ORDER BY", self._layout_name(identity),
+                    self._layout_type(None, identity))
+                sort_spec.append((layout.index(identity), bool(asc)))
+
+            # Each function's OUTPUT identity was pre-minted at plan time and its
+            # true ColumnType resolved at bind time (`_aggregate_return_type`, off
+            # the bound argument) — carried on `node.parameters["outputs"]`'s
+            # SchemaColumns (`window_functions` only has the bare identity). Folded
+            # into the same identity -> (physical type, ColumnType) tracking every
+            # other branch uses (`_layout_type`/`self._cts`), rather than a
+            # bespoke lookup just for this node.
+            self._types = getattr(self, "_types", None) or {}
+            self._cts = getattr(self, "_cts", None) or {}
+            for _kind, sc, _params, _frame in node.parameters.get("outputs") or []:
+                if sc.column_type is not None:
+                    self._types[sc.identity] = sc.column_type.physical
+                    self._cts[sc.identity] = sc.column_type
+
+            fn_args = []
+            for _kind_code, _out_identity, arg_node, _frame in funcs:
+                if arg_node is None:
+                    fn_args.append(-1)
+                    continue
+                arg_identity = arg_node.schema_column.identity
+                if arg_identity not in layout:
+                    _unsupported("a window function argument the engine could not resolve here")
+                arg_idx = layout.index(arg_identity)
+                arg_type = self._layout_type(None, arg_identity)
+                if arg_type not in self._AGG_OPERAND_TYPES:
+                    self._check_key_type("window aggregate", self._layout_name(arg_identity), arg_type)
+                fn_args.append(arg_idx)
+
+            py_funcs = []
+            for (_kind_code, out_identity, arg_node, frame), arg_idx in zip(funcs, fn_args):
+                out_type = self._layout_type(None, out_identity)
+                if out_type is None:
+                    _unsupported("a window aggregate output the engine could not type here")
+                out_logical = _logical_tuple(self._cts.get(out_identity))
+                py_funcs.append((
+                    int(_kind_code), out_identity, arg_idx, int(out_type.value), out_logical, frame
+                ))
+
+            sink_layout = layout
+            emit, layout = self._emit_subset(node, sink_layout)
+            sort_spec, emit, fn_args = self._narrow_sink_input(
+                p, sink_layout, sort_spec, emit, fn_args)
+            for i, (_kc, out_identity, _arg_idx, _ot, _ol, _fr) in enumerate(py_funcs):
+                py_funcs[i] = (_kc, out_identity, fn_args[i], _ot, _ol, _fr)
+            buf = self.nplan.new_buffer()
+            self.nplan.set_framed_window_sink(p, sort_spec, len(part_cols), py_funcs, buf, emit)
+            p2 = self.nplan.new_pipeline()
+            self.nplan.set_buffer_source(p2, buf)
+            self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order
+            return p2, list(layout) + [out_identity for _kc, out_identity, _a, _ot, _ol, _fr in py_funcs]
+
         if kind == "LimitNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
             # "First N of the stream" is only deterministic when one worker claims
@@ -3442,6 +3534,21 @@ class _Compiler:
                     "condition)"
                 )
 
+        # RIGHT SEMI / RIGHT ANTI: the same answer with the legs exchanged, taken when
+        # JoinOrderingStrategy found the leg this join would otherwise MATERIALISE to
+        # be far larger than the one it streams. The rule below pins the emitted leg to
+        # the probe, which also pins the other leg into the hash table — two decisions
+        # that only look like one. See native_join2.hpp's Join2MarkSink.
+        #
+        # Restricted to plain Semi (2) and plain Anti (4). AntiNullAware and the
+        # NotDistinct set-operation modes read their answer from a property of the
+        # BUILD side, and exchanging the legs changes which relation that property
+        # describes — a wrong answer, not a slower one.
+        if mode in (2, 4) and getattr(node, "swap_build_side", False):
+            return self._compile_swapped_semi_anti(
+                node, legs, mode, left_cols, right_cols, filter_residual
+            )
+
         # INNER / CROSS: build = left leg (CROSS builds right for the scalar side).
         # LEFT OUTER / SEMI / ANTI: the LEFT leg is the preserved/filtered side —
         # it must be the PROBE; the RIGHT leg builds the table.
@@ -3601,6 +3708,86 @@ class _Compiler:
             self.nplan.set_buffer_source(p2, buf)
             return p2, out_layout
         return pp, out_layout
+
+    def _compile_swapped_semi_anti(self, node, legs, mode, left_cols, right_cols,
+                                   filter_residual):
+        """RIGHT SEMI / RIGHT ANTI — build the LEFT leg, stream the right one.
+
+        Three pipelines, and their ORDER is the mechanism, not a detail: pipelines run
+        in creation order, so the build is complete before the stream marks against it,
+        and the stream is complete before the source reads the marks. This mirrors how
+        the FULL OUTER tail above is sequenced, for the same reason.
+
+            build   left leg  -> Join2BuildSink(track_matches=True)
+            stream  right leg -> Join2MarkSink            (emits nothing)
+            emit              -> SemiAntiBuildSource(emit_matched)
+
+        The emitted rows are identical to the LEFT form's; what changes is which leg is
+        materialised, that nothing emits until the stream is drained, and that rows
+        arrive in build order. JoinOrderingStrategy owns those consequences — by the
+        time we are here the decision is made.
+        """
+        build_id, probe_id = legs["left"], legs["right"]
+        build_keys, probe_keys = left_cols, right_cols
+
+        coercions = self._join_key_coercions(node, build_keys, probe_keys)
+        bp, blayout = self.compile_node(build_id)
+        self.nplan.set_current_identity(node.identity)
+        self.nplan.set_current_display_name(type(node).__name__)
+        bkeyout, build_keys = self._coerce_join_keys(bp, blayout, build_keys, coercions)
+        build_key_idx = []
+        for identity in build_keys:
+            if identity not in bkeyout:
+                _unsupported("a build-side join key the engine could not resolve here")
+            build_key_idx.append(bkeyout.index(identity))
+        ref = self.nplan.new_join2_ref()
+
+        # Both payloads stay FULL WIDTH, the same call the LEFT form makes whenever a
+        # correlated residual exists and for the same reason: the residual is lowered
+        # against the pair layout, so narrowing either half moves the indices it reads.
+        # The cost is different here and much smaller — this build side is the SMALL
+        # leg (that is why the swap was taken), and the streamed side retains nothing
+        # at all, so its width is per-morsel work rather than a resident table.
+        # Narrowing to `live` U `residual reads` is a real optimisation, and a separate
+        # one; doing it inline here would be a column-index bug waiting to happen.
+        build_payload = list(range(len(blayout)))
+        build_types, build_logical, build_element = self._payload_types(
+            build_id, list(blayout))
+        # track_matches=True is the whole mechanism: it allocates the matched[] flags
+        # the mark sink writes and the source reads. est_output_rows stays unknown —
+        # payload consolidation is a fan-out trade, and an existence filter has none.
+        self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
+                                        build_types, build_logical, build_element,
+                                        True, -1, False)
+
+        sp, playout = self.compile_node(probe_id)
+        self.nplan.set_current_identity(node.identity)
+        self.nplan.set_current_display_name(type(node).__name__)
+        pkeyout, probe_keys = self._coerce_join_keys(sp, playout, probe_keys, coercions)
+        probe_key_idx = []
+        for identity in probe_keys:
+            if identity not in pkeyout:
+                _unsupported("a streamed-side join key the engine could not resolve here")
+            probe_key_idx.append(pkeyout.index(identity))
+        probe_payload = list(range(len(playout)))
+
+        if filter_residual is None:
+            self.nplan.set_join2_mark_sink(sp, ref, probe_key_idx, probe_payload)
+        else:
+            # Pair layout is build payload then streamed payload — the order
+            # Join2ProbeOperator::build_output emits, which Join2MarkSink reuses.
+            bc = self._lower_expression(
+                filter_residual, "a correlated EXISTS residual condition"
+            )
+            self.nplan.set_join2_mark_sink(sp, ref, probe_key_idx, probe_payload,
+                                           bc, list(blayout) + list(playout))
+
+        ep = self.nplan.new_pipeline()
+        self.nplan.set_current_identity(node.identity)
+        self.nplan.set_current_display_name(type(node).__name__)
+        # SEMI emits the build rows that were matched; ANTI the ones that were not.
+        self.nplan.set_semi_anti_build_source(ep, ref, mode == 2)
+        return ep, list(blayout)
 
     # ---- implicit numeric join-key coercion ---------------------------------------
     #
@@ -4614,6 +4801,11 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                         agg["execution_time"] += row["execution_time"]
                         agg["cpu_time"] += row["cpu_time"]
                 telemetry._reading["native_op_stats"] = op_stats
+                # Per-pipeline wall/CPU. Pipelines run one at a time (engine.hpp's
+                # run()), so cpu_time/wall_time is the mean cores that pipeline kept
+                # busy — the only reading that can show the pool standing idle, which
+                # a per-operator stat structurally cannot.
+                telemetry._reading["native_pipeline_stats"] = nplan.collect_pipeline_stats()
             _harvest_ns = _t.perf_counter_ns() - _th0
             # WP-INSTR instruments 1 & 4: harvest the execution-time GIL readings
             # after the driver (and therefore every worker) is done, so the

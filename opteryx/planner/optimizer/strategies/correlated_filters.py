@@ -372,6 +372,26 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             if target_relation not in scan_names:
                 continue
 
+            # IDENTITY GUARD: the alias check above is necessary but not
+            # sufficient -- a materialised join key (e.g. an equi-join hoisted
+            # off an arithmetic operand by cross_join_filter_pushdown, which
+            # keeps the leg's own relation name as `.source` so
+            # extract_join_fields still matches it) carries the SAME `.source`
+            # as its underlying scan while its actual identity is only
+            # produced by a Project sitting ABOVE that scan. Pushing a
+            # predicate keyed by that identity straight onto the scan's own
+            # `.predicates` asks the reader for a column it never emits --
+            # the same class of failure the comment above already describes,
+            # just not reachable through a relation-name mismatch. Scan
+            # output is the ground truth of what a scan can filter on.
+            target_identity = _phys_identity(target_col)
+            scan_schema = getattr(scan, "schema", None)
+            scan_identities = (
+                {c.identity for c in scan_schema.columns} if scan_schema is not None else set()
+            )
+            if target_identity is None or target_identity not in scan_identities:
+                continue
+
             # REDUNDANCY GUARD: compare against the SCAN's own range, not the
             # join's. _intersect_join_keys has already replaced both keys'
             # ranges on the join node with their intersection, so at that level

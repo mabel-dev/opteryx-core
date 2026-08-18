@@ -22,6 +22,8 @@ Responsibilities:
 - Rewrites CREATE/DROP COLLECTION to CREATE/DROP SCHEMA, and ALTER/DROP WORKSPACE
   to ALTER/DROP FUNCTION, so the parser accepts statements whose object types it
   has no grammar for
+- Rewrites VERSION AS OF PREVIOUS to VERSION AS OF 0 (the planner's sentinel for
+  "the parent of the current snapshot"), and refuses a literal VERSION AS OF 0
 
 The rewriter does NOT parse SQL into an AST; it only manipulates the text.
 
@@ -235,6 +237,16 @@ _DROP_COLLECTION = re.compile(r"^(\s*DROP\s+)COLLECTION\b", re.IGNORECASE)
 _ALTER_WORKSPACE = re.compile(r"^(\s*ALTER\s+)WORKSPACE\b", re.IGNORECASE)
 _DROP_WORKSPACE = re.compile(r"^(\s*DROP\s+)WORKSPACE\b", re.IGNORECASE)
 
+# VERSION AS OF PREVIOUS -> VERSION AS OF 0. The parser's grammar for VERSION AS OF
+# only accepts a bare number literal (no PREVIOUS, no expression), so PREVIOUS has to
+# be turned into a number before the statement reaches it. 0 is never a real snapshot
+# id - see _rewrite_version_as_of_previous - so it is free to use as the sentinel the
+# planner resolves to "the parent of the current snapshot".
+_VERSION_AS_OF = re.compile(
+    rf"(?P<quoted>{_QUOTED_SPAN})" r"|\bVERSION\s+AS\s+OF\s+(?P<word>PREVIOUS|0)\b",
+    re.IGNORECASE,
+)
+
 
 def _rewrite_escaped_breaks(text: str) -> Tuple[str, List[Edit]]:
     def replace(match):
@@ -361,6 +373,29 @@ def _rewrite_object_types(text: str) -> Tuple[str, List[Edit]]:
     return text, edits
 
 
+def _rewrite_version_as_of_previous(text: str) -> Tuple[str, List[Edit]]:
+    """VERSION AS OF PREVIOUS -> VERSION AS OF 0; VERSION AS OF 0 is refused.
+
+    The refusal has to happen HERE, on the reader's own text, not after parsing: once
+    PREVIOUS has been rewritten to 0 the two are indistinguishable, so a literal 0 must
+    be caught before that rewrite can produce the same text and hide behind it.
+    """
+
+    def replace(match):
+        if match.group("quoted") is not None:
+            return None
+        word = match.group("word")
+        if word.upper() == "PREVIOUS":
+            prefix = match.group(0)[: -len(word)]
+            return f"{prefix}0"
+        raise UnsupportedSyntaxError(
+            "VERSION AS OF 0 is not a valid snapshot id. Use `VERSION AS OF PREVIOUS` "
+            "for the version immediately before the current one, or a specific snapshot id."
+        )
+
+    return _substitute(text, _VERSION_AS_OF, replace)
+
+
 def do_sql_rewrite(
     statement, source: Optional[str] = None, source_offset: int = 0
 ) -> RewrittenStatement:
@@ -382,6 +417,7 @@ def do_sql_rewrite(
         _rewrite_object_types,
         _rewrite_prefixed_strings,
         _rewrite_explain_format,
+        _rewrite_version_as_of_previous,
     ):
         statement, edits = rewrite(statement)
         passes.append(edits)

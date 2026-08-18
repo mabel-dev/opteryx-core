@@ -389,6 +389,22 @@ def visit_project(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
     # update the columns attribute, preserving order
     bound_columns = {c.schema_column.identity: c for c in columns}
+    # A bare scalar subquery projected directly (`SELECT (SELECT ...) AS x`) binds
+    # via bind_correlated_subquery, which — deliberately — leaves its schema_column
+    # pointing at the identity the SUBQUERY's OWN inner scope minted, not one
+    # registered in any of `context.schemas` here: most subqueries are consumed as
+    # an operand inside a larger bound expression (`x < (SELECT ...)`), and that
+    # outer expression is what mints the identity that matters, so leaking the
+    # subquery's internal identity outward would be wrong for that (the common)
+    # case. When the SUBQUERY node IS the top-level column, though, nothing else
+    # mints an identity for it, and the lookup below KeyErrors. It never needs
+    # resolving against `context.schemas` — decorrelation (`_output_column` in
+    # decorrelate_subquery.py) rederives the true value column from the
+    # subquery's own plan directly — so it is enough to let it stand in for
+    # itself here.
+    for column in top_level_columns:
+        if column.node_type == NodeType.SUBQUERY:
+            bound_columns.setdefault(column.schema_column.identity, column)
     node.columns = [bound_columns[c.schema_column.identity] for c in node.columns]
     node.passthrough_columns = [bound_columns[c.schema_column.identity] for c in node.passthrough_columns]
 

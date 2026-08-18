@@ -35,6 +35,7 @@ class BaseConnector:
 
     # Capability declarations - what the table readers created by this gateway support
     supports_diachronic = False  # Time-travel/temporal queries
+    supports_version_travel = False  # VERSION AS OF <snapshot id / PREVIOUS>
     supports_predicate_pushdown = False  # Filter pushdown to storage
     supports_limit_pushdown = False  # Limit pushdown to storage
     supports_statistics = False  # Statistics gathering
@@ -122,6 +123,7 @@ class BaseTable:
 
     # Capability declarations - what this table reader supports
     supports_diachronic = False  # Time-travel/temporal queries
+    supports_version_travel = False  # VERSION AS OF <snapshot id / PREVIOUS>
     supports_predicate_pushdown = False  # Filter pushdown to storage
     supports_limit_pushdown = False  # Limit pushdown to storage
     supports_statistics = False  # Statistics gathering

@@ -21,11 +21,17 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import Node
+from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext, OptimizationStrategy
 from opteryx.utils import random_string
+
+# Arithmetic operators an equi-join key is allowed to be hoisted through, e.g.
+# `a.x = b.y - 53` (TPC-DS Q02's `d_week_seq1 = d_week_seq2 - 53`). Restricted
+# to plain IDENTIFIER <op> LITERAL (or the mirror) -- a deterministic,
+# side-effect-free shape -- never a function call or a multi-column expression.
+_HOISTABLE_ARITH_OPS = {"Plus", "Minus", "Multiply", "Divide"}
 
 
 def _split_and_conditions(node: Optional[Node]) -> List[Node]:
@@ -111,6 +117,139 @@ def _get_table_from_identifier(node: Optional[Node]) -> Optional[str]:
         # Return the source (table name) if explicitly qualified
         return node.source
     return None
+
+
+def _affine_hoist_target(expr: Optional[Node], relations: List[str]) -> bool:
+    """True if `expr` is `IDENTIFIER <op> LITERAL` (or the mirror), the
+    identifier bound entirely to one of `relations`, and `expr` isn't itself
+    a bare identifier (nothing to hoist then -- the ordinary equi-join path
+    already handles that).
+
+    `expr.schema_column` must already be set -- it was bound as part of the
+    original predicate, so this never mints a type; it only relies on one
+    already minted by the binder.
+    """
+    if expr is None or expr.node_type != NodeType.BINARY_OPERATOR:
+        return False
+    if expr.value not in _HOISTABLE_ARITH_OPS:
+        return False
+    if expr.schema_column is None:
+        return False
+    left, right = expr.left, expr.right
+    if left is None or right is None:
+        return False
+    if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
+        ident = left
+    elif right.node_type == NodeType.IDENTIFIER and left.node_type == NodeType.LITERAL:
+        ident = right
+    else:
+        return False
+    return _get_table_from_identifier(ident) in relations
+
+
+def _passthrough_column(schema_column, source: Optional[str] = None) -> LogicalColumn:
+    """A bare IDENTIFIER referencing an already-computed column by identity.
+
+    `source` defaults to the column's own origin, but the caller may pin it
+    explicitly -- needed for a freshly materialised column, whose relation
+    membership is which SIDE of the join it was projected onto (one of that
+    side's `left_relation_names`/`right_relation_names` entries), not
+    anything `schema_column.origin` (an expression column has none) could
+    supply.
+    """
+    return LogicalColumn(
+        node_type=NodeType.IDENTIFIER,
+        source_column=schema_column.name,
+        source=source
+        if source is not None
+        else (schema_column.origin[0] if getattr(schema_column, "origin", None) else None),
+        schema_column=schema_column,
+    )
+
+
+def _materialize_operand_as_column(
+    plan: LogicalPlan, child_id: str, expr: Node, relation_names: List[str]
+) -> Optional[Node]:
+    """Insert a Project above `child_id` that emits everything it already
+    emits PLUS `expr` as a new column. Returns a passthrough IDENTIFIER
+    referencing that new column, or None if `child_id`'s output schema
+    isn't available (defensive -- leaves the plan untouched).
+
+    `expr` keeps the `schema_column` it was bound with -- no new identity is
+    minted here, so every downstream consumer keyed by that identity (join-key
+    extraction, statistics) resolves to the same column this projects.
+
+    The returned reference's `.source` is pinned to `relation_names[0]` --
+    any member of the join leg's own relation-name list is a valid match for
+    `extract_join_fields`'s `source in left/right_relation_names` check;
+    which specific member is irrelevant, only set membership is.
+    """
+    schema = getattr(plan[child_id], "schema", None)
+    columns = getattr(schema, "columns", None)
+    if not columns or not relation_names:
+        return None
+    project_columns: List[Node] = [_passthrough_column(col) for col in columns]
+    project_columns.append(expr)
+    project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+    project_node.columns = project_columns
+    project_node.passthrough_columns = []
+    plan.insert_node_after(random_string(), project_node, child_id)
+    return _passthrough_column(expr.schema_column, source=relation_names[0])
+
+
+def _hoist_arithmetic_join_key(
+    plan: LogicalPlan, join_id: str, join_node: LogicalPlanNode, pred: Node
+) -> bool:
+    """Rewrite `identifier = affine_expr(other_identifier, literal)` (or the
+    mirror) in place into `identifier = new_identifier`, materialising the
+    affine expression as a genuine column above the side it's bound to.
+
+    Once rewritten, `pred` is an ordinary bare-identifier equality that
+    `_extract_join_predicates`/`extract_join_fields` (and, transitively,
+    DPccp's edge classifier and the row-count estimator) already handle --
+    this function's only job is to make that shape true, not to duplicate
+    any of that logic. Returns True if `pred` was rewritten, False if it
+    doesn't match the recognised shape (`pred` is left untouched).
+    """
+    if pred.node_type != NodeType.COMPARISON_OPERATOR or pred.value != "Eq":
+        return False
+    left_relations = join_node.left_relation_names or []
+    right_relations = join_node.right_relation_names or []
+
+    candidates = ((pred.left, pred.right, "right"), (pred.right, pred.left, "left"))
+    for bare, other, other_attr in candidates:
+        if bare is None or bare.node_type != NodeType.IDENTIFIER:
+            continue
+        bare_side = _get_table_from_identifier(bare)
+        if bare_side in left_relations:
+            expr_relations, expr_side = right_relations, "right"
+        elif bare_side in right_relations:
+            expr_relations, expr_side = left_relations, "left"
+        else:
+            continue
+        if not _affine_hoist_target(other, expr_relations):
+            continue
+
+        # The join's two children are labelled by edge relationship ("left"/
+        # "right"), not by relation-name-set membership -- `expr_relations`
+        # is the join node's OWN bookkeeping list (every relation folded into
+        # that leg, including internal ones a Subquery boundary hides), which
+        # a child-subtree relation-name walk (opaque past that boundary, see
+        # `_subplan_relation_names`) will not reproduce exactly.
+        target_child_id = None
+        for child_id, _, relationship in plan.ingoing_edges(join_id):
+            if relationship == expr_side:
+                target_child_id = child_id
+                break
+        if target_child_id is None:
+            return False
+
+        new_ref = _materialize_operand_as_column(plan, target_child_id, other, expr_relations)
+        if new_ref is None:
+            return False
+        setattr(pred, other_attr, new_ref)
+        return True
+    return False
 
 
 def _collect_scan_uuids(plan: LogicalPlan, root_id: str) -> List[str]:
@@ -425,6 +564,15 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
             any_converted = False
 
             for join_id, join_node in cross_joins:
+                # Rewrite `a = b <op> literal` conjuncts (one side wrapped in
+                # arithmetic) into `a = <materialised column>` IN PLACE, before
+                # classification -- so the ordinary bare-identifier path below
+                # picks them up unchanged. Predicates already bare-identifier
+                # on both sides are untouched (_hoist_arithmetic_join_key
+                # returns False for them; nothing to hoist).
+                for conjunct in _split_and_conditions(remaining_condition):
+                    _hoist_arithmetic_join_key(plan, join_id, join_node, conjunct)
+
                 join_preds, remaining_preds = _extract_join_predicates(
                     remaining_condition,
                     join_node.left_relation_names or [],

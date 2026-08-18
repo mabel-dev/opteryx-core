@@ -244,6 +244,24 @@ def _create_window_node(logical_node, query_properties, registry):
     )
 
 
+def _create_framed_window_node(logical_node, query_properties, registry):
+    node_config = logical_node.properties
+    return registry.create(
+        "Framed Window",
+        query_properties,
+        **{
+            k: v
+            for k, v in node_config.items()
+            # `outputs` carries the bound SchemaColumn per function (the compiler
+            # needs its ColumnType to type each output column — window_functions
+            # only carries the identity) alongside window_functions and
+            # partition_by/order_by, which are unpacked into per-function
+            # config (`_functions`/`_partition_columns`/etc.) by FramedWindowNode.
+            if k in ("partition_by", "order_by", "window_functions", "outputs", "pre_update_columns")
+        },
+    )
+
+
 def _create_exit_node(logical_node, query_properties, registry):
     return registry.create("Exit", query_properties, **logical_node.properties)
 
@@ -592,6 +610,7 @@ _DISPATCH = {
     LogicalPlanStepType.ShowSnapshots:    _create_show_snapshots_node,
     LogicalPlanStepType.Union:            _create_union_node,
     LogicalPlanStepType.Window:           _create_window_node,
+    LogicalPlanStepType.FramedWindow:     _create_framed_window_node,
     LogicalPlanStepType.Unnest:           _create_unnest_node,
     LogicalPlanStepType.Analyze:          _create_analyze_node,
     LogicalPlanStepType.Comment:          _create_comment_node,

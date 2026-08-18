@@ -33,9 +33,31 @@ cross-joining it would multiply the outer rows instead of raising SQL's "more th
 one row returned by a subquery". `_uncorrelated_single_row_proof` recognises three
 shapes that establish this statically: an ungrouped aggregate; AggregateAndGroup
 whose only GROUP BY keys are pinned to a single value by an equality filter below
-it; and a subquery whose own exit step is `LIMIT n` (n <= 1). DISTINCT and a bare
-unaggregated/unlimited SELECT do NOT qualify — no uniqueness metadata exists to
-prove either returns one row, however likely that looks for the data at hand.
+it (TPC-DS Q44's shape: `WHERE ... GROUP BY i_item_sk` pinned by a store-id
+equality); and a subquery whose own exit step is `LIMIT n` (n <= 1). DISTINCT and
+a bare unaggregated/unlimited SELECT do NOT qualify — no uniqueness metadata
+exists to prove either returns one row, however likely that looks for the data
+at hand.
+
+This is why TPC-DS Q06, Q54 and Q58 are refused, permanently, not as a gap to be
+closed later:
+  - Q06/Q54: `SELECT DISTINCT d_month_seq FROM date_dim WHERE d_year = 2001 AND
+    d_moy = 1` — the equality filter pins `d_year`/`d_moy`, not the column being
+    selected/DISTINCT'd (`d_month_seq`). Proving this is one row needs a
+    `(d_year, d_moy) -> d_month_seq` functional dependency on `date_dim` that
+    nothing in the plan states; it just happens to hold for this dataset.
+  - Q58: `SELECT d_week_seq FROM date_dim WHERE d_date = DATE '2000-01-03'` — same
+    gap, bare unaggregated SELECT filtered on a column (`d_date`) different from
+    the one selected (`d_week_seq`); provable only if `d_date` is known unique.
+  Both are instances of the DISTINCT / bare-unaggregated-SELECT case immediately
+  above. The fix is not "recognise one more shape" — it is real schema metadata
+  (a declared PK/UNIQUE constraint the catalog does not currently carry) that
+  would make the proof sound instead of coincidental. Until that metadata exists,
+  accepting these would trade a compile-time refusal for a silent wrong answer
+  the day the coincidence stops holding — see
+  `test_uncorrelated_scalar_subquery_single_row_proofs` in
+  tests/integration/sql_battery/test_shapes_basic.py, which pins this exact
+  boundary by name.
 
 NOT handled here (each raises, never silently wrong):
   - subqueries with no aggregate, no equality-pinned GROUP BY, and no LIMIT 1
@@ -96,26 +118,29 @@ Known gaps (raise, never silently wrong):
   - Skip-level correlation inside NOT EXISTS / NOT IN (the inner negation blocks
     the SEMI→INNER conversion), combined with a correlated non-equality, or with
     an aggregate between it and the enclosing existence test.
-  - A scalar subquery in the SELECT LIST. The logical planner refuses it before
-    it reaches here (UnsupportedSyntaxError at the first walk of the projection),
-    because this strategy only inspects Filter conditions and an unhandled
-    SUBQUERY node in a projection used to crash the binder. Follow-on scope,
-    for the architect: the rewrite is NOT the one `_decorrelate` builds. A
-    WHERE-clause scalar subquery joins INNER — a missing match makes the
-    comparison unknown, so dropping the row is correct. A SELECT-list scalar
-    subquery is a VALUE per outer row: an outer row with no match must survive
-    carrying NULL, which is a LEFT OUTER join to the same grouped relation.
-    The ORDER BY ... LIMIT 1 form additionally needs the
+  - A CORRELATED scalar subquery in the SELECT LIST. `_decorrelate_projection`
+    handles the uncorrelated case (TPC-DS Q09: a SELECT list of CASE
+    expressions, each branch its own uncorrelated scalar subquery) with the
+    identical cross-join rewrite `_decorrelate` builds for the WHERE-clause
+    case, since an uncorrelated subquery has no join key either way. A
+    correlated one is NOT the same rewrite, though, and is refused, cleanly,
+    rather than reusing the wrong join type: a WHERE-clause scalar subquery
+    joins INNER — a missing match makes the comparison unknown, so dropping
+    the row is correct — but a SELECT-list scalar subquery is a VALUE per
+    outer row, so an outer row with no match must survive carrying NULL,
+    which needs a LEFT OUTER join to the same grouped relation. The
+    ORDER BY ... LIMIT 1 form would additionally need the
     `_rewrite_order_limit_to_row_number` rewrite (ROW_NUMBER() OVER
-    (PARTITION BY correlation keys ORDER BY sort spec), filter rn = 1) that is
-    being built for WHERE-clause subqueries — same rewrite, different join type
-    on top. The one-row guarantee still has to hold per partition, or the LEFT
-    join multiplies outer rows instead of raising "more than one row returned".
+    (PARTITION BY correlation keys ORDER BY sort spec), filter rn = 1) already
+    used for WHERE-clause subqueries — same rewrite, different join type on
+    top. The one-row guarantee would still have to hold per partition, or the
+    LEFT join multiplies outer rows instead of raising "more than one row
+    returned".
 The first two predate this strategy.
 """
 
 from opteryx.exceptions import InvalidInternalStateError, UnsupportedSyntaxError
-from opteryx.expression import NodeType, binary_operands
+from opteryx.expression import NodeType, binary_operands, get_all_nodes_of_type
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
@@ -202,6 +227,41 @@ def _find(condition, predicate):
                 return _c
 
             return found, _replace
+
+    # NodeType.CASE uses conditions/results/else_result instead of parameters (see
+    # get_all_nodes_of_type, which walks the same three fields for the same reason).
+    # Q09's shape is exactly this: a scalar subquery in a WHEN test and another in
+    # each of THEN/ELSE — none reachable via left/right/centre/parameters above.
+    if condition.node_type == NodeType.CASE:
+        for index, branch_condition in enumerate(condition.conditions or []):
+            found, replace_child = _find(branch_condition, predicate)
+            if found is not None:
+
+                def _replace(new, _c=condition, _i=index, _rc=replace_child):
+                    _c.conditions[_i] = _rc(new)
+                    return _c
+
+                return found, _replace
+
+        for index, branch_result in enumerate(condition.results or []):
+            found, replace_child = _find(branch_result, predicate)
+            if found is not None:
+
+                def _replace(new, _c=condition, _i=index, _rc=replace_child):
+                    _c.results[_i] = _rc(new)
+                    return _c
+
+                return found, _replace
+
+        if condition.else_result is not None:
+            found, replace_child = _find(condition.else_result, predicate)
+            if found is not None:
+
+                def _replace(new, _c=condition, _rc=replace_child):
+                    _c.else_result = _rc(new)
+                    return _c
+
+                return found, _replace
 
     for index, param in enumerate(getattr(condition, "parameters", None) or []):
         found, replace_param = _find(param, predicate)
@@ -1222,10 +1282,40 @@ def _has_work(condition) -> bool:
     )
 
 
+def _find_subquery_in_columns(columns):
+    """
+    Locate the first scalar subquery across a Project's column list, with a
+    callable that replaces it in place.
+
+    The list-level analogue of `_find`, which locates a match WITHIN one
+    expression tree; a Project has several top-level trees (one per SELECT-list
+    entry), each of which may itself hide the match inside a CASE branch (TPC-DS
+    Q09: each `bucket` column is a CASE whose WHEN/THEN/ELSE are three separate
+    scalar subqueries).
+    """
+    for index, column in enumerate(columns or []):
+        found, replace_child = _find_subquery(column)
+        if found is not None:
+
+            def _replace(new, _cols=columns, _i=index, _rc=replace_child):
+                _cols[_i] = _rc(new)
+                return _cols[_i]
+
+            return found, _replace
+    return None, None
+
+
+def _project_has_subquery(node) -> bool:
+    return node.node_type == LogicalPlanStepType.Project and any(
+        _find_subquery(column)[0] is not None for column in (node.columns or [])
+    )
+
+
 class DecorrelateSubqueryStrategy(OptimizationStrategy):
     def should_i_run(self, plan: LogicalPlan) -> bool:
         return any(
-            node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition)
+            (node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition))
+            or _project_has_subquery(node)
             for _, node in plan.nodes(True)
         )
 
@@ -1233,7 +1323,9 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
         if not context.optimized_plan:
             context.optimized_plan = context.pre_optimized_tree.copy()
 
-        if node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition):
+        if (
+            node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition)
+        ) or _project_has_subquery(node):
             context.collected_decorrelations.append(context.node_id)
 
         return context
@@ -1248,22 +1340,46 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
         #
         # Re-scan rather than trusting what visit() collected. A subquery's own plan
         # can contain further subqueries (canonical TPC-H Q20 nests IN inside IN
-        # inside a scalar subquery); grafting it in brings those Filter nodes into
-        # this plan AFTER the traversal that collected candidates, so they would
+        # inside a scalar subquery); grafting it in brings those Filter/Project nodes
+        # into this plan AFTER the traversal that collected candidates, so they would
         # otherwise never be rewritten and a SUBQUERY node would reach the engine.
         for _round in range(self.MAX_ROUNDS):
-            targets = [
+            filter_targets = [
                 nid
                 for nid, node in plan.nodes(True)
                 if node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition)
             ]
-            if not targets:
+            project_targets = [
+                nid for nid, node in plan.nodes(True) if _project_has_subquery(node)
+            ]
+            if not filter_targets and not project_targets:
                 break
-            plan = self._rewrite_filters(plan, targets)
+            if filter_targets:
+                plan = self._rewrite_filters(plan, filter_targets)
+            if project_targets:
+                plan = self._rewrite_projects(plan, project_targets)
         else:
             raise InvalidInternalStateError(
                 f"subquery decorrelation did not converge after {self.MAX_ROUNDS} rounds"
             )
+
+        # Safety net: a SELECT-list SUBQUERY this pass does not know how to rewrite
+        # (EXISTS/IN — `_project_has_subquery` only ever looks for a SCALAR
+        # subquery, by design; see `_find_subquery`) must never ride into the
+        # compiler, which has no SUBQUERY case and fails with an opaque internal
+        # error rather than an explicit one. The SQL entry point already refuses
+        # these pre-bind (logical_planner.py), so this is a backstop for a plan
+        # built directly against the logical planner (bypassing that guard), not
+        # the primary defence.
+        for _nid, node in plan.nodes(True):
+            if node.node_type == LogicalPlanStepType.Project and get_all_nodes_of_type(
+                node.columns or [], select_nodes=(NodeType.SUBQUERY,)
+            ):
+                raise UnsupportedSyntaxError(
+                    "**EXISTS** and **IN** subqueries are supported in the **WHERE** "
+                    "clause but not yet in the **SELECT** list."
+                )
+
         context.collected_decorrelations = []
         return plan
 
@@ -1284,6 +1400,18 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
             ):
                 while filter_nid in plan and finder(plan[filter_nid].condition)[0] is not None:
                     plan = rewrite(plan, filter_nid, self.telemetry)
+        return plan
+
+    def _rewrite_projects(self, plan: LogicalPlan, project_nids) -> LogicalPlan:
+        for project_nid in project_nids:
+            # A SELECT list can hold several scalar subqueries — Q09's shape puts
+            # three in a single CASE (WHEN/THEN/ELSE) and repeats that CASE five
+            # times. Each pass removes exactly one; keep going until none remain.
+            while (
+                project_nid in plan
+                and _find_subquery_in_columns(plan[project_nid].columns)[0] is not None
+            ):
+                plan = _decorrelate_projection(plan, project_nid, self.telemetry)
         return plan
 
 
@@ -2171,10 +2299,25 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     # provider of the filter onto the join, so this is the join's left input.
     outer_relations: set = set()
     outer_schemas: dict = {}
+    # The provider's OWN declared output columns, for the narrow-back Project
+    # below — `outer_schemas` walks the whole subtree beneath it
+    # (`_collect_relations`), which is the wrong shape here: that would restore
+    # every base relation's raw columns instead of exactly what fed the filter.
+    # This runs before ProjectionPushdownStrategy (see optimizer/__init__.py's
+    # ordering), so `provider.columns` is still whatever the binder declared —
+    # a Project's own SELECT list, in its original order, before anything below
+    # it has narrowed or reordered it.
+    pre_decorrelation_columns: list = []
     for provider, _target, _relation in plan.ingoing_edges(filter_nid):
         found_relations, found_schemas = _collect_relations(plan, provider)
         outer_relations |= found_relations
         outer_schemas.update(found_schemas)
+        pre_decorrelation_columns.extend(plan[provider].columns or [])
+        provider_schema = plan[provider].schema
+        if provider_schema is not None:
+            pre_decorrelation_columns.extend(
+                _reference_to(col) for col in provider_schema.columns
+            )
 
     # A correlation whose outer column belongs to THIS join's left leg can be a key
     # here. One reaching further out — to a grandparent scope — cannot: that
@@ -2272,6 +2415,40 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
     plan.insert_node_before(join_nid, join, filter_nid)
     plan.add_edge(inner_exit, join_nid)
 
+    # --- narrow back to the pre-decorrelation shape ---------------------------
+    # The join above attached the subquery's value as an extra column purely so
+    # the Filter can compare against it — nothing above the Filter asked for it.
+    # Left riding past the Filter, it also breaks a hard positional contract: a
+    # UNION leg's compiled layout must present its OWN declared columns, in
+    # their OWN SELECT-list order, as the very first positions — compiler.py's
+    # UnionNode aligns legs by raw position (`add_select(lp, range(len(ids)),
+    # ids)`), never by identity. A CROSS JOIN's physical output is build-side
+    # first (`_compile_join`: CROSS builds the right/inner leg), so the scalar
+    # value lands BEFORE the leg's real columns, not after — silently
+    # corrupting a "wide enough" leg's values, and for legs projection pushdown
+    # cannot demand-match by identity (any leg but the union's own identity
+    # donor, whose declared schema every other leg's identities are absent
+    # from), under-collecting the leg outright ("a UNION leg narrower than the
+    # union schema"). Found via TPC-DS Q14's `y` CTE — three `GROUP BY ...
+    # HAVING sum(...) > (SELECT ... )` legs `UNION ALL`ed together — but the
+    # defect has nothing to do with UNION, ROLLUP, or Q14 specifically: it is
+    # decorrelation leaving a transparent rewrite non-transparent. Restoring
+    # the exact pre-decorrelation columns, in their original order, immediately
+    # above the Filter makes it transparent again — same shape in, same shape
+    # out, just filtered.
+    #
+    # Placed here — after the join/filter wiring, before the deferred-pairs
+    # walk below — so a DEFERRED correlation still reaches its ancestor join:
+    # `_defer_correlation_to_ancestor` walks up from `join_nid` through every
+    # consumer it finds, widening each Project's `.columns` on the way
+    # (`_carry_column_upward`); this Project is an ordinary Project to that
+    # walk and gets widened exactly like one that was already there.
+    if pre_decorrelation_columns:
+        narrow_back = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
+        narrow_back.columns = [_local_copy(col) for col in pre_decorrelation_columns]
+        narrow_back.passthrough_columns = []
+        plan.insert_node_after(random_string(), narrow_back, filter_nid)
+
     # Correlations reaching past the enclosing scope are bound on the ancestor join
     # that owns their relation. This has to run AFTER the join is in the plan, since
     # the walk starts from it. A carried column that never gets bound is silently
@@ -2283,6 +2460,119 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
                 "belongs to a scope further out than the subquery enclosing it, and no "
                 "enclosing join provides that relation. This nesting is not supported."
             )
+
+    telemetry.optimization_decorrelate_scalar_subquery = (
+        getattr(telemetry, "optimization_decorrelate_scalar_subquery", 0) + 1
+    )
+    return plan
+
+
+def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> LogicalPlan:
+    """
+    Rewrite one scalar subquery out of a Project's SELECT list.
+
+    Same UNCORRELATED cross-join rewrite as `_decorrelate` (the WHERE-clause
+    scalar subquery case), applied to a value sitting inside a SELECT-list
+    expression instead of a Filter condition — including one nested in a CASE
+    branch (TPC-DS Q09: each `bucket` column is a CASE whose WHEN test and
+    THEN/ELSE results are each their own uncorrelated scalar subquery).
+    `_find_subquery_in_columns` is the list-of-trees analogue of `_find` that
+    locates it and replaces it in place.
+
+    CORRELATED SELECT-list subqueries are a different, LEFT OUTER, rewrite that
+    is not built here — see the "Known gaps" note in this module's docstring: an
+    outer row with no match must survive carrying NULL, where a WHERE-clause
+    subquery's INNER join can validly drop it (the comparison the row would land
+    in is simply unknown). Rejected here, cleanly, rather than silently reusing
+    the wrong join type.
+
+    Unlike `_decorrelate`, no "narrow back" Project is needed after the join: the
+    Project node IS the narrowing step. Its own `.columns` already lists exactly
+    the pre-existing SELECT-list expressions — one of them now has the SUBQUERY
+    node inside it swapped for a reference to the cross-joined value — so the
+    join's extra leg is dropped for free by the projection that was already
+    there, rather than needing one inserted the way Filter (a pass-through node)
+    does.
+    """
+    project_node = plan[project_nid]
+    subquery, replace_subquery = _find_subquery_in_columns(project_node.columns)
+    if subquery is None:
+        return plan
+
+    inner_plan = subquery.value
+
+    # --- pull the correlation out of the subquery -----------------------------
+    key_pairs, residual = _lift_correlations(inner_plan)
+
+    # Out of scope here (see the docstring above): a correlated SELECT-list
+    # scalar subquery needs a LEFT OUTER join, not the cross/inner join this
+    # rewrite builds. Refuse cleanly rather than silently misjoin.
+    if residual is not None or key_pairs:
+        raise UnsupportedSyntaxError(
+            "A scalar subquery in the **SELECT** list must be uncorrelated; one "
+            "that references the outer query is not yet supported here — only "
+            "the **WHERE** clause supports correlated scalar subqueries."
+        )
+
+    # Uncorrelated: the subquery does not depend on the outer row, so it is a
+    # single value joined to every row — a cross join against a one-row relation.
+    # "One row" has to be established, not assumed — see
+    # `_uncorrelated_single_row_proof` for the full set of shapes this proves.
+    if not _uncorrelated_single_row_proof(inner_plan):
+        raise UnsupportedSyntaxError(
+            "An uncorrelated scalar subquery must return exactly one row; only an "
+            "ungrouped aggregate, a GROUP BY whose keys are pinned to a single value "
+            "by an equality filter, or a LIMIT 1 is supported here."
+        )
+
+    # Read the subquery's value column before it is grafted into `plan`.
+    value_column = _output_column(inner_plan)
+
+    # See the matching comment in `_decorrelate`: an aggregate's output column has
+    # no origin, and a reference with no source belongs to neither leg as far as
+    # the join operator is concerned.
+    scalar_alias = f"$scalar-{random_string(6)}"
+    if not value_column.origin:
+        value_column.origin = [scalar_alias]
+
+    # --- the subquery's value becomes an ordinary column ----------------------
+    replace_subquery(_reference_to(value_column))
+
+    # --- graft the subquery in as a joined relation ---------------------------
+    # Capture the outer leg BEFORE rewiring: insert_node_before moves every
+    # provider of the project onto the join, so this is the join's left input.
+    outer_relations: set = set()
+    outer_schemas: dict = {}
+    for provider, _target, _relation in plan.ingoing_edges(project_nid):
+        found_relations, found_schemas = _collect_relations(plan, provider)
+        outer_relations |= found_relations
+        outer_schemas.update(found_schemas)
+
+    inner_exit = inner_plan.get_exit_points()[0]
+    plan += inner_plan
+    inner_relations, inner_schemas = _collect_relations(plan, inner_exit)
+    inner_relations.add(scalar_alias)
+
+    join = LogicalPlanNode(node_type=LogicalPlanStepType.Join)
+    # No correlation survives past the check above, so this is always a cross
+    # join: one value attached to every outer row.
+    join.type = "cross join"
+    join.on = None
+    join.using = None
+    # The join's referenced columns — populated for the same reason as
+    # `_decorrelate`'s: projection pushdown only harvests a node's identities
+    # when `node.columns` is truthy, and the value column is the only thing the
+    # outer query needs from this leg.
+    join.columns = [_reference_to(value_column)]
+    join.left_relation_names = sorted(outer_relations)
+    join.right_relation_names = sorted(inner_relations)
+    join.all_relations = outer_relations | inner_relations
+    join.schemas = {**outer_schemas, **inner_schemas}
+    join.left_columns, join.right_columns = [], []
+
+    join_nid = random_string()
+    plan.insert_node_before(join_nid, join, project_nid)
+    plan.add_edge(inner_exit, join_nid)
 
     telemetry.optimization_decorrelate_scalar_subquery = (
         getattr(telemetry, "optimization_decorrelate_scalar_subquery", 0) + 1

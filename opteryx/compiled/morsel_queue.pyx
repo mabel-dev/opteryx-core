@@ -17,6 +17,8 @@ edge (`PyMorselQueue`) for isolation testing — the scheduler will later call t
 
 from libcpp cimport bool as cbool
 from libcpp.memory cimport shared_ptr
+from libcpp.memory cimport make_shared
+from cython.operator cimport dereference as deref
 from libc.stddef cimport size_t
 from libc.stdio cimport fprintf, fflush, stderr
 
@@ -54,28 +56,33 @@ cdef class PyMorselQueue:
     """
 
     def __cinit__(self, size_t capacity=8):
-        self._q = new MorselQueue(capacity)
+        self._q = make_shared[MorselQueue](capacity)
 
     def __dealloc__(self):
-        if self._q != NULL:
-            self._q.close()
-            del self._q
-            self._q = NULL
+        # NO delete here. This used to `del self._q`, which freed the C++ queue the
+        # moment Python's refcount hit zero — while producer threads inside enqueue()
+        # and the consumer inside wait_dequeue_timed() were still using it, neither of
+        # them visible to that refcount. close() is still called so blocked producers
+        # wake and observe the closure promptly; the memory is released when the LAST
+        # shared_ptr drops, which may be a sink or the engine rather than this wrapper.
+        if self._q.get() != NULL:   # shared_ptr::get (null check), NOT MorselQueue::get
+            deref(self._q).close()
+            self._q.reset()
 
     # ---- cdef surface the scheduler will use (no Python, GIL-released) ----------
 
     cdef cbool _put_cxx(self, shared_ptr[CxxMorsel] m) noexcept nogil:
-        return self._q.put(m)
+        return deref(self._q).put(m)
 
     cdef MorselQueueStatus _get_cxx(self, shared_ptr[CxxMorsel]& out) noexcept nogil:
-        return self._q.get(out)
+        return deref(self._q).get(out)
 
     cdef void _finish_cxx(self) noexcept nogil:
         # Graceful end-of-data: out-of-band atomic signal (MorselQueue::finish()),
         # not an in-band sentinel — safe to call once a producer's writes are
         # provably complete, regardless of which thread wrote the data vs which
         # thread calls finish(). See morsel_queue.hpp's class doc.
-        self._q.finish()
+        deref(self._q).finish()
 
     # ---- Python test edge -------------------------------------------------------
 
@@ -84,14 +91,14 @@ cdef class PyMorselQueue:
         cdef shared_ptr[CxxMorsel] cxm = morsel_to_cxx(m)
         cdef cbool ok
         with nogil:
-            ok = self._q.put(cxm)
+            ok = deref(self._q).put(cxm)
         return bool(ok)
 
     def finish(self):
         """Signal graceful end-of-data (producer side). Returns True (the signal is
         unconditional — unlike put(), finish() cannot be refused)."""
         with nogil:
-            self._q.finish()
+            deref(self._q).finish()
         return True
 
     def wait_finished(self):
@@ -100,7 +107,7 @@ cdef class PyMorselQueue:
         No-op if finish() already happened. On the normal path the consumer observes
         FINISHED from get() instead and never calls this."""
         with nogil:
-            self._q.wait_finished()
+            deref(self._q).wait_finished()
 
     def get(self):
         """Dequeue one item: a Morsel (data), `MQ_FINISHED` (producer finished, all
@@ -111,7 +118,7 @@ cdef class PyMorselQueue:
             fprintf(stderr, b"[QTRACE] get: calling native dequeue\n")
             fflush(stderr)
         with nogil:
-            status = self._q.get(out)
+            status = deref(self._q).get(out)
         if _QTRACE:
             fprintf(stderr, b"[QTRACE] get: dequeue returned status=%d\n", <int>status)
             fflush(stderr)
@@ -130,15 +137,15 @@ cdef class PyMorselQueue:
 
     def close(self):
         with nogil:
-            self._q.close()
+            deref(self._q).close()
 
     @property
     def is_closed(self):
-        return bool(self._q.closed())
+        return bool(deref(self._q).closed())
 
     @property
     def capacity(self):
-        return self._q.capacity()
+        return deref(self._q).capacity()
 
     def __len__(self):
-        return self._q.size_approx()
+        return deref(self._q).size_approx()

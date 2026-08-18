@@ -67,7 +67,7 @@ def get_builtin_temporal_functions() -> list:
             _CT_INT64,
             (_part, _date, ParameterSpec(name="end", type_family="temporal")),
             aliases=("DATE_DIFF",),
-            cost=2705.21,
+            cost=2280.32,
             summary="Difference between two dates in the specified unit.",
         ),
         _make(
@@ -79,7 +79,7 @@ def get_builtin_temporal_functions() -> list:
                 ParameterSpec(name="time2", type_family="temporal"),
             ),
             aliases=("TIME_DIFF",),
-            cost=2831.10,
+            cost=2331.70,
             summary="Difference between two times.",
         ),
         _make(
@@ -88,7 +88,7 @@ def get_builtin_temporal_functions() -> list:
             _CT_VARCHAR,
             (ParameterSpec(name="pattern", type_family="string", constant_only=True), _date),
             aliases=("FORMAT_DATE",),
-            cost=31651.72,
+            cost=33455.82,
             summary="Format date/timestamp as string (BigQuery FORMAT_TIMESTAMP/FORMAT_DATE convention: pattern first).",
         ),
         _make(
@@ -109,7 +109,7 @@ def get_builtin_temporal_functions() -> list:
                     maximum=253402300799,
                 ),
             ),
-            cost=3.17,
+            cost=685.61,
             summary="Convert Unix timestamp to TIMESTAMP.",
         ),
         _make(
@@ -118,7 +118,7 @@ def get_builtin_temporal_functions() -> list:
             _CT_INT64,
             (_date,),
             aliases=("TO_UNIXTIME",),
-            cost=521.87,
+            cost=517.15,
             summary="Convert TIMESTAMP to Unix epoch seconds.",
         ),
     ]

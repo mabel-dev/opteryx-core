@@ -155,7 +155,18 @@ struct ExprMultiProjectOperator : Operator {
         auto m = std::make_shared<CxxMorsel>();
         m->columns.reserve(in->columns.size() + progs.size());
         for (const CxxColumn& c : in->columns) m->columns.push_back(c);  // shared once
-        m->names = in->names;
+        // `names` is positional-only and usually ABSENT between native operators
+        // (see gather_rows' "empty or parallel" contract in draken/morsels/sort.hpp
+        // and [[morsel_names_are_not_maintained_inside_the_engine]]). Carry it
+        // forward only when `in` already has one entry per input column — appending
+        // the new computed names on top of an empty (or otherwise short) input list
+        // would leave `names` neither empty nor parallel to `columns`, which
+        // gather_rows treats as a hard error the first time a downstream sink
+        // narrows by emit subset (observed: TPC-DS Q89, a window-over-GROUP-BY
+        // whose computed ORDER BY key morsel carried a 1-entry name list over 9
+        // columns).
+        const bool carry_names = in->names.size() == in->columns.size();
+        if (carry_names) m->names = in->names;
         m->zero_col_rows = in->num_rows();
         m->state = in->state;
         for (size_t k = 0; k < progs.size(); ++k) {
@@ -196,7 +207,7 @@ struct ExprMultiProjectOperator : Operator {
             nc.own->logical_type = out_logicals[k];
             nc.view = nc.own->vec;
             m->columns.push_back(std::move(nc));
-            m->names.push_back(out_names[k]);
+            if (carry_names) m->names.push_back(out_names[k]);
         }
         out = std::move(m);
         return OpResult::EMIT;
@@ -257,7 +268,12 @@ struct JsonExtractMultiOperator : Operator {
         auto m = std::make_shared<CxxMorsel>();
         m->columns.reserve(in->columns.size() + n);
         for (const CxxColumn& c : in->columns) m->columns.push_back(c);  // shared once
-        m->names = in->names;
+        // See the identical guard in ExprMultiProjectOperator::execute above: only
+        // carry `names` forward when it is already parallel to `in->columns` —
+        // appending onto an empty/short list leaves it neither empty nor parallel,
+        // which gather_rows treats as a hard error under an emit-subset narrowing.
+        const bool carry_names = in->names.size() == in->columns.size();
+        if (carry_names) m->names = in->names;
         m->zero_col_rows = in->num_rows();
         m->state = in->state;
 
@@ -269,7 +285,7 @@ struct JsonExtractMultiOperator : Operator {
             nc.own.reset(draken_vecresult_child_owner_new_c(results[k]));
             nc.view = nc.own->vec;
             m->columns.push_back(std::move(nc));
-            m->names.push_back(out_names[k]);
+            if (carry_names) m->names.push_back(out_names[k]);
         }
 
         out = std::move(m);

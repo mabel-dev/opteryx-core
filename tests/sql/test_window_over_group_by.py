@@ -282,37 +282,55 @@ def test_ungrouped_column_is_refused_by_name(statement, column):
     assert "$win_" not in message, message
 
 
-def test_cumulative_window_over_groups_is_refused():
-    """FLAVOUR (b) — TPC-DS Q51 — is NOT delivered, and does not pretend to be.
+def test_cumulative_window_over_groups():
+    """FLAVOUR (b) — TPC-DS Q51 — a window FRAME (native_window_frame.hpp's
+    FramedWindowSink) combined with this file's GROUP BY boundary.
 
         SELECT ws_item_sk, d_date,
                SUM(SUM(ws_sales_price)) OVER (PARTITION BY ws_item_sk ORDER BY d_date
                                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
         FROM ... GROUP BY ws_item_sk, d_date
 
-    needs a window FRAME and an ordered running aggregate, which Opteryx has in NO
-    arrangement — with a GROUP BY or without one. That is a separate capability in the
-    native WindowSink, not part of this lowering, and it is refused rather than answered
-    wrongly.
-
-    Pinned here so that when frames land, this is the test that says what to replace it
-    with: the running total per partition, in the window's ORDER BY order.
+    PARTITION BY and ORDER BY are the same key below (one row per partition), so the
+    running total degenerates to that partition's own SUM(id) — still exercises the
+    framed-window-over-grouped-rows plan shape (Aggregate -> Project -> Subquery ->
+    FramedWindow), not just PARTITION BY passthrough. A genuine multi-row running total
+    (PARTITION BY separate from ORDER BY) is covered without GROUP BY in
+    tests/sql/test_decimal128_compare.py and the shape battery.
     """
-    with pytest.raises(UnsupportedSyntaxError) as raised:
-        rows(
-            "SELECT number_of_moons, SUM(SUM(id)) OVER ("
-            "PARTITION BY number_of_moons ORDER BY number_of_moons "
-            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
-            "FROM $planets GROUP BY number_of_moons"
+    assert rows(
+        "SELECT number_of_moons, SUM(SUM(id)) OVER ("
+        "PARTITION BY number_of_moons ORDER BY number_of_moons "
+        "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) c "
+        "FROM $planets GROUP BY number_of_moons ORDER BY number_of_moons"
+    ) == [(0, 3), (1, 3), (2, 4), (5, 9), (14, 8), (27, 7), (79, 5), (82, 6)]
+
+    # A GENUINE running total: id is unique per row, so PARTITION BY id % 3 groups three
+    # planets per bucket and ORDER BY id orders the running sum within it. Values are
+    # SUM(mass) partial sums in id order — arithmetic on the same masses
+    # test_ratio_to_partition_total above uses, not independently sourced.
+    assert (
+        sorted(
+            (b, n, round(m, 4), round(r, 4))
+            for b, n, m, r in rows(
+                "SELECT id % 3 AS bucket, name, SUM(mass) AS m, "
+                "SUM(SUM(mass)) OVER (PARTITION BY id % 3 ORDER BY id "
+                "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running "
+                "FROM $planets GROUP BY id % 3, id, name"
+            )
         )
-    assert "not supported" in str(raised.value), raised.value
-    # The same refusal without a GROUP BY anywhere — the frame is what is missing, not
-    # the combination.
-    with pytest.raises(UnsupportedSyntaxError):
-        rows(
-            "SELECT SUM(id) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
-            "FROM $planets"
-        )
+        == [
+            (0, "Earth", 5.97, 5.97),
+            (0, "Pluto", 0.0146, 573.9846),
+            (0, "Saturn", 568.0, 573.97),
+            (1, "Mars", 0.642, 0.972),
+            (1, "Mercury", 0.33, 0.33),
+            (1, "Uranus", 86.8, 87.772),
+            (2, "Jupiter", 1898.0, 1902.87),
+            (2, "Neptune", 102.0, 2004.87),
+            (2, "Venus", 4.87, 4.87),
+        ]
+    )
 
 
 def test_a_window_in_having_is_still_refused():

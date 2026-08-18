@@ -128,6 +128,58 @@ def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_nu
     return right_eff < left_eff
 
 
+# How much larger the build leg must be estimated to be before a SEMI/ANTI join is
+# worth exchanging. Not taste: the estimates this reads are known to run LOW, and
+# were measured low on the very query the rule targets — TPC-H Q21 at SF100 estimates
+# its semi-join's left leg at 1,600,101 rows against an actual 7,313,671 (4.6x), and
+# `l_receiptdate > l_commitdate` at 200,012,634 against 379,356,474 (1.9x). A margin
+# of 10 keeps the decision correct through an error of that size instead of assuming
+# the numbers are right. Q21's real ratio is 82:1, so it clears this comfortably —
+# the swap fires where it is robust, not wherever it would help by a nose.
+_SWAP_BUILD_RATIO = 10.0
+
+# Operators that consume their whole input before emitting. If one of these sits
+# between the join and any LIMIT, nothing downstream could have short-circuited the
+# probe, so the exchange costs no streaming that was ever going to happen.
+_BLOCKING_ABOVE = (
+    LogicalPlanStepType.AggregateAndGroup,
+    LogicalPlanStepType.Aggregate,
+    LogicalPlanStepType.Order,
+    LogicalPlanStepType.HeapSort,
+    LogicalPlanStepType.Distinct,
+    LogicalPlanStepType.Window,
+    LogicalPlanStepType.FramedWindow,
+)
+
+
+def _limit_can_short_circuit(plan, join_nid) -> bool:
+    """Could a LIMIT above this join have stopped the probe early?
+
+    Walks from the join toward the exit. A blocking operator found first means the
+    answer is no — the rows were all going to be read regardless. A Limit found first
+    means yes, and the exchange would take a query that could stop after ten rows and
+    make it read the whole streamed relation.
+
+    Unknown shapes answer YES (do not swap). A wrong "no" here turns a fast query
+    slow, which is precisely the regression the ratio gate is being careful about.
+    """
+    seen = set()
+    frontier = [join_nid]
+    while frontier:
+        nid = frontier.pop()
+        for target, _s, _r in plan.outgoing_edges(nid):
+            if target in seen:
+                continue
+            seen.add(target)
+            node_type = plan[target].node_type
+            if node_type in _BLOCKING_ABOVE:
+                continue        # this branch is safe; do not walk past it
+            if node_type == LogicalPlanStepType.Limit:
+                return True
+            frontier.append(target)
+    return False
+
+
 class JoinOrderingStrategy(OptimizationStrategy):
     optimization_technique = "cost"
     requires = ("joins-planned",)
@@ -139,6 +191,44 @@ class JoinOrderingStrategy(OptimizationStrategy):
         if node.node_type == LogicalPlanStepType.Join and node.type == "cross join":
             # 1438
             pass
+
+        # SEMI/ANTI: the build side is pinned to the RIGHT leg by compiler.py, which
+        # also pins WHICH LEG IS MATERIALISED — and those are separate questions. When
+        # the materialised leg is the far larger one, the join can be exchanged: build
+        # the left leg with match tracking, stream the right one past it, then emit the
+        # marked (SEMI) or unmarked (ANTI) build rows. Same rows, materialisation on the
+        # other side. The exchange is BLOCKING, which is why the LIMIT check gates it.
+        #
+        # Only plain semi/anti. "left anti null-aware" (NOT IN) and the not-distinct
+        # set-operation joins decide their answer from a property of the build side, so
+        # exchanging the legs would change which relation that property is read from.
+        if node.node_type == LogicalPlanStepType.Join and node.type in (
+            "left semi",
+            "left anti",
+        ):
+            left_stats, right_stats = self._side_statistics(
+                context.pre_optimized_tree, context.node_id
+            )
+            left_rows = self._side_rows(left_stats, node.left_size)
+            right_rows = self._side_rows(right_stats, node.right_size)
+            # Absent statistics are fail-safe: keep today's shape rather than exchange
+            # a join on a fabricated number.
+            if (
+                left_rows
+                and right_rows
+                and right_rows >= left_rows * _SWAP_BUILD_RATIO
+                and not _limit_can_short_circuit(
+                    context.pre_optimized_tree, context.node_id
+                )
+            ):
+                node.swap_build_side = True
+                self.telemetry.optimization_semi_anti_build_side_swapped = (
+                    getattr(
+                        self.telemetry, "optimization_semi_anti_build_side_swapped", 0
+                    )
+                    + 1
+                )
+                context.optimized_plan[context.node_id] = node
 
         if node.node_type == LogicalPlanStepType.Join and node.type == "inner":
             # Only reorder joins whose legs carry reader UUIDs. Joins without

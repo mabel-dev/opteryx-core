@@ -62,7 +62,7 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                         engine="draken",
                         id="default",
                         callable_ref=date_functions.date_part,
-                        cost_us_per_million=5950.78,
+                        cost_us_per_million=4761.27,
                     ),
                 ),
                 FunctionOverload(

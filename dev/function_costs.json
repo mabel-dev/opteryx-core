@@ -1,61 +1,34 @@
 {
   "method": "marginal per-row cost via bytecode evaluator (func - identity baseline)",
   "driver": "sweep_function_costs.py (subprocess-isolated)",
-  "timestamp": 1782498440.932506,
+  "timestamp": 1787050014.2794838,
   "sample_size": 250000,
-  "measured_kernels": 55,
-  "failed_kernels": 44,
-  "crashed_functions": [
-    "BASE64_DECODE",
-    "HEX_DECODE"
-  ],
+  "measured_kernels": 65,
+  "failed_kernels": 34,
+  "crashed_functions": [],
   "functions": {
     "ABS": [
       {
         "function_name": "ABS",
         "overload_id": "ABS_1",
         "kernel": "abs_value",
-        "current_cost": 265.14,
-        "cost_us_per_million": 262.523,
-        "ns_per_row": 0.2625,
+        "current_cost": 262.52,
+        "cost_us_per_million": 562.559,
+        "ns_per_row": 0.5626,
         "success": true,
         "error": null
       }
     ],
-    "ARRAY_CONTAINS": [
+    "BASE64_DECODE": [
       {
-        "function_name": "ARRAY_CONTAINS",
-        "overload_id": "ARRAY_CONTAINS_default",
-        "kernel": "array_contains",
-        "current_cost": 1.19,
+        "function_name": "BASE64_DECODE",
+        "overload_id": "BASE64_DECODE_default",
+        "kernel": "vector_base64_decode",
+        "current_cost": 2.6,
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "NotImplementedError: ARRAY_CONTAINS must be lowered to `item = ANY(arr)` (AnyOpEq) during planning; the array_contains kernel should never be invoked."
-      }
-    ],
-    "ARRAY_CONTAINS_ALL": [
-      {
-        "function_name": "ARRAY_CONTAINS_ALL",
-        "overload_id": "ARRAY_CONTAINS_ALL_default",
-        "kernel": "array_contains_all",
-        "current_cost": 1.21,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "TypeError: cannot use 'list' as a set element (unhashable type: 'list')"
-      }
-    ],
-    "ARRAY_CONTAINS_ANY": [
-      {
-        "function_name": "ARRAY_CONTAINS_ANY",
-        "overload_id": "ARRAY_CONTAINS_ANY_default",
-        "kernel": "array_contains_any",
-        "current_cost": 1.02,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "TypeError: cannot use 'list' as a set element (unhashable type: 'list')"
+        "error": "ValueError: draken_base64_decode: malformed input string"
       }
     ],
     "BASE64_ENCODE": [
@@ -63,9 +36,9 @@
         "function_name": "BASE64_ENCODE",
         "overload_id": "BASE64_ENCODE_default",
         "kernel": "vector_base64_encode",
-        "current_cost": 7246.11,
-        "cost_us_per_million": 6998.994,
-        "ns_per_row": 6.999,
+        "current_cost": 6998.99,
+        "cost_us_per_million": 5229.892,
+        "ns_per_row": 5.2299,
         "success": true,
         "error": null
       }
@@ -75,11 +48,11 @@
         "function_name": "BASE85_DECODE",
         "overload_id": "BASE85_DECODE_default",
         "kernel": "vector_base85_decode",
-        "current_cost": 9053.16,
-        "cost_us_per_million": 9180.682,
-        "ns_per_row": 9.1807,
-        "success": true,
-        "error": null
+        "current_cost": 9180.68,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "ValueError: draken_base85_decode: malformed input string"
       }
     ],
     "BASE85_ENCODE": [
@@ -87,9 +60,9 @@
         "function_name": "BASE85_ENCODE",
         "overload_id": "BASE85_ENCODE_default",
         "kernel": "vector_base85_encode",
-        "current_cost": 8796.62,
-        "cost_us_per_million": 8774.935,
-        "ns_per_row": 8.7749,
+        "current_cost": 8774.93,
+        "cost_us_per_million": 7321.055,
+        "ns_per_row": 7.3211,
         "success": true,
         "error": null
       }
@@ -99,9 +72,9 @@
         "function_name": "CEILING",
         "overload_id": "CEILING_1",
         "kernel": "ceiling",
-        "current_cost": 328.75,
-        "cost_us_per_million": 329.966,
-        "ns_per_row": 0.33,
+        "current_cost": 329.97,
+        "cost_us_per_million": 2525.335,
+        "ns_per_row": 2.5253,
         "success": true,
         "error": null
       }
@@ -110,10 +83,10 @@
       {
         "function_name": "COALESCE",
         "overload_id": "COALESCE_variadic",
-        "kernel": "vector_coalesce",
-        "current_cost": 3269.85,
-        "cost_us_per_million": 3386.423,
-        "ns_per_row": 3.3864,
+        "kernel": "None",
+        "current_cost": 3386.42,
+        "cost_us_per_million": 3144.692,
+        "ns_per_row": 3.1447,
         "success": true,
         "error": null
       }
@@ -121,25 +94,65 @@
     "CONCAT": [
       {
         "function_name": "CONCAT",
-        "overload_id": "CONCAT_variadic",
-        "kernel": "lambda3",
+        "overload_id": "CONCAT_varchar",
+        "kernel": "None",
         "current_cost": 523.0,
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got str, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "error": "Unsupported: parameter type_family 'varchar'"
+      },
+      {
+        "function_name": "CONCAT",
+        "overload_id": "CONCAT_nvarchar",
+        "kernel": "None",
+        "current_cost": 523.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: parameter type_family 'nvarchar'"
+      },
+      {
+        "function_name": "CONCAT",
+        "overload_id": "CONCAT_varbinary",
+        "kernel": "None",
+        "current_cost": 523.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: parameter type_family 'varbinary'"
       }
     ],
     "CONCAT_WS": [
       {
         "function_name": "CONCAT_WS",
-        "overload_id": "CONCAT_WS_variadic",
-        "kernel": "_concat_ws_kernel",
+        "overload_id": "CONCAT_WS_varchar",
+        "kernel": "None",
         "current_cost": 587.0,
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "AttributeError: 'draken.vectors.vector.Vector' object has no attribute 'join'"
+        "error": "Unsupported: parameter type_family 'varchar'"
+      },
+      {
+        "function_name": "CONCAT_WS",
+        "overload_id": "CONCAT_WS_nvarchar",
+        "kernel": "None",
+        "current_cost": 587.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: parameter type_family 'nvarchar'"
+      },
+      {
+        "function_name": "CONCAT_WS",
+        "overload_id": "CONCAT_WS_varbinary",
+        "kernel": "None",
+        "current_cost": 587.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "Unsupported: parameter type_family 'varbinary'"
       }
     ],
     "CONNECTION_ID": [
@@ -170,10 +183,10 @@
         "overload_id": "COSINE_DISTANCE_TEXT",
         "kernel": "cosine_distance",
         "current_cost": 1.17,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "MissingDependencyError: EMBED and text-based COSINE_SIMILARITY/COSINE_DISTANCE require the optional embeddings capability, which is not installed.\nInstall it with:  pip install opteryx-embeddings\nor register your own provider via opteryx.register_embedding_provider(...)."
+        "cost_us_per_million": 884934.755,
+        "ns_per_row": 884.9348,
+        "success": true,
+        "error": null
       }
     ],
     "COSINE_SIMILARITY": [
@@ -192,10 +205,10 @@
         "overload_id": "COSINE_SIMILARITY_TEXT",
         "kernel": "cosine_similarity",
         "current_cost": 1.33,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "MissingDependencyError: EMBED and text-based COSINE_SIMILARITY/COSINE_DISTANCE require the optional embeddings capability, which is not installed.\nInstall it with:  pip install opteryx-embeddings\nor register your own provider via opteryx.register_embedding_provider(...)."
+        "cost_us_per_million": 893647.144,
+        "ns_per_row": 893.6471,
+        "success": true,
+        "error": null
       }
     ],
     "CURRENT_DATE": [
@@ -251,21 +264,9 @@
         "function_name": "DATEDIFF",
         "overload_id": "DATEDIFF_default",
         "kernel": "date_diff",
-        "current_cost": 2578.64,
-        "cost_us_per_million": 2705.207,
-        "ns_per_row": 2.7052,
-        "success": true,
-        "error": null
-      }
-    ],
-    "FORMAT_TIMESTAMP": [
-      {
-        "function_name": "FORMAT_TIMESTAMP",
-        "overload_id": "FORMAT_TIMESTAMP_default",
-        "kernel": "date_format",
-        "current_cost": 31113.8,
-        "cost_us_per_million": 31651.724,
-        "ns_per_row": 31.6517,
+        "current_cost": 2705.21,
+        "cost_us_per_million": 2280.316,
+        "ns_per_row": 2.2803,
         "success": true,
         "error": null
       }
@@ -287,9 +288,9 @@
         "function_name": "EXTRACT",
         "overload_id": "EXTRACT_2",
         "kernel": "date_part",
-        "current_cost": 5426.78,
-        "cost_us_per_million": 5950.78,
-        "ns_per_row": 5.9508,
+        "current_cost": 5950.78,
+        "cost_us_per_million": 4761.27,
+        "ns_per_row": 4.7613,
         "success": true,
         "error": null
       },
@@ -309,9 +310,21 @@
         "function_name": "FLOOR",
         "overload_id": "FLOOR_1",
         "kernel": "floor_dispatch",
-        "current_cost": 330.77,
-        "cost_us_per_million": 333.307,
-        "ns_per_row": 0.3333,
+        "current_cost": 333.31,
+        "cost_us_per_million": 2577.528,
+        "ns_per_row": 2.5775,
+        "success": true,
+        "error": null
+      }
+    ],
+    "FORMAT_TIMESTAMP": [
+      {
+        "function_name": "FORMAT_TIMESTAMP",
+        "overload_id": "FORMAT_TIMESTAMP_default",
+        "kernel": "date_format",
+        "current_cost": 31651.72,
+        "cost_us_per_million": 33455.817,
+        "ns_per_row": 33.4558,
         "success": true,
         "error": null
       }
@@ -322,34 +335,46 @@
         "overload_id": "FROM_UNIXTIME_default",
         "kernel": "from_unixtimestamp",
         "current_cost": 3.17,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "TypeError: Failed to convert timestamp to datetime"
+        "cost_us_per_million": 685.609,
+        "ns_per_row": 0.6856,
+        "success": true,
+        "error": null
       }
     ],
     "GREATEST": [
       {
         "function_name": "GREATEST",
         "overload_id": "GREATEST_1",
-        "kernel": "_inner",
+        "kernel": "vector_array_greatest",
         "current_cost": 4482220.29,
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "error": "ValueError: C kernel error"
       }
     ],
     "HASH": [
       {
         "function_name": "HASH",
         "overload_id": "HASH_default",
-        "kernel": "_inner",
+        "kernel": "_hash_kernel",
         "current_cost": 437424.69,
+        "cost_us_per_million": 27801.258,
+        "ns_per_row": 27.8013,
+        "success": true,
+        "error": null
+      }
+    ],
+    "HEX_DECODE": [
+      {
+        "function_name": "HEX_DECODE",
+        "overload_id": "HEX_DECODE_default",
+        "kernel": "vector_hex_decode",
+        "current_cost": 3.87,
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "error": "ValueError: draken_hex_decode: malformed input string"
       }
     ],
     "HEX_ENCODE": [
@@ -357,9 +382,9 @@
         "function_name": "HEX_ENCODE",
         "overload_id": "HEX_ENCODE_default",
         "kernel": "vector_hex_encode",
-        "current_cost": 9282.11,
-        "cost_us_per_million": 9353.052,
-        "ns_per_row": 9.3531,
+        "current_cost": 9353.05,
+        "cost_us_per_million": 6652.754,
+        "ns_per_row": 6.6528,
         "success": true,
         "error": null
       }
@@ -369,9 +394,9 @@
         "function_name": "HUMANIZE",
         "overload_id": "HUMANIZE_default",
         "kernel": "humanize",
-        "current_cost": 775947.17,
-        "cost_us_per_million": 111871.697,
-        "ns_per_row": 111.8717,
+        "current_cost": 111871.7,
+        "cost_us_per_million": 107778.291,
+        "ns_per_row": 107.7783,
         "success": true,
         "error": null
       }
@@ -380,10 +405,10 @@
       {
         "function_name": "IFNOTNULL",
         "overload_id": "IFNOTNULL_1",
-        "kernel": "vector_ifnotnull",
-        "current_cost": 3617.27,
-        "cost_us_per_million": 3782.797,
-        "ns_per_row": 3.7828,
+        "kernel": "None",
+        "current_cost": 3782.8,
+        "cost_us_per_million": 2822.128,
+        "ns_per_row": 2.8221,
         "success": true,
         "error": null
       }
@@ -392,10 +417,10 @@
       {
         "function_name": "IFNULL",
         "overload_id": "IFNULL_1",
-        "kernel": "vector_ifnull",
-        "current_cost": 3666.51,
-        "cost_us_per_million": 3737.57,
-        "ns_per_row": 3.7376,
+        "kernel": "None",
+        "current_cost": 3737.57,
+        "cost_us_per_million": 3288.641,
+        "ns_per_row": 3.2886,
         "success": true,
         "error": null
       }
@@ -404,10 +429,10 @@
       {
         "function_name": "IIF",
         "overload_id": "IIF_1",
-        "kernel": "vector_iif",
-        "current_cost": 3658.57,
-        "cost_us_per_million": 3689.177,
-        "ns_per_row": 3.6892,
+        "kernel": "None",
+        "current_cost": 3689.18,
+        "cost_us_per_million": 3589.922,
+        "ns_per_row": 3.5899,
         "success": true,
         "error": null
       }
@@ -417,11 +442,23 @@
         "function_name": "INITCAP",
         "overload_id": "INITCAP_default",
         "kernel": "vector_initcap",
-        "current_cost": 13364.84,
-        "cost_us_per_million": 13437.321,
-        "ns_per_row": 13.4373,
+        "current_cost": 13437.32,
+        "cost_us_per_million": 13268.629,
+        "ns_per_row": 13.2686,
         "success": true,
         "error": null
+      }
+    ],
+    "IP_TRUNC": [
+      {
+        "function_name": "IP_TRUNC",
+        "overload_id": "IP_TRUNC_2",
+        "kernel": "vector_ip_trunc",
+        "current_cost": 0.0,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "ValueError: IP_TRUNC: first argument must be an IPv4 (UINT32) column"
       }
     ],
     "JSONB_OBJECT_KEYS": [
@@ -433,19 +470,19 @@
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "AttributeError: 'dict' object has no attribute 'pos'"
+        "error": "ValueError: jsonb_object_keys: invalid JSON at row 0: unexpected character, expected a JSON value"
       }
     ],
     "LEAST": [
       {
         "function_name": "LEAST",
         "overload_id": "LEAST_1",
-        "kernel": "_inner",
+        "kernel": "vector_array_least",
         "current_cost": 4419443.37,
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "error": "ValueError: C kernel error"
       }
     ],
     "LEFT": [
@@ -453,9 +490,9 @@
         "function_name": "LEFT",
         "overload_id": "LEFT_default",
         "kernel": "vector_string_slice_left",
-        "current_cost": 9143.34,
-        "cost_us_per_million": 9174.75,
-        "ns_per_row": 9.1748,
+        "current_cost": 9174.75,
+        "cost_us_per_million": 8227.494,
+        "ns_per_row": 8.2275,
         "success": true,
         "error": null
       }
@@ -465,9 +502,9 @@
         "function_name": "LENGTH",
         "overload_id": "LENGTH_string",
         "kernel": "vector_string_length",
-        "current_cost": 264.44,
-        "cost_us_per_million": 264.946,
-        "ns_per_row": 0.2649,
+        "current_cost": 264.95,
+        "cost_us_per_million": 483.886,
+        "ns_per_row": 0.4839,
         "success": true,
         "error": null
       },
@@ -475,9 +512,9 @@
         "function_name": "LENGTH",
         "overload_id": "LENGTH_array",
         "kernel": "vector_length",
-        "current_cost": 294.4,
-        "cost_us_per_million": 296.232,
-        "ns_per_row": 0.2962,
+        "current_cost": 296.23,
+        "cost_us_per_million": 338.013,
+        "ns_per_row": 0.338,
         "success": true,
         "error": null
       }
@@ -487,9 +524,9 @@
         "function_name": "LEVENSHTEIN",
         "overload_id": "LEVENSHTEIN_default",
         "kernel": "vector_levenshtein",
-        "current_cost": 2421.75,
-        "cost_us_per_million": 2363.32,
-        "ns_per_row": 2.3633,
+        "current_cost": 2363.32,
+        "cost_us_per_million": 2276.09,
+        "ns_per_row": 2.2761,
         "success": true,
         "error": null
       }
@@ -499,9 +536,9 @@
         "function_name": "LOG",
         "overload_id": "LOG_default",
         "kernel": "vector_log",
-        "current_cost": 4792.69,
-        "cost_us_per_million": 4865.806,
-        "ns_per_row": 4.8658,
+        "current_cost": 4865.81,
+        "cost_us_per_million": 4113.33,
+        "ns_per_row": 4.1133,
         "success": true,
         "error": null
       }
@@ -511,9 +548,9 @@
         "function_name": "LOWER",
         "overload_id": "LOWER_default",
         "kernel": "vector_lowercase",
-        "current_cost": 6243.52,
-        "cost_us_per_million": 6473.408,
-        "ns_per_row": 6.4734,
+        "current_cost": 6473.41,
+        "cost_us_per_million": 6415.139,
+        "ns_per_row": 6.4151,
         "success": true,
         "error": null
       }
@@ -524,10 +561,10 @@
         "overload_id": "LPAD_3",
         "kernel": "left_pad",
         "current_cost": 318.0,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "cost_us_per_million": 3554.954,
+        "ns_per_row": 3.555,
+        "success": true,
+        "error": null
       }
     ],
     "LTRIM": [
@@ -535,9 +572,9 @@
         "function_name": "LTRIM",
         "overload_id": "LTRIM_1",
         "kernel": "vector_ltrim",
-        "current_cost": 3190.9,
-        "cost_us_per_million": 3361.792,
-        "ns_per_row": 3.3618,
+        "current_cost": 3361.79,
+        "cost_us_per_million": 3552.05,
+        "ns_per_row": 3.5521,
         "success": true,
         "error": null
       }
@@ -547,9 +584,9 @@
         "function_name": "MD5",
         "overload_id": "MD5_default",
         "kernel": "vector_md5",
-        "current_cost": 70139.85,
-        "cost_us_per_million": 70856.375,
-        "ns_per_row": 70.8564,
+        "current_cost": 70856.38,
+        "cost_us_per_million": 71082.66,
+        "ns_per_row": 71.0827,
         "success": true,
         "error": null
       }
@@ -560,18 +597,18 @@
         "overload_id": "NORMAL_default",
         "kernel": "random_normal",
         "current_cost": 86571.94,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "RuntimeError: std::bad_cast"
+        "cost_us_per_million": 5355.112,
+        "ns_per_row": 5.3551,
+        "success": true,
+        "error": null
       },
       {
         "function_name": "NORMAL",
         "overload_id": "NORMAL_0",
         "kernel": "random_normal",
-        "current_cost": 7345.37,
-        "cost_us_per_million": 7397.253,
-        "ns_per_row": 7.3973,
+        "current_cost": 7397.25,
+        "cost_us_per_million": 5348.122,
+        "ns_per_row": 5.3481,
         "success": true,
         "error": null
       }
@@ -593,9 +630,9 @@
         "function_name": "OCTET_LENGTH",
         "overload_id": "OCTET_LENGTH_string",
         "kernel": "vector_octet_length",
-        "current_cost": 268.02,
-        "cost_us_per_million": 266.96,
-        "ns_per_row": 0.267,
+        "current_cost": 266.96,
+        "cost_us_per_million": 414.536,
+        "ns_per_row": 0.4145,
         "success": true,
         "error": null
       }
@@ -629,9 +666,9 @@
         "function_name": "POSITION",
         "overload_id": "POSITION_2",
         "kernel": "position",
-        "current_cost": 3343.56,
-        "cost_us_per_million": 3317.721,
-        "ns_per_row": 3.3177,
+        "current_cost": 3317.72,
+        "cost_us_per_million": 3378.429,
+        "ns_per_row": 3.3784,
         "success": true,
         "error": null
       }
@@ -642,10 +679,10 @@
         "overload_id": "POWER_default",
         "kernel": "vector_power",
         "current_cost": 0.86,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "TypeError: vector_power(): incompatible function arguments. The following argument types are supported:\n    1. vector_power(v: object, exponent: float) -> object\n\nInvoked with types: draken.draken_native.Vector, draken.draken_native.Vector"
+        "cost_us_per_million": 6247.937,
+        "ns_per_row": 6.2479,
+        "success": true,
+        "error": null
       }
     ],
     "RANDOM": [
@@ -654,18 +691,18 @@
         "overload_id": "RANDOM_default",
         "kernel": "random_number",
         "current_cost": 85541.62,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "RuntimeError: std::bad_cast"
+        "cost_us_per_million": 2742.839,
+        "ns_per_row": 2.7428,
+        "success": true,
+        "error": null
       },
       {
         "function_name": "RANDOM",
         "overload_id": "RANDOM_0",
         "kernel": "random_number",
-        "current_cost": 2801.27,
-        "cost_us_per_million": 2824.053,
-        "ns_per_row": 2.8241,
+        "current_cost": 2824.05,
+        "cost_us_per_million": 2737.362,
+        "ns_per_row": 2.7374,
         "success": true,
         "error": null
       }
@@ -674,12 +711,12 @@
       {
         "function_name": "RANDOM_STRING",
         "overload_id": "RANDOM_STRING_default",
-        "kernel": "vector_random_strings",
+        "kernel": "None",
         "current_cost": 372872.83,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "TypeError: vector_random_strings(): incompatible function arguments. The following argument types are supported:\n    1. vector_random_strings(row_count: int, width: int) -> object\n\nInvoked with types: draken.draken_native.Vector"
+        "cost_us_per_million": 9189.695,
+        "ns_per_row": 9.1897,
+        "success": true,
+        "error": null
       }
     ],
     "REGEXP_REPLACE": [
@@ -687,11 +724,11 @@
         "function_name": "REGEXP_REPLACE",
         "overload_id": "REGEXP_REPLACE_3",
         "kernel": "regex_replace",
-        "current_cost": 26427.39,
-        "cost_us_per_million": 26767.878,
-        "ns_per_row": 26.7679,
-        "success": true,
-        "error": null
+        "current_cost": 26767.88,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "UnsupportedSyntaxError: REGEXP_REPLACE is only supported natively as whole-match capture extraction \u2014 REGEXP_REPLACE(s, pattern, '\\1') where `pattern` compiles to a DFA program (anchored, consuming the whole input). General regex replacement (arbitrary replacement templates or non-compilable patterns) is not supported: the RE2 runtime matcher has been removed from the execution path."
       }
     ],
     "REPLACE": [
@@ -699,11 +736,11 @@
         "function_name": "REPLACE",
         "overload_id": "REPLACE_default",
         "kernel": "vector_replace",
-        "current_cost": 9262.13,
-        "cost_us_per_million": 9169.948,
-        "ns_per_row": 9.1699,
-        "success": true,
-        "error": null
+        "current_cost": 9169.95,
+        "cost_us_per_million": null,
+        "ns_per_row": null,
+        "success": false,
+        "error": "ValueError: draken_replace: search and replace must be scalar literals (per-row search/replace not supported natively)"
       }
     ],
     "REVERSE": [
@@ -711,9 +748,9 @@
         "function_name": "REVERSE",
         "overload_id": "REVERSE_default",
         "kernel": "vector_reverse",
-        "current_cost": 4987.0,
-        "cost_us_per_million": 5284.139,
-        "ns_per_row": 5.2841,
+        "current_cost": 5284.14,
+        "cost_us_per_million": 6277.983,
+        "ns_per_row": 6.278,
         "success": true,
         "error": null
       }
@@ -723,9 +760,9 @@
         "function_name": "RIGHT",
         "overload_id": "RIGHT_default",
         "kernel": "vector_string_slice_right",
-        "current_cost": 8666.63,
-        "cost_us_per_million": 8650.901,
-        "ns_per_row": 8.6509,
+        "current_cost": 8650.9,
+        "cost_us_per_million": 8458.264,
+        "ns_per_row": 8.4583,
         "success": true,
         "error": null
       }
@@ -735,9 +772,9 @@
         "function_name": "ROUND",
         "overload_id": "ROUND_1",
         "kernel": "round1",
-        "current_cost": 357.19,
-        "cost_us_per_million": 357.873,
-        "ns_per_row": 0.3579,
+        "current_cost": 357.87,
+        "cost_us_per_million": 862.389,
+        "ns_per_row": 0.8624,
         "success": true,
         "error": null
       },
@@ -745,9 +782,9 @@
         "function_name": "ROUND",
         "overload_id": "ROUND_2",
         "kernel": "round2",
-        "current_cost": 556.67,
-        "cost_us_per_million": 557.87,
-        "ns_per_row": 0.5579,
+        "current_cost": 557.87,
+        "cost_us_per_million": 2575.732,
+        "ns_per_row": 2.5757,
         "success": true,
         "error": null
       }
@@ -758,10 +795,10 @@
         "overload_id": "RPAD_3",
         "kernel": "right_pad",
         "current_cost": 321.0,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "cost_us_per_million": 3595.491,
+        "ns_per_row": 3.5955,
+        "success": true,
+        "error": null
       }
     ],
     "RTRIM": [
@@ -769,9 +806,9 @@
         "function_name": "RTRIM",
         "overload_id": "RTRIM_1",
         "kernel": "vector_rtrim",
-        "current_cost": 3159.78,
-        "cost_us_per_million": 3178.18,
-        "ns_per_row": 3.1782,
+        "current_cost": 3178.18,
+        "cost_us_per_million": 3764.161,
+        "ns_per_row": 3.7642,
         "success": true,
         "error": null
       }
@@ -781,9 +818,9 @@
         "function_name": "SHA1",
         "overload_id": "SHA1_default",
         "kernel": "vector_sha1",
-        "current_cost": 31365.6,
-        "cost_us_per_million": 31113.374,
-        "ns_per_row": 31.1134,
+        "current_cost": 31113.37,
+        "cost_us_per_million": 34097.111,
+        "ns_per_row": 34.0971,
         "success": true,
         "error": null
       }
@@ -793,9 +830,9 @@
         "function_name": "SHA224",
         "overload_id": "SHA224_default",
         "kernel": "vector_sha224",
-        "current_cost": 38072.33,
-        "cost_us_per_million": 38132.867,
-        "ns_per_row": 38.1329,
+        "current_cost": 38132.87,
+        "cost_us_per_million": 39687.551,
+        "ns_per_row": 39.6876,
         "success": true,
         "error": null
       }
@@ -805,9 +842,9 @@
         "function_name": "SHA256",
         "overload_id": "SHA256_default",
         "kernel": "vector_sha256",
-        "current_cost": 32001.71,
-        "cost_us_per_million": 32147.718,
-        "ns_per_row": 32.1477,
+        "current_cost": 32147.72,
+        "cost_us_per_million": 32107.069,
+        "ns_per_row": 32.1071,
         "success": true,
         "error": null
       }
@@ -817,9 +854,9 @@
         "function_name": "SHA384",
         "overload_id": "SHA384_default",
         "kernel": "vector_sha384",
-        "current_cost": 89659.1,
-        "cost_us_per_million": 89807.051,
-        "ns_per_row": 89.8071,
+        "current_cost": 89807.05,
+        "cost_us_per_million": 91700.496,
+        "ns_per_row": 91.7005,
         "success": true,
         "error": null
       }
@@ -829,9 +866,9 @@
         "function_name": "SHA512",
         "overload_id": "SHA512_default",
         "kernel": "vector_sha512",
-        "current_cost": 90864.74,
-        "cost_us_per_million": 91033.245,
-        "ns_per_row": 91.0332,
+        "current_cost": 91033.24,
+        "cost_us_per_million": 92702.578,
+        "ns_per_row": 92.7026,
         "success": true,
         "error": null
       }
@@ -841,9 +878,9 @@
         "function_name": "SIGN",
         "overload_id": "SIGN_1",
         "kernel": "sign_value",
-        "current_cost": 459.55,
-        "cost_us_per_million": 444.888,
-        "ns_per_row": 0.4449,
+        "current_cost": 444.89,
+        "cost_us_per_million": 890.699,
+        "ns_per_row": 0.8907,
         "success": true,
         "error": null
       }
@@ -852,12 +889,12 @@
       {
         "function_name": "SORT",
         "overload_id": "SORT_1",
-        "kernel": "_inner",
+        "kernel": "_sort_kernel",
         "current_cost": 4.92,
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "error": "ValueError: C kernel error"
       }
     ],
     "SOUNDEX": [
@@ -865,9 +902,9 @@
         "function_name": "SOUNDEX",
         "overload_id": "SOUNDEX_default",
         "kernel": "vector_soundex",
-        "current_cost": 21617.23,
-        "cost_us_per_million": 21737.773,
-        "ns_per_row": 21.7378,
+        "current_cost": 21737.77,
+        "cost_us_per_million": 21658.113,
+        "ns_per_row": 21.6581,
         "success": true,
         "error": null
       }
@@ -881,7 +918,7 @@
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "error": "ValueError: draken_split: delimiter must be a scalar literal (per-row delimiter not supported natively)"
       },
       {
         "function_name": "SPLIT",
@@ -891,7 +928,7 @@
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "error": "ValueError: draken_split: delimiter must be a scalar literal (per-row delimiter not supported natively)"
       }
     ],
     "SQRT": [
@@ -899,9 +936,9 @@
         "function_name": "SQRT",
         "overload_id": "SQRT_1",
         "kernel": "sqrt_value",
-        "current_cost": 446.21,
-        "cost_us_per_million": 449.029,
-        "ns_per_row": 0.449,
+        "current_cost": 449.03,
+        "cost_us_per_million": 549.219,
+        "ns_per_row": 0.5492,
         "success": true,
         "error": null
       }
@@ -910,20 +947,20 @@
       {
         "function_name": "SUBSTRING",
         "overload_id": "SUBSTRING_2",
-        "kernel": "lambda5",
+        "kernel": "lambda1",
         "current_cost": 378.0,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "TypeError: draken_vector_unwrap: expected draken.draken_native.Vector, got draken.vectors.vector.Vector"
+        "cost_us_per_million": 9236.827,
+        "ns_per_row": 9.2368,
+        "success": true,
+        "error": null
       },
       {
         "function_name": "SUBSTRING",
         "overload_id": "SUBSTRING_3",
         "kernel": "vector_string_substring",
-        "current_cost": 9809.98,
-        "cost_us_per_million": 9921.624,
-        "ns_per_row": 9.9216,
+        "current_cost": 9921.62,
+        "cost_us_per_million": 8114.722,
+        "ns_per_row": 8.1147,
         "success": true,
         "error": null
       }
@@ -933,9 +970,9 @@
         "function_name": "TIMEDIFF",
         "overload_id": "TIMEDIFF_default",
         "kernel": "time_diff",
-        "current_cost": 2826.27,
-        "cost_us_per_million": 2831.1,
-        "ns_per_row": 2.8311,
+        "current_cost": 2831.1,
+        "cost_us_per_million": 2331.699,
+        "ns_per_row": 2.3317,
         "success": true,
         "error": null
       }
@@ -958,10 +995,10 @@
         "overload_id": "TO_ASCII_1",
         "kernel": "to_ascii",
         "current_cost": 6.8,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "ValueError: only single character unicode strings can be converted to Py_UCS4, got length 12"
+        "cost_us_per_million": 493.54,
+        "ns_per_row": 0.4935,
+        "success": true,
+        "error": null
       }
     ],
     "TO_CHAR": [
@@ -970,10 +1007,10 @@
         "overload_id": "TO_CHAR_1",
         "kernel": "to_char",
         "current_cost": 8.2,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "Unsupported: result is not a length-250000 vector (got list, length=None); kernel is likely a placeholder or the function is specially lowered \u2014 measure it through full SQL instead"
+        "cost_us_per_million": 3475.732,
+        "ns_per_row": 3.4757,
+        "success": true,
+        "error": null
       }
     ],
     "TRIM": [
@@ -981,9 +1018,9 @@
         "function_name": "TRIM",
         "overload_id": "TRIM_1",
         "kernel": "vector_trim",
-        "current_cost": 3521.81,
-        "cost_us_per_million": 3529.823,
-        "ns_per_row": 3.5298,
+        "current_cost": 3529.82,
+        "cost_us_per_million": 4610.052,
+        "ns_per_row": 4.6101,
         "success": true,
         "error": null
       }
@@ -993,9 +1030,9 @@
         "function_name": "TRUNC",
         "overload_id": "TRUNC_numeric",
         "kernel": "trunc_dispatch",
-        "current_cost": 336.36,
-        "cost_us_per_million": 333.893,
-        "ns_per_row": 0.3339,
+        "current_cost": 333.89,
+        "cost_us_per_million": 2560.559,
+        "ns_per_row": 2.5606,
         "success": true,
         "error": null
       },
@@ -1003,9 +1040,9 @@
         "function_name": "TRUNC",
         "overload_id": "TRUNC_date",
         "kernel": "trunc_date",
-        "current_cost": 1137.26,
-        "cost_us_per_million": 1133.169,
-        "ns_per_row": 1.1332,
+        "current_cost": 1133.17,
+        "cost_us_per_million": 1126.664,
+        "ns_per_row": 1.1267,
         "success": true,
         "error": null
       },
@@ -1013,9 +1050,9 @@
         "function_name": "TRUNC",
         "overload_id": "TRUNC_timestamp",
         "kernel": "trunc_timestamp",
-        "current_cost": 1137.88,
-        "cost_us_per_million": 1150.452,
-        "ns_per_row": 1.1505,
+        "current_cost": 1150.45,
+        "cost_us_per_million": 1035.007,
+        "ns_per_row": 1.035,
         "success": true,
         "error": null
       }
@@ -1025,9 +1062,9 @@
         "function_name": "UNIXTIME",
         "overload_id": "UNIXTIME_default",
         "kernel": "unixtime",
-        "current_cost": 517.92,
-        "cost_us_per_million": 521.865,
-        "ns_per_row": 0.5219,
+        "current_cost": 521.87,
+        "cost_us_per_million": 517.151,
+        "ns_per_row": 0.5172,
         "success": true,
         "error": null
       }
@@ -1037,9 +1074,9 @@
         "function_name": "UPPER",
         "overload_id": "UPPER_default",
         "kernel": "vector_uppercase",
-        "current_cost": 6274.33,
-        "cost_us_per_million": 6236.704,
-        "ns_per_row": 6.2367,
+        "current_cost": 6236.7,
+        "cost_us_per_million": 6551.572,
+        "ns_per_row": 6.5516,
         "success": true,
         "error": null
       }
@@ -1068,26 +1105,14 @@
         "error": "skipped: constant placeholder kernel (folded at bind time; no per-row cost)"
       }
     ],
-    "_ARRAY": [
-      {
-        "function_name": "_ARRAY",
-        "overload_id": "_ARRAY_2",
-        "kernel": "lambda7",
-        "current_cost": 0.25,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "ValueError: parse_column_type: unknown type \"b'AB'\""
-      }
-    ],
     "_CI_ENDS_WITH": [
       {
         "function_name": "_CI_ENDS_WITH",
         "overload_id": "_CI_ENDS_WITH_default",
         "kernel": "vector_ci_ends_with",
-        "current_cost": 870.37,
-        "cost_us_per_million": 869.184,
-        "ns_per_row": 0.8692,
+        "current_cost": 869.18,
+        "cost_us_per_million": 1734.297,
+        "ns_per_row": 1.7343,
         "success": true,
         "error": null
       }
@@ -1097,9 +1122,9 @@
         "function_name": "_CI_STARTS_WITH",
         "overload_id": "_CI_STARTS_WITH_default",
         "kernel": "vector_ci_starts_with",
-        "current_cost": 876.29,
-        "cost_us_per_million": 872.235,
-        "ns_per_row": 0.8722,
+        "current_cost": 872.24,
+        "cost_us_per_million": 1746.186,
+        "ns_per_row": 1.7462,
         "success": true,
         "error": null
       }
@@ -1113,7 +1138,7 @@
         "cost_us_per_million": null,
         "ns_per_row": null,
         "success": false,
-        "error": "ValueError: vector_dfa_extract: unsupported compiled program version"
+        "error": "ValueError: draken__dfa_extract: compiled program blob is invalid"
       }
     ],
     "_ENDS_WITH": [
@@ -1121,9 +1146,9 @@
         "function_name": "_ENDS_WITH",
         "overload_id": "_ENDS_WITH_default",
         "kernel": "vector_ends_with",
-        "current_cost": 2035.17,
-        "cost_us_per_million": 2082.095,
-        "ns_per_row": 2.0821,
+        "current_cost": 2082.09,
+        "cost_us_per_million": 2892.33,
+        "ns_per_row": 2.8923,
         "success": true,
         "error": null
       }
@@ -1133,23 +1158,11 @@
         "function_name": "_STARTS_WITH",
         "overload_id": "_STARTS_WITH_default",
         "kernel": "vector_starts_with",
-        "current_cost": 2197.54,
-        "cost_us_per_million": 1955.831,
-        "ns_per_row": 1.9558,
+        "current_cost": 1955.83,
+        "cost_us_per_million": 2862.784,
+        "ns_per_row": 2.8628,
         "success": true,
         "error": null
-      }
-    ],
-    "_TRY_ARRAY": [
-      {
-        "function_name": "_TRY_ARRAY",
-        "overload_id": "_TRY_ARRAY_2",
-        "kernel": "lambda8",
-        "current_cost": 0.31,
-        "cost_us_per_million": null,
-        "ns_per_row": null,
-        "success": false,
-        "error": "ValueError: parse_column_type: unknown type \"b'AB'\""
       }
     ]
   }

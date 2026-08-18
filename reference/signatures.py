@@ -133,8 +133,6 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
         (
             "Array Functions",
             (
-                "ARRAY",
-                "TRY_ARRAY",
                 "GREATEST",
                 "LEAST",
                 "SORT",
@@ -221,10 +219,8 @@ _FALLBACK_CATEGORY_LABELS = {
 }
 
 _HIDDEN_FUNCTIONS = {
-    "ARRAY",
     "CASE",
     "GET_STRING",
-    "TRY_ARRAY",
 }
 
 _PUBLIC_SYNTAX_EXPORTS = {
@@ -286,14 +282,6 @@ _COMMON_PARAMETER_DOCUMENTATION = {
 }
 
 _PARAMETER_DOCUMENTATION_OVERRIDES = {
-    "ARRAY": {
-        "expr": "Value or expression to place into the new array.",
-        "type_name": "Element type for the array, such as `INTEGER` or `VARCHAR`.",
-    },
-    "TRY_ARRAY": {
-        "expr": "Value or expression to place into the new array.",
-        "type_name": "Element type for the array, such as `INTEGER` or `VARCHAR`.",
-    },
     "CEILING": {
         "num": "Numeric value to round upward.",
         "scale": "Decimal scale to apply before taking the ceiling. Negative values round to tens, hundreds, and larger positions.",
@@ -364,10 +352,6 @@ _PARAMETER_DOCUMENTATION_OVERRIDES = {
 }
 
 _RETURN_OVERRIDES = {
-    "ARRAY": (
-        "array<type_name>",
-        "Returns a typed array whose element type is taken from `type_name`.",
-    ),
     "CASE": (
         "compatible input type",
         "Returns the selected branch value using the first compatible result type from the CASE expression.",
@@ -408,14 +392,9 @@ _RETURN_OVERRIDES = {
         "array<element type of `string`>",
         "Returns an array whose element type is the string type of `string` — the parts are substrings of the input, so the element type is fixed and known.",
     ),
-    "TRY_ARRAY": (
-        "array<type_name>",
-        "Returns a typed array whose element type is taken from `type_name`, or null when conversion fails.",
-    ),
 }
 
 _FUNCTION_NOTES = {
-    "ARRAY": "The `type_name` argument must be a constant expression naming the target element type.",
     "CEILING": "When `scale` is provided, positive values affect digits to the right of the decimal point and negative values affect tens, hundreds, and larger positions.",
     "CURRENT_DATE": "Canonical SQL-92 form is `CURRENT_DATE`. Opteryx also accepts `CURRENT_DATE()`.",
     "CURRENT_TIME": "Canonical SQL-92 form is `CURRENT_TIME`. Opteryx also accepts `CURRENT_TIME()`.",
@@ -431,11 +410,9 @@ _FUNCTION_NOTES = {
     "RANDOM_STRING": "This function is volatile. It returns `n` random bytes as `VARBINARY` for each row; the integer argument is the byte length, not a seed.",
     "SUBSTRING": "Canonical SQL-92 form is `SUBSTRING(str FROM start FOR length)`. Opteryx also accepts `SUBSTRING(str[, start[, length]])`.",
     "TRIM": "Canonical SQL-92 form is `TRIM([BOTH|LEADING|TRAILING] chars FROM str)`. Opteryx also accepts `TRIM(str[, chars])` as well as `LTRIM` and `RTRIM`. `chars` is a SET of characters, matched in any order and repeated: `TRIM(BOTH 'ab' FROM 'baXab')` is `X`. It must be constant, and over an `NVARCHAR` operand it is matched by codepoint, so a multibyte character is never split. Omit it (`TRIM(str)`) to strip ASCII whitespace; the direction-only spelling `TRIM(BOTH FROM str)` is not accepted.",
-    "TRY_ARRAY": "The `type_name` argument must be a constant expression naming the target element type.",
 }
 
 _RELATED_HINTS = {
-    "ARRAY": ("TRY_ARRAY", "SORT", "GREATEST", "LEAST"),
     "ASCII": ("CHAR", "LEFT", "RIGHT"),
     "BASE64_DECODE": ("BASE64_ENCODE", "BASE85_DECODE", "HEX_DECODE"),
     "BASE64_ENCODE": ("BASE64_DECODE", "BASE85_ENCODE", "HEX_ENCODE"),
@@ -453,10 +430,10 @@ _RELATED_HINTS = {
     "EXTRACT": ("TRUNC", "DATEDIFF", "TIME_BUCKET"),
     "EMBED": ("COSINE_SIMILARITY", "COSINE_DISTANCE"),
     "FLOOR": ("ROUND", "CEILING", "TRUNC"),
-    "GREATEST": ("LEAST", "SORT", "ARRAY"),
+    "GREATEST": ("LEAST", "SORT", "UNNEST"),
     "IFNOTNULL": ("IFNULL", "COALESCE", "NULLIF"),
     "IFNULL": ("COALESCE", "IFNOTNULL", "NULLIF"),
-    "LEAST": ("GREATEST", "SORT", "ARRAY"),
+    "LEAST": ("GREATEST", "SORT", "UNNEST"),
     "LOWER": ("UPPER", "TITLE", "INITCAP"),
     "LTRIM": ("TRIM", "RTRIM", "REPLACE"),
     "NULLIF": ("IFNULL", "IFNOTNULL", "COALESCE"),
@@ -464,7 +441,7 @@ _RELATED_HINTS = {
     "REPLACE": ("REGEXP_REPLACE", "SUBSTRING", "POSITION"),
     "ROUND": ("CEILING", "FLOOR", "TRUNC"),
     "RTRIM": ("TRIM", "LTRIM", "REPLACE"),
-    "SORT": ("ARRAY", "GREATEST", "LEAST"),
+    "SORT": ("GREATEST", "LEAST", "UNNEST"),
     "SUBSTRING": ("LEFT", "RIGHT", "POSITION"),
     "TIME_BUCKET": ("TRUNC", "EXTRACT", "DATEDIFF"),
     "TITLE": ("INITCAP", "UPPER", "LOWER"),

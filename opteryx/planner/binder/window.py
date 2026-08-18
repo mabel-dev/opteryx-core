@@ -6,8 +6,12 @@
 """
 Binder for ranking-window nodes (ROW_NUMBER / RANK / DENSE_RANK).
 
-Aggregate windows are lowered to joins by the plan rewriter and never reach the
-binder. Ranking windows survive as `LogicalPlanStepType.Window` nodes carrying an
+A whole-partition aggregate window (`SUM(x) OVER (PARTITION BY p)`, no ORDER BY) is
+lowered to a join by the plan rewriter and never reaches the binder. A FRAMED
+aggregate window (ORDER BY and/or a ROWS/RANGE frame present) is a different node
+type — `LogicalPlanStepType.FramedWindow` — with its own binder,
+`opteryx.planner.binder.framed_window.visit_framed_window`; it is never rewritten
+to a join. Ranking windows survive as `LogicalPlanStepType.Window` nodes carrying an
 `outputs` list; they come from two producers — the logical planner for user-facing
 ranking windows (PARTITION BY ... ORDER BY ...), and the INTERSECT/EXCEPT ALL
 rewrite (no ORDER BY, single ROW_NUMBER). Both pre-mint the output schema columns
