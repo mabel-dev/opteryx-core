@@ -79,12 +79,14 @@ jobs:
           allow-prereleases: true
 
       # libssl-dev/pkg-config are needed by the vendored libcurl the HTTP client
-      # statically links; Rust builds the opteryx.compute crate. Mirrors the
-      # environment regression_suite.yaml compiles in.
-      - name: Install system packages
+      # statically links; Rust builds the opteryx.compute crate. Both are
+      # preinstalled on the ubuntu-24.04 runner image, so assert rather than
+      # install: `apt-get update` hangs for hours whenever the
+      # azure.archive.ubuntu.com mirror flakes.
+      - name: Verify system packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          dpkg -s libssl-dev pkg-config > /dev/null
+          pkg-config --exists openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -169,10 +171,12 @@ jobs:
 
       # Runtime libssl/libcrypto only — the extensions link them dynamically.
       # No Rust, no cython, no setuptools-rust: these jobs never compile.
-      - name: Install system packages
+      # Preinstalled on the ubuntu-24.04 image; asserted, not installed, so a
+      # flaking azure.archive.ubuntu.com mirror cannot hang the job.
+      - name: Verify system packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          dpkg -s libssl-dev pkg-config > /dev/null
+          pkg-config --exists openssl
 
       - name: Install requirements
         run: |

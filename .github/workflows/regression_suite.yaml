@@ -28,12 +28,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           architecture: x64
-      - name: Install system packages (Ubuntu)
+      # libssl-dev and pkg-config are preinstalled on the ubuntu-24.04 runner
+      # image, so assert rather than install: `apt-get update` hangs for hours
+      # whenever the azure.archive.ubuntu.com mirror flakes. Fails loudly if the
+      # image ever drops them.
+      - name: Verify system packages
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get update
-          # We only need libssl-dev/pkg-config for libcrypto and build tooling
-          sudo apt-get install -y libssl-dev pkg-config
+          dpkg -s libssl-dev pkg-config > /dev/null
+          pkg-config --exists openssl
         
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
