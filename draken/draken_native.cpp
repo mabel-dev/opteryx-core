@@ -11063,20 +11063,29 @@ NB_MODULE(draken_native, m) {
             draken_free(qldata);
             draken_free(qrdata);
 
-            // ---- DECIMAL128 (int128-backed) — genuinely no compare kernel ----
-            // compare_dv.cpp's switch has no DRAKEN_DECIMAL128 case (only
-            // DRAKEN_DECIMAL, the int64-backed fast path, is wired), so it
-            // falls through to `default: return nullptr`. Adding one needs
-            // scale info from the logical-type descriptor, which lives on
-            // VectorOwner, not on DrakenVector — the caller's Python fallback
-            // path covers it until then.
-            __int128* d128ldata = static_cast<__int128*>(draken_malloc(sizeof(__int128)));
-            __int128* d128rdata = static_cast<__int128*>(draken_malloc(sizeof(__int128)));
-            d128ldata[0] = 150; d128rdata[0] = 150;
-            DrakenVector d128lv = draken_vector_from_dense(d128ldata, 1, DRAKEN_DECIMAL128, nullptr);
-            DrakenVector d128rv = draken_vector_from_dense(d128rdata, 1, DRAKEN_DECIMAL128, nullptr);
-            DrakenVector* d128res = draken_compare_dv(0, &d128lv, &d128rv, 0, 0, 1, arena);
-            r["decimal128_returns_null_pending_kernel"] = (d128res == nullptr);
+            // ---- DECIMAL128 EQ (int128-backed, same-scale) ----
+            // compare_dv.cpp routes DRAKEN_DECIMAL128 through i128_compare_vector
+            // on the same reasoning as the int64-backed DECIMAL case above:
+            // unscaled-value ordering == decimal ordering PROVIDED both operands
+            // share one scale, which compiled_expression.pyx's mixed-numeric
+            // routing guarantees (mismatched pairs go to draken_numeric_cmp).
+            // Two rows so the kernel does real int128 work rather than a
+            // trivially-equal single element:
+            //   left = {150, 150}, right = {150, 151} → EQ = [T, F] → 0b01 = 0x01.
+            __int128* d128ldata = static_cast<__int128*>(draken_malloc(2 * sizeof(__int128)));
+            __int128* d128rdata = static_cast<__int128*>(draken_malloc(2 * sizeof(__int128)));
+            d128ldata[0] = 150; d128ldata[1] = 150;
+            d128rdata[0] = 150; d128rdata[1] = 151;
+            DrakenVector d128lv = draken_vector_from_dense(d128ldata, 2, DRAKEN_DECIMAL128, nullptr);
+            DrakenVector d128rv = draken_vector_from_dense(d128rdata, 2, DRAKEN_DECIMAL128, nullptr);
+            DrakenVector* d128res = draken_compare_dv(0, &d128lv, &d128rv, 0, 0, 2, arena);
+            r["decimal128_eq_returns_non_null"] = (d128res != nullptr);
+            if (d128res != nullptr) {
+                r["decimal128_eq_result_is_bool"] = (d128res->type == DRAKEN_BOOL);
+                r["decimal128_eq_result_length"] = (d128res->length == 2u);
+                const uint8_t* d128bits = static_cast<const uint8_t*>(d128res->data);
+                r["decimal128_eq_bitmap"] = ((d128bits[0] & 0x03u) == 0x01u);
+            }
             draken_free(d128ldata);
             draken_free(d128rdata);
 

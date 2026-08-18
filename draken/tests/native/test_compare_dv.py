@@ -13,7 +13,8 @@ Coverage:
   * DATE32 EQ / TIMESTAMP64 LT produce correct DRAKEN_BOOL bitmaps
   * DECIMAL EQ (int64-backed) produces correct DRAKEN_BOOL bitmap — routed
     through the same i64_compare_vector kernel as INT64/TIMESTAMP64
-  * DECIMAL128 (int128-backed) returns NULL — no compare kernel yet
+  * DECIMAL128 EQ (int128-backed) produces correct DRAKEN_BOOL bitmap —
+    routed through the i128_compare_vector kernel
   * Unsupported type returns NULL (ARRAY — no compare kernel)
   * Cross-type operands return NULL
   * Length mismatch returns NULL
@@ -81,7 +82,10 @@ def test_compare_dv_smoke():
         "decimal_eq_returns_non_null",
         "decimal_eq_result_is_bool",
         "decimal_eq_bitmap",
-        "decimal128_returns_null_pending_kernel",
+        "decimal128_eq_returns_non_null",
+        "decimal128_eq_result_is_bool",
+        "decimal128_eq_result_length",
+        "decimal128_eq_bitmap",
         "destroy_no_crash",
     }
 
