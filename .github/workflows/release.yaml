@@ -239,21 +239,15 @@ jobs:
           # attempts an on-box Rust/C++ build. That blocks ClickBench's two
           # Graviton machines (c8g.4xlarge, c8g.metal-48xl), which cannot run
           # a source build in the benchmark harness.
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            runner-python: "3.11"
-            pybuild: "3.11"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            runner-python: "3.12"
-            pybuild: "3.12"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            runner-python: "3.13"
-            pybuild: "3.13"
-            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
+          #
+          # aarch64 ships **3.14 only**, deliberately; x86_64 keeps the full
+          # 3.11-3.14 range. Each wheel is ~35 MB and the PyPI project storage
+          # quota was exhausted mid-publish on 0.9.72, which shipped 8 of 10
+          # files — the missing one was the cp314 x86_64 wheel the production
+          # worker installs, so a "successful" release could not be deployed.
+          # Dropping the three unused ARM interpreters takes a release from
+          # ~310 MB to ~190 MB. The ARM consumers here are the ClickBench
+          # Graviton machines, which run 3.14.
           - arch: aarch64
             runner: ubuntu-24.04-arm
             runner-python: "3.14"
@@ -537,27 +531,6 @@ jobs:
           path: dist-linux-x86_64-3.14
       - run: mv -v dist-linux-x86_64-3.14/* dist/
 
-      - name: Stage linux aarch64 3.11 (GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-aarch64-3.11
-          path: dist-linux-aarch64-3.11
-      - run: mv -v dist-linux-aarch64-3.11/* dist/
-
-      - name: Stage linux aarch64 3.12 (GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-aarch64-3.12
-          path: dist-linux-aarch64-3.12
-      - run: mv -v dist-linux-aarch64-3.12/* dist/
-
-      - name: Stage linux aarch64 3.13 (GIL)
-        uses: actions/download-artifact@v4.1.7
-        with:
-          name: dist-linux-aarch64-3.13
-          path: dist-linux-aarch64-3.13
-      - run: mv -v dist-linux-aarch64-3.13/* dist/
-
       - name: Stage linux aarch64 3.14 (GIL)
         uses: actions/download-artifact@v4.1.7
         with:
@@ -582,14 +555,20 @@ jobs:
           echo "=== staged dist/ ===" && ls -1 dist/
 
           MISSING=0
-          for ARCH in x86_64 aarch64; do
-            for PY in 311 312 313 314; do
-              if ! ls dist/*cp${PY}-cp${PY}-*manylinux_2_34_${ARCH}*.whl >/dev/null 2>&1; then
-                echo "MISSING: linux ${ARCH} cp${PY} wheel"
-                MISSING=1
-              fi
-            done
+          # x86_64 ships the full interpreter range; aarch64 ships 3.14 only.
+          # Keep this in lockstep with the build-manylinux matrix — the point of
+          # this gate is that a leg which silently produced nothing must not be
+          # able to reach PyPI.
+          for PY in 311 312 313 314; do
+            if ! ls dist/*cp${PY}-cp${PY}-*manylinux_2_34_x86_64*.whl >/dev/null 2>&1; then
+              echo "MISSING: linux x86_64 cp${PY} wheel"
+              MISSING=1
+            fi
           done
+          if ! ls dist/*cp314-cp314-*manylinux_2_34_aarch64*.whl >/dev/null 2>&1; then
+            echo "MISSING: linux aarch64 cp314 wheel"
+            MISSING=1
+          fi
           if ! ls dist/*cp314-cp314-*macosx*arm64*.whl >/dev/null 2>&1; then
             echo "MISSING: macos arm64 cp314 wheel"
             MISSING=1
@@ -603,7 +582,7 @@ jobs:
             echo "ERROR: refusing to publish an incomplete artifact set." >&2
             exit 1
           fi
-          echo "All 8 linux wheels + macOS arm64 wheel + sdist present."
+          echo "All 5 linux wheels (4 x86_64 + 1 aarch64) + macOS arm64 wheel + sdist present."
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
