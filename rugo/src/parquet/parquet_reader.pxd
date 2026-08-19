@@ -65,6 +65,10 @@ cdef extern from "metadata.hpp":
         bint sort_descending
         bint sort_nulls_first
 
+        # draken LogicalKind recovered from the file's key-value metadata;
+        # 0 = the file says nothing ("don't know"). See metadata.cpp.
+        int draken_logical_kind
+
     cdef cppclass RowGroupStats:
         long long num_rows
         long long total_byte_size
@@ -80,6 +84,7 @@ cdef extern from "metadata.hpp":
         int scale
         int precision
         int repetition_type
+        int draken_logical_kind
         vector[SchemaElement] children
 
     cdef cppclass SchemaField:
@@ -87,12 +92,14 @@ cdef extern from "metadata.hpp":
         string physical_type
         string logical_type
         bint nullable
+        int draken_logical_kind
 
     cdef cppclass FileStats:
         long long num_rows
         vector[RowGroupStats] row_groups
         vector[SchemaElement] schema
         vector[SchemaField] schema_columns
+        unordered_map[string, string] key_value_metadata
 
     FileStats ReadParquetMetadataC(const char* path) except +
     FileStats ReadParquetMetadataFromBuffer(const uint8_t* buf, size_t size) except +
@@ -164,6 +171,7 @@ cdef extern from "decode.hpp":
         bint is_decimal
         uint8_t decimal_precision
         uint8_t decimal_scale
+        int32_t draken_logical_kind
         int32_t pages_skipped
         int32_t pages_decoded
         bint success

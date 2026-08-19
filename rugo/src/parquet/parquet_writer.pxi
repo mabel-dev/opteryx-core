@@ -321,7 +321,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef int dec_w
     cdef long mul
     cdef int64_t months, us, days, millis
-    cdef object unit, scale_obj, prec_obj, dim_obj
+    cdef object unit, scale_obj, prec_obj, dim_obj, lk_obj
     cdef uint32_t dim
     cdef const uint16_t* fp16_data
     # ARRAY locals
@@ -378,6 +378,19 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
         ci = ColumnInput()
         ci.name = _to_std_string(names[i])
         ci.validity = dv.validity
+
+        # Draken logical descriptor for kinds parquet CANNOT express. DATE /
+        # TIME / TIMESTAMP / DECIMAL / INTERVAL all have a parquet logical type
+        # to map onto and are annotated in the schema by the type branches
+        # below, so they need nothing here. IPV4 has no parquet equivalent at
+        # all — it is DRAKEN_UINT32 plus a descriptor the DrakenVector does not
+        # carry — so without this side channel the column is written as a bare
+        # unsigned integer and read back as one: well-formed, wrong type, no
+        # error. See ColumnInput::draken_logical_kind in _parquet_writer.hpp
+        # for the wire format and why only unexpressible kinds belong there.
+        lk_obj = v._nb.logical_type_kind
+        if lk_obj is not None and <int>lk_obj.value == _DRAKEN_LK_IPV4:
+            ci.draken_logical_kind = _DRAKEN_LK_IPV4
 
         # A compressed-shape vector (constant or true dict) already carries a
         # dictionary: `data` holds dict_n unique values and `selection` the

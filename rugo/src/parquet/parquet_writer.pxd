@@ -57,6 +57,7 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         int dec_precision
         int ts_unit
         bint ts_utc
+        int draken_logical_kind
         bint bloom
         const uint32_t* codes
         uint32_t dict_count

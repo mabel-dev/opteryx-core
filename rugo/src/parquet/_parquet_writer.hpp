@@ -192,6 +192,25 @@ struct ColumnInput {
   int ts_unit = TU_MICROS;  // TIMESTAMP TimeUnit member id
   bool ts_utc = false;      // TIMESTAMP isAdjustedToUTC
 
+  // ---- Draken logical descriptor for kinds parquet CANNOT express ----
+  //
+  // `logical` above covers every kind parquet has a logical type to map onto
+  // (DATE / TIME / TIMESTAMP / DECIMAL / INTERVAL): those survive a round trip
+  // through the schema annotation and need nothing more. Draken's IPV4 has no
+  // parquet equivalent at all — it is DRAKEN_UINT32 plus a descriptor carried
+  // out-of-band on the VectorOwner — so without a side channel it is written as
+  // a bare unsigned integer and read back as one: a perfectly well-formed
+  // column, wrong type, no error. Measured end to end 2026-08-19.
+  //
+  // This is the draken LogicalKind ORDINAL (draken/core/draken_bridge.h:
+  // 0 NONE, 1 TIMESTAMP, 2 TIME, 3 DECIMAL, 4 VECTOR, 5 IPV4). 0 emits nothing.
+  // Only kinds parquet cannot express belong here — annotating a kind the
+  // schema already carries would create two sources of truth that can disagree.
+  // Value-carrying kinds (unit / precision / dimension) add their own fields to
+  // this struct when they are wired; the WIRE format already accommodates them
+  // (see write_draken_logical_kv).
+  int draken_logical_kind = 0;
+
   bool bloom = false;       // emit a split-block bloom filter for this column
 
   // ---- dictionary encoding ----
@@ -1950,6 +1969,52 @@ inline void write_sorting_columns(TCompactWriter &fm,
   }
 }
 
+// Draken logical-descriptor side channel — FileMetaData.key_value_metadata.
+//
+// KEY:   "draken.logical." + the column's TOP-LEVEL name (the same name
+//        FileStats::schema_columns reports, so a reader matches without
+//        re-deriving a path). The prefix is stripped whole, so a name that
+//        itself contains dots parses back unambiguously.
+// VALUE: comma-separated `name=value` pairs drawn from the draken descriptor —
+//        kind, unit, offset, precision, scale, dimension. Only non-default
+//        fields are emitted; an absent field means 0, and a reader IGNORES a
+//        name it does not know. That is what lets the remaining LogicalKind
+//        ordinals be added later without a second format change. Today only
+//        `kind` is ever written (IPV4 is the only kind wired — see
+//        ColumnInput::draken_logical_kind), so the value is "kind=5".
+//
+// FILE-LEVEL, not ColumnChunk-level (parquet.thrift also offers field 8 on
+// ColumnMetaData), ratified 2026-08-19. The descriptor is a property of the
+// SCHEMA, not of a chunk: a per-row-group copy is written N times and can
+// disagree with itself. Decisively, the reader skips row groups entirely on a
+// `schema_only` parse (ReadParquetMetadata's read_metadata path) and skips
+// ColumnMetaData key_value_metadata again when `include_statistics` is off — so
+// a chunk-level annotation would be invisible to exactly the type-discovery
+// read that needs it.
+//
+// Emitted only when at least one column carries a descriptor, matching the
+// optional-field-by-omission pattern used for sorting_columns and the bloom
+// filter offsets: an unannotated file is byte-identical to one written before
+// this existed.
+inline void write_draken_logical_kv(TCompactWriter &fm,
+                                    const std::vector<ColumnInput> &schema_cols) {
+  std::vector<size_t> idxs;
+  for (size_t i = 0; i < schema_cols.size(); i++)
+    if (schema_cols[i].draken_logical_kind != 0) idxs.push_back(i);
+  if (idxs.empty())
+    return;
+
+  fm.writeFieldHeader(CT_LIST, 5);
+  fm.writeListHeader(CT_STRUCT, (uint32_t)idxs.size());
+  for (size_t i : idxs) {
+    fm.structBegin(); // KeyValue
+    fm.writeStringField(1, "draken.logical." + schema_cols[i].name); // key
+    fm.writeStringField(
+        2, "kind=" + std::to_string(schema_cols[i].draken_logical_kind)); // value
+    fm.structEnd();
+  }
+}
+
 // Append the FileMetaData footer + footer length + trailing PAR1 to `out`.
 // `schema_cols` supplies the schema/column shape (types, names, array depth);
 // `all_rg_cols[rg][i]` supplies each chunk's per-row-group shape (num_levels for
@@ -1984,6 +2049,7 @@ inline void write_parquet_footer(std::vector<uint8_t> &out,
     write_sorting_columns(fm, all_rg_cols[rg]);         // sorting_columns (field 4, optional)
     fm.structEnd();
   }
+  write_draken_logical_kv(fm, schema_cols);        // key_value_metadata (field 5, optional)
   fm.writeStringField(6, RUGO_PARQUET_CREATED_BY); // created_by
   // column_orders (field 7): one TypeDefinedOrder per leaf column.
   fm.writeFieldHeader(CT_LIST, 7);

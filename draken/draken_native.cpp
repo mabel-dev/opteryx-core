@@ -10178,11 +10178,14 @@ NB_MODULE(draken_native, m) {
 
     // vector_retag_uint32_as_ipv4 — the IPv4 twin of the retag above.
     //
-    // Parquet has no IPv4 concept: an address column is stored, and decoded, as a
-    // plain uint32 (this is the whole point of the storage model — the files stay
-    // interoperable with tools that have never heard of the type). The IPv4-ness
-    // lives in the Opteryx catalog, so the scan decodes uint32 and this attaches
-    // the descriptor that makes it render and cast as an address.
+    // Parquet has no IPv4 logical type: an address column is stored, and decoded,
+    // as a plain uint32 (this is the whole point of the storage model — the files
+    // stay interoperable with tools that have never heard of the type). The
+    // IPv4-ness therefore arrives out of band — from the Opteryx catalog, or from
+    // the draken logical kind rugo records in the file's parquet key-value
+    // metadata for exactly the kinds parquet cannot express — so the scan decodes
+    // uint32 and this attaches the descriptor that makes it render and cast as an
+    // address.
     //
     // Zero-copy and MOVE-based for the same reason as the timestamp retag: the
     // bits are already exactly right, only the label is missing.

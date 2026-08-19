@@ -67,14 +67,24 @@ def _write(dataset_dir, columns, use_dictionary=True, row_group_size=None):
 
 
 def _col_sig(morsel, n):
-    """Full logical signature of a column: DrakenType tag + timestamp unit + decimal
-    precision/scale (the out-of-band descriptor the tag alone cannot carry). A
-    unit/precision/scale drift changes this even when the raw int payload matches."""
+    """Full logical signature of a column: DrakenType tag + logical KIND + timestamp
+    unit + decimal precision/scale (the out-of-band descriptor the tag alone cannot
+    carry). A unit/precision/scale drift changes this even when the raw int payload
+    matches.
+
+    `logical_type_kind` is in here because every other field is blind to IPV4: it is
+    the one kind that REFINES an already-complete physical type, so an IPv4 column
+    and a plain unsigned one share a DrakenType tag, carry no unit and no
+    precision/scale, and differ only in the kind. Without it this signature reports
+    two different columns as identical — which is exactly how a missing IPV4 arm in
+    `_coerce_vectors` survived here undetected (see parquet_read.pyx).
+    """
     col = morsel.column(n)
     if col is None:
-        return (None, None, None, None)
+        return (None, None, None, None, None)
     nb = col._nb
-    return (col.type, nb.logical_type_unit, nb.logical_type_precision, nb.logical_type_scale)
+    return (col.type, nb.logical_type_kind, nb.logical_type_unit,
+            nb.logical_type_precision, nb.logical_type_scale)
 
 
 def _drain(sql, force_trampoline, monkeypatch):
@@ -120,6 +130,167 @@ def _assert_parity(tmp_path, monkeypatch, columns, sql_tail, *, write_kw=None,
         assert nat_src == ["NativeParquetScanSource"], nat_src
         assert tmp_src == ["StreamingScanSource"], tmp_src
     return nat[0], nat[1]  # (signature, sorted rows)
+
+
+# ── IPV4 ─────────────────────────────────────────────────────────────────────
+#
+# IPV4 is the one logical kind with NO physical tag of its own — it is
+# DRAKEN_UINT32 plus a descriptor — so a path that forgets to attach it returns a
+# perfectly well-formed unsigned integer column and nothing downstream can tell.
+# That is how the trampoline's single-pass `_coerce_vectors` shipped without an
+# IPV4 arm while its name-keyed twin `_coerce_logical_types` had one: the native
+# path retagged (LC_IPV4), the trampoline did not, and any query that failed the
+# native scan's footer gate served addresses as integers all the way to the API.
+# Measured on home.network.netflow, 2026-08-19.
+#
+# The file is written by rugo rather than pyarrow because parquet has no IPv4
+# logical type: the kind travels in rugo's key-value side channel, which is also
+# what lets the footer-derived schema declare the column IPV4 with no catalog in
+# the picture.
+
+def _write_ipv4(dataset_dir):
+    """One parquet file with an IPV4 column beside a plain UINT32 control column.
+
+    The control column matters: both are physically UINT32 with identical values,
+    so anything that retags by physical type rather than by the declared descriptor
+    turns the control into an address too, and this catches it.
+    """
+    import draken.draken_native as dn
+    import rugo.parquet as rp
+    from draken.morsels.morsel import Morsel
+    from draken.vectors.vector import Vector
+
+    addresses = [0x7F000001, 0x0A000001, 0xC0A80101, 0xFFFFFFFF]
+    morsel = Morsel.from_vectors(
+        ["addr", "plain", "n"],
+        [
+            Vector(dn.vector_retag_uint32_as_ipv4(dn.vector_uint32_from_sequence(addresses))),
+            Vector(dn.vector_uint32_from_sequence(addresses)),
+            Vector(dn.vector_from_sequence([1, 2, 3, 4])),
+        ],
+    )
+    os.makedirs(dataset_dir, exist_ok=True)
+    with open(os.path.join(dataset_dir, "part.parquet"), "wb") as handle:
+        handle.write(rp.write_parquet(morsel, compression="none"))
+    return dataset_dir
+
+
+def _ipv4_parity(tmp_path, monkeypatch, sql_tail):
+    """Run `SELECT {sql_tail}` native and forced-trampoline over the IPv4 fixture."""
+    ds = _write_ipv4(str(tmp_path / "ipv4"))
+    proj, _, where = sql_tail.partition(" WHERE ")
+    sql = "SELECT %s FROM '%s'" % (proj, ds)
+    if where:
+        sql += " WHERE %s" % where
+    nat, _ = _drain(sql, False, monkeypatch)
+    tmp, _ = _drain(sql, True, monkeypatch)
+    assert nat == tmp, "native survivor set / descriptor differs from trampoline"
+    return dict(nat[0]), nat[1]
+
+
+def test_ipv4_projection_keeps_its_descriptor(tmp_path, monkeypatch):
+    """Both scan paths return IPV4, not a bare UINT32.
+
+    Parity alone is not enough here: before the fix the two paths DISAGREED, but
+    two paths that both dropped the descriptor would agree and still be wrong. So
+    assert the kind explicitly, on top of parity.
+    """
+    sig, rows = _ipv4_parity(tmp_path, monkeypatch, "addr, plain, n")
+
+    from draken.draken_native import LogicalKind
+    assert sig[b"addr"][1] == LogicalKind.IPV4, sig
+    # The control column is the same bits with no descriptor and must stay that way.
+    assert sig[b"plain"][1] is None, sig
+    assert sig[b"addr"][0] == sig[b"plain"][0], "both are physically UINT32"
+
+
+def test_ipv4_renders_dotted_quad(tmp_path, monkeypatch):
+    """The descriptor is load-bearing for the VALUE, not just the label: an IPv4
+    column renders dotted-decimal while the identical uint32 renders an integer.
+    This is the assertion the `<<=` probe cannot make (it is rewritten to an
+    integer range compare and never touches the type)."""
+    _, rows = _ipv4_parity(tmp_path, monkeypatch, "addr, plain")
+    addrs = sorted(row[0] for row in rows)
+    plains = sorted(row[1] for row in rows)
+    assert addrs == sorted(
+        [repr("127.0.0.1"), repr("10.0.0.1"), repr("192.168.1.1"), repr("255.255.255.255")]
+    ), addrs
+    assert plains == sorted(
+        [repr(0x7F000001), repr(0x0A000001), repr(0xC0A80101), repr(0xFFFFFFFF)]
+    ), plains
+
+
+def test_ipv4_survives_a_predicate(tmp_path, monkeypatch):
+    """A filtered scan takes a different route through the coercion plan; the
+    descriptor must survive it on both paths."""
+    sig, rows = _ipv4_parity(tmp_path, monkeypatch, "addr, n WHERE n > 2")
+
+    from draken.draken_native import LogicalKind
+    assert sig[b"addr"][1] == LogicalKind.IPV4, sig
+    assert len(rows) == 2, rows
+
+
+def test_ipv4_declared_by_schema_over_an_unannotated_file(tmp_path, monkeypatch):
+    """The netflow shape: the SCHEMA declares IPV4, the FILE says nothing.
+
+    The tests above cannot reach this case. They write the file with rugo, so it
+    carries the draken logical kind in its key-value metadata and the scan
+    recovers the descriptor from the file alone — which MASKS a missing coercion
+    arm. Every file written before that side channel existed (i.e. all stored
+    data) carries no annotation, and then the only thing making the column an
+    address is the schema-driven retag on whichever path runs.
+
+    So the file here is written by PYARROW as a plain uint32 — genuinely
+    unannotated — and the IPV4 declaration is injected at `rugo_to_relation_schema`,
+    the seam where the schema for a scanned relation is decided. That is the same
+    ColumnType a catalog-declared IPV4 column produces and the same shape
+    `_sp_ipv4_col_set` is built from.
+
+    Fails with a bare UINT32 if the single-pass coercion plan has no IPV4 arm.
+    """
+    import rugo.parquet as rp
+    from draken.draken_native import LogicalKind
+    from opteryx.connectors import _rugo_schema
+    from opteryx.connectors import filesystem_connector
+    from opteryx.types import logical_type as _lt
+
+    addresses = [0xC0A804B6, 0x7F000001, 0x0A000001]
+    ds = _write(str(tmp_path / "ipv4decl"), {
+        "addr": (pa.uint32(), addresses),
+        "n": (pa.int64(), [1, 2, 3]),
+    })
+    with open(os.path.join(ds, "part.parquet"), "rb") as handle:
+        meta = rp.read_metadata_from_memoryview(memoryview(handle.read()))
+    kinds = {column.name: column.draken_logical_kind for column in meta.schema_columns}
+    assert kinds["addr"] == 0, "the fixture must carry NO file annotation"
+
+    original = _rugo_schema.rugo_to_relation_schema
+
+    def declares_ipv4(rugo_metadata, schema_name="parquet_schema"):
+        schema = original(rugo_metadata, schema_name=schema_name)
+        for column in schema.columns:
+            if column.name == "addr":
+                column.column_type = _lt.IPV4
+        return schema
+
+    monkeypatch.setattr(_rugo_schema, "rugo_to_relation_schema", declares_ipv4)
+    monkeypatch.setattr(filesystem_connector, "rugo_to_relation_schema", declares_ipv4,
+                        raising=False)
+    monkeypatch.setattr(pool_reader, "native_scan_supported", lambda *a, **k: False)
+
+    seen = []
+    for morsel in opteryx.session().execute_to_morsels(
+        "SELECT addr, n FROM '%s'" % ds
+    ):
+        if morsel.num_rows:
+            column = morsel.column("addr")
+            seen.append((column._nb.logical_type_kind, column.to_pylist()))
+    monkeypatch.undo()
+
+    assert seen, "the scan returned no rows"
+    for kind, values in seen:
+        assert kind == LogicalKind.IPV4, f"schema-declared IPV4 came back as {kind}"
+        assert sorted(values) == sorted(["192.168.4.182", "127.0.0.1", "10.0.0.1"]), values
 
 
 # ── BOOL ─────────────────────────────────────────────────────────────────────
@@ -465,7 +636,8 @@ def test_decimal_projection(tmp_path, monkeypatch, precision, scale):
     cols = {"d": (pa.decimal128(precision, scale), _decimals(precision, scale)),
             "n": (pa.int64(), list(range(200)))}
     sig, _ = _assert_parity(tmp_path, monkeypatch, cols, "d, n")
-    assert sig[0][1][2] == precision and sig[0][1][3] == scale, sig
+    # _col_sig is (type, kind, unit, precision, scale) — precision/scale are [3]/[4].
+    assert sig[0][1][3] == precision and sig[0][1][4] == scale, sig
 
 
 def test_decimal_with_nulls(tmp_path, monkeypatch):

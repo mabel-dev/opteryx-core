@@ -47,6 +47,13 @@ struct DecodedColumnMeta {
   bool is_decimal = false;
   uint8_t decimal_precision = 0;
   uint8_t decimal_scale = 0;
+  // Draken logical descriptor KIND for kinds parquet has no logical type to
+  // express (today only IPV4 = 5), copied verbatim from ColumnStats — which
+  // recovers it from the file's key-value metadata (metadata.cpp's
+  // ApplyDrakenLogicalKV). 0 = the file says nothing, which means "don't know",
+  // never "no descriptor". This decoder does not interpret it: the bits it
+  // produces are identical either way; only the vector materializer acts on it.
+  int32_t draken_logical_kind = 0;
   int32_t num_rows = 0;  // total rows including nulls (= sum of page_values)
   int32_t pages_skipped = 0;  // pages skipped due to row_mask (no selected rows in page)
   int32_t pages_decoded = 0;  // pages that passed the row_mask check and were decompressed/decoded

@@ -1035,6 +1035,36 @@ static FileStats ParseFileMeta(TInput &in, const MetadataParseOptions &opts) {
       }
       break;
     }
+    case 5: { // key_value_metadata: list<KeyValue>
+      // Parsed unconditionally — including under schema_only/include_statistics
+      // = false. This is where the draken logical descriptor lives (see
+      // ApplyDrakenLogicalKV), and schema-only is exactly the read that wants
+      // it; it is also a handful of short strings, not stats-class bulk.
+      auto lh = ReadListHeader(in);
+      for (uint32_t i = 0; i < lh.size; i++) {
+        int16_t kv_last = 0;
+        std::string key, value;
+        while (true) {
+          auto kvfh = ReadFieldHeader(in, kv_last);
+          if (kvfh.type == 0)
+            break;
+          switch (kvfh.id) {
+          case 1:
+            key = ReadString(in);
+            break;
+          case 2:
+            value = ReadString(in);
+            break;
+          default:
+            SkipField(in, kvfh.type);
+            break;
+          }
+        }
+        if (!key.empty())
+          fs.key_value_metadata.emplace(std::move(key), std::move(value));
+      }
+      break;
+    }
     case 6: // created_by
       created_by = ReadString(in);
       break;
@@ -1149,6 +1179,84 @@ static void ApplyLeafInfosByIndex(FileStats &fs,
   }
 }
 
+// ------------------- Draken logical descriptor side channel -------------------
+//
+// rugo writes FileMetaData.key_value_metadata (parquet.thrift field 5) entries
+// of the form
+//     key   "draken.logical.<top-level column name>"
+//     value "kind=<LogicalKind ordinal>[,<name>=<value>...]"
+// for draken logical kinds parquet has NO logical type to express. Today that
+// is IPV4 alone (draken DRAKEN_UINT32 plus a descriptor that lives on the
+// VectorOwner, not in the DrakenVector) — without this the column is written as
+// a bare unsigned integer and read back as one: well formed, wrong type, no
+// error. See write_draken_logical_kv in _parquet_writer.hpp for the format and
+// for why this is file-level rather than per column chunk.
+//
+// ABSENT MEANS "DON'T KNOW", NEVER "NOT IPV4". Every file written before this
+// existed carries no entry, and an unparseable or unrecognised payload is
+// treated the same way: the kind stays 0 and the column reads back exactly as
+// it does today.
+//
+// The kind is recorded verbatim, NOT validated against the column's physical
+// type here: this function reports what the file says. Whether a kind may be
+// applied to a given column is the consumer's decision, and every consumer
+// guards it (a descriptor is only ever attached to a physical type that can
+// carry it) — see the IPV4 gates on the read paths.
+static int ParseDrakenLogicalKind(const std::string &value) {
+  static const char kKind[] = "kind=";
+  const size_t kKindLen = sizeof(kKind) - 1;
+  size_t pos = 0;
+  while (pos < value.size()) {
+    size_t end = value.find(',', pos);
+    if (end == std::string::npos)
+      end = value.size();
+    if (value.compare(pos, kKindLen, kKind) == 0) {
+      size_t d = pos + kKindLen;
+      if (d >= end)
+        return 0; // "kind=" with no digits — not a payload we wrote
+      int kind = 0;
+      for (size_t i = d; i < end; i++) {
+        if (value[i] < '0' || value[i] > '9')
+          return 0;
+        kind = kind * 10 + (value[i] - '0');
+        if (kind > 255)
+          return 0;
+      }
+      return kind;
+    }
+    pos = end + 1;
+  }
+  return 0; // no `kind` pair — an annotation carrying only future fields
+}
+
+static void ApplyDrakenLogicalKV(FileStats &fs) {
+  if (fs.key_value_metadata.empty())
+    return;
+  static const char kPrefix[] = "draken.logical.";
+  const size_t kPrefixLen = sizeof(kPrefix) - 1;
+  for (const auto &kv : fs.key_value_metadata) {
+    if (kv.first.size() <= kPrefixLen ||
+        kv.first.compare(0, kPrefixLen, kPrefix) != 0)
+      continue;
+    // The prefix is stripped WHOLE, so a column name containing dots comes
+    // back intact.
+    const std::string name = kv.first.substr(kPrefixLen);
+    const int kind = ParseDrakenLogicalKind(kv.second);
+    if (kind == 0)
+      continue;
+    for (auto &field : fs.schema_columns)
+      if (field.name == name)
+        field.draken_logical_kind = kind;
+    for (auto &element : fs.schema)
+      if (element.name == name)
+        element.draken_logical_kind = kind;
+    for (auto &rg : fs.row_groups)
+      for (auto &col : rg.columns)
+        if (col.name == name)
+          col.draken_logical_kind = kind;
+  }
+}
+
 // ------------------- Entry point -------------------
 
 FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
@@ -1195,6 +1303,8 @@ FileStats ReadParquetMetadataFromBuffer(const uint8_t *buf, size_t size,
     }
     ApplyLeafInfosByIndex(fs, leaf_infos);
   }
+
+  ApplyDrakenLogicalKV(fs);
 
   return fs;
 }

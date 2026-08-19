@@ -62,6 +62,13 @@ from cpython.ref cimport PyObject
 # absent from a file). NULL-typed: no storage, absorbed by type promotion.
 from draken.draken_native import vector_null_from_length
 
+# Zero-copy attach of the IPV4 logical-type descriptor to a UINT32 Vector. Used
+# for the FILE-declared IPv4 fill-in below; it is the same function the
+# catalog-driven retag in parquet_read.pyx (`_uint32_to_ipv4`) calls, so a
+# column reconstructed from the file's annotation is indistinguishable from one
+# the catalog declared.
+from draken.draken_native import vector_retag_uint32_as_ipv4 as _retag_ipv4
+
 # Stage 4b: wrap worker-built direct string slots into a VARCHAR Vector. Mirrors
 # column_deserializer._wrap_raw_pyobj — draken_vector_own_string copies the
 # slots+arena into a self-owned block and frees the inputs, so the worker buffers
@@ -247,6 +254,42 @@ cdef inline Vector _wrap_num_dict_direct(MorselRef* result, size_t i, int dk):
     return vec
 
 
+# draken LogicalKind ordinal for IPV4 (draken/core/draken_bridge.h). The only
+# kind rugo writes to the parquet key-value side channel: every other kind
+# draken models has a parquet logical type of its own.
+cdef int _DRAKEN_LK_IPV4 = 5
+
+
+cdef inline Vector _attach_file_logical(MorselRef* result, size_t i, Vector vec):
+    """Attach the descriptor the FILE declares for column i, if any.
+
+    rugo writes the draken logical kind into the parquet key-value metadata for
+    kinds parquet cannot express (see write_draken_logical_kv in
+    rugo/src/parquet/_parquet_writer.hpp); ColumnOut carries it through the
+    decode. Without this a scan whose schema came from the footer rather than a
+    catalog declaration reads an IPv4 column back as a bare uint32 — well
+    formed, wrong type, no error.
+
+    THE CATALOG STILL WINS (ratified 2026-08-19): the catalog-driven retag in
+    parquet_read.pyx runs after this on the assembled row group and re-attaches
+    IPV4 for every column it declares, which is idempotent. This only fills in
+    where the catalog declares no descriptor at all.
+
+    Absent (kind 0) — every file written before the writer emitted an
+    annotation — returns the vector untouched: absent means "don't know", never
+    "not IPV4". Guarded on UINT32 because IPV4 REFINES uint32; a kind that
+    cannot apply to the column as decoded is left alone rather than
+    reinterpreting unrelated bytes as addresses.
+    """
+    if result.columns[i].draken_logical_kind != _DRAKEN_LK_IPV4:
+        return vec
+    if vec._dv == NULL or vec._dv.type != DRAKEN_UINT32:
+        return vec
+    if vec._nb.logical_type_kind is not None:
+        return vec
+    return Vector(_retag_ipv4(vec._nb))
+
+
 cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_type=DRAKEN_VARCHAR):
     """Wrap direct column i into a Draken Vector via ownership transfer.
     morsel_take_direct hands the draken_alloc'd buffer + validity to the Vector and
@@ -266,7 +309,10 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
         return _wrap_string_dict_direct(result, i, want_type)
     if (dk == 8 or dk == 9 or dk == 10 or dk >= 15 and dk <= 18
             or dk >= 22 and dk <= 24):
-        return _wrap_num_dict_direct(result, i, dk)
+        # A dict-shaped uint32 column is the common case for addresses (low
+        # cardinality), so the file-declared descriptor has to be attached on
+        # this path too, not only on the dense one below.
+        return _attach_file_logical(result, i, _wrap_num_dict_direct(result, i, dk))
     if dk == 1:
         dtype = DRAKEN_INT64
     elif dk == 2:
@@ -303,7 +349,7 @@ cdef inline Vector _wrap_direct(MorselRef* result, size_t i, DrakenType want_typ
             result.columns[i].dec_precision, result.columns[i].dec_scale)
     if result.columns[i].row_sorted:
         draken_vector_mark_row_sorted(<PyObject*>vec._nb, result.columns[i].row_sorted_descending)
-    return vec
+    return _attach_file_logical(result, i, vec)
 
 
 cdef inline tuple _split_columns(MorselRef* result):

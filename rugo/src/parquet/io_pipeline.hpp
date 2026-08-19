@@ -173,6 +173,13 @@ struct ColumnOut {
     // where this ColumnOut is built (col_stats already in scope there).
     bool     row_sorted = false;
     bool     row_sorted_descending = false;
+    // Draken logical descriptor KIND recovered from the file's key-value
+    // metadata (metadata.cpp's ApplyDrakenLogicalKV): the side channel for
+    // kinds parquet has no logical type to express, today only IPV4 (5).
+    // 0 = the file says nothing, which means "don't know", never "no
+    // descriptor". Carried, not applied — the consumer decides whether to
+    // attach it (see the IPV4 gates on the two opteryx scan paths).
+    int      draken_logical_kind = 0;
     // E37 carried key-hash: per-data-element hash seed (str_hash_seed) computed
     // during slot build, one uint64 per slot (plain: length; dict: data_length).
     // draken_vector_own_string* COPIES it, so unlike the buffers above this is NOT
@@ -2320,6 +2327,9 @@ class ParquetIOPipeline {
                 // this column.
                 cout.row_sorted = col_stats.is_sorted;
                 cout.row_sorted_descending = col_stats.sort_descending;
+                // Same posture as the clustering hint above: copied from this
+                // file's footer whichever branch below builds the column.
+                cout.draken_logical_kind = col_stats.draken_logical_kind;
                 // Direct-path logical gate (Stage 4a). Plain numerics + boolean +
                 // int128 DECIMAL128 go direct as their physical kind. DATE and
                 // TIMESTAMP decode to a physical int32/int64 stream and are

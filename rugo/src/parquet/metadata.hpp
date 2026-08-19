@@ -83,6 +83,11 @@ struct ColumnStats {
   // cardinality — so it carries no information about the encoding's value to us.
   // See the byte_array branch in decode_column.cpp.
   bool writer_is_rugo = false;
+
+  // Draken logical-descriptor KIND recovered from the file's key-value
+  // metadata (0 = the file carries no annotation for this column, which means
+  // "don't know", NEVER "no descriptor"). See ApplyDrakenLogicalKV.
+  int draken_logical_kind = 0;
 };
 
 struct RowGroupStats {
@@ -101,6 +106,11 @@ struct SchemaElement {
   int32_t scale = 0;       // for DECIMAL
   int32_t precision = 0;   // for DECIMAL
   int32_t repetition_type = -1;
+  // Draken logical-descriptor kind (see ColumnStats::draken_logical_kind).
+  // Stamped on TOP-LEVEL elements only — the annotation is keyed by the
+  // column's top-level name. Carried here so the column-patch writer, which
+  // rebuilds its ColumnInputs from this tree, does not silently drop it.
+  int draken_logical_kind = 0;
   std::vector<SchemaElement> children;
 };
 
@@ -109,6 +119,8 @@ struct SchemaField {
   std::string physical_type;
   std::string logical_type;
   bool nullable = true;
+  // Draken logical-descriptor kind (see ColumnStats::draken_logical_kind).
+  int draken_logical_kind = 0;
 };
 
 struct FileStats {
@@ -116,6 +128,12 @@ struct FileStats {
   std::vector<RowGroupStats> row_groups;
   std::vector<SchemaElement> schema;
   std::vector<SchemaField> schema_columns;
+  // FileMetaData.key_value_metadata (parquet.thrift field 5), verbatim. rugo
+  // writes "draken.logical.<column>" entries here for draken logical kinds
+  // parquet cannot express; see write_draken_logical_kv in _parquet_writer.hpp
+  // and ApplyDrakenLogicalKV in metadata.cpp. Foreign keys are kept, not
+  // interpreted.
+  std::unordered_map<std::string, std::string> key_value_metadata;
 };
 
 FileStats ReadParquetMetadata(const std::string &path,

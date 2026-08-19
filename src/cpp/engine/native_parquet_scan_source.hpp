@@ -577,6 +577,27 @@ struct NativeScanColumnBuilder {
             LogicalType lt;
             lt.kind = LogicalKind::IPV4;
             out.own->logical_type = logical_type_intern(lt);
+        } else if (result.columns[i].draken_logical_kind ==
+                       static_cast<int>(LogicalKind::IPV4) &&
+                   dtype == DRAKEN_UINT32 && !out.own->logical_type) {
+            // The FILE's own annotation, as a fill-in. rugo writes the draken
+            // logical kind into the parquet key-value metadata for kinds
+            // parquet cannot express (see write_draken_logical_kv), so a column
+            // whose IPv4-ness the plan does not know about — the scan schema
+            // was derived from the footer rather than a catalog declaration —
+            // is still reconstructed as an address rather than a bare uint32.
+            //
+            // The plan WINS where it declares something (ratified 2026-08-19):
+            // this arm runs only when `packed` asked for no IPV4 retag. Guarded
+            // on UINT32 because IPV4 REFINES uint32 — attaching it to any other
+            // physical type would reinterpret unrelated bytes as addresses —
+            // and on logical_type still being unset so it can never overwrite a
+            // descriptor the DECIMAL128 branch above just attached. Absent on
+            // both sides attaches nothing: a file written before this side
+            // channel existed reads exactly as it did.
+            LogicalType lt;
+            lt.kind = LogicalKind::IPV4;
+            out.own->logical_type = logical_type_intern(lt);
         }
         out.view = out.own->vec;
         return true;

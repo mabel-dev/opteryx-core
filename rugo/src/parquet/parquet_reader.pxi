@@ -303,11 +303,17 @@ cdef class SchemaColumn:
     cdef readonly str physical_type
     cdef readonly str logical_type
     cdef readonly bint nullable
+    # draken LogicalKind ordinal recovered from the file's key-value metadata
+    # (draken/core/draken_bridge.h: 5 = IPV4); 0 means the file carries no
+    # annotation for this column — "don't know", never "no descriptor". Parquet
+    # has no logical type for these kinds, so `logical_type` above cannot say it.
+    cdef readonly int draken_logical_kind
 
     def __repr__(self):
         return (
             f"SchemaColumn(name={self.name!r}, physical_type={self.physical_type!r}, "
-            f"logical_type={self.logical_type!r}, nullable={self.nullable})"
+            f"logical_type={self.logical_type!r}, nullable={self.nullable}, "
+            f"draken_logical_kind={self.draken_logical_kind})"
         )
 
 
@@ -392,6 +398,7 @@ cdef SchemaColumn _make_schema_column(parquet_reader.SchemaField& field):
     col.physical_type = field.physical_type.decode("utf-8")
     col.logical_type = field.logical_type.decode("utf-8")
     col.nullable = field.nullable
+    col.draken_logical_kind = field.draken_logical_kind
     return col
 
 
@@ -801,6 +808,38 @@ cdef list _int64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,
                 out[i] = col.int64_values[vi]
         vi += 1
     return out
+
+
+# _DRAKEN_LK_IPV4 is defined once for the whole extension in rugo_native.pyx
+# (the parquet reader and writer are two .pxi in ONE translation unit).
+cdef int _DK_UINT32 = int(_dn.UINT32.value)
+
+
+cdef Vector _attach_draken_logical(Vector vec, int kind, object col_name):
+    """Attach the file's draken logical descriptor to a freshly built vector.
+
+    Zero-copy: the retag MOVES the vector's buffers and attaches the descriptor,
+    leaving the physical type tag untouched (IPv4 IS uint32). Safe here because
+    `vec` was built one statement ago and this is its sole reference.
+
+    An annotation whose kind cannot apply to the column as decoded is a file
+    that contradicts itself — rugo only ever writes the IPV4 entry over a
+    UINT32 column. Reinterpreting some other column's bytes as addresses, or
+    dropping the annotation and returning a plausible wrong type, are both
+    silent; this fails instead.
+    """
+    if kind == _DRAKEN_LK_IPV4:
+        if int(vec._nb.type.value) != _DK_UINT32:
+            raise ValueError(
+                "rugo parquet reader: column %r is annotated IPV4 in the file's "
+                "key-value metadata but decoded as %r, not UINT32"
+                % (col_name, vec._nb.type)
+            )
+        return Vector(_dn.vector_retag_uint32_as_ipv4(vec._nb))
+    raise NotImplementedError(
+        "rugo parquet reader: column %r carries draken logical kind %d, which "
+        "this reader cannot reconstruct" % (col_name, kind)
+    )
 
 
 cdef inline Vector _make_int_vector(parquet_reader.DecodedColumn& col,
@@ -1645,6 +1684,15 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
                 "of decoded physical type %r"
                 % (col_names[col_idx], column.type.decode("utf-8"))
             )
+
+        # Draken logical descriptor the parquet type system cannot express.
+        # The bits are already exactly right — only the label is missing — so
+        # this attaches the descriptor and changes nothing else. A column with
+        # no annotation (every file written before the writer emitted one)
+        # falls straight through: absent means "don't know", never "not IPV4".
+        if column.draken_logical_kind != 0:
+            vec = _attach_draken_logical(vec, column.draken_logical_kind,
+                                         col_names[col_idx])
 
         _TEL["columns"] += 1
         vectors.append(vec)

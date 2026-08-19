@@ -8,6 +8,12 @@ from typing import Any, Dict, Iterable, List, Optional
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
 
+# draken LogicalKind ordinal for IPV4 (draken/core/draken_bridge.h). The only
+# kind rugo records in the parquet key-value side channel — every other kind
+# draken models has a parquet logical type of its own and is already readable
+# from `logical_type`.
+_DRAKEN_LK_IPV4 = 5
+
 SQL_TYPE_ALIASES = {
     "float": "double",
     "float32": "double",
@@ -428,6 +434,16 @@ def rugo_to_relation_schema(
             # back INT64 for every integer, contradicting the exact-width vector
             # the scan produces. See _integer_column_type.
             _ct = _integer_column_type(physical_type, logical_type)
+            # IPV4 has no parquet logical type, so `logical_type` above says
+            # only "uint32". rugo writes the draken descriptor into the file's
+            # key-value metadata for exactly the kinds parquet cannot express
+            # (see write_draken_logical_kv in rugo/src/parquet/_parquet_writer.hpp);
+            # honour it so a file-derived schema declares the column IPV4 rather
+            # than a bare unsigned integer — which is what makes CAST, rendering
+            # and CIDR_AGG agree with the vector the scan hands back. Absent (0)
+            # changes nothing: it means "don't know", never "not IPV4".
+            if entry.draken_logical_kind == _DRAKEN_LK_IPV4 and _ct is _lt.UINT32:
+                _ct = _lt.IPV4
         else:
             _ct = _CATEGORY_TO_CANONICAL.get(sql_type)
         from opteryx.types.schema import mint_column_identity

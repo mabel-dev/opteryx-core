@@ -133,6 +133,12 @@ inline const SchemaElement *list_leaf_and_depth(const SchemaElement &e, int &dep
 inline ColumnInput shape_from_schema_element(const SchemaElement &e) {
   ColumnInput ci;
   ci.name = e.name;
+  // The draken logical descriptor for kinds parquet cannot express (IPV4) is
+  // carried in the file's key-value metadata, not in the schema element's own
+  // annotation, so it has to be copied across explicitly: a patch that rebuilt
+  // the footer without it would strip the descriptor off every untouched
+  // column — the exact silent loss this side channel exists to stop.
+  ci.draken_logical_kind = e.draken_logical_kind;
 
   if (e.logical_type == "array") {
     // A LIST is one leaf column chunk however deep it nests, so its pages copy

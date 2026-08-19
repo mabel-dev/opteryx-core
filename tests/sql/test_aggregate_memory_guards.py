@@ -1,11 +1,13 @@
 """Regression tests for the buffering aggregates' memory guards.
 
 MEDIAN and ARRAY_AGG are holistic — they retain every input value until finalize
-— so each is bounded by its OWN global byte budget across all group buffers
-(kMedianBudgetBytes in _agg_kernels.hpp, kArrayAggBudgetBytes in
-native_group_sinks.hpp). Both budgets replaced per-group value caps, which
-bounded nothing (the group count is unbounded) while refusing ordinary group
-sizes.
+— so each is bounded by its OWN global byte budget across all group buffers. The
+VALUES live in src/cpp/engine/agg_budgets.hpp (`kMedianFloorBytes`/`kMedianBytes`,
+`kArrayAggBytes`); the atomic counters that charge against them stay with the
+states that own them (`median_budget_used` in _agg_kernels.hpp,
+`array_agg_budget_used` in native_group_sinks.hpp). Both budgets replaced
+per-group value caps, which bounded nothing (the group count is unbounded) while
+refusing ordinary group sizes.
 
 ONE GUARD, AT EXECUTION TIME. There is deliberately no plan-time estimate in
 front of these budgets. What a buffering aggregate actually retains turns on
@@ -99,11 +101,18 @@ def test_ordinary_aggregates_are_untouched():
 
 def test_budgets_come_from_the_native_constants():
     """Python reads the budget from C++ rather than mirroring it, so the figure
-    reported and the figure enforced cannot drift apart."""
+    reported and the figure enforced cannot drift apart.
+
+    MEDIAN's figure is its hard CEILING (`kMedianBytes`), which a query reaches
+    only after escalation: it starts entitled to `kMedianFloorBytes` (256MB) and
+    the ceiling doubles on MEASURED demand up to this value before the query is
+    refused. That is why the two aggregates' numbers differ — ARRAY_AGG has a
+    single flat budget.
+    """
     from opteryx.compiled.agg_budgets import array_agg_budget_bytes
     from opteryx.compiled.agg_budgets import median_budget_bytes
 
-    assert median_budget_bytes() == 512 * 1024 * 1024
+    assert median_budget_bytes() == 2048 * 1024 * 1024
     assert array_agg_budget_bytes() == 512 * 1024 * 1024
 
 

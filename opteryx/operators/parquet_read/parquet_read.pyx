@@ -1478,8 +1478,19 @@ cdef class ParquetReadNode(ReaderNode):
             self._sp_name_to_identity[col] for col in column_names
         ]
         # Positional logical-type coercion plan (kind, arg) per column, computed
-        # once. kind 0=none, 1=decimal(prec,scale), 2=date32, 3=timestamp. Empty
-        # of real work for pure numeric scans → coercion is skipped entirely.
+        # once. kind 0=none, 1=decimal(prec,scale), 2=date32, 3=timestamp,
+        # 4=array<timestamp>, 5=ipv4. Empty of real work for pure numeric scans →
+        # coercion is skipped entirely.
+        #
+        # EVERY set `_coerce_logical_types` consults must have an arm here.
+        # `_coerce_vectors` is that function's positional twin, and a coercion
+        # present in one and absent from the other does not fail — it silently
+        # returns the physical type on whichever path is taken. IPV4 was missing
+        # here for exactly that reason: it is the only kind whose absence leaves a
+        # perfectly well-formed column (a bare UINT32), so nothing downstream
+        # could notice. Measured against home.network.netflow 2026-08-19: a file
+        # that fails the native scan's footer gate falls back to this path and
+        # served addresses as integers all the way to the API.
         self._sp_coerce_ops = []
         for col in column_names:
             col_b = col.encode('utf-8')
@@ -1491,6 +1502,8 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_coerce_ops.append((3, self._sp_timestamp_unit_map.get(col_b, "us")))
             elif col_b in self._sp_array_ts_unit_map:
                 self._sp_coerce_ops.append((4, self._sp_array_ts_unit_map[col_b]))
+            elif col_b in self._sp_ipv4_col_set:
+                self._sp_coerce_ops.append((5, None))
             else:
                 self._sp_coerce_ops.append((0, None))
         self._sp_needs_coerce = any(op[0] != 0 for op in self._sp_coerce_ops)
@@ -1600,7 +1613,10 @@ cdef class ParquetReadNode(ReaderNode):
         Mirrors _coerce_logical_types but indexes the precomputed _sp_coerce_ops
         plan instead of a name-keyed dict, so the all-direct numeric path never
         builds a dict. The C++ pipeline serialises these as TAG_INT64 (physical);
-        the schema-driven logical type is applied here."""
+        the schema-driven logical type is applied here.
+
+        The two must stay in step: see the note on the _sp_coerce_ops build for
+        what a coercion present in one and missing from the other actually does."""
         cdef Py_ssize_t i, n = len(vectors)
         cdef tuple op
         cdef int kind
@@ -1618,6 +1634,16 @@ cdef class ParquetReadNode(ReaderNode):
                 # child in place rather than rebinding vectors[i].
                 if v_nb.type == _draken_native_parquet.ARRAY:
                     _array_child_to_timestamp(v_nb, op[1])
+                continue
+            if kind == 5:
+                # IPV4 is physically UINT32, so like kind 4 it must be handled
+                # BEFORE the INT64 guard below or it would be skipped outright.
+                # Guarded on UINT32 for the same reason as _coerce_logical_types:
+                # a schema declaring IPv4 over a column the file stores as
+                # something else is a mismatch, and retagging it would reinterpret
+                # unrelated bytes as addresses.
+                if v_nb.type == _draken_native_parquet.UINT32:
+                    vectors[i] = _uint32_to_ipv4(v_nb)
                 continue
             # DATE is physical int32 and now decodes at that width (E33 exact-width
             # integers), so kind==2 accepts INT32; DECIMAL/TIMESTAMP stay INT64-only.

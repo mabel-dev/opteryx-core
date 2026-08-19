@@ -573,6 +573,11 @@ void DecodeColumnFromChunk(DecodedColumn &result,
       }
     }
 
+    // Draken logical descriptor (IPV4). Parquet has no logical type for it, so
+    // it arrives out-of-band in the file's key-value metadata; carried through
+    // untouched for the materializer to attach.
+    result.draken_logical_kind = target_col->draken_logical_kind;
+
     // DECIMAL: parse "decimal(P,S)" (built in metadata.cpp) so the Cython layer
     // can build a real DECIMAL/DECIMAL128 vector carrying precision+scale. Applies
     // to every physical tier (int32 / int64 / fixed_len_byte_array); the physical
