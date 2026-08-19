@@ -108,12 +108,12 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm \
-            -e PLAT="manylinux2014_${{ matrix.arch }}" \
+            -e PLAT="manylinux_2_34_${{ matrix.arch }}" \
             -e PYTHON_VERSION=${{ matrix.pybuild }} \
             -e OPTERYX_ENABLE_LTO=1 \
             -v "$(pwd)":/io \
             --workdir /io \
-            "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
+            "quay.io/pypa/manylinux_2_34_${{ matrix.arch }}" \
             /io/dev/build-rugo-wheels.sh
 
       - name: Verify wheel imports (release gate — MUST NOT be continue-on-error)
@@ -131,7 +131,7 @@ jobs:
             -e OPTERYX_ALLOW_KNOWN_GRPC_ABORT="${OPTERYX_ALLOW_KNOWN_GRPC_ABORT:-0}" \
             -v "$(pwd)":/io \
             --workdir /io \
-            "quay.io/pypa/manylinux2014_${{ matrix.arch }}" \
+            "quay.io/pypa/manylinux_2_34_${{ matrix.arch }}" \
             /io/dev/verify-wheel-imports.sh /io/dist rugo
         env:
           # TODO(remove once the C++ symbol-hiding fix lands): `import rugo;

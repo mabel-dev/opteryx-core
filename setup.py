@@ -197,6 +197,103 @@ def detect_system_libcurl():
     return include_dirs, link_args
 
 
+# Minimum OpenSSL we will link. 1.1.0 is where OpenSSL became internally
+# thread-safe; below it the APPLICATION must install CRYPTO_set_locking_callback
+# and CRYPTO_THREADID_set_callback or the library's own global state races.
+_MIN_OPENSSL = (1, 1, 0)
+
+
+def _pkg_config_openssl_version():
+    """(major, minor, patch) from `pkg-config --modversion openssl`, or None.
+
+    Deliberately a CONFIGURE-TIME probe rather than an `OPENSSL_VERSION_NUMBER`
+    check in C. Two reasons, both learned the hard way:
+      * http_client.cpp includes only <curl/curl.h> — it never sees an OpenSSL
+        header, so `#if OPENSSL_VERSION_NUMBER < ...` there reads an UNDEFINED
+        macro as 0 and silently compiles to nothing. A guard that always passes
+        is worse than no guard.
+      * LibreSSL pins OPENSSL_VERSION_NUMBER low while being perfectly thread
+        safe, so the C macro rejects a good TLS stack. pkg-config reports
+        LibreSSL's real version and does not.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("pkg-config"):
+        return None
+    result = subprocess.run(
+        ["pkg-config", "--modversion", "openssl"], capture_output=True, text=True
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    # Versions look like "3.6.3", "1.1.1k", "1.0.2k-fips" — take the leading
+    # numeric components and ignore any letter/suffix.
+    parts = []
+    for token in result.stdout.strip().split(".")[:3]:
+        digits = ""
+        for ch in token:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    if len(parts) < 2:
+        return None
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def assert_openssl_thread_safe(*, fail_when_unknown):
+    """Refuse to link an OpenSSL that is not internally thread-safe.
+
+    Opteryx drives libcurl from many native engine threads at once, so a
+    pre-1.1.0 OpenSSL needs locking callbacks that this project does not install.
+    Shipping that combination produced a production SIGSEGV inside `lh_retrieve`
+    (via ERR_clear_error → ERR_get_state) from concurrent TLS handshakes: the
+    manylinux2014 wheel bundled CentOS 7's OpenSSL 1.0.2k. We refuse the build
+    rather than carry an untestable compatibility shim.
+
+    `fail_when_unknown` is True for the VENDORED path, where we are about to link
+    `-lssl -lcrypto` from this very prefix and an unknown version is unacceptable.
+    It is False for a system libcurl, which may not use OpenSSL at all (macOS
+    ships SecureTransport/LibreSSL) — there an undeterminable version is not
+    evidence of a problem, so only a KNOWN-BAD version fails.
+    """
+    version = _pkg_config_openssl_version()
+
+    if version is None:
+        if not fail_when_unknown:
+            return
+        raise RuntimeError(
+            "Cannot determine the OpenSSL version via `pkg-config --modversion openssl`, "
+            "and the vendored libcurl build is about to link -lssl -lcrypto against it.\n\n"
+            f"Opteryx requires OpenSSL >= {'.'.join(map(str, _MIN_OPENSSL))}: it drives "
+            "libcurl from many threads, and earlier OpenSSL is not internally thread-safe.\n\n"
+            "Install OpenSSL development files and pkg-config:\n"
+            "  - Debian/Ubuntu:  apt-get install libssl-dev pkg-config\n"
+            "  - RHEL/Fedora:    dnf install openssl-devel pkgconf-pkg-config\n"
+            "  - macOS:          brew install openssl@3 pkg-config"
+        )
+
+    if version < _MIN_OPENSSL:
+        found = ".".join(map(str, version))
+        want = ".".join(map(str, _MIN_OPENSSL))
+        raise RuntimeError(
+            f"OpenSSL {found} is too old to link: opteryx requires >= {want}.\n\n"
+            "Opteryx drives libcurl concurrently from native engine threads. OpenSSL "
+            "before 1.1.0 is not internally thread-safe — it requires the application to "
+            "install CRYPTO locking callbacks, which this project deliberately does not "
+            "do. Linking it produces intermittent SIGSEGV inside libcrypto during "
+            "concurrent TLS handshakes, not a clean error.\n\n"
+            "Install a supported OpenSSL (1.1.1 or 3.x) and make sure pkg-config finds it "
+            "first, e.g. via PKG_CONFIG_PATH."
+        )
+
+    print(f"OpenSSL {'.'.join(map(str, version))} (>= {'.'.join(map(str, _MIN_OPENSSL))}) OK")
+
+
 def resolve_libcurl():
     """Return (include_dirs, link_args) for libcurl, preferring system over vendored.
 
@@ -205,17 +302,23 @@ def resolve_libcurl():
       2. System libcurl via pkg-config → use it (fast, reliable for local dev).
       3. Vendored static build → fallback.
     Hard-fails if none succeed; the http_client extension is mandatory.
+
+    Both paths are gated on a thread-safe OpenSSL — see assert_openssl_thread_safe.
     """
     force_vendor = os.environ.get("OPTERYX_VENDOR_CURL", "0").lower() in ("1", "true", "yes")
 
     if not force_vendor:
+        assert_openssl_thread_safe(fail_when_unknown=False)
         sys_curl = detect_system_libcurl()
         if sys_curl is not None:
             sys_inc, sys_libs = sys_curl
             print(f"Using system libcurl (pkg-config): {' '.join(sys_libs)}")
             return sys_inc, sys_libs
 
-    # Fall back to vendored static build
+    # Fall back to vendored static build. This path links -lssl -lcrypto from the
+    # pkg-config prefix that build_vendored_libcurl() passes to --with-openssl, so
+    # the gate is exact here and an undeterminable version is itself a failure.
+    assert_openssl_thread_safe(fail_when_unknown=True)
     libcurl_a = build_vendored_libcurl()
     if libcurl_a and os.path.exists(libcurl_a):
         return ["third_party/curl/include"], [libcurl_a, "-lssl", "-lcrypto"]

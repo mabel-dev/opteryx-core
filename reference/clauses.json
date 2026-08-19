@@ -1,4 +1,29 @@
 {
+    "alter_materialized_view_owner": {
+        "canonical_name": "ALTER MATERIALIZED VIEW ... OWNER TO",
+        "planner_entry": "plan_alter_materialized_view_owner",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "ALTER MATERIALIZED VIEW view_name OWNER TO principal"
+        ],
+        "summary": "Change who owns a materialized view.",
+        "documentation": "Synthesized by the planner's pre-parse interception (no native sqlparser grammar). Nothing is read and nothing is written but one field on the view's record, so it gets its own node, its own binder visitor, and its own permission check - unlike REFRESH, this does not desugar into a CTAS.",
+        "notes": "Distinct from AlterMaterializedViewSuspended, which starts/stops refresh rather than reassigning ownership."
+    },
+    "alter_materialized_view_suspended": {
+        "canonical_name": "ALTER MATERIALIZED VIEW ... SUSPEND / RESUME",
+        "planner_entry": "plan_alter_materialized_view_suspended",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "ALTER MATERIALIZED VIEW view_name SUSPEND",
+            "ALTER MATERIALIZED VIEW view_name RESUME"
+        ],
+        "summary": "Suspend or resume a materialized view's automatic refresh.",
+        "documentation": "Suspends automatic refresh without removing the machinery that performs it. Dropping the view's triggers was previously the only way to stop it refreshing, and left no way to tell 'deliberately off' from 'quietly broken'.",
+        "notes": "Synthesized by the planner's pre-parse interception (no native sqlparser grammar)."
+    },
     "alter_table": {
         "canonical_name": "ALTER TABLE",
         "planner_entry": "plan_alter_table",
@@ -108,7 +133,7 @@
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "CREATE VIEW view_name AS query"
+            "CREATE [OR REPLACE] VIEW view_name AS query"
         ],
         "summary": "Create a view.",
         "documentation": "The query body is stored for later planning when the view is referenced.",
@@ -151,6 +176,19 @@
         "documentation": "Builds the same DropRelation node as DROP TABLE, flagged so execution routes to the connector's materialized-view drop, which also removes the refresh triggers from every source table.",
         "notes": "DROP TABLE against a materialized view is rejected, and this statement against a plain table is rejected, each pointing at the other."
     },
+    "drop_statistics": {
+        "canonical_name": "DROP STATISTICS",
+        "planner_entry": "plan_drop_statistics",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "DROP STATISTICS ON table_name",
+            "DROP STATISTICS ON table_name FOR COLUMNS column_name, ..."
+        ],
+        "summary": "Discard collected table statistics.",
+        "documentation": "Synthesized by the planner's pre-parse interception (no native sqlparser grammar). Reuses the ANALYZE logical node / Table Management physical node, dispatching on action.",
+        "notes": "FOR COLUMNS restricts the drop to the named columns; without it every column's statistics are dropped."
+    },
     "drop_table": {
         "canonical_name": "DROP TABLE",
         "planner_entry": "plan_drop",
@@ -186,6 +224,18 @@
         "summary": "Drop a view.",
         "documentation": "Supports dropping one or more views with optional IF EXISTS and CASCADE/RESTRICT flags.",
         "notes": "Only DROP VIEW is accepted by this planner path."
+    },
+    "drop_workspace": {
+        "canonical_name": "DROP WORKSPACE",
+        "planner_entry": "plan_drop_workspace",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "DROP WORKSPACE [IF EXISTS] workspace"
+        ],
+        "summary": "Drop a workspace.",
+        "documentation": "The parser has no WORKSPACE object type, so the SQL rewriter turns this into DROP FUNCTION - the same trick ALTER WORKSPACE uses via ALTER FUNCTION.",
+        "notes": "Names a workspace, never a relation within one; a qualified (dotted) name is rejected. Subject to the workspace's deletion_protection property, set via ALTER WORKSPACE."
     },
     "explain": {
         "canonical_name": "EXPLAIN",
@@ -272,6 +322,18 @@
         "summary": "Skip rows before returning results.",
         "documentation": "OFFSET is parsed as part of the limit clause.",
         "notes": "Usually paired with LIMIT."
+    },
+    "optimize_table": {
+        "canonical_name": "OPTIMIZE TABLE",
+        "planner_entry": "plan_optimize_table",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "OPTIMIZE TABLE table_name"
+        ],
+        "summary": "Compact a table's data files.",
+        "documentation": "The TABLE keyword is required (unlike Databricks, which allows OPTIMIZE table_name without it), and strategy is auto-detected from the table's stored CLUSTER BY / sort order, same as the scheduled compaction job.",
+        "notes": "ClickHouse's ON CLUSTER/PARTITION/FINAL/DEDUPLICATE and Databricks's WHERE/ZORDER BY are all parsed by the grammar but rejected at plan time - there is no equivalent yet."
     },
     "order_by": {
         "canonical_name": "ORDER BY",
@@ -373,6 +435,18 @@
         "documentation": "Handled as a SHOW node with object metadata.",
         "notes": "Currently used for view-style objects."
     },
+    "show_grants": {
+        "canonical_name": "SHOW GRANTS",
+        "planner_entry": "plan_show_variables",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "SHOW GRANTS"
+        ],
+        "summary": "List the current session's policies.",
+        "documentation": "Reached through the parser's generic SHOW catch-all (ShowVariable, words == [\"GRANTS\"]) and answered from the $grants internal-only virtual dataset. Reports the session's own policies and confers nothing - Opteryx has no GRANT/REVOKE.",
+        "notes": "$grants is INTERNAL_ONLY_DATASETS; SHOW GRANTS is its only surface."
+    },
     "show_manifest": {
         "canonical_name": "SHOW MANIFEST",
         "planner_entry": "plan_show_variables",
@@ -411,6 +485,30 @@
         "summary": "List the refresh triggers attached to a table.",
         "documentation": "Reached through the parser's generic SHOW catch-all and planned as a filtered scan of the workspace's information_schema.triggers.",
         "notes": "Bare SHOW TRIGGERS is rejected - there is no session default workspace to enumerate; name the table with FOR, or query information_schema.triggers."
+    },
+    "show_user": {
+        "canonical_name": "SHOW USER",
+        "planner_entry": "plan_show_variables",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "SHOW USER"
+        ],
+        "summary": "Show the current session's user identity.",
+        "documentation": "Reached through the parser's generic SHOW catch-all (ShowVariable, words == [\"USER\"]) and answered from the $user internal-only virtual dataset.",
+        "notes": "$user is INTERNAL_ONLY_DATASETS; SHOW USER is its only surface."
+    },
+    "show_variables": {
+        "canonical_name": "SHOW VARIABLES",
+        "planner_entry": "plan_show_variables",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "SHOW VARIABLES"
+        ],
+        "summary": "List the current session's variables.",
+        "documentation": "Reached through the parser's generic SHOW catch-all (ShowVariable with an empty word list) and answered from the $variables internal-only virtual dataset.",
+        "notes": "$variables is INTERNAL_ONLY_DATASETS; SHOW VARIABLES is its only surface. SHOW VARIABLES LIKE '<pattern>' parses but the pattern is discarded by the parser, so it is rejected rather than silently answered with the unfiltered list."
     },
     "top": {
         "canonical_name": "TOP",

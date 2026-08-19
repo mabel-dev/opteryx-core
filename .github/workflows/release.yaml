@@ -212,22 +212,22 @@ jobs:
             runner: ubuntu-latest
             runner-python: "3.11"
             pybuild: "3.11"
-            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
           - arch: x86_64
             runner: ubuntu-latest
             runner-python: "3.12"
             pybuild: "3.12"
-            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
           - arch: x86_64
             runner: ubuntu-latest
             runner-python: "3.13"
             pybuild: "3.13"
-            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
           - arch: x86_64
             runner: ubuntu-latest
             runner-python: "3.14"
             pybuild: "3.14"
-            manylinux_image: "quay.io/pypa/manylinux2014_x86_64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_x86_64"
           # ── aarch64: NATIVE ARM runner, no QEMU. `docker/setup-qemu-action`
           # would let ubuntu-latest build these, but emulating a manylinux
           # Rust + C++ + LTO build costs hours and risks the job time limit.
@@ -243,22 +243,22 @@ jobs:
             runner: ubuntu-24.04-arm
             runner-python: "3.11"
             pybuild: "3.11"
-            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
           - arch: aarch64
             runner: ubuntu-24.04-arm
             runner-python: "3.12"
             pybuild: "3.12"
-            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
           - arch: aarch64
             runner: ubuntu-24.04-arm
             runner-python: "3.13"
             pybuild: "3.13"
-            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
           - arch: aarch64
             runner: ubuntu-24.04-arm
             runner-python: "3.14"
             pybuild: "3.14"
-            manylinux_image: "quay.io/pypa/manylinux2014_aarch64"
+            manylinux_image: "quay.io/pypa/manylinux_2_34_aarch64"
     name: linux ${{ matrix.arch }} py${{ matrix.pybuild }}
     runs-on: ${{ matrix.runner }}
     steps:
@@ -285,26 +285,19 @@ jobs:
           DESIRED_IMAGE="${{ matrix.manylinux_image }}"
           echo "Attempting to pull ${DESIRED_IMAGE}..."
 
-          # Fallbacks are per-arch and MUST stay per-arch: `docker pull` of a
-          # foreign-arch image succeeds, so a hardcoded x86_64 fallback on an
-          # ARM runner would resolve happily and then either die with an exec
-          # format error or (with binfmt registered) quietly build an x86 wheel
-          # in the aarch64 job. The arch assertion below is the backstop.
+          # NO FALLBACK IMAGES. Every fallback this workflow used to carry was a
+          # DIFFERENT manylinux version than the one PLAT names, so a fallback
+          # build produced wheels tagged (say) manylinux_2_31 while the archive
+          # glob looked for the PLAT tag — the job went green and uploaded an
+          # EMPTY artifact. The file previously documented that trap against the
+          # 2_31 fallback and left it in place; it is removed rather than
+          # re-pointed. A fallback is only ever safe if it is a mirror of the
+          # SAME image, and no verified mirror path is wired up here.
           #
-          # aarch64 deliberately does NOT mirror x86_64's manylinux_2_31
-          # fallback: that image tags wheels manylinux_2_31, which the archive
-          # glob (*manylinux2014_<arch>*) does not match, so it would upload an
-          # empty artifact. See the note on the x86_64 fallback below.
+          # If the pull fails we stop. A missing image is a real failure and must
+          # look like one, not like a silently empty release.
           case "${ARCH}" in
-            x86_64)
-              # NOTE (pre-existing): this 2_31 fallback produces wheels the
-              # Archive glob cannot match. Left as-is to avoid changing x86_64
-              # behaviour in an aarch64 change — flagged, not fixed.
-              FALLBACKS="ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 quay.io/pypa/manylinux2014_x86_64"
-              ;;
-            aarch64)
-              FALLBACKS="ghcr.io/pypa/manylinux2014_aarch64"
-              ;;
+            x86_64|aarch64) FALLBACKS="" ;;
             *)
               echo "ERROR: unsupported matrix arch '${ARCH}'" >&2
               exit 1
@@ -340,7 +333,7 @@ jobs:
           echo "Using container image: ${IMAGE} (${CONTAINER_ARCH})"
 
           docker run --rm \
-            -e PLAT=manylinux2014_${ARCH} \
+            -e PLAT=manylinux_2_34_${ARCH} \
             -e PACKAGE_NAME=opteryx \
             -e PYTHON_VERSION=${{ matrix.pybuild }} \
             -e OPTERYX_ENABLE_LTO=1 \
@@ -403,8 +396,7 @@ jobs:
           # step is a hard release gate — it must fail for the real reason, not
           # because it reached for the wrong container.
           case "${ARCH}" in
-            x86_64)  FALLBACKS="ghcr.io/pypa/manylinux/manylinux_2_31_x86_64 quay.io/pypa/manylinux2014_x86_64" ;;
-            aarch64) FALLBACKS="ghcr.io/pypa/manylinux2014_aarch64" ;;
+            x86_64|aarch64) FALLBACKS="" ;;   # see the no-fallback note above
             *) echo "ERROR: unsupported matrix arch '${ARCH}'" >&2; exit 1 ;;
           esac
 
@@ -450,11 +442,13 @@ jobs:
           # ambiguous and the second job to upload it would fail (or clobber).
           # Every "Stage linux" step in the `upload` job matches this exactly.
           name: dist-linux-${{ matrix.arch }}-${{ matrix.pybuild }}
-          # auditwheel emits e.g. ...-manylinux_2_17_aarch64.manylinux2014_aarch64.whl,
-          # so this glob must track the matrix arch — the old hardcoded
-          # *_x86_64* matched nothing on ARM and would have uploaded an EMPTY
-          # artifact, publishing an incomplete set without failing.
-          path: io/dist/*manylinux2014_${{ matrix.arch }}*.whl
+          # auditwheel emits ...-manylinux_2_34_<arch>.whl for PLAT=manylinux_2_34_<arch>
+          # (a PEP 600 tag, with none of the legacy dual-tagging manylinux2014
+          # carried), so this glob must track BOTH the matrix arch and PLAT — the
+          # old hardcoded *_x86_64* matched nothing on ARM and would have uploaded
+          # an EMPTY artifact, publishing an incomplete set without failing.
+          # `if-no-files-found: error` below is the backstop for that class.
+          path: io/dist/*manylinux_2_34_${{ matrix.arch }}*.whl
           if-no-files-found: error
 
   # No `needs:` — see build-manylinux. `upload` is the gate.
@@ -590,7 +584,7 @@ jobs:
           MISSING=0
           for ARCH in x86_64 aarch64; do
             for PY in 311 312 313 314; do
-              if ! ls dist/*cp${PY}-cp${PY}-*manylinux2014_${ARCH}*.whl >/dev/null 2>&1; then
+              if ! ls dist/*cp${PY}-cp${PY}-*manylinux_2_34_${ARCH}*.whl >/dev/null 2>&1; then
                 echo "MISSING: linux ${ARCH} cp${PY} wheel"
                 MISSING=1
               fi

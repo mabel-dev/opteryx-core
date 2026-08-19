@@ -5,17 +5,28 @@ this covers only the binding layer — marshalling, projection, and the
 Status→SkeneError translation.
 """
 
+import datetime
 import os
 import sys
+from decimal import Decimal
 
 sys.path.insert(1, os.path.join(sys.path[0], "..", "..", ".."))
 
 import pytest
 
 import skene
+from draken import draken_native
 from draken.draken_native import DrakenType
+from draken.draken_native import LogicalKind
 from draken.interop.vector_sequence import vector_from_sequence
 from draken.morsels.morsel import Morsel
+from draken.vectors.vector import Vector
+
+
+def meta_logical_kind(meta, index=0):
+    """The logical kind in the FILE schema directory, or None when absent."""
+    logical = meta["columns"][index]["logical"]
+    return None if logical is None else logical["kind"]
 
 
 def _sample_morsel():
@@ -177,6 +188,134 @@ def test_codec_and_level_must_agree():
         skene.write_morsel(_sample_morsel(), codec="brotli")
 
 
+# ---------------------------------------------------------------------------
+# LogicalType descriptor round-trip
+#
+# Carrying the descriptor is the reason this format exists (format.h's opening
+# comment), but nothing in this suite pinned it. IPV4 is the case that needs a
+# test rather than an argument: every other kind refines a physical tag that is
+# already parameterized, so a dropped descriptor fails loud downstream — a
+# TIMESTAMP64 with a nullptr descriptor is a hard error in draken. IPV4 is
+# DRAKEN_UINT32 plus a descriptor, and a descriptor-less UINT32 is a perfectly
+# well-formed integer column, so losing it degrades silently: addresses render
+# as integers and CIDR_AGG refuses the column. Nothing fails, and that is what
+# makes it expensive to find.
+# ---------------------------------------------------------------------------
+
+# 0 and 2**32-1 are the ends of the range; 3232235777 is 192.168.1.1, the value
+# that catches an octet order reversed anywhere along the write/read path.
+IPV4_VALUES = [0, 3232235777, None, 4294967295]
+IPV4_TEXT = ["0.0.0.0", "192.168.1.1", None, "255.255.255.255"]
+
+
+def _ipv4_morsel():
+    nb = draken_native.vector_retag_uint32_as_ipv4(
+        draken_native.vector_uint32_from_sequence(IPV4_VALUES)
+    )
+    return Morsel.from_vectors(["source_ip"], [Vector(nb)])
+
+
+def test_ipv4_descriptor_survives_the_file():
+    """A UINT32 column marked IPV4 must read back IPV4, not bare UINT32."""
+    buf = skene.write_morsel(_ipv4_morsel(), read_acceleration=True)
+
+    # Both directories carry it: the FILE schema (what a reader consults before
+    # touching a row group) and the ROW GROUP column entry (what the decode
+    # reconstructs the vector from). A descriptor in only one of them reads back
+    # correctly by luck of which path a consumer takes.
+    assert meta_logical_kind(skene.read_metadata(buf)) == LogicalKind.IPV4.value
+    rg = skene.read_row_group_metadata(buf, 0)
+    assert rg["columns"][0]["logical"]["kind"] == LogicalKind.IPV4.value
+
+    m = skene.read_morsel(buf, 0)
+    m.materialize()
+    column = m.column("source_ip")
+    # The descriptor itself, then the two things that are only true because of
+    # it: the SQL name, and dotted-decimal rendering rather than integers.
+    assert column._nb.logical_type_kind is LogicalKind.IPV4
+    assert column.type is DrakenType.UINT32
+    assert column.type_name == "IPV4"
+    assert column.to_pylist() == IPV4_TEXT
+
+
+def test_plain_uint32_gains_no_descriptor():
+    """The other half of the contract — the writer must not invent one."""
+    nb = draken_native.vector_uint32_from_sequence(IPV4_VALUES)
+    buf = skene.write_morsel(
+        Morsel.from_vectors(["port"], [Vector(nb)]), read_acceleration=True
+    )
+    assert meta_logical_kind(skene.read_metadata(buf)) is None
+
+    m = skene.read_morsel(buf, 0)
+    m.materialize()
+    assert m.column("port")._nb.logical_type_kind is None
+    assert m.column("port").type_name == "UINT32"
+    assert m.column("port").to_pylist() == IPV4_VALUES
+
+
+@pytest.mark.parametrize(
+    "codec_options",
+    [
+        {},                                              # spill posture
+        {"read_acceleration": True},                     # value ordering + stats
+        {"read_acceleration": True, "codec": "lz4"},     # for_fast_reads
+        {"read_acceleration": True, "codec": "zstd", "zstd_level": 7},  # for_storage
+        {"read_acceleration": True, "bloom_columns": ["source_ip"]},
+    ],
+    ids=["spill", "accelerated", "lz4", "zstd7", "bloom"],
+)
+def test_ipv4_descriptor_survives_every_write_posture(codec_options):
+    """The descriptor is schema, not payload — no posture may trade it away.
+
+    Value ordering rewrites `data` and the selection codes, and compression
+    rewrites the section bytes; both are transformations the descriptor has to
+    ride over untouched.
+    """
+    buf = skene.write_morsel(_ipv4_morsel(), **codec_options)
+    m = skene.read_morsel(buf, 0)
+    m.materialize()
+    assert m.column("source_ip").type_name == "IPV4"
+    assert m.column("source_ip").to_pylist() == IPV4_TEXT
+
+
+def test_every_logical_kind_round_trips():
+    """Each kind, with a NON-DEFAULT parameter wherever it has one.
+
+    A descriptor that is dropped and then rebuilt from defaults round-trips a
+    TIMESTAMP[us] or a DECIMAL(0,0) convincingly, so a case built on default
+    parameters cannot tell carriage from reconstruction. Every parameter here is
+    off-default for that reason: a lost descriptor changes the name.
+    """
+    cases = [
+        ("ipv4", draken_native.vector_retag_uint32_as_ipv4(
+            draken_native.vector_uint32_from_sequence([3232235777, None])), "IPV4"),
+        ("ts_ms", draken_native.vector_timestamp_from_sequence(
+            [datetime.datetime(2023, 11, 14), None], "ms"), "TIMESTAMP[ms]"),
+        ("ts_ns", draken_native.vector_timestamp_from_sequence(
+            [datetime.datetime(2023, 11, 14), None], "ns"), "TIMESTAMP[ns]"),
+        ("time32_ms", draken_native.vector_time32_from_sequence(
+            [datetime.time(1, 2, 3), None], "ms"), "TIME[ms]"),
+        ("time64_us", draken_native.vector_time64_from_sequence(
+            [datetime.time(1, 2, 3), None], "us"), "TIME[us]"),
+        ("dec", draken_native.vector_decimal_from_sequence(
+            [Decimal("1.25"), None], 10, 2), "DECIMAL(10, 2)"),
+        ("dec128", draken_native.vector_decimal128_from_sequence(
+            [Decimal("1.25"), None], 30, 4), "DECIMAL(30, 4)"),
+        ("fp16", draken_native.vector_fp16_from_sequence(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], 3), "VECTOR(3)"),
+    ]
+    names = [name for name, _, _ in cases]
+    morsel = Morsel.from_vectors(names, [Vector(nb) for _, nb, _ in cases])
+
+    buf = skene.write_morsel(morsel, read_acceleration=True, codec="zstd", zstd_level=7)
+    m = skene.read_morsel(buf, 0)
+    m.materialize()
+
+    assert [m.column(name).type_name for name in names] == [
+        expected for _, _, expected in cases
+    ]
+
+
 if __name__ == "__main__":
     test_roundtrip_values()
     test_probe_and_metadata()
@@ -184,4 +323,12 @@ if __name__ == "__main__":
     test_corruption_fails_loud()
     test_spill_posture_roundtrip()
     test_codec_and_level_must_agree()
+    test_ipv4_descriptor_survives_the_file()
+    test_plain_uint32_gains_no_descriptor()
+    for _options in ({}, {"read_acceleration": True},
+                     {"read_acceleration": True, "codec": "lz4"},
+                     {"read_acceleration": True, "codec": "zstd", "zstd_level": 7},
+                     {"read_acceleration": True, "bloom_columns": ["source_ip"]}):
+        test_ipv4_descriptor_survives_every_write_posture(_options)
+    test_every_logical_kind_round_trips()
     print("✅ okay")
