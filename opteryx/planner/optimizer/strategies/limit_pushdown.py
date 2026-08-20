@@ -60,9 +60,6 @@ class LimitPushdownStrategy(OptimizationStrategy):
     }
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]
-
         if node.node_type == LogicalPlanStepType.Limit:
             if node.offset is not None or node.limit in (None, 0):
                 return context

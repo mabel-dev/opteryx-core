@@ -492,9 +492,6 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         return not config.features.disable_predicate_pushdown
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type in (
             LogicalPlanStepType.Scan,
             LogicalPlanStepType.FunctionDataset,

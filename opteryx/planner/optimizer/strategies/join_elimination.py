@@ -133,9 +133,6 @@ def _right_is_provably_unique(plan: LogicalPlan, join_nid: str, right_relations:
 
 class JoinEliminationStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()
-
         if (
             node.node_type == LogicalPlanStepType.Join
             and node.type == "inner"
@@ -161,7 +158,12 @@ class JoinEliminationStrategy(OptimizationStrategy):
             if not _right_is_provably_unique(plan, join_nid, right_relations):
                 continue
 
-            plan[join_nid].type = "left semi"
+            join_node = plan[join_nid]
+            join_node.type = "left semi"
+            # Write back through the plan: the write-back is what materializes
+            # the copy-on-write working plan and what tells the optimizer the
+            # pass changed something — see OptimizationStrategy's contract.
+            plan[join_nid] = join_node
             self.telemetry.optimization_join_elimination += 1
 
         return plan

@@ -45,9 +45,8 @@ typedef void (*EmitFn)(std::string &, struct Col &, size_t);
 
 struct Col {
   const DrakenVector *dv;    // original column (validity + per-cell formatters)
-  const DrakenVector *child; // ARRAY element vector
   DrakenVector sv;           // string source (cast result OR original string col)
-  ColumnDesc desc;           // logical type of the column and its ARRAY element
+  ColumnDesc desc;           // logical type of the column and (ARRAY) its element chain
   const std::string *name;   // for error messages; null on the JSONL path
   char delim;
   EmitFn emit;               // resolved once per column
@@ -164,13 +163,11 @@ static void ej_date(std::string &o, Col &c, size_t i) {
   fmt_date_quoted(o, ((const int32_t *)c.dv->data)[c.dv->selection[i]]);
 }
 static void ej_array(std::string &o, Col &c, size_t i) {
-  if (!row_valid(c.dv->validity, i)) { o.append("null"); return; }
-  const int32_t *offs = (const int32_t *)c.dv->data;
-  uint32_t p = c.dv->selection[i];
-  int32_t s = offs[p], e = offs[p + 1];
-  o.push_back('[');
-  for (int32_t k = s; k < e; k++) { if (k > s) o.push_back(','); render_json_scalar(o, c.child, (size_t)k, c.desc.child); }
-  o.push_back(']');
+  // c.dv is already known DRAKEN_ARRAY (resolve_col only routes here for
+  // that type), so this recurses through the whole ARRAY<ARRAY<...>> chain
+  // in c.desc.levels rather than treating the immediate element vector as a
+  // scalar leaf — see render_json_value in value_format.hpp.
+  render_json_value(o, c.dv, i, c.desc.column, c.desc.levels, 0);
 }
 // VECTOR_FP16 has no wire representation in CSV/JSONL any more than Parquet
 // does — rendered as an array of floats (fp16->fp32, same conversion as the
@@ -342,10 +339,10 @@ static inline void vr_to_dv(const VecResult &vr, DrakenVector &dv) {
 
 // Resolve one column: choose the cell emitter, and (for int/bool/date/ts) run
 // the batch cast kernel to produce the string source.
-static void resolve_col(Col &c, const DrakenVector *dv, const DrakenVector *child,
+static void resolve_col(Col &c, const DrakenVector *dv,
                         const ColumnDesc &desc, const std::string *name,
                         char delim, bool csv, bool for_excel) {
-  c.dv = dv; c.child = child; c.desc = desc; c.name = name; c.delim = delim;
+  c.dv = dv; c.desc = desc; c.name = name; c.delim = delim;
   c.free_data = nullptr; c.free_sel = nullptr;
   VecResult vr;
   bool quoted = false;
@@ -485,7 +482,7 @@ static inline BS::thread_pool<> &jsonl_render_pool() {
 // into contiguous ranges rendered in parallel on the shared pool; per-thread Col
 // copies give each worker its own array-staging scratch. Small inputs render
 // inline on the calling thread.
-inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const DrakenVector **childs,
+inline std::vector<std::string> jsonl_write(const DrakenVector **dvs,
                                             const ColumnDesc *descs,
                                             const std::string *prefixes, size_t ncols, size_t nrows) {
   std::vector<Col> cols(ncols);
@@ -494,7 +491,7 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const Drak
   std::vector<std::string> baked(ncols);
   size_t est = 2; // "}\n"
   for (size_t c = 0; c < ncols; c++) {
-    resolve_col(cols[c], dvs[c], childs[c], descs[c], nullptr, 0, false, false);
+    resolve_col(cols[c], dvs[c], descs[c], nullptr, 0, false, false);
     baked[c].reserve(prefixes[c].size() + 1);
     baked[c].push_back(c == 0 ? '{' : ',');
     baked[c].append(prefixes[c]);
@@ -532,7 +529,7 @@ inline std::vector<std::string> jsonl_write(const DrakenVector **dvs, const Drak
   return chunks;
 }
 
-inline std::string csv_write(const DrakenVector **dvs, const DrakenVector **childs,
+inline std::string csv_write(const DrakenVector **dvs,
                              const ColumnDesc *descs,
                              const std::string *names, size_t ncols, size_t nrows,
                              char delim, bool header, bool for_excel) {
@@ -566,7 +563,7 @@ inline std::string csv_write(const DrakenVector **dvs, const DrakenVector **chil
   if (ncols) seps[0] = 0; // sentinel: column 0 has no separator
   size_t namesum = 0, est = ncols + 4; // + one '\n' worth of slack
   for (size_t c = 0; c < ncols; c++) {
-    resolve_col(cols[c], dvs[c], childs[c], descs[c], &names[c], delim, true, for_excel);
+    resolve_col(cols[c], dvs[c], descs[c], &names[c], delim, true, for_excel);
     namesum += names[c].size();
     est += est_cell_bytes(cols[c]);
   }

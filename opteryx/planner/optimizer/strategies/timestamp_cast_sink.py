@@ -123,8 +123,6 @@ class TimestampCastSinkStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if node is None:
             return context
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()
         context.optimized_plan.add_node(context.node_id, LogicalPlanNode(**node.properties))
         if context.parent_nid:
             # Re-adding the edge must preserve its relationship: a join leg label

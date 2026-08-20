@@ -7,7 +7,7 @@
 from libc.stdint cimport uint8_t, uint32_t, int32_t
 from libc.stddef cimport size_t
 from libc.stdlib cimport malloc, free
-from libc.string cimport memcpy, memset
+from libc.string cimport memcpy
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -22,7 +22,7 @@ cdef extern from "interop/value_format.hpp" namespace "rugo_text":
 
 cdef extern from "_text_render.hpp" namespace "rugo_text":
     # Returns the rendered bytes as one buffer per worker (parallel render).
-    vector[string] jsonl_write(const DrakenVector** dvs, const DrakenVector** childs,
+    vector[string] jsonl_write(const DrakenVector** dvs,
                                const ColumnDesc* descs,
                                const string* prefixes, size_t ncols, size_t nrows) nogil
 
@@ -34,15 +34,16 @@ def write_jsonl(Morsel morsel not None):
     cdef list names = morsel._col_names
 
     cdef list vecs = []        # keep Vector refs alive
-    cdef list child_vecs = []
+    cdef list child_vecs = []  # keep every ARRAY-level Vector alive (see _fill_array_levels)
     cdef const DrakenVector** dvs = <const DrakenVector**>malloc(ncols * sizeof(void*))
-    cdef const DrakenVector** child_dvs = <const DrakenVector**>malloc(ncols * sizeof(void*))
-    # One descriptor per column. Zero-filled == the C++ struct's own defaults
-    # (kind NONE, unit s, no scale/dimension) — malloc does not run them.
-    cdef ColumnDesc* descs = <ColumnDesc*>malloc(ncols * sizeof(ColumnDesc))
+    # One descriptor per column, properly default-constructed (unlike malloc,
+    # vector[T].resize() runs each ColumnDesc's constructor — required now
+    # that it owns a std::vector<ArrayLevel> member).
+    cdef vector[ColumnDesc] descs
+    descs.resize(ncols)
     cdef vector[string] prefixes   # pre-escaped  "name":
 
-    cdef Vector v, cv
+    cdef Vector v
     cdef const DrakenVector* dv
     cdef Py_ssize_t c, i
     cdef object nm
@@ -54,23 +55,18 @@ def write_jsonl(Morsel morsel not None):
     cdef char* dst
 
     try:
-        memset(descs, 0, ncols * sizeof(ColumnDesc))
         for c in range(ncols):
             v = morsel._get_column(c)
             vecs.append(v)
             dv = v.unified()
             dvs[c] = dv
-            child_dvs[c] = NULL
             _fill_logical_desc(&descs[c].column, v._nb)
             if dv.type == DRAKEN_VECTOR_FP16 and descs[c].column.dim == 0:
                 raise ValueError(
                     "write_jsonl: VECTOR_FP16 column %r missing logical-type "
                     "descriptor (dimension)" % (names[c],))
-            if dv.type == DRAKEN_ARRAY and v._nb.array_child_type is not None:
-                cv = Vector(v._nb.array_child)
-                child_vecs.append(cv)
-                child_dvs[c] = cv.unified()
-                _fill_logical_desc(&descs[c].child, cv._nb)
+            if dv.type == DRAKEN_ARRAY:
+                _fill_array_levels(&descs[c], v, child_vecs)
             nm = names[c]
             nb_name = nm if isinstance(nm, bytes) else str(nm).encode("utf-8")
             namebuf = string()
@@ -79,7 +75,7 @@ def write_jsonl(Morsel morsel not None):
             prefixes.push_back(namebuf)
 
         with nogil:
-            chunks = jsonl_write(dvs, child_dvs, descs,
+            chunks = jsonl_write(dvs, descs.data(),
                                  prefixes.data(), <size_t>ncols, <size_t>nrows)
         for k in range(chunks.size()):
             total += chunks[k].size()
@@ -93,4 +89,4 @@ def write_jsonl(Morsel morsel not None):
                 off += chunks[k].size()
         return result
     finally:
-        free(dvs); free(child_dvs); free(descs)
+        free(dvs)

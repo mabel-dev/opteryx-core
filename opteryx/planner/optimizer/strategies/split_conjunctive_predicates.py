@@ -45,6 +45,7 @@ def _inner_split(node):
 
 
 class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
+    rebuilds_plan = True  # rebuilds the whole plan into an empty working plan
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         """
         Conjunctive Predicates (ANDs) can be split and executed in any order to get the

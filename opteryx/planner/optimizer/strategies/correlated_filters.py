@@ -312,9 +312,6 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
     requires = ("predicates-pushed",)
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Join and node.type in ("inner", "nested loop"):
             join_stats = getattr(node, "statistics", None)
             if join_stats is None:

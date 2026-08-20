@@ -17,6 +17,7 @@ Key design:
 
 from __future__ import annotations
 
+import copy as copy_module
 import dataclasses
 from typing import Any, Dict, List, Optional
 
@@ -120,6 +121,32 @@ class SchemaColumn:
     # optional LogicalType descriptor + optional ARRAY element). Deepcopy
     # is safe — LogicalType has __deepcopy__ wired on the nanobind side.
     column_type: Optional[Any] = dataclasses.field(default=None, repr=False, compare=False)
+
+    def branch_copy(self, memo: dict) -> "SchemaColumn":
+        """Copy for binder branch isolation — see RelationSchema.branch_copy.
+
+        Preserves the concrete subclass and any extra fields via copy.copy,
+        then detaches exactly the state the binder mutates in place on a
+        column: the aliases list (`aliases.append` in binder.py/project.py),
+        origin, and nested STRUCT fields. Everything else is either rebound
+        (never mutated) or immutable (identity bytes, ColumnType), so sharing
+        it is safe and cheap. `memo` keeps one column object referenced from
+        two places copying to ONE new object, exactly like deepcopy's memo —
+        losing that aliasing would silently split columns the binder expects
+        to be the same object.
+        """
+        cached = memo.get(id(self))
+        if cached is not None:
+            return cached
+        clone = copy_module.copy(self)
+        memo[id(self)] = clone
+        if clone.aliases is not None:
+            clone.aliases = list(clone.aliases)
+        if clone.origin is not None:
+            clone.origin = list(clone.origin)
+        if clone.fields:
+            clone.fields = [f.branch_copy(memo) for f in clone.fields]
+        return clone
 
     def __post_init__(self):
         """Normalize identity.
@@ -340,6 +367,27 @@ class RelationSchema:
     def __repr__(self) -> str:
         """Detailed representation."""
         return f"RelationSchema(name={self.name!r}, num_columns={len(self.columns)})"
+
+    def branch_copy(self, memo: dict) -> "RelationSchema":
+        """Copy for binder branch isolation.
+
+        The binder binds a join's two legs (and a filter's guarded scope)
+        against independent copies of the in-scope schemas, because binding
+        MUTATES schemas and their columns in place. This is the hand-rolled
+        replacement for `deepcopy(schemas)` — same isolation, same aliasing
+        (one shared `memo` per BindingContext.copy keeps a column object
+        referenced from two schemas copying to one new object), a fraction of
+        the cost: deepcopy's generic machinery was ~10% of binder time on a
+        wide-schema workload.
+        """
+        cached = memo.get(id(self))
+        if cached is not None:
+            return cached
+        clone = copy_module.copy(self)
+        memo[id(self)] = clone
+        clone.columns = [c.branch_copy(memo) for c in self.columns]
+        clone.aliases = list(self.aliases)
+        return clone
 
     @property
     def column_names(self) -> List[str]:

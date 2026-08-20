@@ -98,9 +98,6 @@ def _is_isnull(node):
 
 class JoinRewriteStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
             conjuncts = _split_and(node.condition)
             if any(_is_isnull(c) for c in conjuncts):

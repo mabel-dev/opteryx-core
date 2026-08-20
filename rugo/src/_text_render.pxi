@@ -10,6 +10,10 @@
 # duplicating the packing in each writer is how the two drift apart.
 
 from libc.stdint cimport uint8_t
+from libcpp.vector cimport vector
+
+from draken.core.buffers cimport DrakenVector, DRAKEN_ARRAY
+from draken.vectors.vector cimport Vector
 
 # Draken's logical-type vocabulary — imported, never copied (see CLAUDE.md §14).
 cdef extern from "logical_type.h":
@@ -28,9 +32,16 @@ cdef extern from "interop/value_format.hpp" namespace "rugo_text":
         int scale
         int dim
 
+    # One nesting level below a column's own ARRAY-ness — see ColumnDesc and
+    # render_json_value in value_format.hpp for how these chain for
+    # ARRAY<ARRAY<...>>.
+    cdef struct ArrayLevel:
+        const DrakenVector* vec
+        LogicalDesc desc
+
     cdef struct ColumnDesc:
         LogicalDesc column
-        LogicalDesc child
+        vector[ArrayLevel] levels
 
 
 cdef inline int _text_unit_code(object u):
@@ -65,3 +76,30 @@ cdef inline void _fill_logical_desc(LogicalDesc* d, object nb) except *:
     dim = nb.logical_type_dimension
     if dim is not None:
         d.dim = <int>dim
+
+
+cdef inline void _fill_array_levels(ColumnDesc* desc, Vector col, list keepalive) except *:
+    """Walk `col`'s ARRAY nesting chain into `desc.levels`, one entry per depth.
+
+    `col` must already be known DRAKEN_ARRAY-typed. Descends through
+    array_child/array_child_type to whatever depth the data actually has
+    (ARRAY<ARRAY<T>> etc.) — mirrors row_array_to_pylist's descent through
+    VectorOwner::child_owner in draken_native.cpp, the reference for correct
+    nested-array handling (see CLAUDE.md and value_format.hpp::ColumnDesc).
+    `keepalive` must outlive the render call: each level's Vector owns the
+    nanobind handle the C++ side borrows a raw DrakenVector* out of.
+    """
+    cdef Vector cur = col
+    cdef Vector cv
+    cdef ArrayLevel lvl
+    while cur.unified().type == DRAKEN_ARRAY and cur._nb.array_child_type is not None:
+        cv = Vector(cur._nb.array_child)
+        keepalive.append(cv)
+        lvl.vec = cv.unified()
+        lvl.desc.kind = LogicalKind.NONE
+        lvl.desc.unit = 0
+        lvl.desc.scale = 0
+        lvl.desc.dim = 0
+        _fill_logical_desc(&lvl.desc, cv._nb)
+        desc.levels.push_back(lvl)
+        cur = cv

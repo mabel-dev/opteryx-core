@@ -142,9 +142,6 @@ def _eliminate_redundant_casts(node, telemetry, value_context=False):
 
 class RedundantCastEliminationStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Project:
             node.columns = [_eliminate_redundant_casts(c, self.telemetry) for c in node.columns]
             context.optimized_plan[context.node_id] = node

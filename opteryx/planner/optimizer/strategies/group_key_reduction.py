@@ -81,9 +81,6 @@ def _make_passthrough(original: Node) -> Node:
 
 class GroupKeyReductionStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()
-
         if node.node_type != LogicalPlanStepType.AggregateAndGroup:
             return context
 

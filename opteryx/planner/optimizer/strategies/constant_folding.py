@@ -70,10 +70,12 @@ def _desugar_rewrite_only(node, telemetry: QueryTelemetry):
     """
     from .predicate_rewriter import _rewrite_function
 
-    for attr in ("left", "centre", "right"):
-        child = getattr(node, attr, None)
-        if isinstance(child, Node):
-            setattr(node, attr, _desugar_rewrite_only(child, telemetry))
+    if isinstance(node.left, Node):
+        node.left = _desugar_rewrite_only(node.left, telemetry)
+    if isinstance(node.centre, Node):
+        node.centre = _desugar_rewrite_only(node.centre, telemetry)
+    if isinstance(node.right, Node):
+        node.right = _desugar_rewrite_only(node.right, telemetry)
     if node.parameters:
         node.parameters = [
             _desugar_rewrite_only(param, telemetry) if isinstance(param, Node) else param
@@ -569,25 +571,42 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
     return root
 
 
+def _fold(expression: Node, telemetry: QueryTelemetry) -> Node:
+    """fold_constants, skipping trees this strategy has already folded.
+
+    The strategy deliberately runs TWICE (early, then after the rewrite
+    strategies), and the second pass exists for expressions the rewrites
+    CREATED — which are new, unstamped node objects. A tree that still carries
+    the first pass's stamp cannot have grown a new foldable subexpression at
+    its root without being rebuilt or rewrapped (both produce unstamped
+    roots), so re-walking it is pure repeat work. An in-place child swap under
+    a kept, stamped root would be missed — that is a missed optimization on
+    that subtree, never a wrong answer, and the rewrite strategies build new
+    roots rather than splicing children.
+    """
+    if expression.folded_by_constant_folding:
+        return expression
+    folded = fold_constants(expression, telemetry)
+    folded.folded_by_constant_folding = True
+    return folded
+
+
 class ConstantFoldingStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         """
         Constant Folding is when we precalculate expressions (or sub expressions)
         which contain only constant or literal values.
         """
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         # fold constants when referenced in filter clauses (WHERE/HAVING)
         if node.node_type == LogicalPlanStepType.Filter:
-            node.condition = fold_constants(node.condition, self.telemetry)
+            node.condition = _fold(node.condition, self.telemetry)
             if node.condition.node_type == NodeType.LITERAL and node.condition.value:
                 context.optimized_plan.remove_node(context.node_id, heal=True)
             else:
                 context.optimized_plan[context.node_id] = node
         # fold constants when referenced in the SELECT clause
         if node.node_type == LogicalPlanStepType.Project:
-            node.columns = [fold_constants(c, self.telemetry) for c in node.columns]
+            node.columns = [_fold(c, self.telemetry) for c in node.columns]
             context.optimized_plan[context.node_id] = node
 
         # remove nesting in order by and group by clauses
@@ -602,7 +621,7 @@ class ConstantFoldingStrategy(OptimizationStrategy):
 
         if node.node_type == LogicalPlanStepType.AggregateAndGroup:
             node.groups = [g.centre if g.node_type == NodeType.NESTED else g for g in node.groups]
-            node.groups = [fold_constants(g, self.telemetry) for g in node.groups]
+            node.groups = [_fold(g, self.telemetry) for g in node.groups]
             context.optimized_plan[context.node_id] = node
 
         return context

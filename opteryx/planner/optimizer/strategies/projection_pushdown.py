@@ -32,6 +32,7 @@ from .optimization_strategy import OptimizerContext
 
 
 class ProjectionPushdownStrategy(OptimizationStrategy):
+    rebuilds_plan = True  # rebuilds the whole plan into an empty working plan
     provides = ("projection-pushed",)
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:

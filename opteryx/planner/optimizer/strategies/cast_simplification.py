@@ -100,9 +100,6 @@ class CastSimplificationStrategy(OptimizationStrategy):
         if node is None:
             return context
 
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()
-
         node_type = getattr(node, "node_type", None)
 
         # Only optimize filter nodes (which contain conditions with CAST expressions)

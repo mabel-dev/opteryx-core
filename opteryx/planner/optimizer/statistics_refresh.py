@@ -44,7 +44,6 @@ read ``node.left_size`` / manifest directly; rewiring them to consume
 ``node.statistics`` is a follow-up.
 """
 
-from dataclasses import replace
 from typing import Dict
 from typing import Iterable
 from typing import List
@@ -99,7 +98,7 @@ def _split_and_conjuncts(node):
 
     if node is None:
         return []
-    if getattr(node, "node_type", None) != NodeType.AND:
+    if node.node_type != NodeType.AND:
         return [node]
     return _split_and_conjuncts(node.left) + _split_and_conjuncts(node.right)
 
@@ -114,14 +113,16 @@ def _identifier_sources(node):
     if node is None:
         return set()
     if node.node_type == NodeType.IDENTIFIER:
-        src = getattr(node, "source", None)
+        src = node.source
         return {src} if src is not None else set()
     out = set()
-    for attr in ("left", "right", "centre"):
-        child = getattr(node, attr, None)
-        if child is not None:
-            out |= _identifier_sources(child)
-    parameters = getattr(node, "parameters", None)
+    if node.left is not None:
+        out |= _identifier_sources(node.left)
+    if node.right is not None:
+        out |= _identifier_sources(node.right)
+    if node.centre is not None:
+        out |= _identifier_sources(node.centre)
+    parameters = node.parameters
     if parameters:
         for p in parameters:
             out |= _identifier_sources(p)
@@ -278,14 +279,54 @@ def _predicate_note(nid, node_type, relation, condition, selectivity, stats=None
     }
 
 
-def _scan_stats(
-    node: LogicalPlanNode,
-    plan: Optional["LogicalPlan"] = None,
-    nid: Optional[str] = None,
-    predicate_notes: Optional[list] = None,
-) -> RelationStatistics:
-    schema = getattr(node, "schema", None)
-    manifest = getattr(node, "manifest", None)
+def _referenced_scan_identities(node: LogicalPlanNode):
+    """The column identities this query can consult on this scan: the scan's
+    own (pushdown-pruned) output columns plus any column its pushed predicates
+    read. Everything downstream of the scan — filter selectivity, join-key
+    intersection, byte-size scaling — keys into this set; a column the query
+    never references cannot influence an estimate, so its manifest walk is
+    pure waste (a 105-column ClickBench scan touching 2 columns paid for 105).
+
+    Returns None when the referenced set cannot be established (no seeded
+    columns) — the caller then computes statistics for every schema column.
+    """
+    from opteryx.expression import NodeType
+    from opteryx.expression import get_all_nodes_of_type
+
+    columns = node.columns
+    if not columns:
+        return None
+    wanted = set()
+    for col in columns:
+        schema_column = col.schema_column
+        if schema_column is not None and isinstance(schema_column.identity, bytes):
+            wanted.add(schema_column.identity)
+    for predicate in node.predicates or []:
+        for ident in get_all_nodes_of_type(predicate, (NodeType.IDENTIFIER,)):
+            schema_column = ident.schema_column
+            if schema_column is not None and isinstance(schema_column.identity, bytes):
+                wanted.add(schema_column.identity)
+    return frozenset(wanted) if wanted else None
+
+
+def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
+    """The manifest/schema-derived statistics of a scan, BEFORE any predicate
+    narrowing — a per-column walk of the manifest (cardinality, distogram,
+    value range, null fraction, char-class, ordinal/length bounds, bytes).
+
+    `wanted` (a frozenset of column identities, or None for "all") limits the
+    walk to the columns the query actually references — see
+    _referenced_scan_identities.
+
+    Everything read here is immutable for the life of a plan: the schema and
+    manifest objects are shared by reference across plan copies (neither has a
+    ``copy`` method, so Node's property copier passes them through), so the
+    result is memoized by ``_scan_stats`` across statistics refreshes. The
+    returned object is therefore SHARED — treat it, its column dict, and its
+    ColumnStatistics entries as immutable; narrowing builds new objects.
+    """
+    schema = node.schema
+    manifest = node.manifest
 
     # Row count: prefer manifest record count, fall back to schema estimates.
     row_count: Optional[int] = None
@@ -305,13 +346,15 @@ def _scan_stats(
         and any(
             (f.column_stats is not None and f.column_stats.has_any_null_counts())
             or bool(f.null_value_counts)
-            for f in (getattr(manifest, "files", None) or [])
+            for f in (manifest.files or [])
         )
     )
     if schema is not None:
         for col in schema.columns:
-            col_name = getattr(col, "name", None)
-            identity = getattr(col, "identity", None)
+            col_name = col.name
+            identity = col.identity
+            if wanted is not None and identity not in wanted:
+                continue
             if not col_name or not isinstance(identity, bytes):
                 continue
             distinct_count = None
@@ -388,15 +431,15 @@ def _scan_stats(
             if total_bytes is None and avg_length is not None:
                 total_bytes = int(avg_length * row_count)
             if total_bytes is None:
-                column_type = getattr(col, "column_type", None)
-                physical = getattr(column_type, "physical", None)
+                column_type = col.column_type
+                physical = None if column_type is None else column_type.physical
                 if physical is not None:
                     fixed_width = physical.fixed_itemsize()
                     if fixed_width:
                         total_bytes = int(fixed_width) * int(row_count)
             # Keyed by identity; the manifest accessors above are name-based
             # because manifest statistics are per-relation and unambiguous.
-            col_type = getattr(col, "column_type", None)
+            col_type = col.column_type
             columns[identity] = ColumnStatistics(
                 column_name=col_name,
                 data_type=str(col_type) if col_type is not None else "",
@@ -414,9 +457,38 @@ def _scan_stats(
     # `row_count` here is the relation's pre-filter size -- the domain the two
     # selectivity passes below shrink. Carry it as base_row_count so join-key
     # tdom estimates divide by the domain rather than by the filtered count.
-    base = RelationStatistics(
+    return RelationStatistics(
         row_count=int(row_count), columns=columns, base_row_count=int(row_count)
     )
+
+
+def _scan_stats(
+    node: LogicalPlanNode,
+    plan: Optional["LogicalPlan"] = None,
+    nid: Optional[str] = None,
+    predicate_notes: Optional[list] = None,
+    base_stats_cache: Optional[dict] = None,
+) -> RelationStatistics:
+    # The base (pre-narrowing) statistics depend only on the scan's schema and
+    # manifest. Both are shared by reference across plan copies and the node's
+    # uuid is preserved by LogicalPlanNode.copy, so within one optimization run
+    # the base is memoizable — keyed by object identity so a strategy that
+    # REPLACES the schema or manifest (statistics_only_response does both)
+    # naturally misses and recomputes. The narrowing below is predicate- and
+    # plan-shape-dependent and always re-runs.
+    wanted = _referenced_scan_identities(node)
+    base = None
+    cache_key = None
+    if base_stats_cache is not None:
+        # `wanted` is part of the key: projection pushdown prunes the scan's
+        # columns mid-optimization, and a base computed for the wide set must
+        # not answer for the narrow one (or vice versa).
+        cache_key = (node.uuid, id(node.schema), id(node.manifest), wanted)
+        base = base_stats_cache.get(cache_key)
+    if base is None:
+        base = _scan_base_stats(node, wanted)
+        if cache_key is not None:
+            base_stats_cache[cache_key] = base
 
     # Apply leaf-local filter selectivity from upward Filter ancestors.
     if plan is not None and nid is not None:
@@ -926,7 +998,7 @@ def _intersect_join_keys(
             new_ndv = r_col.distinct_count
         for key in (lk, rk):
             if key in out:
-                out[key] = replace(out[key], value_range=intersected_range, distinct_count=new_ndv)
+                out[key] = out[key].but(value_range=intersected_range, distinct_count=new_ndv)
     return out
 
 
@@ -971,8 +1043,7 @@ def _aggregate_stats(
         col = base.columns.get(key)
         if col is None:
             continue
-        out_cols[key] = replace(
-            col,
+        out_cols[key] = col.but(
             histogram=None,
             distinct_count=single_key_ndv if single_key_ndv is not None else col.distinct_count,
         )
@@ -1073,7 +1144,7 @@ def _union_stats(
         for k, v in cs.columns.items():
             existing = columns.get(k)
             if existing is None:
-                columns[k] = replace(v, histogram=None)
+                columns[k] = v.but(histogram=None)
                 continue
             # Widen range, sum NDVs.
             new_lower = _min_or_none(existing.value_range.lower_bound, v.value_range.lower_bound)
@@ -1089,8 +1160,7 @@ def _union_stats(
             new_total_bytes: Optional[int] = None
             if existing.total_bytes is not None and v.total_bytes is not None:
                 new_total_bytes = existing.total_bytes + v.total_bytes
-            columns[k] = replace(
-                existing,
+            columns[k] = existing.but(
                 value_range=ColumnRange(lower_bound=new_lower, upper_bound=new_upper),
                 distinct_count=new_ndv,
                 histogram=None,
@@ -1200,7 +1270,7 @@ def _scale_total_bytes(
         if c.total_bytes is None:
             out[k] = c
         else:
-            out[k] = replace(c, total_bytes=max(0, int(c.total_bytes * ratio)))
+            out[k] = c.but(total_bytes=max(0, int(c.total_bytes * ratio)))
     return out
 
 
@@ -1220,13 +1290,15 @@ def _scale_total_bytes_by_origin(
     """
     ratio_left = _ratio(out_rows, left.row_count)
     ratio_right = _ratio(out_rows, right.row_count)
+    if ratio_left == 1.0 and ratio_right == 1.0:
+        return merged
     out: Dict[bytes, ColumnStatistics] = {}
     for k, c in merged.items():
         if c.total_bytes is None:
             out[k] = c
             continue
         ratio = ratio_left if k in left.columns else ratio_right
-        out[k] = replace(c, total_bytes=max(0, int(c.total_bytes * ratio)))
+        out[k] = c.but(total_bytes=max(0, int(c.total_bytes * ratio)))
     return out
 
 
@@ -1239,7 +1311,7 @@ def _cap_ndvs(columns: Dict[bytes, ColumnStatistics], row_count: int) -> Dict[by
     out: Dict[bytes, ColumnStatistics] = {}
     for k, c in columns.items():
         if c.distinct_count is not None and c.distinct_count > row_count:
-            out[k] = replace(c, distinct_count=max(1, int(row_count)))
+            out[k] = c.but(distinct_count=max(1, int(row_count)))
         else:
             out[k] = c
     return out
@@ -1252,8 +1324,13 @@ def _drop_histograms(columns: Dict[bytes, ColumnStatistics]) -> Dict[bytes, Colu
     (joins, group-by on the group keys, distinct, union). We don't try to
     rebuild — the input distogram no longer reflects the output, so it would
     mislead downstream cost estimation.
+
+    No-op preserving: returns `columns` unchanged when no column carries a
+    histogram (the common case), matching _scale_total_bytes / _cap_ndvs.
     """
-    return {k: replace(c, histogram=None) for k, c in columns.items()}
+    if all(c.histogram is None for c in columns.values()):
+        return columns
+    return {k: (c if c.histogram is None else c.but(histogram=None)) for k, c in columns.items()}
 
 
 def _narrow_filter_columns(
@@ -1294,7 +1371,7 @@ def _narrow_filter_columns(
         new_ndv = col.distinct_count
         if eq_card is not None:
             new_ndv = eq_card if new_ndv is None else min(new_ndv, eq_card)
-        out[identity] = replace(col, value_range=new_range, distinct_count=new_ndv)
+        out[identity] = col.but(value_range=new_range, distinct_count=new_ndv)
     return out
 
 
@@ -1499,10 +1576,11 @@ class StatisticsRefreshVisitor:
     don't require a second plan walk elsewhere.
     """
 
-    def __init__(self, plan: LogicalPlan, telemetry=None):
+    def __init__(self, plan: LogicalPlan, telemetry=None, scan_stats_cache: Optional[dict] = None):
         self.plan = plan
         self._visited: set = set()
         self.telemetry = telemetry
+        self.scan_stats_cache = scan_stats_cache
         self.predicate_notes: Optional[list] = [] if telemetry is not None else None
         self.join_notes: Optional[list] = [] if telemetry is not None else None
 
@@ -1516,13 +1594,13 @@ class StatisticsRefreshVisitor:
         row_counts = []
         total_bytes_by_node = []
         for nid, node in self.plan.nodes(True):
-            stats = getattr(node, "statistics", None)
+            stats = node.statistics
             if stats is None:
                 continue
             row_counts.append({
                 "nid": nid,
                 "node_type": node.node_type.name,
-                "relation": getattr(node, "relation", None),
+                "relation": node.relation,
                 "row_count": stats.row_count,
             })
             # Node-level total, summing only the columns with a known
@@ -1535,7 +1613,7 @@ class StatisticsRefreshVisitor:
             total_bytes_by_node.append({
                 "nid": nid,
                 "node_type": node.node_type.name,
-                "relation": getattr(node, "relation", None),
+                "relation": node.relation,
                 "total_bytes": sum(known) if known else None,
             })
         self.telemetry._reading["estimated_row_counts"] = row_counts
@@ -1568,7 +1646,7 @@ class StatisticsRefreshVisitor:
         nt = node.node_type
 
         if nt == LogicalPlanStepType.Scan:
-            return _scan_stats(node, self.plan, nid, self.predicate_notes)
+            return _scan_stats(node, self.plan, nid, self.predicate_notes, self.scan_stats_cache)
         if nt == LogicalPlanStepType.Filter:
             return _filter_stats(node, child_stats, self.plan, nid, self.predicate_notes)
         if nt in (LogicalPlanStepType.Join, LogicalPlanStepType.DependentJoin):
@@ -1592,7 +1670,9 @@ class StatisticsRefreshVisitor:
         return _first_child_stats(child_stats) or _empty_stats()
 
 
-def refresh_statistics(plan: LogicalPlan, telemetry=None) -> LogicalPlan:
+def refresh_statistics(
+    plan: LogicalPlan, telemetry=None, scan_stats_cache: Optional[dict] = None
+) -> LogicalPlan:
     """Recompute statistics for every node in ``plan``.
 
     Walks the plan bottom-up from each exit point and attaches a
@@ -1608,6 +1688,6 @@ def refresh_statistics(plan: LogicalPlan, telemetry=None) -> LogicalPlan:
     Omitting ``telemetry`` (the default) skips this entirely; existing
     callers are unaffected.
     """
-    StatisticsRefreshVisitor(plan, telemetry).run()
+    StatisticsRefreshVisitor(plan, telemetry, scan_stats_cache).run()
     plan.statistics_are_stale = False
     return plan

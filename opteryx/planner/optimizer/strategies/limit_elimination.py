@@ -119,9 +119,6 @@ class LimitEliminationStrategy(OptimizationStrategy):
     def visit(self, node, context: OptimizerContext) -> OptimizerContext:
         # This strategy operates globally in `complete` and does not need to
         # inspect nodes during the traversal phase.
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         return context
 
     def should_i_run(self, plan) -> bool:  # pragma: no cover - trivial

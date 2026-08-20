@@ -64,9 +64,6 @@ class ManifestPruningStrategy(OptimizationStrategy):
         - Collect predicates from FILTER nodes
         - Apply pruning when we reach SCAN nodes with manifests
         """
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Scan:
             # Predicates come from two places:
             #   - node.predicates: pushed INTO the scan by predicate pushdown

@@ -62,7 +62,7 @@ def every_input_has_row_counts(plan) -> bool:
     return saw_a_scan
 
 
-def check_estimated_result_size(plan, limit: int, telemetry=None):
+def check_estimated_result_size(plan, limit: int, telemetry=None, scan_stats_cache=None):
     """Raise ResultTooLargeError when the plan's estimated result exceeds `limit`.
 
     No-op (returns the plan unchanged) when the limit is not positive, when any
@@ -91,7 +91,7 @@ def check_estimated_result_size(plan, limit: int, telemetry=None):
     from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
 
     if getattr(plan, "statistics_are_stale", True):
-        plan = refresh_statistics(plan, telemetry=telemetry)
+        plan = refresh_statistics(plan, telemetry=telemetry, scan_stats_cache=scan_stats_cache)
 
     exit_points = plan.get_exit_points()
     if len(exit_points) != 1 or plan[exit_points[0]].node_type != LogicalPlanStepType.Exit:

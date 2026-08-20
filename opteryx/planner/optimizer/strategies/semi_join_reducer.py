@@ -246,8 +246,6 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         return False
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:

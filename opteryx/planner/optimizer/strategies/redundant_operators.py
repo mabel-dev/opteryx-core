@@ -33,9 +33,6 @@ from .optimization_strategy import OptimizerContext
 
 class RedundantOperationsStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         # If we're a project and the providing step has the same columns, we're
         # not doing anything so can be removed.
         if node.node_type == LogicalPlanStepType.Project:

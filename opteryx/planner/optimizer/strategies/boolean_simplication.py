@@ -85,9 +85,6 @@ class BooleanSimplificationStrategy(OptimizationStrategy):  # pragma: no cover
     """
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Filter:
             # do the work
             node.condition = update_expression_tree(node.condition, self.telemetry)

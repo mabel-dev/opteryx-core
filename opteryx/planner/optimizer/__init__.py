@@ -29,6 +29,8 @@ Example Usage:
 This module aims to enhance query performance through systematic and incremental optimization steps.
 """
 
+from typing import Optional
+
 from opteryx import config
 from opteryx.config import DISABLE_OPTIMIZER
 from opteryx.config import VALIDATE_OPTIMIZER_PLANS
@@ -80,6 +82,7 @@ from opteryx.planner.optimizer.strategies import (
 )
 
 from .statistics_refresh import refresh_statistics
+from .strategies.optimization_strategy import CopyOnWritePlan
 from .strategies.optimization_strategy import OptimizerContext
 
 __all__ = ["do_optimizer"]
@@ -286,6 +289,11 @@ class OptimizerVisitor:
 
         root_nid = exit_points.pop()
         context = OptimizerContext(plan)
+        if strategy.rebuilds_plan:
+            # Rebuild-from-empty strategies re-add every surviving node and
+            # edge themselves; they must start from nothing, not from a view
+            # of the input plan — see OptimizationStrategy.rebuilds_plan.
+            context.optimized_plan = LogicalPlan()
 
         def _inner(nid, parent_nid, context):
             node = context.pre_optimized_tree[nid]
@@ -300,9 +308,20 @@ class OptimizerVisitor:
         # some strategies operate on the entire plan at once, or need to be told
         # there's no more nodes, we handle both with the .complete
         optimized_plan = strategy.complete(context.optimized_plan, context)
+        if isinstance(optimized_plan, CopyOnWritePlan):
+            # A pass that never mutated hands the input plan back untouched
+            # (no copy was ever taken); a pass that did hands back the
+            # materialized working copy. Strategies that build and assign a
+            # whole new plan themselves bypass the wrapper and land below.
+            return optimized_plan.unwrap(plan)
+        if not optimized_plan:
+            # A rebuild-from-empty strategy whose every visit early-returned
+            # (e.g. nothing in the plan concerned it) never added a node; an
+            # empty plan is "no change", never a result.
+            return plan
         return optimized_plan
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
+    def optimize(self, plan: LogicalPlan, scan_stats_cache: Optional[dict] = None) -> LogicalPlan:
         """
         Optimize the logical plan by applying all registered strategies in sequence.
 
@@ -316,6 +335,13 @@ class OptimizerVisitor:
         # Plans enter the optimizer with no propagated statistics, so treat them
         # as stale until refresh_statistics has populated per-node estimates.
         current_plan.statistics_are_stale = True
+        # Memoizes each scan's manifest-derived base statistics across the
+        # multiple refreshes one optimization run performs — the per-column
+        # manifest walk is the expensive half of a refresh and its inputs are
+        # immutable for the life of the plan. Owned by query_planner so the
+        # result-size guard's refresh shares it. See _scan_stats.
+        if scan_stats_cache is None:
+            scan_stats_cache = {}
         for strategy in self.strategies:
             flag_name = _STRATEGY_DISABLE_FLAGS.get(type(strategy).__name__)
             if flag_name is not None and getattr(config.features, flag_name):
@@ -325,9 +351,34 @@ class OptimizerVisitor:
                     strategy.optimization_technique == "cost"
                     and getattr(current_plan, "statistics_are_stale", True)
                 ):
-                    current_plan = refresh_statistics(current_plan, telemetry=self.telemetry)
+                    current_plan = refresh_statistics(
+                        current_plan,
+                        telemetry=self.telemetry,
+                        scan_stats_cache=scan_stats_cache,
+                    )
                 before = (len(current_plan), len(current_plan.edges()))
+                previous_plan = current_plan
+                pre_epoch = current_plan._mutation_epoch
                 current_plan = self.traverse(current_plan, strategy)
+                # Did the strategy actually change anything? Every plan change
+                # goes through a Graph mutator (node replace, add/remove of
+                # nodes or edges), each of which bumps _mutation_epoch. A copy
+                # starts at epoch 0, so: same object back -> epoch moved; a
+                # copy (or freshly built plan) back -> any mutation after the
+                # copy was taken. A strategy handing back an untouched copy
+                # counts as unchanged.
+                if current_plan is previous_plan:
+                    plan_changed = current_plan._mutation_epoch != pre_epoch
+                else:
+                    plan_changed = current_plan._mutation_epoch > 0
+                    # Graph.copy() does not carry instance attributes, so a
+                    # strategy that hands back a copy silently drops the
+                    # staleness flag and the getattr default (True) forces a
+                    # refresh even when nothing changed. Carry it over; the
+                    # plan_changed branch below re-marks it when warranted.
+                    current_plan.statistics_are_stale = getattr(
+                        previous_plan, "statistics_are_stale", True
+                    )
                 self.telemetry.add_plan_rewrite(
                     "optimizer",
                     strategy.__class__.__name__,
@@ -338,9 +389,12 @@ class OptimizerVisitor:
                     # Debug guardrail (WP-3): localise plan corruption to the
                     # strategy that produced it. Off by default; zero cost then.
                     validate_plan(current_plan, where=strategy.__class__.__name__)
-                if strategy.optimization_technique != "cost":
-                    # Heuristic strategies that ran may have rewritten the plan;
-                    # invalidate stats so the next cost-based strategy refreshes.
+                if plan_changed:
+                    # The strategy rewrote the plan (heuristic or cost — either
+                    # way the attached estimates now describe a plan shape that
+                    # no longer exists), so the next cost-based strategy must
+                    # refresh. An untouched plan keeps its statistics —
+                    # refreshing them again would only recompute the same values.
                     current_plan.statistics_are_stale = True
                 ## DEBUG: print(f"AFTER {strategy.__class__.__name__}")
                 ## DEBUG: print(current_plan.draw())
@@ -349,13 +403,19 @@ class OptimizerVisitor:
         return current_plan
 
 
-def do_optimizer(plan: LogicalPlan, telemetry: QueryTelemetry) -> LogicalPlan:
+def do_optimizer(
+    plan: LogicalPlan,
+    telemetry: QueryTelemetry,
+    scan_stats_cache: Optional[dict] = None,
+) -> LogicalPlan:
     """
     Perform optimization on the given logical plan.
 
     Parameters:
         plan (LogicalPlan): The logical plan to optimize.
         telemetry (QueryTelemetry)
+        scan_stats_cache: per-query memo of manifest-derived scan base
+            statistics, shared with the result-size guard's refresh.
 
     Returns:
         LogicalPlan: The optimized logical plan.
@@ -366,4 +426,4 @@ def do_optimizer(plan: LogicalPlan, telemetry: QueryTelemetry) -> LogicalPlan:
         telemetry.add_message(message)
         return plan
     optimizer = OptimizerVisitor(telemetry)
-    return optimizer.optimize(plan)
+    return optimizer.optimize(plan, scan_stats_cache=scan_stats_cache)

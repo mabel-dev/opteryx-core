@@ -43,6 +43,16 @@ OS_SEP = os.sep
 _MANIFEST_CACHE: dict = {}
 _MANIFEST_CACHE_MAX = 128
 
+# Parsed parquet footer metadata (rugo ParquetMetadata — owned Python objects,
+# no buffer views), keyed by (path, size, mtime) so any rewrite invalidates.
+# The schema handed to callers is still BUILT FRESH per query from this parse
+# (rugo_to_relation_schema) — schema/column objects are mutated per query by
+# the binder (origin, name) and column identities must be re-minted per parse
+# so a self-join's two scans never share identities. Only the file read and
+# thrift parse are cached; LRU, bounded.
+_FOOTER_METADATA_CACHE: dict = {}
+_FOOTER_METADATA_CACHE_MAX = 256
+
 
 class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     """
@@ -276,15 +286,34 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             ) from e
 
         try:
+            # The parsed footer (owned Python objects) is cached by
+            # (path, size, mtime); the RelationSchema is rebuilt fresh per
+            # query — see _FOOTER_METADATA_CACHE for why both halves matter.
+            info = self.filesystem.get_file_info([blob_name])[0]
+            cache_key = (
+                blob_name,
+                getattr(info, "size", None),
+                getattr(info, "mtime", None),
+            )
+            rugo_metadata = _FOOTER_METADATA_CACHE.get(cache_key)
+            if rugo_metadata is not None:
+                # Refresh LRU position.
+                _FOOTER_METADATA_CACHE.pop(cache_key, None)
+                _FOOTER_METADATA_CACHE[cache_key] = rugo_metadata
+                return rugo_to_relation_schema(rugo_metadata, schema_name=blob_name)
+
             # Open the file and extract metadata from memoryview
             stream = self.filesystem.open_input_stream(blob_name)
             try:
                 mv = stream.memoryview
                 rugo_metadata = read_metadata_from_memoryview(mv)
                 schema = rugo_to_relation_schema(rugo_metadata, schema_name=blob_name)
-                return schema
             finally:
                 stream.close()
+            if len(_FOOTER_METADATA_CACHE) >= _FOOTER_METADATA_CACHE_MAX:
+                _FOOTER_METADATA_CACHE.pop(next(iter(_FOOTER_METADATA_CACHE)), None)
+            _FOOTER_METADATA_CACHE[cache_key] = rugo_metadata
+            return schema
         except Exception as e:
             if isinstance(e, UnsupportedSyntaxError):
                 raise
@@ -541,6 +570,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
         cached = _MANIFEST_CACHE.get(self.dataset)
         if cached is not None and cached[0] == signature:
+            # Refresh LRU position (dicts preserve insertion order; eviction
+            # below pops the oldest entry, so a re-insert on hit makes this a
+            # true LRU rather than FIFO).
+            _MANIFEST_CACHE.pop(self.dataset, None)
+            _MANIFEST_CACHE[self.dataset] = cached
             # Fresh Manifest over a COPY of the cached file list — optimizer
             # strategies reassign manifest.files (prune, limit, statistics-only
             # COUNT(*) sets it to []), so the cached list is never handed out raw.

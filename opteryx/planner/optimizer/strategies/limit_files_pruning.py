@@ -53,9 +53,6 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
 
     def visit(self, node: Node, context: OptimizerContext) -> OptimizerContext:
         """Visitor method - process each node."""
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]
-
         if node.node_type == LogicalPlanStepType.Scan and node.limit is not None:
             if node.predicates:
                 # We only optimize when there are no filters

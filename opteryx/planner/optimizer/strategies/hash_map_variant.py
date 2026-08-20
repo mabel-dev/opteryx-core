@@ -77,9 +77,6 @@ class HashMapVariantStrategy(OptimizationStrategy):
     requires = ("projection-pushed",)
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]
-
         # Handle both GROUP BY and DISTINCT nodes.
         if node.node_type == LogicalPlanStepType.AggregateAndGroup:
             # `group_map_variant` is the re-entry marker only — nothing reads it

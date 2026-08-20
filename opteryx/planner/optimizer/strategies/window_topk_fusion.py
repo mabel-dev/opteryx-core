@@ -114,9 +114,6 @@ class WindowTopKFusionStrategy(OptimizationStrategy):
         return len(get_nodes_of_type_from_logical_plan(plan, (LogicalPlanStepType.Window,))) > 0
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore[arg-type]
-
         if node.node_type != LogicalPlanStepType.Window:
             return context
 

@@ -185,9 +185,6 @@ class JoinOrderingStrategy(OptimizationStrategy):
     requires = ("joins-planned",)
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Join and node.type == "cross join":
             # 1438
             pass

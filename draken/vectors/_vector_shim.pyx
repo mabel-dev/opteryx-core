@@ -7,6 +7,7 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stdint cimport int32_t, uint8_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
 from libcpp.string cimport string
+from libcpp.vector cimport vector
 
 from draken.core.buffers cimport DrakenVector, DrakenType
 from draken.core.buffers cimport (
@@ -50,13 +51,19 @@ cdef extern from "interop/value_format.hpp" namespace "rugo_text" nogil:
         int scale
         int dim
 
+    # One nesting level below a column's own ARRAY-ness — see ColumnDesc and
+    # render_json_value in value_format.hpp for how these chain for
+    # ARRAY<ARRAY<...>>.
+    cdef struct ArrayLevel:
+        const DrakenVector* vec
+        LogicalDesc desc
+
     cdef struct ColumnDesc:
         LogicalDesc column
-        LogicalDesc child
+        vector[ArrayLevel] levels
 
     void render_json_column(string& out, const DrakenVector* dv,
-                            const DrakenVector* child, const ColumnDesc& desc,
-                            size_t nrows)
+                            const ColumnDesc& desc, size_t nrows)
 
 
 def type_display_name(physical, kind=None, unit=None, precision=0, scale=0,
@@ -450,23 +457,37 @@ cdef class Vector:
         ``/download`` JSON format: timestamps as RFC-3339 ``+00:00``, decimals
         scaled by the column's ``logical_type_scale``, NaN/Inf and nulls as
         ``null``. Honours the ``data[selection[i]]`` indirection, so dense,
-        dict, constant and sliced columns all render correctly.
+        dict, constant and sliced columns all render correctly. ARRAY columns
+        nest to whatever depth the data actually has (ARRAY<ARRAY<T>> etc.) —
+        see ColumnDesc/render_json_value in value_format.hpp.
         """
         cdef const DrakenVector* dv = self._dv
         if dv == NULL:
             return b"[]"
-        cdef const DrakenVector* child = NULL
-        cdef ColumnDesc desc      # C++ defaults: kind NONE, no parameters
+        cdef ColumnDesc desc      # C++ defaults: kind NONE, no levels
+        cdef list child_vecs = []   # keep each level's Vector alive: desc.levels borrows its _dv
+        cdef Vector cur = self
         cdef Vector cv
+        cdef ArrayLevel lvl
         cdef string out
         # The logical type lives on the nanobind descriptor, not the
         # DrakenVector ABI (see rugo _text_render.pxi for the same reads).
         _fill_logical_desc(&desc.column, self._nb)
-        if dv.type == DRAKEN_ARRAY and self._nb.array_child_type is not None:
-            cv = Vector(self._nb.array_child)
-            child = cv._dv
-            _fill_logical_desc(&desc.child, cv._nb)
-        render_json_column(out, dv, child, desc, <size_t>dv.length)
+        # Walk the ARRAY nesting chain to whatever depth the data actually
+        # has, one level per iteration — mirrors row_array_to_pylist's
+        # descent through VectorOwner::child_owner in draken_native.cpp.
+        while cur._dv != NULL and cur._dv.type == DRAKEN_ARRAY and cur._nb.array_child_type is not None:
+            cv = Vector(cur._nb.array_child)
+            child_vecs.append(cv)
+            lvl.vec = cv._dv
+            lvl.desc.kind = LogicalKind.NONE
+            lvl.desc.unit = 0
+            lvl.desc.scale = 0
+            lvl.desc.dim = 0
+            _fill_logical_desc(&lvl.desc, cv._nb)
+            desc.levels.push_back(lvl)
+            cur = cv
+        render_json_column(out, dv, desc, <size_t>dv.length)
         return PyBytes_FromStringAndSize(out.data(), out.size())
 
     def to_arrow(self):

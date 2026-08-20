@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include "core/buffers.h"
 #include "core/ipv4.h"
@@ -47,14 +48,29 @@ struct LogicalDesc {
   int         dim   = 0;
 };
 
-// A column and (for ARRAY columns) its element vector. `child` stays at its
-// defaults — kind NONE — for every non-ARRAY column.
+// One level of a nested-ARRAY descent below the top-level column: the
+// element vector at that depth, and its logical descriptor. Consulted only
+// when a shallower level's vector is itself DRAKEN_ARRAY (see
+// render_json_value below). Default-constructs to vec=nullptr / desc=NONE,
+// same convention as ColumnDesc.
+struct ArrayLevel {
+  const DrakenVector *vec = nullptr;
+  LogicalDesc          desc;
+};
+
+// A column and, for an ARRAY column, the chain of element vectors beneath it
+// — one entry per nesting level, to whatever depth the data actually has
+// (levels[0] is the column's own element vector, levels[1] that vector's
+// own element vector if IT is also ARRAY, and so on for ARRAY<ARRAY<...>>).
+// `levels` stays empty for every non-ARRAY column.
 //
-// Zero-filling a ColumnDesc yields exactly these defaults, which is what the
-// Cython writers rely on when they bulk-allocate one per column.
+// Default-constructing a ColumnDesc yields exactly these defaults (kind
+// NONE, empty levels), which is what the Cython writers rely on when they
+// build one per column — see draken_native.cpp's row_array_to_pylist /
+// child_elem_to_py for the same recursive descent on the to_pylist() path.
 struct ColumnDesc {
   LogicalDesc column;
-  LogicalDesc child;
+  std::vector<ArrayLevel> levels;
 };
 
 // Render a UINT32 carrying LogicalKind::IPV4 as dotted-decimal. Delegates to
@@ -595,36 +611,57 @@ inline void render_json_scalar(std::string &out, const DrakenVector *dv,
   }
 }
 
-// render_json_scalar (above) is reused for ARRAY elements by the fast writer
-// in _text_render.hpp; top-level cell rendering lives there.
+// render_json_scalar (above) is reused for leaf ARRAY elements by
+// render_json_value below and by the fast writer in _text_render.hpp.
+
+// Append the JSON representation of logical row `row_idx` of `vec`. `own_desc`
+// is `vec`'s own descriptor and is used only when `vec` is a scalar (kind /
+// unit / scale for `vec` itself). When `vec` is DRAKEN_ARRAY, `levels[depth]`
+// gives the element vector one nesting level down — `depth` starts at 0 for
+// the top-level column and increases by one each time the recursion steps
+// into an ARRAY-of-ARRAY element, so a column nested to depth N is handled by
+// N recursive calls, each consuming the next `levels` entry. This mirrors
+// row_array_to_pylist's descent through VectorOwner::child_owner in
+// draken_native.cpp, which is the reference for correct nested-array
+// handling — see CLAUDE.md and the caller's comment for how `levels` is
+// built (walking array_child/array_child_type to whatever depth the data
+// actually has).
+inline void render_json_value(std::string &out, const DrakenVector *vec,
+                              size_t row_idx, const LogicalDesc &own_desc,
+                              const std::vector<ArrayLevel> &levels, size_t depth) {
+  if (vec->type != DRAKEN_ARRAY) {
+    render_json_scalar(out, vec, row_idx, own_desc);
+    return;
+  }
+  if (!row_valid(vec->validity, row_idx)) { out.append("null"); return; }
+  const int32_t *offs = (const int32_t *)vec->data;
+  uint32_t p = vec->selection[row_idx];
+  int32_t s = offs[p], e = offs[p + 1];
+  out.push_back('[');
+  const ArrayLevel *next = depth < levels.size() ? &levels[depth] : nullptr;
+  for (int32_t k = s; k < e; k++) {
+    if (k > s) out.push_back(',');
+    // `next` is only null if the caller's chain is shorter than the data's
+    // actual nesting, which cannot happen when `levels` was built by walking
+    // this same vector's array_child chain — an ARRAY row with elements
+    // (s < e) always has a populated child vector at that depth.
+    render_json_value(out, next->vec, (size_t)k, next->desc, levels, depth + 1);
+  }
+  out.push_back(']');
+}
 
 // Append the JSON array  [v0,v1,…,v(nrows-1)]  for every logical row of `dv`.
 // This is the column-oriented analogue of the row-oriented morsel writers in
 // _text_render.hpp; it backs draken's Vector._to_json() so a single column can
 // serialize itself to JSON bytes with the SAME per-value rendering the rugo
-// JSONL writer uses (matching /download output). `child` and `desc.child` are
-// consulted only when `dv->type == DRAKEN_ARRAY` (they describe the array's
-// element vector, mirroring _text_render.hpp::ej_array).
+// JSONL writer uses (matching /download output). `desc.levels` is consulted
+// only when `dv->type == DRAKEN_ARRAY` (see render_json_value above).
 inline void render_json_column(std::string &out, const DrakenVector *dv,
-                               const DrakenVector *child, const ColumnDesc &desc,
-                               size_t nrows) {
+                               const ColumnDesc &desc, size_t nrows) {
   out.push_back('[');
   for (size_t i = 0; i < nrows; i++) {
     if (i) out.push_back(',');
-    if (dv->type == DRAKEN_ARRAY) {
-      if (!row_valid(dv->validity, i)) { out.append("null"); continue; }
-      const int32_t *offs = (const int32_t *)dv->data;
-      uint32_t p = dv->selection[i];
-      int32_t s = offs[p], e = offs[p + 1];
-      out.push_back('[');
-      for (int32_t k = s; k < e; k++) {
-        if (k > s) out.push_back(',');
-        render_json_scalar(out, child, (size_t)k, desc.child);
-      }
-      out.push_back(']');
-    } else {
-      render_json_scalar(out, dv, i, desc.column);
-    }
+    render_json_value(out, dv, i, desc.column, desc.levels, 0);
   }
   out.push_back(']');
 }

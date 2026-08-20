@@ -578,9 +578,6 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
     def visit(self, node, context: OptimizerContext) -> OptimizerContext:
         # This strategy operates globally in `complete` and does not need to
         # inspect nodes during the traversal phase.
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         return context
 
     def should_i_run(self, plan) -> bool:  # pragma: no cover - trivial
@@ -847,6 +844,15 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         # Update telemetry safely
         if self.telemetry is not None:
             self.telemetry.optimization_statistics_only_response += 1
+
+        # Write the rewritten nodes back through the plan. Every edit above was
+        # in place; the write-back is what tells the optimizer this pass changed
+        # the plan (marking its statistics stale — they describe the scan this
+        # rewrite just deleted) and, under copy-on-write, what materializes the
+        # working copy. See OptimizationStrategy's mutation contract.
+        for nid, n in list(plan.nodes(data=True)):
+            if n is scan_node or n is aggregate_node or n is exit_node:
+                plan[nid] = n
 
         # Record connector assignment status on the plan for diagnostic purposes
         plan._stats_assigned_connector_type = getattr(scan_node, "connector", None) and getattr(

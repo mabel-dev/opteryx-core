@@ -1965,9 +1965,6 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 
 class PredicateRewriteStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Filter:
             node.condition = _rewrite_predicate(node.condition, self.telemetry)
             context.optimized_plan[context.node_id] = node

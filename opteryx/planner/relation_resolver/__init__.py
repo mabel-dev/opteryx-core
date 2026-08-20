@@ -112,6 +112,7 @@ def copy_sub_plan(plan: LogicalPlan) -> LogicalPlan:
 
     new_plan._cached_edges = None
     new_plan._cached_ingoing_edges = None
+    new_plan._mutation_epoch = 0
 
     # NOTE: Node.properties returns a FRESH dict on every access, so
     # `node.properties[key] = value` writes into a throwaway and is silently discarded.

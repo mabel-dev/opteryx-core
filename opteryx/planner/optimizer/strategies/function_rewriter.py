@@ -27,9 +27,6 @@ class FunctionRewriteStrategy(OptimizationStrategy):
         return [_rewrite_predicate(expr, self.telemetry) for expr in expressions]
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Project:
             node.columns = self._rewrite_expression_list(node.columns)
             context.optimized_plan[context.node_id] = node

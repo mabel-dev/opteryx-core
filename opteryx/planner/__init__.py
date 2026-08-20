@@ -511,7 +511,11 @@ def query_planner(
     )
 
     start = time.monotonic_ns()
-    optimized_plan = do_optimizer(bound_plan, telemetry)
+    # One memo of manifest-derived scan statistics for this query's plan —
+    # shared between the optimizer's refreshes and the result-size guard's,
+    # never across queries. See statistics_refresh._scan_stats.
+    scan_stats_cache: Dict[Any, Any] = {}
+    optimized_plan = do_optimizer(bound_plan, telemetry, scan_stats_cache=scan_stats_cache)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
     # Refuse a query whose result is already known to blow the row limit, BEFORE any
@@ -524,6 +528,7 @@ def query_planner(
         optimized_plan,
         _resolve_var("sql_select_limit", execution_context.variables, 0),
         telemetry=telemetry,
+        scan_stats_cache=scan_stats_cache,
     )
 
     # Default: build traditional physical plan

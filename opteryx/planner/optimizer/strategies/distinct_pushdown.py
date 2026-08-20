@@ -115,9 +115,6 @@ class DistinctPushdownStrategy(OptimizationStrategy):
         return (ndv / rows) >= _DEGENERATE_NDV_RATIO
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if (node.node_type == LogicalPlanStepType.Distinct) and node.on is None:
             node.nid = context.node_id
             context.collected_distincts.append(node)

@@ -287,9 +287,6 @@ class DisjunctiveDomainPushdownStrategy(OptimizationStrategy):
     """
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()
-
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
             derived: List[Node] = []
             for conjunct in _split_and(node.condition):

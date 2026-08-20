@@ -7,10 +7,12 @@ Supports:
 """
 
 from dataclasses import dataclass
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from typing import Optional
 from typing import Union
+
+_KEEP = object()
+"""Sentinel for ColumnStatistics.but(): "keep this field's current value"."""
 
 if TYPE_CHECKING:
     from opteryx.third_party.maki_nage import Distogram
@@ -148,6 +150,34 @@ class ColumnStatistics:
     # ANALYZE pass and no manifest-level size) — never fabricated.
     total_bytes: Optional[int] = None
 
+    def but(
+        self,
+        *,
+        value_range=_KEEP,
+        histogram=_KEEP,
+        distinct_count=_KEEP,
+        total_bytes=_KEEP,
+    ) -> "ColumnStatistics":
+        """Copy with the given fields changed — the statistics propagators'
+        replacement for ``dataclasses.replace``, which re-derives the field
+        list on every call and was the single hottest function in planning.
+        Only the four fields the propagators actually rewrite are exposed;
+        add a parameter here rather than reintroducing ``replace``.
+        """
+        return ColumnStatistics(
+            column_name=self.column_name,
+            data_type=self.data_type,
+            distinct_count=self.distinct_count if distinct_count is _KEEP else distinct_count,
+            value_range=self.value_range if value_range is _KEEP else value_range,
+            histogram=self.histogram if histogram is _KEEP else histogram,
+            null_fraction=self.null_fraction,
+            class_proportions=self.class_proportions,
+            avg_length=self.avg_length,
+            ordinal_bounds=self.ordinal_bounds,
+            length_bounds=self.length_bounds,
+            total_bytes=self.total_bytes if total_bytes is _KEEP else total_bytes,
+        )
+
 
 @dataclass
 class RelationStatistics:
@@ -197,15 +227,16 @@ class RelationStatistics:
 
     def with_row_count(self, new_count: int) -> "RelationStatistics":
         """Return a copy with updated row count."""
-        return replace(self, row_count=new_count)
+        return RelationStatistics(
+            row_count=new_count, columns=self.columns, base_row_count=self.base_row_count
+        )
 
     def update_column_range(self, identity: bytes, new_range: ColumnRange) -> "RelationStatistics":
         """Return a copy with an updated column range."""
         new_stats = self.copy()
         col_stats = new_stats.columns.get(identity)
         if col_stats:
-            new_col = replace(col_stats, value_range=new_range)
-            new_stats.columns[identity] = new_col
+            new_stats.columns[identity] = col_stats.but(value_range=new_range)
         return new_stats
 
 

@@ -3,7 +3,6 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
@@ -128,8 +127,12 @@ class BindingContext:
         Returns:
             A new BindingContext instance with copied attributes.
         """
+        # One shared memo for the whole scope copy: a column object referenced
+        # from two schemas must copy to the SAME new object (deepcopy's memo
+        # gave the same guarantee; branch_copy is the cheap explicit version).
+        memo: Dict[int, Any] = {}
         return BindingContext(
-            schemas=deepcopy(self.schemas),
+            schemas={name: schema.branch_copy(memo) for name, schema in self.schemas.items()},
             query_id=self.query_id,
             execution_context=self.execution_context,
             relations={k: v for k, v in self.relations.items()},

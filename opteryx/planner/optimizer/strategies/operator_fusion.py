@@ -62,9 +62,6 @@ class OperatorFusionStrategy(OptimizationStrategy):
         )
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()  # type: ignore
-
         if node.node_type == LogicalPlanStepType.Order:
             edges = context.optimized_plan.outgoing_edges(context.node_id)
             if len(edges) == 1:

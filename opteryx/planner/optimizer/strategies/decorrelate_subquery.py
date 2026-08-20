@@ -215,8 +215,13 @@ def _find(condition, predicate):
     if _is_exists(condition) or _is_in_subquery(condition):
         return None, None
 
-    for attr in ("left", "right", "centre"):
-        child = getattr(condition, attr, None)
+    # Unrolled (not a getattr loop): expression carriers answer .left/.right/
+    # .centre natively, returning None when absent.
+    for attr, child in (
+        ("left", condition.left),
+        ("right", condition.right),
+        ("centre", condition.centre),
+    ):
         if child is None:
             continue
         found, replace_child = _find(child, predicate)
@@ -1320,9 +1325,6 @@ class DecorrelateSubqueryStrategy(OptimizationStrategy):
         )
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if not context.optimized_plan:
-            context.optimized_plan = context.pre_optimized_tree.copy()
-
         if (
             node.node_type == LogicalPlanStepType.Filter and _has_work(node.condition)
         ) or _project_has_subquery(node):

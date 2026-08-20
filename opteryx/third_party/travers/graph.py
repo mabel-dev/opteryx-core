@@ -90,7 +90,7 @@ class Graph(object):
 
     """
 
-    __slots__ = ("_nodes", "_edges", "_cached_edges", "_cached_ingoing_edges")
+    __slots__ = ("_nodes", "_edges", "_cached_edges", "_cached_ingoing_edges", "_mutation_epoch")
 
     def __init__(self):
         """
@@ -100,10 +100,16 @@ class Graph(object):
         self._edges = {}
         self._cached_edges = None
         self._cached_ingoing_edges = None
+        self._mutation_epoch = 0
+        """Bumped by every mutating method (node/edge add, remove, replace).
+        `graph.copy()` starts the copy at 0, so `copy._mutation_epoch > 0` means
+        "this copy was modified after it was taken" — the optimizer uses this to
+        tell whether a strategy actually changed the plan it worked on."""
 
     def _invalidate_caches(self):
         self._cached_edges = None
         self._cached_ingoing_edges = None
+        self._mutation_epoch += 1
 
     def __bool__(self) -> bool:
         return len(self._nodes) != 0 or len(self._edges) != 0
@@ -195,6 +201,7 @@ class Graph(object):
                 The attributes of the node
         """
         self._nodes[nid] = node
+        self._mutation_epoch += 1
 
     def nodes(self, data=False):
         """
@@ -452,6 +459,7 @@ class Graph(object):
 
         # remove the node
         self._nodes.pop(nid, None)
+        self._mutation_epoch += 1
 
         if heal:
             # link the nodes each side of the node being removed
@@ -582,6 +590,7 @@ class Graph(object):
         if nid not in self._nodes:
             raise ValueError("Cannot create nodes with [] syntax")
         self._nodes[nid] = node
+        self._mutation_epoch += 1
 
     def __add__(self, other):
         self._edges.update(other._edges)
@@ -641,7 +650,32 @@ class Graph(object):
         graph._edges = self.copy_edges()
         graph._cached_edges = None
         graph._cached_ingoing_edges = None
+        # A copy starts unmodified: epoch > 0 on a copy means it was changed
+        # after it was taken (see the slot's docstring).
+        graph._mutation_epoch = 0
 
+        return graph
+
+    def shallow_copy(self) -> "Graph":
+        """
+        Copy the graph's STRUCTURE only — fresh node and edge containers, the
+        node objects themselves shared with the original.
+
+        This is the copy the optimizer's copy-on-write working plan uses: a
+        strategy needs the structure it is restructuring to be independent of
+        the tree it is walking, but the input plan is discarded the moment the
+        pass completes, so protecting node contents buys nothing and the deep
+        per-node copy (every expression, every LogicalColumn, every schema
+        column) is pure cost. Callers that need node contents to diverge from
+        the original — splicing one CTE body into two places, for example —
+        must use copy(), not this.
+        """
+        graph = self.__class__.__new__(self.__class__)
+        graph._nodes = dict(self._nodes)
+        graph._edges = self.copy_edges()
+        graph._cached_edges = None
+        graph._cached_ingoing_edges = None
+        graph._mutation_epoch = 0
         return graph
 
     def copy_edges(self):
