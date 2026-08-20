@@ -70,6 +70,9 @@ def get_mismatched_condition_column_types(
         ) or node.value.startswith(("AllOp", "AnyOp")):
             return None  # Some ops are meant to have different types
         left_type = node.left.schema_column.category if node.left.schema_column else None
+        left_display_ct = (
+            node.left.schema_column.column_type if node.left.schema_column else None
+        )
         if node.value in ("InList", "NotInList"):
             # The right side is an ARRAY literal; the type that must agree with
             # the left operand is the array's ELEMENT type, not LC.ARRAY itself.
@@ -80,8 +83,12 @@ def get_mismatched_condition_column_types(
             # guard, and a looser kernel would turn this into silent wrong rows).
             right_ct = getattr(node.right, "type", None)
             right_type = right_ct.element.category if right_ct is not None and right_ct.element is not None else None
+            right_display_ct = right_ct.element if right_ct is not None else None
         else:
             right_type = node.right.schema_column.category if node.right.schema_column else None
+            right_display_ct = (
+                node.right.schema_column.column_type if node.right.schema_column else None
+            )
 
         if left_type and right_type and left_type != right_type:
             if (
@@ -113,12 +120,18 @@ def get_mismatched_condition_column_types(
                 or node.right.node_type == NodeType.EXTRACTION_OPERATOR
             ):
                 return None  # it's compound so don't make a decision here
+            # Prefer the full ColumnType string (e.g. "IPV4") over the bare
+            # LogicalCategory name (e.g. "INTEGER") — IPV4 is a UINT32 refined
+            # by a logical descriptor, so its category alone under-reports the
+            # type and misleads the user about what column they're looking at.
             return {
                 "left_column": f"{node.left.source}.{node.left.value}",
-                "left_type": left_type.name,
+                "left_type": str(left_display_ct) if left_display_ct is not None else left_type.name,
                 "left_node": node.left,
                 "right_column": f"{node.right.source}.{node.right.value}",
-                "right_type": right_type.name,
+                "right_type": str(right_display_ct)
+                if right_display_ct is not None
+                else right_type.name,
                 "right_node": node.right,
             }
 

@@ -547,6 +547,20 @@
         "documentation": "The logical planner supports UNION and applies DISTINCT unless ALL is specified.",
         "notes": "Set operations are routed through the Union logical node."
     },
+    "version_as_of": {
+        "canonical_name": "VERSION AS OF",
+        "planner_entry": "visit_scan",
+        "scope": "relation_clause",
+        "status": "supported",
+        "syntax_forms": [
+            "relation VERSION AS OF snapshot_id",
+            "relation VERSION AS OF PREVIOUS",
+            "relation TIMESTAMP AS OF timestamp_expression"
+        ],
+        "summary": "Query a catalog-backed table as of a snapshot or a point in time.",
+        "documentation": "VERSION AS OF takes a literal snapshot id. VERSION AS OF PREVIOUS is rewritten, before the statement reaches the parser, to the snapshot immediately before the current one. TIMESTAMP AS OF takes an expression that resolves to a timestamp before the query runs - a literal like '2024-01-01', or NOW() combined with an INTERVAL - and the binder resolves it to the snapshot that was current at that instant.",
+        "notes": "Only a connector with snapshot-based time travel accepts either form; against any other connector both are rejected at bind time. VERSION AS OF 0 is rejected outright - 0 is the sentinel PREVIOUS rewrites to, so a literal 0 would be indistinguishable from it. FOR SYSTEM_TIME AS OF is not accepted; use TIMESTAMP AS OF."
+    },
     "where": {
         "canonical_name": "WHERE",
         "planner_entry": "plan_query",

@@ -1,9 +1,11 @@
 name: Semgrep Scan
 
 on:
-  - workflow_call
-  - push
-  - pull_request
+  workflow_call:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 6 * * *'
 
 jobs:
   semgrep:
