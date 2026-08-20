@@ -186,6 +186,32 @@ bool bitpack_encode_codes(const uint32_t* codes, uint32_t count,
     return true;
 }
 
+bool bitpack_encode_u32(const uint32_t* values, uint32_t count,
+                        std::vector<uint8_t>* out) {
+    uint32_t maximum = 0;
+    for (uint32_t i = 0; i < count; ++i)
+        if (values[i] > maximum) maximum = values[i];
+    const uint8_t width = bits_required(maximum);
+
+    const uint64_t plain = static_cast<uint64_t>(count) * sizeof(uint32_t);
+    const uint64_t encoded = sizeof(BitpackHeader) + packed_bytes(count, width);
+    if (encoded >= plain) return false;
+
+    out->assign(static_cast<size_t>(encoded), 0);
+
+    BitpackHeader header{};
+    header.count     = count;
+    header.bit_width = width;
+    std::memcpy(out->data(), &header, sizeof(header));
+
+    if (width > 0) {
+        std::vector<uint64_t> widened(count);
+        for (uint32_t i = 0; i < count; ++i) widened[i] = values[i];
+        pack(widened.data(), count, width, out->data() + sizeof(BitpackHeader));
+    }
+    return true;
+}
+
 Status bitpack_decode_codes(const uint8_t* stored, uint64_t stored_bytes,
                             uint32_t count, uint32_t* out) {
     if (stored_bytes < sizeof(BitpackHeader))

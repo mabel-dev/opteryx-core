@@ -302,7 +302,10 @@ int main() {
     // own checksums would then be valid over damaged bytes.
     {
         std::vector<uint8_t> source = make_file();
-        source[kFileHeadBytes + 3] ^= 0xFFu;  // flip a bit inside a data section
+        // v2 aligns section bodies to kSectionAlign, so the first DATA byte is
+        // at 64, not right after the 16-byte head — a flip in the padding gap
+        // would be dead bytes and prove nothing.
+        source[kSectionAlign + 3] ^= 0xFFu;  // flip a bit inside a data section
         std::vector<uint8_t> patched;
         const Status s = patch_columns(source.data(), source.size(), {"flag"}, {}, &patched);
         // The section checksums are copied verbatim, so the damage is caught on
@@ -362,8 +365,17 @@ int main() {
                             {donor<int64_t>("k", 5, DRAKEN_INT64)}, &p3).is_ok());
         const size_t grew_1 = data_region(p1).size() - data_region(one).size();
         const size_t grew_3 = data_region(p3).size() - data_region(three).size();
-        CHECK(grew_3 == grew_1 * 3);   // per row group, and no more
-        CHECK(grew_1 <= 16);           // one int64 value, not four
+        // v2 alignment makes the growth per row group "one aligned section of
+        // one int64", not a byte-exact 8: each added data section starts at a
+        // kSectionAlign boundary, so up to kSectionAlign - 1 bytes of padding
+        // join the 8 value bytes. What must stay true is the SHAPE of the cost:
+        // per row group and independent of the row count.
+        // No lower bound: a row group whose region already ended short of an
+        // alignment boundary can absorb the 8 value bytes into what would have
+        // been padding, so a per-row-group growth of less than another file's
+        // is possible — the ceiling is the invariant.
+        CHECK(grew_1 <= kSectionAlign + 8);
+        CHECK(grew_3 <= 3 * (kSectionAlign + 8));
     }
 
     // Several at once, and composed with the other operations.

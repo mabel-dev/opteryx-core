@@ -369,7 +369,13 @@ def explain(
         elif key == "files_pruned":
             opt_items.append(("files pruned", value))
 
-    if opt_items:
+    # Costed plan choices (QueryTelemetry.add_decision): rendered with the numbers
+    # the choice was made on, so a wrong pick is diagnosable from this text alone.
+    opt_rows = [(label, f"applied {count}×" if count > 1 else "applied") for label, count in opt_items]
+    for decision in readings.get("optimizer_decisions") or []:
+        opt_rows.append((decision["label"], decision["detail"]))
+
+    if opt_rows:
         tree_col.append("OPTIMIZATIONS")
         details_col.append("")
         est_rows_col.append(0)
@@ -377,10 +383,10 @@ def explain(
         rows_col.append(0)
         time_col.append(0.0)
         self_col.append(0.0)
-        for index, (label, count) in enumerate(opt_items):
-            connector = "└─ " if index == len(opt_items) - 1 else "├─ "
+        for index, (label, detail) in enumerate(opt_rows):
+            connector = "└─ " if index == len(opt_rows) - 1 else "├─ "
             tree_col.append(connector + label)
-            details_col.append(f"applied {count}×" if count > 1 else "applied")
+            details_col.append(detail)
             est_rows_col.append(0)
             est_bytes_col.append(0)
             rows_col.append(0)

@@ -23,6 +23,15 @@ jobs:
       - name: Install Semgrep, rugo, and upload client
         run: python -m pip install --no-cache-dir semgrep rugo opteryx-upload
 
+      - name: Report Tool Versions
+        run: |
+          # Tools are deliberately unpinned so a new check reaches us the day it
+          # ships. The cost of that is a run whose result depends on a version
+          # nothing in the repo records — so record it here. A red build must be
+          # reproducible from its own log.
+          python --version
+          semgrep --version
+
       - name: Run Semgrep
         run: semgrep scan --config=auto --json --output=semgrep-report.json
 

@@ -30,6 +30,7 @@ class _QueryTelemetry:
         self._reading["messages"] = []
         self._reading["operations"] = {}
         self._reading["optimizer_trace"] = []
+        self._reading["optimizer_decisions"] = []
 
     def _ns_to_s(self, nano_seconds: int) -> float:
         """convert elapsed ns to s"""
@@ -54,6 +55,16 @@ class _QueryTelemetry:
     def add_message(self, message: str):
         """collect warnings"""
         self._reading["messages"].append(message)
+
+    def add_decision(self, label: str, detail: str):
+        """Record one costed plan choice — an optimizer decision that compared
+        concrete alternatives and picked one (or declined to move).
+
+        ``label`` names the decision point (e.g. ``semi join pushdown``);
+        ``detail`` states the outcome WITH the numbers it was decided on, so a
+        wrong choice is diagnosable from EXPLAIN's text alone. Rendered in the
+        OPTIMIZATIONS block alongside the ``optimization_*`` counters."""
+        self._reading["optimizer_decisions"].append({"label": label, "detail": detail})
 
     def add_plan_rewrite(self, phase: str, strategy: str, before: tuple, after: tuple):
         """Record a plan-shape fingerprint change from one strategy application.

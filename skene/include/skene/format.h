@@ -14,8 +14,42 @@
 //     DATA region    per column, all its sections contiguous (one range GET/column)
 //     INDEX region   optional sections; adjacent to the RG FOOTER, one GET takes both
 //     RG FOOTER      row group header + column directory + section directory + stats
-//   FILE FOOTER      file index: schema + row group directory + per-RG statistics
+//   FILE FOOTER      file index: schema + row group directory + cluster spec
+//                    + per-RG statistics
 //   TAIL             24 bytes, fixed, magic last
+//
+// ─── What changed in v2 (2026-08-20) ────────────────────────────────────────
+// One bump, four changes, each measured before it was committed:
+//
+//  1. SectionEntry gained a CODEC axis (36 -> 48 bytes). v1's single `encoding`
+//     field could not spell "bit-packed AND THEN lz4'd", and the gate that
+//     followed from that declined 137.3 MB of a 572.7 MB ClickBench file (24%)
+//     recoverable at 3.48x — all BITPACK selections on high-NDV string columns
+//     (dev/skene_section_census.cpp, 2026-08-20). v2 stores encoding and codec
+//     as separate fields and adds `encoded_bytes`, the size between the two
+//     stages, which the codec decode needs as its exact destination capacity.
+//
+//  2. The 16-byte string slot is stored as FOUR u32 LANES (kSlotLane0..3)
+//     instead of one interleaved kStringSlots section. Interleaved, the byte
+//     distribution changes every 4 bytes — near-worst-case input for a general
+//     compressor: slots reached only 0.43x against the arena's 0.25x. Planed,
+//     each lane gets the encoding that fits it (lengths bit-pack, offsets
+//     delta-bit-pack, the dead hash32 lane of an all-long column collapses to
+//     a width-0 bitpack — 8 bytes). Measured: -41% of compressed slot bytes on
+//     TPC-H lineitem, -67% on ClickBench (skene/bench/slot_layout.cpp).
+//
+//  3. Sections start 64-byte aligned (kSectionAlign). Costs ~0.07% of a file
+//     in zero padding; buys a future zero-copy reader an aligned plain body it
+//     can cast straight out of a mapping. A writer obligation, never a reader
+//     requirement — offsets remain absolute, so readers never compute with it.
+//
+//  4. The file footer carries a CLUSTER SPEC (which sort keys, if any, the
+//     file's rows are globally ordered by — zero keys means unclustered) and
+//     ColumnStatistics grew an NDV field. Exact when value ordering ran
+//     (dedup makes data_length the exact distinct count), a KMV estimate when
+//     the write-side sketch measured the column and declined. The sketch was
+//     already computed and thrown away; the join-order estimator was flying
+//     blind without it.
 //
 // ─── Why a row group is not a file ───────────────────────────────────────────
 // It used to be. That made a ClickBench mirror 396 objects against parquet's 99
@@ -62,7 +96,11 @@ inline constexpr uint32_t kMagic = 0x4E454B53u;
 // Bumped ONLY by a required-section layout change. Adding an optional section
 // kind, a statistic, or an encoding on an OPTIONAL section does not bump it
 // (see kSectionOptionalBase). Adding an encoding to a REQUIRED section does.
-inline constexpr uint16_t kVersion = 1u;
+//
+// v2 (2026-08-20): SectionEntry layout (codec axis + encoded_bytes), string
+// slot lanes replacing kStringSlots, 64-byte section alignment, cluster spec
+// in the file footer. See the changelog block at the top of this file.
+inline constexpr uint16_t kVersion = 2u;
 
 // Byte order of every multi-byte field and every memcpy'd buffer. A file
 // outliving the fleet must make a big-endian reader FAIL LOUD, not read garbage.
@@ -121,10 +159,15 @@ static_assert(sizeof(FileTail) == kFileTailBytes, "FileTail layout drift");
 // be in the bytes rather than in the version.
 inline constexpr uint32_t kFileFooterMagic = 0x494E4B53u;  // "SKNI"
 
-// Versions the FILE FOOTER's own layout, independently of kVersion. Both are
-// 1 today; they are separate fields because the file index and the row group
-// layout are separately extensible.
-inline constexpr uint16_t kFileFooterVersion = 1u;
+// Versions the FILE FOOTER's own layout, independently of kVersion. They are
+// separate fields because the file index and the row group layout are
+// separately extensible.
+//
+// v2 inserts the CLUSTER SPEC record between the schema directory and the
+// per-row-group statistics. Readers of v1 files (reader_v1) require footer
+// version 1; reader_v2 requires 2 — the file version and the footer version
+// move together in practice, but each reader states its own requirement.
+inline constexpr uint16_t kFileFooterVersion = 2u;
 
 #pragma pack(push, 1)
 
@@ -194,8 +237,23 @@ enum class SectionKind : uint16_t {
                         // DRAKEN_NULL: empty.
     kSelection    = 2,  // length uint32 codes; present iff selection_kind==kStored
     kValidity     = 3,  // (length+7)/8 bytes; absent => all rows valid
-    kStringSlots  = 4,  // slot_count * 16 bytes, verbatim
+    kStringSlots  = 4,  // v1 ONLY: slot_count * 16 bytes, verbatim. v2 files
+                        // never carry it — reader_v2 rejects it as malformed.
     kStringArena  = 5,  // arena_used bytes, verbatim
+
+    // v2: the 16-byte DrakenStringSlot, stored as four u32 lanes so each lane
+    // gets the encoding that fits its distribution (see the changelog above).
+    // Lane k holds u32 word k of every slot, slot_count values each:
+    //   lane 0: length (both slot forms)
+    //   lane 1: bytes 4..7  — big-endian prefix (long) or inline data (short)
+    //   lane 2: bytes 8..11 — dead hash32 (long, always 0) or inline data
+    //   lane 3: bytes 12..15 — arena_offset (long) or inline data
+    // All four are REQUIRED for a string column and reconstruct the slot array
+    // by interleaving; the split loses nothing and invents nothing.
+    kSlotLane0    = 6,
+    kSlotLane1    = 7,
+    kSlotLane2    = 8,
+    kSlotLane3    = 9,
 
     // Optional.
     kBloom        = 256,
@@ -246,17 +304,45 @@ inline constexpr bool section_is_required(uint16_t kind) noexcept {
 // file measured ~8840 MB/s), so it is close to free on read for ~70% of zstd's
 // ratio.
 enum class Encoding : uint16_t {
-    kPlain        = 0,  // verbatim; stored_bytes == plain_bytes
+    kPlain        = 0,  // verbatim; encoded_bytes == plain_bytes
     kBitpack      = 1,  // uint32 array at a fixed bit width (BitpackHeader)
     kDeltaBitpack = 2,  // ascending 4/8-byte integer array: first value verbatim,
                         // then first-order differences bit-packed
                         // (DeltaBitpackHeader)
-    kZstd         = 3,  // zstd frame; plain_bytes is the decoded size
-    kLz4          = 4,  // LZ4 BLOCK (not frame); plain_bytes is the decoded size.
-                        // The block format carries no length of its own, which is
-                        // exactly why the directory's plain_bytes is load-bearing
-                        // here: LZ4_decompress_safe is given that size as its
-                        // capacity and must produce exactly it.
+
+    // v1-ONLY SPELLINGS. In v1 the codec was crammed into this enum because
+    // SectionEntry had no codec field; v2 stores the codec in its own field and
+    // REJECTS these two values in `encoding` — one fact, one spelling. They
+    // stay declared because reader_v1 still decodes them from v1 files.
+    kZstd         = 3,  // v1: zstd frame; plain_bytes is the decoded size
+    kLz4          = 4,  // v1: LZ4 BLOCK (not frame); plain_bytes is the decoded
+                        // size. The block format carries no length of its own,
+                        // which is exactly why the directory's size fields are
+                        // load-bearing: LZ4_decompress_safe is given that size
+                        // as its capacity and must produce exactly it.
+};
+
+// The general-purpose codec applied to a section body AFTER its encoding —
+// the v2 codec axis. A POSTURE, not a per-section decision: the writer offers
+// one codec per file (WriteOptions), and each section records whether it was
+// actually applied (the result gate can decline it section by section).
+//
+// Measured on a ClickBench row group (154.7MB of section bytes, 256KB blocks,
+// Apple Silicon, dev/skene_codec_bench.cpp):
+//
+//   zstd-9   7.34x ratio, 3477 MB/s decode, 219 MB/s encode
+//   lz4      4.49x ratio, 8931 MB/s decode, 1822 MB/s encode
+//
+// zstd's decode rate is essentially LEVEL-INDEPENDENT (3284/3043/3477 MB/s at
+// levels 1/3/9), so a low zstd level buys nothing on the read side and costs
+// ratio — there is no reason to write one. LZ4 decodes at roughly the rate the
+// reader's own uncompressed path runs at, so it is close to free on read for
+// ~70% of zstd's ratio.
+enum class SectionCodec : uint8_t {
+    kNone = 0,   // stored bytes are the encoded bytes
+    kZstd = 1,   // zstd frame over the encoded body
+    kLz4  = 2,   // LZ4 BLOCK over the encoded body; encoded_bytes is the exact
+                 // decode capacity (see kLz4 above for why that is load-bearing)
 };
 
 // Below this, a section is stored plain without attempting compression.
@@ -267,53 +353,93 @@ enum class Encoding : uint16_t {
 // are tiny to begin with.
 inline constexpr uint64_t kCompressMinBytes = 10240u;
 
-// Whether a section kind is worth attempting compression on. Measured on TPC-H
-// (BENCHMARKS.md), not assumed:
+// Whether a section kind is worth OFFERING to the codec. Measured, not assumed
+// (BENCHMARKS.md; dev/skene_section_census.cpp 2026-08-20):
 //
 //   STRING_ARENA   0.25x — text keeps nearly all its redundancy after the other
 //                          encodings, and is the bulk of a real table
-//   STRING_SLOTS   0.43x — 16-byte slots share prefixes and near-sequential
-//                          arena offsets
+//   SLOT LANES     planed+delta reached 0.26x on lineitem slots, 0.09x on
+//                          ClickBench — and what the lane encodings leave
+//                          behind is still worth offering
 //   VALIDITY       0.00x — an all-valid bitmap is a run of ones
-//   DATA                 — candidate: a PLAIN data body is one that bit packing
-//                          and delta both declined, which does not by itself
-//                          mean incompressible (float columns, notably, are
-//                          untested here)
+//   DATA                 — a PLAIN data body is one that bit packing and delta
+//                          both declined, which does not by itself mean
+//                          incompressible (float columns, notably)
+//   SELECTION      v2 CHANGE: v1 excluded it on the premise that a bit-packed
+//                  body has already had its redundancy removed. That premise is
+//                  wrong — bit packing removes per-value WIDTH redundancy, not
+//                  inter-value SEQUENCE redundancy, which is what LZ77 matchers
+//                  eat. Census: 137.3 MB of a 572.7 MB ClickBench file at 3.48x,
+//                  all bit-packed selections on high-NDV string columns.
+//   ZONE_MAP       measured 3.58-5.83x; kilobytes per file, but the attempt is
+//                  as cheap as the bytes are small
 //
 // Excluded, each for a reason rather than by omission:
-//   SELECTION      a PLAIN selection is one bit packing declined, which happens
-//                  when the code space is near-full — high entropy by definition
-//   BLOOM          hash bits; measured at 1.00x, incompressible by construction
-//   ZONE_MAP       measured 0.49-0.70x but only kilobytes per file
+//   BLOOM          hash bits; a correctly-sized filter measures 1.27x —
+//                  incompressible by construction (the 12.25x once observed was
+//                  an oversizing bug, fixed 2026-08-11)
 //   PERMUTATION    row ordinals, near-random by nature
 inline constexpr bool kind_is_compressible(uint16_t kind) noexcept {
     switch (static_cast<SectionKind>(kind)) {
-        case SectionKind::kData:
-        case SectionKind::kValidity:
-        case SectionKind::kStringSlots:
-        case SectionKind::kStringArena:
-            return true;
-        default:
+        case SectionKind::kBloom:
+        case SectionKind::kPermutation:
             return false;
+        default:
+            return true;
     }
 }
+
+// The result gate for a codec applied ON TOP of a real encoding (bitpack /
+// delta): keep the compressed form only when it is at most this percent of the
+// encoded body. A plain body keeps v1's simple "any smaller" rule; a stacked
+// body pays a second decode stage on every read, so it must earn more than a
+// rounding error. 85 is the floor the 2026-08 census analysis used to size the
+// opportunity, and the recovered sections clear it by miles (3.48x average).
+inline constexpr uint64_t kStackFloorPercent = 85u;
+
+// v2: every section body the writer emits starts at a multiple of this within
+// the file. The writer pads with zeros, counted in no section's bytes. A
+// WRITER OBLIGATION, not a reader check: offsets are absolute, so a reader
+// never computes with alignment and MUST NOT require it — a future zero-copy
+// reader that wants to cast an aligned plain body out of a mapping tests the
+// offset it holds and falls back to the copying path when the test fails,
+// which is how it stays correct against any well-formed file. Costs ~0.07% of
+// a real file (measured, ClickBench mirror).
+inline constexpr uint64_t kSectionAlign = 64u;
 
 #pragma pack(push, 1)
 
 // One entry of the section directory. Absolute offsets, so a section is a
 // range request with no further arithmetic.
+//
+// v2 layout (48 bytes; v1's 36-byte form is frozen in reader_v1.h). A body is
+// produced in two stages — ENCODING first (bitpack/delta/plain), then CODEC
+// (zstd/lz4/none) — and decoded in reverse. The three sizes name the three
+// states:
+//
+//   stored_bytes   on disk (post-codec)          == encoded_bytes iff no codec
+//   encoded_bytes  post-encoding, pre-codec      == plain_bytes  iff kPlain
+//   plain_bytes    fully decoded
+//
+// encoded_bytes is REQUIRED, not derivable: the codec decode needs its exact
+// destination capacity before any body header can be parsed, exactly the role
+// plain_bytes plays for the encoding stage.
 struct SectionEntry {
     uint16_t kind;           // SectionKind
-    uint16_t encoding;       // Encoding
-    uint64_t offset;         // absolute, from file start
-    uint64_t stored_bytes;   // on disk, post-encoding
-    uint64_t plain_bytes;    // after decoding; == stored_bytes when kPlain
+    uint8_t  encoding;       // Encoding — kPlain/kBitpack/kDeltaBitpack only;
+                             // the v1 codec spellings (3, 4) are rejected
+    uint8_t  codec;          // SectionCodec
+    uint32_t reserved;       // 0, checked
+    uint64_t offset;         // absolute, from file start; kSectionAlign-aligned
+    uint64_t stored_bytes;   // on disk, post-codec
+    uint64_t encoded_bytes;  // after codec decode, before encoding decode
+    uint64_t plain_bytes;    // after both stages
     uint64_t checksum;       // over the STORED bytes, not the decoded ones
 };
 
 #pragma pack(pop)
 
-static_assert(sizeof(SectionEntry) == 36u, "SectionEntry layout drift");
+static_assert(sizeof(SectionEntry) == 48u, "SectionEntry layout drift");
 
 // ─── Selection ──────────────────────────────────────────────────────────────
 
@@ -364,6 +490,10 @@ enum StatFlag : uint32_t {
     kStatSum       = 1u << 3,  // int128; exact types only, NEVER floats
     kStatRowSorted = 1u << 4,  // mirrors DRAKEN_ROW_SORTED
     kStatRowSortedDescending = 1u << 5,
+    kStatNdv       = 1u << 6,  // `ndv` holds a distinct count (v2 writers)
+    kStatNdvExact  = 1u << 7,  // ...and it is EXACT (value ordering deduplicated
+                               // the column), not a sketch estimate. Never set
+                               // without kStatNdv.
 };
 
 #pragma pack(push, 1)
@@ -393,11 +523,21 @@ struct ColumnStatistics {
     uint64_t null_count;
     int64_t  sum_low;     // int128 accumulator, little-endian halves
     int64_t  sum_high;
+    // v2 growth — statistics blobs are length-prefixed and read prefix-first,
+    // so this appended field needed NO version bump of its own: a v1 blob is a
+    // 48-byte prefix of this struct and reads back with ndv untracked.
+    //
+    // Distinct count of the column's non-null values. kStatNdvExact when value
+    // ordering deduplicated the column (data_length IS the answer); kStatNdv
+    // alone when the write-side KMV sketch measured the column and declined
+    // ordering — an estimate, ±~3% at K=1024. A consumer needing a bound, not
+    // an estimate, must require kStatNdvExact.
+    uint64_t ndv;
 };
 
 #pragma pack(pop)
 
-static_assert(sizeof(ColumnStatistics) == 48u, "ColumnStatistics layout drift");
+static_assert(sizeof(ColumnStatistics) == 56u, "ColumnStatistics layout drift");
 
 // A signed 128-bit sum cannot overflow at any row count this format can
 // address: the worst case is INT64_MIN summed 2^32 times, |2^63 * 2^32| == 2^95,
@@ -494,10 +634,30 @@ struct PermutationHeader {
     // Followed by key_count * SortKey, then length * uint32 row ordinals.
 };
 
+// ─── Cluster spec (FILE FOOTER, v2) ─────────────────────────────────────────
+//
+// Declares which sort keys, if any, the file's rows are GLOBALLY ordered by —
+// in file row order, across every row group. key_count == 0 means unclustered,
+// which is what every writer that does not know better must write: this record
+// is a PROMISE consumers may act on (zone maps become tight, merge readers may
+// skip sorting), so the writer VERIFIES the declared order over the actual
+// rows before writing it. A declared-but-false spec is silent wrong answers in
+// every future consumer; there is no "probably sorted".
+//
+// Sits between the schema directory and the per-row-group statistics, so a
+// pruning reader has it from the file footer alone. Reuses SortKey:
+// column_ordinal indexes the TOP-LEVEL schema order.
+struct ClusterSpecHeader {
+    uint16_t key_count;
+    uint16_t reserved;   // 0, checked
+    // Followed by key_count * SortKey.
+};
+
 #pragma pack(pop)
 
 static_assert(sizeof(SortKey) == 8u, "SortKey layout drift");
 static_assert(sizeof(PermutationHeader) == 8u, "PermutationHeader layout drift");
+static_assert(sizeof(ClusterSpecHeader) == 4u, "ClusterSpecHeader layout drift");
 
 // ─── Logical type descriptor ────────────────────────────────────────────────
 

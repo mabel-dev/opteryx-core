@@ -386,6 +386,7 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
     // wants measuring against the aggregate, not against decode.
     if (length >= kSampleRows && !draken_is_compressed(&vector)) {
         bool near_unique;
+        double measured_ndv = 0.0;
         if (is_string) {
             KmvSketch sketch;
             uint32_t valid_rows = 0;
@@ -396,12 +397,21 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
                 sketch.add(static_cast<uint64_t>(key.hash(vector.selection[row])));
                 ++valid_rows;
             }
+            measured_ndv = sketch.estimate();
             // Same 50% policy the sample expressed, now against a measurement.
-            near_unique = sketch.estimate() * 2.0 > static_cast<double>(valid_rows);
+            near_unique = measured_ndv * 2.0 > static_cast<double>(valid_rows);
         } else {
             near_unique = !prefer_hashing;
         }
-        if (near_unique) return Status::ok();   // declines: written as-is
+        if (near_unique) {
+            // Declines: written as-is. The sketch was paid for either way, so a
+            // string column's estimate is surfaced for the footer's NDV stat —
+            // the fixed-width branch measured nothing and surfaces nothing (its
+            // sample verdict is the biased estimator documented above, and a
+            // biased number written down is worse than absence).
+            out->ndv_estimate = measured_ndv;
+            return Status::ok();
+        }
     }
 
     // representative_of[code] is the canonical index for that code's VALUE.

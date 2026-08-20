@@ -55,22 +55,22 @@ Q43/42          46.59ms        46.16ms              -     46.38ms       46.16ms 
 --- ✅ done
 
 make clickbench (13.53 seconds) <- best ever on rugo parquet files [256K rg] (13-JUL)
-current (14.08s) (09-AUG) [1.32x]
+current (13.82s) (20-AUG) [1.30x]
 make clickbench-skene (11.24s) (17-AUG) [1.05x]
 
-(125.62 seconds) <- 0.26.8
-(16.53s seconds) <- best on clickbench parquet files (16-AUG)
+(125.6 seconds) <- Opteryx 0.26.8
+(16.28 seconds) <- best on clickbench parquet files (20-AUG)
 (10.65 seconds) <- DuckDB Baseline
 
 make --tpch--    (966.5ms) (07-AUG) [SF1] [1.96x] (doesn't run anymore)
-make tpch        (5229.2ms) (17-AUG) [SF10] [1.25x]
-make tpch-sf100  (77260.7ms) (16-AUG) [SF100] [2.53x]
-make tpcds       (105.5) (18-AUG) [5 fails, 2 Timeout] [SF1]
-make medicare1   (456.1ms) (31-JUL) [2.63x]
-make job         (12730.3ms) (17-AUG) [1.89x] (33c)
-make h2o         (51.4s) (18-AUG) [medium]
+make tpch        (3666.5ms) (20-AUG) [SF10] [0.88x]
+make tpch-sf100  (42638.9ms) (20-AUG) [SF100] [1.40x]
+make tpcds       (102.7s) (20-AUG) [5 fails, 2 Timeout] [SF1]
+make medicare1   (451.9ms) (20-AUG) [2.63x]
+make job         (11899.6ms (20-AUG) [1.76x] (33c)
+make h2o         (45.1s) (20-AUG) [medium]
 make jsonbench   (5510.6ms) (16-AUG) [10m] [2.12x]
-make dash        (188.0ms) (05-AUG) [2.07x]
+make dash        (172.1ms) (20-AUG) [1.90x]
 make signals     (0.8s) [only two tests] (05-AUG)
 
 SF1 numbers

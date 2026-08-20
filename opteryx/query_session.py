@@ -871,10 +871,4 @@ class Session(DataFrame):
             return
         self._cursor = iter(())
         self._description = None
-        # best effort close of child cursors
-        try:
-            self._close_all_cursors()
-        except Exception:
-            pass
-
         self._closed = True

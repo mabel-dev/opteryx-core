@@ -4,7 +4,7 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Data Source Connectors with Lazy Loading
+Data Source Connectors with Resolution-First Lookup
 
 This module provides connectors to various data sources, enabling Opteryx to query
 data from files, databases, cloud storage, and other systems. Connectors are lazily
@@ -19,14 +19,29 @@ is responsible for:
 - Supporting predicate pushdown when possible
 - Handling authentication and connection management
 
-Connector Types:
+Which connector serves a dataset is decided per lookup by a RESOLUTION CHAIN,
+walked in `connector_factory` — first answer wins:
 
-Core Connectors:
-- FileSystemConnector: Generic filesystem access (local, GCS)
-- OpteryxConnector: Opteryx table format
+1. Static table — entries from `register_workspace(prefix, connector, **kwargs)`.
+   For embedded use, tests, and deployments that want import-time wiring.
+2. Installed resolver — `set_workspace_resolver(fn)`. `fn(workspace)` returns a
+   `Resolution` (connector + arbitrary nested config + version) or None. This is
+   how a deployment binds workspaces to catalogs from data (a registry) instead
+   of code: the resolver runs on every lookup, so config changes go live without
+   re-registration or redeploy. Resolver exceptions PROPAGATE — a resolver that
+   fails must fail the query, never silently fall through to another slot, which
+   would route a workspace's query at the wrong catalog.
+3. Static default — `set_default_connector(connector, **kwargs)`.
+4. Local disk — the terminal fallback, always available.
 
-Special Connectors:
-- VirtualDataConnector: In-memory datasets and computed tables
+Connector instances are cached per resolved key (the workspace/prefix, or
+"_default"/"_disk" for the shared fallbacks) and validated by a VERSION compare
+on every lookup: the resolution's version (or, absent one, a fingerprint of the
+resolved config) must match the version the cached instance was built with,
+otherwise the instance is rebuilt and replaces the cache entry. A config change
+therefore rotates the connector on the next lookup with no cross-process
+signaling — and nothing hashes the config, so config values may be arbitrarily
+nested.
 
 System metadata (information_schema) is a reserved nested schema addressed
 as `<workspace>.information_schema.<table>` and served by OpteryxConnector
@@ -58,6 +73,21 @@ Usage Patterns:
    a syntax error. Register a prefix as above, or name the file directly with
    `read_parquet('...')`.
 
+4. Dynamic resolution (a deployment-owned registry):
+   from opteryx.connectors import Resolution, set_workspace_resolver
+
+   def resolve(workspace: str) -> Resolution | None:
+       binding = my_registry.read(workspace)          # e.g. one Firestore doc get
+       if binding is None:
+           return None                                # fall through to slots 3/4
+       return Resolution(
+           connector=OpteryxConnector,
+           config={"catalog": SomeMetastore, **binding.config},  # nesting is fine
+           version=binding.version,                   # bumped on registry writes
+       )
+
+   set_workspace_resolver(resolve)
+
 Connector Development:
 1. Inherit from BaseConnector
 2. Implement required methods (read_dataset, get_dataset_schema)
@@ -81,14 +111,12 @@ Performance Considerations:
 - Use async operations for I/O bound connectors
 - Cache schema information when appropriate
 - Consider connection pooling for database connectors
-
-The lazy loading system maps prefixes to connector classes and loads them
-on demand, significantly reducing initial import time while maintaining
-full functionality.
 """
 
 # Lazy imports - connectors are only loaded when actually needed
 # This significantly improves module import time from ~500ms to ~130ms
+
+import re
 
 from enum import Enum
 
@@ -103,14 +131,31 @@ class TableType(str, Enum):
 
 
 
+# Slot 1: static registrations (register_workspace). Shape per entry:
+# {"connector": class_or_factory, "prefix": prefix, **kwargs}
 _storage_prefixes = {}
 
-# Cache for connector instances (keyed by prefix)
+# Cache of connector INSTANCES, keyed by resolved key (workspace/prefix string,
+# or "_default"/"_disk"). Values are the instances themselves - tests iterate
+# and clear this directly, so keep values as bare instances.
 _connector_cache = {}
 
-# Default connector configuration (separate from prefix registry)
+# The version each cached instance was built against, same keys as
+# _connector_cache. Kept separate (not a (version, instance) tuple) so
+# _connector_cache.values() stays an iterable of connector instances.
+_connector_versions = {}
+
+# Slot 3: default connector configuration ({"connector": cls, **kwargs})
 _default_connector = None
+
+# Slot 2: the installed resolver, or None
+_workspace_resolver = None
 # fmt:on
+
+# A workspace segment the resolver is worth consulting for. Protocol-style
+# names (gs://bucket/path) and other non-identifiers skip the resolver and
+# fall through to the default/disk slots, exactly as they always have.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 __all__ = (
@@ -126,11 +171,37 @@ __all__ = (
     "create_gcs_mabel_connector",
     # Utilities
     "set_default_connector",
+    "set_workspace_resolver",
+    "Resolution",
     "TableType",
     # Legacy names (backward compatibility) - map to factories
     "DiskConnector",
     "GcpCloudStorageConnector",
 )
+
+
+class Resolution:
+    """One answer to "what backs this workspace?".
+
+    `connector` is an uninstantiated class or factory (same contract as
+    `register_workspace`). `config` is an ordinary dict, arbitrarily nested -
+    nothing hashes it - passed to the connector as keyword arguments.
+    `version` identifies the config revision the answer came from (e.g. a
+    registry document's version field); when it changes, the cached connector
+    instance is rebuilt. Leave it None to version by config fingerprint, which
+    rebuilds whenever the resolved config's repr changes.
+    """
+
+    __slots__ = ("connector", "config", "version")
+
+    def __init__(self, connector, config: dict | None = None, version=None):
+        if not (isinstance(connector, type) or callable(connector)):
+            raise ValueError(
+                "Resolution.connector must be uninstantiated (a class or factory function)."
+            )
+        self.connector = connector
+        self.config = dict(config or {})
+        self.version = version
 
 
 def register_workspace(prefix, connector, **kwargs):
@@ -174,6 +245,23 @@ def set_default_connector(connector, **kwargs):
     }
 
 
+def set_workspace_resolver(resolver) -> None:
+    """Install (or, with None, remove) the workspace resolver.
+
+    `resolver(workspace)` is called on every lookup that no static
+    registration answered, with the first dot-segment of the dataset name.
+    It returns a `Resolution`, or None to fall through to the default/disk
+    slots. Exceptions it raises propagate to the caller - by design, a
+    resolver failure fails the query rather than mis-routing it.
+    """
+    global _workspace_resolver
+
+    if resolver is not None and not callable(resolver):
+        raise ValueError("workspace resolver must be callable (or None to remove it).")
+
+    _workspace_resolver = resolver
+
+
 def create_local_connector(**kwargs):
     """
     Create a FileSystemConnector for local storage.
@@ -213,12 +301,61 @@ def known_prefix(prefix) -> bool:
     return prefix in _storage_prefixes
 
 
+def _fingerprint(entry: dict) -> str:
+    """A stable-within-process identity for a resolved config.
+
+    Used as the version for answers that don't carry one (static
+    registrations, the static default, resolver Resolutions with
+    version=None): if the resolved config's repr changes - a re-registration
+    with different kwargs, a config value read fresh each call - the cached
+    instance no longer matches and is rebuilt. reprs of classes and modules
+    are stable; reprs of instances are id-based, which is also correct here
+    (a new instance means the caller intends a new configuration).
+    """
+    return repr(sorted((key, repr(value)) for key, value in entry.items()))
+
+
+def _build_connector(connector, entry: dict, telemetry):
+    """Instantiate `connector` with `entry` as configuration.
+
+    Handles the same three connector shapes registration always has: a legacy
+    string name, a class, or a factory callable.
+    """
+    if isinstance(connector, str):
+        if connector == "DiskConnector":
+            from opteryx.connectors.filesystem_connector import FileSystemConnector
+            from opteryx.connectors.io_systems import OpteryxLocalFileSystem
+
+            filesystem = OpteryxLocalFileSystem()
+            return FileSystemConnector(
+                filesystem=filesystem, storage_type="LOCAL", telemetry=telemetry, **entry
+            )
+        if connector == "GcpCloudStorageConnector":
+            from opteryx.connectors.filesystem_connector import FileSystemConnector
+            from opteryx.connectors.io_systems import OpteryxGcsFileSystem
+
+            filesystem = OpteryxGcsFileSystem(**entry)
+            return FileSystemConnector(
+                filesystem=filesystem, storage_type="GCS", telemetry=telemetry, **entry
+            )
+        # Unknown string connector - try __getattr__
+        connector_class = __getattr__(connector)
+        return connector_class(telemetry=telemetry, **entry)
+    if isinstance(connector, type) or callable(connector):
+        # A class is instantiated; a factory function is called - same shape.
+        return connector(telemetry=telemetry, **entry)
+    raise ValueError(f"Invalid connector type: {type(connector)}")
+
+
 def connector_factory(dataset, telemetry, **config):
     """
-    Get or create a connector instance for the given dataset's prefix.
+    Get or create a connector instance for the given dataset's workspace.
 
-    Connectors are now long-lived and cached by prefix/catalog, not by specific dataset.
-    The connector acts as a gateway to the catalog and can be queried about specific tables/views.
+    Walks the resolution chain (static table -> installed resolver -> static
+    default -> local disk; see the module docstring), then reuses the cached
+    connector instance for the resolved key if its version still matches,
+    rebuilding it otherwise. Connectors are long-lived gateways to a catalog,
+    cached per workspace/prefix, not per dataset.
 
     Args:
         dataset: The dataset reference (e.g., "catalog.schema.table")
@@ -226,7 +363,7 @@ def connector_factory(dataset, telemetry, **config):
         **config: Additional configuration
 
     Returns:
-        A cached connector instance for the prefix
+        A connector instance for the dataset's workspace
     """
 
     # if it starts with a $, it's a special internal dataset
@@ -237,91 +374,94 @@ def connector_factory(dataset, telemetry, **config):
         # Those are passed when creating the table reader via table_engine()
         return VirtualDataConnector()
 
-    # Look up the prefix from the registered prefixes
-    connector_entry: dict = config.copy()
     connector = None
+    entry: dict = {}
+    cache_key = None
+    version = None
     matched_prefix = None
 
+    # Slot 1: static registrations. Same match rule as ever - the prefix
+    # itself, or the prefix followed by a dot.
     for prefix, storage_details in _storage_prefixes.items():
         if dataset == prefix or dataset.startswith(prefix + "."):
             if isinstance(storage_details, dict):
-                connector_entry.update(storage_details.copy())
-                connector = connector_entry.get("connector")
-                matched_prefix = prefix
+                entry = {**config, **storage_details}
+                connector = entry.get("connector")
             else:
                 # storage_details is a string (connector class name)
                 connector = storage_details
-                matched_prefix = prefix
-                connector_entry["prefix"] = prefix
+                entry = {**config, "prefix": prefix}
+            cache_key = prefix
+            matched_prefix = prefix
             break
 
+    # Slot 2: the installed resolver, consulted with the first dot-segment -
+    # but only for identifier-shaped names. Protocol paths (gs://...) and
+    # other non-identifiers keep falling through to the default/disk slots.
+    if connector is None and _workspace_resolver is not None:
+        workspace = dataset.split(".", 1)[0]
+        if _IDENTIFIER.match(workspace):
+            resolution = _workspace_resolver(workspace)
+            if resolution is not None:
+                if not isinstance(resolution, Resolution):
+                    raise ValueError(
+                        "workspace resolver must return a Resolution or None, "
+                        f"got {type(resolution)}"
+                    )
+                connector = resolution.connector
+                entry = {**config, **resolution.config}
+                cache_key = workspace
+                version = resolution.version
+                matched_prefix = workspace
+
+    # Slot 3: the static default. One shared gateway instance, as always -
+    # connectors like OpteryxConnector key their catalogs per workspace
+    # internally, so per-workspace duplicates here would only multiply
+    # clients without adding isolation.
+    if connector is None and _default_connector is not None:
+        entry = {**config, **_default_connector}
+        connector = entry.get("connector")
+        cache_key = "_default"
+
+    # Slot 4: local disk, the terminal fallback.
     if connector is None:
-        # Fall back to the default connector
-        if _default_connector is not None:
-            connector_entry = _default_connector.copy()
-            connector = connector_entry.get("connector")
-            matched_prefix = None  # No prefix matched, using default
-        else:
-            # No default set, use local disk with FileSystemConnector
-            from opteryx.connectors.filesystem_connector import FileSystemConnector
-            from opteryx.connectors.io_systems import OpteryxLocalFileSystem
+        from opteryx.connectors.filesystem_connector import FileSystemConnector
+        from opteryx.connectors.io_systems import OpteryxLocalFileSystem
 
-            filesystem = OpteryxLocalFileSystem()
-            connector_instance = FileSystemConnector(
-                filesystem=filesystem, storage_type="LOCAL", telemetry=telemetry, **connector_entry
-            )
-            connector_instance._matched_prefix = None
-            _connector_cache[(None, ())] = connector_instance
-            return connector_instance
+        cache_key = "_disk"
+        if cache_key in _connector_cache:
+            return _connector_cache[cache_key]
+        filesystem = OpteryxLocalFileSystem()
+        connector_instance = FileSystemConnector(
+            filesystem=filesystem, storage_type="LOCAL", telemetry=telemetry, **config
+        )
+        connector_instance._matched_prefix = None
+        _connector_cache[cache_key] = connector_instance
+        return connector_instance
 
-    # Generate a cache key based on prefix and relevant config
-    cache_key = (
-        matched_prefix or "_default",
-        tuple(
-            sorted((k, v) for k, v in connector_entry.items() if k not in ("prefix", "connector"))
-        ),
-    )
+    # Version the answer: an explicit version from a Resolution wins; anything
+    # else is fingerprinted so a config change rotates the instance.
+    if version is None:
+        version = _fingerprint(entry)
 
-    # Check if we have a cached connector instance
-    if cache_key in _connector_cache:
-        return _connector_cache[cache_key]
+    cached = _connector_cache.get(cache_key)
+    if cached is not None and _connector_versions.get(cache_key) == version:
+        return cached
 
-    # Handle string-based connector names - map to appropriate factories
-    if isinstance(connector, str):
-        if connector == "DiskConnector":
-            from opteryx.connectors.filesystem_connector import FileSystemConnector
-            from opteryx.connectors.io_systems import OpteryxLocalFileSystem
+    # The connector itself is not configuration - it IS the thing being
+    # configured - so it is not passed to the constructor. `prefix` is kept in
+    # the entry for compatibility: factories and connectors have always
+    # received (and mostly ignored) it.
+    build_entry = {key: value for key, value in entry.items() if key != "connector"}
+    connector_instance = _build_connector(connector, build_entry, telemetry)
 
-            filesystem = OpteryxLocalFileSystem()
-            connector_instance = FileSystemConnector(
-                filesystem=filesystem, storage_type="LOCAL", telemetry=telemetry, **connector_entry
-            )
-        elif connector == "GcpCloudStorageConnector":
-            from opteryx.connectors.filesystem_connector import FileSystemConnector
-            from opteryx.connectors.io_systems import OpteryxGcsFileSystem
-
-            filesystem = OpteryxGcsFileSystem(**connector_entry)
-            connector_instance = FileSystemConnector(
-                filesystem=filesystem, storage_type="GCS", telemetry=telemetry, **connector_entry
-            )
-        else:
-            # Unknown string connector - try __getattr__
-            connector_class = __getattr__(connector)
-            connector_instance = connector_class(telemetry=telemetry, **connector_entry)
-    elif isinstance(connector, type):
-        # Connector is a class, instantiate directly
-        connector_instance = connector(telemetry=telemetry, **connector_entry)
-    elif callable(connector):
-        # Connector is a factory function (like create_local_connector, create_gcs_connector, etc.)
-        connector_instance = connector(telemetry=telemetry, **connector_entry)
-    else:
-        raise ValueError(f"Invalid connector type: {type(connector)}")
-
-    # Store the matched prefix and config so binder can extract dataset names
+    # Store the matched prefix so binder-side code can extract dataset names
     connector_instance._matched_prefix = matched_prefix
 
-    # Cache the instance
+    # Cache the instance; replacing the entry is the eviction - rotated-config
+    # instances never accumulate.
     _connector_cache[cache_key] = connector_instance
+    _connector_versions[cache_key] = version
 
     return connector_instance
 

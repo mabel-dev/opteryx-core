@@ -31,6 +31,7 @@ from skene.__version__ import __version__
 from skene.skene_native import SkeneError
 from skene.skene_native import SkeneWriter
 from skene.skene_native import footer_extent
+from skene.skene_native import migrate
 from skene.skene_native import probe_version
 from skene.skene_native import read_metadata
 from skene.skene_native import read_morsel
@@ -42,6 +43,7 @@ __all__ = [
     "SkeneWriter",
     "__version__",
     "footer_extent",
+    "migrate",
     "probe_version",
     "read_metadata",
     "read_morsel",

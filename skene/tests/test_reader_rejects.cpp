@@ -187,9 +187,10 @@ static void test_corrupt_footer_is_caught_before_any_offset_is_followed() {
 
 static void test_corrupt_section_body_is_caught() {
     auto bytes = good_file();
-    // Byte 40 is inside the first column's data, well past the head.
+    // The first section starts at kSectionAlign (v2 aligns section bodies);
+    // a flip just past it is inside the first column's data.
     std::vector<uint8_t> corrupt = bytes;
-    corrupt[kFileHeadBytes + 4] ^= 0xFF;
+    corrupt[kSectionAlign + 4] ^= 0xFF;
 
     Status st = expect_rejected(corrupt, "corrupt section body");
     CHECK(st.code() == Code::kChecksumMismatch);
@@ -198,26 +199,87 @@ static void test_corrupt_section_body_is_caught() {
     check_message_mentions(st, "column", "corrupt section body");
 }
 
+// Marks every byte some checksum covers: the head (verified structurally, and
+// any flip there changes magic/version/reserved — all checked), each section's
+// stored bytes, each row group footer, the file footer, and the tail. What is
+// left is v2 alignment padding — zero bytes belonging to no section.
+static std::vector<bool> covered_map(const std::vector<uint8_t>& bytes) {
+    std::vector<bool> covered(bytes.size(), false);
+    auto mark = [&](uint64_t at, uint64_t n) {
+        for (uint64_t i = at; i < at + n && i < covered.size(); ++i)
+            covered[i] = true;
+    };
+    mark(0, kFileHeadBytes);
+    mark(bytes.size() - kFileTailBytes, kFileTailBytes);
+
+    const size_t tail_at = bytes.size() - kFileTailBytes;
+    FileTail tail;
+    std::memcpy(&tail, bytes.data() + tail_at, sizeof(tail));
+    const size_t file_footer_at = tail_at - tail.footer_bytes;
+    mark(file_footer_at, tail.footer_bytes);
+
+    FileFooterHeader ffh;
+    std::memcpy(&ffh, bytes.data() + file_footer_at, sizeof(ffh));
+    const size_t directory_at =
+        file_footer_at + sizeof(FileFooterHeader) + ffh.writer_tag_bytes;
+    for (uint32_t g = 0; g < ffh.row_group_count; ++g) {
+        RowGroupEntry group;
+        std::memcpy(&group, bytes.data() + directory_at + g * sizeof(RowGroupEntry),
+                    sizeof(group));
+        mark(group.footer_offset, group.footer_bytes);
+
+        RowGroupFooterHeader fh;
+        std::memcpy(&fh, bytes.data() + group.footer_offset, sizeof(fh));
+        const size_t sections_at =
+            static_cast<size_t>(group.footer_offset) + group.footer_bytes
+            - static_cast<size_t>(fh.section_count) * sizeof(SectionEntry);
+        for (uint32_t i = 0; i < fh.section_count; ++i) {
+            SectionEntry entry;
+            std::memcpy(&entry, bytes.data() + sections_at + i * sizeof(entry),
+                        sizeof(entry));
+            mark(entry.offset, entry.stored_bytes);
+        }
+    }
+    return covered;
+}
+
 static void test_corrupt_bit_anywhere_is_always_caught() {
-    // Sweep: flipping the top bit of every byte in the file must be rejected.
-    // Any accepted flip is a hole in the checksum coverage — a region of the
-    // file nothing verifies.
+    // Sweep: flip the top bit of every byte. A flip in a COVERED byte must be
+    // rejected — an accepted one is a hole in the checksum coverage. A flip in
+    // alignment PADDING must be inert: the read still succeeds, because those
+    // zero bytes belong to no section and nothing derives anything from them.
+    // Both directions are pinned — a padding flip that suddenly REJECTED would
+    // mean the reader had started depending on bytes outside every checksum.
     const auto bytes = good_file();
-    size_t accepted = 0;
+    const auto covered = covered_map(bytes);
+
+    size_t padding_bytes = 0;
+    for (bool c : covered) if (!c) ++padding_bytes;
+
+    size_t accepted_covered = 0;
+    size_t rejected_padding = 0;
     for (size_t i = 0; i < bytes.size(); ++i) {
         std::vector<uint8_t> corrupt = bytes;
         corrupt[i] ^= 0x80;
         CxxMorsel out;
-        if (read_morsel(corrupt.data(), corrupt.size(), 0, ReadOptions(), &out).is_ok())
-            ++accepted;
+        const bool ok =
+            read_morsel(corrupt.data(), corrupt.size(), 0, ReadOptions(), &out).is_ok();
+        if (covered[i] && ok) ++accepted_covered;
+        if (!covered[i] && !ok) ++rejected_padding;
     }
     ++skene_test::g_checks;
-    if (accepted != 0) {
-        skene_test::report(__FILE__, __LINE__, "unverified bytes in the file",
-                           std::to_string(accepted) + " of " +
-                           std::to_string(bytes.size()) +
-                           " single-bit corruptions were accepted");
-    }
+    if (accepted_covered != 0)
+        skene_test::report(__FILE__, __LINE__, "unverified content bytes",
+                           std::to_string(accepted_covered) + " of " +
+                           std::to_string(bytes.size() - padding_bytes) +
+                           " covered-byte corruptions were accepted");
+    ++skene_test::g_checks;
+    if (rejected_padding != 0)
+        skene_test::report(__FILE__, __LINE__,
+                           "padding bytes are load-bearing",
+                           std::to_string(rejected_padding) + " of " +
+                           std::to_string(padding_bytes) +
+                           " padding-byte corruptions changed the read");
 }
 
 // ─── Structural lies that pass every checksum ───────────────────────────────
@@ -405,12 +467,13 @@ static std::vector<uint8_t> compressed_file(SectionCodec codec, int level) {
     return bytes;
 }
 
-// Runs `mutate` over the first section carrying `encoding`, repairs every
+// Runs `mutate` over the first section carrying `codec`, repairs every
 // checksum, and requires the read to fail. Repairing the checksums is the whole
 // point: it strips away the integrity layer so the CODEC is the only thing left
 // standing between a crafted body and the buffers the reader builds from it.
-static void each_section_with_encoding(
-        const std::vector<uint8_t>& bytes, Encoding encoding, const char* what,
+// (v2: the codec is its own SectionEntry field, no longer an Encoding value.)
+static void each_section_with_codec(
+        const std::vector<uint8_t>& bytes, SectionCodec codec, const char* what,
         void (*mutate)(std::vector<uint8_t>*, SectionEntry*, size_t)) {
     size_t footer_at = 0, footer_len = 0;
     CHECK(skene_test::row_group_footer_extent(bytes, 0, &footer_at, &footer_len));
@@ -424,7 +487,7 @@ static void each_section_with_encoding(
         const size_t at = sections_at + i * sizeof(SectionEntry);
         SectionEntry entry;
         std::memcpy(&entry, bytes.data() + at, sizeof(entry));
-        if (entry.encoding != static_cast<uint16_t>(encoding)) continue;
+        if (entry.codec != static_cast<uint8_t>(codec)) continue;
         found = true;
 
         std::vector<uint8_t> corrupt = bytes;
@@ -485,8 +548,8 @@ static void test_lz4_sections_reject_malformed_bodies() {
 
     // A truncated body. LZ4_decompress_safe must refuse rather than decode as
     // far as it can and leave the rest of the destination buffer as it found it.
-    each_section_with_encoding(
-        bytes, Encoding::kLz4, "a truncated lz4 body",
+    each_section_with_codec(
+        bytes, SectionCodec::kLz4, "a truncated lz4 body",
         [](std::vector<uint8_t>* file, SectionEntry* entry, size_t) {
             (void)file;
             entry->stored_bytes /= 2u;
@@ -494,11 +557,15 @@ static void test_lz4_sections_reject_malformed_bodies() {
 
     // A body whose declared decoded size is larger than it really decodes to.
     // Accepting this would hand back a buffer whose tail was never written.
-    each_section_with_encoding(
-        bytes, Encoding::kLz4, "an lz4 body that decodes short",
+    // v2: the codec's decode capacity is encoded_bytes; plain_bytes moves with
+    // it so the kPlain encoded==plain invariant cannot reject the file before
+    // the codec ever runs — the CODEC must be what stands.
+    each_section_with_codec(
+        bytes, SectionCodec::kLz4, "an lz4 body that decodes short",
         [](std::vector<uint8_t>* file, SectionEntry* entry, size_t) {
             (void)file;
-            entry->plain_bytes += 4096u;
+            entry->encoded_bytes += 4096u;
+            entry->plain_bytes   += 4096u;
         });
 
     // A declared decoded size past the codec's int-sized ceiling belongs in
@@ -512,8 +579,8 @@ static void test_lz4_sections_reject_malformed_bodies() {
 
     // Random bytes where a block should be. LZ4 has no header to reject this
     // on, so only the safe decoder's own bounds checking stands here.
-    each_section_with_encoding(
-        bytes, Encoding::kLz4, "an lz4 body that is not a block at all",
+    each_section_with_codec(
+        bytes, SectionCodec::kLz4, "an lz4 body that is not a block at all",
         [](std::vector<uint8_t>* file, SectionEntry* entry, size_t) {
             uint64_t state = 0x9E3779B97F4A7C15ull;
             for (uint64_t at = entry->offset;

@@ -48,7 +48,7 @@ def test_roundtrip_values():
 
 def test_probe_and_metadata():
     buf = skene.write_morsel(_sample_morsel(), read_acceleration=True, writer_tag="t")
-    assert skene.probe_version(buf) == 1
+    assert skene.probe_version(buf) == 2  # the current writer emits v2
 
     # The FILE footer: schema, the row group directory, and per-row-group
     # statistics. No row group footer is parsed, so nothing per-row-group about a

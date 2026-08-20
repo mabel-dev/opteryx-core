@@ -416,7 +416,7 @@ tpch: ## Run TPC-H benchmark vs DuckDB on the skene mirror (generates testdata/t
 	@# codec until then, so the mirror was written uncompressed — 8.2 GB from
 	@# 2.8 GB of parquet — and the TPC-H skene number was quoted against a
 	@# dataset in the spill posture rather than the stored one.
-	@test -f testdata/tpch_10_skene.rg16 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene lz4 && touch testdata/tpch_10_skene.rg16; }
+	@test -f testdata/tpch_10_skene.skene-v2 || { rm -rf testdata/tpch_10_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene lz4 && touch testdata/tpch_10_skene.skene-v2; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --variant skene
 
@@ -436,7 +436,7 @@ tpch-sf100: ## Run TPC-H benchmark on the skene mirror of SF100 (generates testd
 		echo "Generating testdata/tpch_100 (SF100) via tpchgen-cli..."; \
 		tpchgen-cli -s 100 --format parquet --parts 16 --output-dir testdata/tpch_100; \
 	}
-	@test -f testdata/tpch_100_skene.rg16 || { rm -rf testdata/tpch_100_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_100 testdata/tpch_100_skene lz4 && touch testdata/tpch_100_skene.rg16; }
+	@test -f testdata/tpch_100_skene.skene-v2 || { rm -rf testdata/tpch_100_skene && $(PYTHON) dev/parquet_to_skene.py testdata/tpch_100 testdata/tpch_100_skene lz4 && touch testdata/tpch_100_skene.skene-v2; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/tpch/runner.py --scale 100 --variant skene
 
@@ -492,12 +492,12 @@ clickbench-skene: ## Run ClickBench on the skene mirror of the dataset (generate
 	@# (`make tpch` is skene/lz4 now too — see its own target — so it IS
 	@# comparable to this one on codec, unlike `make clickbench`.)
 	@#
-	@# The stamp is named for the LAYOUT (rg16 = 16 row groups per file), not
+	@# The stamp is named for the FORMAT VERSION the mirror was written at, not
 	@# just for "converted". A mirror written before row groups were packed into
 	@# files is a different set of objects under different names, so the old
 	@# stamp must not satisfy this gate and the old tree must go — otherwise the
 	@# converter refuses and the benchmark never runs.
-	@test -f scratch/hits_skene.rg16 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.rg16; }
+	@test -f scratch/hits_skene.skene-v2 || { rm -rf scratch/hits_skene scratch/hits_skene.converted && $(PYTHON) dev/parquet_to_skene.py scratch/hits_rugo_262k scratch/hits_skene lz4 && touch scratch/hits_skene.skene-v2; }
 	@clear || true
 	@$(PYTHON) -c "import sys; print(f'Running ClickBench (skene) on Python {sys.version.split()[0]}  (GIL enabled: {sys._is_gil_enabled()})')"
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/clickbench/opteryx/runner.py --variant skene
@@ -564,7 +564,7 @@ job: ## Run Join Order Benchmark (JOB) on the skene mirror (generates testdata/j
 	@# Gated on a completion stamp rather than on the directory: an interrupted
 	@# conversion leaves a partial tree that `test -d` would accept, silently
 	@# benchmarking a fraction of the dataset.
-	@test -f testdata/job_skene.rg16 || { rm -rf testdata/job_skene && $(PYTHON) dev/parquet_to_skene.py testdata/job testdata/job_skene lz4 && touch testdata/job_skene.rg16; }
+	@test -f testdata/job_skene.skene-v2 || { rm -rf testdata/job_skene && $(PYTHON) dev/parquet_to_skene.py testdata/job testdata/job_skene lz4 && touch testdata/job_skene.skene-v2; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/job/runner.py --variant skene
 
@@ -585,7 +585,7 @@ h2o: ## Run H2O db-benchmark on the skene mirror (groupby + join, medium; genera
 	@# one size, so there is no size level to carry. The parquet tree keeps its
 	@# testdata/h2o/<size>/<table> layout.
 	@test -d testdata/h2o/medium || { echo "testdata/h2o/medium not found — generate it with: PYTHONPATH=. $(PYTHON) tests/performance/h2o/generate_data.py --size medium"; exit 1; }
-	@test -f testdata/h2o_skene.rg16 || { rm -rf testdata/h2o_skene && $(PYTHON) dev/parquet_to_skene.py testdata/h2o/medium testdata/h2o_skene lz4 && touch testdata/h2o_skene.rg16; }
+	@test -f testdata/h2o_skene.skene-v2 || { rm -rf testdata/h2o_skene && $(PYTHON) dev/parquet_to_skene.py testdata/h2o/medium testdata/h2o_skene lz4 && touch testdata/h2o_skene.skene-v2; }
 	@clear || true
 	@env $(BENCH_PRELOAD) $(PYTHON) tests/performance/h2o/runner.py --variant skene --size medium --workload both
 

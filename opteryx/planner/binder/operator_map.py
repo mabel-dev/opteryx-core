@@ -675,10 +675,12 @@ def determine_type(node):
             return result_ct  # placeholder FLOAT64
     if result_cat == OT.TIMESTAMP:
         if left_ct is not None and right_ct is not None:
-            try:
-                return compute_result_logical_type(left_ct, right_ct, operator, OT.TIMESTAMP)
-            except Exception:
-                pass
-        return result_ct  # placeholder TIMESTAMP()
+            # Unguarded: for TIMESTAMP the callee resolves through the canonical
+            # table or returns lt.TIMESTAMP(), so it has no raising path here.
+            # Anything that does escape is a real defect and must not be masked
+            # into a placeholder DECLARED type — that divergence is only ever
+            # found later, at the kernel, as a bare error code.
+            return compute_result_logical_type(left_ct, right_ct, operator, OT.TIMESTAMP)
+        return result_ct  # placeholder TIMESTAMP() — an operand type is unknown
 
     return result_ct  # non-parameterized: return the ColumnType singleton directly

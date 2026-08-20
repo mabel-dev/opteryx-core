@@ -290,6 +290,19 @@ class OptimizationStrategy:
     def __init__(self, telemetry):
         self.telemetry = telemetry
 
+    def record_decision(self, label: str, detail: str) -> None:
+        """Record one costed plan choice for EXPLAIN's OPTIMIZATIONS block.
+
+        THE CONTRACT for strategies that compare concrete plan alternatives
+        (costed pairs): the comparison must be visible. ``detail`` states the
+        outcome WITH the numbers it was decided on — "pushed: input est 601M >
+        leg base 150M", "declined: 1.6M < 380M" — never a bare "applied". A
+        cost function here may read only trusted statistics (manifest base
+        counts, or ``node.statistics`` estimates the strategy documents as safe
+        for its decision), and any missing statistic means "keep today's plan".
+        """
+        self.telemetry.add_decision(label, detail)
+
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         """
         Visit a node in the logical plan

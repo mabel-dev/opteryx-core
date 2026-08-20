@@ -1,10 +1,13 @@
 name: Regression Suite
 
 on:
+  # Every commit that can reach main is covered: PR commits by `pull_request`,
+  # main itself by `push`. `push` is scoped to main rather than "every branch but
+  # main" so a same-repo PR does not run the whole suite twice for one commit.
   push:
-    branches-ignore:
-      - main  # Exclude the main branch
-      - 'refs/tags/*'  # Exclude tags (releases)
+    branches:
+      - main
+  pull_request:
   schedule:
     - cron: "0 4 * * *"
 
@@ -47,6 +50,16 @@ jobs:
           python -m uv pip install --upgrade numpy cython setuptools-rust
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/tests/requirements.txt
           python -m uv pip install --upgrade -r $GITHUB_WORKSPACE/pyproject.toml
+
+      - name: Report Tool Versions
+        run: |
+          # Requirements are deliberately unpinned so upstream fixes reach us
+          # promptly. The cost is a run whose result depends on versions nothing
+          # in the repo records — so record the resolved set here. A red build
+          # must be reproducible from its own log.
+          python --version
+          rustc --version
+          python -m uv pip freeze
 
       - name: Compile
         run: make compile

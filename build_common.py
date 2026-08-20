@@ -1037,6 +1037,8 @@ def skene_extensions():
                     "skene/src/writer.cpp",
                     "skene/src/reader.cpp",
                     "skene/src/reader_v1.cpp",
+                    "skene/src/reader_v2.cpp",
+                    "skene/src/migrate.cpp",
                     "skene/src/value_order.cpp",
                     "skene/src/statistics.cpp",
                     "skene/src/encoding.cpp",

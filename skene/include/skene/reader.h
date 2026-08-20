@@ -150,6 +150,11 @@ struct FileMetadata {
     std::string writer_tag;
     std::vector<ColumnSchema>    columns;
     std::vector<RowGroupSummary> row_groups;
+
+    // v2: the sort keys the file's rows are GLOBALLY ordered by, verified by
+    // the writer over the actual rows. Empty means unclustered — which is what
+    // every v1 file reports, since v1 had no way to say otherwise.
+    std::vector<SortKey> cluster_keys;
 };
 
 // One row group in full, from its own footer.

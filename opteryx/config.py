@@ -428,6 +428,7 @@ class Features:
     disable_correlated_filters = get_bool("FEATURE_DISABLE_CORRELATED_FILTERS", False)
     disable_decorrelate_subquery = get_bool("FEATURE_DISABLE_DECORRELATE_SUBQUERY", False)
     disable_semi_join_reducer = get_bool("FEATURE_DISABLE_SEMI_JOIN_REDUCER", False)
+    disable_semi_join_pushdown = get_bool("FEATURE_DISABLE_SEMI_JOIN_PUSHDOWN", False)
     disable_cross_join_filter_pushdown = get_bool("FEATURE_DISABLE_CROSS_JOIN_FILTER_PUSHDOWN", False)
     disable_disjunction_simplification = get_bool("FEATURE_DISABLE_DISJUNCTION_SIMPLIFICATION", False)
     disable_disjunctive_domain_pushdown = get_bool("FEATURE_DISABLE_DISJUNCTIVE_DOMAIN_PUSHDOWN", False)

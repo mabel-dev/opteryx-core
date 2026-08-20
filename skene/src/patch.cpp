@@ -72,6 +72,15 @@ class Sink {
         const uint8_t* p = static_cast<const uint8_t*>(src);
         out_->insert(out_->end(), p, p + n);
     }
+    // v2 sections start kSectionAlign-aligned; a patched file keeps that
+    // property, since it must be indistinguishable from a written one.
+    void align_section() {
+        const uint64_t misaligned = out_->size() % kSectionAlign;
+        if (misaligned != 0)
+            out_->insert(out_->end(),
+                         static_cast<size_t>(kSectionAlign - misaligned),
+                         uint8_t{0});
+    }
     template <typename T>
     void pod(const T& value) { bytes(&value, sizeof(T)); }
     void u32(uint32_t value) { pod(value); }
@@ -181,6 +190,7 @@ void copy_sections(Sink& sink, const uint8_t* src, Column* column, bool optional
     std::vector<SectionEntry>& entries = optional ? column->optional : column->required;
     const uint32_t first = static_cast<uint32_t>(directory->size());
     for (SectionEntry entry : entries) {
+        sink.align_section();
         const uint64_t at = sink.position();
         sink.bytes(src + entry.offset, static_cast<size_t>(entry.stored_bytes));
         entry.offset = at;  // checksum is over the STORED bytes, which did not change
@@ -238,7 +248,8 @@ struct Donor {
 // donor's single row carries a value or a NULL.
 bool donor_row_is_null(const SectionEntry& validity, const uint8_t* src) {
     if (validity.stored_bytes == 0) return false;
-    if (validity.encoding != static_cast<uint16_t>(Encoding::kPlain)) return false;
+    if (validity.encoding != static_cast<uint8_t>(Encoding::kPlain)) return false;
+    if (validity.codec != static_cast<uint8_t>(SectionCodec::kNone)) return false;
     return (src[validity.offset] & 1u) == 0u;
 }
 
@@ -385,13 +396,17 @@ void emit_added_column(Sink& sink, const Donor& donor, uint64_t rows,
         // padding and carry no meaning (FORMAT.md §7.1).
         const size_t bitmap_bytes = static_cast<size_t>((rows + 7u) / 8u);
         std::vector<uint8_t> bitmap(bitmap_bytes, 0u);
+        sink.align_section();
         SectionEntry entry{};
-        entry.kind         = static_cast<uint16_t>(SectionKind::kValidity);
-        entry.encoding     = static_cast<uint16_t>(Encoding::kPlain);
-        entry.offset       = sink.position();
-        entry.stored_bytes = bitmap_bytes;
-        entry.plain_bytes  = bitmap_bytes;
-        entry.checksum     = checksum_xxh3_64(bitmap.data(), bitmap_bytes);
+        entry.kind          = static_cast<uint16_t>(SectionKind::kValidity);
+        entry.encoding      = static_cast<uint8_t>(Encoding::kPlain);
+        entry.codec         = static_cast<uint8_t>(SectionCodec::kNone);
+        entry.reserved      = 0;
+        entry.offset        = sink.position();
+        entry.stored_bytes  = bitmap_bytes;
+        entry.encoded_bytes = bitmap_bytes;
+        entry.plain_bytes   = bitmap_bytes;
+        entry.checksum      = checksum_xxh3_64(bitmap.data(), bitmap_bytes);
         sink.bytes(bitmap.data(), bitmap_bytes);
         directory->push_back(entry);
     }
@@ -443,7 +458,8 @@ Status patch_columns(const void* file, size_t file_bytes,
         return fail(Code::kNotSkene, "patch_columns: tail magic missing");
     if (tail.version != kVersion)
         return fail(Code::kUnsupportedVersion,
-                    "patch_columns: this build patches only v" + std::to_string(kVersion));
+                    "patch_columns: this build patches only v" + std::to_string(kVersion) +
+                    "; migrate the file forward first (skene::migrate_file)");
 
     const size_t footer_end = file_bytes - kFileTailBytes;
     if (tail.footer_bytes > footer_end - kFileHeadBytes)
@@ -473,6 +489,15 @@ Status patch_columns(const void* file, size_t file_bytes,
         Status s = read_schema_node(fc, &node);
         if (!s.is_ok()) return s;
     }
+
+    // Cluster spec (v2): sits between the schema and the statistics.
+    ClusterSpecHeader cluster_header{};
+    if (!fc.pod(&cluster_header))
+        return fail(Code::kTruncated, "patch_columns: short cluster spec");
+    std::vector<SortKey> cluster_keys(cluster_header.key_count);
+    for (SortKey& key : cluster_keys)
+        if (!fc.pod(&key))
+            return fail(Code::kTruncated, "patch_columns: short cluster spec keys");
 
     // Per-row-group statistics, kept as raw (length, bytes) pairs per slot so an
     // entry longer than this build understands survives the round trip.
@@ -664,6 +689,35 @@ Status patch_columns(const void* file, size_t file_bytes,
         write_schema_entry(sink, schema[i]);
     }
     for (const Donor& donor : donors) write_schema_entry(sink, donor.schema);
+
+    // Cluster spec: renames leave it untouched (ordinals name positions, not
+    // names); a drop keeps the longest PREFIX of keys whose columns all
+    // survive, with ordinals remapped to the surviving schema's positions.
+    // Rows ordered by (a, b) are still ordered by (a) when b goes, but are NOT
+    // generally ordered by (b) when a goes — a promise must shrink to what
+    // remains provably true, never stretch.
+    {
+        std::vector<uint32_t> new_ordinal(schema.size(), UINT32_MAX);
+        uint32_t position = 0;
+        for (size_t i = 0; i < schema.size(); ++i)
+            if (keep[i]) new_ordinal[i] = position++;
+
+        std::vector<SortKey> kept_keys;
+        for (const SortKey& key : cluster_keys) {
+            if (key.column_ordinal >= schema.size()
+                    || new_ordinal[key.column_ordinal] == UINT32_MAX)
+                break;
+            SortKey remapped = key;
+            remapped.column_ordinal = new_ordinal[key.column_ordinal];
+            kept_keys.push_back(remapped);
+        }
+        ClusterSpecHeader spec{};
+        spec.key_count = static_cast<uint16_t>(kept_keys.size());
+        spec.reserved  = 0;
+        sink.pod(spec);
+        for (const SortKey& key : kept_keys) sink.pod(key);
+    }
+
     for (const std::vector<std::vector<uint8_t>>& group : new_file_stats)
         for (const std::vector<uint8_t>& slot : group) {
             sink.u32(static_cast<uint32_t>(slot.size()));

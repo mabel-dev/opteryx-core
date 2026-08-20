@@ -70,6 +70,8 @@ _metrics: Dict[str, int] = {
     "writes": 0,
     "corrupt": 0,
     "oversize": 0,
+    "get_errors": 0,
+    "put_errors": 0,
     "bytes_served": 0,
     "bytes_written": 0,
 }
@@ -97,8 +99,9 @@ class RemoteFooterCache:
     Mirrors the remote manifest cache's decisions, for the same reasons: a corrupt entry
     is a **miss** (raising would take down every reader of a shared store), payloads above
     `max_value_bytes` are not written (shipping a pathological footer can cost more than
-    the read it saves), and store failures never surface (a cache outage slows queries,
-    never fails them).
+    the read it saves), and store failures never fail a query (a cache outage slows
+    queries, it never breaks them) — they are counted as `get_errors` / `put_errors`
+    and read back through `get_footer_cache_metrics()`.
     """
 
     def __init__(self, store, max_value_bytes: int):
@@ -117,8 +120,9 @@ class RemoteFooterCache:
 
         N files, a bounded number of round trips (see ``_BATCH_CHUNK``). A store without a
         native multi-get still works (the base class loops), just without the collapse. A
-        chunk whose round trip fails is treated as all-miss; the remaining chunks still
-        serve, so one slow shard degrades rather than blanks the whole probe.
+        chunk whose round trip fails is counted as a `get_errors` and treated as all-miss;
+        the remaining chunks still serve, so one slow shard degrades rather than blanks the
+        whole probe.
         """
         unique = list(dict.fromkeys(paths))  # dedup, order-preserving
         if not unique:
@@ -133,6 +137,12 @@ class RemoteFooterCache:
             try:
                 raw = self._store.get_many(list(key_to_path.keys()))
             except Exception:  # pragma: no cover - backend-specific failure modes
+                # Non-fatal BY DESIGN (see the module docstring: a cache outage
+                # slows queries, it never fails them) — but never silent. An
+                # uncounted failure makes a dead cache indistinguishable from a
+                # cold one, which is the exact state this tier's telemetry exists
+                # to tell apart.
+                _metrics["get_errors"] += 1
                 continue
             for key, payload in raw.items():
                 path = key_to_path.get(key)
@@ -163,7 +173,7 @@ class RemoteFooterCache:
 
         Oversized envelopes are skipped individually (still fetched from origin, still
         cached in-process — only the remote write is dropped); a chunk whose write fails
-        is dropped whole. Store failures never surface.
+        is dropped whole and counted as a `put_errors`. Store failures never fail a query.
         """
         pairs = list(pairs)
         if not pairs:
@@ -184,6 +194,9 @@ class RemoteFooterCache:
             try:
                 self._store.set_many(batch)
             except Exception:  # pragma: no cover - backend-specific failure modes
+                # Non-fatal by design, as for the read path — and counted for the
+                # same reason.
+                _metrics["put_errors"] += 1
                 continue
             _metrics["writes"] += len(batch)
             _metrics["bytes_written"] += written_bytes

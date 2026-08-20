@@ -54,7 +54,8 @@ def random_int(min_value: int = 0, max_value: int = 2**31 - 1) -> int:
         >>> 1 <= n <= 100
         True
     """
-    return random.randint(min_value, max_value)
+    # nosec B311 - SQL-level RANDOM(), never a security or cryptographic context.
+    return random.randint(min_value, max_value)  # nosec B311
 
 
 def single_item_cache(func: F) -> F:

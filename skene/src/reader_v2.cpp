@@ -1,4 +1,10 @@
-#include "reader_v1.h"
+// The v2 reader. Forked from reader_v1.cpp at the v2 bump (2026-08-20) — the
+// two share their skeleton by ancestry, not by reference: v1 is FROZEN and this
+// file is the one that tracks format.h. The v2 differences are the section
+// entry's codec axis (two-stage decode), the slot lanes, the cluster spec, and
+// the file footer version.
+
+#include "reader_v2.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -19,7 +25,7 @@
 #include "logical_type.h"
 
 namespace skene {
-namespace v1 {
+namespace v2 {
 namespace {
 
 Status fail(Code code, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -95,6 +101,7 @@ struct ParsedFileFooter {
     std::string                writer_tag;
     std::vector<RowGroupEntry> row_groups;
     std::vector<ParsedSchema>  schema;
+    std::vector<SortKey>       cluster_keys;   // v2; empty == unclustered
     // Row group major, then the schema's depth-first column order.
     std::vector<std::vector<RowGroupColumnStatistics>> statistics;
 };
@@ -352,13 +359,11 @@ Status parse_file_footer(const uint8_t* footer, uint32_t footer_bytes,
                     "current writer.",
                     out->header.footer_magic, kFileFooterMagic);
 
-    // Pinned to the literal 1, NOT kFileFooterVersion: this is the v1 reader,
-    // and the constant moved to 2 with the v2 bump. A v1 file carries footer
-    // layout 1 forever.
-    if (out->header.footer_version != 1u)
+    if (out->header.footer_version != kFileFooterVersion)
         return fail(Code::kUnsupportedVersion,
-                    "file footer declares layout version %u; the v1 reader "
-                    "implements 1", out->header.footer_version);
+                    "file footer declares layout version %u; the v2 reader "
+                    "implements %u", out->header.footer_version,
+                    kFileFooterVersion);
 
     if (out->header.reserved != 0)
         return fail(Code::kMalformed,
@@ -416,6 +421,48 @@ Status parse_file_footer(const uint8_t* footer, uint32_t footer_bytes,
     uint32_t flat_columns = 0;
     for (const ParsedSchema& node : out->schema) flat_columns += count_schema_columns(node);
 
+    // ── Cluster spec (v2) ── a PROMISE consumers act on, so it is validated
+    // structurally here: ordinals inside the schema, reserved bytes zero, the
+    // null rule consistent. Whether the rows genuinely have this order was the
+    // writer's obligation; a reader can only check that the record is coherent.
+    {
+        ClusterSpecHeader spec{};
+        if (!cursor.take(&spec, sizeof(spec)))
+            return fail(Code::kTruncated,
+                        "file footer ends inside the cluster spec header");
+        if (spec.reserved != 0)
+            return fail(Code::kMalformed,
+                        "cluster spec reserved bytes are %u, not 0", spec.reserved);
+        if (static_cast<uint64_t>(spec.key_count) * sizeof(SortKey)
+                > cursor.remaining())
+            return fail(Code::kMalformed,
+                        "cluster spec claims %u keys, which cannot fit in the "
+                        "remaining %zu footer bytes", spec.key_count,
+                        cursor.remaining());
+        out->cluster_keys.resize(spec.key_count);
+        for (uint16_t k = 0; k < spec.key_count; ++k) {
+            SortKey& key = out->cluster_keys[k];
+            if (!cursor.take(&key, sizeof(SortKey)))
+                return fail(Code::kTruncated,
+                            "file footer ends inside the cluster spec keys");
+            if (key.reserved != 0)
+                return fail(Code::kMalformed,
+                            "cluster key %u: reserved bytes are %u, not 0", k,
+                            key.reserved);
+            if (key.column_ordinal >= out->header.column_count)
+                return fail(Code::kMalformed,
+                            "cluster key %u names column ordinal %u but the "
+                            "schema has %u top-level columns", k,
+                            key.column_ordinal, out->header.column_count);
+            const bool expected_nulls_first = key.descending == 0;
+            if ((key.nulls_first != 0) != expected_nulls_first)
+                return fail(Code::kMalformed,
+                            "cluster key %u: nulls_first=%u with descending=%u "
+                            "violates draken's sort rule", k, key.nulls_first,
+                            key.descending);
+        }
+    }
+
     // Per-row-group statistics, row group major, in the schema's depth-first
     // order. Each blob is length-prefixed, so a blob longer than this build
     // understands is read prefix-first and the rest skipped — the same growth
@@ -457,8 +504,10 @@ struct SectionRef {
     bool           present = false;
     const uint8_t* stored = nullptr;
     uint64_t       stored_bytes = 0;
+    uint64_t       encoded_bytes = 0;   // post-codec, pre-encoding (v2)
     uint64_t       plain_bytes = 0;
     Encoding       encoding = Encoding::kPlain;
+    SectionCodec   codec = SectionCodec::kNone;
 };
 
 class SectionResolver {
@@ -540,9 +589,20 @@ class SectionResolver {
                 case SectionKind::kData:
                 case SectionKind::kSelection:
                 case SectionKind::kValidity:
-                case SectionKind::kStringSlots:
                 case SectionKind::kStringArena:
+                case SectionKind::kSlotLane0:
+                case SectionKind::kSlotLane1:
+                case SectionKind::kSlotLane2:
+                case SectionKind::kSlotLane3:
                     break;
+                case SectionKind::kStringSlots:
+                    // The v1 slot layout. A v2 writer stores lanes; a v2 file
+                    // carrying the v1 kind was assembled by nothing this format
+                    // ever shipped.
+                    return fail(Code::kMalformed,
+                                "column '%s' carries the v1 kStringSlots section "
+                                "in a v2 file; v2 stores slot lanes",
+                                column_name);
                 default:
                     return fail(Code::kUnsupportedSection,
                                 "column '%s' carries required section kind %u, "
@@ -588,21 +648,45 @@ class SectionResolver {
 
     Status resolve(const SectionEntry& entry, const char* column_name,
                    SectionRef* out) const {
+        if (entry.reserved != 0)
+            return fail(Code::kMalformed,
+                        "column '%s': section kind %u has reserved bytes %u, "
+                        "not 0", column_name, entry.kind, entry.reserved);
+
         switch (static_cast<Encoding>(entry.encoding)) {
             case Encoding::kPlain:
-                if (entry.stored_bytes != entry.plain_bytes)
+                if (entry.encoded_bytes != entry.plain_bytes)
                     return fail(Code::kMalformed,
                                 "column '%s': section kind %u is PLAIN but declares "
-                                "%llu stored bytes and %llu plain bytes",
+                                "%llu encoded bytes and %llu plain bytes",
                                 column_name, entry.kind,
-                                static_cast<unsigned long long>(entry.stored_bytes),
+                                static_cast<unsigned long long>(entry.encoded_bytes),
                                 static_cast<unsigned long long>(entry.plain_bytes));
                 break;
             case Encoding::kBitpack:
             case Encoding::kDeltaBitpack:
+                // The writer stores an encoded body only when it came out
+                // SMALLER than plain, so a declared encoded size above plain is
+                // a contradiction — and rejecting it here also bounds the
+                // stacked-decode scratch by plain_bytes, which every consumer
+                // validates against the column's declared shape.
+                if (entry.encoded_bytes > entry.plain_bytes)
+                    return fail(Code::kMalformed,
+                                "column '%s': section kind %u declares %llu "
+                                "encoded bytes, more than its %llu plain bytes",
+                                column_name, entry.kind,
+                                static_cast<unsigned long long>(entry.encoded_bytes),
+                                static_cast<unsigned long long>(entry.plain_bytes));
+                break;
             case Encoding::kZstd:
             case Encoding::kLz4:
-                break;
+                // The v1 spellings. v2 stores the codec in its own field, and
+                // one fact gets one spelling — a v2 writer can never have
+                // produced this, so it is corruption, not compatibility.
+                return fail(Code::kMalformed,
+                            "column '%s': section kind %u uses v1 codec-as-"
+                            "encoding value %u in a v2 file",
+                            column_name, entry.kind, entry.encoding);
             default:
                 // A required section this build cannot decode is fatal. Adding an
                 // encoding for a required section is therefore a version bump —
@@ -611,6 +695,26 @@ class SectionResolver {
                             "column '%s': section kind %u uses encoding %u, which "
                             "this build does not implement",
                             column_name, entry.kind, entry.encoding);
+        }
+
+        switch (static_cast<SectionCodec>(entry.codec)) {
+            case SectionCodec::kNone:
+                if (entry.stored_bytes != entry.encoded_bytes)
+                    return fail(Code::kMalformed,
+                                "column '%s': section kind %u has no codec but "
+                                "declares %llu stored bytes and %llu encoded bytes",
+                                column_name, entry.kind,
+                                static_cast<unsigned long long>(entry.stored_bytes),
+                                static_cast<unsigned long long>(entry.encoded_bytes));
+                break;
+            case SectionCodec::kZstd:
+            case SectionCodec::kLz4:
+                break;
+            default:
+                return fail(Code::kUnsupportedEncoding,
+                            "column '%s': section kind %u uses codec %u, which "
+                            "this build does not implement",
+                            column_name, entry.kind, entry.codec);
         }
 
         if (entry.offset < region_begin_
@@ -635,11 +739,13 @@ class SectionResolver {
                         static_cast<unsigned long long>(entry.checksum),
                         static_cast<unsigned long long>(actual));
 
-        out->present      = true;
-        out->stored       = data;
-        out->stored_bytes = entry.stored_bytes;
-        out->plain_bytes  = entry.plain_bytes;
-        out->encoding     = static_cast<Encoding>(entry.encoding);
+        out->present       = true;
+        out->stored        = data;
+        out->stored_bytes  = entry.stored_bytes;
+        out->encoded_bytes = entry.encoded_bytes;
+        out->plain_bytes   = entry.plain_bytes;
+        out->encoding      = static_cast<Encoding>(entry.encoding);
+        out->codec         = static_cast<SectionCodec>(entry.codec);
         return Status::ok();
     }
 
@@ -732,32 +838,73 @@ Status parse_zone_map(const SectionRef& section, const ParsedColumn& column,
 
 // Materializes a section into `destination`, which must hold plain_bytes.
 //
-// Decodes STRAIGHT INTO the final draken buffer rather than into a scratch
-// vector that is then copied — an encoded section otherwise costs two passes
-// over the data for no reason.
-Status decode_into(const SectionRef& section, const char* column_name,
-                   uint32_t count, size_t item_bytes, uint8_t* destination) {
-    switch (section.encoding) {
+// v2 decode is TWO stages in reverse of the writer: codec first (zstd/lz4 over
+// the stored bytes, producing encoded_bytes), then encoding (bitpack/delta/
+// plain, producing plain_bytes). The scratch buffer between them exists ONLY
+// when both stages are real — a plain body codec-decodes straight into the
+// final draken buffer, and an uncodec'd body encoding-decodes straight from
+// the mapping, so the pre-v2 zero-scratch paths are unchanged.
+Status decode_encoded(Encoding encoding, const uint8_t* body, uint64_t body_bytes,
+                      uint64_t plain_bytes, const char* column_name,
+                      uint32_t count, size_t item_bytes, uint8_t* destination) {
+    switch (encoding) {
         case Encoding::kPlain:
-            std::memcpy(destination, section.stored,
-                        static_cast<size_t>(section.plain_bytes));
+            std::memcpy(destination, body, static_cast<size_t>(plain_bytes));
             return Status::ok();
         case Encoding::kBitpack:
-            return bitpack_decode_codes(section.stored, section.stored_bytes, count,
+            return bitpack_decode_codes(body, body_bytes, count,
                                         reinterpret_cast<uint32_t*>(destination));
         case Encoding::kDeltaBitpack:
-            return delta_bitpack_decode(section.stored, section.stored_bytes, count,
+            return delta_bitpack_decode(body, body_bytes, count,
                                         item_bytes, destination);
-        case Encoding::kZstd:
-            return zstd_decode(section.stored, section.stored_bytes,
-                               section.plain_bytes, destination);
-        case Encoding::kLz4:
-            return lz4_decode(section.stored, section.stored_bytes,
-                              section.plain_bytes, destination);
+        default:
+            // resolve() rejected everything else already; reaching this is a
+            // reader bug, not a file property.
+            return fail(Code::kUnsupportedEncoding,
+                        "column '%s': unhandled encoding %u", column_name,
+                        static_cast<unsigned>(encoding));
+    }
+}
+
+Status decode_into(const SectionRef& section, const char* column_name,
+                   uint32_t count, size_t item_bytes, uint8_t* destination) {
+    switch (section.codec) {
+        case SectionCodec::kNone:
+            return decode_encoded(section.encoding, section.stored,
+                                  section.stored_bytes, section.plain_bytes,
+                                  column_name, count, item_bytes, destination);
+        case SectionCodec::kZstd:
+        case SectionCodec::kLz4: {
+            const bool is_zstd = section.codec == SectionCodec::kZstd;
+            if (section.encoding == Encoding::kPlain) {
+                // encoded == plain (resolve() checked), so the codec output IS
+                // the final bytes: decode straight into the draken buffer.
+                return is_zstd
+                    ? zstd_decode(section.stored, section.stored_bytes,
+                                  section.plain_bytes, destination)
+                    : lz4_decode(section.stored, section.stored_bytes,
+                                 section.plain_bytes, destination);
+            }
+            // Stacked: codec into scratch sized to the directory's
+            // encoded_bytes — the codec's EXACT capacity contract, same as
+            // plain_bytes was in v1 (lz4's wildcopy makes over-declaring a
+            // buffer overrun, see encoding.h) — then the encoding stage.
+            std::vector<uint8_t> scratch(
+                static_cast<size_t>(section.encoded_bytes));
+            Status st = is_zstd
+                ? zstd_decode(section.stored, section.stored_bytes,
+                              section.encoded_bytes, scratch.data())
+                : lz4_decode(section.stored, section.stored_bytes,
+                             section.encoded_bytes, scratch.data());
+            if (!st.is_ok()) return st;
+            return decode_encoded(section.encoding, scratch.data(),
+                                  section.encoded_bytes, section.plain_bytes,
+                                  column_name, count, item_bytes, destination);
+        }
     }
     return fail(Code::kUnsupportedEncoding,
-                "column '%s': unhandled encoding %u", column_name,
-                static_cast<unsigned>(section.encoding));
+                "column '%s': unhandled codec %u", column_name,
+                static_cast<unsigned>(section.codec));
 }
 
 Status materialize(const SectionRef& section, const char* column_name,
@@ -808,26 +955,59 @@ Status build_string_data(const BuildContext& ctx, const ParsedColumn& parsed,
     const ColumnEntryHead& head = parsed.head;
     const char* name = parsed.name.c_str();
 
-    SectionRef slots_section;
-    SKENE_RETURN_IF_ERROR(ctx.resolver->find(head, name, SectionKind::kStringSlots,
-                                             &slots_section));
-    if (!slots_section.present)
+    // v2: the slot array arrives as four u32 lanes and is fused back into
+    // 16-byte slots — a 4-way interleave that runs at memcpy speed. All four
+    // lanes are REQUIRED for a string column and each must decode to exactly
+    // slot_count u32s; a missing or short lane cannot be padded, because every
+    // word of a slot is load-bearing (a guessed arena_offset is an OOB read).
+    if (head.string_slot_count > UINT32_MAX)
         return fail(Code::kMalformed,
-                    "column '%s' is string-typed but has no slot section", name);
-    const uint64_t slot_len = slots_section.plain_bytes;
-    std::vector<uint8_t> slot_storage;
-    SKENE_RETURN_IF_ERROR(materialize(slots_section, name, &slot_storage));
-    const uint8_t* slot_bytes = slot_storage.data();
+                    "column '%s': %llu slots exceed the 32-bit code space that "
+                    "addresses them", name,
+                    static_cast<unsigned long long>(head.string_slot_count));
+
+    const uint64_t expect_lane =
+        head.string_slot_count * sizeof(uint32_t);
+    const SectionKind lane_kinds[4] = {
+        SectionKind::kSlotLane0, SectionKind::kSlotLane1,
+        SectionKind::kSlotLane2, SectionKind::kSlotLane3};
+    std::vector<uint32_t> lanes[4];
+    for (int k = 0; k < 4; ++k) {
+        SectionRef lane_section;
+        SKENE_RETURN_IF_ERROR(ctx.resolver->find(head, name, lane_kinds[k],
+                                                 &lane_section));
+        if (!lane_section.present)
+            return fail(Code::kMalformed,
+                        "column '%s' is string-typed but has no slot lane %d "
+                        "section", name, k);
+        if (lane_section.plain_bytes != expect_lane)
+            return fail(Code::kMalformed,
+                        "column '%s': slot lane %d decodes to %llu bytes but "
+                        "%llu slots require %llu", name, k,
+                        static_cast<unsigned long long>(lane_section.plain_bytes),
+                        static_cast<unsigned long long>(head.string_slot_count),
+                        static_cast<unsigned long long>(expect_lane));
+        lanes[k].resize(static_cast<size_t>(head.string_slot_count));
+        if (head.string_slot_count > 0)
+            SKENE_RETURN_IF_ERROR(decode_into(
+                lane_section, name,
+                static_cast<uint32_t>(head.string_slot_count), sizeof(uint32_t),
+                reinterpret_cast<uint8_t*>(lanes[k].data())));
+    }
 
     const uint64_t expect_slots =
         head.string_slot_count * sizeof(DrakenStringSlot);
-    if (slot_len != expect_slots)
-        return fail(Code::kMalformed,
-                    "column '%s': slot section is %llu bytes but %llu slots "
-                    "require %llu", name,
-                    static_cast<unsigned long long>(slot_len),
-                    static_cast<unsigned long long>(head.string_slot_count),
-                    static_cast<unsigned long long>(expect_slots));
+    std::vector<uint8_t> slot_storage(static_cast<size_t>(expect_slots));
+    {
+        uint32_t* words = reinterpret_cast<uint32_t*>(slot_storage.data());
+        for (uint64_t i = 0; i < head.string_slot_count; ++i) {
+            words[i * 4 + 0] = lanes[0][i];
+            words[i * 4 + 1] = lanes[1][i];
+            words[i * 4 + 2] = lanes[2][i];
+            words[i * 4 + 3] = lanes[3][i];
+        }
+    }
+    const uint8_t* slot_bytes = slot_storage.data();
 
     // Codes index into the slot array; a data_length beyond it would let the
     // uniform access path address slots that do not exist.
@@ -1322,10 +1502,11 @@ Status read_metadata(const uint8_t* file, size_t file_bytes,
     SKENE_RETURN_IF_ERROR(parse_file_footer(file + footer_offset, footer_bytes,
                                             footer_offset, &footer));
 
-    out->version            = 1u;
+    out->version            = 2u;
     out->row_count          = footer.header.row_count;
     out->created_at_unix_us = footer.header.created_at_unix_us;
     out->writer_tag         = footer.writer_tag;
+    out->cluster_keys       = std::move(footer.cluster_keys);
     std::memcpy(out->file_uuid, footer.header.file_uuid, sizeof(out->file_uuid));
 
     out->columns.resize(footer.schema.size());
@@ -1426,5 +1607,5 @@ Status read_morsel(const uint8_t* file, size_t file_bytes,
     return Status::ok();
 }
 
-}  // namespace v1
+}  // namespace v2
 }  // namespace skene

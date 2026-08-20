@@ -11,6 +11,7 @@ from typing import Tuple
 # Compiled disk_reader is required — fail fast if unavailable
 from opteryx.compiled.io.disk_reader import list_directory
 from opteryx.compiled.io.disk_reader import list_files_info
+from opteryx.compiled.io.disk_reader import unmap_memory
 
 
 class MemoryMappedFile:
@@ -70,22 +71,15 @@ class MemoryMappedFile:
 
     def close(self):
         """Close and cleanup the memory mapping."""
-        if not self.closed:
-            try:
-                # Import and call unmap_memory inside try/except because during
-                # interpreter shutdown the import machinery may be torn down
-                # (sys.meta_path can be None) which would raise ImportError.
-                from opteryx.compiled.io.disk_reader import unmap_memory
-
-                if self.mmap_obj is not None:
-                    unmap_memory(self.mmap_obj)
-            except Exception:
-                # Swallow any exception during cleanup; we're either shutting
-                # down or the compiled helper is unavailable. Destructor should
-                # never raise.
-                pass
-            finally:
-                self.closed = True
+        if self.closed:
+            return
+        # `unmap_memory` is imported at module scope, so the name is already bound
+        # and no import machinery is needed here — teardown cannot make this fail.
+        # `closed` is set BEFORE the unmap so a failed unmap is never retried by
+        # __del__ (that would be a double-free); the failure itself still raises.
+        self.closed = True
+        if self.mmap_obj is not None:
+            unmap_memory(self.mmap_obj)
 
     def __enter__(self):
         return self
@@ -94,12 +88,10 @@ class MemoryMappedFile:
         self.close()
 
     def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            # Ensure destructor never propagates exceptions during interpreter
-            # shutdown when global state may be partially torn down.
-            pass
+        # Unguarded: an exception escaping __del__ is reported by the interpreter
+        # on stderr rather than propagating, so a failed unmap stays visible. A
+        # handler here would hide a leaked mapping.
+        self.close()
 
 
 class OpteryxLocalFileSystem:

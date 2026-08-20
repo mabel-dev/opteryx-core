@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "skene/format.h"   // SectionCodec, SortKey — on-disk enums live there
 #include "skene/status.h"
 
 // draken — imported, never copied (opteryx-core .claude/CLAUDE.md §14).
@@ -18,31 +19,9 @@
 
 namespace skene {
 
-// Which general-purpose codec the writer offers each eligible section.
-//
-// A POSTURE, not a per-section decision: the choice is between two different
-// answers to "what is this file for", and mixing them within a file would buy
-// nothing a reader can use — every section is decoded independently anyway, so
-// the ratio/latency trade is the same trade at every section.
-//
-// Measured on a ClickBench row group, 154.7MB of section bytes, 256KB blocks,
-// Apple Silicon (dev/skene_codec_bench.cpp):
-//
-//   codec     ratio   compress MB/s   decompress MB/s
-//   lz4       4.49x        1743             8414
-//   zstd-1    6.47x        1081             2882
-//   zstd-9    7.34x         188             3078
-//   zstd-19   7.71x           9             3173
-//
-// zstd's DECODE rate does not vary with level. A low zstd level therefore gives
-// up ratio and buys nothing back, which is why the level here is high rather
-// than light: within zstd, level 9 is the knee (9 -> 12 costs 7x the compression
-// time for 1.6% more ratio; 9 -> 19 costs 20x for 5%).
-enum class SectionCodec : uint8_t {
-    kNone = 0,   // sections are stored plain
-    kZstd = 1,   // ratio-first; `zstd_level` selects the level
-    kLz4  = 2,   // read-first; decodes at roughly the reader's own raw rate
-};
+// SectionCodec moved to format.h with the v2 bump — it is written into every
+// SectionEntry now, so it is an on-disk enum, and on-disk enums have one home.
+// The measurements that pick between the codecs live with the enum.
 
 struct WriteOptions {
     // Everything that exists to make a LATER READ faster, as one switch:
@@ -120,6 +99,31 @@ struct WriteOptions {
     uint8_t     file_uuid[16] = {};   // all-zero == unset
     uint64_t    created_at_unix_us = 0;
     std::string writer_tag;           // provenance only, never load-bearing
+
+    // v2: declares that the file's rows are GLOBALLY ordered by these keys, in
+    // file row order across every row group. Empty means unclustered, which is
+    // the only honest default.
+    //
+    // The declaration is VERIFIED, not trusted: add_row_group checks every
+    // adjacent row pair (and finish() has already checked the seam between row
+    // groups as they arrived) and the write FAILS on the first out-of-order
+    // pair. A cluster spec is a promise consumers may act on — zone maps become
+    // tight, merge readers may skip sorting — and a false one is silent wrong
+    // answers in every one of them. Verification is one comparison per row per
+    // key on the write side, which is exactly where this format spends.
+    //
+    // SortKey.column_ordinal indexes the TOP-LEVEL schema, and nulls_first MUST
+    // follow draken's single sort rule (NULLS FIRST ascending, LAST descending)
+    // — any other combination is rejected. Key columns must be orderable,
+    // non-elided types.
+    std::vector<SortKey> cluster_keys;
+
+    // There is deliberately NO alignment switch. The v2 acceptance A/B
+    // (2026-08-20, interleaved aligned-vs-packed ClickBench mirrors) measured
+    // the two indistinguishable on read time (12353-12401ms vs 12165-12600ms,
+    // overlapping ranges) and alignment at 0.06% of the file — so aligned won
+    // on the zero-copy option it preserves, and the temporary A/B switch was
+    // removed rather than left as a knob nothing should ever set.
 
     // Spill: written once, read once, in-process, wall-clock bound. Nothing
     // that trades write time for read time can pay, so the whole bundle is off.
@@ -256,14 +260,14 @@ Status write_morsel(const CxxMorsel& morsel, const WriteOptions& options,
 
 // ─── Scope of this implementation ───────────────────────────────────────────
 //
-// IMPLEMENTED: the complete required-section layout — every family
+// IMPLEMENTED: the complete v2 required-section layout — every family
 // (fixed-width, BOOL, the string family including length-only columns, ARRAY
 // with recursive children, DRAKEN_NULL), all three selection kinds, LogicalType
 // round-trip, per-section and footer checksums, head/tail framing, every
-// encoding, value ordering, statistics and zone maps.
+// encoding plus the codec axis, slot lanes, value ordering, statistics
+// (including NDV), zone maps, bloom filters, and the cluster spec.
 //
-// NOT YET IMPLEMENTED: bloom filters and permutations. Both are additive — new
-// optional sections — so neither requires a format change. v1 is not frozen
-// until they land.
+// NOT YET IMPLEMENTED: permutations (kPermutation) — additive, an optional
+// section, no format change required when it lands.
 
 }  // namespace skene

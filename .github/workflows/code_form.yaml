@@ -17,6 +17,14 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install Ruff
-        run: pip install --upgrade ruff 
+        run: pip install --upgrade ruff
+      - name: Report Tool Versions
+        run: |
+          # Tools are deliberately unpinned so a new check reaches us the day it
+          # ships. The cost of that is a run whose result depends on a version
+          # nothing in the repo records — so record it here. A red build must be
+          # reproducible from its own log.
+          python --version
+          ruff --version
       - name: Run Ruff
         run: ruff format opteryx

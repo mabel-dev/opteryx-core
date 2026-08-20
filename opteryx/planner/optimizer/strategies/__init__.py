@@ -2,6 +2,7 @@ from .boolean_simplication import BooleanSimplificationStrategy
 from .cast_simplification import CastSimplificationStrategy
 from .constant_folding import ConstantFoldingStrategy
 from .correlated_filters import CorrelatedFiltersStrategy
+from .semi_join_pushdown import SemiJoinPushdownStrategy
 from .semi_join_reducer import SemiJoinReducerStrategy
 from .decorrelate_subquery import DecorrelateSubqueryStrategy
 from .cross_join_chain_reorder import CrossJoinChainReorderStrategy
@@ -44,6 +45,7 @@ __all__ = [
     "CastSimplificationStrategy",
     "ConstantFoldingStrategy",
     "CorrelatedFiltersStrategy",
+    "SemiJoinPushdownStrategy",
     "SemiJoinReducerStrategy",
     "DecorrelateSubqueryStrategy",
     "CrossJoinChainReorderStrategy",

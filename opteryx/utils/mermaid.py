@@ -118,12 +118,7 @@ def _format_expressions(expressions):
 
     parts = []
     for expression in expressions:
-        # As for node.config: one unformattable entry shouldn't cost the
-        # whole list, so skip it and keep the rest.
-        try:
-            rendered = str(format_expression(expression)).strip()
-        except Exception:  # pragma: no cover - defensive, as for node.config
-            continue
+        rendered = str(format_expression(expression)).strip()
         if rendered:
             parts.append(rendered)
     return parts
@@ -166,12 +161,7 @@ def _describe_columns(node):
     for column, is_passthrough in [(c, False) for c in projection] + [
         (c, True) for c in passthrough
     ]:
-        # One unformattable column shouldn't cost the whole list — skip it and
-        # keep the rest, the same way `config` is guarded below.
-        try:
-            name = str(format_expression(column))
-        except Exception:  # pragma: no cover - defensive, as for node.config
-            continue
+        name = str(format_expression(column))
         detail = {"name": name, "passthrough": is_passthrough}
         # `column_type` is the attribute on both SchemaColumn (a plain
         # identifier) and ExpressionColumn (a computed column), and its str()

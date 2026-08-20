@@ -11,6 +11,7 @@
 
 #include "bloom.h"
 #include "reader_v1.h"
+#include "reader_v2.h"
 #include "skene/checksum.h"
 #include "skene/format.h"
 #include "skene/probe.h"
@@ -210,6 +211,8 @@ Status read_metadata(const void* file, size_t file_bytes, FileMetadata* out) {
     switch (version) {
         case 1:
             return v1::read_metadata(bytes, file_bytes, footer_offset, footer_bytes, out);
+        case 2:
+            return v2::read_metadata(bytes, file_bytes, footer_offset, footer_bytes, out);
         default:
             // Unreachable while open_file enforces the window, but a new version
             // added there and forgotten here must fail loud, not fall through.
@@ -233,6 +236,9 @@ Status read_row_group_metadata(const void* file, size_t file_bytes,
         case 1:
             return v1::read_row_group_metadata(bytes, file_bytes, footer_offset,
                                                footer_bytes, row_group, out);
+        case 2:
+            return v2::read_row_group_metadata(bytes, file_bytes, footer_offset,
+                                               footer_bytes, row_group, out);
         default:
             return unsupported_version(version);
     }
@@ -252,6 +258,9 @@ Status read_morsel(const void* file, size_t file_bytes, uint32_t row_group,
     switch (version) {
         case 1:
             return v1::read_morsel(bytes, file_bytes, footer_offset, footer_bytes,
+                                   row_group, options, out);
+        case 2:
+            return v2::read_morsel(bytes, file_bytes, footer_offset, footer_bytes,
                                    row_group, options, out);
         default:
             return unsupported_version(version);

@@ -962,10 +962,13 @@ def find_compatible_type(types: list) -> Optional["ColumnType"]:
         from opteryx.types.type_unification import compute_result_logical_type
         ct_inputs = [t for t in types if isinstance(t, ColumnType) and t.category in (LogicalCategory.DECIMAL, LogicalCategory.INTEGER)]
         if len(ct_inputs) >= 2:
-            try:
-                return compute_result_logical_type(ct_inputs[0], ct_inputs[1], "Plus", LogicalCategory.DECIMAL)
-            except Exception:
-                pass
+            # Unguarded: ct_inputs is already filtered to DECIMAL/INTEGER and the
+            # operator is fixed at "Plus", so neither _decimal_ps nor
+            # _decimal_result has a reachable raise here. Anything that does
+            # escape is a real defect, not a cue to declare DECIMAL(38, 18).
+            return compute_result_logical_type(
+                ct_inputs[0], ct_inputs[1], "Plus", LogicalCategory.DECIMAL
+            )
         return DECIMAL(38, 18)
     if result_lc == LogicalCategory.TIMESTAMP:
         return TIMESTAMP()

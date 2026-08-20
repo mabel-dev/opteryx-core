@@ -450,7 +450,12 @@ public:
         set_sink_(p, std::make_unique<Join2MarkSink>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             std::move(prog), fn));
-        pipelines[p]->fill_join2_ref = static_cast<int>(ref);
+        // ⛔ Deliberately NO fill_join2_ref here. Only the BUILD pipeline may fill the
+        // ref: run() points the ref's global at the filling pipeline's sink result,
+        // and this sink's result is an empty base GlobalSinkState — filling from it
+        // re-points the ref AWAY from the build table between the mark pass and
+        // SemiAntiBuildSource reading the match flags, which emits zero rows for
+        // every swapped SEMI/ANTI, silently.
     }
     // RIGHT SEMI / RIGHT ANTI, half two: emit the build rows whose match flag has the
     // requested polarity — `emit_matched` true for SEMI, false for ANTI. Unlike

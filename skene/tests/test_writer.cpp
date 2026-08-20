@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "build_vectors.h"
+#include "encoding.h"   // lane decode in fuse_slot_lanes (tests build with -Isrc)
 #include "footer_probe.h"
 #include "harness.h"
 #include "skene/checksum.h"
@@ -101,6 +102,55 @@ static std::map<uint16_t, SectionEntry> sections_of(const ParsedFile& f,
 
 static bool has(const std::map<uint16_t, SectionEntry>& m, SectionKind k) {
     return m.count(static_cast<uint16_t>(k)) != 0;
+}
+
+// Decodes the four v2 slot lanes of one column back into 16-byte slots. Each
+// lane carries whatever encoding the writer picked for it (plain, bitpack,
+// delta-bitpack — codec none in these fixtures), so this decodes rather than
+// casts.
+static bool fuse_slot_lanes(const std::vector<uint8_t>& bytes,
+                            const std::map<uint16_t, SectionEntry>& s,
+                            uint32_t slot_count,
+                            std::vector<DrakenStringSlot>* out) {
+    const SectionKind kinds[4] = {SectionKind::kSlotLane0, SectionKind::kSlotLane1,
+                                  SectionKind::kSlotLane2, SectionKind::kSlotLane3};
+    std::vector<uint32_t> lanes[4];
+    for (int k = 0; k < 4; ++k) {
+        auto it = s.find(static_cast<uint16_t>(kinds[k]));
+        if (it == s.end()) return false;
+        const SectionEntry& e = it->second;
+        if (e.codec != static_cast<uint8_t>(SectionCodec::kNone)) return false;
+        lanes[k].resize(slot_count);
+        const uint8_t* body = bytes.data() + e.offset;
+        switch (static_cast<Encoding>(e.encoding)) {
+            case Encoding::kPlain:
+                if (e.plain_bytes != slot_count * sizeof(uint32_t)) return false;
+                std::memcpy(lanes[k].data(), body, e.plain_bytes);
+                break;
+            case Encoding::kBitpack:
+                if (!bitpack_decode_codes(body, e.stored_bytes, slot_count,
+                                          lanes[k].data()).is_ok())
+                    return false;
+                break;
+            case Encoding::kDeltaBitpack:
+                if (!delta_bitpack_decode(body, e.stored_bytes, slot_count,
+                                          sizeof(uint32_t),
+                                          lanes[k].data()).is_ok())
+                    return false;
+                break;
+            default:
+                return false;
+        }
+    }
+    out->resize(slot_count);
+    uint32_t* words = reinterpret_cast<uint32_t*>(out->data());
+    for (uint32_t i = 0; i < slot_count; ++i) {
+        words[i * 4 + 0] = lanes[0][i];
+        words[i * 4 + 1] = lanes[1][i];
+        words[i * 4 + 2] = lanes[2][i];
+        words[i * 4 + 3] = lanes[3][i];
+    }
+    return true;
 }
 
 static std::vector<uint8_t> write_or_die(const CxxMorsel& m) {
@@ -308,15 +358,30 @@ static void test_string_slots_and_arena() {
     CHECK_EQ(c.head.string_arena_used, static_cast<uint64_t>(expect_arena));
 
     auto s = sections_of(f, c);
-    CHECK(has(s, SectionKind::kStringSlots));
+    // v2: the slot array is four u32 lanes, each decoding to slot_count words.
+    CHECK(has(s, SectionKind::kSlotLane0));
+    CHECK(has(s, SectionKind::kSlotLane1));
+    CHECK(has(s, SectionKind::kSlotLane2));
+    CHECK(has(s, SectionKind::kSlotLane3));
+    CHECK(!has(s, SectionKind::kStringSlots));  // the v1 kind is never written
     CHECK(has(s, SectionKind::kStringArena));
     // No kData: the arena STRUCT is decomposed, never written as a blob — its
     // slots/arena members are absolute pointers.
     CHECK(!has(s, SectionKind::kData));
-    CHECK_EQ(s[static_cast<uint16_t>(SectionKind::kStringSlots)].stored_bytes,
-             uint64_t{4 * sizeof(DrakenStringSlot)});
+    for (SectionKind lane : {SectionKind::kSlotLane0, SectionKind::kSlotLane1,
+                             SectionKind::kSlotLane2, SectionKind::kSlotLane3})
+        CHECK_EQ(s[static_cast<uint16_t>(lane)].plain_bytes,
+                 uint64_t{4 * sizeof(uint32_t)});
     CHECK_EQ(s[static_cast<uint16_t>(SectionKind::kStringArena)].stored_bytes,
              static_cast<uint64_t>(expect_arena));
+
+    // The lanes fuse back to the slots the column was built with.
+    std::vector<DrakenStringSlot> fused;
+    CHECK(fuse_slot_lanes(bytes, s, 4, &fused));
+    const DrakenStringSlot* original =
+        static_cast<const DrakenStringArena*>(m.columns[0].view.data)->slots;
+    CHECK_EQ(std::memcmp(fused.data(), original,
+                         4 * sizeof(DrakenStringSlot)), 0);
 }
 
 static void test_length_only_column_round_trips_the_elided_flag() {
@@ -336,13 +401,13 @@ static void test_length_only_column_round_trips_the_elided_flag() {
     CHECK_EQ(c.head.string_arena_used, uint64_t{0});
 
     auto s = sections_of(f, c);
-    CHECK(has(s, SectionKind::kStringSlots));
+    CHECK(has(s, SectionKind::kSlotLane0));
+    CHECK(has(s, SectionKind::kSlotLane3));
     CHECK(!has(s, SectionKind::kStringArena));  // there are no payload bytes
 
     // The trap value is present in the written slots, not silently normalised.
-    const SectionEntry& slots = s[static_cast<uint16_t>(SectionKind::kStringSlots)];
-    const DrakenStringSlot* written =
-        reinterpret_cast<const DrakenStringSlot*>(bytes.data() + slots.offset);
+    std::vector<DrakenStringSlot> written;
+    CHECK(fuse_slot_lanes(bytes, s, 2, &written));
     CHECK(!str_is_inline(&written[1]));
     CHECK_EQ(written[1].ext.arena_offset, STR_ELIDED_PAYLOAD_OFFSET);
 }

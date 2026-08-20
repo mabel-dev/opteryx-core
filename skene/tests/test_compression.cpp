@@ -280,16 +280,17 @@ static void test_the_selected_codec_is_the_one_recorded(const Posture& posture) 
         std::memcpy(&entry, packed.data() + sections_at + i * sizeof(SectionEntry),
                     sizeof(entry));
         // No section may carry the OTHER codec's tag: the writer offers one.
+        // (v2: the codec is SectionEntry.codec, no longer an Encoding value.)
         for (const Posture& other : kCodecs) {
-            if (other.encoding == posture.encoding) continue;
+            if (other.codec == posture.codec) continue;
             ++skene_test::g_checks;
-            if (entry.encoding == static_cast<uint16_t>(other.encoding))
+            if (entry.codec == static_cast<uint8_t>(other.codec))
                 skene_test::report(__FILE__, __LINE__,
                                    "a section carries the wrong codec's tag",
                                    std::string("wrote ") + posture.name +
                                    ", found " + other.name);
         }
-        if (entry.encoding == static_cast<uint16_t>(posture.encoding))
+        if (entry.codec == static_cast<uint8_t>(posture.codec))
             ++compressed_sections;
     }
     ++skene_test::g_checks;

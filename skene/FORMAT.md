@@ -1,8 +1,16 @@
 # The `.skene` File Format
 
-**Version 1 — DRAFT. Not frozen.** Byte layouts below are implemented and
-tested, but v1 is not released: fields may still change without a version bump
+**Version 2 — DRAFT. Not frozen.** Byte layouts below are implemented and
+tested, but v2 is not released: fields may still change without a version bump
 until it is. Once frozen, every change follows §12.
+
+v2 (2026-08-20) is one bump carrying four changes, each measured before it was
+committed: the section directory entry gained a **codec axis** and an
+`encoded_bytes` field (36 → 48 bytes, §5.8); string slots are stored as **four
+`u32` lanes** instead of one interleaved section (§7.1, §7.4); sections start
+**64-byte aligned** as a writer obligation (§3); and the file footer gained a
+**cluster spec** (§5.3b) while the statistics blob gained an **NDV** field
+(§8).
 
 This is the **normative specification**: it defines the bytes, and is complete
 enough to write an independent reader from. The *rationale* — why Parquet and the
@@ -78,7 +86,7 @@ redefined here. Their authority is `draken/core/buffers.h`,
  │ ROW GROUP 1 …                              │
  ├════════════════════════════════════════════┤
  │ FILE FOOTER                footer_bytes    │  schema + row group directory
- ├────────────────────────────────────────────┤  + per-row-group statistics
+ ├────────────────────────────────────────────┤  + cluster spec + per-RG stats
  │ TAIL                             24 bytes  │  magic LAST
  └────────────────────────────────────────────┘
  EOF
@@ -91,6 +99,15 @@ parse.
 
 **All sections of one column, and of its descendants, are contiguous within a
 row group**, so reading one column of one row group is a single range request.
+
+**Every section body starts at a multiple of 64 bytes** (`kSectionAlign`) from
+byte 0 of the file. The writer pads with zeros, and the padding is counted in
+**no** section's bytes. This is a writer obligation and a v2 validation fact —
+a misaligned section offset in a v2 file is malformed — but readers never
+compute with it: offsets remain absolute, so a reader that ignores alignment
+entirely still reads the same bytes. It costs ~0.03% of a real file and buys a
+future zero-copy reader the right to cast plain fixed-width bodies straight out
+of an aligned mapping.
 
 Each row group is a self-contained `[DATA][INDEX][FOOTER]` unit at a known
 offset, so it is readable without parsing any other. Its INDEX region is
@@ -131,7 +148,7 @@ range-GET reader) MUST still validate the tail's `version`, `endianness` and
 | offset | size | field | value |
 |---|---|---|---|
 | 0 | 4 | `magic` | `0x4E454B53` — ASCII `SKEN` |
-| 4 | 2 | `version` | format version, `1` |
+| 4 | 2 | `version` | format version, `2` |
 | 6 | 1 | `endianness` | `0` little, `1` big |
 | 7 | 1 | `checksum_algorithm` | `0` XXH3-64 |
 | 8 | 8 | `reserved` | `0` |
@@ -177,6 +194,12 @@ file on the version alone.
 > one is rejected. Any accepted position is a region of the file nothing
 > verifies.
 
+One honest v2 caveat to that sweep: the alignment padding §3 introduces is zero
+bytes counted in no section, so no checksum covers it — a flipped bit there is
+**inert**, read by nothing and computed with by nothing. Content bytes remain
+fully covered; the sweep's assertion becomes "every byte is rejected or
+provably unread", not "every byte is rejected".
+
 ---
 
 ## 5. Footers
@@ -197,7 +220,8 @@ trailing or short remainder as `kMalformed`.
 2. **Writer tag** — `writer_tag_bytes` bytes, provenance only
 3. **Row group directory** — `row_group_count` entries (§5.2), 56 bytes each
 4. **Schema directory** — `column_count` entries (§5.3), each nesting its children
-5. **Per-row-group statistics** (§5.4)
+5. **Cluster spec** (§5.3b)
+6. **Per-row-group statistics** (§5.4)
 
 **ROW GROUP footer**, in order:
 
@@ -205,7 +229,7 @@ trailing or short remainder as `kMalformed`.
 2. **Writer tag** — `writer_tag_bytes` bytes, provenance only
 3. **Column directory** — `column_count` entries (§5.6), each of which nests its
    own children
-4. **Section directory** — `section_count` entries (§5.8), 36 bytes each
+4. **Section directory** — `section_count` entries (§5.8), 48 bytes each
 5. **Statistics blobs** (§8), in the same order columns appear in the directory
 
 ### 5.1 File footer header — 56 bytes
@@ -213,7 +237,7 @@ trailing or short remainder as `kMalformed`.
 | offset | size | field | notes |
 |---|---|---|---|
 | 0 | 4 | `footer_magic` | `0x494E4B53` — ASCII `SKNI`. See below. |
-| 4 | 2 | `footer_version` | file-footer layout version, `1` |
+| 4 | 2 | `footer_version` | file-footer layout version, `2` |
 | 6 | 2 | `reserved` | `0` |
 | 8 | 8 | `row_count` | **total** logical rows, summed over row groups |
 | 16 | 4 | `row_group_count` | at least 1 |
@@ -229,6 +253,11 @@ same head, same tail, same version, a footer whose checksum verifies — so
 framing alone cannot tell them apart, and parsing one as a file index would read
 a row count as a magic and a writer tag as a row group directory. A reader MUST
 reject a mismatch, naming the change and saying to regenerate the file.
+
+`footer_version` versions the FILE footer's own layout independently of the
+file `version`; the two move together in practice, but each reader states its
+own requirement. Footer version `2` inserts the **cluster spec** record (§5.3b)
+between the schema directory and the per-row-group statistics.
 
 ### 5.2 Row group directory entry — 56 bytes
 
@@ -282,6 +311,32 @@ A writer MUST reject a row group whose columns differ from the first's in name,
 type, logical descriptor, `field_id` or nesting. A schema directory that does
 not describe every row group is a lie a reader has no way to detect.
 
+### 5.3b Cluster spec
+
+Declares which sort keys, if any, the file's rows are **globally** ordered by —
+in file row order, across every row group, seams included. It sits between the
+schema directory and the per-row-group statistics so that a pruning reader has
+it from the file footer alone.
+
+```
+u16 key_count │ u16 reserved                        (4 bytes; reserved 0, checked)
+key_count × { u32 column_ordinal │ u8 descending │ u8 nulls_first │ u16 reserved }
+```
+
+The 8-byte key entry is the same `SortKey` §9.2's permutations use.
+`column_ordinal` indexes the **top-level** schema order. `key_count == 0` means
+**unclustered**, which is what every writer that does not know better MUST
+write.
+
+This record is a **verified promise**, never a trusted claim: consumers may act
+on it — zone maps become tight, merge readers may skip sorting — so the writer
+proves the declared order over the actual rows, every adjacent pair including
+the seams between row groups, and fails the write on the first out-of-order
+pair. A declared-but-false spec is silent wrong answers in every future
+consumer; there is no "probably sorted". `nulls_first` MUST follow draken's
+single sort null-ordering rule (NULLS FIRST ascending, NULLS LAST descending) —
+any other combination is rejected.
+
 ### 5.4 Per-row-group statistics
 
 Row group major, then the schema's depth-first column order (ARRAY children
@@ -314,7 +369,7 @@ reject a `row_count` that disagrees with the row group directory's.
 
 ### 5.6 Column directory entry
 
-A fixed 72-byte head, then variable-length parts, then children — depth first.
+A fixed 80-byte head, then variable-length parts, then children — depth first.
 
 | offset | size | field | notes |
 |---|---|---|---|
@@ -363,16 +418,32 @@ Immediately following the head, in order:
 2. a `LogicalTypeDescriptor` (§6), only if `logical_present == 1`
 3. `child_count` complete child entries, recursively
 
-### 5.8 Section directory entry — 36 bytes
+### 5.8 Section directory entry — 48 bytes
 
 | offset | size | field |
 |---|---|---|
 | 0 | 2 | `kind` (§7.1) |
-| 2 | 2 | `encoding` (§7.7) |
-| 4 | 8 | `offset` — absolute from file start |
-| 12 | 8 | `stored_bytes` — length on disk, post-encoding |
-| 20 | 8 | `plain_bytes` — length after decoding; equals `stored_bytes` when `PLAIN` |
-| 28 | 8 | `checksum` — over the **stored** bytes, not the decoded ones |
+| 2 | 1 | `encoding` (§7.7) — `PLAIN`/`BITPACK`/`DELTA_BITPACK` only; the v1 codec spellings (`3`, `4`) MUST be rejected here |
+| 3 | 1 | `codec` (§7.7) — `0` none, `1` zstd, `2` lz4 |
+| 4 | 4 | `reserved` — `0`, checked |
+| 8 | 8 | `offset` — absolute from file start; MUST be a multiple of 64 (§3) |
+| 16 | 8 | `stored_bytes` — length on disk, post-codec |
+| 24 | 8 | `encoded_bytes` — length after codec decode, before encoding decode |
+| 32 | 8 | `plain_bytes` — length after both stages |
+| 40 | 8 | `checksum` — over the **stored** bytes, not the decoded ones |
+
+The three sizes name a **two-stage pipeline**. A body is produced encoding
+first (bitpack/delta/plain), then codec (zstd/lz4/none), and decoded in
+reverse; `stored_bytes` is the on-disk state, `encoded_bytes` the state between
+the stages, `plain_bytes` the fully decoded one. The invariants a reader MUST
+enforce: `codec == NONE` ⟹ `stored_bytes == encoded_bytes`;
+`encoding == PLAIN` ⟹ `encoded_bytes == plain_bytes`; and for a real encoding,
+`encoded_bytes <= plain_bytes`.
+
+`encoded_bytes` is REQUIRED, not derivable: the codec decode needs its exact
+destination capacity before any body header can be parsed — the role
+`plain_bytes` played in v1 for the LZ4 block, whose block format carries no
+length of its own (§7.7).
 
 ---
 
@@ -420,8 +491,19 @@ Every column is stored in draken's **general form**: a `data` array of
 | 1 | `DATA` | §7.3 |
 | 2 | `SELECTION` | `length × u32` codes; present **iff** `selection_kind == STORED` |
 | 3 | `VALIDITY` | `ceil(length / 8)` bytes, 1 bit per logical row, LSB-first, **set == valid**. Absent means every row is valid; a writer MUST NOT emit an all-valid bitmap (§7.8). Bits at or above `length` are padding and carry no meaning. |
-| 4 | `STRING_SLOTS` | `string_slot_count × 16` bytes of `DrakenStringSlot`, verbatim |
+| 4 | `STRING_SLOTS` | **v1 only** — `string_slot_count × 16` bytes of `DrakenStringSlot`, verbatim. A v2 file MUST NOT carry it, and a v2 reader MUST reject it as malformed. |
 | 5 | `STRING_ARENA` | `string_arena_used` bytes, verbatim. Absent when `string_arena_used == 0`. |
+| 6 | `SLOT_LANE0` | `string_slot_count × u32`: word 0 of every slot — the length, in both slot forms |
+| 7 | `SLOT_LANE1` | word 1: bytes 4–7 — big-endian prefix (long slots) or inline data (short slots) |
+| 8 | `SLOT_LANE2` | word 2: bytes 8–11 — the dead `hash32` (long slots, always `0`) or inline data |
+| 9 | `SLOT_LANE3` | word 3: bytes 12–15 — `arena_offset` (long slots) or inline data |
+
+**All four lanes are REQUIRED for a string column** (§7.4). Lane *k* holds
+`u32` word *k* of every 16-byte `DrakenStringSlot`, `string_slot_count` values
+each; the reader reconstructs the slot array by a 4-way interleave. The split
+loses nothing and invents nothing — it exists because each lane gets the
+encoding that fits its own distribution (lane 2 of an all-long column is all
+zeros and collapses to a width-0 bitpack: 8 bytes for the whole lane).
 
 **Optional** — accelerators only:
 
@@ -481,12 +563,23 @@ members are **absolute pointers**. Those pointers are never written. Instead:
 
 - the scalar fields live in the column directory (`string_slot_count`,
   `string_arena_used`, `string_arena_cap`, `string_payloads_elided`),
-- the slot block is the `STRING_SLOTS` section,
+- the slot array is the four `SLOT_LANE0..3` sections (§7.1), one `u32` lane
+  per slot word,
 - the payload bytes are the `STRING_ARENA` section.
 
-A reader allocates a fresh block, copies both sections into it, and rebuilds the
-two pointers. `owns_buffers` is **not** carried: it is `0` by construction,
-because the reader's own ownership record governs the block.
+A reader decodes the four lanes, interleaves them back into `string_slot_count`
+16-byte slots in a fresh block alongside the arena bytes, and rebuilds the two
+pointers. `owns_buffers` is **not** carried: it is `0` by construction, because
+the reader's own ownership record governs the block.
+
+The lane split is measured, not aesthetic. Interleaved as one verbatim slot
+section (v1's `STRING_SLOTS`), the byte distribution changes every 4 bytes —
+near-worst-case input for a general compressor: slots reached only 0.43x
+against the arena's 0.25x. Planed into lanes, each gets the encoding that fits
+it — lengths bit-pack, arena offsets delta-bit-pack, the dead `hash32` lane of
+an all-long column collapses to a width-0 bitpack — for **−41%** of compressed
+slot bytes on TPC-H lineitem and **−67%** on ClickBench
+(`skene/bench/slot_layout.cpp`).
 
 Slots are position-independent — a long slot stores a `u32` arena **offset**, not
 a pointer — so slots and arena are byte-for-byte relocatable.
@@ -548,35 +641,52 @@ references, or `data_length` ceases to be the exact distinct count.
 
 | value | name | applies to |
 |---|---|---|
-| 0 | `PLAIN` | anything; `stored_bytes == plain_bytes` |
-| 1 | `BITPACK` | `u32` arrays (selection codes) at a fixed bit width |
-| 2 | `DELTA_BITPACK` | ascending 4- or 8-byte integer arrays |
-| 3 | `ZSTD` | any body; `plain_bytes` is the decoded size |
-| 4 | `LZ4` | any body; LZ4 **block** format; `plain_bytes` is the decoded size |
+| 0 | `PLAIN` | anything; `encoded_bytes == plain_bytes` |
+| 1 | `BITPACK` | `u32` arrays (selection codes, slot lanes) at a fixed bit width |
+| 2 | `DELTA_BITPACK` | 4- or 8-byte integer arrays |
+| 3 | `ZSTD` | **v1-only spelling** — MUST be rejected in a v2 `encoding` field |
+| 4 | `LZ4` | **v1-only spelling** — MUST be rejected in a v2 `encoding` field |
+
+In v1 the codec was crammed into this enum because the section entry had no
+codec field, so "zstd" and "lz4" were spelled as encodings. v2 stores the codec
+in its own `SectionEntry.codec` field — `0` NONE, `1` ZSTD, `2` LZ4 — applied
+**after** the encoding on write and undone **before** it on read (§5.8), and
+REJECTS values `3` and `4` in `encoding`: one fact, one spelling. The values
+stay declared because the retained v1 reader still decodes them from v1 files.
 
 There is deliberately no bare `DELTA`: differences stored at the source width are
 never smaller than the values, so nothing would produce one. Delta only pays
 combined with bit packing.
 
-`BITPACK` width comes from `data_length`, not from scanning for a maximum: every
-code is already `< data_length`, so the bound is known before the array is read.
+`BITPACK` width on a `SELECTION` body comes from `data_length`, not from
+scanning for a maximum: every code is already `< data_length`, so the bound is
+known before the array is read. On a slot lane the maximum is scanned — no
+prior bound exists — and a width of `0` (an all-zero lane) is the 8-byte
+degenerate case §7.1 describes.
 
 `DELTA_BITPACK` computes differences in **unsigned** arithmetic and wraps
 deliberately. For an ascending signed array the wrapping unsigned difference is
 the true step magnitude regardless of sign (`-5` → `3` gives `8`), and it cannot
 overflow the way signed subtraction does when the array spans more than half the
-type's range. It applies ONLY where ascending order is established by
-construction — a value-ordered column — never inferred from data that happens to
-look sorted.
+type's range. The wrapping construction in fact reconstructs **any** integer
+sequence exactly, not only ascending ones — a non-monotonic input simply
+produces wide deltas and declines on the size test. On `DATA` bodies the writer
+applies it ONLY where ascending order is established by construction — a
+value-ordered column — never inferred from data that happens to look sorted; on
+the slot lanes (§7.1) it is tried on every lane and the size test decides,
+which is the natural fit for lane 3's near-sequential arena offsets.
 
-`LZ4` is the LZ4 **block** format, not the frame format. A block carries no
-header and cannot state its own decoded size, so `plain_bytes` supplies it and is
-load-bearing: a decoder is given that value as its destination capacity and MUST
-produce exactly it. A body that decodes short is as malformed as one that
-overruns — the directory decides the section's shape, and a short decode would
-leave the tail of the destination holding whatever was there before. Readers MUST
-NOT narrow `plain_bytes` or `stored_bytes` to fit the codec's `int`-sized API; a
-value past that ceiling is rejected, never truncated into a plausible one.
+The LZ4 codec is the LZ4 **block** format, not the frame format. A block
+carries no header and cannot state its own decoded size, so `encoded_bytes`
+supplies it and is load-bearing: a decoder is given that value as its
+destination capacity and MUST produce exactly it — the role `plain_bytes`
+played in v1, moved one stage earlier now that a codec can sit over a real
+encoding. A body that decodes short is as malformed as one that overruns — the
+directory decides the section's shape, and a short decode would leave the tail
+of the destination holding whatever was there before. Readers MUST NOT narrow
+`encoded_bytes`, `plain_bytes` or `stored_bytes` to fit the codec's `int`-sized
+API; a value past that ceiling is rejected, never truncated into a plausible
+one.
 
 **Which codec is a writer POSTURE, not a per-section choice.** A file uses at
 most one of `ZSTD` and `LZ4`. Both are decoded per section independently, so
@@ -607,36 +717,53 @@ every column — destroying the property §3 exists for. Per-section keeps each
 extent independently fetchable and independently decodable, and that is worth
 the few percent.
 
-A writer attempts `ZSTD` only where it measurably pays. Three gates, each set
-from measurement (BENCHMARKS.md) rather than intuition:
+A writer offers a section to the codec only where it measurably pays. Three
+gates, each set from measurement (BENCHMARKS.md;
+`dev/skene_section_census.cpp`) rather than intuition:
 
-**Encoding.** Only `PLAIN` bodies are candidates. A bit-packed or delta body has
-already had its redundancy removed, so layering a general compressor over it
-costs CPU for nothing.
+**Section kind.** Every compressible kind is offered — the exclusions are
+`BLOOM` (hash bits; a correctly-sized filter measures 1.27x, incompressible by
+construction) and `PERMUTATION` (row ordinals, near-random by nature). **v1's
+encoding gate is gone.** v1 offered only `PLAIN` bodies, on the premise that a
+bit-packed or delta body had already had its redundancy removed. That premise
+was wrong: bit packing removes per-value *width* redundancy, not inter-value
+*sequence* redundancy, which is what LZ77 matchers eat. The census measured the
+cost — 137.3 MB of a 572.7 MB ClickBench file (24%), recoverable at 3.48x, all
+bit-packed selections on high-NDV string columns.
 
-**Section kind.** Only `DATA`, `VALIDITY`, `STRING_SLOTS` and `STRING_ARENA`.
-The string family is where the bytes are and where they compress — 0.25x for
-arenas, 0.43x for slots. The rest are excluded for cause: `BLOOM` is hash bits
-and measures 1.00x, a `PLAIN` `SELECTION` is one bit packing declined and so is
-high-entropy by definition, and `ZONE_MAP` is kilobytes per file.
+**Size.** Only encoded bodies of at least **10240 bytes**. Sections below that
+are 87% of all sections but hold ~1.2% of the recoverable bytes.
 
-**Size.** Only bodies of at least **10240 bytes**. Sections below that are 87%
-of all sections but hold ~1.2% of the recoverable bytes.
+**Result.** A `PLAIN` body keeps v1's rule — the compressed form is stored only
+when it is smaller at all. A **stacked** body (a codec over `BITPACK` or
+`DELTA_BITPACK`) pays a second decode stage on every read, so it MUST be at
+most **85%** of the encoded body to be kept; the recovered census sections
+clear that floor by miles (3.48x average).
 
 These are writer-side policy, not reader obligations: a reader MUST decode any
-`ZSTD` or `LZ4` section it is given, on any kind, at any size.
+codec'd section it is given, on any kind, at any size, stacked or not.
 
 Every encoder DECLINES when the result would not be smaller than plain, and the
 writer then emits `PLAIN`. "Not worth it" is a normal outcome measured on actual
 size, never a guess — so a compressed file is never larger than an uncompressed
 one, section by section.
 
-> Compression is **not** cosmetic for stored data. Measured on TPC-H, skene
-> without it is 1.9–3.8x larger than the equivalent ZSTD Parquet; with it, 0.92–
-> 1.09x. The cause is the string family: 16-byte slots plus a verbatim arena keep
-> almost all their redundancy after the other encodings have run, and text
-> columns dominate real tables. Spill is the exception and stays uncompressed —
-> written once, read once, wall-clock bound.
+> Compression is **not** cosmetic for stored data. Measured on TPC-H under the
+> v1 layout, skene without it was 1.9–3.8x larger than the equivalent ZSTD
+> Parquet; with it, 0.92–1.09x. The cause is the string family: the arena (and,
+> in v1, the interleaved 16-byte slots) keeps almost all its redundancy after
+> the other encodings have run, and text columns dominate real tables. v2's
+> slot lanes shrink the slot half of that further — the arena remains the case
+> that makes the codec mandatory. Spill is the exception and stays
+> uncompressed — written once, read once, wall-clock bound.
+>
+> One writer-policy consequence of the codec axis, measured the day it was
+> built: a lane (or any body) is stored in whichever **(encoding, codec)** form
+> ends smallest, costed to the FINAL stored size — never first-encoding-wins.
+> On TPC-H `l_comment`, bit-packing the prefix lane 32 → 31 bits "won" 3% and
+> then denied zstd its 57%: packing at a non-byte width misaligns text-like
+> bytes so the codec's matcher finds nothing. A smaller intermediate is not a
+> smaller file.
 
 ### 7.8 All-valid bitmaps are not written
 
@@ -683,7 +810,7 @@ is `0`. A reader encountering a blob **longer** than it understands MUST read th
 prefix it knows and skip the remainder — this is what lets statistics be added
 without a version bump.
 
-Version 1 blob — 48 bytes:
+Current blob — 56 bytes:
 
 | offset | size | field |
 |---|---|---|
@@ -694,6 +821,7 @@ Version 1 blob — 48 bytes:
 | 24 | 8 | `null_count` |
 | 32 | 8 | `sum_low` — low half of an `i128` |
 | 40 | 8 | `sum_high` — high half of an `i128` |
+| 48 | 8 | `ndv` — distinct count of the non-null values |
 
 | bit | flag | present when |
 |---|---|---|
@@ -703,8 +831,20 @@ Version 1 blob — 48 bytes:
 | 3 | `SUM` | |
 | 4 | `ROW_SORTED` | mirrors `DRAKEN_ROW_SORTED` |
 | 5 | `ROW_SORTED_DESC` | direction; meaningful only with bit 4 |
+| 6 | `NDV` | `ndv` holds a distinct count |
+| 7 | `NDV_EXACT` | …and it is **exact**; never set without bit 6 |
 
 A field whose flag is clear MUST be zero and MUST NOT be read.
+
+`ndv` was **appended** for v2 and is the working example of the prefix-first
+growth rule: blobs are length-prefixed and read prefix-first, so the addition
+needed no version bump of its own — a v1 blob is a valid 48-byte prefix of this
+one and reads back with `ndv` untracked. `NDV_EXACT` is set when value ordering
+deduplicated the column, so `data_length` **is** the exact distinct non-null
+count; `NDV` alone means the write-side KMV sketch measured the column and
+declined ordering — an estimate, ±~3% at K = 1024. The sketch was already
+computed and thrown away; the join-order estimator was flying blind without it.
+A consumer needing a bound, not an estimate, MUST require `NDV_EXACT`.
 
 **`min`/`max` are `ordinalize()` ordinals**, the same dialect the catalog
 manifest speaks, so a predicate literal's ordinal compares directly against them
@@ -824,8 +964,19 @@ content before all of it passes:
    slots and arena (§7.4); `child_count == 1` iff the type is `DRAKEN_ARRAY`.
 10. Unrecognised **required** section kind or encoding → reject. Unrecognised
     **optional** section kind → skip.
-11. `reserved` in the head, the tail (§4.3) and every row group directory entry
-    is zero.
+11. `reserved` in the head, the tail (§4.3), every row group directory entry,
+    every section entry (v2), the cluster spec header and every cluster key is
+    zero.
+12. v2 additions, all rejections not warnings: the v1 codec-as-encoding values
+    (3, 4) in `encoding`; the v1 `STRING_SLOTS` kind (4) in a v2 file; an
+    unrecognised `codec`; the §5.8 size invariants (`codec == none` ⟹
+    `stored_bytes == encoded_bytes`; `encoding == PLAIN` ⟹ `encoded_bytes ==
+    plain_bytes`; a real encoding ⟹ `encoded_bytes <= plain_bytes`); every
+    slot lane present for a string column and decoding to exactly
+    `string_slot_count` u32s; cluster-key ordinals within the schema and
+    `nulls_first` consistent with draken's rule. Section-offset ALIGNMENT is a
+    writer obligation a reader MAY exploit but MUST NOT require — offsets are
+    absolute, and a v2 file written without padding is still well-formed.
 
 Bounding a section against its own row group rather than against the file is not
 belt and braces: a section entry in row group 3 that addresses row group 0's
@@ -862,6 +1013,20 @@ exactly, so a migrator re-reads its own output and compares decoded buffers
 before anything replaces the original. Optional sections MAY be dropped or
 rebuilt — they are reconstructible by definition (§7.1).
 
+The entry point exists: `skene::migrate_file` (`include/skene/migrate.h`;
+`skene.migrate` from Python) rewrites a v1 file as v2 — exactly one hop, and a
+file already at the current version or more than one behind is refused rather
+than silently copied or skipped over. It is a rewrite, not a byte transform:
+each row group is read back through the retained v1 reader into draken vectors
+and written by the current writer. Provenance (`file_uuid`,
+`created_at_unix_us`, the original `writer_tag`, field ids) is **carried from
+the source**, not reissued — the data's identity did not change, its encoding
+did — and setting any of them on the migration posture is rejected. Everything
+else about the posture (codec, read acceleration, cluster keys) is the
+caller's choice, and the writer re-verifies all of it as it would for any
+write, including proving any declared cluster order over the actual rows
+(§5.3b).
+
 Because a build cannot read a file more than one version old, **any build MUST be
 able to identify any file**: reading `magic` and `version` MUST succeed for every
 version, including versions that build cannot read and versions that do not exist
@@ -877,30 +1042,34 @@ yet. That is what freezes bytes 0–5 (§4.1).
 | New required section kind, or a layout change to one | **Yes** |
 | New encoding on a required section | **Yes** |
 | Any change to the column or section directory layout | **Yes** |
-| Any change to the file footer, row group directory or schema directory layout | **Yes**, once v1 is frozen — and `footer_version` (§5.1) tracks it independently |
+| Any change to the file footer, row group directory or schema directory layout | **Yes**, once frozen — and `footer_version` (§5.1) tracks it independently |
 | Any change to bytes 0–5 of the head | **Never permitted** |
 
-While v1 is DRAFT (§1) none of the above applies: the layout may change without
-a bump, which is how row groups came to be packed into files. The one obligation
-a draft change still carries is that files written before it MUST NOT be
-misread — which is why that change added `footer_magic` rather than relying on
-the version.
+While the current version is DRAFT (§1) none of the above applies: the layout
+may change without a bump, which is how row groups came to be packed into
+files during v1's draft. The one obligation a draft change still carries is
+that files written before it MUST NOT be misread — which is why that change
+added `footer_magic` rather than relying on the version.
 
 ---
 
 ## 13. Implementation status
 
-Implemented and tested, writer **and** reader: §4, §5, §6, §7 in full (including
-§7.6 value ordering and all §7.7 encodings), §8, §9.1 bloom filters, §9.3
-zone maps, §10, §11 in full, §12 version window and identification.
+v2 is implemented and tested in full, writer **and** reader: §4, §5 (cluster
+spec included), §6, §7 in full (slot lanes, §7.6 value ordering, all §7.7
+encodings and both codecs, stacked and plain), §8 including NDV, §9.1 bloom
+filters, §9.3 zone maps, §10, §11 in full, §12 version window, identification
+**and** the migration entry point.
 
-Not implemented: §9.2 permutations. Deliberately deferred rather than
-outstanding — nothing in the engine produces a stored sort order yet, so the
-section would have no writer and no consumer. It is an optional section and adds
-with no version bump when something needs it.
+Not implemented: §9.2 permutations — the one unchanged deferral. Deliberately
+deferred rather than outstanding: nothing in the engine produces a stored sort
+order yet, so the section would have no writer and no consumer. It is an
+optional section and adds with no version bump when something needs it.
 
-Also not implemented: the migration entry point of §12, which cannot exist until
-there is a v2 to migrate from.
+Golden v1 fixtures live at `skene/tests/fixtures/v1/`, exercised by the
+migration suite `tests/test_migration.cpp` — the retained v1 reader and the
+one-hop migrate path are tested against real v1 bytes, not against files this
+build wrote itself.
 
 Value ordering is not applied to ARRAY children. Ordering one is correct under
 the uniform access contract, but it produces a dict-shaped array child, and

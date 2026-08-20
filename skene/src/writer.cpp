@@ -150,34 +150,36 @@ struct WriteContext {
     int                        zstd_level = 0;
 };
 
-// The checksum covers the STORED bytes, so it is computed after encoding — a
-// reader verifies what it is about to decode, not what the writer started from.
+// The checksum covers the STORED bytes, so it is computed after both stages —
+// a reader verifies what it is about to decode, not what the writer started
+// from.
 void emit_raw(WriteContext& ctx, SectionKind kind, Encoding encoding,
-              const void* stored, size_t stored_bytes, size_t plain_bytes) {
+              SectionCodec codec, const void* stored, size_t stored_bytes,
+              size_t encoded_bytes, size_t plain_bytes) {
+    // v2 alignment: pad with zeros so the body starts at a kSectionAlign
+    // multiple. The padding belongs to no section and is counted in nothing —
+    // offsets are absolute, so readers never compute with it.
+    {
+        const uint64_t at = ctx.writer->position();
+        const uint64_t misaligned = at % kSectionAlign;
+        if (misaligned != 0)
+            ctx.writer->zeros(static_cast<size_t>(kSectionAlign - misaligned));
+    }
+
     SectionEntry entry;
-    entry.kind         = static_cast<uint16_t>(kind);
-    entry.encoding     = static_cast<uint16_t>(encoding);
-    entry.offset       = ctx.writer->position();
-    entry.stored_bytes = stored_bytes;
-    entry.plain_bytes  = plain_bytes;
-    entry.checksum     = checksum_xxh3_64(stored, stored_bytes);
+    entry.kind          = static_cast<uint16_t>(kind);
+    entry.encoding      = static_cast<uint8_t>(encoding);
+    entry.codec         = static_cast<uint8_t>(codec);
+    entry.reserved      = 0;
+    entry.offset        = ctx.writer->position();
+    entry.stored_bytes  = stored_bytes;
+    entry.encoded_bytes = encoded_bytes;
+    entry.plain_bytes   = plain_bytes;
+    entry.checksum      = checksum_xxh3_64(stored, stored_bytes);
     ctx.writer->bytes(stored, stored_bytes);
     ctx.sections->push_back(entry);
 }
 
-// Compresses a section body when that is smaller, otherwise stores it as-is.
-//
-// Three gates, each measured rather than assumed (see format.h and
-// BENCHMARKS.md):
-//
-//   encoding   only PLAIN bodies are candidates. A bit-packed or delta body has
-//              already had its redundancy removed, so a general compressor over
-//              it costs CPU for nothing.
-//   kind       only kinds that measurably compress. Bloom bits are random by
-//              construction and a PLAIN selection is one bit packing declined,
-//              meaning high entropy — attempting either is pure cost.
-//   size       only above kCompressMinBytes. Small sections are the large
-//              MAJORITY by count and a rounding error by bytes.
 // True when every bit in [0, length) is set. The bits above `length` in the
 // final byte are padding and carry no meaning, so they are masked out rather
 // than required to be anything in particular.
@@ -193,36 +195,50 @@ bool bitmap_is_all_set(const uint8_t* bits, uint32_t length) {
     return true;
 }
 
-// A fourth gate applies to every codec and is not listed above because it is
-// not a heuristic: a section is only stored compressed when the result is
-// actually SMALLER. Each *_encode returns false to say so, and "not worth it" is
-// a normal answer rather than a failure.
+// Offers an ENCODED body (any encoding, kPlain included) to the codec, storing
+// whichever form wins. Three gates, each measured rather than assumed
+// (format.h):
+//
+//   kind    only kinds that measurably compress. Bloom bits are random by
+//           construction; permutations are near-random row ordinals. v2 CHANGE:
+//           SELECTION is now eligible — v1's premise that a bit-packed body had
+//           no redundancy left confused per-value width with inter-value
+//           sequence, and cost 24% of a real ClickBench file (census).
+//   size    only above kCompressMinBytes, on the ENCODED body. Small sections
+//           are the large majority by count and a rounding error by bytes.
+//   result  a plain body keeps v1's rule — stored compressed only when SMALLER
+//           (the encoders return false to say "not worth it", a normal answer).
+//           A STACKED body (codec over bitpack/delta) pays a second decode
+//           stage per read, so it must clear kStackFloorPercent instead of
+//           merely shaving a byte.
 void emit_encoded(WriteContext& ctx, SectionKind kind, Encoding encoding,
-                  const void* stored, size_t stored_bytes, size_t plain_bytes) {
-    if (ctx.codec != SectionCodec::kNone && encoding == Encoding::kPlain
-            && stored_bytes >= kCompressMinBytes
+                  const void* body, size_t body_bytes, size_t plain_bytes) {
+    if (ctx.codec != SectionCodec::kNone
+            && body_bytes >= kCompressMinBytes
             && kind_is_compressible(static_cast<uint16_t>(kind))) {
         std::vector<uint8_t> packed;
+        bool worthwhile = false;
         switch (ctx.codec) {
             case SectionCodec::kZstd:
-                if (zstd_encode(stored, stored_bytes, ctx.zstd_level, &packed)) {
-                    emit_raw(ctx, kind, Encoding::kZstd, packed.data(),
-                             packed.size(), plain_bytes);
-                    return;
-                }
+                worthwhile = zstd_encode(body, body_bytes, ctx.zstd_level, &packed);
                 break;
             case SectionCodec::kLz4:
-                if (lz4_encode(stored, stored_bytes, &packed)) {
-                    emit_raw(ctx, kind, Encoding::kLz4, packed.data(),
-                             packed.size(), plain_bytes);
-                    return;
-                }
+                worthwhile = lz4_encode(body, body_bytes, &packed);
                 break;
             case SectionCodec::kNone:
                 break;
         }
+        if (worthwhile && encoding != Encoding::kPlain
+                && packed.size() * 100u > body_bytes * kStackFloorPercent)
+            worthwhile = false;
+        if (worthwhile) {
+            emit_raw(ctx, kind, encoding, ctx.codec, packed.data(),
+                     packed.size(), body_bytes, plain_bytes);
+            return;
+        }
     }
-    emit_raw(ctx, kind, encoding, stored, stored_bytes, plain_bytes);
+    emit_raw(ctx, kind, encoding, SectionCodec::kNone, body, body_bytes,
+             body_bytes, plain_bytes);
 }
 
 void emit_section(WriteContext& ctx, SectionKind kind, const void* data, size_t bytes) {
@@ -259,6 +275,110 @@ void emit_fixed_data(WriteContext& ctx, const void* data, uint32_t data_length,
         }
     }
     emit_section(ctx, SectionKind::kData, data, plain);
+}
+
+// v2: the 16-byte slot array, stored as four u32 lanes (format.h SectionKind).
+// Each lane gets whichever encoding fits its own distribution:
+//
+//   delta    tried first on every lane. The wrapping-difference construction
+//            reconstructs ANY u32 sequence exactly (not only ascending ones);
+//            a lane that is not near-monotonic simply produces wide deltas and
+//            declines on the size test. It is the natural fit for lane 3, where
+//            long slots carry near-sequential arena offsets.
+//   bitpack  the arbitrary-max variant (bitpack_encode_u32). Lengths are small;
+//            the dead hash32 lane of an all-long column is all zeros and
+//            collapses to width 0 — 8 bytes for the whole lane.
+//   plain    text-like lanes (prefixes, inline payload bytes) fall through, and
+//            the codec picks up what the encodings could not.
+// Emits ONE lane in whichever (encoding, codec) form stores smallest.
+//
+// First-encoding-wins is a TRAP here, measured: on TPC-H l_comment the prefix
+// lane bit-packs 32 -> 31 bits — a 3% "win" — but packing at a non-byte width
+// misaligns the text-like bytes so the codec's matcher finds nothing, and the
+// lane stores at 0.97x where PLAIN-then-zstd reaches ~0.43x. A smaller
+// intermediate is not a smaller file. So every viable form is costed to its
+// FINAL stored size — encoding alone, and encoding+codec where the codec
+// clears its gate — and the smallest wins; ties go to the fewest decode
+// stages.
+void emit_slot_lane(WriteContext& ctx, SectionKind kind,
+                    const std::vector<uint32_t>& lane) {
+    const uint32_t count = static_cast<uint32_t>(lane.size());
+    const size_t   plain = static_cast<size_t>(count) * sizeof(uint32_t);
+
+    struct Form {
+        Encoding             encoding;
+        std::vector<uint8_t> body;      // empty for kPlain (points at the lane)
+        std::vector<uint8_t> packed;    // codec output; empty == not applied
+    };
+
+    // Candidate order IS the tie-break order: plain first (one decode stage),
+    // then delta, then bitpack.
+    std::vector<Form> forms;
+    forms.push_back(Form{Encoding::kPlain, {}, {}});
+    {
+        std::vector<uint8_t> body;
+        if (delta_bitpack_encode(lane.data(), count, sizeof(uint32_t), &body))
+            forms.push_back(Form{Encoding::kDeltaBitpack, std::move(body), {}});
+        body.clear();
+        if (bitpack_encode_u32(lane.data(), count, &body))
+            forms.push_back(Form{Encoding::kBitpack, std::move(body), {}});
+    }
+
+    size_t best = 0;
+    size_t best_stored = SIZE_MAX;
+    for (size_t i = 0; i < forms.size(); ++i) {
+        Form& form = forms[i];
+        const uint8_t* body = form.encoding == Encoding::kPlain
+            ? reinterpret_cast<const uint8_t*>(lane.data()) : form.body.data();
+        const size_t body_bytes = form.encoding == Encoding::kPlain
+            ? plain : form.body.size();
+
+        size_t stored = body_bytes;
+        if (ctx.codec != SectionCodec::kNone && body_bytes >= kCompressMinBytes) {
+            std::vector<uint8_t> packed;
+            bool worthwhile = ctx.codec == SectionCodec::kZstd
+                ? zstd_encode(body, body_bytes, ctx.zstd_level, &packed)
+                : lz4_encode(body, body_bytes, &packed);
+            if (worthwhile && form.encoding != Encoding::kPlain
+                    && packed.size() * 100u > body_bytes * kStackFloorPercent)
+                worthwhile = false;
+            if (worthwhile) {
+                stored = packed.size();
+                form.packed = std::move(packed);
+            }
+        }
+        if (stored < best_stored) { best_stored = stored; best = i; }
+    }
+
+    Form& winner = forms[best];
+    const uint8_t* body = winner.encoding == Encoding::kPlain
+        ? reinterpret_cast<const uint8_t*>(lane.data()) : winner.body.data();
+    const size_t body_bytes = winner.encoding == Encoding::kPlain
+        ? plain : winner.body.size();
+    if (!winner.packed.empty())
+        emit_raw(ctx, kind, winner.encoding, ctx.codec, winner.packed.data(),
+                 winner.packed.size(), body_bytes, plain);
+    else
+        emit_raw(ctx, kind, winner.encoding, SectionCodec::kNone, body,
+                 body_bytes, body_bytes, plain);
+}
+
+void emit_slot_lanes(WriteContext& ctx, const DrakenStringSlot* slots,
+                     uint64_t slot_count) {
+    const size_t n = static_cast<size_t>(slot_count);
+    std::vector<uint32_t> lanes[4];
+    for (int k = 0; k < 4; ++k) lanes[k].resize(n);
+    const uint32_t* words = reinterpret_cast<const uint32_t*>(slots);
+    for (size_t i = 0; i < n; ++i) {
+        lanes[0][i] = words[i * 4 + 0];
+        lanes[1][i] = words[i * 4 + 1];
+        lanes[2][i] = words[i * 4 + 2];
+        lanes[3][i] = words[i * 4 + 3];
+    }
+    emit_slot_lane(ctx, SectionKind::kSlotLane0, lanes[0]);
+    emit_slot_lane(ctx, SectionKind::kSlotLane1, lanes[1]);
+    emit_slot_lane(ctx, SectionKind::kSlotLane2, lanes[2]);
+    emit_slot_lane(ctx, SectionKind::kSlotLane3, lanes[3]);
 }
 
 // Everything the footer needs to describe one column, gathered while its data
@@ -397,8 +517,7 @@ Status write_string_column(WriteContext& ctx, const DrakenVector& v,
     plan->head.string_arena_cap       = sa->arena_cap;
     plan->head.string_payloads_elided = sa->payloads_elided;
 
-    emit_section(ctx, SectionKind::kStringSlots, sa->slots,
-                 static_cast<size_t>(sa->length) * sizeof(DrakenStringSlot));
+    emit_slot_lanes(ctx, sa->slots, sa->length);
 
     if (sa->arena_used > 0) {
         if (sa->arena == nullptr)
@@ -484,6 +603,18 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
                                ordered.applied ? ordered.data_length : 0u));
         plan->has_statistics   = true;
         plan->head.stats_bytes = static_cast<uint32_t>(sizeof(ColumnStatistics));
+
+        // v2 NDV: exact when ordering deduplicated (data_length IS the distinct
+        // non-null count), the KMV estimate when the sketch measured the column
+        // and declined. Never both spellings; never the biased sample verdict.
+        if (ordered.applied) {
+            plan->statistics.ndv = ordered.data_length;
+            plan->statistics.flags |= kStatNdv | kStatNdvExact;
+        } else if (ordered.ndv_estimate > 0.0) {
+            plan->statistics.ndv =
+                static_cast<uint64_t>(ordered.ndv_estimate + 0.5);
+            plan->statistics.flags |= kStatNdv;
+        }
     }
 
     SelectionKind selection_kind;
@@ -500,9 +631,10 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
             plan->head.string_arena_used      = ordered.arena_used;
             plan->head.string_arena_cap       = ordered.arena_used;
             plan->head.string_payloads_elided = 0;  // elided columns are never ordered
-            emit_section(ctx, SectionKind::kStringSlots, ordered.data.get(),
-                         static_cast<size_t>(ordered.slot_count)
-                             * sizeof(DrakenStringSlot));
+            emit_slot_lanes(ctx,
+                            reinterpret_cast<const DrakenStringSlot*>(
+                                ordered.data.get()),
+                            ordered.slot_count);
             if (ordered.arena_used > 0)
                 emit_section(ctx, SectionKind::kStringArena, ordered.arena.get(),
                              static_cast<size_t>(ordered.arena_used));
@@ -633,6 +765,203 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
         plan->head.child_count = 1;
     }
 
+    return Status::ok();
+}
+
+// ─── Cluster verification ───────────────────────────────────────────────────
+//
+// A cluster spec is a PROMISE the writer signs on the file's behalf, so the
+// writer proves it over the actual rows before writing it down. One comparison
+// per row per key, on the write side — where this format spends by charter.
+//
+// Comparison is by ordinal first (the same dialect the zone maps and manifest
+// speak), with a full-bytes tiebreak for the string family, whose ordinals are
+// monotonic but NOT injective (first-8-bytes pack). For every other orderable
+// type the ordinal is order-faithful, so ordinal equality is order equality.
+
+// One key column's value in the FINAL row of a row group, captured so the seam
+// to the next row group can be verified after the morsel is gone.
+struct SeamKeyValue {
+    bool        captured = false;
+    bool        is_null = false;
+    int64_t     ordinal = 0;
+    bool        has_bytes = false;
+    std::string bytes;          // string family only
+};
+
+bool cluster_row_is_valid(const DrakenVector& v, uint32_t row) {
+    if (v.validity == nullptr) return true;
+    return (v.validity[row >> 3] & (1u << (row & 7u))) != 0;
+}
+
+// Payload bytes of one string CODE (not row). Precondition: the column is
+// string storage and not payloads-elided — enforced by the eligibility check.
+void cluster_string_bytes(const DrakenVector& v, uint32_t code,
+                          const uint8_t** out, uint32_t* out_len) {
+    const DrakenStringArena* sa = static_cast<const DrakenStringArena*>(v.data);
+    const DrakenStringSlot*  slot = &sa->slots[code];
+    *out_len = str_length(slot);
+    *out = str_is_inline(slot) ? slot->inl.data
+                               : sa->arena + slot->ext.arena_offset;
+}
+
+int compare_bytes(const uint8_t* a, uint32_t a_len, const uint8_t* b, uint32_t b_len) {
+    const uint32_t common = a_len < b_len ? a_len : b_len;
+    const int cmp = common > 0 ? std::memcmp(a, b, common) : 0;
+    if (cmp != 0) return cmp < 0 ? -1 : 1;
+    if (a_len != b_len) return a_len < b_len ? -1 : 1;
+    return 0;
+}
+
+// FILE-ORDER comparison of two key values: negative/zero means "a may precede
+// b". Encodes the key's direction and draken's single null rule (NULLS FIRST
+// ascending, LAST descending — validated against the SortKey up front).
+int file_order_compare(bool a_null, bool b_null, int ascending_cmp, bool descending) {
+    if (a_null && b_null) return 0;
+    if (a_null) return descending ? 1 : -1;
+    if (b_null) return descending ? -1 : 1;
+    return descending ? -ascending_cmp : ascending_cmp;
+}
+
+// Verifies `morsel`'s rows are ordered by `keys`, including the seam from the
+// previous row group's final row, and re-captures the seam for the next call.
+Status verify_cluster_order(const CxxMorsel& morsel,
+                            const std::vector<SortKey>& keys,
+                            uint32_t row_group,
+                            std::vector<SeamKeyValue>* seam) {
+    const uint32_t rows = static_cast<uint32_t>(morsel.num_rows());
+
+    struct KeyColumn {
+        const DrakenVector* v;
+        const LogicalType*  lt;
+        bool                is_string;
+    };
+    std::vector<KeyColumn> columns(keys.size());
+
+    for (size_t k = 0; k < keys.size(); ++k) {
+        const SortKey& key = keys[k];
+        if (key.column_ordinal >= morsel.columns.size())
+            return fail(Code::kMalformed,
+                        "cluster key %zu names column ordinal %u but the morsel "
+                        "has %zu columns", k, key.column_ordinal,
+                        morsel.columns.size());
+        const CxxColumn& column = morsel.columns[key.column_ordinal];
+        const DrakenVector& v = column.view;
+
+        if (!type_has_min_max(v.type))
+            return fail(Code::kMalformed,
+                        "cluster key %zu ('%s') has physical type %u, which has "
+                        "no defined order — it cannot be a cluster key", k,
+                        morsel.names[key.column_ordinal].c_str(),
+                        static_cast<unsigned>(v.type));
+        const bool is_string = draken_type_is_string_storage(v.type) != 0;
+        if (is_string) {
+            const DrakenStringArena* sa =
+                static_cast<const DrakenStringArena*>(v.data);
+            if (sa == nullptr || sa->payloads_elided)
+                return fail(Code::kMalformed,
+                            "cluster key %zu ('%s') is a length-only string "
+                            "column; its values cannot be compared", k,
+                            morsel.names[key.column_ordinal].c_str());
+        }
+        columns[k] = KeyColumn{
+            &v, column.own != nullptr ? column.own->logical_type : nullptr,
+            is_string};
+    }
+
+    // One key value, read fresh from a row. `ordinal` is meaningless when
+    // is_null — a null has no ordinal and must never be compared as one.
+    auto read_key = [&](size_t k, uint32_t row, bool* is_null, int64_t* ordinal,
+                        const uint8_t** bytes, uint32_t* len) -> Status {
+        const KeyColumn& kc = columns[k];
+        *is_null = !cluster_row_is_valid(*kc.v, row);
+        if (*is_null) return Status::ok();
+        const uint32_t code = kc.v->selection[row];
+        if (!column_ordinal_at(*kc.v, kc.lt, code, ordinal))
+            return fail(Code::kMalformed,
+                        "cluster key %zu: no ordinal for row %u", k, row);
+        if (kc.is_string) cluster_string_bytes(*kc.v, code, bytes, len);
+        return Status::ok();
+    };
+
+    if (rows == 0) return Status::ok();  // nothing to order, seam unchanged
+
+    // ── The seam: previous row group's last row vs this one's first ──
+    if (!seam->empty() && (*seam)[0].captured) {
+        for (size_t k = 0; k < keys.size(); ++k) {
+            const SeamKeyValue& prev = (*seam)[k];
+            bool cur_null = false; int64_t cur_ord = 0;
+            const uint8_t* cur_bytes = nullptr; uint32_t cur_len = 0;
+            SKENE_RETURN_IF_ERROR(
+                read_key(k, 0, &cur_null, &cur_ord, &cur_bytes, &cur_len));
+
+            int ascending_cmp = 0;
+            if (!prev.is_null && !cur_null) {
+                ascending_cmp = prev.ordinal < cur_ord ? -1
+                              : prev.ordinal > cur_ord ? 1 : 0;
+                if (ascending_cmp == 0 && columns[k].is_string)
+                    ascending_cmp = compare_bytes(
+                        reinterpret_cast<const uint8_t*>(prev.bytes.data()),
+                        static_cast<uint32_t>(prev.bytes.size()),
+                        cur_bytes, cur_len);
+            }
+            const int order = file_order_compare(prev.is_null, cur_null,
+                                                 ascending_cmp,
+                                                 keys[k].descending != 0);
+            if (order < 0) break;
+            if (order > 0)
+                return fail(Code::kMalformed,
+                            "cluster_keys declares an order the rows do not "
+                            "have: row group %u row 0 sorts before the previous "
+                            "row group's last row on key %zu ('%s')", row_group,
+                            k, morsel.names[keys[k].column_ordinal].c_str());
+        }
+    }
+
+    // ── Every adjacent pair within the row group ──
+    for (uint32_t row = 1; row < rows; ++row) {
+        for (size_t k = 0; k < keys.size(); ++k) {
+            bool a_null = false, b_null = false;
+            int64_t a_ord = 0, b_ord = 0;
+            const uint8_t* a_bytes = nullptr; const uint8_t* b_bytes = nullptr;
+            uint32_t a_len = 0, b_len = 0;
+            SKENE_RETURN_IF_ERROR(
+                read_key(k, row - 1u, &a_null, &a_ord, &a_bytes, &a_len));
+            SKENE_RETURN_IF_ERROR(
+                read_key(k, row, &b_null, &b_ord, &b_bytes, &b_len));
+
+            int ascending_cmp = 0;
+            if (!a_null && !b_null) {
+                ascending_cmp = a_ord < b_ord ? -1 : a_ord > b_ord ? 1 : 0;
+                if (ascending_cmp == 0 && columns[k].is_string)
+                    ascending_cmp = compare_bytes(a_bytes, a_len, b_bytes, b_len);
+            }
+            const int order = file_order_compare(a_null, b_null, ascending_cmp,
+                                                 keys[k].descending != 0);
+            if (order < 0) break;   // strictly ordered on this key; later keys free
+            if (order > 0)
+                return fail(Code::kMalformed,
+                            "cluster_keys declares an order the rows do not "
+                            "have: row group %u rows %u and %u are out of order "
+                            "on key %zu ('%s')", row_group, row - 1u, row, k,
+                            morsel.names[keys[k].column_ordinal].c_str());
+            // order == 0: tied on this key, the next key decides.
+        }
+    }
+
+    // ── Capture the final row for the next seam ──
+    seam->assign(keys.size(), SeamKeyValue{});
+    for (size_t k = 0; k < keys.size(); ++k) {
+        SeamKeyValue& capture = (*seam)[k];
+        const uint8_t* bytes = nullptr; uint32_t len = 0;
+        SKENE_RETURN_IF_ERROR(read_key(k, rows - 1u, &capture.is_null,
+                                       &capture.ordinal, &bytes, &len));
+        capture.captured = true;
+        if (!capture.is_null && columns[k].is_string) {
+            capture.has_bytes = true;
+            capture.bytes.assign(reinterpret_cast<const char*>(bytes), len);
+        }
+    }
     return Status::ok();
 }
 
@@ -772,7 +1101,29 @@ void write_schema_entry(ByteWriter& w, const SchemaNode& node) {
     for (const SchemaNode& child : node.children) write_schema_entry(w, child);
 }
 
+Status validate_cluster_keys(const WriteOptions& options) {
+    for (size_t k = 0; k < options.cluster_keys.size(); ++k) {
+        const SortKey& key = options.cluster_keys[k];
+        if (key.reserved != 0)
+            return fail(Code::kMalformed,
+                        "cluster key %zu: reserved bytes are %u, not 0", k,
+                        key.reserved);
+        // draken's single sort null rule: NULLS FIRST ascending, LAST
+        // descending (format.h SortKey). A key written under any other rule is
+        // a DIFFERENT order wearing the same name, so it is rejected rather
+        // than recorded.
+        const bool expected_nulls_first = key.descending == 0;
+        if ((key.nulls_first != 0) != expected_nulls_first)
+            return fail(Code::kMalformed,
+                        "cluster key %zu: nulls_first=%u with descending=%u "
+                        "violates draken's sort rule (NULLS FIRST ascending, "
+                        "LAST descending)", k, key.nulls_first, key.descending);
+    }
+    return Status::ok();
+}
+
 Status validate_options(const WriteOptions& options) {
+    SKENE_RETURN_IF_ERROR(validate_cluster_keys(options));
     // `codec` and `zstd_level` describe one setting between them, so a
     // combination that means two different things is rejected rather than
     // resolved. A caller who sets a level and gets no zstd — or selects zstd and
@@ -816,6 +1167,9 @@ struct FileWriter::State {
     std::vector<SchemaNode> schema;
     // One entry per row group; each is the depth-first column order.
     std::vector<std::vector<StatSlot>> statistics;
+    // The previous row group's final key values, so the cluster order is
+    // verified ACROSS row groups, not merely within each.
+    std::vector<SeamKeyValue> cluster_seam;
 };
 
 FileWriter::FileWriter() : state_(new State()) {}
@@ -870,6 +1224,13 @@ Status FileWriter::add_row_group(const CxxMorsel& morsel) {
                     options.field_ids.size(), column_count);
 
     const uint32_t index = static_cast<uint32_t>(state_->row_groups.size());
+
+    // Cluster order is proved BEFORE a byte of this row group is written: a
+    // violation must leave the buffer untouched, not half a row group deep.
+    if (!options.cluster_keys.empty())
+        SKENE_RETURN_IF_ERROR(verify_cluster_order(morsel, options.cluster_keys,
+                                                   index, &state_->cluster_seam));
+
     ByteWriter w(state_->out);
 
     RowGroupEntry entry{};
@@ -997,6 +1358,30 @@ Status FileWriter::finish() {
 
     for (const RowGroupEntry& entry : state_->row_groups) w.pod(entry);
     for (const SchemaNode& node : state_->schema) write_schema_entry(w, node);
+
+    // ── Cluster spec (v2) ── between the schema and the statistics, so a
+    // pruning reader has the file's declared order from the file footer alone.
+    // Zero keys is the ordinary case and writes just the 4-byte header. The
+    // ordinals were verified against every row group's columns as they arrived;
+    // this checks them against the schema width once more because the spec is
+    // written against the SCHEMA's order, and an ordinal past it would be a
+    // record no reader could resolve.
+    {
+        if (options.cluster_keys.size() > UINT16_MAX)
+            return fail(Code::kMalformed, "%zu cluster keys exceed the 16-bit "
+                        "key count", options.cluster_keys.size());
+        for (const SortKey& key : options.cluster_keys)
+            if (key.column_ordinal >= state_->schema.size())
+                return fail(Code::kMalformed,
+                            "cluster key names column ordinal %u but the schema "
+                            "has %zu top-level columns", key.column_ordinal,
+                            state_->schema.size());
+        ClusterSpecHeader spec{};
+        spec.key_count = static_cast<uint16_t>(options.cluster_keys.size());
+        spec.reserved  = 0;
+        w.pod(spec);
+        for (const SortKey& key : options.cluster_keys) w.pod(key);
+    }
 
     // Per-row-group statistics: row group major, then the schema's depth-first
     // column order. Each blob carries its own length, so a reader that knows a

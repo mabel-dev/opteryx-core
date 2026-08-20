@@ -195,6 +195,12 @@ cdef extern from "skene/writer.h" namespace "skene" nogil:
                                                 vector[uint8_t]* out)
 
 
+cdef extern from "skene/migrate.h" namespace "skene" nogil:
+    Status c_migrate_file "skene::migrate_file"(const void* file, size_t file_bytes,
+                                                const WriteOptions& posture,
+                                                vector[uint8_t]* out)
+
+
 # ─── Error model ─────────────────────────────────────────────────────────────
 
 class SkeneError(Exception):
@@ -605,5 +611,29 @@ def write_morsel(Morsel morsel not None, *, read_acceleration=False,
     cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)
     with nogil:
         st = c_write_morsel(deref(sp), options, &out)
+    _check(st)
+    return PyBytes_FromStringAndSize(<char*>out.data(), <Py_ssize_t>out.size())
+
+
+def migrate(const unsigned char[::1] file not None, *,
+            read_acceleration=True, codec="none", zstd_level=0):
+    """Rewrite a version-(N-1) .skene file as version N, returning the bytes.
+
+    One hop only, per the format's migration contract (format.h): a build
+    migrates exactly its predecessor version. Provenance (file uuid, creation
+    time, writer tag, field ids) is carried from the source file; the posture
+    arguments here choose the REWRITE's encoding exactly as write_morsel's do.
+    A file already at the current version is refused — there is nothing to
+    migrate, and silently copying it would misreport what happened.
+    """
+    cdef WriteOptions options
+    cdef vector[uint8_t] out
+    cdef Status st
+
+    _fill_write_options(&options, read_acceleration, codec, zstd_level,
+                        None, 0.05, None, 0, "")
+    with nogil:
+        st = c_migrate_file(<const void*>&file[0], <size_t>file.shape[0],
+                            options, &out)
     _check(st)
     return PyBytes_FromStringAndSize(<char*>out.data(), <Py_ssize_t>out.size())

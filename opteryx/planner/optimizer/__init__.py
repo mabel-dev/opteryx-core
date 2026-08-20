@@ -43,6 +43,7 @@ from opteryx.planner.optimizer.strategies import (
     CastSimplificationStrategy,
     ConstantFoldingStrategy,
     CorrelatedFiltersStrategy,
+    SemiJoinPushdownStrategy,
     SemiJoinReducerStrategy,
     CrossJoinChainReorderStrategy,
     DecorrelateSubqueryStrategy,
@@ -99,6 +100,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "CastSimplificationStrategy": "disable_cast_simplification",
     "ConstantFoldingStrategy": "disable_constant_folding",
     "CorrelatedFiltersStrategy": "disable_correlated_filters",
+    "SemiJoinPushdownStrategy": "disable_semi_join_pushdown",
     "SemiJoinReducerStrategy": "disable_semi_join_reducer",
     "DecorrelateSubqueryStrategy": "disable_decorrelate_subquery",
     "CrossJoinFilterPushdownStrategy": "disable_cross_join_filter_pushdown",
@@ -220,6 +222,7 @@ class OptimizerVisitor:
             # Narrow a decorrelated subquery's leg to the keys the join can
             # consume. After pushdown, which is what makes the opposite leg
             # narrow enough to be worth copying.
+            SemiJoinPushdownStrategy(telemetry),  # costed pair; before the reducer, see its docstring
             SemiJoinReducerStrategy(telemetry),
             ManifestPruningStrategy(telemetry),  # Apply after predicate pushdown
             FilterImpliedGroupKeyReductionStrategy(telemetry),

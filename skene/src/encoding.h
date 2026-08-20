@@ -46,6 +46,14 @@ bool bitpack_encode_codes(const uint32_t* codes, uint32_t count,
 Status bitpack_decode_codes(const uint8_t* stored, uint64_t stored_bytes,
                             uint32_t count, uint32_t* out);
 
+// Packs an ARBITRARY uint32 array (v2 slot lanes), deriving the width from the
+// actual maximum — unlike bitpack_encode_codes, whose width comes from the
+// data_length bound the caller already holds. Same body layout, same decoder.
+//
+// Returns false when packing would not be smaller than plain.
+bool bitpack_encode_u32(const uint32_t* values, uint32_t count,
+                        std::vector<uint8_t>* out);
+
 // ─── Ascending integer data: kDeltaBitpack ──────────────────────────────────
 
 // True when `type` is a flat 4- or 8-byte integer-family type whose ascending

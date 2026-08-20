@@ -1,8 +1,0 @@
-{
-  "codec": "lz4",
-  "generator": "h2o generate_data.py --size medium -> parquet_to_skene lz4",
-  "listing_sha256": "ce75b90092827b874c01ea106049730b500b948c767664d313eb2e956e1f94d4",
-  "name": "h2o_skene",
-  "object_count": 74,
-  "total_bytes": 8682956209
-}

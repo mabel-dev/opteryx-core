@@ -80,16 +80,17 @@ static void test_version_window() {
 }
 
 static void test_record_layouts() {
-    CHECK_EQ(sizeof(SectionEntry), size_t{36});
+    CHECK_EQ(sizeof(SectionEntry), size_t{48});        // v2: codec + encoded_bytes
     CHECK_EQ(sizeof(ColumnEntryHead), size_t{80});
     CHECK_EQ(sizeof(RowGroupFooterHeader), size_t{48});
     CHECK_EQ(sizeof(FileFooterHeader), size_t{56});
     CHECK_EQ(sizeof(RowGroupEntry), size_t{56});
     CHECK_EQ(sizeof(SchemaEntryHead), size_t{20});
-    CHECK_EQ(sizeof(ColumnStatistics), size_t{48});
+    CHECK_EQ(sizeof(ColumnStatistics), size_t{56});    // v2: + ndv
     CHECK_EQ(sizeof(LogicalTypeDescriptor), size_t{12});
     CHECK_EQ(sizeof(ZoneMapEntry), size_t{16});
     CHECK_EQ(sizeof(SortKey), size_t{8});
+    CHECK_EQ(sizeof(ClusterSpecHeader), size_t{4});    // v2
 }
 
 // FORMAT.md documents every field's offset in byte tables, and a spec that
@@ -173,13 +174,16 @@ static void test_offsets_match_the_specification() {
     CHECK_EQ(offsetof(ColumnEntryHead, index_section_index), size_t{68});
     CHECK_EQ(offsetof(ColumnEntryHead, index_section_count), size_t{72});
 
-    // FORMAT.md §5.3 — section directory entry
+    // FORMAT.md §5.3 — section directory entry (v2 layout)
     CHECK_EQ(offsetof(SectionEntry, kind), size_t{0});
     CHECK_EQ(offsetof(SectionEntry, encoding), size_t{2});
-    CHECK_EQ(offsetof(SectionEntry, offset), size_t{4});
-    CHECK_EQ(offsetof(SectionEntry, stored_bytes), size_t{12});
-    CHECK_EQ(offsetof(SectionEntry, plain_bytes), size_t{20});
-    CHECK_EQ(offsetof(SectionEntry, checksum), size_t{28});
+    CHECK_EQ(offsetof(SectionEntry, codec), size_t{3});
+    CHECK_EQ(offsetof(SectionEntry, reserved), size_t{4});
+    CHECK_EQ(offsetof(SectionEntry, offset), size_t{8});
+    CHECK_EQ(offsetof(SectionEntry, stored_bytes), size_t{16});
+    CHECK_EQ(offsetof(SectionEntry, encoded_bytes), size_t{24});
+    CHECK_EQ(offsetof(SectionEntry, plain_bytes), size_t{32});
+    CHECK_EQ(offsetof(SectionEntry, checksum), size_t{40});
 
     // FORMAT.md §6 — logical type descriptor
     CHECK_EQ(offsetof(LogicalTypeDescriptor, kind), size_t{0});

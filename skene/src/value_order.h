@@ -41,6 +41,13 @@ struct OrderedColumn {
     std::vector<uint32_t> codes;         // one per logical row
     uint32_t              data_length = 0;
     uint8_t               flags = 0;     // recomputed, NOT inherited
+
+    // v2: distinct-count ESTIMATE from the KMV sketch, set ONLY on the
+    // string-family decline path — the one place the sketch runs. 0 means "no
+    // estimate was measured", never "zero distinct". When `applied` is true the
+    // exact answer is `data_length` and this stays 0; the writer must prefer
+    // the exact count and never write both spellings of the same fact.
+    double ndv_estimate = 0.0;
 };
 
 // Returns OK with out->applied == false when the column is not eligible; that
