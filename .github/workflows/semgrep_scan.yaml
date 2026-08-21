@@ -11,6 +11,9 @@ jobs:
   semgrep:
     name: Semgrep Analysis
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,7 +24,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install Semgrep, rugo, and upload client
-        run: python -m pip install --no-cache-dir semgrep rugo opteryx-upload
+        run: python -m pip install --no-cache-dir semgrep rugo "opteryx-upload>=0.6.0"
 
       - name: Report Tool Versions
         run: |
