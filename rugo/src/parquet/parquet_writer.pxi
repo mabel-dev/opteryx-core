@@ -72,6 +72,7 @@ from parquet_writer cimport (
     StreamingParquetWriter,
     PT_INT32,
     PT_INT64,
+    PT_FLOAT,
     PT_DOUBLE,
     PT_BOOLEAN,
     PT_BYTE_ARRAY,
@@ -271,6 +272,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     # the lifetime of the WriteParquet call below.
     cdef vector[vector[int32_t]] i32_store
     cdef vector[vector[int64_t]] i64_store
+    cdef vector[vector[float]] f32_store
     cdef vector[vector[double]] f64_store
     cdef vector[vector[uint8_t]] bool_store
     cdef vector[vector[StrSlice]] str_store
@@ -282,6 +284,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     codes_store.reserve(ncols)
     i32_store.reserve(ncols)
     i64_store.reserve(ncols)
+    f32_store.reserve(ncols)
     f64_store.reserve(ncols)
     bool_store.reserve(ncols)
     str_store.reserve(ncols)
@@ -308,6 +311,19 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
     cdef const DrakenStringSlot* slot
     cdef vector[int32_t] tmp32
     cdef vector[int64_t] tmp64
+    cdef vector[float] tmpf32
+    # Narrowed ARRAY-leaf buffers. The per-element loops below stage every
+    # integer leaf in `elem_i64` and every float leaf in `elem_f64` (one branch
+    # per source width, already written and tested); a single nogil pass then
+    # narrows the staged buffer to the leaf's OWN parquet width. Doing it here,
+    # rather than threading two more element kinds through every push site in
+    # those loops, keeps the change to one pass and one place. The pass is
+    # sequential, nogil and trivially vectorizable — cheap next to the
+    # push_back loop that just produced the buffer.
+    cdef vector[int32_t] elem_i32
+    cdef vector[float] elem_f32
+    cdef DrakenType leaf_draken_t
+    cdef Py_ssize_t e_n
     cdef vector[double] tmpf
     cdef vector[uint8_t] tmpb
     cdef vector[StrSlice] tmps
@@ -585,22 +601,25 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             ci.strs = str_store.back().data()
 
         elif t == DRAKEN_FLOAT32:
-            # widen losslessly to DOUBLE (every float32 is exact in float64)
-            tmpf = vector[double]()
+            # Written as parquet FLOAT, at its own width. This used to widen to
+            # DOUBLE — lossless per VALUE, but the file then declared float64 and
+            # every reader bound the column at 8 bytes, so a FLOAT32 column could
+            # not survive a rugo write/read round trip as FLOAT32.
+            tmpf32 = vector[float]()
             with nogil:
                 if dict_shape:
-                    tmpf.resize(dict_n)
+                    tmpf32.resize(dict_n)
                     for j in range(dict_n):
-                        tmpf[j] = (<const float*>dv.data)[j]
+                        tmpf32[j] = (<const float*>dv.data)[j]
                     did_preserve = True
                 else:
-                    tmpf.resize(nrows)
+                    tmpf32.resize(nrows)
                     for j in range(nrows):
-                        tmpf[j] = (<const float*>dv.data)[sel[j]]
+                        tmpf32[j] = (<const float*>dv.data)[sel[j]]
                     ci.dict_enabled = use_dict
-            f64_store.push_back(tmpf)
-            ci.type = PT_DOUBLE
-            ci.f64 = f64_store.back().data()
+            f32_store.push_back(tmpf32)
+            ci.type = PT_FLOAT
+            ci.f32 = f32_store.back().data()
 
         elif t == DRAKEN_TIME32 or t == DRAKEN_TIME64:
             unit = v._nb.logical_type_unit
@@ -774,7 +793,7 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                 # the leaf physical type is arbitrary -- fall back to INT32,
                 # the same convention as the DRAKEN_NULL column case above.
                 elem_kind = 0
-                ci.elem_type = PT_INT32
+                leaf_draken_t = DRAKEN_INT32
                 with nogil:
                     for j in range(nrows):
                         row_lvl_off.push_back(<uint32_t>rep_v.size())
@@ -811,21 +830,13 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                     leaf_val = leaf_dv.validity
                     ci.array_depth = 2
 
-                    if leaf_t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64):
+                    leaf_draken_t = leaf_t
+                    if leaf_t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
+                                  DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32,
+                                  DRAKEN_UINT64):
                         elem_kind = 0
-                        ci.elem_type = PT_INT64
-                    elif leaf_t in (DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32,
-                                    DRAKEN_UINT64):
-                        # Unsigned leaves widen to physical INT64 (lossless bit
-                        # reinterpret) + INTEGER(64, isSigned=false) annotation so a
-                        # conformant reader recovers the unsigned value.
-                        elem_kind = 0
-                        ci.elem_type = PT_INT64
-                        ci.is_unsigned = True
-                        ci.int_bit_width = 64
                     elif leaf_t == DRAKEN_FLOAT32 or leaf_t == DRAKEN_FLOAT64:
                         elem_kind = 1
-                        ci.elem_type = PT_DOUBLE
                     elif leaf_t == DRAKEN_BOOL:
                         elem_kind = 2
                         ci.elem_type = PT_BOOLEAN
@@ -934,17 +945,12 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
                         else:
                             row_elem_off.push_back(<uint32_t>elem_s.size())
                 else:
-                    if ct in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64):
+                    leaf_draken_t = ct
+                    if ct in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32, DRAKEN_INT64,
+                              DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64):
                         elem_kind = 0
-                        ci.elem_type = PT_INT64
-                    elif ct in (DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32, DRAKEN_UINT64):
-                        elem_kind = 0
-                        ci.elem_type = PT_INT64
-                        ci.is_unsigned = True
-                        ci.int_bit_width = 64
                     elif ct == DRAKEN_FLOAT32 or ct == DRAKEN_FLOAT64:
                         elem_kind = 1
-                        ci.elem_type = PT_DOUBLE
                     elif ct == DRAKEN_BOOL:
                         elem_kind = 2
                         ci.elem_type = PT_BOOLEAN
@@ -1040,11 +1046,63 @@ cdef _encode(Morsel morsel, str compression, bint want_bounds, object bloom_filt
             ci.is_array = True
             ci.type = PT_BYTE_ARRAY  # placeholder; element type drives output
             if elem_kind == 0:
-                i64_store.push_back(elem_i64); ci.i64 = i64_store.back().data()
-                ci.num_elements = i64_store.back().size()
+                # Same ruling as a scalar integer column: the leaf is stored at
+                # the narrowest physical type that holds its DECLARED width, with
+                # an INTEGER(bitWidth, isSigned) annotation where the physical
+                # type does not already say it. Leaves used to widen to INT64
+                # unconditionally (and every unsigned leaf claimed bitWidth 64),
+                # so a list<int32> read back as a list<int64> and the declared
+                # width was gone from the file.
+                if leaf_draken_t in (DRAKEN_INT8, DRAKEN_INT16, DRAKEN_INT32,
+                                     DRAKEN_UINT8, DRAKEN_UINT16, DRAKEN_UINT32):
+                    # The staged int64 holds the value; the low 32 bits ARE the
+                    # int32 slot, and for an unsigned value at or above 2**31
+                    # that slot is negative — the on-wire convention the
+                    # INTEGER(width, isSigned=false) annotation decodes.
+                    e_n = <Py_ssize_t>elem_i64.size()
+                    elem_i32 = vector[int32_t]()
+                    elem_i32.resize(e_n)
+                    with nogil:
+                        for j in range(e_n):
+                            elem_i32[j] = <int32_t>elem_i64[j]
+                    i32_store.push_back(elem_i32)
+                    ci.elem_type = PT_INT32
+                    ci.i32 = i32_store.back().data()
+                    ci.num_elements = i32_store.back().size()
+                else:
+                    i64_store.push_back(elem_i64); ci.i64 = i64_store.back().data()
+                    ci.elem_type = PT_INT64
+                    ci.num_elements = i64_store.back().size()
+                if leaf_draken_t == DRAKEN_INT8:
+                    ci.int_bit_width = 8
+                elif leaf_draken_t == DRAKEN_INT16:
+                    ci.int_bit_width = 16
+                elif leaf_draken_t == DRAKEN_UINT8:
+                    ci.is_unsigned = True; ci.int_bit_width = 8
+                elif leaf_draken_t == DRAKEN_UINT16:
+                    ci.is_unsigned = True; ci.int_bit_width = 16
+                elif leaf_draken_t == DRAKEN_UINT32:
+                    ci.is_unsigned = True; ci.int_bit_width = 32
+                elif leaf_draken_t == DRAKEN_UINT64:
+                    ci.is_unsigned = True; ci.int_bit_width = 64
+                # INT32 / INT64 leaves stay bare: the physical type already says
+                # exactly what they are (same rule as the scalar path).
             elif elem_kind == 1:
-                f64_store.push_back(elem_f64); ci.f64 = f64_store.back().data()
-                ci.num_elements = f64_store.back().size()
+                if leaf_draken_t == DRAKEN_FLOAT32:
+                    e_n = <Py_ssize_t>elem_f64.size()
+                    elem_f32 = vector[float]()
+                    elem_f32.resize(e_n)
+                    with nogil:
+                        for j in range(e_n):
+                            elem_f32[j] = <float>elem_f64[j]
+                    f32_store.push_back(elem_f32)
+                    ci.elem_type = PT_FLOAT
+                    ci.f32 = f32_store.back().data()
+                    ci.num_elements = f32_store.back().size()
+                else:
+                    f64_store.push_back(elem_f64); ci.f64 = f64_store.back().data()
+                    ci.elem_type = PT_DOUBLE
+                    ci.num_elements = f64_store.back().size()
             elif elem_kind == 2:
                 bool_store.push_back(elem_b); ci.boolean = bool_store.back().data()
                 ci.num_elements = bool_store.back().size()
@@ -1197,6 +1255,8 @@ cdef object _decode_bounds(list kinds, vector[ColumnStats]& stats):
         if ptype == <int>PT_INT64:
             bounds[i] = (int.from_bytes(mn, "little", signed=True),
                          int.from_bytes(mx, "little", signed=True))
+        elif ptype == <int>PT_FLOAT:
+            bounds[i] = (struct.unpack("<f", mn)[0], struct.unpack("<f", mx)[0])
         elif ptype == <int>PT_DOUBLE:
             bounds[i] = (struct.unpack("<d", mn)[0], struct.unpack("<d", mx)[0])
         elif ptype == <int>PT_BOOLEAN:
@@ -1403,10 +1463,11 @@ def patch_columns(bytes source not None, drop=None, rename=None, add=None,
         retype: {column_name: donor} - re-declare an existing column as the
             donor's type. Only the donor's ANNOTATION is used; its value is
             ignored. When the target's parquet physical type matches what is
-            already stored (INT8/INT16/INT32 all ride physical int32, and
-            FLOAT32 is already written as float64) the pages are copied
-            verbatim and this costs exactly what a rename costs. When it
-            differs - only physical int32 to int64 is supported - that ONE
+            already stored (INT8/INT16/INT32 all ride physical int32) the
+            pages are copied verbatim and this costs exactly what a rename
+            costs. When it differs - only physical int32 to int64 is
+            supported; FLOAT32 is stored as physical float, so a FLOAT32
+            <-> FLOAT64 retype is a physical change and is refused - that ONE
             column is decoded and re-encoded and every other column is still
             copied byte for byte.
 

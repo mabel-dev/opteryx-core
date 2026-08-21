@@ -22,6 +22,8 @@
 //   - Child (element) tags, all of which serialize_list_column can emit:
 //       CHILD_INT64(1) CHILD_INT32(2) CHILD_FLOAT32(3) CHILD_FLOAT64(4)
 //       CHILD_BOOL(5)  CHILD_STRING(6) CHILD_UINT64(7)  CHILD_ARRAY(8, nested)
+//       CHILD_INT8(9)  CHILD_INT16(10) CHILD_UINT8(11)  CHILD_UINT16(12)
+//       CHILD_UINT32(13)
 //     CHILD_ARRAY recurses, so list<list<...>> of arbitrary depth is handled the
 //     same way the Cython `_build_array_vector_nested` handles it.
 //   - Element types rugo CANNOT serialize (int96, fixed_len_byte_array/int128
@@ -71,6 +73,13 @@ enum : uint8_t {
     ARR_CHILD_STRING  = 6,
     ARR_CHILD_UINT64  = 7,
     ARR_CHILD_ARRAY   = 8,
+    // Narrow integer leaves (physical int32 + INTEGER(bitWidth, isSigned)).
+    // Appended; 1..8 never renumber.
+    ARR_CHILD_INT8    = 9,
+    ARR_CHILD_INT16   = 10,
+    ARR_CHILD_UINT8   = 11,
+    ARR_CHILD_UINT16  = 12,
+    ARR_CHILD_UINT32  = 13,
 };
 
 // Cheap structural bound check. The Cython reference does none of this — it trusts
@@ -215,6 +224,11 @@ inline std::unique_ptr<VectorOwner> build_array_level(const uint8_t*& p, const u
                 case ARR_CHILD_FLOAT32: child_type = DRAKEN_FLOAT32; elem_size = 4; break;
                 case ARR_CHILD_FLOAT64: child_type = DRAKEN_FLOAT64; elem_size = 8; break;
                 case ARR_CHILD_BOOL:    child_type = DRAKEN_BOOL;    elem_size = 0; break;
+                case ARR_CHILD_INT8:    child_type = DRAKEN_INT8;    elem_size = 1; break;
+                case ARR_CHILD_INT16:   child_type = DRAKEN_INT16;   elem_size = 2; break;
+                case ARR_CHILD_UINT8:   child_type = DRAKEN_UINT8;   elem_size = 1; break;
+                case ARR_CHILD_UINT16:  child_type = DRAKEN_UINT16;  elem_size = 2; break;
+                case ARR_CHILD_UINT32:  child_type = DRAKEN_UINT32;  elem_size = 4; break;
                 default:
                     err.code = 1;
                     err.msg = "build_pool_array_column: unsupported TAG_ARRAY child type tag";

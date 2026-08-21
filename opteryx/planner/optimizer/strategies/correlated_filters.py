@@ -9,11 +9,21 @@ Optimization Rule - Correlated Filters
 Type: Cost-based (consumes propagated statistics)
 Goal: Reduce Rows / IO
 
-For an equi-join ``a.k = b.k`` the matching rows on one side are bounded by the
-realized value range of the join key on the other side. We read that range from
-the propagated ``node.statistics`` (post-filter / post-join-intersection — see
-statistics_refresh) and push it onto the opposite leg's scan as a range
-predicate, so the scan can prune row groups and pre-filter rows before the join.
+For a join predicate ``a.k <op> b.k + delta`` the matching rows on one side are
+bounded by the realized value range of the correlated column on the other side.
+We read that range from the propagated ``node.statistics`` (post-filter /
+post-join-intersection — see statistics_refresh), SHIFT it by ``delta``, and push
+it onto the opposite leg's scan as a range predicate, so the scan can prune row
+groups and pre-filter rows before the join.
+
+An equi-join ``a.k = b.k`` is the zero-offset special case: it transports BOTH
+bounds. A band ``l.event_time > f.flow_start - INTERVAL '20' SECOND`` transports
+ONE — any match needs ``l.event_time`` above ``min(f.flow_start) - 20s`` — and a
+two-sided band is two such conjuncts, each contributing its own half. The
+necessary-condition argument is the same in all three cases; only the offset and
+the number of bounds differ. Strict comparators are transported as non-strict
+(``>`` becomes ``>=`` on the same value), which weakens the derived filter and so
+can only ever forgo pruning, never drop a matching row.
 
 This runs *after* PredicatePushdown so the original predicates are already on the
 scans and their effect is reflected in the propagated key ranges. The derived
@@ -24,17 +34,20 @@ instead. Only inner / nested-loop joins are eligible — the pushed range is a
 necessary condition for a match, which would be unsound for outer joins.
 """
 
-import datetime
 import decimal
 import math
 import struct
 
 from opteryx.expression import NodeType
+from opteryx.expression.intervals import MICROSECONDS_PER_DAY
 from opteryx.models import Node
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
+from opteryx.planner.optimizer.statistics import ColumnRange
+from opteryx.types.logical_type import INTERVAL
 from opteryx.types.logical_type import DrakenType
 from opteryx.types.logical_type import LogicalCategory
+from opteryx.types.logical_type import TimestampUnit
 from opteryx.types.logical_type import integer_bounds
 from opteryx.utils import random_string
 
@@ -69,9 +82,7 @@ def _key_value_range(stats, col):
     if col_stats is None:
         return None
     value_range = col_stats.value_range
-    if value_range is None or (
-        value_range.lower_bound is None and value_range.upper_bound is None
-    ):
+    if value_range is None or (value_range.lower_bound is None and value_range.upper_bound is None):
         return None
     return value_range
 
@@ -109,25 +120,101 @@ def _tightens(candidate, existing) -> bool:
     )
 
 
-def _get_equi_join_pairs(on_node):
+# Comparators whose truth over every joined pair implies a bound on each
+# operand. `NotEq` is deliberately absent: `a.k <> b.k` constrains neither side.
+# The value is (bounds carried onto the LEFT operand, bounds carried onto the
+# RIGHT operand), derived from `Lcol <op> Rcol + delta`:
+#
+#   Eq            L in [rlo+d, rhi+d]      R in [llo-d, lhi-d]
+#   Lt / LtEq     L <= rhi+d               R >= llo-d
+#   Gt / GtEq     L >= rlo+d               R <= lhi-d
+#
+# `Lt`/`Gt` collapse onto their non-strict partners on purpose — the pushed
+# predicate is only ever GtEq/LtEq, and relaxing a strict bound WIDENS the
+# derived filter. A wider necessary condition prunes less; it cannot drop a row.
+_TRANSPORTED_BOUNDS = {
+    "Eq": ("both", "both"),
+    "Lt": ("upper", "lower"),
+    "LtEq": ("upper", "lower"),
+    "Gt": ("lower", "upper"),
+    "GtEq": ("lower", "upper"),
+}
+
+
+def _unwrap_nested(expression):
+    """Strip NESTED (parenthesis) wrappers — `(a.k) = (b.k + 1)` is `a.k = b.k + 1`."""
+    while expression is not None and expression.node_type == NodeType.NESTED:
+        expression = expression.centre
+    return expression
+
+
+def _split_offset(operand):
+    """Decompose *operand* into ``(identifier, offset_terms)``, or None.
+
+    Accepted shapes are the ones that mean "this column, displaced by a
+    constant": a bare ``col``, ``col + lit``, ``col - lit`` and ``lit + col``.
+    ``lit - col`` is NOT of that form (it negates the column) and is rejected,
+    as is anything with a non-literal or multiplicative operand — `0.1 * b.ave`
+    scales the range rather than shifting it, and no additive delta describes it.
+
+    ``offset_terms`` is a list of ``(literal_node, sign)``. The literal's VALUE
+    is deliberately left uninterpreted here: an INTERVAL carries a
+    ``(months, microseconds)`` tuple that only becomes a number once the target
+    column's native unit is known (see `_resolve_offset`).
     """
-    Extract (left_col, right_col) identifier pairs from a (possibly AND-nested) equi-join
-    ON condition.  Returns an empty list for anything that isn't a col = col comparison.
+    operand = _unwrap_nested(operand)
+    if operand is None:
+        return None
+    if operand.node_type == NodeType.IDENTIFIER:
+        return (operand, [])
+    if operand.node_type != NodeType.BINARY_OPERATOR or operand.value not in ("Plus", "Minus"):
+        return None
+    left = _unwrap_nested(getattr(operand, "left", None))
+    right = _unwrap_nested(getattr(operand, "right", None))
+    if left is None or right is None:
+        return None
+    if left.node_type == NodeType.IDENTIFIER and right.node_type == NodeType.LITERAL:
+        return (left, [(right, 1 if operand.value == "Plus" else -1)])
+    if (
+        operand.value == "Plus"
+        and left.node_type == NodeType.LITERAL
+        and right.node_type == NodeType.IDENTIFIER
+    ):
+        return (right, [(left, 1)])
+    return None
+
+
+def _correlated_join_predicates(on_node):
+    """Extract transportable correlations from a (possibly AND-nested) ON condition.
+
+    Yields ``(left_col, right_col, offset_terms, left_bounds, right_bounds)``,
+    where ``offset_terms`` is the signed literal decomposition of ``delta`` in
+    ``left_col <op> right_col + delta`` and the two ``*_bounds`` say which of that
+    operand's bounds the comparator lets us carry ("both" / "upper" / "lower").
+
+    Anything that is not a comparison between two displaced identifiers yields
+    nothing — the pre-existing behaviour for every non-equi shape.
     """
     if on_node is None:
         return []
     if on_node.node_type == NodeType.AND:
-        return _get_equi_join_pairs(on_node.left) + _get_equi_join_pairs(on_node.right)
-    if (
-        on_node.node_type == NodeType.COMPARISON_OPERATOR
-        and on_node.value == "Eq"
-        and getattr(on_node, "left", None) is not None
-        and getattr(on_node, "right", None) is not None
-        and on_node.left.node_type == NodeType.IDENTIFIER
-        and on_node.right.node_type == NodeType.IDENTIFIER
-    ):
-        return [(on_node.left, on_node.right)]
-    return []
+        return _correlated_join_predicates(on_node.left) + _correlated_join_predicates(
+            on_node.right
+        )
+    if on_node.node_type != NodeType.COMPARISON_OPERATOR:
+        return []
+    sides = _TRANSPORTED_BOUNDS.get(on_node.value)
+    if sides is None:
+        return []
+    left = _split_offset(getattr(on_node, "left", None))
+    right = _split_offset(getattr(on_node, "right", None))
+    if left is None or right is None:
+        return []
+    left_col, left_offset = left
+    right_col, right_offset = right
+    # `Lcol + dl <op> Rcol + dr`  ==  `Lcol <op> Rcol + (dr - dl)`.
+    offset_terms = list(right_offset) + [(node, -sign) for node, sign in left_offset]
+    return [(left_col, right_col, offset_terms, sides[0], sides[1])]
 
 
 def _representable(bound, target_type) -> bool:
@@ -161,18 +248,53 @@ def _representable(bound, target_type) -> bool:
 # FLOAT64 constant. The compare kernel is identical-type only, so that pair
 # declines and the native ExprFilter (which has no fallback) hard-fails with
 # `err_op=11`. Every bound therefore gets re-expressed here, or dropped.
+#
+# DATE / TIME / TIMESTAMP are absent on purpose — see `_coerce_temporal_bound`.
+# A temporal bound never arrives as a `datetime`: `value_range` holds the
+# column's NATIVE ENCODING, an int. Listing `datetime.date` here would describe a
+# value this layer cannot receive.
 _CATEGORY_VALUE_TYPES = {
     LogicalCategory.BOOLEAN: bool,
     LogicalCategory.INTEGER: int,
     LogicalCategory.FLOAT: float,
     LogicalCategory.DECIMAL: decimal.Decimal,
-    LogicalCategory.DATE: datetime.date,
-    LogicalCategory.TIME: datetime.time,
-    LogicalCategory.TIMESTAMP: datetime.datetime,
     LogicalCategory.VARCHAR: str,
     LogicalCategory.NVARCHAR: str,
     LogicalCategory.VARBINARY: bytes,
 }
+
+
+# The native encoding a temporal bound is expressed in, and the physical width a
+# literal carrying it must fit. For the units admitted below (and ONLY those --
+# see the gate that follows), both inlets of `value_range` agree on this space:
+# a manifest bound is the parquet footer's raw int (µs for TIMESTAMP64, days for
+# DATE32), and a bound harvested from a predicate literal is the same int, because
+# `build_literal_node` has already run `timestamp_to_int64_us` / `date_to_int64_days`
+# on it. `build_literal_node` passes an int through UNTOUCHED, so handing the bound
+# straight back is an identity, not a conversion — which is precisely what keeps the
+# DATE32 hazard (a `datetime` silently converted to microseconds against a column
+# counting DAYS, giving a 1970 bound) out of this path: no `datetime` is involved.
+_TEMPORAL_NATIVE = {
+    LogicalCategory.TIMESTAMP: (DrakenType.TIMESTAMP64, (-(2**63), 2**63 - 1)),
+    LogicalCategory.DATE: (DrakenType.DATE32, (-(2**31), 2**31 - 1)),
+}
+
+# ⛔ A TIMESTAMP64 is admitted ONLY at MICROSECOND resolution, and that is a
+# CORRECTNESS gate, not caution. `predicate_pushdown._temporal_storage_scale_us`
+# looks like the general answer here — it maps DATE and every TIMESTAMP unit to a
+# µs scale — but it describes what a column STORES, and the two inlets of
+# `value_range` do not agree on that for a non-µs timestamp:
+#
+#   manifest inlet   `_scan_stats` records the parquet footer's raw int, so a
+#                    TIMESTAMP[ms] column contributes MILLISECONDS.
+#   predicate inlet  `_narrow_filter_columns` records a literal's value, and
+#                    `build_literal_node` has already run `timestamp_to_int64_us`
+#                    on it — so the SAME column contributes MICROSECONDS.
+#
+# For TIMESTAMP[us] and DATE the two coincide, which is what makes the identity
+# pass-through in `_coerce_temporal_bound` sound. Anywhere else the bound's unit is
+# not knowable from its type, and a bound read in the wrong unit is a silently
+# displaced window. Do not widen this by reaching for that helper.
 
 
 def _as_float(bound, target_type, keep_upper):
@@ -218,9 +340,18 @@ def _coerce_bound(bound, target_type, keep_upper):
         return bound  # untyped target — build_literal_node infers from the value
 
     category = target_type.category
+
+    if category in _TEMPORAL_NATIVE:
+        return _coerce_temporal_bound(bound, target_type, category)
+
     wanted = _CATEGORY_VALUE_TYPES.get(category)
     if wanted is None:
-        return None  # NULL / INTERVAL / VARIANT / ARRAY / VECTOR — no literal form
+        # NULL / INTERVAL / TIME / VARIANT / ARRAY / VECTOR — no literal form this
+        # layer can build. TIME is in that list by ruling, not by omission: the
+        # engine has no working TIME column type (a scan yields raw ints, CAST
+        # yields raw ticks, and the operator map has no TIME rows), so a bound
+        # pushed onto one would be compared in a space nothing else agrees on.
+        return None
 
     # bool is a subclass of int; a boolean bound is only ever a boolean bound.
     if isinstance(bound, bool) or wanted is bool:
@@ -256,18 +387,145 @@ def _coerce_bound(bound, target_type, keep_upper):
         # scale, and the quantize rounds in a direction this layer cannot see.
         return None
 
-    # TIMESTAMP is a datetime.datetime; DATE is a date that is NOT a datetime
-    # (build_literal_node converts a datetime to microseconds even when the
-    # target is DATE32, which is days — a silent 1970 bound).
-    if category is LogicalCategory.DATE:
-        return bound if type(bound) is datetime.date else None
     return bound if isinstance(bound, wanted) else None
+
+
+def _coerce_temporal_bound(bound, target_type, category):
+    """A TIMESTAMP / DATE bound re-expressed for a literal of *target_type*.
+
+    The bound is already in the target's native encoding (see
+    `_TEMPORAL_NATIVE`), so the work here is verification, not conversion:
+
+    * it must be an ``int`` — a float bound on a temporal column would mean an
+      inlet wrote a value `value_range` does not hold, and guessing at its unit
+      is exactly the mistake this whole path exists to avoid;
+    * a TIMESTAMP64 must be declared in MICROSECONDS. Other units are a real
+      possibility in a footer and the literal side has no unit-carrying spelling
+      to match them with, so they DECLINE rather than gamble on the tick size;
+    * the value must fit the physical width, or `vector_int32_from_constant`
+      dies with a bare OverflowError on materialisation.
+
+    Declining only forgoes pruning — the join still enforces the predicate.
+    """
+    physical, (low, high) = _TEMPORAL_NATIVE[category]
+    if type(bound) is not int:
+        return None
+    if getattr(target_type, "physical", None) is not physical:
+        return None
+    if category is LogicalCategory.TIMESTAMP:
+        logical = getattr(target_type, "logical", None)
+        if logical is None or logical.unit is not TimestampUnit.MICROSECONDS:
+            return None
+    if not low <= bound <= high:
+        return None
+    return bound
+
+
+def _resolve_offset(offset_terms, target_type):
+    """The signed sum of *offset_terms* in *target_type*'s native unit, or None.
+
+    Returns 0 for the no-offset case, which is every equi-join and every band
+    written without a displacement — the overwhelmingly common path, and one
+    that reaches the caller's arithmetic as an exact identity.
+
+    Everything else must be EXACT. A shifted bound that is off by any amount in
+    the tightening direction silently deletes joined rows, and nothing downstream
+    can tell that from a correct answer, so this declines wherever exactness is
+    not provable:
+
+    * INTEGER / FLOAT targets take integer terms only. `b.y + 0.5` on a float
+      column would make the sum a rounding question whose safe direction depends
+      on the bound's side, and the float's own ULP can exceed the offset.
+    * TIMESTAMP / DATE targets take INTERVAL terms only, and only the
+      ``(0, microseconds)`` ones. A months component is NOT a fixed displacement —
+      `interval_apply_to_temporal` applies it as calendar arithmetic with
+      end-of-month day clamping, so `+ INTERVAL '1' MONTH` shifts a January bound
+      by 31 days and a February one by 28. No single number describes it.
+    * A DATE32 target additionally needs the µs component to be a whole number of
+      DAYS. `d + INTERVAL '12' HOUR` compares in microsecond space (DATE ±
+      INTERVAL yields a TIMESTAMP64, per the kernel), where a half-day offset has
+      no exact day-unit spelling; it declines rather than round.
+    """
+    if not offset_terms:
+        return 0
+    category = target_type.category if target_type is not None else None
+    total = 0
+    for node, sign in offset_terms:
+        value = node.value
+        if category in _TEMPORAL_NATIVE:
+            if node.type != INTERVAL or not (isinstance(value, tuple) and len(value) == 2):
+                return None
+            months, microseconds = value
+            if months:
+                return None
+            if category is LogicalCategory.DATE:
+                if microseconds % MICROSECONDS_PER_DAY:
+                    return None
+                microseconds //= MICROSECONDS_PER_DAY
+            total += sign * microseconds
+            continue
+        if category not in (LogicalCategory.INTEGER, LogicalCategory.FLOAT):
+            return None
+        if type(value) is not int:
+            return None
+        total += sign * value
+    return total
+
+
+def _shifted(value_range, offset, keep):
+    """*value_range* displaced by *offset*, narrowed to the bounds in *keep*.
+
+    *keep* is "both" / "upper" / "lower": a band comparator establishes only one
+    end of the range on each operand, and dropping the other half here is what
+    lets `_range_conditions` — which already skips a None bound — emit the
+    one-sided filter unchanged.
+    """
+    lower = value_range.lower_bound if keep in ("both", "lower") else None
+    upper = value_range.upper_bound if keep in ("both", "upper") else None
+    if offset:
+        # Both bounds are ints whenever an offset survived `_resolve_offset`
+        # (integer terms for a numeric target, native-unit ints for a temporal
+        # one), so the displacement is exact addition, not a rounding step.
+        if lower is not None:
+            if type(lower) is not int:
+                return None
+            lower += offset
+        if upper is not None:
+            if type(upper) is not int:
+                return None
+            upper += offset
+    if lower is None and upper is None:
+        return None
+    return ColumnRange(lower_bound=lower, upper_bound=upper)
+
+
+def _column_type(col):
+    """The bound ColumnType behind an identifier node, or None."""
+    schema_column = getattr(col, "schema_column", None)
+    return getattr(schema_column, "column_type", None) if schema_column is not None else None
+
+
+def _comparable_encoding(source_type, target_type) -> bool:
+    """Does a bound read off *source_type* mean the same thing to a literal of
+    *target_type*?
+
+    For numbers, yes by construction: a `value_range` bound is a plain number and
+    `_coerce_bound` already re-expresses it for the target's width. For temporals
+    it is a UNIT question, and getting it wrong is a silently displaced window
+    rather than an error — days read as microseconds land every bound in 1970. So
+    require the two ColumnTypes to be identical (frozen dataclasses, so `==` is
+    structural) instead of inventing a conversion between two encodings this layer
+    cannot inspect. A DATE joined against a TIMESTAMP declines and prunes nothing.
+    """
+    if target_type is None or target_type.category not in _TEMPORAL_NATIVE:
+        return True
+    return source_type == target_type
 
 
 def _range_conditions(target_col, value_range):
     """Build GtEq/LtEq COMPARISON_OPERATOR condition Nodes pushing *value_range*
     (native, post-filter bounds) onto *target_col*, correctly typed."""
-    target_type = getattr(getattr(target_col, "schema_column", None), "column_type", None)
+    target_type = _column_type(target_col)
     conditions = []
     for bound, operator, keep_upper in (
         (value_range.upper_bound, "LtEq", True),
@@ -324,16 +582,51 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 if node_uuid:
                     uuid_to_nid[node_uuid] = nid
 
-            for left_key, right_key in _get_equi_join_pairs(node.on):
-                left_range = _key_value_range(join_stats, left_key)
-                right_range = _key_value_range(join_stats, right_key)
-                # Each key's realized range constrains the *other* leg's key.
-                if left_range is not None:
-                    self._push_range(context, node, right_key, left_range, uuid_to_nid)
-                if right_range is not None:
-                    self._push_range(context, node, left_key, right_range, uuid_to_nid)
+            for (
+                left_col,
+                right_col,
+                offset_terms,
+                left_bounds,
+                right_bounds,
+            ) in _correlated_join_predicates(node.on):
+                # The predicate reads `left_col <op> right_col + delta`. The
+                # right's realized range shifted FORWARD by delta bounds the left;
+                # the left's range shifted BACK by delta bounds the right.
+                self._transport(
+                    context, node, left_col, right_col, offset_terms, left_bounds, 1, uuid_to_nid
+                )
+                self._transport(
+                    context, node, right_col, left_col, offset_terms, right_bounds, -1, uuid_to_nid
+                )
 
         return context
+
+    def _transport(
+        self,
+        context,
+        join_node,
+        target_col,
+        source_col,
+        offset_terms,
+        keep,
+        direction,
+        uuid_to_nid,
+    ):
+        """Carry *source_col*'s realized range onto *target_col*, displaced by the
+        predicate's offset and narrowed to the bounds *keep* names."""
+        source_range = _key_value_range(getattr(join_node, "statistics", None), source_col)
+        if source_range is None:
+            return
+        target_type = _column_type(target_col)
+        if not _comparable_encoding(_column_type(source_col), target_type):
+            return
+        offset = _resolve_offset(offset_terms, target_type)
+        if offset is None:
+            return
+        shifted = _shifted(source_range, direction * offset, keep)
+        if shifted is None:
+            return
+        self._push_range(context, join_node, target_col, shifted, uuid_to_nid)
 
     def _push_range(self, context, join_node, target_col, value_range, uuid_to_nid):
         """Push *value_range* onto *target_col*'s scan(s): append to the scan's
@@ -393,7 +686,9 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             # join's. _intersect_join_keys has already replaced both keys'
             # ranges on the join node with their intersection, so at that level
             # every pair looks identical and nothing would ever push.
-            if not _tightens(value_range, _key_value_range(getattr(scan, "statistics", None), target_col)):
+            if not _tightens(
+                value_range, _key_value_range(getattr(scan, "statistics", None), target_col)
+            ):
                 continue
 
             connector = getattr(scan, "connector", None)

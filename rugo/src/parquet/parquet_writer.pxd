@@ -47,6 +47,7 @@ cdef extern from "_parquet_writer.hpp" namespace "rugo_pq_write":
         const uint8_t* validity
         const int32_t* i32
         const int64_t* i64
+        const float* f32
         const double* f64
         const uint8_t* boolean
         const StrSlice* strs

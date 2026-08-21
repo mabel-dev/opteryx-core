@@ -14,15 +14,22 @@ from opteryx.types.schema import SchemaColumn, RelationSchema
 # from `logical_type`.
 _DRAKEN_LK_IPV4 = 5
 
+# Parquet type spellings the SQL type grammar does not know, rewritten to ones
+# `parse_column_type` accepts. This map is applied to the WHOLE type string
+# (`_normalize_parquet_type_string`), so an entry here rewrites an ARRAY's
+# element as readily as a scalar.
+#
+# ⛔ NOTHING THAT CHANGES A WIDTH BELONGS HERE. This used to carry
+# float32/float64/float -> double and int8/16/32/64 -> integer, which meant
+# `array<int32>` normalised to `array<integer>` and bound as ARRAY<INT64>, and
+# `array<float32>` bound as ARRAY<FLOAT64> — the declared element width was
+# destroyed on the way in, while the scan produced the file's real width. That
+# is the declared-vs-actual divergence, one level down (see
+# `_integer_column_type` / `_float_column_type` for the scalar side).
+# `parse_column_type` reads every one of those spellings exactly, so the aliases
+# bought nothing and cost the width. What is left is only the spellings it
+# genuinely cannot parse.
 SQL_TYPE_ALIASES = {
-    "float": "double",
-    "float32": "double",
-    "float64": "double",
-    "int8": "integer",
-    "int16": "integer",
-    "int32": "integer",
-    "int64": "integer",
-    "bool": "boolean",
     "byte_array": "blob",
     "fixed_len_byte_array": "blob",
     "utf8": "varchar",
@@ -139,6 +146,44 @@ _INTEGER_PHYSICAL_WIDTHS = {
     "int32": "INT32",
     "int64": "INT64",
 }
+
+
+# Parquet float width → the exact ColumnType to declare. Same ruling as
+# `_INTEGER_*_WIDTHS` above, for the same reason: the scan decodes a parquet
+# float32 column as a FLOAT32 vector (pool_reader `_wrap_direct`), so declaring
+# it FLOAT64 leaves the plan disagreeing with the data. That is not cosmetic —
+# kernels are bound at PLAN time from the declared physical type, so a FLOAT64
+# binding over a FLOAT32 buffer reads eight bytes per element from a four-byte
+# column. Observed: `WHERE f32 > 0.25` over a five-row float32 parquet file
+# returned ZERO rows, silently, with no error and no pruning involved.
+#
+# Keys are the rugo footer's strings (metadata.cpp emits "float32"/"float64")
+# plus the parquet-spec spellings, so either source resolves.
+_FLOAT_WIDTHS = {
+    "float": "FLOAT32",  # parquet's own physical spelling for binary32
+    "float32": "FLOAT32",
+    "float64": "FLOAT64",
+    "double": "FLOAT64",
+}
+
+
+def _float_column_type(physical_type: Optional[str], logical_type: Optional[str]):
+    """The exact ColumnType for a float column, honouring the stored width.
+
+    Falls back to FLOAT64 only when neither the annotation nor the physical type
+    identifies a width — the same shape (and the same last-resort widening) as
+    `_integer_column_type`."""
+    from opteryx.types import logical_type as _lt
+
+    if logical_type:
+        name = _FLOAT_WIDTHS.get(logical_type.lower())
+        if name is not None:
+            return getattr(_lt, name)
+    if physical_type:
+        name = _FLOAT_WIDTHS.get(physical_type.lower())
+        if name is not None:
+            return getattr(_lt, name)
+    return _lt.FLOAT64
 
 
 def _integer_column_type(physical_type: Optional[str], logical_type: Optional[str]):
@@ -429,6 +474,11 @@ def rugo_to_relation_schema(
                 and _ct.element.category == LogicalCategory.TIMESTAMP
             ):
                 _ct = _lt.ARRAY(_lt.TIMESTAMP(_ts_unit))
+        elif sql_type == LogicalCategory.FLOAT:
+            # Declare the column's REAL width — _CATEGORY_TO_CANONICAL would hand
+            # back FLOAT64 for every float, contradicting the FLOAT32 vector the
+            # scan produces for a parquet float32 column. See _float_column_type.
+            _ct = _float_column_type(physical_type, logical_type)
         elif sql_type == LogicalCategory.INTEGER:
             # Declare the column's REAL width — _CATEGORY_TO_CANONICAL would hand
             # back INT64 for every integer, contradicting the exact-width vector

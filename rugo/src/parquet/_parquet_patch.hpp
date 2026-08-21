@@ -249,6 +249,7 @@ struct ConstantColumn {
 
   int32_t v_i32 = 0;
   int64_t v_i64 = 0;
+  float v_f32 = 0.0f;
   double v_f64 = 0.0;
   uint8_t v_bool = 0;
   // BYTE_ARRAY payload, or a DECIMAL/INTERVAL FLBA value in the
@@ -261,14 +262,15 @@ struct ConstantColumn {
 // Whether a repeated value of this physical type can be written as a
 // one-entry dictionary (PRESERVE mode: `codes` + `dict_count`).
 //
-// Only these four honour `codes` in encode_values/compute_stats - which is
+// Only these five honour `codes` in encode_values/compute_stats - which is
 // also exactly the set the writer's own auto-dictionary covers, so this is not
 // a limitation this file invents. BOOLEAN and FLBA index their buffers by ROW
 // there, so handing them codes would read past a one-entry buffer. They take
 // the plain path below instead: a full-length repeated buffer, which costs
 // transient memory but compresses to nothing.
 inline bool ptype_takes_dict_codes(PType t) {
-  return t == PT_INT32 || t == PT_INT64 || t == PT_DOUBLE || t == PT_BYTE_ARRAY;
+  return t == PT_INT32 || t == PT_INT64 || t == PT_FLOAT || t == PT_DOUBLE ||
+         t == PT_BYTE_ARRAY;
 }
 
 // Read a donor file: its column's shape, and the single value it holds.
@@ -347,6 +349,10 @@ inline ConstantColumn parse_donor(const uint8_t *src, size_t src_len) {
     need(8);
     std::memcpy(&cc.v_i64, val, 8);
     break;
+  case PT_FLOAT:
+    need(4);
+    std::memcpy(&cc.v_f32, val, 4);
+    break;
   case PT_DOUBLE:
     need(8);
     std::memcpy(&cc.v_f64, val, 8);
@@ -392,9 +398,14 @@ inline ConstantColumn parse_donor(const uint8_t *src, size_t src_len) {
 // which in the widening lattice means exactly one transition: physical INT32
 // (which carries declared INT8/INT16/INT32 and UINT8/UINT16/UINT32) to
 // physical INT64. Every other legal widening is an annotation change over
-// unchanged bytes - INT8 -> INT32 stays physical INT32, and FLOAT32 is already
-// written as physical float64 - so those go the copy-the-pages path and never
-// get here.
+// unchanged bytes - INT8 -> INT32 stays physical INT32 - so those go the
+// copy-the-pages path and never get here.
+//
+// FLOAT32 is stored as physical `float`, not widened to `double`, so a
+// FLOAT32 <-> FLOAT64 retype IS a physical change and is NOT supported: it
+// raises out of the guard below rather than mislabelling 4-byte pages as
+// 8-byte ones. (Before that change FLOAT32 was written as float64, so the
+// retype was a no-op annotation edit.)
 //
 // This is the one place in the patcher that decodes anything. It decodes ONE
 // column of ONE row group; every other column is still copied byte for byte.
@@ -768,6 +779,7 @@ inline std::vector<uint8_t> PatchParquetColumns(const uint8_t *src, size_t src_l
         switch (ci.type) {
         case PT_INT32:      ci.i32 = &cc.v_i32; break;
         case PT_INT64:      ci.i64 = &cc.v_i64; break;
+        case PT_FLOAT:      ci.f32 = &cc.v_f32; break;
         case PT_DOUBLE:     ci.f64 = &cc.v_f64; break;
         default:            ci.strs = &cc.v_str; break;  // PT_BYTE_ARRAY
         }

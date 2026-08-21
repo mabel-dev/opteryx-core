@@ -185,8 +185,15 @@ import draken.draken_native as _dn
 # the array constructor the child type when a list column carries no inferable
 # leaf value (every row null or empty) — see _make_array_vector.
 cdef int _DK_EL_VARCHAR = int(_dn.VARCHAR.value)
+cdef int _DK_EL_INT8 = int(_dn.INT8.value)
+cdef int _DK_EL_INT16 = int(_dn.INT16.value)
+cdef int _DK_EL_INT32 = int(_dn.INT32.value)
 cdef int _DK_EL_INT64 = int(_dn.INT64.value)
+cdef int _DK_EL_UINT8 = int(_dn.UINT8.value)
+cdef int _DK_EL_UINT16 = int(_dn.UINT16.value)
+cdef int _DK_EL_UINT32 = int(_dn.UINT32.value)
 cdef int _DK_EL_UINT64 = int(_dn.UINT64.value)
+cdef int _DK_EL_FLOAT32 = int(_dn.FLOAT32.value)
 cdef int _DK_EL_FLOAT64 = int(_dn.FLOAT64.value)
 cdef int _DK_EL_BOOL = int(_dn.BOOL.value)
 
@@ -1097,10 +1104,15 @@ cdef Vector _make_int64_vector(
     return _make_int_vector(decoded_col, num_rows, False)
 
 
-cdef Vector _make_float64_from_float32_vector(
+cdef Vector _make_float32_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, True)))
+    # A parquet `float` column becomes a FLOAT32 vector, not a widened FLOAT64
+    # one. `_float64_list` hands back Python floats (doubles) that each hold an
+    # exact binary32 value, so the narrowing here is exact by construction — it
+    # is the CARRIER that was wrong before, not the values: a FLOAT64-tagged
+    # vector makes every consumer read the column at 8 bytes.
+    return Vector(_dn.vector_float32_from_sequence(_float64_list(decoded_col, num_rows, True)))
 
 
 cdef Vector _make_int32_as_int64_vector(
@@ -1301,10 +1313,10 @@ cdef Vector _make_typed_float64_dictionary_vector(
     return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
 
 
-cdef Vector _make_typed_float64_from_float32_dictionary_vector(
+cdef Vector _make_typed_float32_dictionary_vector(
         parquet_reader.DecodedColumn& decoded_col,
         int32_t num_rows):
-    return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, True)))
+    return Vector(_dn.vector_float32_from_sequence(_float64_list(decoded_col, num_rows, True)))
 
 
 cdef Vector _make_typed_string_dictionary_vector(
@@ -1335,7 +1347,7 @@ cdef Vector _make_dictionary_vector(
     elif col_type == b"int64":
         return _make_typed_int64_dictionary_vector(decoded_col, num_rows)
     elif col_type == b"float32":
-        return _make_typed_float64_from_float32_dictionary_vector(decoded_col, num_rows)
+        return _make_typed_float32_dictionary_vector(decoded_col, num_rows)
     elif col_type == b"float64":
         return _make_typed_float64_dictionary_vector(decoded_col, num_rows)
 
@@ -1354,7 +1366,7 @@ cdef Vector _make_typed_constant_vector(
     if col_type == b"float64":
         return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, False)))
     if col_type == b"float32":
-        return Vector(_dn.vector_float64_from_sequence(_float64_list(decoded_col, num_rows, True)))
+        return Vector(_dn.vector_float32_from_sequence(_float64_list(decoded_col, num_rows, True)))
     if col_type == b"byte_array":
         return Vector(_dn.vector_from_string_sequence(_string_list(decoded_col, num_rows)))
     raise ValueError(f"unsupported constant column type: {col_type!r}")
@@ -1379,10 +1391,11 @@ cdef Vector _make_bool_vector(
 # a fresh sub-structure begins at depth r+1. A value is consumed from the leaf
 # stream only when def == max_def_level (present element).
 #
-# Element types: int32/int64 (-> INT64), float32/float64 (-> FLOAT64), bool,
-# and byte_array (-> VARCHAR str). Draken's vector_array_from_sequence detects
-# the child type from the leaf Python objects (bool before int), so leaves are
-# materialized as the matching Python scalar type.
+# Element types: int32/int64 and their unsigned/narrow annotations, float32/
+# float64, bool, and byte_array (-> VARCHAR str) — each kept at its DECLARED
+# width, never widened (see `_make_array_vector`). Leaf VALUES are materialized
+# as plain Python scalars (int / float / bool / str); the width is carried by
+# the `el_type` handed to `vector_array_from_sequence`, not inferred from them.
 
 
 cdef list _array_leaf_values(parquet_reader.DecodedColumn& col):
@@ -1542,13 +1555,35 @@ cdef Vector _make_array_vector(
     # the constructor knows to build ARRAY children above the leaf level.
     cdef bytes col_type = decoded_col.type
     cdef int el_type
+    # The element keeps its DECLARED width, exactly like a scalar column. The
+    # physical type alone does not carry it: parquet stores every integer
+    # narrower than 64 bits on physical int32/int64 plus an INTEGER(bitWidth,
+    # isSigned) annotation, which the decoder surfaces as
+    # `int_bit_width`/`is_unsigned`. Reading the annotation is what stops a
+    # list<int32> coming back as a list<int64> (values identical, type a lie).
+    cdef int32_t leaf_bits = decoded_col.int_bit_width
     if col_type == b"byte_array":
         el_type = _DK_EL_VARCHAR
-    elif col_type == b"int64" or col_type == b"int32":
-        # Unsigned leaf → UINT64 child so the draken constructor stores the
-        # full unsigned range (values were reinterpreted in _array_leaf_values).
+    elif col_type == b"int32":
+        if decoded_col.is_unsigned:
+            if leaf_bits == 8:
+                el_type = _DK_EL_UINT8
+            elif leaf_bits == 16:
+                el_type = _DK_EL_UINT16
+            else:
+                el_type = _DK_EL_UINT32
+        elif leaf_bits == 8:
+            el_type = _DK_EL_INT8
+        elif leaf_bits == 16:
+            el_type = _DK_EL_INT16
+        else:
+            # A bare physical int32 IS a 32-bit signed column — never widen it.
+            el_type = _DK_EL_INT32
+    elif col_type == b"int64":
         el_type = _DK_EL_UINT64 if decoded_col.is_unsigned else _DK_EL_INT64
-    elif col_type == b"float64" or col_type == b"float32":
+    elif col_type == b"float32":
+        el_type = _DK_EL_FLOAT32
+    elif col_type == b"float64":
         el_type = _DK_EL_FLOAT64
     elif col_type == b"boolean":
         el_type = _DK_EL_BOOL
@@ -1657,11 +1692,11 @@ cdef object _morsel_from_row_group(vector[parquet_reader.DecodedColumn]& row_gro
             if _should_emit_constant_vector(column, num_rows):
                 vec = _make_typed_constant_vector(column, num_rows)
             elif _should_emit_dictionary_vector(column, num_rows):
-                vec = _make_typed_float64_from_float32_dictionary_vector(column, num_rows)
+                vec = _make_typed_float32_dictionary_vector(column, num_rows)
             else:
                 if _decoded_has_dictionary(column):
                     _TEL["parquet_dict_materialize_fallbacks"] += 1
-                vec = _make_float64_from_float32_vector(column, num_rows)
+                vec = _make_float32_vector(column, num_rows)
             _TEL["cython_float_s"] += _time.perf_counter() - _t0
         elif column.type == b"float64":
             if _should_emit_constant_vector(column, num_rows):
@@ -2115,10 +2150,10 @@ def decode_column_from_chunk_to_python(chunk_bytes, col_stats):
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
         if _should_emit_dictionary_vector(result, num_rows):
-            return _make_typed_float64_from_float32_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
+            return _make_typed_float32_dictionary_vector(result, <int32_t>result.num_rows).to_pylist()
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
-        return _make_float64_from_float32_vector(result, num_rows).to_pylist()
+        return _make_float32_vector(result, num_rows).to_pylist()
     elif result.type == b"float64":
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, <int32_t>result.num_rows).to_pylist()
@@ -2307,10 +2342,10 @@ def decode_column_from_chunk(chunk_bytes, col_stats, row_mask=None):
         if _should_emit_constant_vector(result, num_rows):
             return _make_typed_constant_vector(result, num_rows)
         if _should_emit_dictionary_vector(result, num_rows):
-            return _make_typed_float64_from_float32_dictionary_vector(result, num_rows)
+            return _make_typed_float32_dictionary_vector(result, num_rows)
         if _decoded_has_dictionary(result):
             _TEL["parquet_dict_materialize_fallbacks"] += 1
-        return _make_float64_from_float32_vector(result, num_rows)
+        return _make_float32_vector(result, num_rows)
 
     elif result.type == b"float64":
         if _should_emit_constant_vector(result, num_rows):

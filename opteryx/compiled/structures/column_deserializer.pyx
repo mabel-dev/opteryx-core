@@ -165,8 +165,16 @@ DEF CHILD_FLOAT32 = 3
 DEF CHILD_FLOAT64 = 4
 DEF CHILD_BOOL    = 5
 DEF CHILD_STRING  = 6
-DEF CHILD_UINT64  = 7   # unsigned int leaf, widened to 64-bit
+DEF CHILD_UINT64  = 7   # 64-bit unsigned leaf
 DEF CHILD_ARRAY   = 8   # nested list child (recursive block)
+# Narrow integer leaves — parquet carries these as physical int32 plus an
+# INTEGER(bitWidth, isSigned) annotation, so they need tags of their own or the
+# declared width is lost on the wire. Appended; 1..8 never renumber.
+DEF CHILD_INT8    = 9
+DEF CHILD_INT16   = 10
+DEF CHILD_UINT8   = 11
+DEF CHILD_UINT16  = 12
+DEF CHILD_UINT32  = 13
 
 # sizeof(DrakenStringSlot) == 16 always (16-byte fixed-width slot, documented in string_slot.h).
 DEF SLOT_BYTES = 16
@@ -1088,6 +1096,21 @@ cdef object _build_array_vector_numeric(const uint8_t* p, uint32_t num_rows,
     elif child_type_tag == CHILD_FLOAT64:
         child_type = DRAKEN_FLOAT64
         elem_size = 8
+    elif child_type_tag == CHILD_INT8:
+        child_type = DRAKEN_INT8
+        elem_size = 1
+    elif child_type_tag == CHILD_INT16:
+        child_type = DRAKEN_INT16
+        elem_size = 2
+    elif child_type_tag == CHILD_UINT8:
+        child_type = DRAKEN_UINT8
+        elem_size = 1
+    elif child_type_tag == CHILD_UINT16:
+        child_type = DRAKEN_UINT16
+        elem_size = 2
+    elif child_type_tag == CHILD_UINT32:
+        child_type = DRAKEN_UINT32
+        elem_size = 4
     else:
         child_type = DRAKEN_BOOL
         elem_size = 0

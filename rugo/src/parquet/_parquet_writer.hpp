@@ -177,6 +177,11 @@ struct ColumnInput {
 
   const int32_t *i32 = nullptr;     // DATE32 (days)
   const int64_t *i64 = nullptr;     // INT64 / TIMESTAMP64
+  // FLOAT32 is written as parquet FLOAT (4 bytes), NOT widened to DOUBLE.
+  // Widening was lossless per value but not per COLUMN: the file then declares
+  // float64, so every reader — including opteryx's own schema inference — binds
+  // the column at 8 bytes and rugo cannot round-trip a 4-byte float at all.
+  const float *f32 = nullptr;
   const double *f64 = nullptr;
   const uint8_t *boolean = nullptr; // one byte per row, 0/1
   const StrSlice *strs = nullptr;   // one per row
@@ -220,7 +225,7 @@ struct ColumnInput {
   //   1. PRESERVE — the edge already holds a dictionary (the incoming
   //      DrakenVector was dict/constant-shaped). It sets `codes` (one dict
   //      code per logical row; null rows carry an arbitrary in-range code),
-  //      `dict_count`, and points the typed buffers (i32/i64/f64/strs) at the
+  //      `dict_count`, and points the typed buffers (i32/i64/f32/f64/strs) at the
   //      `dict_count` DICTIONARY VALUES rather than per-row values. `codes !=
   //      nullptr` is the discriminator for this mode: encode/stats/bloom then
   //      read value[codes[i]] for logical row i.
@@ -261,12 +266,14 @@ struct ColumnInput {
   // ---- ARRAY (LIST) columns ----
   // When `is_array`, this column is a list nested `array_depth` levels deep
   // (1 = list<scalar>, 2 = list<list<scalar>>). The leaf element values live in
-  // the typed buffers above (i32/i64/f64/boolean/strs), holding only the
+  // the typed buffers above (i32/i64/f32/f64/boolean/strs), holding only the
   // num_elements PRESENT elements in order; `elem_type`/`elem_is_utf8` describe
   // the leaf. `rep_levels`/`def_levels` hold `num_levels` entries under the
   // all-nullable nesting scheme (max_rep == array_depth, max_def ==
   // 2*array_depth + 1). `is_unsigned`/`int_bit_width` (above), when set,
-  // annotate the leaf element as unsigned.
+  // annotate the leaf element's declared width/signedness — the leaf is stored
+  // at its OWN physical width (INT8/16/32 and UINT8/16/32 on physical INT32,
+  // INT64/UINT64 on INT64, FLOAT32 on FLOAT), exactly like a scalar column.
   bool is_array = false;
   int array_depth = 1;
   PType elem_type = PT_INT64;
@@ -423,6 +430,14 @@ inline void encode_values(const ColumnInput &col, size_t num_rows,
     for (size_t i = 0; i < num_rows; i++)
       if (is_valid(col.validity, i))
         put_u64_le(out, (uint64_t)col.i64[i]);
+    break;
+  case PT_FLOAT:
+    for (size_t i = 0; i < num_rows; i++)
+      if (is_valid(col.validity, i)) {
+        uint32_t bits;
+        std::memcpy(&bits, &col.f32[i], 4);
+        put_u32_le(out, bits);
+      }
     break;
   case PT_DOUBLE:
     for (size_t i = 0; i < num_rows; i++)
@@ -603,6 +618,36 @@ inline ColumnStats compute_stats(const ColumnInput &col, size_t num_rows) {
     }
     break;
   }
+  case PT_FLOAT: {
+    // Same rules as PT_DOUBLE below, at binary32 width: NaN excluded from
+    // min/max (parquet spec), bytes written little-endian at the PHYSICAL
+    // width — a 4-byte column whose stats carry 8 bytes is unreadable.
+    bool any = false;
+    float lo = 0, hi = 0;
+    for (size_t i = 0; i < num_rows; i++) {
+      if (!is_valid(col.validity, i))
+        continue;
+      float v = col.f32[codes ? codes[i] : i];
+      if (v != v) // skip NaN (parquet: NaN excluded from min/max)
+        continue;
+      if (!any) {
+        lo = hi = v;
+        any = true;
+      } else {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+    if (any) {
+      st.has_minmax = true;
+      uint32_t b;
+      std::memcpy(&b, &lo, 4);
+      put_u32_le(st.min_bytes, b);
+      std::memcpy(&b, &hi, 4);
+      put_u32_le(st.max_bytes, b);
+    }
+    break;
+  }
   case PT_DOUBLE: {
     bool any = false;
     double lo = 0, hi = 0;
@@ -698,6 +743,11 @@ inline std::vector<uint64_t> bloom_hashes(const ColumnInput &col, size_t num_row
       int64_t v = col.i64[vi];
       std::memcpy(buf, &v, 8);
       hashes.push_back(bloom_hash(buf, 8));
+      break;
+    }
+    case PT_FLOAT: {
+      std::memcpy(buf, &col.f32[vi], 4);
+      hashes.push_back(bloom_hash(buf, 4));
       break;
     }
     case PT_DOUBLE: {
@@ -937,7 +987,8 @@ inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
   } else if (col.type == PT_BOOLEAN) {
     rows_per_page = max_page_bytes * 8; // ~1 bit/row (def-level overhead ignored, small)
   } else {
-    size_t width = (col.type == PT_INT32) ? 4 : 8; // INT32 vs INT64/DOUBLE
+    // 4-byte physical types (INT32, FLOAT) vs 8-byte (INT64, DOUBLE).
+    size_t width = (col.type == PT_INT32 || col.type == PT_FLOAT) ? 4 : 8;
     rows_per_page = max_page_bytes / width;
   }
   if (rows_per_page == 0) rows_per_page = 8;
@@ -951,6 +1002,7 @@ inline PageBuild build_data_pages(const ColumnInput &col, size_t rg_rows,
     ColumnInput sub = col;
     if (col.i32)     sub.i32     = col.i32     + start;
     if (col.i64)     sub.i64     = col.i64     + start;
+    if (col.f32)     sub.f32     = col.f32     + start;
     if (col.f64)     sub.f64     = col.f64     + start;
     if (col.boolean) sub.boolean = col.boolean + start;
     if (col.strs)    sub.strs    = col.strs    + start;
@@ -1008,7 +1060,12 @@ inline PageBuild build_array_data_pages(const ColumnInput &rg_col, int codec,
   } else if (rg_col.elem_type == PT_BOOLEAN) {
     elem_bytes = (rg_col.num_elements + 7) / 8;
   } else {
-    elem_bytes = rg_col.num_elements * 8; // INT64/DOUBLE-widened leaves
+    // Leaves are stored at their own width (INT32/FLOAT are 4 bytes, INT64/
+    // DOUBLE are 8) — this only sizes a page boundary, but an 8-byte assumption
+    // over a 4-byte leaf halves the rows a page holds for no reason.
+    const size_t elem_width =
+        (rg_col.elem_type == PT_INT32 || rg_col.elem_type == PT_FLOAT) ? 4 : 8;
+    elem_bytes = rg_col.num_elements * elem_width;
   }
   size_t approx_bytes = rg_col.num_levels * 2 /* rep+def, pre-RLE */ + elem_bytes;
   double bpr = rg_rows > 0 ? (double)approx_bytes / (double)rg_rows : 1.0;
@@ -1028,7 +1085,9 @@ inline PageBuild build_array_data_pages(const ColumnInput &rg_col, int codec,
     sub.def_levels   = rg_col.def_levels + lvl_s;
     sub.num_levels   = lvl_e - lvl_s;
     sub.num_elements = el_e - el_s;
+    if (rg_col.i32)     sub.i32     = rg_col.i32     + el_s;
     if (rg_col.i64)     sub.i64     = rg_col.i64     + el_s;
+    if (rg_col.f32)     sub.f32     = rg_col.f32     + el_s;
     if (rg_col.f64)     sub.f64     = rg_col.f64     + el_s;
     if (rg_col.boolean) sub.boolean = rg_col.boolean + el_s;
     if (rg_col.strs)    sub.strs    = rg_col.strs    + el_s;
@@ -1059,6 +1118,7 @@ static const uint32_t DICT_MAX_CARDINALITY = 1u << 20; // 1,048,576 entries
 struct BuiltDict {
   std::vector<int32_t> i32;
   std::vector<int64_t> i64;
+  std::vector<float> f32;
   std::vector<double> f64;
   std::vector<StrSlice> strs;
   std::vector<uint32_t> codes; // one code per logical row (null rows => 0)
@@ -1230,6 +1290,24 @@ inline bool dict_sample_looks_high_cardinality_f64(const double *vals, const uin
   return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
 }
 
+inline bool dict_sample_looks_high_cardinality_f32(const float *vals, const uint8_t *validity,
+                                                    size_t num_rows, size_t present) {
+  if (present <= DICT_SAMPLE_CAP)
+    return false;
+  const size_t stride = num_rows / DICT_SAMPLE_CAP;
+  std::unordered_set<uint32_t> seen;
+  size_t sampled = 0;
+  for (size_t i = 0; i < num_rows && sampled < DICT_SAMPLE_CAP; i += (stride ? stride : 1)) {
+    if (!is_valid(validity, i))
+      continue;
+    uint32_t bits;
+    std::memcpy(&bits, &vals[i], 4);
+    seen.insert(bits);
+    sampled++;
+  }
+  return sampled > 0 && (double)seen.size() / (double)sampled >= DICT_SAMPLE_DISTINCT_THRESHOLD;
+}
+
 inline bool dict_sample_looks_high_cardinality_str(const StrSlice *vals, const uint8_t *validity,
                                                     size_t num_rows, size_t present) {
   if (present <= DICT_SAMPLE_CAP)
@@ -1294,6 +1372,37 @@ inline bool build_double_dict(const double *vals, const uint8_t *validity,
       continue;
     uint64_t bits;
     std::memcpy(&bits, &vals[i], 8);
+    auto it = seen.find(bits);
+    if (it != seen.end()) {
+      codes[i] = it->second;
+    } else {
+      if (dict.size() >= cap)
+        return false;
+      uint32_t code = (uint32_t)dict.size();
+      seen.emplace(bits, code);
+      dict.push_back(vals[i]);
+      codes[i] = code;
+    }
+  }
+  return true;
+}
+
+// Keyed on the raw bits, like build_double_dict: -0.0 and +0.0 are distinct
+// dictionary entries and NaN payloads are preserved verbatim, so the dictionary
+// round-trips the exact stored value rather than an == -equivalent one.
+inline bool build_float_dict(const float *vals, const uint8_t *validity,
+                             size_t num_rows, size_t present,
+                             std::vector<float> &dict,
+                             std::vector<uint32_t> &codes) {
+  const size_t cap =
+      std::min<size_t>((size_t)DICT_MAX_CARDINALITY, present / 2);
+  std::unordered_map<uint32_t, uint32_t> seen;
+  codes.assign(num_rows, 0);
+  for (size_t i = 0; i < num_rows; i++) {
+    if (!is_valid(validity, i))
+      continue;
+    uint32_t bits;
+    std::memcpy(&bits, &vals[i], 4);
     auto it = seen.find(bits);
     if (it != seen.end()) {
       codes[i] = it->second;
@@ -1889,6 +1998,13 @@ inline void write_row_group_chunks(std::vector<uint8_t> &out, int64_t base_offse
                                                 rg_rows, present, bd.i64, bd.codes);
           if (built) { dcol.i64 = bd.i64.data(); dcol.dict_count = (uint32_t)bd.i64.size(); }
           break;
+        case PT_FLOAT:
+          if (!dict_sample_looks_high_cardinality_f32(rg_cols[i].f32, rg_cols[i].validity,
+                                                       rg_rows, present))
+            built = build_float_dict(rg_cols[i].f32, rg_cols[i].validity,
+                                     rg_rows, present, bd.f32, bd.codes);
+          if (built) { dcol.f32 = bd.f32.data(); dcol.dict_count = (uint32_t)bd.f32.size(); }
+          break;
         case PT_DOUBLE:
           if (!dict_sample_looks_high_cardinality_f64(rg_cols[i].f64, rg_cols[i].validity,
                                                        rg_rows, present))
@@ -2134,7 +2250,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
     // Build per-row-group column views by offsetting pointers.
     // Validity is bit-packed; rg_start is a multiple of 8 by construction so
     // the byte offset rg_start>>3 is exact.
-    // PRESERVE-dict columns (codes!=nullptr): dict buffers (i32/i64/f64/strs)
+    // PRESERVE-dict columns (codes!=nullptr): dict buffers (i32/i64/f32/f64/strs)
     // point at dictionary values, NOT per-row data — do not offset them.
     std::vector<ColumnInput> &rg_cols = all_rg_cols[rg];
     rg_cols.resize(cols.size());
@@ -2152,7 +2268,9 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
         rg_cols[i].def_levels  = cols[i].def_levels + lvl_start;
         rg_cols[i].num_levels  = lvl_end - lvl_start;
         rg_cols[i].num_elements = el_end - el_start;
+        if (cols[i].i32)     rg_cols[i].i32     = cols[i].i32     + el_start;
         if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + el_start;
+        if (cols[i].f32)     rg_cols[i].f32     = cols[i].f32     + el_start;
         if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + el_start;
         if (cols[i].boolean) rg_cols[i].boolean = cols[i].boolean + el_start;
         if (cols[i].strs)    rg_cols[i].strs    = cols[i].strs    + el_start;
@@ -2161,6 +2279,7 @@ inline std::vector<uint8_t> WriteParquet(const std::vector<ColumnInput> &cols,
       } else if (!cols[i].codes) {
         if (cols[i].i32)     rg_cols[i].i32     = cols[i].i32     + rg_start;
         if (cols[i].i64)     rg_cols[i].i64     = cols[i].i64     + rg_start;
+        if (cols[i].f32)     rg_cols[i].f32     = cols[i].f32     + rg_start;
         if (cols[i].f64)     rg_cols[i].f64     = cols[i].f64     + rg_start;
         if (cols[i].boolean) rg_cols[i].boolean = cols[i].boolean + rg_start;
         if (cols[i].strs)    rg_cols[i].strs    = cols[i].strs    + rg_start;
@@ -2251,7 +2370,7 @@ class StreamingParquetWriter {
     std::vector<ColumnInput> out = in;
     for (ColumnInput &c : out) {
       c.validity = nullptr;
-      c.i32 = nullptr; c.i64 = nullptr; c.f64 = nullptr;
+      c.i32 = nullptr; c.i64 = nullptr; c.f32 = nullptr; c.f64 = nullptr;
       c.boolean = nullptr; c.strs = nullptr; c.dec_raw = nullptr;
       c.codes = nullptr;
       c.rep_levels = nullptr; c.def_levels = nullptr;

@@ -3158,12 +3158,12 @@ class _Compiler:
             names,
             # Remote scans are admitted now that the gate accepts signable paths, so the
             # worker budget branches on the connector type exactly as the trampoline path
-            # does — a GCS scan is latency-bound and wants the wider budget.
+            # does — a remote scan (GCS, S3) is latency-bound and wants the wider budget.
             decode_workers=_resolve_var(
                 "parquet_gcs_io_workers",
                 getattr(scan.properties, "variables", None),
                 config.PARQUET_GCS_IO_WORKERS,
-            ) if connector_type in ("GCS", "GS") else _resolve_var(
+            ) if connector_type in ("GCS", "GS", "S3") else _resolve_var(
                 "parquet_local_io_workers",
                 getattr(scan.properties, "variables", None),
                 config.PARQUET_LOCAL_IO_WORKERS,
@@ -3361,7 +3361,7 @@ class _Compiler:
             "parquet_gcs_io_workers",
             getattr(scan.properties, "variables", None),
             config.PARQUET_GCS_IO_WORKERS,
-        ) if connector_type in ("GCS", "GS") else _resolve_var(
+        ) if connector_type in ("GCS", "GS", "S3") else _resolve_var(
             "parquet_local_io_workers",
             getattr(scan.properties, "variables", None),
             config.PARQUET_LOCAL_IO_WORKERS,

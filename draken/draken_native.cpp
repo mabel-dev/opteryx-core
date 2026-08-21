@@ -4657,20 +4657,42 @@ static VectorOwner take_child(const VectorOwner& src_child,
 // element_type < 0 / nesting_depth <= 0 selects the legacy value-only behaviour
 // (default DRAKEN_INT64 when nothing can be inferred).
 //
-// int-vs-uint is the one ambiguity value-inference can never resolve on its
-// own (a Python int looks the same either way) — so at the leaf level
-// (nesting_depth == 1), an explicit element_type == DRAKEN_UINT64 hint
-// overrides the value-inferred DRAKEN_INT64 rather than only being consulted
-// when every row is null/empty. Values must still fit uint64_t; nb::cast
-// raises OverflowError otherwise (same contract as vector_uint64_from_sequence).
+// WIDTH and int-vs-uint are what value-inference can never resolve on its own:
+// a Python int looks the same at every width and either signedness, and a
+// Python float the same at binary32 and binary64. So at the leaf level
+// (nesting_depth == 1) an explicit narrow/unsigned element_type OVERRIDES the
+// value-inferred DRAKEN_INT64/DRAKEN_FLOAT64 rather than only being consulted
+// when every row is null/empty. (DRAKEN_UINT64 already worked this way; the
+// other widths were silently ignored, so every ARRAY built here had an INT64 or
+// FLOAT64 child whatever the caller declared — a list<int32> read back from
+// parquet became a list<int64>, values identical and type a lie.) Values must
+// still fit the declared width; the narrow constructors raise OverflowError
+// otherwise, exactly as their scalar entry points do.
 // ---------------------------------------------------------------------------
 static VectorOwner make_array_from_sequence(
         nb::list seq, int element_type = -1, int nesting_depth = 0) {
     const uint32_t length = static_cast<uint32_t>(seq.size());
 
-    enum ChildType { CT_UNKNOWN, CT_INT64, CT_UINT64, CT_FLOAT64, CT_BOOL, CT_STRING, CT_ARRAY };
+    enum ChildType { CT_UNKNOWN, CT_INT8, CT_INT16, CT_INT32, CT_INT64,
+                     CT_UINT8, CT_UINT16, CT_UINT32, CT_UINT64,
+                     CT_FLOAT32, CT_FLOAT64, CT_BOOL, CT_STRING, CT_ARRAY };
     ChildType child_type = CT_UNKNOWN;
     const bool leaf_is_uint64 = (nesting_depth == 1) && (element_type == DRAKEN_UINT64);
+    // Declared leaf width wins over inference. Only at the leaf level, and only
+    // for the widths inference cannot reach — INT64/FLOAT64 are exactly what it
+    // already produces, and everything non-numeric still infers as before.
+    if (nesting_depth == 1) {
+        switch (element_type) {
+            case DRAKEN_INT8:    child_type = CT_INT8;    break;
+            case DRAKEN_INT16:   child_type = CT_INT16;   break;
+            case DRAKEN_INT32:   child_type = CT_INT32;   break;
+            case DRAKEN_UINT8:   child_type = CT_UINT8;   break;
+            case DRAKEN_UINT16:  child_type = CT_UINT16;  break;
+            case DRAKEN_UINT32:  child_type = CT_UINT32;  break;
+            case DRAKEN_FLOAT32: child_type = CT_FLOAT32; break;
+            default: break;
+        }
+    }
 
     // Pass 1: detect child type, compute offsets, collect flat child elements.
     std::vector<int32_t> offsets(length + 1u);
@@ -4730,7 +4752,14 @@ static VectorOwner make_array_from_sequence(
                 case DRAKEN_VARCHAR:
                 case DRAKEN_NVARCHAR:
                 case DRAKEN_VARBINARY: child_type = CT_STRING;  break;
+                case DRAKEN_FLOAT32:   child_type = CT_FLOAT32; break;
                 case DRAKEN_FLOAT64:   child_type = CT_FLOAT64; break;
+                case DRAKEN_INT8:      child_type = CT_INT8;    break;
+                case DRAKEN_INT16:     child_type = CT_INT16;   break;
+                case DRAKEN_INT32:     child_type = CT_INT32;   break;
+                case DRAKEN_UINT8:     child_type = CT_UINT8;   break;
+                case DRAKEN_UINT16:    child_type = CT_UINT16;  break;
+                case DRAKEN_UINT32:    child_type = CT_UINT32;  break;
                 case DRAKEN_BOOL:      child_type = CT_BOOL;    break;
                 case DRAKEN_ARRAY:     child_type = CT_ARRAY;   break;
                 case DRAKEN_INT64:     child_type = CT_INT64;   break;
@@ -4793,12 +4822,40 @@ static VectorOwner make_array_from_sequence(
             child = std::make_unique<VectorOwner>(make_array_from_sequence(
                 flat_children, element_type, nesting_depth - 1));
             break;
+        case CT_FLOAT32:
+            child = std::make_unique<VectorOwner>(
+                make_float_from_sequence<float, DRAKEN_FLOAT32>(flat_children));
+            break;
         case CT_FLOAT64:
             child = std::make_unique<VectorOwner>(
                 make_float_from_sequence<double, DRAKEN_FLOAT64>(flat_children));
             break;
         case CT_BOOL:
             child = std::make_unique<VectorOwner>(make_bool_from_sequence(flat_children));
+            break;
+        case CT_INT8:
+            child = std::make_unique<VectorOwner>(
+                make_narrow_int_from_sequence<int8_t, DRAKEN_INT8>(flat_children, "int8"));
+            break;
+        case CT_INT16:
+            child = std::make_unique<VectorOwner>(
+                make_narrow_int_from_sequence<int16_t, DRAKEN_INT16>(flat_children, "int16"));
+            break;
+        case CT_INT32:
+            child = std::make_unique<VectorOwner>(
+                make_narrow_int_from_sequence<int32_t, DRAKEN_INT32>(flat_children, "int32"));
+            break;
+        case CT_UINT8:
+            child = std::make_unique<VectorOwner>(
+                make_narrow_int_from_sequence<uint8_t, DRAKEN_UINT8>(flat_children, "uint8"));
+            break;
+        case CT_UINT16:
+            child = std::make_unique<VectorOwner>(
+                make_narrow_int_from_sequence<uint16_t, DRAKEN_UINT16>(flat_children, "uint16"));
+            break;
+        case CT_UINT32:
+            child = std::make_unique<VectorOwner>(
+                make_narrow_int_from_sequence<uint32_t, DRAKEN_UINT32>(flat_children, "uint32"));
             break;
         case CT_UINT64:
             child = std::make_unique<VectorOwner>(make_uint64_from_sequence(flat_children));

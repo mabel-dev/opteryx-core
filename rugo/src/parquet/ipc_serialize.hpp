@@ -606,8 +606,11 @@ static void serialize_string_plain(ByteSink& out, const DecodedColumn& col) {
 //   uint32_t  num_rows          (outer row count, e.g. 357)
 //   uint32_t  list_null_bmap_len
 //   uint8_t[list_null_bmap_len] list_null_bmap  (bit i=1: row i has non-null list)
-//   uint8_t   child_type_tag    (CHILD_STRING=6, CHILD_INT64=1, CHILD_INT32=2,
-//                                 CHILD_FLOAT32=3, CHILD_FLOAT64=4, CHILD_BOOL=5)
+//   uint8_t   child_type_tag    (CHILD_INT64=1, CHILD_INT32=2, CHILD_FLOAT32=3,
+//                                 CHILD_FLOAT64=4, CHILD_BOOL=5, CHILD_STRING=6,
+//                                 CHILD_UINT64=7, CHILD_ARRAY=8, CHILD_INT8=9,
+//                                 CHILD_INT16=10, CHILD_UINT8=11, CHILD_UINT16=12,
+//                                 CHILD_UINT32=13)
 //   uint32_t  child_count       (total child slots, e.g. 869)
 //   int32_t[(num_rows+1)]       offsets         (Arrow-style child start indices)
 //   uint32_t  child_null_bmap_len (0 if no null child elements)
@@ -628,8 +631,20 @@ static const uint8_t CHILD_FLOAT32 = 3;
 static const uint8_t CHILD_FLOAT64 = 4;
 static const uint8_t CHILD_BOOL    = 5;
 static const uint8_t CHILD_STRING  = 6;
-static const uint8_t CHILD_UINT64  = 7;   // unsigned int leaf, widened to 64-bit
+static const uint8_t CHILD_UINT64  = 7;   // 64-bit unsigned leaf
 static const uint8_t CHILD_ARRAY   = 8;   // nested list child (recursive block)
+// Narrow integer leaves. Parquet carries these as physical int32 plus an
+// INTEGER(bitWidth, isSigned) annotation, so the DECLARED width lives in
+// `col.int_bit_width` / `col.is_unsigned`, not in `col.type`. Without a tag of
+// their own every one of them arrived as INT32 (signed) or UINT64 (unsigned),
+// which is the declared-vs-actual divergence one level down: the plan binds
+// ARRAY<INT8> from the file's annotation while the vector carries INT32.
+// Tags are appended, never renumbered — 1..8 keep their meaning.
+static const uint8_t CHILD_INT8    = 9;
+static const uint8_t CHILD_INT16   = 10;
+static const uint8_t CHILD_UINT8   = 11;
+static const uint8_t CHILD_UINT16  = 12;
+static const uint8_t CHILD_UINT32  = 13;
 
 static inline int32_t _decode_packed_parquet_code(const uint8_t* arr, size_t idx, uint8_t width) {
     if (width == 1) return static_cast<int32_t>(arr[idx]);
@@ -663,18 +678,25 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
     const int32_t max_def  = col.max_def_level;
     const size_t  n_levels = col.rep_levels.size();
 
-    // Leaf (innermost element) wire tag from the element's physical type. An
-    // unsigned int leaf is widened to 64-bit unsigned (CHILD_UINT64) so the full
-    // range survives — matching the Cython Path-A reader (_make_array_vector).
+    // Leaf (innermost element) wire tag from the element's DECLARED type: the
+    // physical type plus the INTEGER(bitWidth, isSigned) annotation, exactly as a
+    // scalar column resolves it. A bare physical int32/int64 (int_bit_width == 0)
+    // IS a 32/64-bit signed leaf and must not be widened.
     uint8_t leaf_tag;
+    const int32_t leaf_bits = col.int_bit_width;
     if (col.type == "string" || col.type == "byte_array") {
         leaf_tag = CHILD_STRING;
     } else if ((col.type == "int64" || col.type == "int32") && col.is_unsigned) {
-        leaf_tag = CHILD_UINT64;
+        if (leaf_bits == 8)       leaf_tag = CHILD_UINT8;
+        else if (leaf_bits == 16) leaf_tag = CHILD_UINT16;
+        else if (leaf_bits == 32) leaf_tag = CHILD_UINT32;
+        else                      leaf_tag = CHILD_UINT64;
     } else if (col.type == "int64") {
         leaf_tag = CHILD_INT64;
     } else if (col.type == "int32") {
-        leaf_tag = CHILD_INT32;
+        if (leaf_bits == 8)       leaf_tag = CHILD_INT8;
+        else if (leaf_bits == 16) leaf_tag = CHILD_INT16;
+        else                      leaf_tag = CHILD_INT32;
     } else if (col.type == "float32") {
         leaf_tag = CHILD_FLOAT32;
     } else if (col.type == "float64") {
@@ -725,7 +747,10 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
 
     const uint32_t elem_size = (leaf_tag == CHILD_INT64 || leaf_tag == CHILD_FLOAT64 ||
                                 leaf_tag == CHILD_UINT64) ? 8
-                             : (leaf_tag == CHILD_INT32 || leaf_tag == CHILD_FLOAT32) ? 4
+                             : (leaf_tag == CHILD_INT32 || leaf_tag == CHILD_FLOAT32 ||
+                                leaf_tag == CHILD_UINT32) ? 4
+                             : (leaf_tag == CHILD_INT16 || leaf_tag == CHILD_UINT16) ? 2
+                             : (leaf_tag == CHILD_INT8  || leaf_tag == CHILD_UINT8)  ? 1
                              : 0;
 
     // Load one fixed-width leaf value into raw[0..elem_size). `idx` indexes the
@@ -736,8 +761,22 @@ static void serialize_list_column(ByteSink& out, const DecodedColumn& col) {
                 std::memcpy(raw, from_dict ? &col.dict_int64_values[idx] : &col.int64_values[idx], 8);
                 break;
             case CHILD_INT32:
+            case CHILD_UINT32:
                 std::memcpy(raw, from_dict ? &col.dict_int32_values[idx] : &col.int32_values[idx], 4);
                 break;
+            case CHILD_INT8:
+            case CHILD_INT16:
+            case CHILD_UINT8:
+            case CHILD_UINT16: {
+                // Narrow leaves ride physical int32 — signed values are
+                // sign-extended in the slot, unsigned ones zero-extended, so on a
+                // little-endian wire the declared value is exactly the low
+                // `elem_size` bytes of that slot either way.
+                const int32_t v = from_dict ? col.dict_int32_values[idx]
+                                            : col.int32_values[idx];
+                std::memcpy(raw, &v, elem_size);
+                break;
+            }
             case CHILD_FLOAT32:
                 std::memcpy(raw, from_dict ? &col.dict_float32_values[idx] : &col.float32_values[idx], 4);
                 break;

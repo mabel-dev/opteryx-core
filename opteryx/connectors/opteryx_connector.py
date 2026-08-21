@@ -18,19 +18,59 @@ from opteryx.connectors import TableType
 
 logger = logging.getLogger(__name__)
 
-# One-shot guard so a catalog too old to expose native sketch vectors reports the
-# degraded (Python-fallback) stats path once per process instead of silently.
-_warned_no_native_sketches = False
+# One-shot guard for the "backend has no native sketch vectors" report, keyed by
+# the CLASS that failed the probe rather than by process. A global flag meant the
+# first backend to degrade silenced every other one for the life of the process,
+# so in a deployment mixing a native workspace with a third-party one you only
+# ever heard about whichever happened to be read first - and the line named no
+# dataset, so you could not tell which.
+_warned_no_native_sketches: set = set()
 
 
-def _warn_no_native_sketches() -> None:
-    global _warned_no_native_sketches
-    if not _warned_no_native_sketches:
-        _warned_no_native_sketches = True
+def _warn_no_native_sketches(table: Any) -> None:
+    """Report, once per backend class, that a table exposes no sketch vectors.
+
+    Do not prescribe an upgrade unconditionally here. `manifest_sketch_vectors`
+    is probed by duck typing against whatever `Dataset` implementation the
+    workspace is registered with, and a missing accessor has two unrelated
+    causes:
+
+      * an opteryx_catalog older than the accessor - genuinely stale, and
+        upgrading is the fix, so this is a WARNING; or
+      * a catalog backend whose format simply has no sketch statistics to give.
+        Apache Iceberg is the case in point: its manifests have no field for
+        NDV/histogram sketches, so no version of opteryx_catalog would add them
+        and "upgrade opteryx_catalog" is advice the operator cannot act on. That
+        is a property of the format, not a fault, so it is logged at DEBUG.
+
+    The two are told apart by where the implementing class comes from, which is
+    the only thing the engine actually knows. Third-party backends should define
+    the accessor and return `{}` to declare "no sketches" explicitly rather than
+    relying on this path.
+    """
+    cls = type(table)
+    key = f"{cls.__module__}.{cls.__qualname__}"
+    if key in _warned_no_native_sketches:
+        return
+    _warned_no_native_sketches.add(key)
+
+    native = cls.__module__.split(".")[0] == "opteryx_catalog"
+    detail = (
+        f"{key} does not implement manifest_sketch_vectors, so whole-column "
+        f"NDV/histogram sketches are not available natively; the planner uses the "
+        f"per-file Python fallback where per-file sketch stats exist, and no sketch "
+        f"statistics at all where they do not."
+    )
+    if native:
         logger.warning(
-            "Catalog does not expose manifest_sketch_vectors; manifest statistics "
-            "(NDV / histogram) fall back to the slower Python path. Upgrade the "
-            "opteryx_catalog package to enable native sketch reductions."
+            f"{detail} This is an opteryx_catalog dataset predating the accessor - "
+            f"upgrade opteryx_catalog to enable native sketch reductions."
+        )
+    else:
+        logger.debug(
+            f"{detail} This is a non-opteryx_catalog backend; if its format carries "
+            f"no sketch statistics this is expected and the backend should define "
+            f"manifest_sketch_vectors returning an empty dict to say so."
         )
 from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Diachronic, Eidetic, PredicatePushable, Writable
@@ -464,15 +504,20 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
 
         # Whole-column native sketch vectors (min_k_hashes / histogram_counts) from
         # the same cached manifest read, so the planner reduces them with native
-        # kernels instead of the per-file boxed lists. A catalog that predates this
-        # accessor keeps working via the Manifest's Python fallback — but that
-        # degradation is announced once (not silent) so a stale catalog is visible.
+        # kernels instead of the per-file boxed lists. A backend that does not
+        # implement the accessor keeps working - via the Manifest's Python
+        # fallback if it emits per-file sketch stats, and with no sketches at all
+        # if it does not - and _warn_no_native_sketches reports which of those it
+        # is, once per backend class, at a severity matching whether it is
+        # actually fixable. Note this branch is NOT reached by a backend that
+        # implements the accessor and returns {} to declare "no sketches"; that
+        # is the supported way to say so and is not reported at all.
         sketch_vectors_fn = getattr(self.table, "manifest_sketch_vectors", None)
         if sketch_vectors_fn is not None:
             sketch_vectors = sketch_vectors_fn(self.snapshot_id)
         else:
             sketch_vectors = {}
-            _warn_no_native_sketches()
+            _warn_no_native_sketches(self.table)
 
         # Create Manifest with files and schema.
         #

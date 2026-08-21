@@ -243,8 +243,16 @@ def test_interval_roundtrip():
 
 
 def test_float32_time_via_vectors():
-    """FLOAT32 widens to double; TIME32/64 keep time semantics. Built directly
-    since opteryx SQL has no CAST AS FLOAT / TIME producer."""
+    """FLOAT32 stays parquet `float`; TIME32/64 keep time semantics. Built
+    directly since opteryx SQL has no CAST AS FLOAT / TIME producer.
+
+    ⛔ This assertion was `== "double"` until 2026-08-21. The writer widened
+    FLOAT32 to a parquet float64 column — lossless per VALUE, but the file then
+    DECLARED float64, so no reader could recover the 4-byte column and rugo
+    could not round-trip a FLOAT32 vector at all. A declared width that is not
+    the stored width is the whole silent-wrong-rows class (see
+    `tests/sql/test_narrow_width_column_predicates.py`), so the physical type
+    is pinned here, not just the values."""
     import datetime
     import draken.draken_native as dn
     from draken.vectors.vector import Vector
@@ -256,7 +264,7 @@ def test_float32_time_via_vectors():
         return types[name], cols[name]
 
     ty, vals = one("f", dn.vector_float32_from_sequence([1.5, 2.25, None]))
-    assert ty == "double" and vals == [1.5, 2.25, None]
+    assert ty == "float" and vals == [1.5, 2.25, None]
 
     times = [datetime.time(1, 0, 0), datetime.time(23, 59, 59), None]
     ty, vals = one("t32", dn.vector_time32_from_sequence(times, "ms"))

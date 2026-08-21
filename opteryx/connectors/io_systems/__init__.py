@@ -2,12 +2,13 @@
 Custom filesystem implementations for Opteryx I/O operations.
 
 Provides memory-view-based readers and stream wrappers for optimal performance
-across local, GCS, and HTTP storage backends.
+across local, GCS, S3, and HTTP storage backends.
 """
 
 __all__ = [
     "OpteryxLocalFileSystem",
     "OpteryxGcsFileSystem",
+    "OpteryxS3FileSystem",
     "OpteryxHttpFileSystem",
     "create_filesystem",
 ]
@@ -37,6 +38,7 @@ def create_filesystem(protocol: str):
     protocol_map = {
         "gs": "OpteryxGcsFileSystem",
         "gcs": "OpteryxGcsFileSystem",
+        "s3": "OpteryxS3FileSystem",
         "http": "OpteryxHttpFileSystem",
         "https": "OpteryxHttpFileSystem",
         "file": "OpteryxLocalFileSystem",
@@ -60,6 +62,10 @@ def __getattr__(file_system: str):
         from opteryx.connectors.io_systems.gcs_filesystem import OpteryxGcsFileSystem
 
         return OpteryxGcsFileSystem
+    if file_system == "OpteryxS3FileSystem":
+        from opteryx.connectors.io_systems.s3_filesystem import OpteryxS3FileSystem
+
+        return OpteryxS3FileSystem
     if file_system == "OpteryxLocalFileSystem":
         from opteryx.connectors.io_systems.local_filesystem import OpteryxLocalFileSystem
 
