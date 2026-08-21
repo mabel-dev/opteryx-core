@@ -396,9 +396,16 @@ struct ColumnPlan {
     LogicalTypeDescriptor     logical{};
     ColumnStatistics          statistics{};
     bool                      has_statistics = false;
+    // KMV min-hashes appended after `statistics` in the blob (format.h,
+    // ColumnSketchHeader). Empty means no sketch, and kStatSketch stays clear.
+    std::vector<uint64_t>     sketch;
     std::vector<PendingIndex> index_sections;
     std::vector<ColumnPlan>   children;
 };
+
+// Defined with the other footer writers below; declared here because the
+// statistics are sized where they are computed, far above that point.
+uint32_t statistics_blob_bytes(const std::vector<uint64_t>& sketch);
 
 // Per-chunk code bounds, for skipping byte ranges WITHIN a column.
 //
@@ -602,7 +609,6 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
                                    ? ordered.data.get() : nullptr,
                                ordered.applied ? ordered.data_length : 0u));
         plan->has_statistics   = true;
-        plan->head.stats_bytes = static_cast<uint32_t>(sizeof(ColumnStatistics));
 
         // v2 NDV: exact when ordering deduplicated (data_length IS the distinct
         // non-null count), the KMV estimate when the sketch measured the column
@@ -615,6 +621,18 @@ Status write_column_data(WriteContext& ctx, const CxxColumn& column,
                 static_cast<uint64_t>(ordered.ndv_estimate + 0.5);
             plan->statistics.flags |= kStatNdv;
         }
+
+        // v2 sketch: the MERGEABLE form of the same fact. Written alongside an
+        // exact `ndv` rather than instead of it — the exact count describes this
+        // ROW GROUP, and a reader combining row groups or files needs the
+        // hashes, not the total (format.h, ColumnSketchHeader).
+        if (!ordered.min_hashes.empty()) {
+            plan->sketch = ordered.min_hashes;
+            plan->statistics.flags |= kStatSketch;
+        }
+
+        // Set LAST: the declared length must cover whatever was appended above.
+        plan->head.stats_bytes = statistics_blob_bytes(plan->sketch);
     }
 
     SelectionKind selection_kind;
@@ -987,8 +1005,31 @@ void emit_index_sections(WriteContext& ctx, ColumnPlan* plan) {
     for (ColumnPlan& child : plan->children) emit_index_sections(ctx, &child);
 }
 
+// Bytes one statistics blob occupies: the fixed struct, plus the sketch when
+// there is one. ONE definition, used by both the size calculation and both
+// writers — a blob whose declared length disagreed with its contents would
+// desynchronise every following column in the footer.
+uint32_t statistics_blob_bytes(const std::vector<uint64_t>& sketch) {
+    uint32_t bytes = static_cast<uint32_t>(sizeof(ColumnStatistics));
+    if (!sketch.empty())
+        bytes += static_cast<uint32_t>(sizeof(ColumnSketchHeader)
+                                       + sketch.size() * sizeof(uint64_t));
+    return bytes;
+}
+
+void write_statistics_blob(ByteWriter& w, const ColumnStatistics& statistics,
+                           const std::vector<uint64_t>& sketch) {
+    w.pod(statistics);
+    if (sketch.empty()) return;
+    ColumnSketchHeader header;
+    header.k     = kSketchK;
+    header.count = static_cast<uint32_t>(sketch.size());
+    w.pod(header);
+    for (uint64_t hash : sketch) w.u64(hash);
+}
+
 void write_statistics(ByteWriter& w, const ColumnPlan& plan) {
-    if (plan.has_statistics) w.pod(plan.statistics);
+    if (plan.has_statistics) write_statistics_blob(w, plan.statistics, plan.sketch);
     for (const ColumnPlan& child : plan.children) write_statistics(w, child);
 }
 
@@ -1017,8 +1058,9 @@ struct SchemaNode {
 // nothing tracked, but a min of 0 with kStatMin set is ordinary) — so absence is
 // written as an explicit zero length rather than inferred.
 struct StatSlot {
-    bool             present = false;
-    ColumnStatistics statistics{};
+    bool                  present = false;
+    ColumnStatistics      statistics{};
+    std::vector<uint64_t> sketch;
 };
 
 SchemaNode schema_from_plan(const ColumnPlan& plan) {
@@ -1082,6 +1124,7 @@ void collect_statistics(const ColumnPlan& plan, std::vector<StatSlot>* out) {
     StatSlot slot;
     slot.present    = plan.has_statistics;
     slot.statistics = plan.statistics;
+    slot.sketch     = plan.sketch;
     out->push_back(slot);
     for (const ColumnPlan& child : plan.children) collect_statistics(child, out);
 }
@@ -1395,8 +1438,8 @@ Status FileWriter::finish() {
     for (const std::vector<StatSlot>& row_group : state_->statistics) {
         for (const StatSlot& slot : row_group) {
             if (!slot.present) { w.u32(0); continue; }
-            w.u32(static_cast<uint32_t>(sizeof(ColumnStatistics)));
-            w.pod(slot.statistics);
+            w.u32(statistics_blob_bytes(slot.sketch));
+            write_statistics_blob(w, slot.statistics, slot.sketch);
         }
     }
 

@@ -299,16 +299,24 @@ class ColumnType:
         raises rather than guessing a unit — the caller then skips pruning,
         which costs speed, never correctness.
 
-        DECIMAL/DECIMAL128 — raises. A stored DECIMAL bound is the unscaled
-        mantissa at the COLUMN's scale, while `DrakenType.DECIMAL.ordinalize`
-        returns the mantissa at the LITERAL's own natural scale
-        (`Decimal("1.5")` -> 15, never 15000 for a scale-4 column), so the
-        two are only comparable when the scales happen to coincide. Aligning
-        them needs rescaling semantics (rounding direction on truncation)
-        that are not pinned down anywhere, so this refuses instead of
-        inventing them. Pruning is skipped for DECIMAL, exactly as it is
-        today — `_comparable_literal` already declines a `Decimal` literal
-        against an integer bound.
+        DECIMAL — rescales. A stored DECIMAL bound is the unscaled mantissa at
+        the COLUMN's scale, while `DrakenType.DECIMAL.ordinalize` returns the
+        mantissa at the LITERAL's own natural scale (`Decimal("1.5")` -> 15,
+        never 1500 for a scale-2 column), so the literal is put on the column's
+        gridline first, via `rescale_decimal_literal`. Returns None (caller
+        skips pruning) when it does not land there exactly.
+
+        This used to refuse outright, on the grounds that rescaling semantics
+        "are not pinned down anywhere". They are: the compiler's
+        `_rewrite_decimal_compares` has pinned them down since it shipped, and
+        it is the rewrite that decides what the literal means to the ENGINE.
+        That rule now lives in `rescale_decimal_literal` and both call it, which
+        is the property that matters — a bound pruner disagreeing with the filter
+        it runs ahead of would drop rows the filter would have kept.
+
+        DECIMAL128 — still raises. Not a rescaling question: draken produces no
+        ordinal key for it at all, so no stored bound in this space exists to
+        compare against.
         """
         physical = self.physical
 
@@ -326,11 +334,32 @@ class ColumnType:
                 f"{type(value).__name__}"
             )
 
-        if physical in (DrakenType.DECIMAL, DrakenType.DECIMAL128):
+        if physical == DrakenType.DECIMAL:
+            # A stored DECIMAL bound is the mantissa at the COLUMN's scale, so the
+            # literal has to be put on that same gridline first —
+            # `DrakenType.DECIMAL.ordinalize` would give its own-scale mantissa
+            # (`Decimal("1.5")` -> 15, never 1500 for a scale-2 column), which is a
+            # different number in the same int64 space.
+            #
+            # No operator context here, so this is the EXACT case only: a literal
+            # that does not land on the gridline returns None and the caller skips
+            # pruning. `rescale_decimal_literal` can also round an off-gridline
+            # ORDERING bound direction-aware — exactly, not approximately — but that
+            # needs the operator, so it is available to callers that have one and
+            # deliberately not assumed here.
+            rescaled = rescale_decimal_literal(self, value)
+            if rescaled is None:
+                return None
+            return int(rescaled.scaleb(int(self.logical.scale)))
+
+        if physical == DrakenType.DECIMAL128:
+            # draken has no ordinalize entry for DECIMAL128 at all, deliberately:
+            # a saturated low-resolution int64 proxy for a 128-bit type is worse
+            # than refusing (draken/ops/ordinalize.h). Nothing to compare against,
+            # so nothing to rescale to.
             raise ValueError(
-                f"ordinalize: {physical!r} is not supported — a stored DECIMAL bound is "
-                "the mantissa at the column's scale, which cannot be compared against a "
-                "literal's own-scale mantissa without rescaling"
+                f"ordinalize: {physical!r} is not supported — draken produces no "
+                "ordinal key for it, so a stored bound in this space cannot exist"
             )
 
         return physical.ordinalize(value)
@@ -407,6 +436,70 @@ IPV4 = ColumnType(DrakenType.UINT32, LogicalType(kind=LogicalKind.IPV4))
 # ---------------------------------------------------------------------------
 # Constructors (parameterized — build a Draken LogicalType descriptor)
 # ---------------------------------------------------------------------------
+# Ops for which an INEXACT decimal bound can be rounded to the column's scale
+# without changing which rows satisfy it. Eq/NotEq are absent on purpose: there is
+# no rounding of an equality target that preserves its meaning.
+_DECIMAL_ROUNDABLE_OPS = {
+    "Lt": decimal.ROUND_CEILING,
+    "GtEq": decimal.ROUND_CEILING,
+    "Gt": decimal.ROUND_FLOOR,
+    "LtEq": decimal.ROUND_FLOOR,
+}
+
+
+def rescale_decimal_literal(column_type, value, effective_op: Optional[str] = None):
+    """`value` as a Decimal on `column_type`'s scale gridline, or None if it cannot
+    be put there without changing the predicate's meaning.
+
+    THE one definition of "what does this numeric literal mean against this DECIMAL
+    column". Two callers depend on agreeing exactly: the compiler's
+    `_rewrite_decimal_compares`, which rewrites the predicate the engine runs, and
+    `Manifest.ordinal_zone_map_terms`, which prunes files and row groups AHEAD of
+    that predicate. A pruner that rounded differently from the filter would drop a
+    row group the filter would have kept — a wrong answer, and one that only shows
+    up on the boundary value.
+
+    `effective_op` is the comparison as it applies to the COLUMN (already swapped if
+    the literal was the left operand). None means "no operator context", which
+    restricts this to the EXACT case.
+
+    The rules, none of them invented here:
+
+    * `Decimal(str(value))` first, floats included. Python's float repr is
+      shortest-roundtrip, so it recovers the decimal the user actually WROTE for a
+      source literal (`9.8` -> '9.8') while keeping the noise on a genuinely
+      computed one (`0.06 - 0.01` -> '0.049999999999999996'). Taking the exact
+      binary rational instead makes every source decimal look inexact —
+      `Decimal(9.8)` is 9.80000000000000071 — which fires the rounding branch on
+      literals it was never meant for and turns `< 9.8` into `< 9.9`.
+    * Exact on the gridline: done, no operator context needed.
+    * Off the gridline, ordering ops only: round DIRECTION-AWARE, which is EXACT
+      rather than approximate. Column values are integer multiples of 10^-scale, so
+      `col >= 0.049999...` holds for exactly the same rows as
+      `unscaled >= ceil(0.049999... * 10^scale)`. CEILING for `GtEq`/`Lt`, FLOOR
+      for `Gt`/`LtEq`.
+    * Off the gridline, Eq/NotEq (or no operator context): None. No rounding of an
+      equality target preserves it, so the caller must decline.
+    * DECIMAL128 is never handled here — draken has no ordinalize entry for it and
+      this rewrite's same-int64-tier assumption does not hold.
+    """
+    if column_type is None or column_type.logical is None:
+        return None
+    if getattr(column_type.physical, "name", "") != "DECIMAL":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, decimal.Decimal)):
+        return None
+    quantized = decimal.Decimal(str(value))
+    quantum = decimal.Decimal(1).scaleb(-int(column_type.logical.scale))
+    rescaled = quantized.quantize(quantum)
+    if rescaled == quantized:
+        return rescaled
+    rounding = _DECIMAL_ROUNDABLE_OPS.get(effective_op)
+    if rounding is None:
+        return None
+    return quantized.quantize(quantum, rounding=rounding)
+
+
 def DECIMAL(precision: int, scale: int) -> ColumnType:
     """Build a DECIMAL ColumnType. p ≤ 18 → int64-backed; 19 ≤ p ≤ 38 → int128-backed
     (DECIMAL128 physical tier). p > 38 raises (genuine overflow — no wider tier)."""

@@ -553,13 +553,13 @@ SUPPORT_MATRIX: Tuple[Tuple[str, str, Optional[str]], ...] = (
         "= ANY (subquery)",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE sq_o.id = ANY "
         f"(SELECT sq_i.planetId FROM {_M_INNER})",
-        "must return exactly one row",
+        "ANY**/**ALL** over a subquery is not supported",
     ),
     (
         "> ALL (subquery)",
         f"SELECT sq_o.name FROM {_M_OUTER} WHERE sq_o.id > ALL "
         f"(SELECT sq_i.planetId FROM {_M_INNER})",
-        "must return exactly one row",
+        "ANY**/**ALL** over a subquery is not supported",
     ),
     (
         "IN (subquery) under an expression",

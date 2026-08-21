@@ -66,7 +66,7 @@ def _stats(
         distinct_count=distinct_count,
         length_bounds=length_bounds,
     )
-    return RelationStatistics(row_count=1000, columns={_IDENTITY: col})
+    return RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
 
 
 def _instr_node(needle, decay=0.7, op="InStr", column_type=VARCHAR):

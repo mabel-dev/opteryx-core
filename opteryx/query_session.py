@@ -131,7 +131,11 @@ class Session(DataFrame):
         self._query_planner = None
         self._collected_stats = None
         self._plan = None
-        self._query_id = query_id if query_id is not None else random_string(32)
+        # An EMPTY id is not an id: QueryTelemetry is a registry keyed by this
+        # value, so passing "" through would alias this session's readings onto
+        # the same shared instance as every other session that did the same.
+        # Treat it exactly like the id that wasn't supplied at all.
+        self._query_id = query_id if query_id else random_string(32)
         self._telemetry = QueryTelemetry(self._query_id)
         self._trace = TraceBundle()
         # Set fresh per STATEMENT in _inner_execute (not once per _execute_statements()

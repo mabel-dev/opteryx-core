@@ -69,10 +69,40 @@ def do_bind_phase(
         plan = apply_visibility_filters(plan, visibility_filters, telemetry)
 
     binder_visitor = BinderVisitor()
+
+    # Shared CTE bodies (relation_resolver: CTEs referenced 2+ times, executed
+    # once) are bound FIRST, each as a standalone plan, in dependency order —
+    # `shared_ctes` is topologically ordered, so a body reading another shared
+    # CTE finds it already bound. Each body is headed by a Subquery boundary
+    # whose bound schema is the output the single execution produces;
+    # visit_materialized_cte_ref re-exposes it per reference under fresh
+    # identities. Row-level security applies inside the bodies exactly as it
+    # does in the main plan — a body holds real Scans.
+    shared_ctes = getattr(plan, "shared_ctes", None) or {}
+    # One registry dict, shared BY REFERENCE into every context (including the
+    # child scopes expression subqueries bind under — see BindingContext).
+    shared_cte_schemas: dict = {}
+    for cte_key, body in shared_ctes.items():
+        if visibility_filters:
+            body = apply_visibility_filters(body, visibility_filters, telemetry)
+        body_heads = body.get_exit_points()
+        if len(body_heads) != 1:
+            raise InvalidInternalStateError(
+                f"{query_id} - shared CTE body has {len(body_heads)} heads - this is an error"
+            )
+        body_context = BindingContext.initialize(
+            query_id=query_id, execution_context=execution_context, schema_only=schema_only
+        )
+        body_context.shared_cte_schemas = shared_cte_schemas
+        body, _ = binder_visitor.traverse(body, body_heads[0], context=body_context)
+        shared_ctes[cte_key] = body
+        shared_cte_schemas[cte_key] = body[body_heads[0]].schema
+
     root_node = plan.get_exit_points()
     context = BindingContext.initialize(
         query_id=query_id, execution_context=execution_context, schema_only=schema_only
     )
+    context.shared_cte_schemas = shared_cte_schemas
 
     if len(root_node) > 1:
         raise InvalidInternalStateError(
@@ -80,5 +110,6 @@ def do_bind_phase(
         )
 
     plan, _ = binder_visitor.traverse(plan, root_node[0], context=context)
+    plan.shared_ctes = shared_ctes
 
     return plan

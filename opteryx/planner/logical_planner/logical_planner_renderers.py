@@ -213,6 +213,11 @@ def render_heapsort(node: LogicalPlanNode) -> str:
     return f"HEAP SORT{qualifier} (LIMIT {node.limit}, ORDER BY [{order}])"
 
 
+@register_render(LogicalPlanStepType.ScalarSubqueryGuard)
+def render_scalar_subquery_guard(node: LogicalPlanNode) -> str:
+    return "SCALAR SUBQUERY GUARD (one row or NULL)"
+
+
 @register_render(LogicalPlanStepType.Limit)
 def render_limit(node: LogicalPlanNode) -> str:
     limit_str = f"LIMIT ({node.limit})" if node.limit is not None else ""

@@ -62,10 +62,11 @@ make clickbench-skene (11.24s) (17-AUG) [1.05x]
 (16.28 seconds) <- best on clickbench parquet files (20-AUG)
 (10.65 seconds) <- DuckDB Baseline
 
-make --tpch--    (966.5ms) (07-AUG) [SF1] [1.96x] (doesn't run anymore)
-make tpch        (3666.5ms) (20-AUG) [SF10] [0.88x]
+make tpch-sf1    (758.5ms) (20-AUG) [SF1] [2.18x]
+make tpch-sf10   (3613.5ms) (20-AUG) [SF10] [0.87x]
 make tpch-sf100  (42638.9ms) (20-AUG) [SF100] [1.40x]
-make tpcds       (102.7s) (20-AUG) [5 fails, 2 Timeout] [SF1]
+make tpcds-sf1   (55.1s) (20-AUG) [1 fails, 1 Timeout] [SF1]
+make tpcds-sf001 (19.2s) (21-AUG) [1 fails] [SF001]
 make medicare1   (451.9ms) (20-AUG) [2.63x]
 make job         (11899.6ms (20-AUG) [1.76x] (33c)
 make h2o         (45.1s) (20-AUG) [medium]

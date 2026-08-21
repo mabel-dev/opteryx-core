@@ -7,13 +7,18 @@
 
 Two gates, because neither alone is sufficient:
 
-  PLAN time  — refuses before any IO, from the optimizer's estimate, but ONLY when
-               every input relation reports a real row count. An estimate resting on
+  PLAN time  — refuses before any IO, but ONLY on a `row_count_metric`: a number
+               the statistics claim to KNOW (real input counts composed through
+               exact arithmetic — a cross-join product, a LIMIT min). Two kinds of
+               guess are excluded. An estimate resting on
                statistics_refresh._UNKNOWN_ROW_COUNT (1,000,000 for a relation that
                cannot report its size) multiplies through joins: before virtual
                datasets declared their counts, a 2-way self cross join of the 9-row
-               $planets estimated 10**12 rows against an actual 81. Gating on that
-               would refuse trivial queries.
+               $planets estimated 10**12 rows against an actual 81. And a
+               `row_count_estimate` — anything through a selectivity or NDV
+               heuristic (filters, equi-joins, grouped aggregates) — is a guess by
+               its own admission: TPC-DS Q39 was refused on a fabricated 8.5
+               billion rows. Gating on either would refuse queries on fiction.
 
   RUN time   — counts rows actually delivered, catching results the estimate was too
                low (or too unavailable) to predict.
@@ -153,6 +158,39 @@ def test_gate_is_disabled_when_an_input_has_no_row_count():
     # decline to act rather than reject on a fabricated number.
     assert _declared_row_count(scan) is None
     assert every_input_has_row_counts(plan) is False
+
+
+def test_heuristic_estimates_do_not_plan_time_reject():
+    # TPC-DS Q39's shape at toy scale: a self-join of grouped aggregates. The
+    # aggregate's output count is an ESTIMATE (an NDV heuristic, or the bare
+    # input-row cap when no NDV exists), and the guard must not refuse a query
+    # on a number the statistics themselves admit is a guess — Q39 was refused
+    # on a fabricated 8.5 billion rows against a tiny actual result. $planets
+    # has 9 rows and 8 distinct gravities: the plan-time estimate here is 81
+    # (9 x 9 through the cross join of two group-by estimates), the actual
+    # result is 64. A limit strictly between the two only passes if the guard
+    # defers to the runtime counter instead of acting on the estimate.
+    assert (
+        _run(
+            "SELECT a.g FROM (SELECT gravity AS g FROM $planets GROUP BY gravity) AS a "
+            "CROSS JOIN (SELECT gravity AS g FROM $planets GROUP BY gravity) AS b",
+            limit=70,
+        )
+        == 64
+    )
+
+
+def test_runtime_still_enforces_heuristic_shapes():
+    # Same query, limit below the actual result: enforcement happens, but at
+    # RUN time (measured rows), not plan time (a guess).
+    with pytest.raises(ResultTooLargeError) as exc:
+        _run(
+            "SELECT a.g FROM (SELECT gravity AS g FROM $planets GROUP BY gravity) AS a "
+            "CROSS JOIN (SELECT gravity AS g FROM $planets GROUP BY gravity) AS b",
+            limit=50,
+        )
+    assert exc.value.estimated is False, "should have been caught during delivery"
+    assert exc.value.limit == 50
 
 
 def test_runtime_catches_what_the_estimate_cannot():

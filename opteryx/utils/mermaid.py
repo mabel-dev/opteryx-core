@@ -440,11 +440,33 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
     # (EXPLAIN) still draws it, unchanged, via node_stats/excluded_nodes below.
     exit_nids = {nid for nid, node in plan.nodes(True) if node.__class__.__name__ == "ExitNode"}
 
+    # Planner row-count estimates, recorded by StatisticsRefreshVisitor.
+    # _record_telemetry against the LOGICAL plan's nids — the physical plan is
+    # keyed by the same nids (see create_physical_plan), so this joins directly.
+    # Overlaying them here makes each operator's telemetry record carry BOTH the
+    # planner's estimate and the runtime actual (records_out, from the native
+    # op-stat harvest above) — the estimate-vs-actual pairing the q-error
+    # harness reads. A node refresh never reached simply has no est_rows key:
+    # absence means "no estimate was made", never "estimated zero".
+    _any_node_telemetry = next((node.telemetry for _, node in plan.nodes(True)), None)
+    est_by_nid = {
+        entry["nid"]: entry
+        for entry in (
+            (_any_node_telemetry._reading.get("estimated_row_counts") or [])
+            if _any_node_telemetry is not None
+            else []
+        )
+    }
+
     # Store detailed stats in telemetry operations with node UID as key and type as field
     for nid, node in plan.nodes(True):
         if not node.is_not_explained and nid not in exit_nids:
             stat = node_stats.get(node.identity)
             if stat:
+                est = est_by_nid.get(nid)
+                if est is not None:
+                    stat["est_rows"] = est["row_count"]
+                    stat["est_rows_kind"] = est["row_count_kind"]
                 # Add node type to the stat dictionary
                 node_type = _get_logical_node_type(node)
                 if node_type:

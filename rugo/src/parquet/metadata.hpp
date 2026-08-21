@@ -185,6 +185,15 @@ struct AggColumnStat {
                                          // column, every leaf rolled into this display
                                          // name) -- the on-disk uncompressed footprint,
                                          // for planner byte-size estimation.
+  // File-level NDV merged from per-row-group Statistics.distinct_count (rugo's
+  // writer emits a real hash-derived count for bloom-eligible columns). -1 when
+  // ANY row group lacks the statistic, or the column is a nested leaf — a
+  // partial merge would under-count, and unknown is not zero. Merge rule:
+  // disjoint row-group value ranges sum their counts (each range holds its own
+  // values); overlapping ranges take the max (the safe floor — the true NDV
+  // lies between max and sum, and under-counting only makes downstream
+  // equality-selectivity LESS aggressive). See AggregateColumnStats.
+  int64_t distinct_count = -1;
   bool has_min = false;
   bool has_max = false;
   bool null_count_complete = true;

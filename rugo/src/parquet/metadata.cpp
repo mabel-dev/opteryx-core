@@ -1443,6 +1443,11 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
     result.push_back(std::move(agg));
   }
 
+  // Tracks columns whose distinct_count can no longer be trusted: a row group
+  // without the statistic, or a nested leaf (leaf-level NDVs say nothing about
+  // the display column). Parallel to `result`.
+  std::vector<uint8_t> distinct_poisoned(result.size(), 0);
+
   for (const auto &rg : fs.row_groups) {
     for (const auto &col : rg.columns) {
       // Map leaf path to top-level display name (everything before first dot).
@@ -1460,6 +1465,32 @@ std::vector<AggColumnStat> AggregateColumnStats(const FileStats &fs) {
       if (agg.physical_type.empty() && !col.physical_type.empty()) {
         agg.physical_type = col.physical_type;
         agg.logical_type  = col.logical_type;
+      }
+
+      // Merge distinct_count BEFORE the min/max updates below extend the
+      // running range — disjointness is judged against the range of the row
+      // groups already merged. See AggColumnStat::distinct_count for the rule.
+      if (!distinct_poisoned[it->second]) {
+        if (dot != std::string::npos || col.distinct_count < 0) {
+          distinct_poisoned[it->second] = 1;
+          agg.distinct_count = -1;
+        } else if (agg.distinct_count < 0) {
+          agg.distinct_count = col.distinct_count;
+        } else {
+          bool disjoint = false;
+          if (col.has_min && col.has_max && agg.has_min && agg.has_max) {
+            disjoint =
+                CompareStatBytes(col.min, agg.max_bytes, agg.physical_type,
+                                 agg.logical_type) > 0 ||
+                CompareStatBytes(col.max, agg.min_bytes, agg.physical_type,
+                                 agg.logical_type) < 0;
+          }
+          if (disjoint) {
+            agg.distinct_count += col.distinct_count;
+          } else if (col.distinct_count > agg.distinct_count) {
+            agg.distinct_count = col.distinct_count;
+          }
+        }
       }
 
       // Aggregate null count.

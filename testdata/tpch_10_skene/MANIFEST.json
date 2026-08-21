@@ -1,0 +1,8 @@
+{
+  "codec": "lz4",
+  "generator": "libskene 0.2.0 / parquet_to_skene (format v2)",
+  "listing_sha256": "ea7f9df4b387c26b80663fe6eb1e031a320e6a420db62af3362c73b9bae4101b",
+  "name": "tpch_10_skene",
+  "object_count": 29,
+  "total_bytes": 4015715860
+}

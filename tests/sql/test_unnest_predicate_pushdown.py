@@ -105,6 +105,58 @@ def test_non_anchored_predicates_still_work():
         assert got == want, (predicate, got, want)
 
 
+# A CROSS JOIN UNNEST leg joined to a relation that carries its own
+# column-vs-column filter. The predicate belongs to the OTHER leg entirely.
+UNNEST_LEG = "(SELECT name FROM testdata.astronauts CROSS JOIN UNNEST(missions) AS m) a"
+
+
+def _rows(sql):
+    session = opteryx.session()
+    return sum(morsel.num_rows for morsel in session.execute_to_morsels(sql))
+
+
+def test_a_sibling_legs_predicate_is_not_placed_above_the_unnest():
+    """A predicate belonging to another leg must not be moved by the Unnest arm.
+
+    The optimizer walks a plan depth-first with ONE shared predicate list, so a
+    predicate destined for one leg of a join rides into the other leg's subtree.
+    The Unnest arm's column-vs-column clause (`query_columns == known_columns`)
+    is trivially true for ANY `a.x = b.y` predicate — it carries no test that
+    this unnest emits the columns the predicate reads — so it placed a sibling
+    leg's filter directly above the unnest and the physical compile died with
+
+        KeyError: expression references column b'$pl_gra_...' which the stream
+        does not carry
+
+    It reproduced in ONE of the two FROM orders only: placement happened when the
+    DFS reached the unnest leg before the filter's own leg, which is why an
+    UNNEST alongside a column-vs-column filter worked or crashed depending on how
+    the query was written.
+
+    Both orders are asserted, and against each other — a row count alone would
+    pass for a predicate that had been silently dropped instead of misplaced.
+    """
+    for predicate in ("p.gravity = p.density", "p.gravity <> p.density", "p.mass > p.density"):
+        unnest_first = _rows(
+            f"SELECT a.name, p.name AS pn FROM {UNNEST_LEG}, $planets p WHERE {predicate}"
+        )
+        relation_first = _rows(
+            f"SELECT a.name, p.name AS pn FROM $planets p, {UNNEST_LEG} WHERE {predicate}"
+        )
+        assert unnest_first == relation_first, (predicate, unnest_first, relation_first)
+
+        # ... and both equal the cross product of the two legs' own row counts,
+        # so the filter really was applied, to the leg that owns it.
+        expanded = _rows(f"SELECT name FROM {UNNEST_LEG}")
+        matching = _rows(f"SELECT name FROM $planets p WHERE {predicate}")
+        assert unnest_first == expanded * matching, (
+            predicate,
+            unnest_first,
+            expanded,
+            matching,
+        )
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

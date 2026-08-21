@@ -45,7 +45,7 @@ def _estimate(left_null_fraction):
     """Estimate inner-join row_count with the left key carrying the given null
     fraction; both sides 1000 rows, NDV 100 (so per-key selectivity 1/100)."""
     left = RelationStatistics(
-        row_count=1000,
+        row_count_estimate=1000,
         columns={
             _LK: ColumnStatistics(
                 column_name="lk", data_type="INTEGER", distinct_count=100, null_fraction=left_null_fraction
@@ -53,7 +53,7 @@ def _estimate(left_null_fraction):
         },
     )
     right = RelationStatistics(
-        row_count=1000,
+        row_count_estimate=1000,
         columns={
             _RK: ColumnStatistics(column_name="rk", data_type="INTEGER", distinct_count=100, null_fraction=0.0)
         },

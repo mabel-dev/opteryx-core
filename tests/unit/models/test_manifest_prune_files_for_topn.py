@@ -65,7 +65,7 @@ def test_desc_prunes_file_entirely_below_the_guaranteed_floor():
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
     assert [f.file_path for f in manifest.files] == ["lemon_melon"]
 
@@ -79,7 +79,7 @@ def test_asc_is_the_mirror_of_desc():
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=False, limit=5)
+    manifest = manifest.prune_files_for_topn("project", descending=False, limit=5)
 
     assert [f.file_path for f in manifest.files] == ["apple_banana"]
 
@@ -92,7 +92,7 @@ def test_desc_needs_two_files_when_the_top_file_is_short_of_the_limit():
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
     # top (3) + middle (10) = 13 >= 5; threshold = min(lo) over {top, middle}
     # = min(90, 50) = 50, so "bottom" (max 49) is provably excluded.
@@ -120,7 +120,7 @@ def test_threshold_is_the_minimum_lower_bound_across_all_included_files_not_just
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
     kept = {f.file_path for f in manifest.files}
     assert "D" in kept, kept
@@ -134,7 +134,7 @@ def test_tie_at_the_boundary_is_kept_inclusive():
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
     assert {f.file_path for f in manifest.files} == {"winner", "tied"}
 
@@ -154,7 +154,7 @@ def test_file_with_no_bounds_is_always_kept_and_not_used_to_tighten_the_threshol
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
     kept = {f.file_path for f in manifest.files}
     assert "no_stats" in kept, kept
@@ -169,7 +169,7 @@ def test_limit_larger_than_total_stats_bearing_rows_prunes_nothing():
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=1000)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=1000)
 
     assert {f.file_path for f in manifest.files} == {"a", "b"}
 
@@ -181,7 +181,7 @@ def test_accumulated_exactly_equal_to_limit_stops_there():
     ]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=5)
 
     assert [f.file_path for f in manifest.files] == ["top"]
 
@@ -190,7 +190,7 @@ def test_unresolvable_column_is_a_no_op():
     files = [_file("a", 1, 10, 5)]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("does_not_exist", descending=True, limit=1)
+    manifest = manifest.prune_files_for_topn("does_not_exist", descending=True, limit=1)
 
     assert [f.file_path for f in manifest.files] == ["a"]
 
@@ -199,7 +199,7 @@ def test_zero_or_negative_limit_is_a_no_op():
     files = [_file("a", 1, 10, 5)]
     manifest = Manifest(files=files, schema=_schema())
 
-    manifest.prune_files_for_topn("project", descending=True, limit=0)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=0)
     assert [f.file_path for f in manifest.files] == ["a"]
 
 
@@ -220,7 +220,7 @@ def test_live_rows_stay_aligned_after_pruning_for_topn():
     manifest.files = [files[0], files[2]]
     manifest._live_rows = [0, 2]
 
-    manifest.prune_files_for_topn("project", descending=True, limit=3)
+    manifest = manifest.prune_files_for_topn("project", descending=True, limit=3)
 
     # keep_first alone (record_count=5) already satisfies LIMIT 3, so
     # keep_second (max=99 < threshold=100) is dropped by this second pass -

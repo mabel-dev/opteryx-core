@@ -142,7 +142,7 @@ def test_float_file_is_kept_for_ops_a_nan_would_satisfy(op):
     lower, upper, literal = _case(op)
     manifest = _manifest(FLOAT64, ordinal=False, lower=lower, upper=upper)
 
-    manifest.prune_files([_comparison(op, literal)])
+    manifest = manifest.prune_files([_comparison(op, literal)])
 
     assert len(manifest.files) == 1, (
         f"{op} pruned a float file on bounds that cannot see a NaN — a NaN row "
@@ -157,7 +157,7 @@ def test_float_file_still_prunes_for_ops_a_nan_cannot_satisfy(op):
     lower, upper, literal = _case(op)
     manifest = _manifest(FLOAT64, ordinal=False, lower=lower, upper=upper)
 
-    manifest.prune_files([_comparison(op, literal)])
+    manifest = manifest.prune_files([_comparison(op, literal)])
 
     assert len(manifest.files) == 0, f"{op} stopped pruning floats — the fix is too wide"
 
@@ -170,7 +170,7 @@ def test_non_float_columns_are_untouched(op):
     lower, upper, literal = _case(op)
     manifest = _manifest(INT64, ordinal=False, lower=int(lower), upper=int(upper))
 
-    manifest.prune_files([_comparison(op, int(literal))])
+    manifest = manifest.prune_files([_comparison(op, int(literal))])
 
     assert len(manifest.files) == 0, f"{op} stopped pruning an INT64 column"
 
@@ -179,13 +179,13 @@ def test_between_keeps_the_arm_a_nan_cannot_satisfy():
     # BETWEEN is two conjuncts. `value BETWEEN 1000.0 AND 2000.0` is disproved
     # ONLY by the `max < lower` half — the unsound one — so the file is kept.
     manifest = _manifest(FLOAT64, ordinal=False)
-    manifest.prune_files([_between(ABOVE, ABOVE * 2)])
+    manifest = manifest.prune_files([_between(ABOVE, ABOVE * 2)])
     assert len(manifest.files) == 1, "BETWEEN pruned a float file on the NaN-blind arm"
 
     # `value BETWEEN -20.0 AND -10.0` is disproved by the `min > upper` half,
     # which a NaN cannot affect — that arm must still prune.
     manifest = _manifest(FLOAT64, ordinal=False)
-    manifest.prune_files([_between(-20.0, -10.0)])
+    manifest = manifest.prune_files([_between(-20.0, -10.0)])
     assert len(manifest.files) == 0, "BETWEEN lost the sound half of its float pruning"
 
 
@@ -199,7 +199,7 @@ def test_topn_pruning_stands_down_for_float_columns():
         bounds_are_ordinal=False,
     )
 
-    manifest.prune_files_for_topn("value", descending=True, limit=1)
+    manifest = manifest.prune_files_for_topn("value", descending=True, limit=1)
 
     assert len(manifest.files) == 2, "top-n pruning dropped a float file that may hold a NaN"
 
@@ -224,7 +224,7 @@ def test_ordinal_float_bounds_still_prune(op):
     lower, upper, literal = _case(op, ordinalize=FLOAT64.ordinalize)
     manifest = _manifest(FLOAT64, ordinal=True, lower=lower, upper=upper)
 
-    manifest.prune_files([_comparison(op, literal)])
+    manifest = manifest.prune_files([_comparison(op, literal)])
 
     assert len(manifest.files) == 0, (
         f"{op} stopped pruning ordinal float bounds — those bounds rank NaN "

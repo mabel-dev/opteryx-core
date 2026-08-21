@@ -22,6 +22,7 @@ LocalStoreConnector, which is not catalog-backed.
 import struct
 from typing import Dict, List, Optional, Tuple
 
+from opteryx.exceptions import md_code
 from opteryx.models.file_entry import FileEntry
 
 # Column order/dtypes mirror opteryx_catalog's write_parquet_manifest exactly —
@@ -195,6 +196,39 @@ def _file_entry_bounds_as_values(file_entry: FileEntry, schema) -> Tuple[List, L
     return min_values, max_values
 
 
+def _histogram_bins_of(file_entry: FileEntry, histogram: Optional[List]) -> int:
+    """The bin count to stamp on this row: the width the counts ACTUALLY have.
+
+    `histogram` is this file's per-column bin lists; a column with no histogram
+    contributes an empty list and no width. Widths must agree across columns —
+    one manifest row carries one `histogram_bins`, so two widths in one row
+    cannot both be described and the row would lie about one of them.
+
+    Whatever the file entry already claims must agree too. A rewrite that
+    re-stamps a stored width with a different one (the old unconditional
+    `HISTOGRAM_BINS`) hands the next reader bin boundaries that do not match the
+    counts — a silently mis-binned histogram, worse than no histogram at all.
+    """
+    if not histogram:
+        return 0
+    widths = {len(bins) for bins in histogram if bins}
+    if len(widths) > 1:
+        raise ValueError(
+            f"Manifest row for {md_code(file_entry.file_path)} carries histograms of "
+            f"differing widths {sorted(widths)}; one row records one bin count."
+        )
+    if not widths:
+        return 0
+    actual = widths.pop()
+    stored = file_entry.histogram_bins
+    if stored is not None and stored != actual:
+        raise ValueError(
+            f"Histogram bin count mismatch for {md_code(file_entry.file_path)}: the file "
+            f"entry records {stored} bins but its histogram holds {actual}."
+        )
+    return actual
+
+
 def _file_entry_to_manifest_dict(
     file_entry: FileEntry,
     schema,
@@ -213,7 +247,7 @@ def _file_entry_to_manifest_dict(
         "null_counts": file_entry.null_counts or [],
         "min_k_hashes": sketch or [],
         "histogram_counts": histogram or [],
-        "histogram_bins": HISTOGRAM_BINS if histogram else 0,
+        "histogram_bins": _histogram_bins_of(file_entry, histogram),
         "min_values": min_values,
         "max_values": max_values,
         "field_ids": list(range(len(schema.columns))),
@@ -426,6 +460,13 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
         # ANALYZE, writes it that way), so plain enumerate() is correct here.
         min_length_bounds = {j: v for j, v in enumerate(min_lengths) if v is not None} or None
         max_length_bounds = {j: v for j, v in enumerate(max_lengths) if v is not None} or None
+        # Same positional-is-field_id reasoning again, for null counts: the
+        # field_id-keyed dict is the form every Manifest accessor reads
+        # (estimate_null_fraction, get_total_null_count); the positional list
+        # below is what SHOW MANIFEST and the char-class avg_length denominator
+        # read. Both are carried, neither is derived at the call site.
+        row_null_counts = columns["null_counts"][i] or []
+        null_value_counts = {j: v for j, v in enumerate(row_null_counts) if v is not None} or None
         entries.append(
             FileEntry(
                 file_path=columns["file_path"][i],
@@ -439,12 +480,15 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
                 max_values=max_values or None,
                 column_uncompressed_sizes_in_bytes=columns["column_uncompressed_sizes_in_bytes"][i]
                 or None,
-                null_counts=columns["null_counts"][i] or None,
+                null_counts=row_null_counts or None,
+                null_value_counts=null_value_counts,
                 min_lengths=min_lengths or None,
                 max_lengths=max_lengths or None,
                 min_length_bounds=min_length_bounds,
                 max_length_bounds=max_length_bounds,
                 char_total_bytes=columns["char_total_bytes"][i] or None,
+                # 0 is the writer's "no histogram" marker, not a bin count.
+                histogram_bins=columns["histogram_bins"][i] or None,
             )
         )
     return entries, native

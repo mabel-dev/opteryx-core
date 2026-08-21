@@ -19,28 +19,37 @@
 //   pass 2  decode the FULL projection for the files that still hold a candidate,
 //           and gather just those rows.
 //
-// ── Why this is not the reader-side row filter that was ruled out ──────────────────
-// FileSystemTable::can_push still declines predicate pushdown for skene, and this
-// Source does not change that. That ruling is about saving FILTER work: a reader-side
-// row filter on the materialized path serialised work the parallel engine Filter does
-// concurrently (+460ms across TPC-H SF1). Late materialization saves DECODE work
-// instead — the 104 columns this query never looks at for the 99M rows it discards —
-// which is waste no matter how parallel the filter is. The two concerns are
-// independent, so the predicate reaches this Source through its own plan-time route
-// (compiler.py::_skene_latmat_scan_plan, which reads the Filter node sitting ABOVE
-// the scan) and NOT through can_push.
+// ── Relationship to the single-pass Source's reader-side filter ────────────────────
+// They save different things and they compose. The single-pass Source
+// (native_skene_scan_source.hpp) applies the pushed predicate to save the engine
+// FILTER's work; this Source uses the same predicate to save DECODE work — the 104
+// columns Q24 never looks at, for the 99M rows it discards.
 //
-// The Filter node stays in the plan. This Source only ever drops a row that (a) fails
-// the predicate — which the Filter would have dropped — or (b) is strictly worse than
-// the n-th best surviving sort key — which the downstream TopNSink would have dropped.
-// So the Filter re-running over the handful of candidate rows is a no-op on the
-// answer, and it is what makes this safe by construction rather than by argument.
+// Since the 2026-08-21 ruling, both take the predicate from the same place.
+// FileSystemTable::can_push ACCEPTS for skene, so the pushdown strategy consumes the
+// Filter node and the predicate arrives on `scan.predicates`;
+// compiler.py::_skene_latmat_scan_plan composes those pushed conjuncts with any
+// residual Filter still above the scan (a conjunct the connector declined) into ONE
+// pass-1 program.
+//
+// What changed for THIS Source is the safety argument, and it got stricter. It used
+// to lean on the Filter above re-checking every candidate; there is now usually no
+// Filter above. Pass 1 drops a row only if (a) it fails the predicate or (b) it is
+// strictly worse than the n-th best surviving sort key, which the downstream TopNSink
+// would have dropped. (b) is unchanged. (a) is now load-bearing on its own: a pushed
+// conjunct pass 1 fails to evaluate is applied by NOTHING. Which is why the compiler
+// DECLINES this Source (falling through to the single-pass Source, which applies the
+// predicate itself) for any predicate it cannot lower for pass 1, rather than
+// planning a pass 1 that quietly evaluates a subset.
 //
 // ── Differences from the parquet twin, all forced by the format ────────────────────
 //   * The pass-1/pass-2 unit is a ROW GROUP, and a .skene file holds up to 16 of
 //     them. Both passes claim from the same flat (file, row group) list, so a
 //     surviving row group is re-decoded on its own rather than dragging its
-//     fifteen neighbours back in with it.
+//     fifteen neighbours back in with it. That shared list is also where ROW-GROUP
+//     ZONE-MAP pruning happens (SkeneClaimSet::build), so a row group the footer
+//     statistics prove empty is opened by NEITHER pass — pass 1 does not claim it,
+//     and pass 2 only revisits what pass 1 kept.
 //   * skene::read_morsel has no row-mask parameter, so pass 2 decodes a surviving
 //     file's projected columns in full and gathers the winners afterwards. The win is
 //     therefore entirely in the FILES not opened, which is the dominant term: a
@@ -172,7 +181,10 @@ class NativeSkeneLatmatScanSource : public Source {
                                 SkeneLatmatPredFn pred_fn, void* pred_ctx,
                                 const std::vector<int>* pred_col_to_p1,
                                 int sort_p1_index, bool sort_ascending,
-                                int64_t topn_limit)
+                                int64_t topn_limit,
+                                SkeneZoneMap zone,
+                                int64_t* row_groups_total,
+                                int64_t* row_groups_pruned)
         : files_(files),
           p1_column_names_(p1_column_names),
           p1_column_types_(p1_column_types),
@@ -186,7 +198,10 @@ class NativeSkeneLatmatScanSource : public Source {
           pred_col_to_p1_(pred_col_to_p1),
           sort_p1_index_(sort_p1_index),
           sort_ascending_(sort_ascending),
-          topn_limit_(topn_limit) {}
+          topn_limit_(topn_limit),
+          zone_(zone),
+          row_groups_total_(row_groups_total),
+          row_groups_pruned_(row_groups_pruned) {}
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         return std::make_unique<SkeneLatmatGlobal>();
@@ -203,7 +218,8 @@ class NativeSkeneLatmatScanSource : public Source {
         // by whichever worker arrives first; a failure here is recorded like any
         // pass-1 failure so the barrier is released rather than parked on.
         std::call_once(g.init, [&g, this] {
-            g.init_ok = g.work_set.build(*files_, g.init_err);
+            g.init_ok = g.work_set.build(*files_, zone_, row_groups_total_,
+                                         row_groups_pruned_, g.init_err);
         });
         if (!g.init_ok) {
             {
@@ -563,6 +579,13 @@ class NativeSkeneLatmatScanSource : public Source {
     int     sort_p1_index_;     // the sort key's position within the pass-1 columns
     bool    sort_ascending_;
     int64_t topn_limit_;
+    // ROW-GROUP zone terms and the run-time counts the shared claim builder writes
+    // back. Pruning happens once, at claim time, and therefore covers both passes:
+    // pass 2's work items are drawn from pass 1's survivors, so a row group that
+    // was never claimed cannot reappear.
+    SkeneZoneMap zone_;
+    int64_t* row_groups_total_;
+    int64_t* row_groups_pruned_;
 };
 
 }  // namespace opteryx::engine

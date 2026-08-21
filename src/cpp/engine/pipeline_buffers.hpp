@@ -18,7 +18,9 @@ namespace opteryx::engine {
 
 struct MorselBuffer {
     std::vector<MorselPtr> morsels;   // written only in finalize (single-threaded)
-    std::atomic<size_t> cursor{0};    // read-side claim
+    // NOTE: the read-side claim cursor lives in BufferSource's GlobalSourceState
+    // (one per pipeline RUN), not here — a shared CTE's buffer is read by SEVERAL
+    // consumer pipelines, each of which must see every morsel from the start.
 };
 
 // Append-through sink: streams every morsel into a (possibly SHARED) MorselBuffer.
@@ -55,16 +57,22 @@ struct BufferAppendSink : Sink {
 
 struct BufferSource : Source {
     MorselBuffer* buf;
+    // Per-RUN claim cursor: one pipeline run makes one Global, so a buffer read
+    // by several consumer pipelines (a shared CTE's result) hands the full
+    // morsel set to each of them; workers within one run still claim by atomic.
+    struct Global : GlobalSourceState {
+        std::atomic<size_t> cursor{0};
+    };
     explicit BufferSource(MorselBuffer* b) : buf(b) {}
     std::unique_ptr<GlobalSourceState> make_global() override {
-        return std::make_unique<GlobalSourceState>();
+        return std::make_unique<Global>();
     }
     std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
         return std::make_unique<LocalSourceState>();
     }
-    SourceResult get_morsel(GlobalSourceState&, LocalSourceState&, MorselPtr& out,
+    SourceResult get_morsel(GlobalSourceState& gs, LocalSourceState&, MorselPtr& out,
                             ErrCtx&) override {
-        size_t idx = buf->cursor.fetch_add(1);
+        size_t idx = static_cast<Global&>(gs).cursor.fetch_add(1);
         if (idx >= buf->morsels.size()) return SourceResult::FINISHED;
         out = buf->morsels[idx];
         return SourceResult::HAVE_MORE;

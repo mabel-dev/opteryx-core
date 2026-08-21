@@ -10,8 +10,9 @@ ANALYZE / DROP STATISTICS orchestration for filesystem datasets.
 all columns): a KMV sketch, null count, min/max (as ``Vector.ordinalize()``
 ordinal keys — see ``opteryx.models.manifest_io.write_manifest_parquet``'s
 docstring for what that means and does not mean), a 32-bin equi-width
-histogram, record count, and — for VARCHAR/NVARCHAR/VARBINARY columns —
-byte-class counts, total byte count, and min/max string length. All of it is
+histogram, record count, uncompressed byte size (per column and per file, read
+off the footer), and — for VARCHAR/NVARCHAR/VARBINARY columns — byte-class
+counts, total byte count, and min/max string length. All of it is
 written into the dataset's single manifest — the same Parquet manifest format
 the catalog and LocalStore use (see ``opteryx.models.manifest_io``). One
 manifest per dataset, one format everywhere. ``DROP STATISTICS ON t [FOR
@@ -154,6 +155,56 @@ def _target_categories(schema, targets: List[str]) -> Dict[str, LogicalCategory]
     return {name: by_name[name].column_type.category for name in targets}
 
 
+def _footer_size_stats(
+    table_engine, blobs: List[str], schema
+) -> Dict[str, Tuple[Optional[int], List[Optional[int]]]]:
+    """Per-file ``(uncompressed_size_in_bytes, column_uncompressed_sizes)``,
+    read off the parquet footers.
+
+    Sizes are a property of the FILE, not of the columns ANALYZE was asked to
+    analyze: a ``FOR COLUMNS`` subset still records every column's size, because
+    a partially-filled size list read back positionally would attribute one
+    column's bytes to another. They come from the footer rather than from
+    `_analyze_one_file`'s decoded morsels for the same reason — the morsels only
+    carry the target columns, and their in-memory size is not the file's
+    on-disk uncompressed size anyway.
+
+    ONE batched, GIL-released acquisition for the whole file set (the only
+    sanctioned plan-time stats entry point — see fetch_column_stats_many, which
+    forbids the per-file loop). A footer that cannot be read raises for the whole
+    call, and ANALYZE lets it: the user asked for statistics over these files, so
+    an unreadable file is a failure to report, not a column to quietly leave
+    empty.
+
+    Per column, `None` means the footer recorded no size for it — kept as None,
+    never 0. One such column makes the FILE total None too: a partial sum
+    understates the real size and is indistinguishable from a small file.
+    """
+    from opteryx.connectors.parquet_io.pool_reader import fetch_column_stats_many
+
+    # field_id == position for a local dataset, which is the key bind_schema
+    # assigns and the same key `_field_ids` hands the rest of this module.
+    column_names = [col.name for col in schema.columns]
+    file_sizes = {blob: os.path.getsize(blob) for blob in blobs}
+
+    sizes: Dict[str, Tuple[Optional[int], List[Optional[int]]]] = {}
+    # strict: the returned list is parallel to `blobs` by contract, and a silent
+    # zip truncation would record one file's sizes against another's path.
+    for blob, (_record_count, _row_groups, column_stats) in zip(
+        blobs,
+        fetch_column_stats_many(table_engine.filesystem, blobs, file_sizes),
+        strict=True,
+    ):
+        column_stats.bind_schema(column_names)
+        per_column = [
+            column_stats.get_uncompressed_size(field_id)
+            for field_id in range(len(column_names))
+        ]
+        total = None if any(size is None for size in per_column) else sum(per_column)
+        sizes[blob] = (total, per_column)
+    return sizes
+
+
 def _analyze_one_file(blob: str, targets: List[str], categories: Dict[str, LogicalCategory]) -> dict:
     """Compute this file's full native statistics pass for each target column:
     KMV sketch, null count, min/max (ordinalize() ordinal keys — see
@@ -272,8 +323,10 @@ def analyze_table(
     """Compute native per-file statistics for ``columns`` (or all columns)
     over every parquet file of the dataset and write them into the dataset's
     single manifest — KMV sketch, null count, min/max, histogram, record
-    count, and (string columns) char-class counts / total bytes / min-max
-    length. See _analyze_one_file for the per-file computation.
+    count, uncompressed sizes, and (string columns) char-class counts / total
+    bytes / min-max length. See _analyze_one_file for the per-file computation
+    and _footer_size_stats for the sizes (whole schema, footer-read, not
+    limited to `columns`).
 
     Files are analyzed concurrently — on the free-threaded build this is real
     parallelism across cores; each file is independent (own reader). The manifest
@@ -307,6 +360,7 @@ def analyze_table(
 
     manifest_path = _manifest_path(table_engine)
     existing = _read_existing_stats(manifest_path, column_count)
+    file_sizes = _footer_size_stats(table_engine, blobs, schema)
 
     workers = _worker_count(len(blobs))
     if workers == 1:
@@ -370,18 +424,25 @@ def analyze_table(
         sketches[blob] = sketch
         histograms[blob] = histogram
         char_classes[blob] = char_class
+        uncompressed_size, column_sizes = file_sizes[blob]
         entries.append(
             FileEntry(
                 file_path=blob,
                 file_format="PARQUET",
                 record_count=result["record_count"],
                 file_size_in_bytes=os.path.getsize(blob),
+                uncompressed_size_in_bytes=uncompressed_size,
+                column_uncompressed_sizes_in_bytes=column_sizes,
                 null_counts=null_counts,
                 min_values=min_values,
                 max_values=max_values,
                 min_lengths=min_lengths,
                 max_lengths=max_lengths,
                 char_total_bytes=char_total_bytes,
+                # The width the bins above were actually built with — recorded
+                # so the writer stamps the real number and the reader can check
+                # the counts it reads back against it.
+                histogram_bins=HISTOGRAM_BINS,
             )
         )
 
@@ -472,12 +533,22 @@ def drop_statistics(table_engine, columns: Optional[Sequence[str]]) -> int:
             file_format=entry.file_format,
             record_count=entry.record_count,
             file_size_in_bytes=entry.file_size_in_bytes,
+            # Sizes are facts about the FILE, not statistics about the values in
+            # a column, so DROP STATISTICS FOR COLUMNS leaves them alone — same
+            # treatment the file-level size and record_count already get. The
+            # per-column list must survive whole: clearing some slots would leave
+            # a list that is still read positionally, with holes where columns
+            # still have real bytes on disk.
             uncompressed_size_in_bytes=entry.uncompressed_size_in_bytes,
+            column_uncompressed_sizes_in_bytes=entry.column_uncompressed_sizes_in_bytes,
             null_counts=_clear_scalar(entry.null_counts or _empty_scalar(column_count), drop_ids),
             min_values=_clear_scalar(entry.min_values or _empty_scalar(column_count), drop_ids),
             max_values=_clear_scalar(entry.max_values or _empty_scalar(column_count), drop_ids),
             min_lengths=_clear_scalar(entry.min_lengths or _empty_scalar(column_count), drop_ids),
             max_lengths=_clear_scalar(entry.max_lengths or _empty_scalar(column_count), drop_ids),
+            # Clearing SOME columns' histograms does not change how wide the
+            # surviving ones are — carry the recorded width, don't re-stamp it.
+            histogram_bins=entry.histogram_bins,
             char_total_bytes=_clear_scalar(
                 entry.char_total_bytes or _empty_scalar(column_count), drop_ids
             ),

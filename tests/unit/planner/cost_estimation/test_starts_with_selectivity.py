@@ -84,7 +84,7 @@ def _distogram_over_values(*values, bin_count=64):
 
 def _stats_with_histogram(dgram, identity=_IDENTITY):
     col = ColumnStatistics(column_name="col", data_type="VARCHAR", histogram=dgram)
-    return RelationStatistics(row_count=1000, columns={identity: col})
+    return RelationStatistics(row_count_estimate=1000, columns={identity: col})
 
 
 def _stats_with_char_class(
@@ -96,7 +96,7 @@ def _stats_with_char_class(
         class_proportions=class_proportions,
         avg_length=avg_length,
     )
-    return RelationStatistics(row_count=1000, columns={identity: col})
+    return RelationStatistics(row_count_estimate=1000, columns={identity: col})
 
 
 # ── _selectivity_starts_with (case-sensitive, ordinal range) ────────────────
@@ -140,7 +140,7 @@ def test_eight_byte_prefix_uses_point_density_path():
 
 def test_no_histogram_falls_back_to_prefix_constant():
     col = ColumnStatistics(column_name="col", data_type="VARCHAR")  # histogram=None
-    stats = RelationStatistics(row_count=1000, columns={_IDENTITY: col})
+    stats = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
     node = _func_node(b"foo")
     assert _selectivity_starts_with(node, stats) == _LIKE_PREFIX_SELECTIVITY
 
@@ -190,7 +190,7 @@ def _stats_with_ordinal_bounds(bounds, identity=_IDENTITY, distinct_count=None):
     col = ColumnStatistics(
         column_name="col", data_type="VARCHAR", ordinal_bounds=bounds, distinct_count=distinct_count
     )
-    return RelationStatistics(row_count=1000, columns={identity: col})
+    return RelationStatistics(row_count_estimate=1000, columns={identity: col})
 
 
 def test_ordinal_bounds_disjoint_range_is_zero():
@@ -276,7 +276,7 @@ def test_histogram_takes_precedence_over_ordinal_bounds():
         # histogram, "zzz" would NOT read as disjoint.
         ordinal_bounds=(VARCHAR.ordinalize("a"), VARCHAR.ordinalize("zzz")),
     )
-    stats = RelationStatistics(row_count=1000, columns={_IDENTITY: col})
+    stats = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
     node = _func_node(b"zzz")
     assert _selectivity_starts_with(node, stats) == pytest.approx(0.0, abs=1e-9)
     assert predicate_estimator_tag(node, stats) == "ordinal_range"
@@ -407,7 +407,7 @@ def test_predicate_estimator_tag_ordinal_range_when_stats_present():
 
 def test_predicate_estimator_tag_flat_fallback_without_histogram():
     col = ColumnStatistics(column_name="col", data_type="VARCHAR")
-    stats = RelationStatistics(row_count=1000, columns={_IDENTITY: col})
+    stats = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
     node = _func_node(b"foo")
     assert predicate_estimator_tag(node, stats) == "flat_fallback"
 
@@ -452,7 +452,7 @@ def test_reported_bug_long_prefix_against_short_only_value_is_zero():
         distinct_count=1,
         length_bounds=(len(real_value), len(real_value)),
     )
-    stats = RelationStatistics(row_count=1000, columns={_IDENTITY: col})
+    stats = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
 
     # Shares the first 8 bytes with "lorem ipsom" ("lorem ip") but is far
     # longer than any value in the column -- provably impossible.
@@ -474,7 +474,7 @@ def test_hard_guard_does_not_reject_a_genuinely_shorter_prefix():
         distinct_count=1,
         length_bounds=(len(real_value), len(real_value)),
     )
-    stats = RelationStatistics(row_count=1000, columns={_IDENTITY: col})
+    stats = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
 
     node = _func_node(b"lorem")
     assert _selectivity_starts_with(node, stats) > 0.0
@@ -511,7 +511,7 @@ def test_nvarchar_starts_with_not_hard_zeroed_by_length_guard():
         histogram=dgram,
         length_bounds=(1, 3),  # would otherwise hard-zero a long needle
     )
-    stats = RelationStatistics(row_count=1000, columns={_IDENTITY: col})
+    stats = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col})
     node = _func_node(b"averylongneedlefarbeyondthelengthbounds", column_type=NVARCHAR)
     # Not hard-zeroed by the guard -- falls through to whatever the
     # histogram/bounds/constant tiers actually compute (still likely small,
@@ -537,8 +537,8 @@ def test_avg_discount_applies_to_point_case_not_range_case():
     col_short_avg = ColumnStatistics(
         column_name="col", data_type="VARCHAR", ordinal_bounds=bounds, avg_length=1.0
     )
-    stats_no_avg = RelationStatistics(row_count=1000, columns={_IDENTITY: col_no_avg})
-    stats_short_avg = RelationStatistics(row_count=1000, columns={_IDENTITY: col_short_avg})
+    stats_no_avg = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col_no_avg})
+    stats_short_avg = RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col_short_avg})
     node_range = _func_node(b"al")  # 2 bytes, range case
     assert _selectivity_starts_with(node_range, stats_no_avg) == pytest.approx(
         _selectivity_starts_with(node_range, stats_short_avg)
@@ -558,10 +558,10 @@ def test_avg_discount_applies_to_point_case_not_range_case():
         avg_length=1.0,
     )
     s_no_avg = _selectivity_starts_with(
-        node_point, RelationStatistics(row_count=1000, columns={_IDENTITY: col_no_avg_ndv})
+        node_point, RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col_no_avg_ndv})
     )
     s_short_avg = _selectivity_starts_with(
-        node_point, RelationStatistics(row_count=1000, columns={_IDENTITY: col_short_avg_ndv})
+        node_point, RelationStatistics(row_count_estimate=1000, columns={_IDENTITY: col_short_avg_ndv})
     )
     assert s_short_avg < s_no_avg
 

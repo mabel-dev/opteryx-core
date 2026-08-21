@@ -44,7 +44,7 @@ def _bind(sql, ctx, run_optimizer=True):
     from opteryx.third_party import sqloxide
     from opteryx.models import QueryTelemetry
 
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     clean = do_sql_rewrite(sql)
     parsed = sqloxide.parse_sql(clean, _dialect="opteryx")
     ast = do_ast_rewriter(parsed, parameters=[])[0]

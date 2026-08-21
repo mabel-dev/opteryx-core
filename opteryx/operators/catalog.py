@@ -178,6 +178,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.aggregate import UngroupedAggregateNode
     from opteryx.operators.asof_join import AsofJoinNode
     from opteryx.operators.cross_join import CrossJoinNode
+    from opteryx.operators.cte_ref import CteRefNode
     from opteryx.operators.csv_read import CsvReadNode
     from opteryx.operators.distinct import DistinctNode
     from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
@@ -193,6 +194,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.jsonl_read import JsonlReadNode
     from opteryx.operators.skene_read import SkeneReadNode
     from opteryx.operators.limit import LimitNode
+    from opteryx.operators.scalar_guard import ScalarGuardNode
     from opteryx.operators.window import FramedWindowNode
     from opteryx.operators.window import WindowNode
     from opteryx.operators.nested_loop_join import NestedLoopJoinNode
@@ -237,6 +239,13 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         NullReaderNode,
         name="Null Reader",
+        category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
+        is_scan=True,
+    )
+    r.register(
+        CteRefNode,
+        name="CTE Reference",
         category=OperatorCategory.SCAN,
         parallelism=OperatorParallelism.STATELESS,
         is_scan=True,
@@ -331,6 +340,16 @@ def _build_registry() -> OperatorRegistry:
         LimitNode,
         name="Limit",
         category=OperatorCategory.LIMIT,
+    )
+    # Runtime cardinality guard for an uncorrelated scalar subquery the planner
+    # could not statically prove single-row — buffers the subquery result and
+    # enforces SQL's "one row or NULL" at the materialization boundary
+    # (native_scalar_guard.hpp).
+    r.register(
+        ScalarGuardNode,
+        name="Scalar Guard",
+        category=OperatorCategory.LIMIT,
+        is_pipeline_breaking=True,
     )
 
     # -- Window operators -----------------------------------------------------

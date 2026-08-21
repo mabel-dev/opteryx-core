@@ -100,6 +100,23 @@ cdef class FileColumnStats:
             return None
         return s.null_count
 
+    cpdef object get_distinct_count(self, int field_id):
+        """File-level NDV for field_id, or None when unknown.
+
+        Sourced from parquet ``Statistics.distinct_count`` — a real hash-derived
+        count rugo's writer emits for bloom-eligible columns — merged across row
+        groups by AggregateColumnStats (disjoint ranges sum, overlapping ranges
+        take the max). None (never a guess) when any row group lacks the
+        statistic; most foreign writers never populate the field.
+        """
+        idx = self._field_id_to_idx.get(field_id)
+        if idx is None:
+            return None
+        cdef AggColumnStat* s = &self._stats[<int>idx]
+        if s.distinct_count < 0:
+            return None
+        return s.distinct_count
+
     cpdef object get_uncompressed_size(self, int field_id):
         """Return total uncompressed byte size for field_id, or None if unknown.
 

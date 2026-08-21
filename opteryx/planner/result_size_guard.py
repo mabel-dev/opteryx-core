@@ -8,14 +8,26 @@
 Refuses the query BEFORE any data is read, so an accidental cross join costs
 nothing rather than an hour of IO.
 
-The check is deliberately CONDITIONAL: it only fires when every scanned relation
-carries a real row count. `statistics_refresh._UNKNOWN_ROW_COUNT` substitutes
-1,000,000 for a relation that cannot report its size, and that fabrication
-multiplies through joins — before virtual datasets declared their counts, a
-2-way self cross join of the 9-row `$planets` was estimated at 10**12 rows
-against an actual 81. Gating on a number like that would refuse trivial queries,
-so a single unknown input disables the plan-time check entirely and leaves
-enforcement to the runtime counter (which measures rows instead of guessing).
+The check is deliberately CONDITIONAL, twice over:
+
+  * It only fires when every scanned relation carries a real row count.
+    `statistics_refresh._UNKNOWN_ROW_COUNT` substitutes 1,000,000 for a
+    relation that cannot report its size, and that fabrication multiplies
+    through joins — before virtual datasets declared their counts, a 2-way
+    self cross join of the 9-row `$planets` was estimated at 10**12 rows
+    against an actual 81. Gating on a number like that would refuse trivial
+    queries, so a single unknown input disables the plan-time check entirely.
+
+  * It only fires when the terminal count is a `row_count_metric` — a number
+    the statistics claim to KNOW (exact arithmetic over real counts: the
+    accidental plain cross join, the unfiltered too-large scan). A
+    `row_count_estimate` — anything that passed through a selectivity or NDV
+    heuristic (a filter, an equi-join, a grouped aggregate) — is a guess, and
+    refusing a query on a guess is the same dishonesty as the fabricated
+    unknown-count case: TPC-DS Q39 (a self-join of a grouped-aggregate CTE)
+    was refused on an "estimated" 8.5 billion rows against a tiny actual
+    result. Estimates defer to the runtime counter, which measures rows
+    instead of guessing.
 
 This is the "too big to be worth starting" gate; it is not the only one. A query
 whose estimate is UNDER the limit can still deliver more rows than predicted, so
@@ -66,7 +78,10 @@ def check_estimated_result_size(plan, limit: int, telemetry=None, scan_stats_cac
     """Raise ResultTooLargeError when the plan's estimated result exceeds `limit`.
 
     No-op (returns the plan unchanged) when the limit is not positive, when any
-    input lacks real statistics, or when no estimate could be produced.
+    input lacks real statistics, when no estimate could be produced, or when
+    the terminal count is only a `row_count_estimate` rather than a metric
+    (see the module docstring — the guard acts on numbers it can stand
+    behind, never on heuristics).
 
     Also a no-op when the plan's actual output isn't a plain `Exit` -- e.g.
     `EXPLAIN SELECT ...` wraps the inner query's plan (`... -> Exit -> Explain`)
@@ -97,7 +112,12 @@ def check_estimated_result_size(plan, limit: int, telemetry=None, scan_stats_cac
     if len(exit_points) != 1 or plan[exit_points[0]].node_type != LogicalPlanStepType.Exit:
         return plan
 
-    estimate = getattr(getattr(plan[exit_points[0]], "statistics", None), "row_count", None)
+    # Enforce ONLY on a metric terminal count — `row_count_metric` is None
+    # whenever the number is an estimate, so estimates fall through to the
+    # runtime counter without a special case here.
+    estimate = getattr(
+        getattr(plan[exit_points[0]], "statistics", None), "row_count_metric", None
+    )
 
     if estimate is not None and estimate > limit:
         if telemetry is not None:

@@ -17,6 +17,7 @@ execution follows those decisions deterministically.
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from opteryx.exceptions import md_code
 from opteryx.models.file_entry import FileEntry
 from opteryx.third_party.maki_nage.distogram import Distogram, merge
 from opteryx.types.logical_type import LogicalCategory
@@ -212,8 +213,10 @@ class Manifest:
         self._char_class_vector = char_class_vector
         self.bounds_are_ordinal = bounds_are_ordinal
         # The sketch vectors are built once over the FULL file set and are indexed
-        # by original file position. prune_files shrinks self.files, so we track the
-        # surviving original row indices to keep native reductions aligned with the
+        # by original file position. Pruning (copy-on-write — prune_files/
+        # prune_files_for_topn/subset return a NEW Manifest, see subset's
+        # docstring) shrinks the file list, so the clone tracks the surviving
+        # original row indices to keep native reductions aligned with the
         # (pruned) file list — matching the Python paths that iterate self.files.
         # None means "no pruning yet": row i of the vectors == self.files[i].
         self._live_rows: Optional[List[int]] = None
@@ -408,21 +411,183 @@ class Manifest:
 
         return op in _NAN_UNSOUND_OPS and self._bounds_may_omit_nan(column_name)
 
-    def prune_files(self, predicates: List) -> None:
+    def _with_files(self, kept_files: List[FileEntry], kept_rows: List[int]) -> "Manifest":
+        """New Manifest over `kept_files`, sharing everything file-set-independent
+        with this one by reference (schema, sketch vectors, load-time column
+        snapshot, field-id mappings) — the copy-on-write half of the pruning
+        contract, see `subset`. `kept_rows` is the surviving ORIGINAL vector-row
+        index per kept file (the `_live_rows` invariant). The per-column caches
+        start empty: they memoise answers derived from the file set, which is
+        exactly what changed.
+        """
+        clone = Manifest.__new__(Manifest)
+        clone.files = kept_files
+        clone.schema = self.schema
+        clone._min_k_vector = self._min_k_vector
+        clone._histogram_vector = self._histogram_vector
+        clone._char_class_vector = self._char_class_vector
+        clone.bounds_are_ordinal = self.bounds_are_ordinal
+        clone._live_rows = kept_rows
+        clone._load_time_columns = self._load_time_columns
+        clone._field_id_to_name = self._field_id_to_name
+        clone._name_to_field_id = self._name_to_field_id
+        clone._column_bounds_cache = {}
+        clone._distogram_cache = {}
+        return clone
+
+    def subset(self, positions: List[int]) -> "Manifest":
+        """New Manifest keeping only the files at `positions` (indexes into the
+        CURRENT `self.files`, in the order given). `self` is left untouched.
+
+        Pruning is copy-on-write by contract: a Manifest attached to a plan
+        node is immutable for the life of the plan, because the optimizer's
+        scan-statistics cache (statistics_refresh._scan_stats) keys its
+        memoised base statistics by `id(node.manifest)`. An in-place prune
+        keeps the id and re-serves PRE-pruning row counts and bounds to every
+        later refresh; assigning the returned object to `node.manifest` makes
+        the cache miss and recompute honestly.
+        """
+        kept_files = [self.files[position] for position in positions]
+        kept_rows = [
+            position if self._live_rows is None else self._live_rows[position]
+            for position in positions
+        ]
+        return self._with_files(kept_files, kept_rows)
+
+    # Op codes for `ordinal_zone_map_terms`, mirrored in
+    # src/cpp/engine/native_skene_scan_source.hpp's SkeneZoneTerm. Small ints
+    # rather than strings because the consumer is a C++ claim builder that must
+    # not carry a string table, let alone this module's op vocabulary.
+    ZONE_OP_EQ = 0
+    ZONE_OP_GT = 1
+    ZONE_OP_GTEQ = 2
+    ZONE_OP_LT = 3
+    ZONE_OP_LTEQ = 4
+
+    def ordinal_zone_map_terms(self, predicates: List) -> List[tuple]:
+        """`(column_name, op_code, ordinal)` terms a ROW-GROUP zone map can be
+        tested against, for the conjuncts of `predicates` that are safely prunable.
+
+        This is `prune_files`' reasoning, factored so a reader that prunes at a
+        FINER grain than the file can reuse it instead of restating it. Everything
+        that makes a bounds comparison sound or unsound — the ordinal dialect
+        (`_ordinalize_literal`), the temporal-domain mismatch guard
+        (`_predicate_domain_mismatch`), the NaN-invisibility rule
+        (`_nan_invisible_to_bounds`) — is decided HERE, in the one place that knows
+        the column's type. What crosses to the consumer is three numbers and a
+        name, and the consumer does arithmetic. A second site deciding any of the
+        above would be a second dialect, which is the exact failure
+        `bounds_are_ordinal` exists to prevent (see [[ordinalize-vs-to-int]] in the
+        __init__ docstring: two "value -> int64" functions exist and agree only for
+        plain int64).
+
+        The terms are a CONJUNCTION: every one of them must be satisfiable for a
+        row group to be worth reading, so a consumer may skip on any single term
+        proving emptiness. Conjuncts this cannot express are simply absent — a
+        missing term costs a read, never an answer.
+
+        Deliberately excluded:
+          * `NotEq`. It prunes only on `min == max == v`, which reads ordinal
+            equality as value uniformity. String ordinals pack the first 8 content
+            bytes and are monotonic but NOT injective, so that inference is false
+            for exactly the type where a row group is most likely to be uniform.
+            `prune_files` handles it with a type test; here the payoff is too small
+            to carry the rule into another consumer.
+          * Anything that is not `column <op> literal` or
+            `column BETWEEN literal AND literal` — the same two shapes
+            `prune_files` knows, since this is the same reasoning.
+
+        Returns [] when the bounds are not ordinal: the caller's statistics are,
+        so a non-ordinal literal is not comparable with them at all.
+        """
+        from opteryx.expression import NodeType
+        from opteryx.planner.optimizer.strategies.split_conjunctive_predicates import (
+            _inner_split,
+        )
+
+        if not self.bounds_are_ordinal:
+            return []
+
+        comparisons = {
+            "Eq": self.ZONE_OP_EQ,
+            "Gt": self.ZONE_OP_GT,
+            "GtEq": self.ZONE_OP_GTEQ,
+            "Lt": self.ZONE_OP_LT,
+            "LtEq": self.ZONE_OP_LTEQ,
+        }
+        terms: List[tuple] = []
+
+        def _literal(node):
+            value = node.value
+            # numpy/pyarrow scalars reach predicates as 0-d wrappers; ordinalize
+            # wants the python value, same unwrap prune_files does.
+            return value.item() if getattr(value, "item", None) is not None else value
+
+        def _emit(column_name, op_code, raw_value):
+            ordinal = self._ordinalize_literal(column_name, raw_value)
+            # None is "this type has no scalar ordinalize kernel", not zero.
+            if ordinal is None or not isinstance(ordinal, int):
+                return
+            terms.append((column_name, op_code, ordinal))
+
+        # `predicates` is a list of separately-pushed conjuncts, but any one of
+        # them can itself be an AND tree or a DNF node (this engine's n-ary AND)
+        # after PredicateOrderingStrategy. `_inner_split` is the ONE splitter that
+        # knows both shapes — never write a second one.
+        conjuncts = []
+        for predicate in predicates or []:
+            if predicate is not None:
+                conjuncts.extend(_inner_split(predicate))
+
+        for conjunct in conjuncts:
+            if self._predicate_domain_mismatch(conjunct):
+                continue
+            if (
+                conjunct.node_type == NodeType.COMPARISON_OPERATOR
+                and conjunct.value in comparisons
+                and conjunct.left.node_type == NodeType.IDENTIFIER
+                and conjunct.right.node_type == NodeType.LITERAL
+            ):
+                column_name = conjunct.left.source_column
+                if self._nan_invisible_to_bounds(column_name, conjunct.value):
+                    continue
+                _emit(column_name, comparisons[conjunct.value], _literal(conjunct.right))
+            elif (
+                conjunct.node_type == NodeType.BETWEEN
+                and conjunct.left.node_type == NodeType.IDENTIFIER
+                and conjunct.right.node_type == NodeType.LITERAL
+                and conjunct.centre.node_type == NodeType.LITERAL
+            ):
+                # BETWEEN is two conjuncts and they fail differently under NaN —
+                # the lower half is the GtEq test, the upper half the LtEq test —
+                # so each half asks the NaN question under its OWN op, exactly as
+                # prune_files does rather than gating both on one answer.
+                column_name = conjunct.left.source_column
+                if not self._nan_invisible_to_bounds(column_name, "GtEq"):
+                    _emit(column_name, self.ZONE_OP_GTEQ, _literal(conjunct.right))
+                if not self._nan_invisible_to_bounds(column_name, "LtEq"):
+                    _emit(column_name, self.ZONE_OP_LTEQ, _literal(conjunct.centre))
+
+        return terms
+
+    def prune_files(self, predicates: List) -> "Manifest":
         """
         Filter files based on predicates using min/max bounds.
 
         Called by optimizer to determine which files to read.
-        Returns list of files that might contain matching rows.
 
         This is NOT called at execution time - the optimizer makes
         this decision and execution just follows it.
+
+        Copy-on-write: `self` is never modified. Returns `self` when no file
+        was pruned, otherwise a new Manifest over the surviving files (see
+        `subset` for why the caller must re-assign `node.manifest`).
 
         Args:
             predicates: List of predicate Node objects to evaluate
 
         Returns:
-            Filtered list of FileEntry objects
+            The Manifest describing the surviving file set.
         """
         from opteryx.expression import NodeType
 
@@ -448,7 +613,7 @@ class Manifest:
 
         if not predicates:
             # No predicates (or none left that can be safely compared) = no pruning
-            return self.files
+            return self
 
         kept_files = []
         kept_rows: List[int] = []
@@ -608,10 +773,11 @@ class Manifest:
                 kept_files.append(file_entry)
                 kept_rows.append(original_row)
 
-        self.files = kept_files
-        self._live_rows = kept_rows
+        if len(kept_files) == len(self.files):
+            return self
+        return self._with_files(kept_files, kept_rows)
 
-    def prune_files_for_topn(self, column_name: str, descending: bool, limit: int) -> None:
+    def prune_files_for_topn(self, column_name: str, descending: bool, limit: int) -> "Manifest":
         """Drop files that provably cannot hold any of the top-`limit` rows of
         `column_name` for a single-column ``ORDER BY column_name [ASC|DESC]
         LIMIT limit`` query.
@@ -623,6 +789,10 @@ class Manifest:
         answer, not a defensive no-op. With that precondition, record_count IS
         the non-null row count for every file, so no separate null-aware
         accounting is needed.
+
+        Copy-on-write, same contract as `prune_files`: `self` is never
+        modified; returns `self` when nothing is pruned, otherwise a new
+        Manifest over the surviving files (see `subset`).
 
         Algorithm: rank the files that carry a (lower_bound, upper_bound) for
         this column by the value nearest the query's "best" end - max
@@ -645,7 +815,7 @@ class Manifest:
         """
         field_id = self._resolve_field_id(column_name)
         if field_id is None or limit is None or limit <= 0:
-            return
+            return self
 
         # NaN breaks this in BOTH directions when the bounds cannot see it (the
         # non-ordinal, rugo-min/max provenance — see `_nan_invisible_to_bounds`),
@@ -661,7 +831,7 @@ class Manifest:
         # Neither is recoverable from bounds that omit the value, so the whole
         # prune stands down for such a column.
         if self._bounds_may_omit_nan(column_name):
-            return
+            return self
 
         # position in self.files -> (lower_bound, upper_bound)
         bounds_by_position: Dict[int, Tuple[Any, Any]] = {}
@@ -687,7 +857,7 @@ class Manifest:
 
         if not bounds_by_position:
             # No file carries stats for this column - nothing safe to prune.
-            return
+            return self
 
         ranked = sorted(
             bounds_by_position.items(),
@@ -729,8 +899,9 @@ class Manifest:
             kept_files.append(file_entry)
             kept_rows.append(original_row)
 
-        self.files = kept_files
-        self._live_rows = kept_rows
+        if len(kept_files) == len(self.files):
+            return self
+        return self._with_files(kept_files, kept_rows)
 
     # ================================================================
     # File Accessors
@@ -798,6 +969,7 @@ class Manifest:
             RelationStatistics,
         )
         total_rows = self.get_record_count()
+        row_count_is_metric = total_rows is not None
         if total_rows is None:
             # RelationStatistics.row_count is a real int and selectivity does
             # arithmetic on it, so an unknown count needs a stand-in. Use the same
@@ -824,10 +996,15 @@ class Manifest:
             if has_null_counts:
                 null_fraction = self.estimate_null_fraction(col_name)
             char_class_stats = self.get_char_class_stats(col_name)
+            distinct_count = self.estimate_cardinality(col_name)
+            if distinct_count is None:
+                # Range-derived fallback for un-ANALYZE'd relations — same
+                # costing-only substitution statistics_refresh makes.
+                distinct_count = self.estimate_range_cardinality(col_name)
             columns[identity] = ColumnStatistics(
                 column_name=col_name,
                 data_type=str(getattr(col, "type", "")),
-                distinct_count=self.estimate_cardinality(col_name),
+                distinct_count=distinct_count,
                 value_range=ColumnRange(),
                 histogram=self.get_distogram(col_name),
                 null_fraction=null_fraction,
@@ -836,7 +1013,9 @@ class Manifest:
                 ordinal_bounds=self.get_ordinal_bounds(col_name),
                 length_bounds=self.get_length_bounds(col_name),
             )
-        return RelationStatistics(row_count=total_rows, columns=columns)
+        if row_count_is_metric:
+            return RelationStatistics(columns=columns, row_count_metric=total_rows)
+        return RelationStatistics(columns=columns, row_count_estimate=total_rows)
 
     # ================================================================
     # Char-class stats (LIKE '%needle%' selectivity)
@@ -1162,9 +1341,138 @@ class Manifest:
                 continue
             if col_min is None or col_max is None:
                 continue
+            # The bins the producer says it wrote must be the bins that are
+            # here. load_counts_i64 spaces the bin centres across
+            # (col_min, col_max) by the slice length, so reading N counts as if
+            # they were M puts every boundary in the wrong place — a wrong
+            # selectivity, not a missing one. Fail loud rather than coerce.
+            stored_bins = file_entry.histogram_bins
+            if stored_bins is not None and stored_bins != (end - start):
+                raise ValueError(
+                    f"Histogram bin count mismatch for {md_code(file_entry.file_path)}: the "
+                    f"manifest records {stored_bins} bins but the histogram holds "
+                    f"{end - start}."
+                )
             dgram = load_counts_i64(counts[start:end], float(col_min), float(col_max))
             combined = dgram if combined is None else merge(combined, dgram)
         return combined
+
+    def _exact_cardinality_from_footers(self, col_name: str) -> Optional[int]:
+        """Relation-level EXACT distinct count from per-file footer NDV, or None.
+
+        skene's `kStatNdvExact` means value ordering deduplicated the column, so
+        the stored count IS the file's distinct non-null count — a BOUND, not an
+        estimate. That per-FILE bound only survives to the RELATION when the
+        files' value sets cannot overlap, so this returns a number in exactly two
+        provable cases and None otherwise:
+
+          * one file — its count is trivially the relation's;
+          * several files whose ordinal ranges are pairwise STRICTLY disjoint,
+            in which case the counts add with no double counting.
+
+        Disjointness on ordinals is sound in the direction used here: ordinalize
+        is monotonic, so `ord(a) < ord(b)` implies `a < b`. It is not injective
+        (string ordinals collide on a shared 8-byte prefix), so a touching pair
+        (`hi == lo`) may or may not share a value and is NOT provable — hence the
+        strict `<`. Non-injectivity can only cost us a provable case, never
+        manufacture one.
+
+        ⚠️ Counts distinct NON-NULL values, matching skene's definition. The KMV
+        path this backs up is built the same way, and both consumers
+        (distinct_pushdown, hash_map_variant) use the number as a perf signal, so
+        a NULL is not worth a +1 fudge in either direction.
+        """
+        field_id = self._resolve_field_id(col_name)
+        if field_id is None or not self.files:
+            return None
+
+        total = 0
+        intervals = []
+        for file in self.files:
+            counted = (file.distinct_value_counts or {}).get(field_id)
+            # None is not tracked; not-exact is a sketch, which cannot be summed
+            # into a bound however many files agree.
+            if counted is None or not counted[1]:
+                return None
+            total += counted[0]
+            intervals.append(
+                ((file.lower_bounds or {}).get(field_id), (file.upper_bounds or {}).get(field_id))
+            )
+
+        if len(self.files) == 1:
+            return total
+        # Comparing bounds across files requires them to speak ONE dialect;
+        # ordinal-vs-decoded would be a meaningless inequality.
+        if not self.bounds_are_ordinal:
+            return None
+        if any(low is None or high is None for low, high in intervals):
+            return None
+        intervals.sort()
+        for lower, upper in zip(intervals, intervals[1:]):
+            if not lower[1] < upper[0]:
+                return None
+        return total
+
+    def _cardinality_from_sketches(self, col_name: str) -> Optional[int]:
+        """Relation NDV by unioning the live files' skene KMV sketches, or None.
+
+        This is the answer a stored sketch exists to give. A per-file distinct
+        COUNT cannot be merged — two files reporting 250,000 each may hold
+        250,000 between them or 500,000, and min/max cannot tell those apart
+        (measured on TPC-H `l_comment`: every row group shares an identical min
+        ordinal while the value sets are 91% disjoint, so a range-based rule
+        lands 17.6x low). The K smallest hashes CAN be merged, exactly, so the
+        overlap is measured rather than guessed.
+
+        EXACT below K, which is the regime most columns live in: a union holding
+        fewer than K hashes holds every distinct value the relation has.
+
+        Requires EVERY live file to carry a sketch — a union missing one file's
+        hashes undercounts, and nothing distinguishes that from a genuinely
+        smaller column.
+        """
+        field_id = self._resolve_field_id(col_name)
+        if field_id is None or not self.files:
+            return None
+
+        sketches = []
+        for file in self.files:
+            sketch = (file.distinct_sketches or {}).get(field_id)
+            if sketch is None:
+                return None
+            sketches.append(sketch)
+
+        from opteryx.utils.kmv import estimate_from_min_k, merge_min_k
+
+        count, exact = estimate_from_min_k(merge_min_k(sketches))
+
+        if not exact:
+            # Floor the estimate with what the footers PROVE. A file whose own
+            # distinct count is exact holds that many distinct values, and a
+            # subset cannot hold more than the whole — so the largest exact
+            # per-file count is a hard lower bound on the relation, and the K=32
+            # estimator's ~18% error can land below it (measured on l_shipdate:
+            # 2002 estimated against 2526 proven in one file).
+            #
+            # MAX, never SUM: two files' exact counts may describe the same
+            # values, which is the entire reason the sketch exists.
+            floor = 0
+            for file in self.files:
+                proven = (file.distinct_floors or {}).get(field_id)
+                if proven:
+                    floor = max(floor, proven)
+                counted = (file.distinct_value_counts or {}).get(field_id)
+                if counted is not None and counted[1]:
+                    floor = max(floor, counted[0])
+            count = max(count, floor)
+
+        # A distinct count cannot exceed the rows it was counted over. The
+        # estimator can overshoot above K; below K it is exact and this is a
+        # no-op.
+        total_rows = self.get_record_count()
+        if total_rows is not None and total_rows > 0:
+            count = min(count, int(total_rows))
+        return max(1, count) if count else count
 
     def estimate_cardinality(self, column) -> Optional[int]:
         """
@@ -1174,11 +1482,27 @@ class Manifest:
         estimator (exact count when the merged sketch is under K). Reduced
         natively over the whole-column sketch vector — no boxing. Returns None
         when the relation carries no sketches (nothing produced them).
+
+        A provably EXACT footer count outranks the sketch: skene's value ordering
+        deduplicates a column outright, and where that count survives to the
+        relation (see `_exact_cardinality_from_footers`) it is a bound, which is
+        strictly stronger than KMV's near-exact estimate. This is the only source
+        here that is not a sketch, so it is consulted FIRST — and it also gives
+        this method an answer for un-ANALYZE'd skene relations, which previously
+        got None and dropped `distinct_pushdown` and `hash_map_variant` on the
+        floor.
         """
         # identity may be bytes; resolve to str for field mapping
         col_name = column.decode("utf-8") if isinstance(column, bytes) else column
+
+        exact = self._exact_cardinality_from_footers(col_name)
+        if exact is not None:
+            return exact
+
         if self._min_k_vector is None:
-            return None
+            # No ANALYZE sketches. skene files carry their own, which merge the
+            # same way and are exact below K — see _cardinality_from_sketches.
+            return self._cardinality_from_sketches(col_name)
 
         from opteryx.compiled.nanobind.vectors import kmv_ndv
 
@@ -1188,6 +1512,162 @@ class Manifest:
         # _live_rows (None until first prune) keeps the merge over the surviving
         # files only, matching the file set the rest of the plan will read.
         return kmv_ndv(self._native_handle(self._min_k_vector), sketch_id, self._live_rows)
+
+    def estimate_range_cardinality(self, column) -> Optional[int]:
+        """NDV estimate from per-file footer statistics — no data read.
+
+        The dataless fallback for relations nobody has ANALYZE'd (no KMV
+        sketches — the norm for plain parquet directories). COSTING ONLY:
+        deliberately a separate method from ``estimate_cardinality``, whose
+        near-exact KMV semantics are load-bearing for the execution-variant
+        strategies (distinct_pushdown, hash_map_variant) — those must never
+        act on a number derived like this.
+
+        Per-file NDV, in priority order:
+
+          1. The footer's own ``Statistics.distinct_count`` — a REAL
+             hash-derived count rugo's writer emits for bloom-eligible columns
+             (any type, strings included), pre-merged across row groups by
+             AggregateColumnStats.
+          2. An integer column's bounds span (``max - min + 1``, capped at the
+             file's rows).
+          3. Any other numeric column: ``rows // 2``.
+
+        A file resolving none of these makes the WHOLE column unknown (None):
+        unknown stays unknown — a fabricated per-file stand-in is exactly the
+        ``input_rows // 2`` class of lie this method exists to replace, and it
+        measurably backfires (an enum-like VARCHAR estimated at half the
+        relation drove TPC-DS Q85's equality selectivity to ~0 and a 660x
+        slower plan). Strings therefore get an estimate ONLY from a real
+        footer count; bloom-occupancy estimation is the agreed follow-up for
+        foreign-written files.
+
+        Files merge sequentially by value-range overlap so two files covering
+        the same values count them once: numeric ranges accrue the fraction of
+        a file's estimate proportional to the part of its range OUTSIDE the
+        running range; non-numeric (byte-comparable) ranges sum when disjoint
+        and take the max when overlapping (the safe floor); files without
+        comparable bounds take the max. Result is capped at the relation's row
+        count. None when the total row count is unknown or zero.
+        """
+        col_name = column.decode("utf-8") if isinstance(column, bytes) else column
+        field_id = self._resolve_field_id(col_name)
+        if field_id is None:
+            return None
+
+        total_rows = self.get_record_count()
+        if total_rows is None or total_rows <= 0:
+            return None
+
+        # Ordinalized bounds (ANALYZE manifests, skene footers) are decoded
+        # values only for identity-mapped categories — same gate as
+        # get_value_range. A VARCHAR's prefix-packed ordinal span says nothing
+        # about its distinct-value count, and must not drive the span rule OR
+        # the overlap merge.
+        bounds_usable = True
+        if self.bounds_are_ordinal:
+            column_type = self._column_type(col_name)
+            bounds_usable = column_type is not None and column_type.category in (
+                LogicalCategory.INTEGER,
+                LogicalCategory.DATE,
+            )
+
+        # Gather (rows, ndv, lo, hi) per file; any unresolvable file makes the
+        # column unknown — a partial merge would count that file's values
+        # either zero times or twice.
+        per_file: list = []
+        for file in self.files:
+            rows = file.record_count
+            if rows is None or rows <= 0:
+                return None
+            footer_ndv = None
+            if file.column_stats is not None:
+                footer_ndv = file.column_stats.get_distinct_count(field_id)
+            elif file.distinct_value_counts is not None:
+                # skene footers (filesystem_connector's SKENE branch) carry NDV
+                # as (count, is_exact) rather than inside a FileColumnStats.
+                # Same slot in the priority order as the parquet footer count
+                # above, and used the same way: this method is COSTING ONLY, so
+                # even an exact per-file count is consumed as an estimate here —
+                # the merge below is a bound, not a count, the moment two files
+                # can share a value. An exact NDV that a consumer may treat as a
+                # BOUND has no route through this method by design.
+                counted = file.distinct_value_counts.get(field_id)
+                if counted is not None:
+                    footer_ndv = counted[0]
+            file_min = file_max = None
+            if bounds_usable:
+                if file.column_stats is not None:
+                    file_min = file.column_stats.get_min(field_id)
+                    file_max = file.column_stats.get_max(field_id)
+                elif file.lower_bounds is not None or file.upper_bounds is not None:
+                    file_min = (file.lower_bounds or {}).get(field_id)
+                    file_max = (file.upper_bounds or {}).get(field_id)
+            numeric = (
+                type(file_min) in (int, float)
+                and type(file_max) in (int, float)
+                and file_max >= file_min
+            )
+            if footer_ndv is not None:
+                ndv = int(min(rows, footer_ndv))
+            elif numeric and type(file_min) is int and type(file_max) is int:
+                ndv = min(rows, file_max - file_min + 1)
+            elif numeric:
+                ndv = max(1, rows // 2)
+            else:
+                return None
+            per_file.append((int(rows), ndv, file_min, file_max, numeric))
+
+        if not per_file:
+            return None
+
+        running_ndv = 0.0
+        running_lo = running_hi = None
+        running_numeric = False
+        first = True
+        for rows, ndv, lo, hi, numeric in per_file:
+            file_ndv = float(ndv)
+            if first:
+                first = False
+                running_ndv = file_ndv
+                running_lo, running_hi = (lo, hi) if lo is not None else (None, None)
+                running_numeric = numeric
+                continue
+            if numeric and running_numeric and running_lo is not None:
+                # Numeric overlap: accrue the fraction of this file's range
+                # outside the running range.
+                width = float(hi) - float(lo)
+                if width <= 0.0:
+                    fraction = 0.0 if running_lo <= lo <= running_hi else 1.0
+                else:
+                    outside = max(0.0, float(running_lo) - float(lo)) + max(
+                        0.0, float(hi) - float(running_hi)
+                    )
+                    fraction = min(1.0, outside / width)
+                running_ndv += fraction * file_ndv
+                running_lo = min(running_lo, lo)
+                running_hi = max(running_hi, hi)
+            elif (
+                lo is not None
+                and running_lo is not None
+                and type(lo) is type(running_lo)
+                and type(hi) is type(running_hi)
+            ):
+                # Comparable non-numeric bounds (byte strings): disjoint ranges
+                # hold disjoint values (sum); overlapping ranges take the max —
+                # exact for the common shape where every file spans the same
+                # enum domain.
+                if hi < running_lo or lo > running_hi:
+                    running_ndv += file_ndv
+                else:
+                    running_ndv = max(running_ndv, file_ndv)
+                running_lo = min(running_lo, lo)
+                running_hi = max(running_hi, hi)
+            else:
+                # No overlap information: max is the safe floor.
+                running_ndv = max(running_ndv, file_ndv)
+
+        return max(1, min(int(running_ndv), int(total_rows)))
 
     def get_total_null_count(self, column) -> Optional[int]:
         """Total nulls for a column across all files.

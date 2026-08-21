@@ -90,6 +90,13 @@ struct ColumnMetadata {
 
     bool             has_statistics = false;
     ColumnStatistics statistics{};
+    // KMV min-hashes read from the tail of the statistics blob, ascending;
+    // empty when the writer stored none. MERGEABLE — union two sketches by
+    // taking the K smallest of their combined hashes. Only ever with ANOTHER
+    // SKENE sketch: these are skene's XXH3 dedup hashes, not draken's
+    // Vector.hash(), so they do not mix with ANALYZE/catalog sketches
+    // (format.h, ColumnSketchHeader).
+    std::vector<uint64_t> sketch;
     ZoneMap          zone_map;
 
     // Serialized bloom filter, empty when the column has none. Probe it with
@@ -117,6 +124,13 @@ struct ColumnSchema {
 struct RowGroupColumnStatistics {
     bool             present = false;
     ColumnStatistics statistics{};
+    // KMV min-hashes read from the tail of the statistics blob, ascending;
+    // empty when the writer stored none. MERGEABLE — union two sketches by
+    // taking the K smallest of their combined hashes. Only ever with ANOTHER
+    // SKENE sketch: these are skene's XXH3 dedup hashes, not draken's
+    // Vector.hash(), so they do not mix with ANALYZE/catalog sketches
+    // (format.h, ColumnSketchHeader).
+    std::vector<uint64_t> sketch;
 };
 
 // One row group as the FILE FOOTER describes it.

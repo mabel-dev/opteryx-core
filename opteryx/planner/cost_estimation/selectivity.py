@@ -29,6 +29,24 @@ import math
 from typing import Optional
 
 from opteryx.expression import NodeType
+
+# Textbook constant fallbacks are defined ONCE in fallback_selectivity (shared
+# with the no-stats ordering path in optimizer.strategies.predicate_ordering);
+# the leading-underscore aliases keep this module's ~30 use sites and the
+# existing unit-test imports stable. See fallback_selectivity for what each
+# constant covers.
+from opteryx.planner.cost_estimation.fallback_selectivity import (
+    EQ_UNKNOWN_NDV_FALLBACK as _EQ_UNKNOWN_NDV_FALLBACK,
+)
+from opteryx.planner.cost_estimation.fallback_selectivity import (
+    LIKE_INFIX_SELECTIVITY as _LIKE_INFIX_SELECTIVITY,
+)
+from opteryx.planner.cost_estimation.fallback_selectivity import (
+    LIKE_PREFIX_SELECTIVITY as _LIKE_PREFIX_SELECTIVITY,
+)
+from opteryx.planner.cost_estimation.fallback_selectivity import (
+    RANGE_FALLBACK_SELECTIVITY as _RANGE_FALLBACK_SELECTIVITY,
+)
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.third_party.maki_nage.distogram import count_up_to
 from opteryx.types.logical_type import DrakenType
@@ -67,6 +85,34 @@ def _selectivity(node, stats: RelationStatistics) -> float:
         s1 = _selectivity(node.left, stats)
         s2 = _selectivity(node.right, stats)
         return 1.0 - (1.0 - s1) * (1.0 - s2)
+
+    # DNF and CNF are the n-ARY forms of the two above -- DNF is this engine's
+    # n-ary AND and CNF its n-ary OR, both carrying their terms in `parameters`
+    # (expression/__init__.pyx). PredicateOrderingStrategy REWRITES a filter
+    # chain into a single DNF node, so every multi-term WHERE that survives to
+    # the second statistics refresh arrives here in that shape.
+    #
+    # Without these branches such a predicate fell through to the 1.0 default:
+    # not "no reduction estimated" but SELECTIVITY SILENTLY DROPPED, which made
+    # a filtered relation cost as its full cardinality. Downstream that is not a
+    # rounding error -- it is what let TPC-DS Q54 estimate a cross join at
+    # 3.6e19 rows (past INT64_MAX, so the native join sink's int64_t parameter
+    # raised OverflowError and the query died). The pushed-predicate path hid it:
+    # a scan that CONSUMES its predicate never builds a DNF, so only formats
+    # that declined pushdown met the shape — at the time, skene. (skene pushes
+    # since 2026-08-21, so that particular producer is gone; the branches below
+    # stay because the shape is reachable from any connector that declines, and
+    # because the failure mode when it is missing is a SILENT 1.0, not an error.)
+    if nt == NodeType.DNF:
+        product = 1.0
+        for term in node.parameters or ():
+            product *= _selectivity(term, stats)
+        return product
+    if nt == NodeType.CNF:
+        complement = 1.0
+        for term in node.parameters or ():
+            complement *= 1.0 - _selectivity(term, stats)
+        return 1.0 - complement
     if nt == NodeType.NOT:
         return 1.0 - _selectivity(node.centre, stats)
 
@@ -282,7 +328,7 @@ def _selectivity_range(
                 return _clamp01(fraction_below)
             return _clamp01(1.0 - fraction_below)
 
-    return 0.25
+    return _RANGE_FALLBACK_SELECTIVITY
 
 
 def _selectivity_in(identity: bytes, literal_value, stats: RelationStatistics) -> float:
@@ -342,7 +388,7 @@ def _selectivity_between(node, stats: RelationStatistics) -> float:
             lo, hi = (a, b) if a <= b else (b, a)
             fraction = (_count_up_to(dgram, hi) - _count_up_to(dgram, lo)) / total
             return _clamp01(fraction)
-    return 0.25
+    return _RANGE_FALLBACK_SELECTIVITY
 
 
 def _selectivity_is_null(identity: bytes, stats: RelationStatistics) -> float:
@@ -421,19 +467,6 @@ def _to_float(value) -> Optional[float]:
 def _count_up_to(dgram, value: float) -> float:
     return count_up_to(dgram, value)
 
-
-# Textbook constant fallbacks for LIKE-family predicates the estimator has no
-# real content stats for. "Prefix" = pattern like 'foo%' (still bounds a range,
-# a bit more selective); "infix" = pattern like '%foo%' or unrecognized shapes
-# (no positional anchor at all, least selective). Named so InStr/IInStr (the
-# rewritten form of an infix LIKE -- see predicate_rewriter.INSTR_REWRITES)
-# can reuse the infix constant directly instead of re-deriving one.
-_LIKE_PREFIX_SELECTIVITY = 0.25
-_LIKE_INFIX_SELECTIVITY = 0.1
-
-# Equality selectivity when neither side's NDV is known -- shared by the
-# literal (`col = X`) and column-vs-column (`col = col`) paths.
-_EQ_UNKNOWN_NDV_FALLBACK = 0.1
 
 # Textbook default for an inequality between two columns (`a.x < b.y`) with no
 # literal on either side. Per-column histograms/ranges say nothing about the

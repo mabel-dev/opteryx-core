@@ -25,11 +25,13 @@ The reference arm is the same query with `config.features.skene_late_materializa
 off, i.e. the ordinary single-pass `NativeSkeneScanSource` — the un-pushed ground
 truth, and the path every skene scan took before this landed.
 
-One property has no parquet counterpart and is asserted separately: the Filter node
-above the scan STAYS in the plan. That is what makes the reduction safe by
-construction (the scan may only drop rows the Filter or the TopNSink would have
-dropped anyway), and it is why this needed no change to skene's predicate-pushdown
-decline in `FileSystemTable.can_push`. See `test_filter_node_is_not_consumed`.
+One property has no parquet counterpart and is asserted separately: the predicate
+this Source reduces with is now a PUSHED one — `FileSystemTable.can_push` accepts
+for skene (architect ruling, 2026-08-21), so the pushdown strategy CONSUMES the
+Filter node and pass 1 is the only thing that applies it. There is no Filter above
+to re-check the survivors, which is why the parity arm above is the whole of the
+safety argument rather than a convenience. See
+`test_pushed_predicate_is_the_only_filter`.
 """
 
 import os
@@ -276,17 +278,20 @@ def _source_for(tmp_path, name, sql_tail, monkeypatch, columns=None):
 
 def test_narrow_projection_declines(tmp_path, monkeypatch):
     """One projected column, and it is already a pass-1 column. Deferring nothing
-    would cost a second open and a second decode to save nothing — this is the shape
-    the reader-side-filter ruling was about, and the min-deferred gate is what keeps
-    two passes away from it."""
+    would cost a second open and a second decode to save nothing, so the
+    min-deferred gate keeps two passes away from it. The single-pass Source it
+    falls back to still applies the pushed predicate itself."""
     assert _source_for(tmp_path, "narrow", "k FROM {DATASET} WHERE tag LIKE '"
                        + NEEDLE + "' ORDER BY k LIMIT 10",
                        monkeypatch) == ["NativeSkeneScanSource"]
 
 
 def test_no_predicate_declines(tmp_path, monkeypatch):
-    """No WHERE at all: there is no Filter node above the scan, so there is no
-    predicate to reduce with and every row is a candidate."""
+    """No WHERE at all: nothing pushed and no Filter node above the scan, so there
+    is no predicate to reduce with and every row is a candidate. This is also what
+    stops an unfiltered `ORDER BY ... LIMIT` being admitted as a two-pass shape now
+    that a zero-Filter chain is the ordinary case (see
+    `compiler._skene_latmat_consumers`)."""
     assert _source_for(tmp_path, "nowhere", "* FROM {DATASET} ORDER BY k LIMIT 10",
                        monkeypatch) == ["NativeSkeneScanSource"]
 
@@ -312,24 +317,33 @@ def test_feature_flag_off_declines(tmp_path, monkeypatch):
         "NativeSkeneScanSource"]
 
 
-def test_filter_node_is_not_consumed(tmp_path, monkeypatch):
-    """The Filter above the scan SURVIVES into the executed plan.
+def test_pushed_predicate_is_the_only_filter(tmp_path, monkeypatch):
+    """The Filter above the scan is CONSUMED, and pass 1 still applies its predicate.
 
-    This is the load-bearing safety property, not an incidental one. The scan is
-    allowed to emit a superset of the answer (it drops only predicate failures and
-    rows strictly worse than the n-th best), and the Filter re-running over the
-    handful of candidates is what makes that superset harmless. It is also why this
-    optimization needed no change to `FileSystemTable.can_push`, which still declines
-    predicate pushdown for skene on its own measured grounds.
+    `FileSystemTable.can_push` accepts for skene (architect ruling, 2026-08-21), so
+    the predicate arrives on `scan.predicates` and the Filter node is gone from the
+    plan. That removes the backstop this optimization used to lean on: a row pass 1
+    wrongly keeps is no longer re-checked by anything, and a conjunct pass 1 failed
+    to evaluate would simply not be applied. Both failure modes show up as a wrong
+    answer against the single-pass arm, which is what the parity assert below is
+    for; the EXPLAIN assert pins the premise that the Filter really is gone, so
+    this test cannot pass vacuously if pushdown silently stops firing.
     """
-    path = _write_skene(os.path.join(str(tmp_path), "keepfilter"),
+    path = _write_skene(os.path.join(str(tmp_path), "pushedfilter"),
                         _base(pa.int64(), list(range(N))))
     sql = ("SELECT * FROM '%s' WHERE tag LIKE '%s' ORDER BY k LIMIT 10"
            % (path, NEEDLE))
     # The scan really does take the two-pass path for this query...
-    _rows, _names, src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
-    assert src == ["NativeSkeneLatmatScanSource"]
-    # ...and the Filter is still there above it. (EXPLAIN renders the plan without
+    nat_rows, nat_names, nat_src = _drain(sql, latmat=True, monkeypatch=monkeypatch)
+    assert nat_src == ["NativeSkeneLatmatScanSource"]
+    # ...and it answers exactly what the single-pass Source answers.
+    ref_rows, ref_names, ref_src = _drain(sql, latmat=False, monkeypatch=monkeypatch)
+    assert ref_src == ["NativeSkeneScanSource"]
+    assert nat_names == ref_names
+    assert sorted(nat_rows) == sorted(ref_rows), (
+        "the two-pass Source disagreed with the single-pass Source on a query "
+        "whose predicate is pushed — nothing above either scan re-applies it")
+    # ...with no Filter node left in the plan. (EXPLAIN renders the plan without
     # compiling a native scan, hence the separate run.)
     plan_rows = []
     session = opteryx.session()
@@ -338,9 +352,10 @@ def test_filter_node_is_not_consumed(tmp_path, monkeypatch):
                  for n in morsel.column_names]
         for i in range(morsel.num_rows):
             plan_rows.append(repr(morsel.column(names[0])[i]))
-    assert any("Filter" in row for row in plan_rows), (
-        "the Filter node above the skene scan was consumed — the two-pass Source's "
-        "correctness argument depends on it still being there: %s" % plan_rows)
+    assert not any("Filter" in row for row in plan_rows), (
+        "a Filter node survived above the skene scan — the predicate was not "
+        "pushed, so this test is no longer exercising the pushed path: %s"
+        % plan_rows)
 
 
 if __name__ == "__main__":  # pragma: no cover

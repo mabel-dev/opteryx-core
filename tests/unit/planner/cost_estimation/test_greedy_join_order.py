@@ -13,7 +13,16 @@ from opteryx.planner.cost_estimation import JoinTreeLeaf
 from opteryx.planner.cost_estimation import JoinTreeNode
 from opteryx.planner.cost_estimation import JoinVertex
 from opteryx.planner.cost_estimation import KeyStats
+from opteryx.planner.cost_estimation import NdvProvenance
 from opteryx.planner.cost_estimation import greedy_join_order
+
+
+def _ks(ndv):
+    """A KeyStats with a MEASURED NDV -- these tests exercise the arithmetic,
+    not the domain-size stand-in path."""
+    if ndv is None:
+        return KeyStats(ndv=None, null_fraction=0.0)
+    return KeyStats(ndv=ndv, null_fraction=0.0, ndv_provenance=NdvProvenance.MEASURED)
 
 
 def _v(i, rows, name=None):
@@ -24,7 +33,7 @@ def _key_edge(l, r, l_ndv, r_ndv):
     return JoinEdge(
         left=l,
         right=r,
-        equi_keys=((KeyStats(ndv=l_ndv, null_fraction=0.0), KeyStats(ndv=r_ndv, null_fraction=0.0)),),
+        equi_keys=((_ks(l_ndv), _ks(r_ndv)),),
     )
 
 

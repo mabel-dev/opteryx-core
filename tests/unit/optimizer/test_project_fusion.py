@@ -35,7 +35,7 @@ def _optimized_plan(sql: str):
     Mirrors the helper in test_optimizer_plan_snapshots.py (duplicated rather
     than imported so this file doesn't depend on sibling test collection order).
     """
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     query_id = str(uuid.uuid4())
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
 
@@ -188,7 +188,7 @@ def test_fanned_out_project_is_not_fused():
     plan.add_edge("lower", "upper_a")
     plan.add_edge("lower", "upper_b")
 
-    strategy = ProjectFusionStrategy(QueryTelemetry())
+    strategy = ProjectFusionStrategy(QueryTelemetry.detached())
     context = OptimizerContext(plan)
     context.optimized_plan = plan.copy()
     context.node_id = "lower"

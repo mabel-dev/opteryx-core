@@ -941,9 +941,22 @@ void DecodeColumnFromChunk(DecodedColumn &result,
             if (any_match) break;
           }
         } else {
+          // Widen each dictionary entry to the LOGICAL value the needle is
+          // expressed in before comparing. Parquet has no narrow or unsigned
+          // physical storage - INT8/UINT8/INT16/UINT16/UINT32 all arrive as
+          // physical int32 - so an unsigned column must ZERO-extend, exactly as
+          // the RLE materialisation below does for the same reason. Sign-
+          // extending is what broke it: 192.168.4.136 is stored as the bit
+          // pattern 0xC0A80488, which read as int32 is -1062730616 and equals no
+          // needle, so `= <any value with bit 31 set>` found the dictionary
+          // "disjoint", skipped EVERY dictionary-encoded row group, and returned
+          // zero rows with no error. Comparing in int64 also removes the need for
+          // an INT32 range guard on the needle: a needle outside the column's
+          // range simply matches nothing, which is the right answer.
           for (int32_t dv : result.dict_int32_values) {
+            const int64_t val = result.is_unsigned ? (int64_t)(uint32_t)dv : (int64_t)dv;
             for (int64_t needle : *skip_pred->int_vals) {
-              if (needle >= INT32_MIN && needle <= INT32_MAX && dv == (int32_t)needle) { any_match = true; break; }
+              if (val == needle) { any_match = true; break; }
             }
             if (any_match) break;
           }

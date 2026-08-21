@@ -1642,12 +1642,30 @@ inline bool fk_is_float_t(DrakenType t) {
 
 // Read any integer-or-decimal operand as a RAW int128 (scale-0 for ints; the
 // caller rescales by 10^(maxscale-own_scale) to a common scale — exact).
+//
+// EVERY width this kernel can be routed for MUST have a case here. The `default`
+// reads eight bytes, so a type that falls through to it while storing fewer —
+// every unsigned width did, until they were added — reads past the end of a
+// one-, two- or four-byte-per-row buffer and answers from whatever follows it.
+// That is why the unsigned entries in `_NUM_PHYS` (compiled_expression.pyx, the
+// gate that decides what routes here) and these cases are ONE change: the gate
+// without the cases is an out-of-bounds read, and it is strictly worse than the
+// hard `err_op=11` decline that preceded both.
+//
+// int128 holds every UINT64 exactly, so unsigned needs no double promotion and
+// loses nothing — a value above INT64_MAX compares as itself, not as the
+// negative int64 its bits spell.
 inline __int128 fk_read_dec(const DrakenVector* v, uint32_t phys) {
     switch (v->type) {
         case DRAKEN_DECIMAL128: return static_cast<const __int128*>(v->data)[phys];
         case DRAKEN_INT8:       return static_cast<const int8_t*>(v->data)[phys];
         case DRAKEN_INT16:      return static_cast<const int16_t*>(v->data)[phys];
         case DRAKEN_INT32:      return static_cast<const int32_t*>(v->data)[phys];
+        case DRAKEN_UINT8:      return static_cast<const uint8_t*>(v->data)[phys];
+        case DRAKEN_UINT16:     return static_cast<const uint16_t*>(v->data)[phys];
+        case DRAKEN_UINT32:     return static_cast<const uint32_t*>(v->data)[phys];
+        case DRAKEN_UINT64:     return static_cast<__int128>(
+                                           static_cast<const uint64_t*>(v->data)[phys]);
         default:                return static_cast<const int64_t*>(v->data)[phys];  // INT64/DECIMAL
     }
 }
@@ -1665,6 +1683,13 @@ inline double fk_read_num_double(const DrakenVector* v, uint32_t phys, int scale
         case DRAKEN_INT8:    return static_cast<const int8_t*>(v->data)[phys];
         case DRAKEN_INT16:   return static_cast<const int16_t*>(v->data)[phys];
         case DRAKEN_INT32:   return static_cast<const int32_t*>(v->data)[phys];
+        // See fk_read_dec: the `default` reads eight bytes, so every narrow width
+        // routed here needs its own case or it reads past its buffer.
+        case DRAKEN_UINT8:   return static_cast<const uint8_t*>(v->data)[phys];
+        case DRAKEN_UINT16:  return static_cast<const uint16_t*>(v->data)[phys];
+        case DRAKEN_UINT32:  return static_cast<const uint32_t*>(v->data)[phys];
+        case DRAKEN_UINT64:  return static_cast<double>(
+                                        static_cast<const uint64_t*>(v->data)[phys]);
         case DRAKEN_DECIMAL128: {
             double d = static_cast<double>(fk_read_dec(v, phys));
             for (int i = 0; i < scale; ++i) d /= 10.0;

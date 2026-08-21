@@ -315,10 +315,10 @@ def test_local_store_bounds_prune_correctly_as_real_values_not_ordinal(connector
         return Node(NodeType.COMPARISON_OPERATOR, value=op, left=identifier, right=literal)
 
     # id's real range is [5, 95] — 1000 is out of range and must prune.
-    manifest.prune_files([_comparison("id", "Gt", 1000)])
+    manifest = manifest.prune_files([_comparison("id", "Gt", 1000)])
     assert manifest.files == []
 
     manifest = Manifest(files=restored_entries, schema=simple_schema)
     # 50 is within [5, 95] and must be kept.
-    manifest.prune_files([_comparison("id", "Eq", 50)])
+    manifest = manifest.prune_files([_comparison("id", "Eq", 50)])
     assert len(manifest.files) == 1

@@ -28,41 +28,28 @@ schema columns and identities, so the decorrelated relation can simply be
 joined to: no schema has to be synthesized and no re-binding is needed.
 
 An UNCORRELATED scalar subquery is the same rewrite with no keys: it is one value
-attached to every outer row, i.e. a cross join. It must provably yield one row, or
-cross-joining it would multiply the outer rows instead of raising SQL's "more than
-one row returned by a subquery". `_uncorrelated_single_row_proof` recognises three
-shapes that establish this statically: an ungrouped aggregate; AggregateAndGroup
-whose only GROUP BY keys are pinned to a single value by an equality filter below
-it (TPC-DS Q44's shape: `WHERE ... GROUP BY i_item_sk` pinned by a store-id
-equality); and a subquery whose own exit step is `LIMIT n` (n <= 1). DISTINCT and
-a bare unaggregated/unlimited SELECT do NOT qualify — no uniqueness metadata
-exists to prove either returns one row, however likely that looks for the data
-at hand.
+attached to every outer row, i.e. a cross join. "One value" is enforced, never
+assumed: cross-joining a many-row result would multiply the outer rows instead of
+raising SQL's "more than one row returned by a subquery", and an empty result
+would drop every outer row where SQL says the subquery IS NULL. Unless the plan
+proves EXACTLY one row statically (`_emits_exactly_one_row`: an ungrouped
+aggregate under nothing but Projects), `_guard_scalar_cardinality` appends a
+ScalarSubqueryGuard step at the subquery's exit and the ENGINE enforces the
+semantics at the materialization boundary (native_scalar_guard.hpp): >1 row is
+the SQL-standard cardinality violation raised as DataError, 0 rows yields one
+NULL, 1 row passes through.
 
-This is why TPC-DS Q06, Q54 and Q58 are refused, permanently, not as a gap to be
-closed later:
-  - Q06/Q54: `SELECT DISTINCT d_month_seq FROM date_dim WHERE d_year = 2001 AND
-    d_moy = 1` — the equality filter pins `d_year`/`d_moy`, not the column being
-    selected/DISTINCT'd (`d_month_seq`). Proving this is one row needs a
-    `(d_year, d_moy) -> d_month_seq` functional dependency on `date_dim` that
-    nothing in the plan states; it just happens to hold for this dataset.
-  - Q58: `SELECT d_week_seq FROM date_dim WHERE d_date = DATE '2000-01-03'` — same
-    gap, bare unaggregated SELECT filtered on a column (`d_date`) different from
-    the one selected (`d_week_seq`); provable only if `d_date` is known unique.
-  Both are instances of the DISTINCT / bare-unaggregated-SELECT case immediately
-  above. The fix is not "recognise one more shape" — it is real schema metadata
-  (a declared PK/UNIQUE constraint the catalog does not currently carry) that
-  would make the proof sound instead of coincidental. Until that metadata exists,
-  accepting these would trade a compile-time refusal for a silent wrong answer
-  the day the coincidence stops holding — see
-  `test_uncorrelated_scalar_subquery_single_row_proofs` in
-  tests/integration/sql_battery/test_shapes_basic.py, which pins this exact
-  boundary by name.
+The runtime guard is what admits shapes whose single-row property is a fact
+about the DATA rather than the plan — TPC-DS Q06/Q54 (`SELECT DISTINCT
+d_month_seq FROM date_dim WHERE d_year = 2001 AND d_moy = 1`: the equality pins
+`d_year`/`d_moy`, not the selected column, so one row needs a functional
+dependency nothing declares) and Q58 (`SELECT d_week_seq FROM date_dim WHERE
+d_date = DATE '2000-01-03'`: provable only if `d_date` were a declared unique
+key). Widening the STATIC proof to accept these was rejected on principle: it
+would trade an enforced property for a silent wrong answer the day the data
+coincidence stops holding. The guard checks, the proof proves; neither lies.
 
 NOT handled here (each raises, never silently wrong):
-  - subqueries with no aggregate, no equality-pinned GROUP BY, and no LIMIT 1
-    (use EXISTS/IN, or add a LIMIT 1)
-  - an uncorrelated subquery that could return several rows
   - correlations that are not equalities
 
 EXISTS is the same rewrite with a different join:
@@ -144,9 +131,6 @@ from opteryx.expression import NodeType, binary_operands, get_all_nodes_of_type
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.join_helpers import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
-from opteryx.planner.optimizer.strategies.filter_implied_group_key_reduction import (
-    _collect_equality_predicates,
-)
 from opteryx.planner.optimizer.strategies.optimization_strategy import (
     FILTER_REFERENCED_NODE_TYPES,
     OptimizationStrategy,
@@ -214,6 +198,27 @@ def _find(condition, predicate):
     # searching for something else.
     if _is_exists(condition) or _is_in_subquery(condition):
         return None, None
+
+    # `x = ANY (SELECT ...)` / `x > ALL (SELECT ...)`: the subquery is a SET here,
+    # not a value, so the scalar rewrite must not claim it — treating it as a
+    # scalar makes an EMPTY subquery yield NULL where ALL's answer is TRUE, a
+    # silent wrong answer, not a slower one. Refused here, while the cause is
+    # legible, rather than letting the SUBQUERY node ride through unresolved.
+    # (`x = ANY (array_column)` never reaches this: its operand is not SUBQUERY.)
+    if (
+        condition.node_type == NodeType.COMPARISON_OPERATOR
+        and isinstance(condition.value, str)
+        and (condition.value.startswith("AnyOp") or condition.value.startswith("AllOp"))
+        and any(
+            operand is not None and operand.node_type == NodeType.SUBQUERY
+            for operand in (condition.left, condition.right, condition.centre)
+        )
+    ):
+        raise UnsupportedSyntaxError(
+            "**ANY**/**ALL** over a subquery is not supported. For `= ANY` use "
+            "**IN** (SELECT ...); for other comparisons compare against an "
+            "aggregate of the subquery instead."
+        )
 
     # Unrolled (not a getattr loop): expression carriers answer .left/.right/
     # .centre natively, returning None when absent.
@@ -598,84 +603,71 @@ def _aggregate_node(plan: LogicalPlan):
     return None, None
 
 
-def _group_keys_pinned_by_equality(inner_plan: LogicalPlan, aggregate_nid, aggregate) -> bool:
+def _emits_exactly_one_row(inner_plan: LogicalPlan) -> bool:
     """
-    Every GROUP BY key forced to a single value by a `col = literal` equality in a
-    Filter below the aggregate means AggregateAndGroup can produce AT MOST ONE
-    group — the same guarantee an ungrouped aggregate gives for free, just proven
-    a different way.
+    Does the subquery's plan prove — statically, from structure alone — that it
+    emits EXACTLY one row? Only then can the ScalarSubqueryGuard be omitted.
 
-    Same walk FilterImpliedGroupKeyReductionStrategy uses to strip such keys, but
-    that strategy runs at optimizer position ~22; decorrelation is position 1, so
-    the proof has to be redone here rather than assumed from its output. Only
-    bare-identifier keys are recognised (mirrors that strategy's own restriction)
-    — an expression key (`GROUP BY a + 1`) is not chased through the equality set.
-    """
-    groups = getattr(aggregate, "groups", None)
-    if not groups:
-        return False
-    if any(g.node_type != NodeType.IDENTIFIER for g in groups):
-        return False
-    equalities = _collect_equality_predicates(inner_plan, aggregate_nid)
-    if not equalities:
-        return False
-    return all(g.qualified_name in equalities for g in groups)
-
-
-def _terminates_in_limit_one(inner_plan: LogicalPlan) -> bool:
-    """
-    Does the subquery's own final step cap it to at most one row?
-
-    A bare `LIMIT n` (n <= 1) as the plan's exit node is sufficient on its own —
-    it bounds total output regardless of what feeds it (DISTINCT, GROUP BY, a
-    plain projection, an ORDER BY or none at all). OFFSET does not weaken this:
-    it only chooses which row survives, never how many can.
-
-    Deliberately narrower than `_rewrite_order_limit_to_row_number`: that rewrite
-    exists for the CORRELATED case, where a global LIMIT 1 is wrong post-join and
-    must become a per-partition top-1 window. Here there is no correlation key to
-    partition by — the subquery is a single value for the whole query — so a
-    plain LIMIT 1 is already the proof, nothing to rewrite.
+    One shape qualifies: an ungrouped Aggregate at the plan's exit, seen through
+    Project nodes only. An ungrouped aggregate yields exactly one row even over
+    zero input, and a Project reshapes columns without touching row count.
+    Anything else between the aggregate and the exit — a HAVING Filter, a LIMIT,
+    a DISTINCT — can drop that row, and "exactly one" degrades to "at most one":
+    the zero-row case must then yield NULL (SQL's answer for an empty scalar
+    subquery), which is the guard's other job. Note this is deliberately about
+    the path ABOVE the aggregate; the old at-most-one proofs (pinned GROUP BY
+    keys, LIMIT 1) are not exactly-one and so still take the guard — cross-
+    joining their empty result would silently DROP every outer row where SQL
+    says the subquery IS NULL (visible on `WHERE (subq) IS NULL`).
     """
     exit_points = inner_plan.get_exit_points()
     if len(exit_points) != 1:
         return False
-    exit_node = inner_plan[exit_points[0]]
-    return (
-        exit_node.node_type == LogicalPlanStepType.Limit
-        and exit_node.limit is not None
-        and exit_node.limit <= 1
-    )
-
-
-def _uncorrelated_single_row_proof(inner_plan: LogicalPlan) -> bool:
-    """
-    Can the uncorrelated subquery's plan prove — statically, from structure alone
-    — that it emits at most one row?
-
-    Three shapes qualify, each sufficient on its own:
-      - an ungrouped aggregate: always exactly one row, even over zero input rows;
-      - AggregateAndGroup whose every key is pinned constant by an equality filter
-        below it (`_group_keys_pinned_by_equality`): at most one group can exist;
-      - the plan's own exit step is `LIMIT n` with n <= 1
-        (`_terminates_in_limit_one`): caps output regardless of what is beneath.
-
-    DISTINCT and a bare (ungrouped, unaggregated, unlimited) projection do NOT
-    qualify: nothing in the plan bounds how many distinct values, or how many
-    rows, the filtered relation can produce — the planner has no uniqueness
-    metadata (no declared PK/UNIQUE constraints) to lean on. Accepting either
-    would trade a compile-time refusal for a silent wrong answer the moment the
-    underlying data stops being coincidentally single-valued — exactly the bug
-    class this guard exists to prevent.
-    """
-    aggregate_nid, aggregate = _aggregate_node(inner_plan)
-    if aggregate is not None:
-        if aggregate.node_type == LogicalPlanStepType.Aggregate:
+    nid = exit_points[0]
+    while True:
+        node = inner_plan[nid]
+        if node.node_type == LogicalPlanStepType.Aggregate:
             return True
-        if aggregate.node_type == LogicalPlanStepType.AggregateAndGroup:
-            if _group_keys_pinned_by_equality(inner_plan, aggregate_nid, aggregate):
-                return True
-    return _terminates_in_limit_one(inner_plan)
+        if node.node_type != LogicalPlanStepType.Project:
+            return False
+        providers = [provider for provider, _t, _r in inner_plan.ingoing_edges(nid)]
+        if len(providers) != 1:
+            return False
+        nid = providers[0]
+
+
+def _guard_scalar_cardinality(inner_plan: LogicalPlan, telemetry) -> None:
+    """
+    Cap an uncorrelated scalar subquery to SQL's scalar semantics at RUNTIME:
+    append a ScalarSubqueryGuard step at the plan's exit. The engine enforces it
+    at the subquery's materialization boundary (native_scalar_guard.hpp) — more
+    than one row raises the SQL-standard "more than one row returned by a
+    subquery used as an expression" as a DataError; zero rows yields the NULL a
+    scalar subquery is defined to be; exactly one row passes through untouched.
+
+    Skipped only for the shape that needs neither half (`_emits_exactly_one_row`).
+    Everything else takes the guard, INCLUDING statically at-most-one shapes
+    (pinned GROUP BY, LIMIT 1) — for those the >1 check can never fire, but the
+    zero-row NULL is load-bearing (see `_emits_exactly_one_row`). The guard is
+    what lets DISTINCT and bare-projection subqueries (TPC-DS Q06/Q54/Q58) run
+    at all: their single-row property is a fact about the DATA (an undeclared
+    functional dependency), not the plan, so it can only ever be checked, never
+    proven — checking it honestly at runtime is the SQL-mandated behaviour,
+    where widening the static proof would instead multiply outer rows silently
+    the day the coincidence stops holding.
+    """
+    if _emits_exactly_one_row(inner_plan):
+        return
+    exit_nid = inner_plan.get_exit_points()[0]
+    guard = LogicalPlanNode(node_type=LogicalPlanStepType.ScalarSubqueryGuard)
+    guard_nid = random_string()
+    inner_plan.add_node(guard_nid, guard)
+    inner_plan.add_edge(exit_nid, guard_nid)
+    setattr(
+        telemetry,
+        "optimization_scalar_subquery_guard",
+        getattr(telemetry, "optimization_scalar_subquery_guard", 0) + 1,
+    )
 
 
 def _is_restricted(plan: LogicalPlan) -> bool:
@@ -2244,17 +2236,13 @@ def _decorrelate(plan: LogicalPlan, filter_nid: str, telemetry) -> LogicalPlan:
         # Uncorrelated: the subquery does not depend on the outer row, so it is a
         # single value joined to every row — a cross join against a one-row relation.
         #
-        # "One row" has to be established, not assumed: an ungrouped aggregate always
-        # yields exactly one row, but a GROUP BY (or no aggregate at all) can yield
-        # many, and cross-joining that would silently MULTIPLY the outer rows rather
-        # than raise the "more than one row returned by a subquery" that SQL requires.
-        # See `_uncorrelated_single_row_proof` for the full set of shapes this proves.
-        if not _uncorrelated_single_row_proof(inner_plan):
-            raise UnsupportedSyntaxError(
-                "An uncorrelated scalar subquery must return exactly one row; only an "
-                "ungrouped aggregate, a GROUP BY whose keys are pinned to a single value "
-                "by an equality filter, or a LIMIT 1 is supported here."
-            )
+        # "One row" has to be established, not assumed: cross-joining a many-row
+        # result would silently MULTIPLY the outer rows rather than raise the
+        # "more than one row returned by a subquery" that SQL requires, and an
+        # empty result would silently DROP every outer row where SQL says the
+        # subquery IS NULL. `_guard_scalar_cardinality` establishes both at
+        # runtime, at the subquery's materialization boundary in the engine.
+        _guard_scalar_cardinality(inner_plan, telemetry)
 
     # A correlated subquery with no aggregate can still be provably one-row-per-
     # binding: `ORDER BY x LIMIT 1` — the top-1-per-group idiom. Rewritten to a
@@ -2532,14 +2520,12 @@ def _decorrelate_projection(plan: LogicalPlan, project_nid: str, telemetry) -> L
 
     # Uncorrelated: the subquery does not depend on the outer row, so it is a
     # single value joined to every row — a cross join against a one-row relation.
-    # "One row" has to be established, not assumed — see
-    # `_uncorrelated_single_row_proof` for the full set of shapes this proves.
-    if not _uncorrelated_single_row_proof(inner_plan):
-        raise UnsupportedSyntaxError(
-            "An uncorrelated scalar subquery must return exactly one row; only an "
-            "ungrouped aggregate, a GROUP BY whose keys are pinned to a single value "
-            "by an equality filter, or a LIMIT 1 is supported here."
-        )
+    # "One row" has to be established, not assumed — `_guard_scalar_cardinality`
+    # establishes it at runtime (>1 row errors, 0 rows yields NULL). The NULL
+    # half matters MORE here than in the WHERE-clause case: a SELECT-list scalar
+    # subquery is a value per outer row, so an empty subquery must still hand
+    # every outer row a NULL rather than empty the cross join.
+    _guard_scalar_cardinality(inner_plan, telemetry)
 
     # Read the subquery's value column before it is grafted into `plan`.
     value_column = _output_column(inner_plan)

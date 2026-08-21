@@ -55,6 +55,7 @@ from opteryx.planner.logical_planner import LogicalPlanStepType
 
 __all__ = [
     "do_resolve_relations",
+    "iter_plan_forest",
     "rename_relations",
     "join_leg_preprocess",
     "subplan_rooted_at",
@@ -68,6 +69,7 @@ RELATION_STEP_TYPES = (
     LogicalPlanStepType.Scan,
     LogicalPlanStepType.FunctionDataset,
     LogicalPlanStepType.Subquery,
+    LogicalPlanStepType.MaterializedCteRef,
 )
 
 # The deepest chain of view/CTE expansions we will follow. A legitimate plan nests a
@@ -259,6 +261,52 @@ def rename_relations(plan: LogicalPlan, prefix: str = VIEW_ALIAS_PREFIX):
         for property in node.properties:
             node.properties[property] = _prop(node.properties[property])
 
+    # Window and FramedWindow nodes carry a pre-minted output relation
+    # (`$window-XXXXXX` / `$framedwindow-XXXXXX`) and pre-minted SchemaColumn
+    # identities for their outputs, fixed at logical-planning time. A CTE
+    # referenced twice splices two copies of one body, and identity is the
+    # engine's per-column handle — two copies sharing one identity means a
+    # self-join's `a.rn = b.rn + 1` binds both sides to the SAME column and
+    # silently collapses (TPC-DS Q57 answered 0 rows, "ok"). Re-mint both per
+    # copy. Nothing in the unbound sub-plan references the relation string or
+    # the identities — references to a window output are by NAME until the
+    # binder registers the schema — so no fixup pass is needed.
+    for nid, node in plan.nodes(True):
+        # Guard on output_relation: an UNFRAMED aggregate window is also a Window
+        # node at this stage, but carries `aggregates` only — the plan rewriter
+        # lowers it to a join and it never mints an output relation.
+        if (
+            node.node_type
+            in (
+                LogicalPlanStepType.Window,
+                LogicalPlanStepType.FramedWindow,
+            )
+            and node.output_relation
+        ):
+            import dataclasses
+
+            from opteryx.types.schema import mint_column_identity
+
+            new_rel = f"{node.output_relation.rsplit('-', 1)[0]}-{random_string(6)}"
+            node.output_relation = new_rel
+            # REPLACE the SchemaColumns rather than mutating them: copy_sub_plan's
+            # node copy shares any non-Node property object between the copy and
+            # its source (see _inner_copy in compiled/structures/node.pyx), so an
+            # in-place identity write would hit the CTE template and every other
+            # copy of it too — the very sharing this re-mint exists to break.
+            node.outputs = [
+                (
+                    output[0],
+                    dataclasses.replace(
+                        output[1],
+                        identity=mint_column_identity(new_rel, output[1].name),
+                    ),
+                    *output[2:],
+                )
+                for output in node.outputs
+            ]
+            plan[nid] = node
+
     # Remap left/right relation name lists and reader UUID lists on join nodes.
     # _prop only handles LogicalColumn.source; plain string lists need explicit remapping.
     # Set-operation nodes (Union/Intersect/Except) also carry left/right relation
@@ -307,7 +355,10 @@ def join_leg_preprocess(plan: LogicalPlan):
     for nid, node in (
         (nid, node)
         for (nid, node) in plan.nodes(True)
-        if node.node_type == LogicalPlanStepType.Scan
+        # A MaterializedCteRef is a reader in exactly the Scan sense: it has a
+        # uuid and an alias, and a join leg that includes it must list both.
+        if node.node_type
+        in (LogicalPlanStepType.Scan, LogicalPlanStepType.MaterializedCteRef)
     ):
         uuid = node.uuid
 
@@ -427,12 +478,24 @@ def _resolve(
     telemetry,
     catalog_cache=None,
     root_via_view: Optional[str] = None,
+    cte_registry: Optional[Dict[str, LogicalPlan]] = None,
+    cte_body_keys: Optional[Dict[Tuple[int, str], str]] = None,
+    cte_names: Optional[Dict[str, str]] = None,
 ) -> LogicalPlan:
     """
-    Expand every CTE and view reference in one plan, then recurse into the sub-plans of
+    Expand every view reference in one plan, resolve every CTE reference to a
+    once-resolved body in `cte_registry`, then recurse into the sub-plans of
     any subquery expressions it carries. `root_scope`/`root_path` are the scope and
     expansion trail this plan is being resolved under; `root_via_view` is the innermost
     view this plan came out of, if any.
+
+    CTE references are NOT spliced here. Each distinct CTE definition — keyed by
+    (scope object, name), so one definition resolved through however many references —
+    is resolved exactly once into `cte_registry`, and the referencing Scan becomes a
+    pending marker (`pending_cte_key`). `_finalize_cte_sharing` then counts references:
+    a single-reference body is spliced inline (today's behaviour, one copy), a
+    multiply-referenced body stays in the registry and its markers become
+    MaterializedCteRef leaves that share the one body.
     """
     from opteryx.managers.views import resolve_relation
 
@@ -467,11 +530,37 @@ def _resolve(
             if relation in scope:
                 if relation in path:
                     raise _cycle_error(relation, path)
-                sub_plan = copy_sub_plan(scope[relation])
-                # a CTE body may reference CTEs declared alongside it
-                child_scope = scope
-                # a CTE inside a view is still read through that view
-                child_via_view = via_view
+                if len(path) >= MAX_EXPANSION_DEPTH:
+                    trail = " -> ".join((*path, relation))
+                    raise UnsupportedSyntaxError(
+                        f"Relations are nested more than {MAX_EXPANSION_DEPTH} deep: {trail}. Flatten some of the views or **WITH** clauses feeding this query."
+                    )
+                # One resolution per CTE DEFINITION: the scope dict object plus the
+                # name identifies the definition across all its references.
+                body_key = cte_body_keys.get((id(scope), relation))
+                if body_key is None:
+                    from opteryx.utils import random_string
+
+                    body_key = f"$cte-{random_string(8)}"
+                    cte_body_keys[(id(scope), relation)] = body_key
+                    cte_names[body_key] = relation
+                    body = copy_sub_plan(scope[relation])
+                    # a CTE body may reference CTEs declared alongside it, and a CTE
+                    # inside a view is still read through that view
+                    cte_registry[body_key] = _resolve(
+                        body,
+                        scope,
+                        path + (relation,),
+                        telemetry,
+                        catalog_cache,
+                        via_view,
+                        cte_registry=cte_registry,
+                        cte_body_keys=cte_body_keys,
+                        cte_names=cte_names,
+                    )
+                node.pending_cte_key = body_key
+                settled.add(nid)
+                continue
             else:
                 kind, resolved = resolve_relation(relation, telemetry, catalog_cache)
                 if kind == "view":
@@ -520,9 +609,192 @@ def _resolve(
         scope, path, via_view = scopes.get(nid, (root_scope, root_path, root_via_view))
         for subquery in _expression_subqueries(node):
             subquery.value = _resolve(
-                subquery.value, scope, path, telemetry, catalog_cache, via_view
+                subquery.value,
+                scope,
+                path,
+                telemetry,
+                catalog_cache,
+                via_view,
+                cte_registry=cte_registry,
+                cte_body_keys=cte_body_keys,
+                cte_names=cte_names,
             )
 
+    return plan
+
+
+def iter_plan_forest(plan: LogicalPlan, _seen: Optional[set] = None):
+    """Yield `plan` and every LogicalPlan embedded in its nodes' properties
+    (expression subqueries hold whole plans off to the side), recursively.
+
+    Deduplicated by object identity: one expression object (and so one embedded
+    plan) is routinely reachable from SEVERAL plan nodes — a Project and the
+    Exit above it share their column expression objects — and counting a plan
+    twice inflates CTE reference counts."""
+    if _seen is None:
+        _seen = set()
+    if id(plan) in _seen:
+        return
+    _seen.add(id(plan))
+    yield plan
+    for _nid, node in plan.nodes(True):
+        for embedded in _embedded_plans(node):
+            yield from iter_plan_forest(embedded, _seen)
+
+
+def _embedded_plans(node) -> list:
+    """Every LogicalPlan hanging off a plan node's properties (see
+    `_expression_subqueries` — the plan is the SUBQUERY expression node's value)."""
+    found: list = []
+
+    def _walk(value):
+        if isinstance(value, LogicalPlan):
+            found.append(value)
+        elif isinstance(value, (list, tuple, set)):
+            for v in value:
+                _walk(v)
+        elif isinstance(value, dict):
+            for v in value.values():
+                _walk(v)
+        elif isinstance(value, (Node, LogicalColumn)):
+            props = value.properties
+            for key, val in (props or {}).items():
+                if key in ("node_type", "uuid"):
+                    continue
+                _walk(val)
+
+    for key, value in node.properties.items():
+        if key in ("node_type", "uuid"):
+            continue
+        _walk(value)
+    return found
+
+
+def _pending_refs(plan: LogicalPlan):
+    """(plan, nid, node) for every pending CTE marker in `plan`'s forest."""
+    for member in iter_plan_forest(plan):
+        for nid, node in list(member.nodes(True)):
+            if getattr(node, "pending_cte_key", None) is not None:
+                yield member, nid, node
+
+
+def _finalize_cte_sharing(
+    plan: LogicalPlan, registry: Dict[str, LogicalPlan], names: Dict[str, str]
+) -> LogicalPlan:
+    """Decide, per CTE definition, between inline expansion and result sharing.
+
+    Reference counts are taken over the final structure: the main plan's forest plus
+    each REACHABLE registry body, counted once — a body executes once however many
+    references it carries. Then:
+
+    - refcount 1  -> splice the body inline at its single reference (exactly the plan
+      shape the resolver produced before sharing existed, minus redundant copies).
+    - refcount 2+ -> the markers become MaterializedCteRef leaves and the body stays
+      in `plan.shared_ctes` (topologically ordered, dependencies first), headed by a
+      Subquery boundary node so the Binder derives its output schema the same way it
+      does for any derived relation.
+
+    Unreachable bodies (a CTE declared but never referenced) are dropped.
+    """
+    from opteryx.expression import NodeType
+
+    # ---- reachability + reference counts ------------------------------------
+    def _refs_in(p: LogicalPlan):
+        return [node.pending_cte_key for _m, _nid, node in _pending_refs(p)]
+
+    counts: Dict[str, int] = {}
+    reachable: list = []  # discovery order
+    frontier = _refs_in(plan)
+    while frontier:
+        key = frontier.pop()
+        counts[key] = counts.get(key, 0) + 1
+        if key not in reachable:
+            reachable.append(key)
+            frontier.extend(_refs_in(registry[key]))
+        # already-reachable bodies were counted when first discovered
+
+    # A body's OWN references were counted exactly once, on discovery, which is the
+    # once-per-execution the count is defined over.
+
+    # ---- refcount 1: splice inline ------------------------------------------
+    # A single reference can live in the main plan's forest OR inside another
+    # (not-yet-spliced) registry body — search both. Splicing merges the body's
+    # nodes into the referencing plan, so markers it carried are found by later
+    # searches wherever they ended up; the order keys are processed in does not
+    # matter.
+    def _all_sites(key: str, exclude_body: str):
+        for site in _pending_refs(plan):
+            if site[2].pending_cte_key == key:
+                yield site
+        for other_key, body in registry.items():
+            if other_key == exclude_body:
+                continue
+            for site in _pending_refs(body):
+                if site[2].pending_cte_key == key:
+                    yield site
+
+    for key in [k for k in reachable if counts[k] == 1]:
+        sites = list(_all_sites(key, exclude_body=key))
+        if len(sites) != 1:  # pragma: no cover — counts and sites derive identically
+            raise UnsupportedSyntaxError(
+                f"CTE '{names.get(key, key)}' reference bookkeeping is inconsistent."
+            )
+        member, nid, node = sites[0]
+        node.pending_cte_key = None
+        _splice(member, nid, node, registry.pop(key))
+
+    # ---- refcount 2+: shared, materialized once ------------------------------
+    shared: Dict[str, LogicalPlan] = {}
+    remaining = [_pending_refs(plan)] + [_pending_refs(body) for body in registry.values()]
+    for site_iter in remaining:
+        for member, nid, node in site_iter:
+            key = node.pending_cte_key
+            node.pending_cte_key = None
+            node.node_type = LogicalPlanStepType.MaterializedCteRef
+            node.cte_key = key
+            node.cte_name = names.get(key)
+            shared.setdefault(key, registry[key])
+
+    # Head each shared body with a Subquery boundary (alias = the CTE's declared
+    # name) so binding it standalone produces the body's output schema exactly as
+    # visit_subquery does for a derived table.
+    from opteryx.planner.logical_planner import LogicalPlanNode
+    from opteryx.utils import random_string
+
+    for key, body in shared.items():
+        head = body.get_exit_points()[0]
+        boundary = LogicalPlanNode(LogicalPlanStepType.Subquery)
+        boundary.alias = names.get(key, key)
+        boundary.columns = _output_columns(body, head) or [Node(NodeType.WILDCARD)]
+        boundary_nid = random_string()
+        body.add_node(boundary_nid, boundary)
+        body.add_edge(head, boundary_nid)
+
+    # Topological order, dependencies first — a shared body referencing another
+    # shared CTE must be bound/compiled after the body it reads.
+    ordered: Dict[str, LogicalPlan] = {}
+
+    def _converted_refs_in(p: LogicalPlan):
+        return [
+            node.cte_key
+            for member in iter_plan_forest(p)
+            for _nid, node in member.nodes(True)
+            if node.node_type == LogicalPlanStepType.MaterializedCteRef
+        ]
+
+    def _emit(key: str, trail: Tuple[str, ...]):
+        if key in ordered:
+            return
+        if key in trail:  # pragma: no cover — the resolver's cycle check fires first
+            raise _cycle_error(names.get(key, key), trail)
+        for dep in set(_converted_refs_in(shared[key])):
+            _emit(dep, trail + (key,))
+        ordered[key] = shared[key]
+
+    for key in shared:
+        _emit(key, ())
+
+    plan.shared_ctes = ordered
     return plan
 
 
@@ -535,10 +807,25 @@ def do_resolve_relations(
     """
     Expand every CTE and view reference in the plan until only real datasets remain.
 
-    Returns the expanded plan. Fails loud on relation cycles and on runaway nesting.
+    Returns the expanded plan, carrying `shared_ctes` — the once-materialized bodies
+    of CTEs referenced two or more times (empty dict when there are none). Fails loud
+    on relation cycles and on runaway nesting.
 
     `catalog_cache` is passed by the edit-time check path ONLY - it makes catalog
     lookups up to a minute stale, which a statement that reads rows must not be. The
     query planner does not accept one; see `opteryx.CatalogCache`.
     """
-    return _resolve(plan, common_table_expressions or {}, (), telemetry, catalog_cache)
+    registry: Dict[str, LogicalPlan] = {}
+    body_keys: Dict[Tuple[int, str], str] = {}
+    names: Dict[str, str] = {}
+    plan = _resolve(
+        plan,
+        common_table_expressions or {},
+        (),
+        telemetry,
+        catalog_cache,
+        cte_registry=registry,
+        cte_body_keys=body_keys,
+        cte_names=names,
+    )
+    return _finalize_cte_sharing(plan, registry, names)

@@ -48,8 +48,13 @@ def execute(plan, telemetry, trace_sink=None):
     if not plan.is_acyclic():
         raise InvalidInternalStateError("Query plan is cyclic, cannot execute.")
 
-    # Label the join legs to ensure left/right ordering
+    # Label the join legs to ensure left/right ordering — shared CTE bodies are
+    # plans in their own right and carry their own joins.
     plan.label_join_legs()
+    for body in (getattr(plan, "shared_ctes", None) or {}).values():
+        if not body.is_acyclic():
+            raise InvalidInternalStateError("Shared CTE body plan is cyclic, cannot execute.")
+        body.label_join_legs()
 
     # Triage by plan head. Non-pipeline special operations (EXPLAIN / SET / SHOW /
     # INSERT / DDL) run on serial_engine — they have no morsel pipeline to drive

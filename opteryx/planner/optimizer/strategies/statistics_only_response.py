@@ -688,9 +688,13 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         scan_node.relation = "$no_table"
         scan_node.alias = "$no_table"
         # Prune 100% of files in the manifest so optimizer/executor treat
-        # this as having no data to read while preserving connector/schema
+        # this as having no data to read while preserving connector/schema.
+        # Copy-on-write (Manifest.subset): manifests attached to plan nodes
+        # are immutable — the optimizer's scan statistics cache keys by
+        # id(node.manifest), so emptying the file list in place would keep
+        # serving the pre-rewrite statistics.
         if scan_node.manifest is not None:
-            scan_node.manifest.files = []
+            scan_node.manifest = scan_node.manifest.subset([])
 
         # Replace any lingering AGGREGATOR expressions in Project/Exit nodes with
         # the corresponding literal, to ensure no node still references aggregators

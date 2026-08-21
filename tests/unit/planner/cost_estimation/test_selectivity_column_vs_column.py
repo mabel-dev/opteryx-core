@@ -60,7 +60,7 @@ def _stats(x_ndv, y_ndv) -> RelationStatistics:
         columns[_X] = ColumnStatistics(column_name="x", data_type="INTEGER", distinct_count=x_ndv)
     if y_ndv is not None:
         columns[_Y] = ColumnStatistics(column_name="y", data_type="INTEGER", distinct_count=y_ndv)
-    return RelationStatistics(row_count=1000, columns=columns)
+    return RelationStatistics(row_count_estimate=1000, columns=columns)
 
 
 def test_eq_uses_ndv_formula_like_a_join_key():
@@ -141,7 +141,7 @@ def _optimized_and_refreshed_scan_row_count(sql):
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     query_id = str(uuid.uuid4())
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
 

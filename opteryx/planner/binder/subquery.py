@@ -45,6 +45,71 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     return node, context
 
 
+def visit_materialized_cte_ref(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """A reference to a shared, materialize-once CTE body.
+
+    The body was bound BEFORE the main plan (see do_bind_phase), and its boundary
+    schema is the one set of output columns the single execution produces. Each
+    reference exposes that schema under its OWN alias with FRESHLY MINTED column
+    identities: identity is the handle the execution stream is keyed by, and a
+    self-join of two references must present two distinct relations — sharing the
+    body's identities across references is exactly the wrong-answer shape the old
+    per-reference copies suffered when a copy leaked an identity.
+
+    `cte_column_map` records reference identity -> body output identity; the plan
+    compiler uses it to select-and-rename each reference's columns out of the one
+    shared result buffer.
+    """
+    from opteryx.exceptions import AmbiguousDatasetError
+    from opteryx.exceptions import InvalidInternalStateError
+    from opteryx.expression import NodeType
+    from opteryx.models import LogicalColumn
+    from opteryx.types.schema import mint_column_identity
+
+    if node.alias and node.alias.lower() in {r.lower() for r in context.relations}:
+        raise AmbiguousDatasetError(dataset=node.alias)
+
+    boundary_schema = context.shared_cte_schemas.get(node.cte_key)
+    if boundary_schema is None:
+        raise InvalidInternalStateError(
+            f"Reference to CTE '{node.cte_name}' found no bound shared body - "
+            "shared CTE bodies must be bound before the plan that reads them."
+        )
+
+    columns = []
+    mapping = {}
+    for body_column in boundary_schema.columns:
+        out_column = copy.copy(body_column)
+        out_column.identity = mint_column_identity(node.alias, body_column.name)
+        out_column.origin = [node.alias]
+        out_column.aliases = []
+        columns.append(out_column)
+        mapping[out_column.identity] = body_column.identity
+
+    schema = RelationSchema(name=node.alias, columns=columns)
+    context.schemas[node.alias] = schema
+    context.relations[node.alias] = "materialized_cte"
+    context.manifests[node.alias] = None
+    node.schema = schema
+    node.cte_column_map = mapping
+    if context.schema_only:
+        node.unpruned_columns = list(schema.columns)
+    # Same contract as a bound Scan: the node reads its whole schema until
+    # ProjectionPushdownStrategy narrows `columns`.
+    node.columns = [
+        LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=column.name,
+            source=node.alias,
+            schema_column=column,
+        )
+        for column in schema.columns
+    ]
+    return node, context
+
+
 def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     from opteryx.planner.binder.project import visit_exit
 
@@ -78,71 +143,63 @@ def visit_subquery(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     columns: list = []
     source_relations: list = []
     # One underlying column can be reachable under SEVERAL `context.schemas` keys (the
-    # scan's relation and `$project`/`$shared` copies all hold the same object), and this
-    # loop walks every key. Without this guard the boundary emitted the column once PER
-    # KEY, so the derived relation carried duplicates — invisible while `SELECT *`
-    # deduped by identity, an AmbiguousIdentifierError from `s.*` once it stopped.
-    emitted_identities: set = set()
+    # scan's relation and `$project`/`$shared` copies all hold the same object). Every
+    # key contributes its origins to the node's source relations, but the schema column
+    # itself is recorded once by identity — without that dedup the boundary emitted the
+    # column once PER KEY, so the derived relation carried duplicates — invisible while
+    # `SELECT *` deduped by identity, an AmbiguousIdentifierError from `s.*` once it
+    # stopped.
+    schema_columns_by_identity: dict = {}
     for schema in context.schemas.values():
         for schema_column in schema.columns:
             if schema_column.identity not in projected_identities:
                 continue
-            # Every key this column is reachable under contributes its origins to the
-            # node's source relations, so this runs before the emit guard below.
             source_relations.extend(schema_column.origin or [])
-            if schema_column.identity in emitted_identities:
-                continue
-            emitted_identities.add(schema_column.identity)
-            # Find ALL projection columns matching this schema_column's identity.
-            # When the user aliases the same underlying column with multiple
-            # output names (e.g. `n1.n_name AS supp, n2.n_name AS cust` in a
-            # self-join, or `id AS x, id AS y`), every alias must remain
-            # resolvable from the outer query.
-            # Non-empty: the filter above kept only schema columns the projection
-            # names, so every column reaching here has at least one match.
-            projection_matches = [
-                column
-                for column in node.columns
-                if column.schema_column.identity == schema_column.identity
-            ]
+            if schema_column.identity not in schema_columns_by_identity:
+                schema_columns_by_identity[schema_column.identity] = schema_column
 
-            # ONE OUTPUT COLUMN PER PROJECTION ENTRY. `SELECT id AS x, id` names two
-            # columns of the derived relation, not one column carrying an alias — the
-            # same for `id AS x, id AS y` and for `n1.n_name AS supp, n2.n_name AS cust`
-            # over a self-join, where both legs resolve to one underlying identity.
-            # Emitting a single column here (with the siblings' names demoted to
-            # `aliases`) kept every name RESOLVABLE but left the relation one column
-            # short: `SELECT *` over it expands the schema, so the un-aliased copy
-            # silently vanished when the query was wrapped.
-            #
-            # These outputs deliberately SHARE the underlying identity. Identity is the
-            # handle the stream is keyed by, and the subquery has no physical operator
-            # to duplicate a vector with (the optimizer removes it); the duplication
-            # happens where it already happens for the un-nested spelling — the Exit's
-            # `add_select`, which is free to point two output names at one input index.
-            for projection_column in projection_matches:
-                # The subquery's OUTPUT column carries the user-facing alias as its
-                # name. It must be a SEPARATE object from the underlying scan's column:
-                # the scan column keeps its physical name (e.g. `id`) so the reader can
-                # map the connector's physically-named data back to this identity, while
-                # the output column below is renamed to the alias (e.g. `k`) for outer
-                # resolution. Mutating the shared column in place renamed the scan column
-                # too, leaving the reader unable to find the physical column (it then
-                # emitted a NULL placeholder of the wrong width).
-                out_column = copy.copy(schema_column)
-                projection_column.source = node.alias
-                out_column.origin = list(schema_column.origin or []) + [node.alias]
+    # ONE OUTPUT COLUMN PER PROJECTION ENTRY, IN PROJECTION ORDER. The projection list
+    # drives emission — walking `context.schemas` here instead put the boundary's
+    # columns in underlying-schema order, so `SELECT * FROM (SELECT name, id ...) x`
+    # came back (id, name). `SELECT id AS x, id` names two columns of the derived
+    # relation, not one column carrying an alias — the same for `id AS x, id AS y` and
+    # for `n1.n_name AS supp, n2.n_name AS cust` over a self-join, where both legs
+    # resolve to one underlying identity. Emitting a single column per identity (with
+    # the siblings' names demoted to `aliases`) kept every name RESOLVABLE but left the
+    # relation one column short: `SELECT *` over it expands the schema, so the
+    # un-aliased copy silently vanished when the query was wrapped.
+    #
+    # These outputs deliberately SHARE the underlying identity. Identity is the
+    # handle the stream is keyed by, and the subquery has no physical operator
+    # to duplicate a vector with (the optimizer removes it); the duplication
+    # happens where it already happens for the un-nested spelling — the Exit's
+    # `add_select`, which is free to point two output names at one input index.
+    for projection_column in node.columns:
+        schema_column = schema_columns_by_identity.get(projection_column.schema_column.identity)
+        if schema_column is None:
+            continue
+        # The subquery's OUTPUT column carries the user-facing alias as its
+        # name. It must be a SEPARATE object from the underlying scan's column:
+        # the scan column keeps its physical name (e.g. `id`) so the reader can
+        # map the connector's physically-named data back to this identity, while
+        # the output column below is renamed to the alias (e.g. `k`) for outer
+        # resolution. Mutating the shared column in place renamed the scan column
+        # too, leaving the reader unable to find the physical column (it then
+        # emitted a NULL placeholder of the wrong width).
+        out_column = copy.copy(schema_column)
+        projection_column.source = node.alias
+        out_column.origin = list(schema_column.origin or []) + [node.alias]
 
-                out_column.name = projection_column.current_name
+        out_column.name = projection_column.current_name
 
-                if "." in out_column.name:
-                    # a qualified reference (`t.id`) names the output column `id`
-                    out_column.name = out_column.name.split(".")[-1]
+        if "." in out_column.name:
+            # a qualified reference (`t.id`) names the output column `id`
+            out_column.name = out_column.name.split(".")[-1]
 
-                # The output name is the only name this column answers to; the
-                # underlying column's aliases are not the derived relation's.
-                out_column.aliases = []
-                columns.append(out_column)
+        # The output name is the only name this column answers to; the
+        # underlying column's aliases are not the derived relation's.
+        out_column.aliases = []
+        columns.append(out_column)
 
     schema = RelationSchema(name=node.alias, columns=columns)
 

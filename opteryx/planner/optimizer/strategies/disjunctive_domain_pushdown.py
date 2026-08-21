@@ -67,10 +67,12 @@ condition to be OR-rooted.
 
 from typing import Dict, List, Optional, Set, Tuple
 
-from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.expression import ExpressionColumn, NodeType, get_all_nodes_of_type
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import ARRAY as _CT_ARRAY
+from opteryx.types.logical_type import BOOLEAN as _CT_BOOLEAN
+from opteryx.types.schema import ConstantColumn
 
 from .disjunction_simplification import _split_and, _split_or
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
@@ -225,13 +227,45 @@ def _domain_for_column(branch_domains: List[Dict[str, tuple]], identity: str) ->
     return ident, "range", (lo, hi)
 
 
+def _literal_node(value, column_type) -> Node:
+    """A synthesized LITERAL carrying BOTH its `.type` and a matching
+    `schema_column`.
+
+    Both are load-bearing and they are read by different consumers: the
+    row-group pruner reads `node.type`, while the bytecode compiler
+    (`compiled_expression._linearize`) reads types exclusively off
+    `schema_column.column_type`. A literal stamped with only one of them is a
+    half-bound node — `_validate_temporal_at_bind` saw `right_type is None`
+    for a derived temporal predicate and refused the whole query with
+    "literals must be explicitly cast", even though every literal it came
+    from WAS explicitly cast. A bound literal always carries both, so a
+    synthesized one must too.
+    """
+    lit = Node(node_type=NodeType.LITERAL, type=column_type, value=value)
+    lit.schema_column = ConstantColumn(name="", column_type=column_type, value=value)
+    return lit
+
+
+def _comparison_node(op: str, ident: Node, lit: Node) -> Node:
+    """A synthesized COMPARISON_OPERATOR, stamped BOOL like a bound one. Same
+    half-bound hazard as `_literal_node` — a comparison is an expression, and
+    a consumer reading its result type off `schema_column` must not find None."""
+    return Node(
+        NodeType.COMPARISON_OPERATOR,
+        value=op,
+        left=ident.copy(),
+        right=lit,
+        schema_column=ExpressionColumn(name="", column_type=_CT_BOOLEAN),
+    )
+
+
 def _build_points_node(ident: Node, values: Set, element_type) -> Node:
     ordered = sorted(values, key=str)
     if len(ordered) == 1:
-        lit = Node(node_type=NodeType.LITERAL, type=element_type, value=ordered[0])
-        return Node(NodeType.COMPARISON_OPERATOR, value="Eq", left=ident.copy(), right=lit)
-    lit = Node(node_type=NodeType.LITERAL, type=_CT_ARRAY(element_type), value=ordered)
-    return Node(NodeType.COMPARISON_OPERATOR, value="InList", left=ident.copy(), right=lit)
+        return _comparison_node("Eq", ident, _literal_node(ordered[0], element_type))
+    return _comparison_node(
+        "InList", ident, _literal_node(ordered, _CT_ARRAY(element_type))
+    )
 
 
 def _build_range_nodes(ident: Node, lo: Optional[_Bound], hi: Optional[_Bound]) -> List[Node]:
@@ -242,11 +276,11 @@ def _build_range_nodes(ident: Node, lo: Optional[_Bound], hi: Optional[_Bound]) 
     if lo is not None:
         _, inclusive, lit = lo
         op = "GtEq" if inclusive else "Gt"
-        nodes.append(Node(NodeType.COMPARISON_OPERATOR, value=op, left=ident.copy(), right=lit.copy()))
+        nodes.append(_comparison_node(op, ident, lit.copy()))
     if hi is not None:
         _, inclusive, lit = hi
         op = "LtEq" if inclusive else "Lt"
-        nodes.append(Node(NodeType.COMPARISON_OPERATOR, value=op, left=ident.copy(), right=lit.copy()))
+        nodes.append(_comparison_node(op, ident, lit.copy()))
     return nodes
 
 

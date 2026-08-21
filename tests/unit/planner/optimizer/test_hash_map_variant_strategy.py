@@ -53,7 +53,7 @@ def _make_identifier_node(name: str):
 
 def test_parvi_selected_on_small_ndv_product():
     """Parvi is selected when NDV product of group columns is <= the gate (40)."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     # Create a scan with manifest.
@@ -88,7 +88,7 @@ def test_parvi_selected_on_small_ndv_product():
 
 def test_carchar_selected_on_large_ndv_product():
     """Carchar is selected when NDV product exceeds the gate (40)."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 1000)
@@ -116,7 +116,7 @@ def test_carchar_selected_on_large_ndv_product():
 
 def test_parvi_selected_on_small_record_count():
     """Parvi is selected when total record count is <= the gate (signal 2 priority)."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     # Create a scan with very small record count.
@@ -146,7 +146,7 @@ def test_parvi_selected_on_small_record_count():
 
 def test_carchar_default_on_missing_manifest():
     """Carchar is the default when scan manifest is None."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
@@ -175,7 +175,7 @@ def test_carchar_default_on_missing_manifest():
 
 def test_empty_group_by_is_parvi_eligible():
     """GROUP BY with no columns (scalar aggregate) is trivially parvi-eligible."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 1000)
@@ -204,7 +204,7 @@ def test_groupby_ndv_estimate_stashed_in_native_gate_band():
     """The raw group-count estimate is stored on the node for the native sink's
     parvi gate (kGBParviGateNDV=64) even when it exceeds the Cython
     PARVI_ELIGIBILITY_GATE (40)."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 1000)
@@ -232,7 +232,7 @@ def test_groupby_ndv_estimate_stashed_in_native_gate_band():
 
 def test_groupby_ndv_estimate_none_without_stats():
     """No manifest → no estimate → the native gate stays off (fail-safe)."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 1000)
@@ -265,7 +265,7 @@ def test_plain_distinct_without_resolvable_columns_is_carchar():
     every plain DISTINCT claimed an NDV of 1 and armed the native DistinctSink's
     parvi front set — including high-cardinality DISTINCTs, which then paid a
     promote on every worker for nothing."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 4_000_000)
@@ -292,7 +292,7 @@ def test_scalar_aggregate_still_estimates_one_group():
     """The counterpart to the test above: GROUP BY () genuinely produces exactly
     one row, so an empty `groups` list on an AggregateAndGroup node IS provably
     an estimate of 1 — that shortcut must survive."""
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     strategy = HashMapVariantStrategy(telemetry)
 
     scan = _make_scan_node_with_manifest("test_table", 4_000_000)

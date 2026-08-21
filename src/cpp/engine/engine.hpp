@@ -42,6 +42,7 @@
 #include "native_cidr_unnest.hpp"   // CidrUnnestOperator — CROSS JOIN CIDR_UNNEST
 #include "native_grouping_expand.hpp"  // GroupingExpandOperator — GROUP BY ROLLUP
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
+#include "native_scalar_guard.hpp"  // ScalarGuardSource — scalar-subquery cardinality
 #include "native_queue_sink.hpp"    // QueueSink/Global — the terminal output edge
 #include "streaming_scan_source.hpp"
 #include "trace.hpp"                 // TraceSpan/trace_begin/trace_drain — execution tracing
@@ -196,6 +197,8 @@ struct PipelineNode {
     std::vector<std::unique_ptr<Operator>> operators;
     std::unique_ptr<Sink> sink;
     int fill_join2_ref = -1;  // join2_refs index to point at this sink's global post-run
+    int reads_buffer = -1;    // buffers index this pipeline's BufferSource reads, so
+                              // run() can free a buffer after its LAST consumer
     int dop_override = 0;     // >0 forces this pipeline's degree (order-sensitive
                               // consumers of a sorted buffer run at 1); 0 = engine dop
     std::atomic<bool> halt{false};   // set by LimitOperator when its quota is filled
@@ -222,6 +225,13 @@ public:
     // stable as the vectors grow.
     std::vector<std::unique_ptr<std::vector<int>>> latmat_owned_ints;
     std::vector<std::unique_ptr<std::vector<std::string>>> latmat_owned_names;
+    // A skene scan's PUSHED predicate program. Same reason as the latmat vectors:
+    // NativeSkeneScanSource borrows it and it has nowhere else to live (the
+    // ExprProgram is a C++ struct, so the Cython-side SkeneScanPlan cannot hold
+    // one). unique_ptr so the address stays stable as more scans are compiled.
+    // The `instrs` it points at, and every literal DrakenVector*, are owned by the
+    // CompiledBytecode the NativePlan holds — same contract as add_expr_filter.
+    std::vector<std::unique_ptr<ExprProgram>> skene_scan_filters;
     // Shared, not raw: the engine writes to this during run() (see the drain at the
     // bottom of this class), and the queue's lifetime must not depend on Python
     // still holding its PyMorselQueue wrapper at that moment. See the ownership note
@@ -545,14 +555,46 @@ public:
     // timestamp unit for any column the plan declares TIMESTAMP64 (-1 for the
     // rest) so the Source can honour a scan-declared INT64→TIMESTAMP64 retag.
     // Every pointer is borrowed from the NativePlan, which holds the owners alive.
+    // `emit_indices` = the projection's positions in the read set (which is the
+    // projection plus any predicate-only column). `instrs`/`count`/`col_idx`/
+    // `lit_dv` are the PUSHED predicate, resolved at plan time against that same
+    // read set and run inside the Source's decode workers — the Filter node it came
+    // from was consumed by the pushdown strategy, so nothing downstream re-applies
+    // it. `instrs == nullptr` means nothing was pushed.
     void set_native_skene_scan_source(size_t p,
                                       const std::vector<std::string>* files,
                                       const std::vector<std::string>* column_names,
                                       const std::vector<std::string>* out_identities,
                                       const std::vector<int>* column_types,
-                                      const std::vector<int>* retag_units) {
+                                      const std::vector<int>* retag_units,
+                                      const std::vector<int>* emit_indices,
+                                      void* instrs, int count,
+                                      std::vector<int> col_idx,
+                                      std::vector<void*> lit_dv,
+                                      ExprFilterFn fn,
+                                      const std::vector<std::string>* zone_columns,
+                                      const std::vector<int>* zone_ops,
+                                      const std::vector<int64_t>* zone_ordinals,
+                                      int64_t* row_groups_total,
+                                      int64_t* row_groups_pruned) {
+        ExprProgram* program = nullptr;
+        if (instrs != nullptr) {
+            skene_scan_filters.push_back(std::make_unique<ExprProgram>());
+            program = skene_scan_filters.back().get();
+            program->instrs = instrs;
+            program->count = count;
+            program->col_idx = std::move(col_idx);
+            program->lit_dv = std::move(lit_dv);
+        }
+        SkeneZoneMap zone;
+        zone.columns = zone_columns;
+        zone.ops = zone_ops;
+        zone.ordinals = zone_ordinals;
         set_source_(p, std::make_unique<NativeSkeneScanSource>(
-                           files, column_names, out_identities, column_types, retag_units));
+                           files, column_names, out_identities, column_types,
+                           retag_units, emit_indices,
+                           program != nullptr ? fn : nullptr, program, zone,
+                           row_groups_total, row_groups_pruned));
     }
 
     // The two-pass late-materialization skene scan: pass 1 decodes only the
@@ -560,7 +602,12 @@ public:
     // the top-n boundary; pass 2 decodes the full projection for just the files that
     // still hold a candidate. See native_skene_latmat_scan_source.hpp for the
     // algorithm, for why the reduction reuses draken's own sort comparator, and for
-    // why this is NOT the reader-side row filter skene's can_push still declines.
+    // why the top-n reduction is safe on its own now that the Filter node above the
+    // scan is gone (can_push accepts for skene since 2026-08-21).
+    //
+    // `zone_*` are the same ROW-GROUP zone terms the single-pass Source takes. Pass 1
+    // sweeps every row group, so an excluded one is never opened by EITHER pass —
+    // pass 2 only revisits row groups pass 1 kept.
     // Every pointer is borrowed from the NativePlan, which holds the owners alive.
     void set_skene_latmat_scan_source(size_t p,
                                       const std::vector<std::string>* files,
@@ -574,13 +621,23 @@ public:
                                       void* pred_fn, void* pred_ctx,
                                       const std::vector<int>* pred_col_to_p1,
                                       int sort_p1_index, bool sort_ascending,
-                                      int64_t topn_limit) {
+                                      int64_t topn_limit,
+                                      const std::vector<std::string>* zone_columns,
+                                      const std::vector<int>* zone_ops,
+                                      const std::vector<int64_t>* zone_ordinals,
+                                      int64_t* row_groups_total,
+                                      int64_t* row_groups_pruned) {
+        SkeneZoneMap zone;
+        zone.columns = zone_columns;
+        zone.ops = zone_ops;
+        zone.ordinals = zone_ordinals;
         set_source_(p, std::make_unique<NativeSkeneLatmatScanSource>(
                            files, p1_column_names, p1_column_types, p1_retag_units,
                            out_column_names, out_identities, out_column_types,
                            out_retag_units,
                            reinterpret_cast<SkeneLatmatPredFn>(pred_fn), pred_ctx,
-                           pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit));
+                           pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit,
+                           zone, row_groups_total, row_groups_pruned));
     }
 
     void set_native_scan_source(size_t p, rugo::ParquetIOPipeline* pipeline,
@@ -689,6 +746,34 @@ public:
     }
     void set_buffer_source(size_t p, size_t buf) {
         set_source_(p, std::make_unique<BufferSource>(buffers[buf].get()));
+        pipelines[p]->reads_buffer = static_cast<int>(buf);
+    }
+    // Scalar-subquery cardinality guard over a finalized buffer (see
+    // native_scalar_guard.hpp). `names` are the leg's column identities and
+    // types/lt_*/elem_chain its plan-known column types — the same plumbing as
+    // set_unmatched_build_source, for the same zero-rows-streamed reason: the
+    // all-NULL row a zero-row subquery must yield is gathered against these,
+    // so the engine never has to learn a type from data that never arrived.
+    void set_scalar_guard_source(size_t p, size_t buf,
+                                 std::vector<std::string> names,
+                                 std::vector<DrakenType> types,
+                                 std::vector<int> lt_kind, std::vector<int> lt_unit,
+                                 std::vector<int> lt_precision,
+                                 std::vector<int> lt_scale,
+                                 std::vector<int> lt_dimension,
+                                 std::vector<std::vector<int>> elem_chain) {
+        auto logical = intern_logical_vec(lt_kind, lt_unit, lt_precision,
+                                          lt_scale, lt_dimension);
+        auto element = decode_elem_chains(elem_chain, types.size());
+        auto schema = std::make_shared<CxxMorsel>();
+        schema->columns.reserve(types.size());
+        for (size_t c = 0; c < types.size(); ++c)
+            schema->columns.push_back(make_empty_col(types[c], logical[c], element[c]));
+        schema->names = std::move(names);
+        schema->zero_col_rows = 0;
+        set_source_(p, std::make_unique<ScalarGuardSource>(buffers[buf].get(),
+                                                           std::move(schema)));
+        pipelines[p]->reads_buffer = static_cast<int>(buf);
     }
     void add_expr_filter(size_t p, void* instrs, int count, std::vector<int> col_idx,
                          std::vector<void*> lit_dv, ExprFilterFn fn,
@@ -964,6 +1049,18 @@ public:
     // ---- execution (native; called once from the detached driver task) ------------
     // Invariant (compiler-enforced): the LAST pipeline's sink is the QueueSink.
     void run(int dop, void* pool, ErrCtx& err) {
+        // Free each buffer's morsels after its LAST consumer completes: pipelines
+        // run strictly in creation order, so once the highest-indexed pipeline
+        // sourcing a buffer is done, nothing can read it again. A shared CTE's
+        // buffer holds the whole materialized result — releasing it here caps the
+        // window it is held over, and morsels still referenced elsewhere (the
+        // output queue) survive via their shared_ptr refcounts.
+        std::vector<int> last_consumer(buffers.size(), -1);
+        for (size_t i = 0; i < pipelines.size(); ++i) {
+            const int b = pipelines[i]->reads_buffer;
+            if (b >= 0) last_consumer[static_cast<size_t>(b)] = static_cast<int>(i);
+        }
+        size_t pipeline_index = 0;
         for (auto& pn : pipelines) {
             // Consumer abandoned (LIMIT early-exit / cursor dropped): stop between
             // pipelines — running the rest of the graph would be wasted work feeding
@@ -988,6 +1085,13 @@ public:
                 join2_refs[static_cast<size_t>(pn->fill_join2_ref)]->g =
                     static_cast<const Join2BuildGlobal*>(pn->result.get());
             }
+            for (size_t b = 0; b < last_consumer.size(); ++b) {
+                if (last_consumer[b] == static_cast<int>(pipeline_index)) {
+                    buffers[b]->morsels.clear();
+                    buffers[b]->morsels.shrink_to_fit();
+                }
+            }
+            ++pipeline_index;
         }
         // Courtesy empty-result morsel: a query that legitimately produced zero rows
         // still surfaces its output schema to the cursor (the old Exit `at_least_one`).

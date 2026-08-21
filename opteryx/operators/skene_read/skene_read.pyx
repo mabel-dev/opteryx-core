@@ -16,11 +16,11 @@ Skene Read Node
 
 NOTE — the execution path for a projecting skene scan is now
 src/cpp/engine/native_skene_scan_source.hpp (zero-Python, parallel: workers
-claim files from an atomic counter and decode independently). This operator
+claim row groups from an atomic counter and decode independently). This operator
 remains the plan-node carrier (it holds skene_files / skene_read_schema_columns
-for the compiler) and still SERVES the zero-projection COUNT(*) shape, which
-needs the materialized path's genuine zero-column morsel. read_morsels() below
-is therefore the declining-shape path, not the main one.
+for the compiler) and still SERVES the bare zero-projection COUNT(*) shape,
+which needs the materialized path's genuine zero-column morsel. read_morsels()
+below is therefore the declining-shape path, not the main one.
 
 Scan operator for `.skene` datasets. A `.skene` file holds one or more ROW
 GROUPS, and libskene reconstructs one row group at a time as a draken Morsel
@@ -33,14 +33,20 @@ unprojected column's bytes are never interpreted (whole-file bytes are still
 fetched in this phase — the footer-extent ranged-read path is the native scan
 source's job, not this operator's).
 
-Predicates are NOT pushed into this reader — FileSystemTable.can_push
-declines for skene, because on the compile-time materialized path a
-reader-side row filter SERIALIZES work the parallel engine Filter does
-concurrently (measured: +460ms across TPC-H SF1). Filters stay in the plan;
-FILE-level pruning still happens at plan time — the manifest pruning strategy
-prunes from parent Filter nodes (footer min/max ordinals in the manifest
-bounds) without consuming them. Reader-side predicates and zone-map/bloom
-pruning return with the native scan source.
+Predicates ARE pushed for skene (architect ruling, 2026-08-21 — reversing the
+earlier decline), but NOT into THIS operator: they are applied by
+NativeSkeneScanSource, inside its decode workers. `can_push` accepting means
+the pushdown strategy CONSUMES the Filter node, so a pushed predicate that
+reached this reader would be silently dropped and the answer would be wrong.
+This reader therefore refuses one outright (see read_morsels) rather than
+ignoring it — and the compiler never routes one here, because the read set of
+a scan with predicates is non-empty by construction, which is exactly the
+condition that selects the native Source.
+
+FILE-level pruning is unchanged and happens at plan time either way: the
+manifest pruning strategy prunes from `node.predicates` and from parent Filter
+nodes (footer min/max ordinals in the manifest bounds), consuming neither.
+Zone-map/bloom ROW-GROUP skipping is still to come, in the native Source.
 
 Schema is not inferred and not sampled: every file's footer carries the exact
 DrakenType + LogicalType per column, and every decoded file is validated
@@ -182,6 +188,20 @@ cdef class SkeneReadNode(ReaderNode):
     def read_morsels(self):
         """One Morsel per ROW GROUP, in manifest order then row group order."""
         import skene as _skene
+
+        if self.predicates:
+            # can_push accepts for skene, so a pushed predicate has had its Filter
+            # node removed from the plan — this reader applying nothing would
+            # return unfiltered rows, silently. The compiler routes every scan
+            # with predicates to NativeSkeneScanSource (their columns make the read
+            # set non-empty, which is that path's admission test), so reaching here
+            # means that routing broke. Fail, do not scan.
+            raise DatasetReadError(
+                f"skene scan '{self.dataset}': {len(self.predicates)} pushed "
+                "predicate(s) reached the materialized reader, which cannot apply "
+                "them — NativeSkeneScanSource is the only skene path with a "
+                "reader-side filter."
+            )
 
         filesystem = self._ensure_filesystem()
 

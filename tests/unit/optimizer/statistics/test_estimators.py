@@ -163,7 +163,7 @@ class TestRelationStatistics:
             column_name="name",
             data_type="string",
         )
-        stats = RelationStatistics(row_count=10000, columns={_AGE: col1, _NAME: col2})
+        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col1, _NAME: col2})
 
         assert stats.row_count == 10000
         assert len(stats.columns) == 2
@@ -174,7 +174,7 @@ class TestRelationStatistics:
             column_name="age",
             data_type="int",
         )
-        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
+        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
 
         retrieved = stats.get_column(_AGE)
         assert retrieved is not None
@@ -182,7 +182,7 @@ class TestRelationStatistics:
 
     def test_relation_statistics_get_nonexistent_column(self):
         """Test retrieving nonexistent column."""
-        stats = RelationStatistics(row_count=10000, columns={})
+        stats = RelationStatistics(row_count_estimate=10000, columns={})
         retrieved = stats.get_column(_AGE)
         assert retrieved is None
 
@@ -192,7 +192,7 @@ class TestRelationStatistics:
             column_name="age",
             data_type="int",
         )
-        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
+        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
         stats_copy = stats.copy()
 
         assert stats_copy.row_count == 10000
@@ -205,7 +205,7 @@ class TestRelationStatistics:
             column_name="age",
             data_type="int",
         )
-        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
+        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
         new_stats = stats.with_row_count(5000)
 
         assert stats.row_count == 10000  # Original unchanged
@@ -218,7 +218,7 @@ class TestRelationStatistics:
             data_type="int",
             value_range=ColumnRange(lower_bound=0, upper_bound=120),
         )
-        stats = RelationStatistics(row_count=10000, columns={_AGE: col})
+        stats = RelationStatistics(row_count_estimate=10000, columns={_AGE: col})
 
         new_range = ColumnRange(lower_bound=18, upper_bound=65)
         new_stats = stats.update_column_range(_AGE, new_range)
@@ -254,8 +254,13 @@ class TestCardinalityFunctions:
 
     def test_estimate_group_by_cardinality_unknown_ndvs(self):
         from opteryx.planner.cost_estimation import estimate_group_by_cardinality
-        # Unknown NDV falls back to input_rows / 2 per missing key.
-        assert estimate_group_by_cardinality(100, [None]) == 50
+        # A key with unknown NDV makes the estimate the input row count -- the
+        # only sound cap (a grouped aggregate can never emit more rows than it
+        # consumes). The old input_rows // 2 per missing key was a fabrication.
+        assert estimate_group_by_cardinality(100, [None]) == 100
+        # One unknown key poisons the product: known NDVs cannot bound the
+        # combination count when any key's contribution is unknown.
+        assert estimate_group_by_cardinality(100, [3, None]) == 100
         assert estimate_group_by_cardinality(100, []) == 1
         assert estimate_group_by_cardinality(0, [10]) == 1
 

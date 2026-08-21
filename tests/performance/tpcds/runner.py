@@ -15,15 +15,19 @@ signal-based timeout, only by killing the process. See _query_worker.py's
 docstring for why.
 
 Usage:
-    make tpcds
-    python tests/performance/tpcds/runner.py
+    make tpcds-sf1 | tpcds-sf001
+    python tests/performance/tpcds/runner.py --scale 1 --variant skene
     python tests/performance/tpcds/runner.py --scale 1
     python tests/performance/tpcds/runner.py --query 23   # run one query
     python tests/performance/tpcds/runner.py --timeout 60
 
 Inputs:
-    tests/performance/tpcds/opteryx/queries/*.sql   — query bodies (dev/tpcds/generate_queries.py)
-    testdata/tpcds_<scale>/<table>/*.parquet        — data (dev/tpcds/generate_data.py)
+    tests/performance/tpcds/opteryx/queries/*.sql        — query bodies (dev/tpcds/generate_queries.py)
+    testdata/tpcds_<scale>/<table>/*.parquet             — parquet source (dev/tpcds/generate_data.py)
+    testdata/tpcds_<scale>_skene/<table>/*.skene         — skene v2 mirror (dev/parquet_to_skene.py)
+
+The make targets run the SKENE MIRROR; the parquet source is the intermediate
+it is built from and stays reachable by dropping --variant.
 """
 
 from __future__ import annotations
@@ -53,8 +57,13 @@ _RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 _WORKER_PATH = os.path.join(os.path.dirname(__file__), "_query_worker.py")
 
 
-def _load_queries(scale: str, only: str = "") -> list[tuple[str, str]]:
-    dataset = f"testdata.tpcds_{scale}"
+def _dataset_suffix(scale: str, variant: str) -> str:
+    """`tpcds_<scale>` or `tpcds_<scale>_<variant>` (e.g. variant `skene`)."""
+    return f"tpcds_{scale}_{variant}" if variant else f"tpcds_{scale}"
+
+
+def _load_queries(scale: str, only: str = "", variant: str = "") -> list[tuple[str, str]]:
+    dataset = f"testdata.{_dataset_suffix(scale, variant)}"
     queries: list[tuple[str, str]] = []
     for path in sorted(glob.glob(os.path.join(_QUERY_DIR, "query*.sql"))):
         name = os.path.splitext(os.path.basename(path))[0]
@@ -103,17 +112,30 @@ def main() -> int:
     )
     parser.add_argument("--query", type=str, default="", help="Run a single query number (e.g. 23)")
     parser.add_argument(
+        "--variant",
+        type=str,
+        default="",
+        help="Dataset format variant: runs against testdata/tpcds_<scale>_<variant> "
+        "(e.g. `skene` for the skene v2 mirror; default: the parquet dataset)",
+    )
+    parser.add_argument(
         "--timeout", type=float, default=30.0, help="Per-query wall-clock timeout in seconds (default: 30)"
     )
     args = parser.parse_args()
 
-    dataset_path = os.path.join(_REPO_ROOT, "testdata", f"tpcds_{args.scale}")
+    suffix = _dataset_suffix(args.scale, args.variant)
+    dataset_path = os.path.join(_REPO_ROOT, "testdata", suffix)
     if not os.path.isdir(dataset_path):
         print(f"ERROR: dataset not found at {dataset_path}")
-        print(f"       generate it: python dev/tpcds/generate_data.py --scale {args.scale}")
+        print(f"       expected: testdata/{suffix}")
+        if args.variant:
+            print(f"       generate it: python dev/parquet_to_skene.py "
+                  f"testdata/tpcds_{args.scale} testdata/{suffix} lz4")
+        else:
+            print(f"       generate it: python dev/tpcds/generate_data.py --scale {args.scale}")
         return 1
 
-    queries = _load_queries(args.scale, args.query)
+    queries = _load_queries(args.scale, args.query, args.variant)
     if not queries:
         print(f"ERROR: no matching .sql files found in {_QUERY_DIR}")
         return 1
@@ -122,14 +144,15 @@ def main() -> int:
         title="TPC-DS SMOKE RUN",
         opteryx_version=opteryx.__version__,
         metadata=[
-            ("Scale factor", f"{args.scale}  (testdata.tpcds_{args.scale})"),
+            ("Scale factor", f"{args.scale}  (testdata.{suffix})"),
+            ("Format", args.variant or "parquet"),
             ("Queries", str(len(queries))),
         ],
     )
 
     csv_writer, csv_path, csv_handle = open_results_csv(
         _RESULTS_DIR,
-        fieldnames=["scale", "query", "status", "elapsed_ms", "row_count", "error"],
+        fieldnames=["scale", "variant", "query", "status", "elapsed_ms", "row_count", "error"],
     )
 
     passed = 0
@@ -155,6 +178,7 @@ def main() -> int:
             csv_writer.writerow(
                 {
                     "scale": args.scale,
+                    "variant": args.variant or "parquet",
                     "query": name,
                     "status": status,
                     "elapsed_ms": f"{elapsed_ms:.3f}" if status == "ok" else "",

@@ -26,6 +26,10 @@ from opteryx.models.manifest_io import read_manifest_sketches
 
 DATASET = "testdata.satellites"
 _MANIFEST_GLOB = f"testdata/satellites/{DATASET_MANIFEST_NAME}"
+# satellites has no NULLs at all; the null-count assertions need a dataset that
+# does (astronauts: death_date/death_mission are mostly null).
+NULLABLE_DATASET = "testdata.astronauts"
+_NULLABLE_MANIFEST_GLOB = f"testdata/astronauts/{DATASET_MANIFEST_NAME}"
 
 
 def _clean():
@@ -180,7 +184,7 @@ def test_prune_files_wired_from_analyze_manifest_int_column():
         assert manifest.files[0].lower_bounds is not None
 
         # id's real range is [1, 177] — 10000 is far outside it.
-        manifest.prune_files([_comparison("id", "Gt", 10000)])
+        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)])
         assert manifest.files == []
     finally:
         _clean()
@@ -192,7 +196,7 @@ def test_prune_files_wired_from_analyze_manifest_int_column_keeps_in_range():
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
         _, manifest = _metadata()
 
-        manifest.prune_files([_comparison("id", "Eq", 1)])
+        manifest = manifest.prune_files([_comparison("id", "Eq", 1)])
         assert len(manifest.files) == 1
     finally:
         _clean()
@@ -217,7 +221,7 @@ def test_prune_files_wired_from_analyze_manifest_float_column():
         assert stored_max != 9887.834  # real max is 9887.834; ordinal key is not
 
         # gm's real range is [0.0, 9887.834] — 1e12 is far outside it.
-        manifest.prune_files([_comparison("gm", "Gt", 1e12)])
+        manifest = manifest.prune_files([_comparison("gm", "Gt", 1e12)])
         assert manifest.files == []
     finally:
         _clean()
@@ -229,7 +233,7 @@ def test_prune_files_wired_from_analyze_manifest_float_column_keeps_in_range():
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS gm")
         _, manifest = _metadata()
 
-        manifest.prune_files([_comparison("gm", "Lt", 5000.0)])
+        manifest = manifest.prune_files([_comparison("gm", "Lt", 5000.0)])
         assert len(manifest.files) == 1
     finally:
         _clean()
@@ -251,7 +255,7 @@ def test_prune_files_wired_from_analyze_manifest_varchar_column():
         assert isinstance(stored_min, int)
 
         # name's real range is ['Adrastea', 'Ymir'] — "Zzz" sorts after both.
-        manifest.prune_files([_comparison("name", "Eq", "Zzz")])
+        manifest = manifest.prune_files([_comparison("name", "Eq", "Zzz")])
         assert manifest.files == []
     finally:
         _clean()
@@ -263,7 +267,7 @@ def test_prune_files_wired_from_analyze_manifest_varchar_column_keeps_in_range()
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
         _, manifest = _metadata()
 
-        manifest.prune_files([_comparison("name", "Eq", "Adrastea")])
+        manifest = manifest.prune_files([_comparison("name", "Eq", "Adrastea")])
         assert len(manifest.files) == 1
     finally:
         _clean()
@@ -282,7 +286,7 @@ def test_prune_files_manifest_bounds_survive_the_metadata_cache():
         _, manifest = _metadata()
 
         assert manifest.bounds_are_ordinal is True
-        manifest.prune_files([_comparison("id", "Gt", 10000)])
+        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)])
         assert manifest.files == []
     finally:
         _clean()
@@ -296,7 +300,7 @@ def test_no_manifest_means_no_bounds_and_no_pruning():
         _, manifest = _metadata()
         assert manifest.files[0].lower_bounds is None
 
-        manifest.prune_files([_comparison("id", "Gt", 10000)])
+        manifest = manifest.prune_files([_comparison("id", "Gt", 10000)])
         # No bounds to prune with — the file is conservatively kept.
         assert len(manifest.files) == 1
     finally:
@@ -538,6 +542,250 @@ def test_analyze_unknown_column_fails_loud():
         except ColumnNotFoundError:
             failed = True
         assert failed
+    finally:
+        _clean()
+
+
+# ======================================================================
+# Statistics decoded from the manifest must reach the FileEntry the
+# planner sees. Before this, _read_dataset_manifest returned only the
+# sketches and the value bounds: every other per-column statistic ANALYZE
+# had computed was decoded and then dropped on the floor.
+# ======================================================================
+
+
+def _fresh_metadata(dataset):
+    """Dataset metadata read from disk, not from the connector's process-global
+    manifest cache. These tests assert what the READ PATH produces; a cache
+    entry another test in this process left behind would answer for it."""
+    from opteryx.connectors.filesystem_connector import _MANIFEST_CACHE
+
+    _MANIFEST_CACHE.clear()
+    eng = connector_factory(dataset, None).table_engine(dataset, telemetry=None)
+    return eng.get_dataset_metadata()
+
+
+def _astronauts_metadata():
+    return _fresh_metadata(NULLABLE_DATASET)
+
+
+def _clean_nullable():
+    for p in glob.glob(_NULLABLE_MANIFEST_GLOB):
+        os.remove(p)
+
+
+def test_length_bounds_reach_the_manifest_from_an_analyzed_dataset():
+    """get_length_bounds returned None for EVERY filesystem dataset, however
+    recently ANALYZE'd, because min_length_bounds/max_length_bounds were never
+    carried from the manifest onto the FileEntry."""
+    _clean()
+    try:
+        _, manifest = _fresh_metadata(DATASET)
+        # Nothing ANALYZE'd: no length statistics exist at all.
+        assert manifest.get_length_bounds("name") is None
+
+        _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
+        _, manifest = _fresh_metadata(DATASET)
+        bounds = manifest.get_length_bounds("name")
+        assert bounds is not None, "ANALYZE'd string column still has no length bounds"
+        min_length, max_length = bounds
+        assert 0 < min_length <= max_length
+        # Real satellite names, not a fabricated span.
+        assert (min_length, max_length) == (2, 10), bounds
+    finally:
+        _clean()
+
+
+def test_null_counts_reach_the_manifest_from_an_analyzed_dataset():
+    """ANALYZE's per-column null counts land on the FileEntry in BOTH forms —
+    the positional list (SHOW MANIFEST, the char-class avg_length denominator)
+    and the field_id-keyed dict every Manifest accessor reads."""
+    _clean_nullable()
+    try:
+        _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
+        _, manifest = _astronauts_metadata()
+        file_entry = manifest.files[0]
+        assert file_entry.null_counts is not None
+        assert file_entry.null_value_counts is not None
+        # death_date is mostly null in this dataset — a real count, not zeros.
+        field_id = manifest._resolve_field_id("death_date")
+        assert file_entry.null_value_counts[field_id] > 0
+        assert file_entry.null_counts[field_id] == file_entry.null_value_counts[field_id]
+
+        null_fraction = manifest.estimate_null_fraction("death_date")
+        assert null_fraction is not None and 0.0 < null_fraction < 1.0
+    finally:
+        _clean_nullable()
+
+
+def test_relation_statistics_carry_length_bounds_and_null_fraction():
+    """End-to-end at the surface the planner actually reads: the
+    RelationStatistics snapshot the selectivity estimators are handed."""
+    _clean_nullable()
+    try:
+        _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
+        _, manifest = _astronauts_metadata()
+        stats = manifest._as_relation_statistics()
+
+        column = next(
+            c for c in manifest.schema.columns if c.name == "death_mission"
+        )
+        column_stats = stats.columns[column.identity]
+        assert column_stats.length_bounds is not None
+        assert column_stats.null_fraction is not None and column_stats.null_fraction > 0
+        # avg_length divides char_total_bytes by the NON-NULL row count; with
+        # ~95% of this column null, the raw-record_count denominator produced a
+        # value an order of magnitude too small.
+        assert column_stats.avg_length is not None
+        assert column_stats.avg_length >= column_stats.length_bounds[0]
+    finally:
+        _clean_nullable()
+
+
+def test_histogram_bin_count_is_read_back_not_assumed():
+    """The manifest records how many bins its histograms hold; the reader
+    honours that number rather than assuming manifest_io.HISTOGRAM_BINS."""
+    from opteryx.models.manifest_io import HISTOGRAM_BINS
+
+    _clean()
+    try:
+        _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
+        _, manifest = _metadata()
+        assert manifest.files[0].histogram_bins == HISTOGRAM_BINS
+        # ... and the histogram still folds cleanly against it.
+        assert manifest.get_distogram("id") is not None
+    finally:
+        _clean()
+
+
+def test_histogram_bin_count_mismatch_fails_loud():
+    """A stored bin count that disagrees with the counts actually present is a
+    mis-binned histogram — every boundary in the wrong place. It must raise,
+    never be silently coerced to the default width."""
+    _clean()
+    try:
+        import dataclasses
+
+        from opteryx.models.manifest import Manifest
+
+        _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
+        schema, manifest = _metadata()
+        # Claim a width the stored counts do not have. A COPY of the file entry,
+        # not the live one: get_dataset_metadata caches the FileEntry objects
+        # themselves, so mutating one would poison every later reader.
+        patched = dataclasses.replace(manifest.files[0], histogram_bins=17)
+        probe = Manifest(
+            [patched],
+            schema,
+            min_k_vector=manifest._min_k_vector,
+            histogram_vector=manifest._histogram_vector,
+            char_class_vector=manifest._char_class_vector,
+            bounds_are_ordinal=manifest.bounds_are_ordinal,
+        )
+        failed = False
+        try:
+            probe.get_distogram("id")
+        except ValueError:
+            failed = True
+        assert failed, "a mis-binned histogram was read as if it were well-formed"
+    finally:
+        _clean()
+
+
+def test_manifest_writer_stamps_the_real_bin_count():
+    from opteryx.models.manifest_io import _histogram_bins_of
+    from opteryx.models.file_entry import FileEntry
+
+    entry = FileEntry(file_path="f.parquet", file_format="PARQUET", record_count=1, file_size_in_bytes=1)
+    assert _histogram_bins_of(entry, None) == 0
+    assert _histogram_bins_of(entry, [[], []]) == 0
+    assert _histogram_bins_of(entry, [[0] * 8, []]) == 8
+
+    entry.histogram_bins = 8
+    assert _histogram_bins_of(entry, [[0] * 8]) == 8
+
+    entry.histogram_bins = 32
+    failed = False
+    try:
+        _histogram_bins_of(entry, [[0] * 8])
+    except ValueError:
+        failed = True
+    assert failed, "a bin count that contradicts the counts was written anyway"
+
+    entry.histogram_bins = None
+    failed = False
+    try:
+        _histogram_bins_of(entry, [[0] * 8, [0] * 16])
+    except ValueError:
+        failed = True
+    assert failed, "two histogram widths cannot share one manifest row"
+
+
+def test_analyze_records_uncompressed_sizes():
+    """ANALYZE computed no size statistics at all: the manifest's
+    uncompressed_size_in_bytes / column_uncompressed_sizes_in_bytes columns were
+    written empty for every filesystem dataset."""
+    _clean()
+    try:
+        _run("ANALYZE TABLE testdata.satellites")
+        with open(_manifests()[0], "rb") as handle:
+            entries, _native = read_manifest_file_entries(handle.read())
+        entry = entries[0]
+
+        schema, manifest = _fresh_metadata(DATASET)
+        assert entry.column_uncompressed_sizes_in_bytes is not None
+        assert len(entry.column_uncompressed_sizes_in_bytes) == len(schema.columns)
+        assert all(size > 0 for size in entry.column_uncompressed_sizes_in_bytes)
+        # The file total is the sum of its columns, not a separate measurement.
+        assert entry.uncompressed_size_in_bytes == sum(
+            entry.column_uncompressed_sizes_in_bytes
+        )
+
+        # ... and they are the SAME bytes the footer reports, positionally by
+        # field_id — a size list keyed one column out would be silently wrong,
+        # never visibly so.
+        for position, column in enumerate(schema.columns):
+            assert entry.column_uncompressed_sizes_in_bytes[
+                position
+            ] == manifest.get_total_uncompressed_size(column.name), column.name
+    finally:
+        _clean()
+
+
+def test_analyze_for_columns_still_sizes_every_column():
+    """Sizes are facts about the file, not about the analyzed columns: a subset
+    ANALYZE must not leave holes in a list that is read positionally."""
+    _clean()
+    try:
+        _run("ANALYZE TABLE testdata.satellites FOR COLUMNS name")
+        with open(_manifests()[0], "rb") as handle:
+            entries, _native = read_manifest_file_entries(handle.read())
+        schema, _ = _fresh_metadata(DATASET)
+        sizes = entries[0].column_uncompressed_sizes_in_bytes
+        assert sizes is not None and len(sizes) == len(schema.columns)
+        assert all(size > 0 for size in sizes)
+    finally:
+        _clean()
+
+
+def test_drop_statistics_for_columns_keeps_sizes():
+    """DROP STATISTICS clears value statistics. A column's byte size on disk is
+    not one of them, and the surviving list is still read positionally."""
+    _clean()
+    try:
+        _run("ANALYZE TABLE testdata.satellites")
+        with open(_manifests()[0], "rb") as handle:
+            before, _native = read_manifest_file_entries(handle.read())
+
+        _run("DROP STATISTICS ON testdata.satellites FOR COLUMNS name")
+        with open(_manifests()[0], "rb") as handle:
+            after, _native = read_manifest_file_entries(handle.read())
+
+        assert (
+            after[0].column_uncompressed_sizes_in_bytes
+            == before[0].column_uncompressed_sizes_in_bytes
+        )
+        assert after[0].uncompressed_size_in_bytes == before[0].uncompressed_size_in_bytes
     finally:
         _clean()
 

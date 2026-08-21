@@ -49,7 +49,7 @@ def _optimized_plan(sql: str):
     Mirrors the optimizer entry path in opteryx/planner/__init__.py so the plan
     we assert on is the same one the physical planner consumes.
     """
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     query_id = str(uuid.uuid4())
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
 

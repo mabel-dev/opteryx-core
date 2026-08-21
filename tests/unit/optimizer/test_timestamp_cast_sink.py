@@ -33,7 +33,7 @@ TABLE = "testdata.tpch_001.lineitem"
 
 
 def _scan_physical(sql: str, column: str):
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
     plan, _, ctes = do_logical_planning_phase(
         do_ast_rewriter(sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[])[0]

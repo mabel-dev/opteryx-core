@@ -193,10 +193,22 @@ class RelationStatistics:
     relations that both have an ``id`` dropped one side's stats outright, and
     range constraints gathered from ``it1.info``, ``mi.info`` and
     ``mi_idx.info`` were intersected as though they described one column.
+
+    Row counts follow the ``RelationSchema`` metric/estimate lingo: exactly one
+    of ``row_count_metric`` / ``row_count_estimate`` is set, never both. A
+    METRIC is a number we claim to know — a manifest record count, or exact
+    arithmetic over metric inputs (a cross-join product, a LIMIT min, a UNION
+    ALL sum). An ESTIMATE is just that — anything that passed through a
+    selectivity or NDV heuristic (a filter, an equi-join, a grouped aggregate,
+    a DISTINCT), or a fabricated stand-in for a relation that cannot report its
+    size. Consumers that only need a working number read ``row_count``;
+    consumers that ACT on the number (the plan-time result-size guard) must
+    check ``row_count_metric`` and stand down when only an estimate exists.
     """
 
-    row_count: int
     columns: dict[bytes, ColumnStatistics]
+    row_count_metric: Optional[int] = None
+    row_count_estimate: Optional[int] = None
 
     # Pre-filter row count of the largest base relation underneath this node --
     # a *domain* size, not a cardinality. Join-key NDV is frequently absent
@@ -208,16 +220,56 @@ class RelationStatistics:
     # every existing construction site keeps its previous meaning.
     base_row_count: Optional[int] = None
 
+    def __post_init__(self):
+        # Exactly one of metric/estimate — a count with no provenance, or two
+        # competing provenances, is the dishonesty this split exists to stop.
+        if (self.row_count_metric is None) == (self.row_count_estimate is None):
+            raise ValueError(
+                "exactly one of row_count_metric / row_count_estimate must be set "
+                f"(got metric={self.row_count_metric!r}, estimate={self.row_count_estimate!r})"
+            )
+
+    @property
+    def row_count(self) -> int:
+        """The working row count, whatever its provenance."""
+        return (
+            self.row_count_metric
+            if self.row_count_metric is not None
+            else self.row_count_estimate
+        )
+
+    @property
+    def row_count_is_metric(self) -> bool:
+        """True when the row count is a number we claim to KNOW."""
+        return self.row_count_metric is not None
+
     @property
     def domain_row_count(self) -> int:
         """Base (pre-filter) row count, falling back to the live row count."""
         return self.row_count if self.base_row_count is None else self.base_row_count
 
+    def as_estimate(self) -> "RelationStatistics":
+        """This statistics object with its row count demoted to an estimate.
+
+        Returns ``self`` unchanged when the count is already an estimate. Used
+        by operators whose OUTPUT count is a guess even when the number itself
+        didn't change (a predicate whose selectivity estimated 1.0, a set-op
+        bounded by its left input) — the value may stand, the claim may not.
+        """
+        if self.row_count_metric is None:
+            return self
+        return RelationStatistics(
+            columns=self.columns,
+            row_count_estimate=self.row_count_metric,
+            base_row_count=self.base_row_count,
+        )
+
     def copy(self) -> "RelationStatistics":
         """Create a shallow copy with new column dict."""
         return RelationStatistics(
-            row_count=self.row_count,
             columns={k: v for k, v in self.columns.items()},
+            row_count_metric=self.row_count_metric,
+            row_count_estimate=self.row_count_estimate,
             base_row_count=self.base_row_count,
         )
 
@@ -226,9 +278,14 @@ class RelationStatistics:
         return self.columns.get(identity)
 
     def with_row_count(self, new_count: int) -> "RelationStatistics":
-        """Return a copy with updated row count."""
+        """Return a copy with an updated row count.
+
+        The result is always an ESTIMATE: every caller of this method is
+        applying a derived adjustment (selectivity, a heuristic bound), and a
+        derived number is not a metric even when its input was.
+        """
         return RelationStatistics(
-            row_count=new_count, columns=self.columns, base_row_count=self.base_row_count
+            columns=self.columns, row_count_estimate=new_count, base_row_count=self.base_row_count
         )
 
     def update_column_range(self, identity: bytes, new_range: ColumnRange) -> "RelationStatistics":

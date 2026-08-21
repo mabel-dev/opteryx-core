@@ -494,6 +494,8 @@ enum StatFlag : uint32_t {
     kStatNdvExact  = 1u << 7,  // ...and it is EXACT (value ordering deduplicated
                                // the column), not a sketch estimate. Never set
                                // without kStatNdv.
+    kStatSketch    = 1u << 8,  // a KMV min-hash sketch follows ColumnStatistics
+                               // inside this blob — see ColumnSketchHeader.
 };
 
 #pragma pack(push, 1)
@@ -538,6 +540,53 @@ struct ColumnStatistics {
 #pragma pack(pop)
 
 static_assert(sizeof(ColumnStatistics) == 56u, "ColumnStatistics layout drift");
+
+// ─── KMV min-hash sketch ────────────────────────────────────────────────────
+//
+// `ndv` above is a SCALAR, and a scalar cannot be merged. Two row groups each
+// reporting 250,000 distinct values may hold 250,000 between them or 500,000,
+// and nothing in min/max distinguishes those cases: measured on TPC-H lineitem,
+// all 16 row groups of `l_comment` carry an IDENTICAL min ordinal and a
+// near-identical max — every range spans 100% of the file's range — while their
+// value sets are 91% disjoint. A merge rule built on range disjointness
+// therefore reports the largest row group (17.6x under the true 4,580,663);
+// summing instead is 23x OVER on a low-cardinality column. No rule over scalars
+// wins both, because the information needed is not in a scalar.
+//
+// The K smallest value hashes ARE mergeable: the union of two sketches is the K
+// smallest of their combined hashes, exactly. So the sketch is stored and the
+// merge becomes arithmetic instead of guesswork.
+//
+// Appended AFTER ColumnStatistics inside the same length-prefixed blob, which
+// is why it needed no version bump: an older reader takes the 56-byte prefix it
+// understands and skips the rest, losing an estimate and nothing else.
+//
+// ⛔ HASH IDENTITY. The hashes are `XXH3_64bits` over string CONTENT bytes, or
+// over the raw BIT PATTERN for fixed width — skene's own dedup hash (see
+// ValueKey in value_order.cpp), chosen so the sketch and the deduplication it
+// gates cannot disagree about what "distinct" means. This is NOT draken's
+// `Vector.hash()`, which is what ANALYZE and the catalog stats engine sketch
+// with. Min-hashes only union if they came from the same hash function, so a
+// skene sketch may be merged with another skene sketch and NEVER with an
+// ANALYZE/catalog one. Architect ruling 2026-08-21.
+//
+// EXACT below K: a column with at most K distinct values has all of them in the
+// sketch, and `count` IS the answer. Above K it is the standard KMV estimator,
+// relative standard error ~1/sqrt(K-2) — ~18% at K=32. K is stored rather than
+// assumed so a future width change stays readable.
+inline constexpr uint32_t kSketchK = 32u;
+
+#pragma pack(push, 1)
+
+struct ColumnSketchHeader {
+    uint32_t k;      // the K this sketch was built at
+    uint32_t count;  // min-hashes that follow, 0..k
+    // uint64_t hashes[count] — ASCENDING, distinct
+};
+
+#pragma pack(pop)
+
+static_assert(sizeof(ColumnSketchHeader) == 8u, "ColumnSketchHeader layout drift");
 
 // A signed 128-bit sum cannot overflow at any row count this format can
 // address: the worst case is INT64_MIN summed 2^32 times, |2^63 * 2^32| == 2^95,

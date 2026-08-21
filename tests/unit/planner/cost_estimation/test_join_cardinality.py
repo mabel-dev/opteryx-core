@@ -8,11 +8,13 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 import pytest
 
 from opteryx.planner.cost_estimation import KeyStats
+from opteryx.planner.cost_estimation import NdvProvenance
 from opteryx.planner.cost_estimation import estimate_join_cardinality
 
 
 def _stats(ndv, null_fraction=0.0):
-    return KeyStats(ndv=ndv, null_fraction=null_fraction)
+    provenance = NdvProvenance.UNKNOWN if ndv is None else NdvProvenance.MEASURED
+    return KeyStats(ndv=ndv, null_fraction=null_fraction, ndv_provenance=provenance)
 
 
 # ---------------------------------------------------------------------------
@@ -202,22 +204,42 @@ def test_right_outer_floors_at_right_rows():
 
 
 def test_full_outer_when_no_matches():
-    # tiny inner → full = left + right - inner ≈ left + right
+    # tiny inner → full ≈ inner + (left - inner) + (right - inner)
     out = estimate_join_cardinality(
         100, 200, "full outer", [(_stats(1_000_000), _stats(1_000_000))]
     )
-    # left + right - 1 = 299; max with max(left, right)=200 → 299
+    # inner = 100×200/1_000_000 = 0.02 → 0.02 + 99.98 + 199.98 = 299.98 → 299
     assert out == 299
 
 
-def test_full_outer_when_inner_dominates():
-    # inner = 100×100/1 = 10_000; full = max(100+100-10_000, 100) = 100
-    # but 10_000 > 100, so full = max(-9800, 100) = 100? Spec says
-    # full = max(left+right-inner, max(left,right)). Here that's max(-9800, 100) = 100
-    out = estimate_join_cardinality(
-        100, 100, "full outer", [(_stats(1), _stats(1))]
-    )
-    assert out == 100
+def test_full_outer_many_to_many_is_at_least_inner():
+    # inner = 100×100/1 = 10_000 (many-to-many: every row matches every row).
+    # A full outer join CONTAINS the inner join, so it can never be smaller.
+    # The old formula max(l + r - inner, l, r) returned 100 here.
+    inner = estimate_join_cardinality(100, 100, "inner", [(_stats(1), _stats(1))])
+    full = estimate_join_cardinality(100, 100, "full outer", [(_stats(1), _stats(1))])
+    assert inner == 10_000
+    assert full >= inner
+    assert full == 10_000
+
+
+def test_full_outer_at_least_both_inputs():
+    # Every left row and every right row appears at least once (matched or
+    # null-extended), so full outer >= max(l, r) regardless of key stats.
+    for left_ndv, right_ndv in ((1, 1), (100, 100), (1_000_000, 1_000_000), (None, None)):
+        out = estimate_join_cardinality(
+            300, 700, "full outer", [(_stats(left_ndv), _stats(right_ndv))]
+        )
+        assert out >= 700, f"ndv=({left_ndv}, {right_ndv}) gave {out}"
+
+
+def test_full_outer_at_least_inner():
+    # full outer >= inner across a sweep of shapes, including many-to-many.
+    for l, r, ndv in ((100, 100, 1), (1000, 500, 10), (50, 5000, 100), (10, 10, 1_000_000)):
+        keys = [(_stats(ndv), _stats(ndv))]
+        inner = estimate_join_cardinality(l, r, "inner", keys)
+        full = estimate_join_cardinality(l, r, "full outer", keys)
+        assert full >= inner, f"l={l} r={r} ndv={ndv}: full {full} < inner {inner}"
 
 
 # ---------------------------------------------------------------------------

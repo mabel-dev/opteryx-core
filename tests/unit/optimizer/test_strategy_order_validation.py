@@ -34,7 +34,7 @@ class _Stub:
 
 def test_real_pipeline_satisfies_ordering_contract():
     # Constructing the visitor runs _validate_strategy_order; must not raise.
-    visitor = OptimizerVisitor(QueryTelemetry())
+    visitor = OptimizerVisitor(QueryTelemetry.detached())
     assert len(visitor.strategies) > 0
     # And the validator is happy when called directly on the live list.
     _validate_strategy_order(visitor.strategies)

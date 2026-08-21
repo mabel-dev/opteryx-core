@@ -115,7 +115,7 @@ def test_real_optimized_plan_is_valid():
         "SELECT name FROM $planets ORDER BY id DESC LIMIT 3",
     ]
     for sql in queries:
-        telemetry = QueryTelemetry()
+        telemetry = QueryTelemetry.detached()
         ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
         ast = do_ast_rewriter(
             sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[]

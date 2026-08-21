@@ -81,7 +81,7 @@ def _stats_with_char_class(
         avg_length=avg_length,
         length_bounds=length_bounds,
     )
-    return RelationStatistics(row_count=1000, columns={identity: col})
+    return RelationStatistics(row_count_estimate=1000, columns={identity: col})
 
 
 # ── _selectivity_ends_with (case-sensitive, char-class) ─────────────────────

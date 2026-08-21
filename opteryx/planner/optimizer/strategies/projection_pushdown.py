@@ -104,7 +104,12 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
         # and prune nothing, silently turning this optimization into a no-op. The
         # identities that keep a scan's columns alive come from the Project/Filter/Join
         # nodes ABOVE it, which are visited first (traversal is top-down).
-        if node.node_type not in (LogicalPlanStepType.Subquery, LogicalPlanStepType.Scan):
+        if node.node_type not in (
+            LogicalPlanStepType.Subquery,
+            LogicalPlanStepType.Scan,
+            # same circularity as Scan: this pass ASSIGNS a ref's `.columns`
+            LogicalPlanStepType.MaterializedCteRef,
+        ):
             if node.columns:  # Assumes node.columns is an iterable or None
                 collected_columns = self.collect_columns(node)
                 context.collected_identities.update(collected_columns)
@@ -129,6 +134,7 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
                     LogicalPlanStepType.Scan,
                     LogicalPlanStepType.Subquery,
                     LogicalPlanStepType.Union,
+                    LogicalPlanStepType.MaterializedCteRef,
                 )
                 or is_pushable_function_dataset
             )
@@ -202,7 +208,11 @@ class ProjectionPushdownStrategy(OptimizationStrategy):
             # it above was the gap, not a deliberate narrower scope.
             if (
                 node.node_type
-                in (LogicalPlanStepType.Scan, LogicalPlanStepType.Subquery)
+                in (
+                    LogicalPlanStepType.Scan,
+                    LogicalPlanStepType.Subquery,
+                    LogicalPlanStepType.MaterializedCteRef,
+                )
                 or is_pushable_function_dataset
             ) and context.seen_unions > 0 and node.schema.columns:
                 width = context.bag.get("_union_leg_width", len(node.schema.columns))

@@ -39,6 +39,13 @@ class MockManifest:
     def get_file_count(self):
         return len(self.files)
 
+    def subset(self, positions):
+        # Mirror Manifest.subset's copy-on-write contract: a NEW manifest over
+        # the selected files, the original untouched.
+        clone = MockManifest.__new__(MockManifest)
+        clone.files = [self.files[p] for p in positions]
+        return clone
+
 
 class MockAggregator:
     def __init__(self):

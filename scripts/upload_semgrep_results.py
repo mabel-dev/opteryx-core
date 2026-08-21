@@ -3,10 +3,16 @@
 Usage:
     python scripts/upload_semgrep_results.py <semgrep-report.json>
 
+Authenticates with the workflow's own GitHub OIDC token - no stored
+credential. The job needs `permissions: id-token: write`, and this repository
+has to be registered against a service account in authenticate.opteryx.
+Nothing here holds a secret, so there is nothing to rotate and nothing to leak.
+
 Reads scan metadata from environment variables (all required, set by the CI
 workflow):
-    UPLOAD_CLIENT / UPLOAD_TOKEN                    - upload.opteryx.app PAT
     GITHUB_REPOSITORY, GITHUB_SHA, GITHUB_REF_NAME  - provided by GitHub Actions
+    ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN           - provided by GitHub Actions
+                                                      when id-token: write is set
 
 The upload target is a fixed workspace/collection/dataset:
     opteryx / ops / sast_findings
@@ -24,7 +30,7 @@ from datetime import datetime
 from datetime import timezone
 
 from opteryx_upload import ConflictResolution
-from opteryx_upload import PATAuthenticator
+from opteryx_upload import GitHubOIDCAuthenticator
 from opteryx_upload import Target
 from opteryx_upload import UploadClient
 from rugo.jsonl import read_jsonl
@@ -92,10 +98,12 @@ def main() -> int:
             with open(parquet_path, "wb") as fh:
                 fh.write(write_parquet(morsel))
 
-    authenticator = PATAuthenticator(
-        client_id=os.environ["UPLOAD_CLIENT"],
-        client_secret=os.environ["UPLOAD_TOKEN"],
-    )
+    # GitHub signs a token describing this job; authenticate.opteryx verifies
+    # it against GitHub's JWKS, matches the repository to a registered service
+    # account, and returns the same short-lived assertion a PAT would have
+    # bought. Replaced UPLOAD_CLIENT/UPLOAD_TOKEN, which were repository
+    # secrets that had to be minted, stored and rotated in every repo here.
+    authenticator = GitHubOIDCAuthenticator()
     client = UploadClient(token=authenticator)
     commit = client.upload_and_commit(
         [parquet_path],

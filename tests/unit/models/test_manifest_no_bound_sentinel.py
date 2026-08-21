@@ -111,7 +111,7 @@ def test_sentinel_bounds_keep_file_for_every_comparison_operator():
             schema=_schema(UINT32),
             bounds_are_ordinal=True,
         )
-        manifest.prune_files([_comparison(op, literal)])
+        manifest = manifest.prune_files([_comparison(op, literal)])
         assert len(manifest.files) == 1, f"{op} pruned a file on a no-bound sentinel"
 
 
@@ -121,7 +121,7 @@ def test_sentinel_bounds_keep_file_for_ipv4_column():
         files=[_file(NO_BOUND, NO_BOUND)], schema=_schema(IPV4), bounds_are_ordinal=True
     )
 
-    manifest.prune_files([_comparison("Eq", IP_LOW)])
+    manifest = manifest.prune_files([_comparison("Eq", IP_LOW)])
 
     assert len(manifest.files) == 1
 
@@ -131,7 +131,7 @@ def test_sentinel_bounds_keep_file_for_between():
         files=[_file(NO_BOUND, NO_BOUND)], schema=_schema(UINT32), bounds_are_ordinal=True
     )
 
-    manifest.prune_files([_between(1, 10)])
+    manifest = manifest.prune_files([_between(1, 10)])
 
     assert len(manifest.files) == 1
 
@@ -143,7 +143,7 @@ def test_one_sentinel_bound_is_enough_to_disqualify_the_pair():
         manifest = Manifest(
             files=[_file(lower, upper)], schema=_schema(UINT32), bounds_are_ordinal=True
         )
-        manifest.prune_files([_comparison("Eq", 999999)])
+        manifest = manifest.prune_files([_comparison("Eq", 999999)])
         assert len(manifest.files) == 1
 
 
@@ -158,7 +158,7 @@ def test_sentinel_file_kept_while_real_bounded_file_still_prunes():
         bounds_are_ordinal=True,
     )
 
-    manifest.prune_files([_comparison("Eq", IP_HIGH)])
+    manifest = manifest.prune_files([_comparison("Eq", IP_HIGH)])
 
     assert [f.file_path for f in manifest.files] == ["no_stats"]
 
@@ -176,7 +176,7 @@ def test_negative_but_real_bounds_still_prune():
         bounds_are_ordinal=True,
     )
 
-    manifest.prune_files([_comparison("Gt", 0)])
+    manifest = manifest.prune_files([_comparison("Gt", 0)])
 
     assert manifest.files == []
 
@@ -190,7 +190,7 @@ def test_int64_min_plus_one_is_a_real_bound_and_still_prunes():
         bounds_are_ordinal=True,
     )
 
-    manifest.prune_files([_comparison("Gt", 0)])
+    manifest = manifest.prune_files([_comparison("Gt", 0)])
 
     assert manifest.files == []
 
@@ -214,7 +214,7 @@ def test_topn_keeps_sentinel_file_and_still_prunes_the_others():
         schema=_schema(INT64),
     )
 
-    manifest.prune_files_for_topn("value", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("value", descending=True, limit=5)
 
     assert sorted(f.file_path for f in manifest.files) == ["high", "no_stats"]
 
@@ -234,7 +234,7 @@ def test_topn_ascending_sentinel_does_not_delete_every_real_file():
         schema=_schema(INT64),
     )
 
-    manifest.prune_files_for_topn("value", descending=False, limit=5)
+    manifest = manifest.prune_files_for_topn("value", descending=False, limit=5)
 
     assert "low" in [f.file_path for f in manifest.files]
 
@@ -249,7 +249,7 @@ def test_topn_ascending_keeps_sentinel_file():
         schema=_schema(INT64),
     )
 
-    manifest.prune_files_for_topn("value", descending=False, limit=5)
+    manifest = manifest.prune_files_for_topn("value", descending=False, limit=5)
 
     assert sorted(f.file_path for f in manifest.files) == ["low", "no_stats"]
 
@@ -266,7 +266,7 @@ def test_topn_live_rows_stay_aligned_when_a_sentinel_file_survives():
         schema=_schema(INT64),
     )
 
-    manifest.prune_files_for_topn("value", descending=True, limit=5)
+    manifest = manifest.prune_files_for_topn("value", descending=True, limit=5)
 
     assert [f.file_path for f in manifest.files] == ["no_stats", "high"]
     assert manifest._live_rows == [1, 2]

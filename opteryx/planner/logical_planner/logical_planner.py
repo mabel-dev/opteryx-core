@@ -68,7 +68,21 @@ class LogicalPlanStepType(int, Enum):
     Exit = auto()
     HeapSort = auto()
 
+    # Runtime cardinality guard on an uncorrelated scalar subquery: >1 row is
+    # SQL's cardinality violation, 0 rows yields NULL. Inserted by
+    # decorrelate_subquery (post-bind) at the subquery's exit whenever plan
+    # structure cannot prove the exactly-one-row property statically.
+    ScalarSubqueryGuard = auto()
+
     Subquery = auto()
+    # Leaf reference to a multiply-referenced CTE whose body executes ONCE (the
+    # body plan lives in `plan.shared_ctes`, keyed by this node's `cte_key`).
+    # Inserted by the Relation Resolver when a CTE is referenced >= 2 times;
+    # single-reference CTEs are still spliced inline. Each reference mints its
+    # own column identities at bind time (`cte_column_map`: ref identity ->
+    # body output identity), which is what keeps a CTE self-join two distinct
+    # relations over one materialized result.
+    MaterializedCteRef = auto()
     Window = auto()  # OVER (PARTITION BY ...) — rewritten to join by plan rewriter
     FramedWindow = auto()  # SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE BETWEEN ...) — native sink, never rewritten
     FunctionDataset = auto()  # Unnest, GenerateSeries, values + Fake

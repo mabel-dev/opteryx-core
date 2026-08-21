@@ -410,6 +410,7 @@ def do_optimizer(
     plan: LogicalPlan,
     telemetry: QueryTelemetry,
     scan_stats_cache: Optional[dict] = None,
+    shared_ctes: Optional[dict] = None,
 ) -> LogicalPlan:
     """
     Perform optimization on the given logical plan.
@@ -419,9 +420,15 @@ def do_optimizer(
         telemetry (QueryTelemetry)
         scan_stats_cache: per-query memo of manifest-derived scan base
             statistics, shared with the result-size guard's refresh.
+        shared_ctes: materialize-once CTE bodies (relation_resolver), keyed and
+            topologically ordered dependencies-first. Threaded explicitly —
+            Graph copies do not carry instance attributes, so an attribute on
+            `plan` would not survive the strategies.
 
     Returns:
-        LogicalPlan: The optimized logical plan.
+        LogicalPlan: The optimized logical plan, with `shared_ctes` re-attached
+        (each body coordinated with its references and optimized in its own
+        right — see opteryx/planner/optimizer/shared_cte.py).
     """
     if DISABLE_OPTIMIZER:  # pragma: no cover
         message = "[OPTERYX] The optimizer has been disabled, 'DISABLE_OPTIMIZER' variable is TRUE."
@@ -429,4 +436,42 @@ def do_optimizer(
         telemetry.add_message(message)
         return plan
     optimizer = OptimizerVisitor(telemetry)
-    return optimizer.optimize(plan, scan_stats_cache=scan_stats_cache)
+    shared = dict(shared_ctes or {})
+
+    if shared:
+        from opteryx.planner.optimizer.shared_cte import coordinate_shared_cte
+        from opteryx.planner.optimizer.shared_cte import stamp_reference_estimates
+
+        # Estimates first: a reference leaf carries no manifest, so the main
+        # plan's cost-based strategies would otherwise see UNKNOWN where the
+        # body's output estimate is derivable. Dependencies first, so a body
+        # referencing another shared CTE already sees ITS estimate.
+        for key, body in shared.items():
+            body = refresh_statistics(body, scan_stats_cache=scan_stats_cache)
+            head = body.get_exit_points()[0]
+            stamp_reference_estimates(
+                [plan] + [b for k, b in shared.items() if k != key],
+                key,
+                body[head].statistics,
+            )
+
+    plan = optimizer.optimize(plan, scan_stats_cache=scan_stats_cache)
+
+    if shared:
+        # Dependents first (reverse topological order): when a body is
+        # coordinated, every plan that references it — the main plan and any
+        # shared body that reads it — has already been optimized, so the
+        # filters and projections above its references have settled.
+        optimized: dict = {}
+        for key in reversed(list(shared.keys())):
+            body = coordinate_shared_cte(
+                shared[key], [plan] + list(optimized.values()), key, telemetry
+            )
+            optimized[key] = optimizer.optimize(body, scan_stats_cache=scan_stats_cache)
+        # hand back in dependencies-first order — binding used it, compilation
+        # relies on it (a producer pipeline must exist before its consumers)
+        plan.shared_ctes = {key: optimized[key] for key in shared.keys()}
+    else:
+        plan.shared_ctes = {}
+
+    return plan

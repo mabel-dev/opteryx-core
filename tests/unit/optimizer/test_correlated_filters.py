@@ -37,7 +37,7 @@ def _optimized_plan(sql):
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
     ast = do_ast_rewriter(
         sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[]

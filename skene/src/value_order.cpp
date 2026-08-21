@@ -151,6 +151,20 @@ class KmvSketch {
         smallest_.erase(std::prev(smallest_.end()));
     }
 
+    // The k smallest hashes, ascending. Taking the k smallest of the K smallest
+    // IS the k smallest overall, so a K=1024 sketch yields an exact K=32 one —
+    // which is why the decline decision keeps its 3% accuracy while the STORED
+    // sketch costs 32 hashes.
+    std::vector<uint64_t> min_k(size_t k) const {
+        std::vector<uint64_t> out;
+        out.reserve(k < smallest_.size() ? k : smallest_.size());
+        for (uint64_t h : smallest_) {
+            if (out.size() >= k) break;
+            out.push_back(h);
+        }
+        return out;
+    }
+
     double estimate() const {
         if (smallest_.size() < kK) return static_cast<double>(smallest_.size());
         // 2^64 as a double. The K-th smallest hash divided by this is the
@@ -216,10 +230,12 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
     // what makes `data_length` the exact distinct count.
     std::vector<uint8_t> referenced(vector.data_length, 0);
     uint32_t referenced_count = 0;
+    uint32_t valid_rows = 0;
     for (uint32_t row = 0; row < length; ++row) {
         if (vector.validity != nullptr
                 && (vector.validity[row >> 3] & (1u << (row & 7u))) == 0)
             continue;
+        ++valid_rows;
         const uint32_t code = vector.selection[row];
         if (code >= vector.data_length)
             return fail(Code::kMalformed,
@@ -278,6 +294,30 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
         const ValueKey* k;
         bool operator()(uint32_t a, uint32_t b) const { return k->equal(a, b); }
     };
+
+    // ── KMV sketch over the column's DISTINCT values ───────────────────────
+    //
+    // One pass, for EVERY orderable column — not just the string family, and not
+    // just the decline path. `ndv` is a scalar and scalars do not merge; the
+    // stored min-hashes are what let a reader union row groups and files (see
+    // format.h, ColumnSketchHeader).
+    //
+    // Iterates REFERENCED CODES rather than rows. The two produce an identical
+    // hash set — every valid row's code is referenced and every referenced code
+    // has at least one valid row — but a dictionary column pays data_length
+    // hashes instead of length. `referenced` already excludes null rows, which
+    // is exactly the non-null rule `ndv` is defined by.
+    //
+    // Kept at K=1024 rather than kSketchK: the string decline below reads
+    // estimate() and needs its ~3% accuracy, and the 32 smallest of the 1024
+    // smallest are the 32 smallest outright, so the stored sketch loses nothing
+    // by being taken from it.
+    KmvSketch sketch;
+    for (uint32_t code = 0; code < vector.data_length; ++code) {
+        if (referenced[code]) sketch.add(static_cast<uint64_t>(key.hash(code)));
+    }
+    // Set before the decline returns below, so every exit from here on carries it.
+    out->min_hashes = sketch.min_k(kSketchK);
 
     // ── Pick the deduplication strategy from a SAMPLE ──
     //
@@ -388,15 +428,7 @@ Status order_column(const DrakenVector& vector, const LogicalType* logical,
         bool near_unique;
         double measured_ndv = 0.0;
         if (is_string) {
-            KmvSketch sketch;
-            uint32_t valid_rows = 0;
-            for (uint32_t row = 0; row < length; ++row) {
-                if (vector.validity != nullptr
-                        && (vector.validity[row >> 3] & (1u << (row & 7u))) == 0)
-                    continue;
-                sketch.add(static_cast<uint64_t>(key.hash(vector.selection[row])));
-                ++valid_rows;
-            }
+            // The sketch above measured this already — same hashes, same set.
             measured_ndv = sketch.estimate();
             // Same 50% policy the sample expressed, now against a measurement.
             near_unique = measured_ndv * 2.0 > static_cast<double>(valid_rows);

@@ -39,6 +39,7 @@ from opteryx.exceptions import md_column
 from opteryx.exceptions import md_syntax
 from opteryx.expression import NodeType
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
+from opteryx.types.logical_type import rescale_decimal_literal as _rescale_decimal_literal
 
 _MAX_WORKER_CAP = 16
 _QUEUE_DEPTH = 4
@@ -126,6 +127,45 @@ def _skene_row_group_count(manifest, file_count: int) -> int:
         return file_count
     total = manifest.get_row_group_count()
     return total if total is not None else file_count
+
+
+def _fold_skene_scan_facts(nplan, telemetry) -> None:
+    """Copy each skene scan's RUN-TIME row-group counts into `native_scan_facts`.
+
+    `scan_facts` is built during compilation, so it can only carry plan-time
+    numbers. Skene's row-group skipping is decided in the Source's claim builder,
+    from footer statistics the plan never reads — leaving the fact at its 0
+    placeholder would report "pruned nothing" for a scan that skipped most of its
+    work, which reads as the optimization not existing.
+
+    Called once, after the driver is finished, which is what orders the Source's
+    single write (inside its `call_once`) before this read. A plan whose scan never
+    ran reports `row_group_counts is None` and is left alone rather than being
+    stamped with a fabricated 0.
+    """
+    if telemetry is None:
+        return
+    plans = getattr(nplan, "skene_scan_plans", None)
+    if not plans:
+        return
+    facts = telemetry._reading.get("native_scan_facts")
+    if not facts:
+        return
+    for plan in plans:
+        identity = getattr(plan, "scan_identity", None)
+        counts = getattr(plan, "row_group_counts", None)
+        if identity is None or counts is None:
+            continue
+        entry = facts.get(identity)
+        if entry is None:
+            continue
+        total, pruned = counts
+        entry["row_groups_pruned"] = pruned
+        # The claim builder counted the row groups it actually saw in the file
+        # footers. That is a better number than the manifest's, and it is the
+        # denominator `row_groups_pruned` is a fraction OF — reporting a pruned
+        # count against a differently-derived total invites a nonsense ratio.
+        entry["row_groups_read"] = total - pruned
 
 
 def _and_conjuncts(node):
@@ -219,6 +259,35 @@ def _unsupported(what: str, remedy: str = None):
             "that construct",
         )
     )
+
+
+_INT64_MAX = (1 << 63) - 1
+
+
+def _estimate_to_int64(value, what: str) -> int:
+    """Planner estimates cross the native boundary as ``int64_t`` here.
+
+    ``None`` means unknown and crosses as -1, the setters' sentinel. Anything
+    else outside [0, INT64_MAX] is refused loudly: an estimator emitting more
+    than ~9.2e18 rows (or a negative count) is always an estimator bug, never
+    a real workload, and saturating it to INT64_MAX would hide the next such
+    bug behind a plausible-looking plan. Before this guard, a 3.6e19 estimate
+    (TPC-DS Q54, DNF selectivity) died in the setter's implicit coercion with
+    a bare OverflowError naming neither the operator nor the number.
+    """
+    if value is None:
+        return -1
+    estimate = int(value)
+    if estimate < 0 or estimate > _INT64_MAX:
+        raise InvalidInternalStateError(
+            compose(
+                f"The planner's {what} is {md_code(estimate)}, which is "
+                "outside the signed 64-bit range the engine carries estimates in",
+                "An estimate this size is always a cost-estimator bug, never a "
+                "real workload - the estimator needs fixing, not the query",
+            )
+        )
+    return estimate
 
 
 # Physical types the native scan reads through its plain "int" kind: every integer
@@ -511,6 +580,13 @@ class _Compiler:
         # so "compile" stops silently meaning "compile plus however many blobs'
         # footers were uncached."
         self.footer_fetch_ns = 0
+        # Shared CTE result buffers: cte_key -> (buffer handle, body output
+        # layout). Written by compile_to_native when it lowers each shared body
+        # (producer pipelines, created BEFORE the main plan's so run()'s
+        # creation-order execution fills every buffer before anything reads it);
+        # read by the CteRefNode arm of compile_node. The dict OBJECT is shared
+        # between the body compilers and the main compiler.
+        self.cte_buffers: dict = {}
 
     # ---- expression lowering ------------------------------------------------------
     # Expressions are lowered ONCE, at plan time, to the phase-9 flat bytecode whose
@@ -719,19 +795,22 @@ class _Compiler:
                 # both as FLOAT64, where the SQL standard makes the first an EXACT
                 # numeric literal (DECIMAL) and only the second approximate. Fixing that
                 # removes the float from this path altogether — tracked separately.
-                q = _dec.Decimal(str(v))
-                quantum = _dec.Decimal(1).scaleb(-int(ct.logical.scale))
-                rescaled = q.quantize(quantum)
-                if rescaled != q:
-                    op = expr.value
-                    if op not in ("Lt", "LtEq", "Gt", "GtEq"):
-                        continue   # inexact Eq/NotEq — leave it alone, fail loud
-                    # effective op on the COLUMN (swap when literal is the left leg)
-                    eff = op if a == "left" else {
-                        "Lt": "Gt", "Gt": "Lt", "LtEq": "GtEq", "GtEq": "LtEq"}[op]
-                    rounding = (_dec.ROUND_CEILING if eff in ("GtEq", "Lt")
-                                else _dec.ROUND_FLOOR)
-                    rescaled = q.quantize(quantum, rounding=rounding)
+                # The rule itself lives in types/logical_type.py, shared with
+                # Manifest's bound pruning — a pruner that rounded a boundary
+                # literal differently from this rewrite would drop a file or row
+                # group whose rows this predicate then keeps. `None` back means the
+                # literal cannot be put on the column's scale gridline without
+                # changing what it matches (an inexact Eq/NotEq): leave it alone
+                # and let the kernel fail loud, exactly as before.
+                #
+                # The op passed is the effective one on the COLUMN, swapped when
+                # the literal is the left operand.
+                eff = expr.value if a == "left" else {
+                    "Lt": "Gt", "Gt": "Lt", "LtEq": "GtEq", "GtEq": "LtEq"}.get(
+                        expr.value, expr.value)
+                rescaled = _rescale_decimal_literal(ct, v, eff)
+                if rescaled is None:
+                    continue
                 # The literal need not FIT the column's declared precision:
                 # `gravity DECIMAL(3,1) = 999` is a perfectly legal predicate that
                 # simply matches nothing. Stamping the column's ColumnType on an
@@ -1637,6 +1716,40 @@ class _Compiler:
             )
         kind = type(node).__name__
 
+        if kind == "CteRefNode":
+            # One reference to a shared CTE: a pipeline over the body's result
+            # buffer (filled by the producer pipeline compile_to_native created
+            # first), selecting the body's output columns and renaming them to
+            # THIS reference's identities. Each reference gets its own pipeline
+            # — BufferSource claims morsels per-run (its cursor lives in the
+            # pipeline run's GlobalSourceState), so N references read the one
+            # materialized result N times without re-executing the body.
+            entry = self.cte_buffers.get(node.cte_key)
+            if entry is None:
+                _unsupported(
+                    f"a CTE reference ({node.cte_name}) whose shared body was not compiled"
+                )
+            buf, body_layout = entry
+            mapping = node.cte_column_map or {}
+            out_ids = []
+            indices = []
+            for col in node.columns or []:
+                identity = col.schema_column.identity
+                body_identity = mapping.get(identity)
+                if body_identity is None or body_identity not in body_layout:
+                    _unsupported(
+                        f"a CTE reference column the shared body does not carry"
+                    )
+                out_ids.append(identity)
+                indices.append(body_layout.index(body_identity))
+            p = self.nplan.new_pipeline()
+            self.nplan.set_current_identity(node.identity)
+            self.nplan.set_current_display_name(kind)
+            self.nplan.set_buffer_source(p, buf)
+            self.nplan.add_select(p, indices, out_ids)
+            self._remember_types(node.columns)
+            return p, out_ids
+
         if getattr(node, "is_scan", False):
             # `nid` so a scan can inspect what CONSUMES it — the skene two-pass path
             # reads its predicate and top-n spec off the Filter/HeapSort above,
@@ -1811,7 +1924,8 @@ class _Compiler:
                 # count estimate is the distinct-count estimate here.
                 ndv_estimate = getattr(node, "groupby_ndv_estimate", None)
                 self.nplan.set_distinct_sink(
-                    p, key_idx, buf, -1 if ndv_estimate is None else int(ndv_estimate))
+                    p, key_idx, buf,
+                    _estimate_to_int64(ndv_estimate, "group-count estimate for GROUP BY"))
                 p2 = self.nplan.new_pipeline()
                 self.nplan.set_buffer_source(p2, buf)
                 return p2, list(layout)
@@ -1849,7 +1963,7 @@ class _Compiler:
             buf = self.nplan.new_buffer()
             self.nplan.set_groupby_sink(
                 p, key_idx, group_cols, key_emit, specs, buf,
-                -1 if ndv_estimate is None else int(ndv_estimate))
+                _estimate_to_int64(ndv_estimate, "group-count estimate for GROUP BY"))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             out_layout = [identity for identity, emit in zip(group_cols, key_emit) if emit]
@@ -1924,7 +2038,8 @@ class _Compiler:
             # -1 = unknown. Gates the sink's parvi front set.
             ndv_estimate = getattr(node, "distinct_ndv_estimate", None)
             self.nplan.set_distinct_sink(
-                p, on_idx, buf, -1 if ndv_estimate is None else int(ndv_estimate))
+                p, on_idx, buf,
+                _estimate_to_int64(ndv_estimate, "distinct-count estimate for DISTINCT"))
             p2 = self.nplan.new_pipeline()
             self.nplan.set_buffer_source(p2, buf)
             return p2, layout
@@ -2155,6 +2270,30 @@ class _Compiler:
             self.nplan.set_buffer_source(p2, buf)
             self.nplan.set_pipeline_dop(p2, 1)   # emits sorted — preserve the order
             return p2, list(layout) + [out_identity for _kc, out_identity, _a, _ot, _ol, _fr in py_funcs]
+
+        if kind == "ScalarGuardNode":
+            # Runtime cardinality guard on an uncorrelated scalar subquery
+            # (decorrelate_subquery's ScalarSubqueryGuard step). The decision
+            # needs the WHOLE subquery result — the zero-row case must be told
+            # apart from "no morsel yet" — so the leg is materialized into a
+            # buffer (an ordinary breaker) and read back through the engine's
+            # ScalarGuardSource: >1 row raises SQL's cardinality violation as a
+            # DataError, 0 rows emits one all-NULL row, 1 row passes through.
+            # Types are handed down plan-side for the NULL row, same plumbing
+            # (and reason) as set_unmatched_build_source: they must not be
+            # learned from a stream that legitimately carries nothing.
+            (p, layout) = self._compile_only_child(in_edges, kind, node)
+            buf = self.nplan.new_buffer()
+            self.nplan.set_buffer_append_sink(p, buf)
+            types, logical, element = self._payload_types(in_edges[0][0], layout)
+            p2 = self.nplan.new_pipeline()
+            self.nplan.set_current_identity(node.identity)
+            self.nplan.set_current_display_name(type(node).__name__)
+            self.nplan.set_scalar_guard_source(p2, buf, list(layout),
+                                               types, logical, element)
+            # At most one row can flow — nothing to parallelise.
+            self.nplan.set_pipeline_dop(p2, 1)
+            return p2, layout
 
         if kind == "LimitNode":
             (p, layout) = self._compile_only_child(in_edges, kind, node)
@@ -2461,10 +2600,28 @@ class _Compiler:
     def _skene_scan_plan(self, scan):
         """Plan-time setup for the zero-Python skene Source.
 
-        Returns a SkeneScanPlan, or None when this scan is not a shape the
-        native Source serves — today only the zero-projection (COUNT(*)) case,
-        which needs the materialized path's genuine zero-column morsel.
-        Declining is a fallback to a slower CORRECT path, never a wrong answer.
+        Returns `(SkeneScanPlan, filter_bc | None, read_layout, emit_ids)`, or None
+        when this scan is not a shape the native Source serves — today only the
+        zero-projection, zero-predicate (bare COUNT(*)) case, which needs the
+        materialized path's genuine zero-column morsel. Declining is a fallback to
+        a slower CORRECT path, never a wrong answer.
+
+        The scan's READ SET is the projection plus any column only a pushed
+        predicate touches (`_skene_scan_config` builds it, projection first). The
+        Source decodes the read set, filters it, then emits `emit_indices` — so a
+        predicate-only column never leaves the scan and no downstream Select is
+        needed.
+
+        `filter_bc` is the PUSHED predicate. `FileSystemTable.can_push` accepts for
+        skene (architect ruling, 2026-08-21), which means the pushdown strategy
+        CONSUMED the Filter node: nothing above this scan re-applies the predicate,
+        so lowering it here is a correctness obligation, not an optimization. It is
+        lowered through `_lower_expression` — the same admission gate
+        `add_expr_filter` enforces for a Filter node — so a predicate that can be a
+        Filter can be a reader-side filter, and there is no shape that pushes but
+        cannot then run. (`_lower_scan_predicate` is deliberately NOT used: its
+        three consumers all DECLINE to a broader path on a non-c-native program,
+        and this one has no broader path to decline to.)
 
         `retag_units` is the ONE sanctioned type divergence between the plan and
         a skene footer: a column the plan declares TIMESTAMP64 may be stored as
@@ -2477,36 +2634,82 @@ class _Compiler:
         from opteryx.operators._operators import SkeneScanPlan
 
         read_columns = getattr(scan, "skene_read_schema_columns", None) or []
+        predicates = list(getattr(scan, "predicates", None) or [])
         if not read_columns:
+            # No projection AND no predicate columns == bare COUNT(*). A pushed
+            # predicate always contributes its columns to the read set, so this
+            # cannot be a case of silently dropping one.
+            if predicates:
+                raise RuntimeError(
+                    "compiler: skene scan carries pushed predicates but an empty "
+                    "read set — _skene_scan_config must add every predicate "
+                    "column, and the materialized path cannot apply a predicate"
+                )
             return None
-        return SkeneScanPlan(
+
+        read_layout = [sc.identity for sc in read_columns]
+        emit_ids = [col.schema_column.identity for col in (scan.columns or [])]
+        emit_indices = [read_layout.index(identity) for identity in emit_ids]
+        filter_bc = None
+        zone_terms = []
+        if predicates:
+            filter_bc = self._lower_expression(
+                self._compose_predicate_nodes(predicates), "a WHERE predicate"
+            )
+            # ROW-GROUP zone map. A .skene file footer carries per-row-group
+            # min/max ordinals, so a row group provably holding no matching row is
+            # never decoded. The terms are resolved by the Manifest, which owns the
+            # ordinal dialect and every soundness rule around it; the Source does
+            # integer comparisons and nothing else.
+            #
+            # These terms are an OPTIMIZATION on top of the reader-side filter, not
+            # a substitute for it: a surviving row group is still filtered row by
+            # row, so a term this cannot express costs a decode and never an
+            # answer. Absent for a manifest whose bounds are not ordinal — and a
+            # skene manifest's always are (FileSystemConnector's SKENE branch).
+            manifest = getattr(scan, "manifest", None)
+            if manifest is not None:
+                # By PHYSICAL name: the Source matches these against each file's
+                # own footer schema, which is file-named. `sc.name` is the same
+                # spelling `read_columns` uses.
+                zone_terms = manifest.ordinal_zone_map_terms(predicates)
+        splan = SkeneScanPlan(
             list(scan.skene_files),
             [sc.name for sc in read_columns],
-            [sc.identity for sc in read_columns],
+            read_layout,
             [sc.column_type.physical.value for sc in read_columns],
             [
                 _wp11_unit(sc) if sc.column_type.physical == DrakenType.TIMESTAMP64 else -1
                 for sc in read_columns
             ],
+            emit_indices,
+            zone_terms,
         )
+        splan.scan_identity = scan.identity
+        return splan, filter_bc, read_layout, emit_ids
 
-    def _skene_latmat_consumers(self, nid):
-        """The Filter chain and HeapSort sitting directly above the skene scan at
-        ``nid``, or None when the plan is not that shape.
+    def _skene_latmat_consumers(self, nid, has_pushed_predicate):
+        """The residual Filter chain and the HeapSort sitting directly above the
+        skene scan at ``nid``, or None when the plan is not that shape.
 
-        Shape: ``SkeneReadNode -> FilterNode+ -> HeapSortNode``. The chain is 1..N
-        Filters because a multi-conjunct WHERE can reach here either way:
-        SplitConjunctivePredicatesStrategy makes one Filter node per conjunct, and
-        PredicateOrderingStrategy may then merge them back into a single AND tree.
-        Both shapes are accepted; anything else between the scan and the sort (a
+        Shape: ``SkeneReadNode -> FilterNode* -> HeapSortNode``. The chain is 0..N
+        Filters. ZERO is now the ordinary case: `FileSystemTable.can_push` accepts
+        for skene (architect ruling, 2026-08-21), so the pushdown strategy CONSUMES
+        the Filter and the predicate arrives on `scan.predicates` instead — which
+        is why ``has_pushed_predicate`` is required to accept an empty chain.
+        Accepting it unconditionally would admit an unfiltered
+        ``ORDER BY ... LIMIT`` scan as a two-pass shape with no predicate to
+        evaluate. 1..N Filters still occur, for conjuncts the connector declined
+        (SplitConjunctivePredicatesStrategy makes one Filter per conjunct;
+        PredicateOrderingStrategy may merge them back into one AND tree — both
+        shapes are accepted). Anything else between the scan and the sort (a
         Projection, a second consumer, a Join) declines.
 
-        This walks UP from the scan because, unlike parquet, a skene scan carries no
-        pushed predicate: `FileSystemTable.can_push` declines for skene and that
-        ruling stands (see `_skene_latmat_scan_plan`). The predicate the two-pass
-        scan needs is therefore still sitting on the Filter node, and this is the
-        physical plan, so it is FINAL — no optimizer strategy can rewrite it after
-        this reads it."""
+        A residual Filter that is left here STAYS in the plan and re-runs; a pushed
+        predicate does not exist anywhere else, so pass 1 applying it is the only
+        thing that applies it. Both are composed into the pass-1 program by
+        `_skene_latmat_scan_plan`. This is the physical plan, so what it reads is
+        FINAL — no optimizer strategy can rewrite it afterwards."""
         filters = []
         node_id = nid
         while True:
@@ -2522,7 +2725,7 @@ class _Compiler:
             if consumer_kind == "FilterNode":
                 filters.append(consumer)
                 continue
-            if consumer_kind == "HeapSortNode" and filters:
+            if consumer_kind == "HeapSortNode" and (filters or has_pushed_predicate):
                 return filters, consumer
             return None
 
@@ -2537,21 +2740,22 @@ class _Compiler:
         every file; pass 2 decodes the full projection for just the files still
         holding a top-n candidate.
 
-        **This is NOT the reader-side row filter skene declines.** `can_push` still
-        returns False for skene and this method does not consult or change it. That
-        ruling is about saving FILTER work, and it was measured to LOSE (+460ms on
-        TPC-H SF1) because a reader-side filter serialises work the parallel engine
-        Filter does concurrently. Late materialization saves DECODE work — the 104
-        columns Q24 never looks at, for the 99M rows it discards — which is waste
-        regardless of how parallel the filter is. So the predicate reaches the Source
-        by its own route: read off the Filter node ABOVE the scan
-        (`_skene_latmat_consumers`), with that Filter LEFT IN THE PLAN.
+        This is a DIFFERENT saving from the single-pass Source's reader-side filter,
+        and the two compose. The reader-side filter saves the engine Filter's work;
+        late materialization saves DECODE work — the 104 columns Q24 never looks at,
+        for the 99M rows it discards. Both routes now take their predicate from the
+        same place: `scan.predicates` (pushed — `can_push` accepts for skene since
+        the 2026-08-21 ruling) plus any residual Filter the connector declined,
+        which `_skene_latmat_consumers` reads off the plan above the scan.
 
-        Leaving the Filter in place is what makes this safe by construction rather
-        than by argument: the Source only ever drops a row that fails the predicate
-        (the Filter would have dropped it) or is strictly worse than the n-th best
-        surviving sort key (the downstream TopNSink would have dropped it), so the
-        Filter re-running over the surviving candidates cannot change the answer.
+        Safety. Pass 1 drops a row only if it fails the predicate or is strictly
+        worse than the n-th best surviving sort key (the downstream TopNSink would
+        have dropped that one). A residual Filter left in the plan re-runs over the
+        survivors and cannot change the answer. A PUSHED conjunct has no such
+        backstop — pass 1 is the only thing that applies it — which is why the
+        program below composes the pushed conjuncts and the residual ones together
+        and why an inadmissible one must DECLINE (falling through to the single-pass
+        Source, which applies it) rather than be skipped.
 
         Gates, and why each one is here:
           * `skene_late_materialization_min_deferred_columns` — the projection has to
@@ -2597,7 +2801,8 @@ class _Compiler:
         if manifest is None or manifest.get_file_count() == 0:
             return None
 
-        shape = self._skene_latmat_consumers(nid)
+        pushed = list(getattr(scan, "predicates", None) or [])
+        shape = self._skene_latmat_consumers(nid, bool(pushed))
         if shape is None:
             return None
         filter_nodes, heapsort = shape
@@ -2625,7 +2830,9 @@ class _Compiler:
         # here would add a list that can drift, to gate a case that cannot arise.
 
         # ── the predicate ──────────────────────────────────────────────────────────
-        predicates = [node.filter for node in filter_nodes]
+        # Pushed conjuncts FIRST (they have no Filter left to fall back on), then
+        # whatever the connector declined and is still a Filter node above.
+        predicates = pushed + [node.filter for node in filter_nodes]
         # Every column the predicate touches must be a column this scan reads —
         # otherwise pass 1 cannot evaluate it (a hoisted/computed operand lands as an
         # EVALUATED node referring to a column that only exists above the scan).
@@ -2700,6 +2907,13 @@ class _Compiler:
         ):
             return None
 
+        # ROW-GROUP zone map, from the SAME conjunct set pass 1 evaluates. Pruning
+        # on a RESIDUAL conjunct is sound as well as on a pushed one: the residual
+        # Filter above still runs, so a row group its bounds exclude holds no row
+        # that survives to the answer either way. The terms are a conjunction and
+        # every conjunct here is ANDed into the effective WHERE.
+        zone_terms = manifest.ordinal_zone_map_terms(predicates)
+
         splan = SkeneLatmatScanPlan(
             list(scan.skene_files),
             p1_names,
@@ -2716,7 +2930,9 @@ class _Compiler:
                 for sc in read_columns
             ],
             pred_col_to_p1,
+            zone_terms,
         )
+        splan.scan_identity = scan.identity
         return (splan, resolver, p1_index_by_name[sort_sc.name], bool(ascending),
                 int(limit), len(p1_names))
 
@@ -3263,15 +3479,26 @@ class _Compiler:
                 manifest = getattr(scan, "manifest", None)
                 file_count = manifest.get_file_count() if manifest is not None else 0
                 row_group_count = _skene_row_group_count(manifest, file_count)
+                record_count = (
+                    manifest.get_record_count() if manifest is not None else None
+                )
                 self.scan_facts[scan.identity] = {
                     # Pass 1 reads every row group; pass 2 re-reads only the ones
                     # still holding a top-n candidate. This counts the pass-1
                     # sweep — the work the scan is responsible for — the same
                     # number the single-pass path reports for the same query.
                     "files_read": file_count,
+                    # Both overwritten by `_fold_skene_scan_facts` once the driver
+                    # is done — row-group skipping is a run-time decision here too.
                     "row_groups_read": row_group_count,
                     "row_groups_pruned": 0,
-                    "parquet_rows_before_filter": 0,
+                    # Pass 1 sweeps every row group it CLAIMS and applies the
+                    # predicate, so rows-in is the manifest's record count across the
+                    # surviving files — the same plan-time number the single-pass
+                    # path reports for the same query. It overstates by whatever the
+                    # zone map skipped, which `row_groups_pruned` below is the
+                    # honest record of.
+                    "parquet_rows_before_filter": record_count or 0,
                     # The WIDEST read: pass 2's full projection. Pass 1 reads only
                     # `p1_column_count` of these, which is the whole point — one
                     # number cannot say both, and the projection is what the
@@ -3283,17 +3510,33 @@ class _Compiler:
                     p, lat_plan, get_pass1_eval_fn_ptr(), resolver.ctx_ptr(),
                     resolver, sort_p1_index, sort_ascending, topn_limit)
                 self._remember_types(scan.columns)
-                return p, [sc.identity for sc in scan.skene_read_schema_columns]
+                # This Source emits the READ SET (projection ∪ predicate-only
+                # columns). A pushed predicate can add a column nobody projects, so
+                # narrow back — unlike the single-pass Source, which does it inside
+                # itself, this is a Select. It runs on top-n survivors only (a
+                # handful of rows), so the operator is not worth avoiding here, and
+                # the alternative would be a second emit-mapping in the two-pass C++.
+                read_layout = [sc.identity for sc in scan.skene_read_schema_columns]
+                emit_ids = [col.schema_column.identity for col in (scan.columns or [])]
+                if read_layout != emit_ids:
+                    self.nplan.add_select(
+                        p, [read_layout.index(identity) for identity in emit_ids],
+                        emit_ids)
+                return p, emit_ids
             # Zero-Python skene Source: workers claim ROW GROUPS from an atomic
             # counter and decode them independently (skene::read_morsel is a
             # pure function over a buffer). Replaces the compile-time
             # materialized path, which decoded every file serially on the
             # driver thread and held the whole read set resident.
-            splan = self._skene_scan_plan(scan)
-            if splan is not None:
+            plan = self._skene_scan_plan(scan)
+            if plan is not None:
+                splan, filter_bc, read_layout, emit_ids = plan
                 self.scan_sources[scan.identity] = "NativeSkeneScanSource"
                 manifest = getattr(scan, "manifest", None)
                 file_count = manifest.get_file_count() if manifest is not None else 0
+                record_count = (
+                    manifest.get_record_count() if manifest is not None else None
+                )
                 self.scan_facts[scan.identity] = {
                     "files_read": file_count,
                     # A .skene file holds up to 16 row groups, so this is NOT
@@ -3303,17 +3546,33 @@ class _Compiler:
                     # the manifest pruning strategy reports what it dropped, and
                     # counting it twice would double-report.
                     "row_groups_read": _skene_row_group_count(manifest, file_count),
+                    # Row-group SKIPPING happens at RUN time, in the Source's
+                    # claim builder, off each file's footer statistics — so this
+                    # placeholder is overwritten by `_fold_skene_scan_facts` once
+                    # the driver is done. FILE-level pruning is separate, already
+                    # applied at plan time, and already reflected in the manifest
+                    # counts above; this is never a stand-in for it.
                     "row_groups_pruned": 0,
-                    # No reader-side predicate on this path (skene declines
-                    # pushdown), so rows-in == rows-out of the scan; the Filter
-                    # above it carries the selectivity.
-                    "parquet_rows_before_filter": 0,
+                    # Rows fed INTO the scan, before its reader-side predicate. With
+                    # a pushed predicate that is no longer the same as rows out, so
+                    # it is the manifest's record count across the surviving files —
+                    # the plan-time number, exactly as the parquet Source reports
+                    # `splan.surviving_row_count`. 0 when nothing is pushed
+                    # (rows-in == rows-out) or the manifest cannot say.
+                    "parquet_rows_before_filter": (
+                        record_count if filter_bc is not None and record_count else 0
+                    ),
+                    # The read set, which is what the Source decodes — projection
+                    # plus predicate-only columns, not just the projection.
                     "columns_read": len(scan.skene_read_schema_columns or []),
                 }
                 p = self.nplan.new_pipeline()
-                self.nplan.set_native_skene_scan_source(p, splan)
+                self.nplan.set_native_skene_scan_source(p, splan, filter_bc, read_layout)
                 self._remember_types(scan.columns)
-                return p, [sc.identity for sc in scan.skene_read_schema_columns]
+                # The Source emits the PROJECTION: it applies the pushed predicate
+                # over the read set and drops predicate-only columns itself, so
+                # there is no relocated filter and no trailing Select here.
+                return p, emit_ids
             # Zero-projection (COUNT(*)) and anything else the native Source
             # declines fall through to the materialized path below, which
             # handles the zero-column morsel shape.
@@ -3627,7 +3886,9 @@ class _Compiler:
         self.nplan.set_join2_build_sink(bp, build_key_idx, build_payload, ref,
                                         build_types, build_logical, build_element,
                                         mode == 5,   # FULL OUTER: track matches
-                                        -1 if est_rows is None else int(est_rows),
+                                        _estimate_to_int64(
+                                            est_rows,
+                                            f"output-row estimate for the {join_type} join"),
                                         null_equal)
 
         pp, playout = self.compile_node(probe_id)
@@ -4350,7 +4611,9 @@ class _Compiler:
                                        bmatchout.index(asof_right), ref,
                                        build_types, build_logical, build_element,
                                        asof_type.value,
-                                       -1 if asof_est_rows is None else int(asof_est_rows))
+                                       _estimate_to_int64(
+                                           asof_est_rows,
+                                           "output-row estimate for the asof join"))
         self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
         self.nplan.set_current_display_name(type(node).__name__)
         self.nplan.add_asof_probe(pp, ref, probe_key_idx, list(range(len(playout))),
@@ -4507,6 +4770,27 @@ def compile_to_native(plan, pool=None):
 
     nplan = NativePlan()
     compiler = _Compiler(plan, nplan, pool=pool)
+
+    # Shared CTE bodies FIRST, in dependency order: run() executes pipelines in
+    # creation order, so every body's buffer is fully materialized before any
+    # pipeline that reads it exists. Each body is a plan of its own (no Exit);
+    # its head streams into a buffer-append sink, and the CteRefNode arm of
+    # compile_node wires each reference to that buffer.
+    for cte_key, body_plan in (getattr(plan, "shared_ctes", None) or {}).items():
+        body_compiler = _Compiler(body_plan, nplan, pool=pool)
+        body_compiler.cte_buffers = compiler.cte_buffers
+        body_heads = list(set(body_plan.get_exit_points()))
+        if len(body_heads) != 1:
+            _unsupported(f"a shared CTE body with {len(body_heads)} heads")
+        body_pipeline, body_layout = body_compiler.compile_node(body_heads[0])
+        buf = nplan.new_buffer()
+        nplan.set_buffer_append_sink(body_pipeline, buf)
+        compiler.cte_buffers[cte_key] = (buf, list(body_layout))
+        # fold the body's plan-time facts into the facts this compile returns
+        compiler.scan_sources.update(body_compiler.scan_sources)
+        compiler.scan_facts.update(body_compiler.scan_facts)
+        compiler.scan_residual_reasons.update(body_compiler.scan_residual_reasons)
+        compiler.footer_fetch_ns += body_compiler.footer_fetch_ns
 
     in_edges = list(plan.ingoing_edges(exit_id))
     if len(in_edges) != 1:
@@ -4747,6 +5031,12 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                                 _io_diags.append(_diag)
                 for _scan in _scans:
                     _scan.close_source()
+            # Skene row-group SKIPPING is a run-time decision (the Source's claim
+            # builder reads each file's footer statistics), so unlike parquet's
+            # plan-time pruning its count does not exist when scan_facts is built.
+            # Fold it in here, at the same "driver is done, counters are final"
+            # point the operator stats below use.
+            _fold_skene_scan_facts(nplan, telemetry)
             # The driver is done, so every operator's counters are final: harvest the
             # per-operator telemetry and fold it onto the session telemetry, keyed by
             # plan-node identity (mermaid's get_node_stats reads it back for the

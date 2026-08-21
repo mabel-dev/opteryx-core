@@ -136,6 +136,6 @@ def test_prune_files_resolves_field_id_after_projection_pushdown():
     literal = Node(NodeType.LITERAL, type=INT64, value=100)
     predicate = Node(NodeType.COMPARISON_OPERATOR, value="Gt", left=identifier, right=literal)
 
-    manifest.prune_files([predicate])
+    manifest = manifest.prune_files([predicate])
 
     assert manifest.files == []

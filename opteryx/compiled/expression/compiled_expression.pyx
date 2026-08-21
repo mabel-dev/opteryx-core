@@ -651,7 +651,54 @@ def _build_in_list_blob(values, left_type, int negate):
     phys = ""
     if left_type is not None and left_type.physical is not None:
         phys = getattr(left_type.physical, "name", "")
-    if phys in ("INT8", "INT16", "INT32", "INT64") and all(
+    # DATE32 rides the SIGNED int arm: draken's ops table aliases
+    # `entries[DRAKEN_DATE32] = entries[DRAKEN_INT32]` (ops/hash.h, "D.9"), so
+    # the in_list kernel is the int32 one and the column's storage IS a signed
+    # int (days since epoch, no logical descriptor to parameterize it). A DATE
+    # literal reaches here already lowered to that same raw day count, so the
+    # blob needs no conversion — `d_date IN (CAST('2000-06-30' AS DATE), ...)`
+    # packs as [11138, ...] exactly as an INT32 column's list would.
+    #
+    # The other temporal types need one extra step for the same reason DATE32
+    # needs none: their dispatch aliases an int kernel too (TIMESTAMP64/TIME64 →
+    # INT64, TIME32 → INT32; ops/hash.h "D.8"/"D.9") but they carry a UNIT in
+    # their logical descriptor, and a literal is carried as raw MICROSECONDS
+    # regardless of the column's storage unit. So each literal is converted to
+    # the column's unit before packing (_micros_to_storage_unit — the same
+    # conversion the array-membership path uses). A LOSSY literal (finer
+    # precision than the column's granularity, e.g. a ms-resolution literal
+    # against a seconds column) can provably never equal any stored value —
+    # every stored raw int is a whole tick of the column's unit — so dropping
+    # it from the set is exact, not a narrowing, exactly like the UINT
+    # out-of-range drop below. An empty resulting set lowers correctly: kind-0
+    # with count=0 is "matches nothing" (negate=True → "matches everything").
+    # No descriptor / no unit → the stored unit is unknowable → decline (the
+    # caller falls through to plan-time refusal, never a guessed unit).
+    #
+    # TIMESTAMP64 is the only one of the three that can actually REACH here
+    # today; TIME32/TIME64 are listed because the unit arithmetic is identical
+    # and a divergence would be the bug, NOT because TIME IN-lists work. TIME
+    # is not a column type in this engine: a scan decodes parquet TIME as plain
+    # INT32/INT64 (pool_reader's "WP-11" note — "the binder models no TIME
+    # logical type from a scan"), `CAST(col AS TIME)` yields raw ticks rather
+    # than TIME values, and OPERATOR_MAP carries ZERO LC.TIME rows, so every
+    # TIME comparison is refused in the binder before lowering. A TIME literal
+    # is also carried as a `datetime.time`, not the raw microseconds this arm's
+    # int gate requires. Making TIME reachable is a type-system change (scan
+    # typing + CAST + operator map + unit-aware compare routing, which
+    # `_TEMPORAL_PHYS` does not cover for TIME either), not an edit here.
+    if phys in ("TIMESTAMP64", "TIME32", "TIME64") and all(
+            isinstance(v, int) and not isinstance(v, bool) for v in vals):
+        if left_type.logical is None or left_type.logical.unit is None:
+            return None
+        unit_value = int(left_type.logical.unit.value)
+        converted = []
+        for v in vals:
+            raw = _micros_to_storage_unit(v, unit_value)
+            if raw is not None:
+                converted.append(raw)
+        return _pack_membership_blob(converted, 0, negate)
+    if phys in ("INT8", "INT16", "INT32", "INT64", "DATE32") and all(
             isinstance(v, int) and not isinstance(v, bool) for v in vals):
         return _pack_membership_blob(vals, 0, negate)
     if phys in ("UINT8", "UINT16", "UINT32", "UINT64") and all(
@@ -693,17 +740,24 @@ def _build_array_membership_blob(values):
 # MICROSECONDS=2, NANOSECONDS=3. Literal TIMESTAMP values are always carried
 # as raw MICROSECONDS (_materialise_constant_literal's int branch, and
 # vector_timestamp_from_constant's unit="us" default) regardless of the
-# target array's storage unit.
-def _micros_to_array_unit(long long micros, int unit_value):
-    """Convert a microsecond instant to the array child's raw storage unit.
-    Returns None when the conversion is LOSSY (the literal has finer
-    precision than the array's granularity) — such an item can provably never
-    equal any element (every stored value is already a whole tick of that
-    unit), but the caller has no "guaranteed false" blob kind, so it declines
-    rather than silently rounding to a DIFFERENT stored value's raw int."""
+# target column's/array's storage unit.
+def _micros_to_storage_unit(long long micros, int unit_value):
+    """Convert a microsecond instant to the target's raw storage unit (the
+    IN-list column's unit, or the array child's). Returns None when the
+    conversion is LOSSY (the literal has finer precision than the target's
+    granularity) — such a value can provably never equal any stored value
+    (every stored value is already a whole tick of that unit), but the caller
+    has no "guaranteed false" blob kind, so per-value it is dropped/declined
+    rather than silently rounded to a DIFFERENT stored value's raw int.
+    The NANOSECONDS ×1000 is range-guarded for the same reason: a microsecond
+    instant beyond ±INT64_MAX/1000 (past year 2262) is unrepresentable in an
+    int64 nanosecond column, so it too can never match — None, never a C
+    wraparound to some other valid instant's raw int."""
     if unit_value == 2:
         return micros
     if unit_value == 3:
+        if micros > 9223372036854775 or micros < -9223372036854775:
+            return None
         return micros * 1000
     if unit_value == 1:
         return micros // 1000 if micros % 1000 == 0 else None
@@ -742,7 +796,7 @@ def _build_single_item_blob(value, element_ct):
                 getattr(element_ct, "physical", None), "name", "") == "TIMESTAMP64":
             if element_ct.logical is None or element_ct.logical.unit is None:
                 return None
-            raw = _micros_to_array_unit(value, int(element_ct.logical.unit.value))
+            raw = _micros_to_storage_unit(value, int(element_ct.logical.unit.value))
             if raw is None:
                 return None
             return _pack_membership_blob([raw], 0, 0)
@@ -1827,7 +1881,23 @@ cdef Py_ssize_t _linearize(
         # pairs rescale exactly in int128, any-float pairs promote to double.
         # Fires ONLY when the two numeric operands differ in (type, scale) — a
         # matched same-type-same-scale pair stays on the fast draken_compare_dv.
+        # Unsigned widths belong here for the same reason the signed ones do, and
+        # their absence was not a decision: draken_compare_dv is identical-type
+        # only, so EVERY cross-type numeric pair involving an unsigned column
+        # (u32 vs i64, u32 vs a DECIMAL column, u8 vs u16 — the whole unsigned
+        # band of the type matrix) declined to nullptr and, with no fallback on
+        # the native expression path, raised err_op=11. Unsigned vs a LITERAL was
+        # always fine — _coerce_literal_physical materialises the literal in the
+        # column's own physical type — which is what kept this to column-to-column
+        # comparisons and hid it.
+        #
+        # ⛔ These four names and the DRAKEN_UINT* cases in fk_read_dec /
+        # fk_read_num_double (draken/ops/kernels/function_kernels.cpp) are ONE
+        # change. Naming a type here routes it into those readers, and a reader
+        # without its case reads a narrow buffer eight bytes at a time. Never add
+        # a physical type to this tuple without checking both.
         _NUM_PHYS = ("INT8", "INT16", "INT32", "INT64",
+                     "UINT8", "UINT16", "UINT32", "UINT64",
                      "FLOAT32", "FLOAT64", "DECIMAL", "DECIMAL128")
         _lphys = getattr(left_type.physical, "name", "") if left_type is not None else ""
         _rphys = getattr(right_type.physical, "name", "") if right_type is not None else ""

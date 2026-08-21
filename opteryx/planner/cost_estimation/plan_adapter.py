@@ -26,6 +26,7 @@ from typing import Tuple
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.planner.cost_estimation.join_cardinality import KeyStats
+from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
 from opteryx.planner.cost_estimation.join_graph import JoinEdge
 from opteryx.planner.cost_estimation.join_graph import JoinGraph
 from opteryx.planner.cost_estimation.join_graph import JoinVertex
@@ -39,10 +40,23 @@ def _identifier_source(expr: Optional[Node]) -> Optional[str]:
     return expr.source
 
 
-def _identifier_column(expr: Optional[Node]) -> Optional[str]:
+def _identifier_identity(expr: Optional[Node]) -> Optional[bytes]:
+    """Identity of an identifier's bound column, matching how
+    ``RelationStatistics.columns`` is keyed (see that class's docstring and
+    ``join_ordering._join_key_identity``).
+
+    Returns None when the expression carries no bound ``schema_column``
+    (NDV/null then go unknown and the tdom fallback applies). Never falls
+    back to the column *name* — names are not unique across a plan, so a
+    name lookup can silently return another relation's statistics.
+    """
     if expr is None or expr.node_type != NodeType.IDENTIFIER:
         return None
-    return getattr(expr, "source_column", None) or getattr(expr, "value", None)
+    schema_column = getattr(expr, "schema_column", None)
+    if schema_column is None:
+        return None
+    identity = getattr(schema_column, "identity", None)
+    return identity if isinstance(identity, bytes) else None
 
 
 def _walk_subplan(
@@ -135,17 +149,27 @@ def _subtree_sources_are_backed(plan: LogicalPlan, root_id: str) -> bool:
     return saw_a_source
 
 
-def _key_stats(scan_node, column_name: Optional[str]) -> KeyStats:
-    """Resolve KeyStats for a column by reading the refreshed Scan stats."""
-    if scan_node is None or column_name is None:
+def _key_stats(scan_node, column_identity: Optional[bytes]) -> KeyStats:
+    """Resolve KeyStats for a column by reading the refreshed Scan stats.
+
+    ``column_identity`` is the ``SchemaColumn.identity`` bytes the statistics
+    dict is keyed by — never a column name (see ``_identifier_identity``).
+    """
+    if scan_node is None or column_identity is None:
         return KeyStats(ndv=None, null_fraction=None)
     stats = getattr(scan_node, "statistics", None)
     if stats is None:
         return KeyStats(ndv=None, null_fraction=None)
-    col = stats.columns.get(column_name)
+    col = stats.columns.get(column_identity)
     if col is None:
         return KeyStats(ndv=None, null_fraction=None)
-    return KeyStats(ndv=col.distinct_count, null_fraction=col.null_fraction)
+    if col.distinct_count is None:
+        return KeyStats(ndv=None, null_fraction=col.null_fraction)
+    return KeyStats(
+        ndv=col.distinct_count,
+        null_fraction=col.null_fraction,
+        ndv_provenance=NdvProvenance.MEASURED,
+    )
 
 
 def _leaf_relation_to_scan(
@@ -228,18 +252,21 @@ def _classify_predicate(
 
 def _group_equivalence_classes(
     cross_equi: List[Tuple[int, int, Node]],
-) -> List[List[Tuple[int, str]]]:
-    """Partition (leaf_idx, col_name) key references into equivalence classes.
+) -> List[List[Tuple[int, bytes]]]:
+    """Partition (leaf_idx, column_identity) key references into equivalence
+    classes.
 
     Columns transitively joined by equality (e.g. JOB's
     `t.id=mi.movie_id AND t.id=mk.movie_id AND mk.movie_id=mi.movie_id`) form
     one class — the three predicates all restate a single key identity.
-    Returned in a deterministic order (by each class's smallest member) so
-    class ids are stable across calls for the same input.
+    Members are keyed by ``SchemaColumn.identity`` bytes, not name — a
+    self-join's two sides share a name but are distinct columns with distinct
+    statistics. Returned in a deterministic order (by each class's smallest
+    member) so class ids are stable across calls for the same input.
     """
-    parent: Dict[Tuple[int, str], Tuple[int, str]] = {}
+    parent: Dict[Tuple[int, bytes], Tuple[int, bytes]] = {}
 
-    def find(key: Tuple[int, str]) -> Tuple[int, str]:
+    def find(key: Tuple[int, bytes]) -> Tuple[int, bytes]:
         if key not in parent:
             parent[key] = key
         root = key
@@ -251,19 +278,19 @@ def _group_equivalence_classes(
             parent[cur], cur = root, parent[cur]
         return root
 
-    def union(a: Tuple[int, str], b: Tuple[int, str]) -> None:
+    def union(a: Tuple[int, bytes], b: Tuple[int, bytes]) -> None:
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[rb] = ra
 
     for left_leaf, right_leaf, pred in cross_equi:
-        left_col = _identifier_column(pred.left)
-        right_col = _identifier_column(pred.right)
-        if left_col is not None and right_col is not None:
-            union((left_leaf, left_col), (right_leaf, right_col))
+        left_key = _identifier_identity(pred.left)
+        right_key = _identifier_identity(pred.right)
+        if left_key is not None and right_key is not None:
+            union((left_leaf, left_key), (right_leaf, right_key))
 
     # Group members by representative.
-    sets: Dict[Tuple[int, str], List[Tuple[int, str]]] = defaultdict(list)
+    sets: Dict[Tuple[int, bytes], List[Tuple[int, bytes]]] = defaultdict(list)
     for key in parent:
         sets[find(key)].append(key)
 
@@ -271,10 +298,10 @@ def _group_equivalence_classes(
 
 
 def _build_equiv_tdoms(
-    equivalence_classes: List[List[Tuple[int, str]]],
+    equivalence_classes: List[List[Tuple[int, bytes]]],
     per_leaf_scans: List[Dict[str, Any]],
     vertices: List[JoinVertex],
-) -> Dict[Tuple[int, str], int]:
+) -> Dict[Tuple[int, bytes], int]:
     """Compute tdom for each join column using equivalence sets (Ebergen 2022 §3.2).
 
     tdom for a set = max(known NDVs in set) if any NDV is available,
@@ -300,21 +327,21 @@ def _build_equiv_tdoms(
     agree, or the tree-picker and the build-side chooser cost the same join
     differently.
 
-    Returns a dict mapping (leaf_idx, col_name) → tdom for every column seen in
-    a join predicate. Columns not present in the returned dict had no join
-    predicate and are unaffected.
+    Returns a dict mapping (leaf_idx, column_identity) → tdom for every column
+    seen in a join predicate. Columns not present in the returned dict had no
+    join predicate and are unaffected.
     """
-    result: Dict[Tuple[int, str], int] = {}
+    result: Dict[Tuple[int, bytes], int] = {}
     for members in equivalence_classes:
         known_ndvs: List[int] = []
         leaf_set: set = set()
-        for leaf_idx, col_name in members:
+        for leaf_idx, col_identity in members:
             leaf_set.add(leaf_idx)
             for scan in per_leaf_scans[leaf_idx].values():
                 stats = getattr(scan, "statistics", None)
                 if stats is None:
                     continue
-                col_stat = stats.columns.get(col_name)
+                col_stat = stats.columns.get(col_identity)
                 if col_stat is not None and col_stat.distinct_count is not None:
                     known_ndvs.append(col_stat.distinct_count)
 
@@ -402,18 +429,26 @@ def build_join_graph(
     # Reverse lookup so edges can be tagged with the class they belong to —
     # DPccp/_combine uses this to dedupe redundant transitive-equality edges
     # when a chain of joins closes a cycle (see dpccp._combine).
-    class_id_of: Dict[Tuple[int, str], int] = {
+    class_id_of: Dict[Tuple[int, bytes], int] = {
         member: class_idx
         for class_idx, members in enumerate(equivalence_classes)
         for member in members
     }
 
-    def _key_stats_with_tdom(scan_node, col_name: Optional[str], leaf_idx: int) -> KeyStats:
-        ks = _key_stats(scan_node, col_name)
-        if ks.ndv is None and col_name is not None:
-            tdom = equiv_tdoms.get((leaf_idx, col_name))
+    def _key_stats_with_tdom(scan_node, col_identity: Optional[bytes], leaf_idx: int) -> KeyStats:
+        ks = _key_stats(scan_node, col_identity)
+        if ks.ndv is None and col_identity is not None:
+            tdom = equiv_tdoms.get((leaf_idx, col_identity))
             if tdom is not None:
-                ks = KeyStats(ndv=tdom, null_fraction=ks.null_fraction)
+                # The tdom is the key's DOMAIN size, not a counted distinct
+                # value -- _key_selectivity wants exactly that (see
+                # statistics.py's base_row_count note), but a consumer that
+                # ACTS on the number being measured must be able to tell.
+                ks = KeyStats(
+                    ndv=tdom,
+                    null_fraction=ks.null_fraction,
+                    ndv_provenance=NdvProvenance.DOMAIN_STANDIN,
+                )
         return ks
 
     # Build edges, one JoinEdge per equality predicate (DPccp combines them).
@@ -421,22 +456,22 @@ def build_join_graph(
     for left_leaf, right_leaf, pred in cross_equi:
         left_src = _identifier_source(pred.left)
         right_src = _identifier_source(pred.right)
-        left_col = _identifier_column(pred.left)
-        right_col = _identifier_column(pred.right)
+        left_key = _identifier_identity(pred.left)
+        right_key = _identifier_identity(pred.right)
         # Order endpoints so the edge's ``left`` matches the predicate's left.
         # If the predicate's left identifier belongs to the right leaf, swap.
         if rel_to_leaf.get(left_src) == right_leaf:
             left_leaf, right_leaf = right_leaf, left_leaf
             left_src, right_src = right_src, left_src
-            left_col, right_col = right_col, left_col
+            left_key, right_key = right_key, left_key
 
         left_scan = per_leaf_scans[left_leaf].get(left_src) if left_src else None
         right_scan = per_leaf_scans[right_leaf].get(right_src) if right_src else None
         equi = ((
-            _key_stats_with_tdom(left_scan, left_col, left_leaf),
-            _key_stats_with_tdom(right_scan, right_col, right_leaf),
+            _key_stats_with_tdom(left_scan, left_key, left_leaf),
+            _key_stats_with_tdom(right_scan, right_key, right_leaf),
         ),)
-        class_id = class_id_of.get((left_leaf, left_col)) if left_col is not None else None
+        class_id = class_id_of.get((left_leaf, left_key)) if left_key is not None else None
         edges.append(
             JoinEdge(
                 left=left_leaf,

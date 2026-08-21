@@ -1,0 +1,8 @@
+{
+  "codec": "lz4",
+  "generator": "libskene 0.2.0 / parquet_to_skene (format v2)",
+  "listing_sha256": "37f36e126068ba2f609b5a8ced9267cc0a7f6dec6a90eee41ccc49c426af86b0",
+  "name": "h2o_skene",
+  "object_count": 74,
+  "total_bytes": 8235083324
+}

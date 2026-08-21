@@ -515,7 +515,14 @@ def query_planner(
     # shared between the optimizer's refreshes and the result-size guard's,
     # never across queries. See statistics_refresh._scan_stats.
     scan_stats_cache: Dict[Any, Any] = {}
-    optimized_plan = do_optimizer(bound_plan, telemetry, scan_stats_cache=scan_stats_cache)
+    # Threaded explicitly from here on: Graph copies do not carry instance
+    # attributes, so `shared_ctes` on the plan object would not survive an
+    # optimizer strategy handing back a copy.
+    shared_ctes = getattr(bound_plan, "shared_ctes", None) or {}
+    optimized_plan = do_optimizer(
+        bound_plan, telemetry, scan_stats_cache=scan_stats_cache, shared_ctes=shared_ctes
+    )
+    shared_ctes = getattr(optimized_plan, "shared_ctes", None) or shared_ctes
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
 
     # Refuse a query whose result is already known to blow the row limit, BEFORE any
@@ -535,7 +542,7 @@ def query_planner(
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()
     query_properties = QueryProperties(query_id=query_id, variables=execution_context.variables)
-    physical_plan = create_physical_plan(optimized_plan, query_properties)
+    physical_plan = create_physical_plan(optimized_plan, query_properties, shared_ctes=shared_ctes)
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
     return physical_plan

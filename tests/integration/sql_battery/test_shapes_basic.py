@@ -34,6 +34,7 @@ from opteryx.exceptions import (
     ArrayWithMixedTypesError,
     ColumnNotFoundError,
     ColumnReferencedBeforeEvaluationError,
+    DataError,
     DatasetNotFoundError,
     EmptyDatasetError,
     FunctionExecutionError,
@@ -3467,27 +3468,28 @@ def test_framed_window_general_shapes():
 
 def test_uncorrelated_scalar_subquery_single_row_proofs():
     """
-    VALUE-level regression for the uncorrelated-scalar-subquery single-row guard
-    in `decorrelate_subquery.py` (`_uncorrelated_single_row_proof`).
+    VALUE-level regression for uncorrelated-scalar-subquery cardinality
+    enforcement in `decorrelate_subquery.py` (`_guard_scalar_cardinality` /
+    the engine's ScalarGuardSource).
 
     An uncorrelated scalar subquery decorrelates into a CROSS JOIN of one value
-    against every outer row — sound only if the subquery is PROVABLY at most one
-    row, or the join silently multiplies outer rows instead of the "more than one
-    row returned by a subquery" SQL requires. Originally only an ungrouped
-    aggregate was accepted; TPC-DS Q06/Q44/Q54/Q58 hit the guard on three other
-    shapes, of which two are actually provable and one is not:
+    against every outer row — sound only if the subquery yields ONE value.
+    Unless the plan proves exactly one row statically (an ungrouped aggregate),
+    a ScalarSubqueryGuard step enforces SQL's scalar semantics at runtime, at
+    the subquery's materialization boundary in the engine:
 
-      - accepted: AggregateAndGroup whose only GROUP BY key is pinned to a single
-        value by a `col = literal` equality filter below it (Q44's shape) — at
-        most one group can exist;
-      - accepted: the subquery's own exit step is `LIMIT 1` — caps output to at
-        most one row regardless of what feeds it;
-      - still refused: DISTINCT and a bare unaggregated/unlimited SELECT (Q06's
-        and Q58's shape) — the planner has no uniqueness metadata (no declared
-        PK/UNIQUE constraints) to prove either returns one row, and TPC-DS's
-        date_dim just happens to have one row per (year, month) — coincidental,
-        not provable. Accepting these would trade a compile-time refusal for a
-        silent wrong answer the day that coincidence stops holding.
+      - more than one row -> the SQL-standard "more than one row returned by a
+        subquery used as an expression", raised as DataError. This replaced the
+        old compile-time refusal ("must return exactly one row"): shapes whose
+        single-row property is a fact about the DATA — DISTINCT, a bare
+        filtered SELECT (TPC-DS Q06/Q54/Q58) — now run, and error only when
+        the data genuinely breaks the property. The STATIC proof was never
+        widened to accept them (that would multiply outer rows silently the
+        day the data changes); the runtime check is what admits them honestly.
+      - zero rows -> NULL, per SQL. Without the guard an empty subquery
+        emptied the cross join, so `WHERE (subq) IS NULL` wrongly returned
+        nothing; the guard emits one all-NULL row instead.
+      - exactly one row -> passes through untouched.
     """
     session = opteryx.session()
 
@@ -3498,36 +3500,64 @@ def test_uncorrelated_scalar_subquery_single_row_proofs():
         return collected
 
     # Jupiter (id=5) has 79 moons; Saturn is the only planet with more (82).
-    # GROUP BY id, filtered by `id = 5` — one possible group, now accepted.
+    # GROUP BY id, filtered by `id = 5` — one possible group.
     assert _names(
         "SELECT name FROM $planets WHERE number_of_moons > "
         "(SELECT avg(number_of_moons) FROM $planets WHERE id = 5 GROUP BY id)"
     ) == ["Saturn"]
 
     # Saturn (82 moons) is also the top row by this ordering — LIMIT 1 with no
-    # GROUP BY or aggregate at all, now accepted purely on the exit-step cap.
+    # GROUP BY or aggregate at all.
     assert _names(
         "SELECT name FROM $planets WHERE number_of_moons >= "
         "(SELECT number_of_moons FROM $planets ORDER BY number_of_moons DESC LIMIT 1)"
     ) == ["Saturn"]
 
-    # Still refused: `mass > 1` matches several planets, so GROUP BY id has
-    # several possible groups — nothing pins it to exactly one.
-    with pytest.raises(UnsupportedSyntaxError, match="must return exactly one row"):
+    # A DISTINCT that is GENUINELY single-valued for the data (TPC-DS Q06/Q54's
+    # shape): filter pins a different column than the one selected, so this is
+    # a data fact the plan cannot prove — the runtime guard admits it.
+    assert _names(
+        "SELECT name FROM $planets WHERE number_of_moons = "
+        "(SELECT DISTINCT number_of_moons FROM $planets WHERE name = 'Saturn')"
+    ) == ["Saturn"]
+
+    # A bare filtered projection, no DISTINCT/LIMIT/aggregate (TPC-DS Q58's
+    # shape) — same data-fact single row, same runtime admission.
+    assert _names(
+        "SELECT name FROM $planets WHERE number_of_moons = "
+        "(SELECT number_of_moons FROM $planets WHERE name = 'Saturn')"
+    ) == ["Saturn"]
+
+    # Genuinely >1 row: `mass > 1` matches several planets, so GROUP BY id has
+    # several groups — the guard raises SQL's cardinality violation at runtime.
+    with pytest.raises(DataError, match="more than one row returned by a subquery"):
         _names(
             "SELECT name FROM $planets WHERE number_of_moons > "
             "(SELECT avg(number_of_moons) FROM $planets WHERE mass > 1 GROUP BY id)"
         )
 
-    # Still refused: DISTINCT over `number_of_moons` with no filter that pins
-    # THAT column — every planet has a different moon count, so this DISTINCT
-    # returns nine rows. Coincidentally-one-row DISTINCT subqueries (TPC-DS
-    # Q06/Q54) are refused for the identical reason: unprovable, not untrue.
-    with pytest.raises(UnsupportedSyntaxError, match="must return exactly one row"):
+    # Genuinely >1 row through DISTINCT: every planet has a different moon
+    # count, so this DISTINCT returns nine rows.
+    with pytest.raises(DataError, match="more than one row returned by a subquery"):
         _names(
             "SELECT name FROM $planets WHERE number_of_moons = "
             "(SELECT DISTINCT number_of_moons FROM $planets WHERE mass > 0)"
         )
+
+    # Zero rows -> NULL. The comparison with NULL is unknown, so no outer row
+    # survives ...
+    assert _names(
+        "SELECT name FROM $planets WHERE number_of_moons = "
+        "(SELECT number_of_moons FROM $planets WHERE name = 'Krypton' LIMIT 1)"
+    ) == []
+
+    # ... while IS NULL is TRUE for every outer row. Before the guard, the
+    # empty subquery emptied the cross join and this wrongly returned nothing —
+    # the LIMIT 1 shape had exactly this bug.
+    assert len(_names(
+        "SELECT name FROM $planets WHERE "
+        "(SELECT number_of_moons FROM $planets WHERE name = 'Krypton' LIMIT 1) IS NULL"
+    )) == 9
 
 
 def test_select_list_scalar_subquery():
@@ -3585,12 +3615,27 @@ def test_select_list_scalar_subquery():
             "x",
         )
 
-    # Still refused: not provably one row (no aggregate, no GROUP BY, no LIMIT).
-    with pytest.raises(UnsupportedSyntaxError, match="must return exactly one row"):
+    # Not provably one row (no aggregate, no GROUP BY, no LIMIT): no longer a
+    # compile-time refusal. The runtime ScalarSubqueryGuard admits the shape and
+    # enforces SQL's scalar semantics at the materialization boundary — nine
+    # planets come back, so this raises the standard cardinality violation.
+    # (Same contract as the WHERE-clause shapes proved above in
+    # test_scalar_subquery_single_row_proofs.)
+    with pytest.raises(DataError, match="more than one row returned by a subquery"):
         _col(
             "SELECT (SELECT number_of_moons FROM $planets) AS x FROM $planets WHERE id = 1",
             "x",
         )
+
+    # A LIMIT-headed subquery binds too (LIMIT / ORDER BY / DISTINCT head the
+    # subplan as column-less pass-through steps — bind_correlated_subquery must
+    # descend to the Project to type the value). Zero rows -> NULL per outer
+    # row, never an emptied result.
+    assert _col(
+        "SELECT (SELECT number_of_moons FROM $planets WHERE name = 'Krypton' LIMIT 1) AS x "
+        "FROM $planets WHERE id = 1",
+        "x",
+    ) == [None]
 
     # Still refused: EXISTS in the SELECT list — a boolean existence test, not a
     # value; unaffected by this change (the pre-bind guard still refuses it).

@@ -164,6 +164,59 @@ def test_tied_boundary_value_across_two_files_keeps_both():
         shutil.rmtree(ds_dir, ignore_errors=True)
 
 
+def test_declined_predicate_disables_the_optimization():
+    """A predicate the connector DECLINED still cuts rows, and this optimization
+    must not fire under one.
+
+    The guard inside the strategy reads `node.predicates`, which is populated ONLY
+    when `can_push` accepted — so it looks like a declined predicate (left as a
+    Filter NODE above the scan) slips past it. It does not, and the protection is
+    UPSTREAM: TopNScanPushdownStrategy stamps the top-N spec only when the HeapSort
+    reads directly from the Scan, so a surviving Filter node between them means
+    this strategy is never armed. That is an invariant of another strategy, held in
+    another file, with nothing here depending on it visibly — which is exactly the
+    kind of thing that breaks silently and returns too few rows. This test is the
+    thing that would notice.
+
+    `project = 'melon' OR seq < 3` is the vehicle: a disjunction over two columns is
+    outside `PredicatePushable._SIMPLE_NODE_TYPES`, so it is declined and left as a
+    Filter. It matches melon(12) in the TOP file by `project` and avocado(2),
+    apple(1) in the BOTTOM one — so pruning to the top files by sort-key bounds
+    would lose two of the three answer rows rather than merely read too much.
+    """
+    dataset, ds_dir = _write_dataset(
+        "_tmp_topn_declined",
+        [
+            "SELECT * FROM (VALUES ('apple',1),('avocado',2),('banana',3)) AS t(project, seq)",
+            "SELECT * FROM (VALUES ('carrot',4),('durian',5),('eggplant',6)) AS t(project, seq)",
+            "SELECT * FROM (VALUES ('fig',7),('grape',8),('jackfruit',9)) AS t(project, seq)",
+            "SELECT * FROM (VALUES ('kiwi',10),('lemon',11),('melon',12)) AS t(project, seq)",
+        ],
+    )
+    try:
+        session = opteryx.session()
+        sql = (f"SELECT * FROM {dataset} WHERE project = 'melon' OR seq < 3 "
+               "ORDER BY project DESC LIMIT 5")
+        on_rows, on_telemetry, off_rows = _run_on_and_off(session, sql, ["project", "seq"])
+
+        # The premise: this predicate really is declined, so it really is a Filter
+        # node sitting between the HeapSort and the Scan. Without this the test
+        # would still pass if pushdown started accepting ORs, while no longer
+        # exercising the declined path at all.
+        assert on_telemetry.get("optimization_predicate_pushdown_into_scan", 0) == 0, (
+            "the OR was pushed into the scan — this test no longer exercises the "
+            "declined-predicate path: %s" % on_telemetry)
+
+        assert on_rows == [("melon", 12), ("avocado", 2), ("apple", 1)], on_rows
+        assert on_rows == off_rows, (on_rows, off_rows)
+        assert on_telemetry.get("files_pruned", 0) == 0, (
+            "files were pruned under a residual Filter — the top-N threshold "
+            "counted rows the filter removes: %s" % on_telemetry)
+        assert on_telemetry.get("optimization_topn_manifest_pruning", 0) == 0, on_telemetry
+    finally:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+
+
 def test_null_in_sort_column_disables_the_optimization_entirely():
     # v1 scope gate: any NULL anywhere in the sort column and this strategy
     # must not touch the file list at all (see module docstring on

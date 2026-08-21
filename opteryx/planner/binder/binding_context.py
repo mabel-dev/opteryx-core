@@ -75,6 +75,13 @@ class BindingContext:
     relations: Dict[str, str]
     telemetry: QueryTelemetry
     outer_schemas: Dict[str, Any] = field(default_factory=dict)
+    # Boundary schemas of shared (materialize-once) CTE bodies, keyed by cte_key.
+    # Populated by do_bind_phase after binding each body, BEFORE any plan that
+    # references it binds; read by visit_materialized_cte_ref. The dict OBJECT is
+    # shared by every context derived from this one (copy/open_correlated_scope):
+    # a reference inside an expression subquery binds under a child scope and
+    # must see the same registry. Read-only for consumers.
+    shared_cte_schemas: Dict[str, Any] = field(default_factory=dict)
     manifests: Dict[str, Any] = field(default_factory=dict)
     snapshots: Dict[str, Any] = field(default_factory=dict)
     schema_only: bool = False
@@ -137,6 +144,7 @@ class BindingContext:
             execution_context=self.execution_context,
             relations={k: v for k, v in self.relations.items()},
             telemetry=self.telemetry,
+            shared_cte_schemas=self.shared_cte_schemas,
             # NOT deep-copied: the outer scope is read-only from in here, and
             # copying it would detach resolved columns from the outer query's
             # own schema objects (identity comparisons downstream rely on
@@ -166,5 +174,6 @@ class BindingContext:
             relations={},
             telemetry=self.telemetry,
             outer_schemas={**self.outer_schemas, **self.schemas},
+            shared_cte_schemas=self.shared_cte_schemas,
             schema_only=self.schema_only,
         )

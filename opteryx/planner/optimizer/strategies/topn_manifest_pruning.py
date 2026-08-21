@@ -21,7 +21,18 @@ Algorithm: see Manifest.prune_files_for_topn's docstring for the
 threshold-accumulation itself.
 
 v1 scope, deliberately narrow:
-- Only fires when the Scan carries NO residual predicate. The accumulation
+- Only fires when the Scan carries NO residual predicate. `node.predicates` is
+  populated only when the connector ACCEPTED a predicate, which looks like it
+  misses a DECLINED one (left as a Filter NODE above the scan, cutting just as
+  many rows). It does not, and the reason is upstream, not here:
+  TopNScanPushdownStrategy stamps `topn_sort_name` only when the HeapSort reads
+  DIRECTLY from the Scan, so a surviving Filter node between them means this
+  strategy is never armed at all. Checked 2026-08-21 against a declined
+  disjunction on both parquet and skene - the spec is not stamped. Do not
+  "fix" this guard to walk parent Filters: that walk can only decline a case
+  that cannot arise, and it would read as though the adjacency requirement were
+  not load-bearing. See test_declined_predicate_disables_the_optimization.
+  The accumulation
   counts each file's `record_count`, which is its TOTAL row count; a filter
   applied at scan time means an unknown number of those rows never reach the
   sort, so the threshold is computed from rows that do not exist and files
@@ -99,13 +110,17 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
         descending = bool(getattr(node, "topn_descending", False))
 
         original_count = node.manifest.get_file_count()
-        node.manifest.prune_files_for_topn(sort_name, descending, limit)
-        pruned_count = node.manifest.get_file_count()
-        if pruned_count < original_count:
-            self.telemetry.files_pruned += original_count - pruned_count
+        # Copy-on-write: a real prune hands back a NEW Manifest (same object
+        # when nothing was pruned), so the id()-keyed scan statistics cache
+        # misses and recomputes over the pruned file set.
+        pruned_manifest = node.manifest.prune_files_for_topn(sort_name, descending, limit)
+        if pruned_manifest is not node.manifest:
+            node.manifest = pruned_manifest
+            self.telemetry.files_pruned += original_count - pruned_manifest.get_file_count()
             self.telemetry.optimization_topn_manifest_pruning += 1
-
-        context.optimized_plan[context.node_id] = node
+            # Only a real prune marks the plan mutated; an unconditional write
+            # forces a redundant full statistics refresh after this strategy.
+            context.optimized_plan[context.node_id] = node
         return context
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:

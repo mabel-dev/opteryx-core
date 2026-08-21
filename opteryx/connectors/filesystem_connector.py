@@ -112,6 +112,25 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         LogicalCategory.DATE,
     }
 
+    # SKENE's own set. Its reader-side filter runs the SAME c-native predicate VM
+    # the engine's Filter operator runs (native_skene_scan_source.hpp), so the type
+    # gate here describes an admission decision, not a reader limitation.
+    #
+    # DECIMAL is the difference, and it is not cosmetic: without it a mixed WHERE
+    # (TPC-H Q06 — a DATE range AND a DECIMAL range AND a DECIMAL bound) SPLITS
+    # into a pushed program plus a residual Filter, which is two filter passes
+    # where one fused pass ran before. That split is the mechanism behind Q06's
+    # measured loss on the plan-level-acceptance prototype. Decimal comparisons
+    # reach the reader correctly because the predicate is lowered ONCE here, through
+    # `_rewrite_decimal_compares` (an off-scale literal against a DECIMAL column is
+    # rescaled at plan time) — the same lowering a Filter node gets.
+    #
+    # It is NOT widened to every LogicalCategory. A type admitted here CONSUMES the
+    # Filter node, so admitting one the reader has not been exercised on converts a
+    # missed optimization into a failed query; the remaining categories are a
+    # follow-up with their own evidence, not an assumption.
+    SKENE_PUSHABLE_TYPES = PUSHABLE_TYPES | {LogicalCategory.DECIMAL}
+
     def __init__(
         self,
         dataset: str,
@@ -159,34 +178,41 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     def can_push(self, operator, types: set = None) -> bool:
         """Format-aware predicate gate.
 
-        Parquet takes PredicatePushable's generic gate against this class's
-        PUSHABLE_OPS/TYPES. JSONL delegates to JsonlPredicatePushable — the
-        same (deliberately narrower) gate READ_JSONL uses, so a dataset scan
-        and READ_JSONL over the same files push identically.
+        Accepting here has teeth: the pushdown strategy CONSUMES the Filter node,
+        so a format that accepts a predicate its reader does not apply returns
+        wrong answers silently. Every branch below is a statement about what that
+        format's reader actually does.
 
-        SKENE deliberately DECLINES: its scan runs on the compile-time
-        materialized path, where a reader-side row filter serializes work the
-        parallel engine Filter does concurrently — measured on TPC-H SF1,
-        accepting pushdown cost +460ms across the suite. Filters therefore
-        stay in the plan, and file-level pruning still happens: the manifest
-        pruning strategy prunes from parent Filter nodes without consuming
-        them. Reader-side predicates return with the native skene scan source,
-        which can filter during the scan without serializing it.
+        PARQUET takes PredicatePushable's generic gate against this class's
+        PUSHABLE_OPS/TYPES.
 
-        The two-pass late-materialization skene scan
-        (`compiler.py::_skene_latmat_scan_plan` /
-        native_skene_latmat_scan_source.hpp) does NOT change this answer and
-        deliberately does not route through here. It evaluates a predicate during
-        the scan, but for a different purpose: to avoid DECODING the projected
-        columns of rows that cannot be in the answer, not to save the Filter's
-        work. It reads the predicate off the Filter node above the scan and leaves
-        that Filter in the plan. The measurement this decline rests on is about
-        filter work on projection-narrow queries and is untouched by it.
+        SKENE takes the same generic gate, against SKENE_PUSHABLE_TYPES — this
+        instance's PUSHABLE_TYPES, re-gated per format in get_dataset_metadata
+        alongside the limit gate. Its reader-side row filter runs inside
+        NativeSkeneScanSource's decode workers and evaluates the SAME c-native
+        predicate program the engine's Filter operator would have run, so what it
+        can apply is what a Filter can apply.
+
+        This REVERSES the earlier decline (architect ruling, 2026-08-21). That
+        decline's rationale — "a reader-side row filter serializes work the
+        parallel engine Filter does concurrently, +460ms across TPC-H SF1" — was
+        measured against the compile-time materialized path, which no longer
+        exists: the scan is now N workers claiming row groups off an atomic
+        counter, and a filter on those workers serializes nothing. The ruling does
+        not rest on a re-measurement either way — pushing selection and projection
+        toward the scan is a rule applied without cost information to justify it.
+
+        JSONL delegates to JsonlPredicatePushable — the same (deliberately
+        narrower) gate READ_JSONL uses, so a dataset scan and READ_JSONL over the
+        same files push identically.
 
         Anything else declines: a declined predicate stays behind as a Filter
-        node — a missed optimization, never a dropped predicate.
+        node — a missed optimization, never a dropped predicate. File-level
+        pruning is unaffected by the answer here either way; ManifestPruningStrategy
+        prunes from `node.predicates` AND from parent Filter nodes, which it reads
+        without consuming.
         """
-        if self.dataset_file_format == PARQUET:
+        if self.dataset_file_format in (PARQUET, SKENE):
             return PredicatePushable.can_push(self, operator, types)
         if self.dataset_file_format == JSONL:
             from opteryx.connectors.jsonl_io import JsonlPredicatePushable
@@ -549,6 +575,14 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # (rugo tuples, gated by can_push below) but not limits.
         self.dataset_file_format = dataset_fmt
         self.supports_limit_pushdown = dataset_fmt == PARQUET
+        if dataset_fmt == SKENE:
+            # Per-instance, alongside the limit gate above and for the same reason:
+            # one class fronts readers with genuinely different capabilities, and
+            # PredicatePushable.can_push reads self.PUSHABLE_TYPES. skene's
+            # reader-side filter runs the full c-native predicate VM, so DECIMAL is
+            # admissible for it where it is not for the parquet reader's own gate —
+            # see SKENE_PUSHABLE_TYPES.
+            self.PUSHABLE_TYPES = self.SKENE_PUSHABLE_TYPES
         manifest_path = os.path.join(self.dataset, DATASET_MANIFEST_NAME)
         # Stat the manifest alongside the data: ANALYZE rewrites only the manifest,
         # so a data-only signature would serve stale sketches from cache forever.
@@ -591,9 +625,14 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # ANALYZE's per-dataset manifest, when it describes exactly this file set.
         # Order matters: the sketch vectors' rows are positional to the manifest's
         # rows, so file_entries must be built in that same order to stay aligned.
-        ordered_names, min_k_vector, histogram_vector, char_class_vector, manifest_bounds = (
-            self._read_dataset_manifest(manifest_path, data_names)
-        )
+        (
+            ordered_names,
+            min_k_vector,
+            histogram_vector,
+            char_class_vector,
+            manifest_bounds,
+            manifest_stats,
+        ) = self._read_dataset_manifest(manifest_path, data_names)
         # manifest_bounds' lower/upper bounds (when present) are ANALYZE's
         # Vector.ordinalize() ordinal keys, not real values — this Manifest's
         # bounds_are_ordinal flag must travel with them so prune_files knows to
@@ -612,11 +651,22 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # Footer statistics per format. Formats without a footer (JSONL) take
         # the stats-absent path below (record_count=None — UNKNOWN, never 0).
         stats_by_name: Dict[str, tuple] = {}
-        # Row groups per file. A .skene file holds up to 16 of them and the scan's
-        # unit of work is the row group, so this is not derivable from the file
-        # count. Left empty for formats whose producer does not report it, which
-        # keeps FileEntry.row_group_count None — UNKNOWN, never a fabricated 1.
+        # Row groups per file. A .skene file holds up to 16 of them, a parquet file
+        # holds as many as its writer chose, and the scan's unit of work is the row
+        # group — so this is not derivable from the file count for either. Both are
+        # read off the footer that branch already parses. Left empty for formats
+        # whose producer does not report it (JSONL/CSV have no footer), which keeps
+        # FileEntry.row_group_count None — UNKNOWN, never a fabricated 1.
         row_groups_by_name: Dict[str, int] = {}
+        # Per-column null counts and distinct counts, per file, keyed by the
+        # column's SCHEMA POSITION — the key space Manifest._resolve_field_id
+        # resolves to on this path (no field_ids here), same as the bounds
+        # dicts below. Only the SKENE branch fills these; the parquet branch
+        # carries both inside its FileColumnStats object instead.
+        skene_null_counts: Dict[str, dict] = {}
+        skene_distinct_counts: Dict[str, dict] = {}
+        skene_sketches: Dict[str, dict] = {}
+        skene_floors: Dict[str, dict] = {}
         if dataset_fmt == SKENE:
             # Skene's footer carries an exact row_count and per-column min/max
             # ORDINALS (draken ordinalize dialect — format.h ColumnStatistics:
@@ -639,12 +689,15 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             # read_metadata parses only the footer; the mmap'd open touches
             # footer pages, not the data region.
             from opteryx.connectors.skene_io import (
+                skene_aggregate_row_group_statistics as _skene_aggregate_row_group_statistics,
+            )
+            from opteryx.connectors.skene_io import (
                 skene_statistics_positions as _skene_statistics_positions,
             )
             from skene import SkeneError
             from skene import read_metadata as _skene_read_metadata
 
-            _KSTAT_MIN_MAX = 0x3  # kStatMin | kStatMax (skene format.h StatFlag)
+            _KSTAT_NULL_COUNT = 0x4  # kStatNullCount
             position_by_name = {col.name: idx for idx, col in enumerate(schema.columns)}
             skene_bounds: Dict[str, tuple] = {}
             for blob_name in ordered_names:
@@ -675,35 +728,29 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 # row group that tracked nothing (all-null, say) means the file's
                 # bound is unknown, and a union over the rest would be a bound
                 # that excludes rows the file actually holds.
-                lower: Dict[int, int] = {}
-                upper: Dict[int, int] = {}
-                # Depth-first over `columns`, ARRAY children included — the same
-                # order skene writes the statistics in.
+                # Slots are DEPTH FIRST over `columns`, ARRAY children
+                # included — the same order skene writes the statistics in.
                 positions = _skene_statistics_positions(footer["columns"], position_by_name)
-                for slot, position in enumerate(positions):
-                    if position is None:
-                        continue
-                    low = None
-                    high = None
-                    for row_group in row_groups:
-                        statistics = row_group["column_statistics"][slot]
-                        if statistics is None:
-                            low = None
-                            break
-                        if (statistics["flags"] & _KSTAT_MIN_MAX) != _KSTAT_MIN_MAX:
-                            low = None
-                            break
-                        if low is None:
-                            low, high = statistics["min_ordinal"], statistics["max_ordinal"]
-                        else:
-                            low = min(low, statistics["min_ordinal"])
-                            high = max(high, statistics["max_ordinal"])
-                    if low is None:
-                        continue
-                    lower[position] = low
-                    upper[position] = high
+                # Per-row-group blobs aggregated to file level: bounds (union),
+                # null counts (sum) and NDV (disjoint-sum / overlap-max), each
+                # with its own independent "unknown" state. The three rules and
+                # why they differ are in the helper's docstring.
+                lower, upper, nulls, distincts, sketches, floors = (
+                    _skene_aggregate_row_group_statistics(row_groups, positions)
+                )
                 if lower:
                     skene_bounds[blob_name] = (lower, upper)
+                # Empty means "nothing tracked for any column", which is the same
+                # signal as absent — store nothing so the has_null_counts gates in
+                # statistics_refresh read no signal rather than an empty one.
+                if nulls:
+                    skene_null_counts[blob_name] = nulls
+                if distincts:
+                    skene_distinct_counts[blob_name] = distincts
+                if sketches:
+                    skene_sketches[blob_name] = sketches
+                if floors:
+                    skene_floors[blob_name] = floors
             if skene_bounds:
                 manifest_bounds = skene_bounds
                 bounds_are_ordinal = True
@@ -715,13 +762,17 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 # strict: the returned list is parallel to ordered_names by contract,
                 # and a silent zip truncation here would hand a file another file's
                 # statistics from that point on.
-                for blob_name, (record_count, column_stats) in zip(
+                for blob_name, (record_count, row_group_count, column_stats) in zip(
                     ordered_names,
                     fetch_column_stats_many(self.filesystem, ordered_names, sizes),
                     strict=True,
                 ):
                     column_stats.bind_schema(schema_column_names)
                     stats_by_name[blob_name] = (record_count, column_stats)
+                    # Off the footer this call already parsed — not a second read.
+                    # A parquet file holds one row group per ~256k rows here, so
+                    # this is no more derivable from the file count than skene's is.
+                    row_groups_by_name[blob_name] = row_group_count
             except (OSError, ValueError, RuntimeError):
                 # No statistics for this dataset. The C++ footer batch is
                 # all-or-nothing, so one unreadable file costs the whole set, and
@@ -729,6 +780,10 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 # a fabricated 0, which would let the optimizer answer COUNT(*) as 0
                 # and delete LIMIT nodes. Files are still listed and still read.
                 stats_by_name = {}
+                # Same footers, same all-or-nothing: partially-filled row group
+                # counts would make get_row_group_count() sum a subset of the
+                # files and report it as the total.
+                row_groups_by_name = {}
 
         # Build FileEntry objects from file metadata. Every name in ordered_names
         # yields exactly one entry, in order, whether or not it has statistics —
@@ -739,6 +794,14 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         for blob_name in ordered_names:
             record_count, column_stats = stats_by_name.get(blob_name, (None, None))
             manifest_lower, manifest_upper = manifest_bounds.get(blob_name, (None, None))
+            # ANALYZE's per-column statistics for this file, when the manifest
+            # describes exactly this file set (None otherwise). record_count is
+            # deliberately NOT taken from here: the footer read above is the
+            # current file's own count, while the manifest's is only as fresh as
+            # the last ANALYZE and the drift check compares PATH SETS, not
+            # contents -- a file rewritten in place would answer COUNT(*) with a
+            # stale number.
+            analyzed = manifest_stats.get(blob_name)
             file_entries.append(
                 FileEntry(
                     file_path=blob_name,
@@ -749,6 +812,33 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                     column_stats=column_stats,
                     lower_bounds=manifest_lower,
                     upper_bounds=manifest_upper,
+                    null_counts=analyzed.null_counts if analyzed else None,
+                    # The file's OWN footer wins over ANALYZE's manifest, on the
+                    # same freshness argument record_count makes above: the skene
+                    # footer describes this file as it is now, the manifest only
+                    # as of the last ANALYZE. Membership, not truthiness — a file
+                    # whose every column is all-non-null maps to a dict of zeros,
+                    # which is a real answer and must not fall through.
+                    null_value_counts=(
+                        skene_null_counts[blob_name]
+                        if blob_name in skene_null_counts
+                        else (analyzed.null_value_counts if analyzed else None)
+                    ),
+                    distinct_value_counts=skene_distinct_counts.get(blob_name),
+                    distinct_sketches=skene_sketches.get(blob_name),
+                    distinct_floors=skene_floors.get(blob_name),
+                    min_lengths=analyzed.min_lengths if analyzed else None,
+                    max_lengths=analyzed.max_lengths if analyzed else None,
+                    min_length_bounds=analyzed.min_length_bounds if analyzed else None,
+                    max_length_bounds=analyzed.max_length_bounds if analyzed else None,
+                    char_total_bytes=analyzed.char_total_bytes if analyzed else None,
+                    histogram_bins=analyzed.histogram_bins if analyzed else None,
+                    uncompressed_size_in_bytes=(
+                        analyzed.uncompressed_size_in_bytes if analyzed else None
+                    ),
+                    column_uncompressed_sizes_in_bytes=(
+                        analyzed.column_uncompressed_sizes_in_bytes if analyzed else None
+                    ),
                 )
             )
 
@@ -776,7 +866,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
 
     def _read_dataset_manifest(self, manifest_path, parquet_names):
         """ANALYZE's per-dataset manifest, as
-        ``(ordered_names, min_k, histogram, char_class, bounds_by_path)``.
+        ``(ordered_names, min_k, histogram, char_class, bounds_by_path,
+        stats_by_path)``.
 
         Returns the data files in the manifest's own row order — the sketch vectors
         are positional to those rows, so the caller must build its FileEntry list in
@@ -794,6 +885,14 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         The sketches (and bounds) are used ONLY when the manifest describes
         exactly the current file set. A dataset directory is ad-hoc: files can be
         added or removed under it at any time, and a manifest that has drifted
+        `stats_by_path` maps each file's path to the whole FileEntry read back
+        from the manifest, so the caller can carry the per-column statistics
+        ANALYZE computed (null counts, string-length bounds, char totals) onto
+        the FileEntry it builds from footers. Without this they were decoded and
+        dropped: `Manifest.get_length_bounds` returned None for EVERY filesystem
+        dataset however recently ANALYZE'd, and `get_char_class_stats`' avg_length
+        divided by the raw record count instead of the non-null count.
+
         holds an INCOMPLETE picture — `estimate_cardinality` returns an EXACT
         count when the merged sketch is under K, so serving it from a partial
         file set would be a wrong answer, not a worse estimate. On any drift (or
@@ -805,7 +904,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # No manifest is the norm (a dataset nobody has ANALYZE'd) — an explicit
         # check, not an exception, so a genuine read failure below stays visible.
         if not os.path.isfile(manifest_path):
-            return parquet_names, None, None, None, {}
+            return parquet_names, None, None, None, {}, {}
 
         try:
             stream = self.filesystem.open_input_stream(manifest_path)
@@ -816,11 +915,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             stream.close()
             entries, native = read_manifest_file_entries(payload)
         except (OSError, ValueError, RuntimeError):
-            return parquet_names, None, None, None, {}
+            return parquet_names, None, None, None, {}, {}
 
         ordered = [entry.file_path for entry in entries]
         if set(ordered) != set(parquet_names):
-            return parquet_names, None, None, None, {}
+            return parquet_names, None, None, None, {}, {}
 
         bounds_by_path = {
             entry.file_path: (entry.lower_bounds, entry.upper_bounds) for entry in entries
@@ -831,6 +930,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             native.get("histogram_counts"),
             native.get("char_class_counts"),
             bounds_by_path,
+            {entry.file_path: entry for entry in entries},
         )
 
 

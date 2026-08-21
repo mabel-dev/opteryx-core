@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Dict
 from typing import List
 from typing import Optional
+from typing import Tuple
 
 
 @dataclass
@@ -84,10 +85,57 @@ class FileEntry:
     # == position). None where neither producer has touched a column.
     min_length_bounds: Optional[Dict[int, int]] = None
     max_length_bounds: Optional[Dict[int, int]] = None
+    # How many equi-width bins each per-column histogram in this file's
+    # `histogram_counts` row holds. Stored by every manifest producer alongside
+    # the counts themselves (manifest_io._MANIFEST_COLUMNS) and carried here so
+    # readers HONOUR it rather than assuming manifest_io.HISTOGRAM_BINS: a
+    # manifest written with a different bin count is a differently-shaped
+    # histogram, and silently reading it as 32 bins mis-places every bin
+    # boundary -- a wrong selectivity, not a missing one. None means the
+    # producer recorded no bin count (nothing to check against).
+    histogram_bins: Optional[int] = None
     # Total string byte count per column (string-family columns only; None
     # elsewhere) — the numerator half of avg_length = char_total_bytes /
     # true_non_null_count, computed at read time from the now-real null_counts.
     char_total_bytes: Optional[List[Optional[int]]] = None
+    # Per-column distinct-value count, field_id-keyed, as (ndv, is_exact).
+    #
+    # The two halves are ONE value on purpose. An exact NDV (skene's
+    # kStatNdvExact — value ordering deduplicated the column, so the count is a
+    # BOUND) and a sketched NDV (kStatNdv alone — a KMV estimate, ~+/-3% at
+    # K=1024) are not the same kind of number, and the codebase's metric-vs-
+    # estimate lingo says a bound must never be reachable as a bare int that
+    # has lost its provenance. Splitting these into two dicts is how the flag
+    # gets dropped at the first call site that only wanted "the number".
+    #
+    # Populated by the filesystem connector's SKENE branch (aggregated from the
+    # per-ROW-GROUP blobs the file footer carries; see the aggregation rule
+    # there). The parquet path carries its NDV inside `column_stats` instead and
+    # leaves this None. None means NOT TRACKED for the whole file; a column
+    # absent from the dict means not tracked for that column.
+    distinct_value_counts: Optional[Dict[int, Tuple[int, bool]]] = None
+    # Per-column KMV min-hash sketch, field_id-keyed — this FILE's union of its
+    # row groups' stored sketches (skene format.h, ColumnSketchHeader).
+    #
+    # Carried as well as the count above because a count cannot be merged and
+    # these can: unioning two files' sketches gives the K smallest of the
+    # combined hashes exactly, so `Manifest.estimate_cardinality` measures the
+    # overlap between files instead of guessing it from min/max. Fewer than K
+    # hashes means the union holds every distinct value, so the answer is exact.
+    #
+    # ⛔ skene's XXH3 value hashes. NEVER merge with ANALYZE's sketches
+    # (`Manifest._min_k_vector`), which are draken `Vector.hash()`.
+    distinct_sketches: Optional[Dict[int, list]] = None
+    # Largest EXACT per-row-group distinct count in this file, field_id-keyed.
+    #
+    # A PROVEN LOWER BOUND, kept apart from `distinct_value_counts` because it is
+    # a different claim: that count describes the whole file and may be an
+    # estimate, where this is a number some row group demonstrated. A row group
+    # is a subset of the file and the file of the relation, so a subset's exact
+    # distinct count can never exceed the whole's — which makes this the right
+    # floor for the K=32 sketch estimator, whose ~18% error can otherwise land
+    # under a value the footers already prove.
+    distinct_floors: Optional[Dict[int, int]] = None
     # Lazy typed column stats from Parquet footer (FileColumnStats Cython object).
     # Populated by the filesystem connector; None for catalog/datafile path.
     # Access via column_stats.get_min(field_id) etc — no Python dicts created
@@ -232,6 +280,13 @@ class FileEntry:
             # manifest actually stored.
             char_total_bytes = entry.get("char_total_bytes")
 
+            # The bin count the histogram in this row was actually built with.
+            # 0 is the writer's "no histogram" marker (manifest_io writes
+            # `HISTOGRAM_BINS if histogram else 0`), which is not a bin count --
+            # keep it None so a reader can tell "no histogram here" from a real
+            # width and never validates against a fabricated 0.
+            histogram_bins = entry.get("histogram_bins") or None
+
         else:
             # Fallback: try direct attribute access. No known producer of this
             # shape carries string-length stats, so length_bounds stay None —
@@ -239,6 +294,7 @@ class FileEntry:
             # same as any other FileEntry no stats pass has touched.
             min_length_bounds = None
             max_length_bounds = None
+            histogram_bins = None
             null_value_counts = None
             min_lengths = None
             max_lengths = None
@@ -293,6 +349,7 @@ class FileEntry:
             min_lengths=min_lengths,
             max_lengths=max_lengths,
             char_total_bytes=char_total_bytes,
+            histogram_bins=histogram_bins,
         )
 
     def to_dict(self) -> dict:

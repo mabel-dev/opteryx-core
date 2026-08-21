@@ -30,6 +30,7 @@ from opteryx.planner.cost_estimation.predicate_cost import (
     base_cost as _base_cost,
     predicate_cost as _predicate_cost,
 )
+from opteryx.planner.cost_estimation.fallback_selectivity import DEFAULT_SELECTIVITY
 from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType
@@ -43,25 +44,9 @@ from .optimization_strategy import (
     get_nodes_of_type_from_logical_plan,
 )
 
-# If we have no data, we assume these default selectivities
-DEFAULT_SELECTIVITY = {
-    "Eq": 0.1,
-    "NotEq": 0.9,
-    "Gt": 0.5,
-    "GtEq": 0.5,
-    "Lt": 0.5,
-    "LtEq": 0.5,
-    "InStr": 0.3,
-    "IInStr": 0.3,
-    "NotInStr": 0.7,
-    "NotIInStr": 0.7,
-    "Like": 0.3,
-    "ILike": 0.3,
-    "NotLike": 0.7,
-    "NotILike": 0.7,
-    "RLike": 0.3,
-    "NotRLike": 0.7,
-}
+# If we have no data, we assume these default selectivities. Defined ONCE in
+# fallback_selectivity, shared with the stats-informed estimator, so the same
+# predicate is priced identically whether or not statistics are attached.
 
 
 def _contains_function(node):

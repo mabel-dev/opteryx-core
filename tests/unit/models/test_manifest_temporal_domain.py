@@ -105,7 +105,7 @@ def _prune(column_type, bounds, predicate, bounds_are_ordinal=False):
         schema=_schema(column_type),
         bounds_are_ordinal=bounds_are_ordinal,
     )
-    manifest.prune_files([predicate])
+    manifest = manifest.prune_files([predicate])
     return manifest.files
 
 
@@ -302,7 +302,7 @@ def test_mixed_predicates_drop_only_the_unsafe_one():
         schema=_schema(DATE),
     )
 
-    manifest.prune_files(
+    manifest = manifest.prune_files(
         [
             _comparison("GtEq", US_2025_01_01, literal_type=TIMESTAMP()),  # unsafe, ignored
             _comparison("GtEq", DAY_2025_01_01, literal_type=DATE),  # safe, prunes

@@ -2110,10 +2110,12 @@ def in_list(branch, alias: Optional[List[str]] = None, key=None):
     # subtree by construction: the IN-list grammar admits no column
     # references (`x IN (SELECT ...)` is the separate in_subquery() builder).
     if any(v.node_type != NodeType.LITERAL for v in value_nodes):
-        from opteryx.models.query_telemetry import _QueryTelemetry
+        from opteryx.models import QueryTelemetry
         from opteryx.planner.optimizer.strategies.constant_folding import fold_constants
 
-        _telemetry = _QueryTelemetry()
+        # Folding here is incidental to building one IN-list; its counters belong
+        # to no query, so take an unregistered sink rather than the private base.
+        _telemetry = QueryTelemetry.detached()
         value_nodes = [
             v if v.node_type == NodeType.LITERAL else fold_constants(v, _telemetry)
             for v in value_nodes

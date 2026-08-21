@@ -1334,11 +1334,61 @@ cdef class IpcRowGroupSource:
             self.footer_map = NULL
 
 
+# The int64 slot the C++ decode-skip probe compares needles in, and the bounds of
+# what fits in it. UINT64 is the one column type whose values do not all fit as a
+# SIGNED int64, so those needles ride the slot as their two's-complement bit
+# pattern — see `_needle_slot`.
+_I64_MAX = (1 << 63) - 1
+_I64_MIN = -(1 << 63)
+_U64_MAX = (1 << 64) - 1
+
+
+def _needle_slot(value):
+    """A Python int as the int64 slot the decode-skip probe compares in, or None.
+
+    The probe (`decode_column.cpp`) compares a needle against a row group's
+    dictionary entries, which are the RAW wire values: a UINT64 column's
+    dictionary holds int64s that are negative for every value above INT64_MAX.
+    The needle therefore has to be the same 64 bits, not the same signed number,
+    so a value in (INT64_MAX, UINT64_MAX] is carried as its two's-complement
+    pattern and matches its own dictionary entry exactly.
+
+    Without this, `WHERE u64col = 18446744073709551611` did not return a wrong
+    answer — it raised `OverflowError: Python int too large to convert to C long`
+    out of the `cdef int64_t` conversion in the two callers below, at scan-open
+    time, so the query could not run at all. Every other route to the same rows
+    (`>=`, `MAX`, the un-pushed form) was already correct.
+
+    Returning None DECLINES the needle: the column simply gets no decode-skip and
+    is read in full, which is the correct answer minus an optimisation. That is
+    the only safe direction to fail here, and it is why a value too large for any
+    64-bit column is declined rather than treated as "matches nothing" — a needle
+    that eliminates row groups on a value it cannot represent is the
+    wrong-answer direction.
+
+    The reverse risk — an INT64 column whose dictionary genuinely holds the
+    negative number some huge unsigned needle wrapped onto — costs nothing: a
+    needle that matches only makes the probe DECLINE to skip, so a false match is
+    a slower scan and never a dropped row.
+    """
+    if type(value) is not int:
+        return None
+    if _I64_MIN <= value <= _I64_MAX:
+        return value
+    if _I64_MAX < value <= _U64_MAX:
+        return value - (1 << 64)
+    return None
+
+
 def _flatten_dict_skip_predicates(predicates):
     """Flatten pushed (col, op, value) triples into dictionary decode-skip inputs:
     ``(int_needles{col:[int]}, str_preds{col:(kind,[bytes])})``. kind: 1=membership
     (=/IN), 2=starts-with, 3=ends-with, 4=contains. One predicate per column for
-    strings (first wins) — a single conjunct is sound for skipping."""
+    strings (first wins) — a single conjunct is sound for skipping.
+
+    Every int needle leaves here already in the probe's int64 slot (`_needle_slot`)
+    — the two callers below push straight into a `vector[int64_t]` and must not be
+    the place that discovers a value does not fit."""
     int_needles = {}
     str_preds = {}
     _kind = {"_STARTS_WITH": 2, "_ENDS_WITH": 3, "InStr": 4}
@@ -1346,16 +1396,23 @@ def _flatten_dict_skip_predicates(predicates):
         p_col, p_op, p_val = pred
         if p_op == "Eq":
             if type(p_val) is int:
-                int_needles.setdefault(p_col, []).append(p_val)
+                slot = _needle_slot(p_val)
+                if slot is not None:
+                    int_needles.setdefault(p_col, []).append(slot)
             else:
                 b = p_val if isinstance(p_val, bytes) else (p_val.encode("utf-8") if isinstance(p_val, str) else None)
                 if b is not None and p_col not in str_preds:
                     str_preds[p_col] = (1, [b])
         elif p_op == "InList":
-            ints = [vv for vv in (p_val or []) if type(vv) is int]
-            if ints:
+            # An IN list is a disjunction: a member that cannot be represented
+            # cannot be shown absent either, so ONE unrepresentable member
+            # forfeits the whole list's skip rather than eliminating row groups
+            # on the members that survived.
+            raw_ints = [vv for vv in (p_val or []) if type(vv) is int]
+            ints = [_needle_slot(vv) for vv in raw_ints]
+            if ints and None not in ints:
                 int_needles.setdefault(p_col, []).extend(ints)
-            elif p_col not in str_preds:
+            elif not raw_ints and p_col not in str_preds:
                 strs = []
                 for vv in (p_val or []):
                     if isinstance(vv, bytes):
@@ -1580,8 +1637,15 @@ cpdef list fetch_column_stats_many(
 ):
     """Planning-phase stats for MANY files in ONE signed, concurrent acquisition.
 
-    Returns [(num_rows, FileColumnStats), ...] parallel to `paths`; FileColumnStats
-    holds its values lazily — nothing is decoded until get_min/get_max is called.
+    Returns [(num_rows, row_group_count, FileColumnStats), ...] parallel to `paths`;
+    FileColumnStats holds its values lazily — nothing is decoded until get_min/get_max
+    is called.
+
+    `row_group_count` is the file's row group total, read off the SAME footer this
+    call already parsed (`FileStats.row_groups`) — it costs a vector size(), never a
+    second footer read. It is returned because the row group, not the file, is the
+    scan's unit of work, and a manifest that reports only the file count understates
+    the work by the packing factor (see Manifest.get_row_group_count).
 
     This is the ONLY plan-time stats entry point, and it is batched because a
     per-file one CANNOT serve a private remote bucket (the per-file form that used
@@ -1653,7 +1717,11 @@ cpdef list fetch_column_stats_many(
                 _PARSED_FOOTER_CACHE.put_fs(path, fs)
                 fsp = &fs
         agg_stats = AggregateColumnStats(fsp[0])
-        out.append((fsp.num_rows, file_column_stats_from_agg(agg_stats)))
+        out.append((
+            fsp.num_rows,
+            <int>fsp.row_groups.size(),
+            file_column_stats_from_agg(agg_stats),
+        ))
 
     return out
 

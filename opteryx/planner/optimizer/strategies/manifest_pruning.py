@@ -69,11 +69,15 @@ class ManifestPruningStrategy(OptimizationStrategy):
             #   - node.predicates: pushed INTO the scan by predicate pushdown
             #     (the connector accepted them; the reader applies them);
             #   - parent Filter nodes directly above the scan: predicates the
-            #     connector DECLINED (e.g. skene scans, which decline so the
-            #     parallel engine Filter keeps the row-level work). Pruning
-            #     from a Filter does not consume it — the Filter still runs,
-            #     so a pruned file is one whose rows were provably all
-            #     filter-dropped anyway. Files skipped, answers unchanged.
+            #     connector DECLINED (a type or operator outside its
+            #     PUSHABLE_TYPES/OPS). Pruning from a Filter does not consume
+            #     it — the Filter still runs, so a pruned file is one whose
+            #     rows were provably all filter-dropped anyway. Files skipped,
+            #     answers unchanged.
+            # Reading BOTH is what keeps file pruning independent of whether a
+            # format accepts pushdown: skene moved from declining to accepting
+            # (2026-08-21) and its predicates simply moved from the second
+            # source to the first.
             prunable = list(node.predicates or [])
             prunable.extend(
                 self._parent_filter_predicates(
@@ -81,15 +85,24 @@ class ManifestPruningStrategy(OptimizationStrategy):
                 )
             )
             if node.manifest is not None and prunable:
-                # Apply manifest-based pruning
+                # Apply manifest-based pruning. Copy-on-write: prune_files
+                # returns a NEW Manifest when files were removed (same object
+                # back when nothing was), so the optimizer's id()-keyed scan
+                # statistics cache misses and recomputes over the pruned set.
                 original_count = node.manifest.get_file_count()
 
-                node.manifest.prune_files(prunable)
+                pruned_manifest = node.manifest.prune_files(prunable)
 
-                pruned_count = node.manifest.get_file_count()
-                self.telemetry.files_pruned += original_count - pruned_count
-
-            context.optimized_plan[context.node_id] = node
+                if pruned_manifest is not node.manifest:
+                    node.manifest = pruned_manifest
+                    self.telemetry.files_pruned += (
+                        original_count - pruned_manifest.get_file_count()
+                    )
+                    # Only a real prune marks the plan mutated — an
+                    # unconditional write here advanced the mutation epoch for
+                    # EVERY scan and forced a guaranteed-redundant full
+                    # statistics refresh after this strategy.
+                    context.optimized_plan[context.node_id] = node
 
         return context
 

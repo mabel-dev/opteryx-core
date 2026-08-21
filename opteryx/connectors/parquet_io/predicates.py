@@ -71,6 +71,23 @@ _FLOAT_PHYSICALS = None  # lazily populated from DrakenType on first use
 _NAN_UNSOUND_OPS = frozenset({"Gt", "GtEq", "NotEq", "NotInList"})
 
 
+def _temporal_physicals():
+    """The lazily-built `_TEMPORAL_PHYSICALS` frozenset (see its comment above)."""
+    global _TEMPORAL_PHYSICALS
+    if _TEMPORAL_PHYSICALS is None:
+        from opteryx.types.logical_type import DrakenType
+
+        _TEMPORAL_PHYSICALS = frozenset(
+            {
+                DrakenType.DATE32,
+                DrakenType.TIMESTAMP64,
+                DrakenType.TIME32,
+                DrakenType.TIME64,
+            }
+        )
+    return _TEMPORAL_PHYSICALS
+
+
 def _temporal_domain_mismatch(col_node, literal_node) -> bool:
     """True when *col* and *literal* are both temporal but occupy different raw
     domains — DATE32 (days) vs TIMESTAMP64 (microseconds), or two TIMESTAMP64s
@@ -85,22 +102,18 @@ def _temporal_domain_mismatch(col_node, literal_node) -> bool:
     (``draken_temporal_cmp``, which promotes both sides to nanoseconds) then
     produces the correct answer.
     """
-    global _TEMPORAL_PHYSICALS
-    if _TEMPORAL_PHYSICALS is None:
-        from opteryx.types.logical_type import DrakenType
-
-        _TEMPORAL_PHYSICALS = frozenset(
-            {
-                DrakenType.DATE32,
-                DrakenType.TIMESTAMP64,
-                DrakenType.TIME32,
-                DrakenType.TIME64,
-            }
-        )
+    _temporal_physicals()
 
     col_sc = getattr(col_node, "schema_column", None)
     col_ct = getattr(col_sc, "column_type", None)
     lit_ct = getattr(literal_node, "type", None)
+    # An IN-list literal is typed as the ARRAY of its elements
+    # (ARRAY<TIMESTAMP[us]>, stamped by the binder / predicate rewriter); the
+    # domain question is about the ELEMENT, so unwrap it — the ARRAY wrapper's
+    # own physical (DRAKEN_ARRAY) is never temporal and would wave a
+    # unit-mismatched temporal IN list straight into the raw bounds compare.
+    if lit_ct is not None and lit_ct.element is not None:
+        lit_ct = lit_ct.element
     if col_ct is None or lit_ct is None:
         return False
 
@@ -294,6 +307,19 @@ def _try_extract_in(node) -> Optional[Tuple[str, str, Any]]:
     # ...)) — the raw min/max compare would be domain-blind; residual filter runs.
     if _temporal_domain_mismatch(left, right):
         return None
+    # A temporal column whose IN-list element type is unknowable (no literal
+    # type, or an ARRAY<VARIANT> stamp) cannot be PROVEN same-domain, and the
+    # raw bounds compare is only sound inside one domain — decline; the
+    # residual filter (unit-converted in_list blob) answers correctly.
+    # _temporal_domain_mismatch cannot cover this: it answers False when either
+    # side's type is missing, which is right for its Eq/BETWEEN callers (their
+    # scalar literals always carry a type) but not for a membership list.
+    col_ct = getattr(col_sc, "column_type", None)
+    if col_ct is not None and col_ct.physical in _temporal_physicals():
+        lit_ct = getattr(right, "type", None)
+        elem_ct = getattr(lit_ct, "element", None) if lit_ct is not None else None
+        if elem_ct is None or elem_ct.physical not in _temporal_physicals():
+            return None
 
     # NotInList on a float column, or any IN list carrying a NaN, cannot be
     # decided by the bounds — see `_nan_invisible_to_bounds`.

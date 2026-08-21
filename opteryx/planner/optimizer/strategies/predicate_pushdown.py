@@ -67,7 +67,12 @@ def _emitted_identities(plan, nid, memo):
     memo[nid] = frozenset()  # cycle guard
     node = plan[nid]
     nt = node.node_type
-    if nt in (LogicalPlanStepType.Scan, LogicalPlanStepType.FunctionDataset):
+    if nt in (
+        LogicalPlanStepType.Scan,
+        LogicalPlanStepType.FunctionDataset,
+        # a shared-CTE reference originates its schema columns exactly as a Scan does
+        LogicalPlanStepType.MaterializedCteRef,
+    ):
         sch = node.schema
         ids = frozenset(c.identity for c in sch.columns) if sch is not None else frozenset()
     elif nt == LogicalPlanStepType.Project:
@@ -94,6 +99,92 @@ def _predicate_column_ids(predicate):
         if sc is not None and sc.identity is not None:
             out.add(sc.identity)
     return out
+
+
+def _subtree_relation_names(plan, nid, memo):
+    """Every relation name visible in the subtree rooted at `nid`.
+
+    A SAFETY input for retaining a predicate past a barrier (see
+    `_retainable_past_barrier`), never a routing input. Names are collected from
+    every place a relation can be named — a Scan's relation/alias, a join's
+    left/right relation names, an UNNEST's source and alias — because the sites
+    that match on names read them from all of those. Over-collecting a name only
+    ever makes retention MORE conservative, so err that way.
+    """
+    cached = memo.get(nid)
+    if cached is not None:
+        return cached
+    memo[nid] = frozenset()  # cycle guard
+    node = plan[nid]
+    names = set()
+    for name in (node.relation, node.alias, node.unnest_alias):
+        if name:
+            names.add(name)
+    for name_list in (node.left_relation_names, node.right_relation_names):
+        if name_list:
+            names.update(name_list)
+    if node.unnest_column is not None and node.unnest_column.source:
+        names.add(node.unnest_column.source)
+    for child, _, _ in plan.ingoing_edges(nid):
+        names |= _subtree_relation_names(plan, child, memo)
+    result = frozenset(names)
+    memo[nid] = result
+    return result
+
+
+def _retainable_past_barrier(predicate, emitted, subtree_names) -> bool:
+    """True if `predicate` provably belongs to a leg OTHER than this barrier's
+    subtree, and nothing inside that subtree can act on it while the traversal is
+    in there.
+
+    The optimizer walks children sequentially with ONE shared
+    `collected_predicates` list (optimizer/__init__.py::_inner), so a predicate
+    destined for one leg of a join rides into the other leg's subtree. Where that
+    subtree is headed by a barrier, the arm below used to dispose of EVERY
+    collected predicate: the ones the barrier emits are parked above it (correct,
+    a filter must not cross a Union), and the rest were plan_path-restored to
+    their original position ABOVE THE WHOLE JOIN STACK. That evicted a SIBLING
+    leg's predicate before the traversal ever reached its own scan, so it ran as
+    a post-join filter instead of at the scan — TPC-DS Q54 joined 22.6M rows and
+    then filtered them to 93.
+
+    Retention is only sound if the subtree cannot place, fold or mutate the
+    predicate; otherwise it lands in a leg whose stream does not carry its
+    columns. Three conditions make that a proof rather than a hope:
+
+      1. the subtree does not emit every identity the predicate reads, so every
+         IDENTITY-gated site declines it (_handle_predicates at a Scan,
+         _dump_above at a join, the Project passthrough split, the Unnest arm,
+         the implied-predicate derivation);
+      2. none of the predicate's relation NAMES occur in the subtree, so every
+         NAME-gated site declines it too (the cross-join both-sides fold, the
+         two-relation Eq fold into a join condition, the Unnest pre-filter).
+         Names — unlike identities — are not unique across a plan: the same table
+         can be scanned inside and outside the barrier under the same name;
+      3. the predicate carries no AGGREGATOR. This one is not about a site being
+         unsafe, it is about the EVIDENCE: `COUNT(*) > 1` references no column at
+         all, so (1) can say nothing about it, and the AggregateAndGroup arm folds
+         an aggregator-bearing predicate into the first such node it meets as a
+         HAVING clause without checking ownership. A HAVING predicate is collected
+         directly above its own aggregate anyway, so it has nothing to gain here.
+
+    A predicate carrying an inline rewrite is never retained: its condition is
+    valid only at a `deep_restore_target` computed elsewhere, and the barrier's
+    revert-first handling is what keeps that sound. Status quo for those.
+
+    Declining retention hands the predicate back to the original disposal path,
+    so the worst case is exactly the behaviour before this existed.
+    """
+    if predicate.pre_inline_condition is not None:
+        return False
+    predicate_ids = _predicate_column_ids(predicate)
+    if not predicate_ids or predicate_ids <= emitted:
+        return False
+    if not predicate.relations or (predicate.relations & subtree_names):
+        return False
+    if get_all_nodes_of_type(predicate.condition, (NodeType.AGGREGATOR,)):
+        return False
+    return True
 
 
 def _stamp_inlined_predicate(node, condition, identifiers, target) -> None:
@@ -187,6 +278,54 @@ def _deep_pushdown_target(plan, start_nid, predicate_ids, group_key_identity, em
             break
         current = children[0][0]
     return best
+
+
+# The non-equality comparators. A join ON clause containing one of these has no
+# hash key to build from for that conjunct, so JoinOrderingStrategy re-types the
+# join to "nested loop" and the compiler applies the whole ON as a per-pair
+# residual (see compiler.py's `zero_key`/`residual`).
+_THETA_COMPARATORS = frozenset({"NotEq", "Gt", "GtEq", "Lt", "LtEq"})
+
+# The expression node types an absorbed theta conjunct may be built from.
+#
+# This is deliberately an ALLOWLIST, and deliberately narrower than what a
+# Filter node admits. A Filter is compiled by _compile_filter, which runs
+# `_hoist_array_operands` and `_fuse_json_extractions` over the predicate before
+# lowering it; the nested-loop residual path (`_lower_expression(residual, ...)`)
+# does neither. A predicate needing either of those rewrites is compilable as a
+# Filter and a HARD COMPILE FAILURE as a residual, so absorbing one would turn a
+# working query into a broken one. Rather than mirror the compiler's internal
+# array/JSON detection here, admit only the shapes that provably need neither:
+# columns, literals, arithmetic, casts and nesting. Everything else DECLINES and
+# stays a Filter above the join, which is exactly the behaviour before this
+# absorption existed.
+#
+# Widening this set requires checking the candidate node type against those two
+# compiler rewrites, not just against `_lower_expression`.
+_THETA_ABSORBABLE_NODE_TYPES = frozenset(
+    {
+        NodeType.COMPARISON_OPERATOR,
+        NodeType.IDENTIFIER,
+        NodeType.LITERAL,
+        NodeType.BINARY_OPERATOR,
+        NodeType.CAST,
+        NodeType.NESTED,
+    }
+)
+
+
+def _is_absorbable_theta(condition) -> bool:
+    """Can this cross-relation non-equality be evaluated as an INNER join's
+    per-pair residual? See `_THETA_ABSORBABLE_NODE_TYPES` for why the shape test
+    is an allowlist rather than the compiler's own admission gate."""
+    if condition.node_type != NodeType.COMPARISON_OPERATOR:
+        return False
+    if condition.value not in _THETA_COMPARATORS:
+        return False
+    return all(
+        n.node_type in _THETA_ABSORBABLE_NODE_TYPES
+        for n in get_all_nodes_of_type(condition, ("*",))
+    )
 
 
 def _add_condition(existing_condition, new_condition):
@@ -495,6 +634,14 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         if node.node_type in (
             LogicalPlanStepType.Scan,
             LogicalPlanStepType.FunctionDataset,
+            # A shared-CTE reference is a leaf like a Scan. It has no connector,
+            # so _handle_predicates lands every predicate it can answer directly
+            # ABOVE the reference — without this arm they fell through to
+            # complete()'s plan_path restore, which put each reference's own
+            # selective filter back at the TOP of the plan, above the reference
+            # self-joins it should have pruned (TPC-DS Q31 went from 0.3s to
+            # >180s on exactly that shape).
+            LogicalPlanStepType.MaterializedCteRef,
         ):
             # Handle predicates specific to node types
             context = self._handle_predicates(node, context)
@@ -544,9 +691,30 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # the physical compile dies with "column not carried by stream".
             # Such predicates are restored to their recorded original position
             # now (same plan_path walk complete() uses).
+            #
+            # A predicate that belongs to a SIBLING leg is neither of those: it is
+            # only here because the traversal shares one predicate list across all
+            # of a join's children. Disposing of it strands it above the join stack
+            # (see _retainable_past_barrier), so where it can be PROVED inert
+            # inside this subtree it is retained and delivered when the traversal
+            # reaches its own leg.
             _emit_memo = {}
             emitted = _emitted_identities(context.optimized_plan, context.node_id, _emit_memo)
+            _guard_memo = {}
+            subtree_names = _subtree_relation_names(
+                context.optimized_plan, context.node_id, _guard_memo
+            )
+            retained_predicates = []
             for predicate in context.collected_predicates:
+                if _retainable_past_barrier(predicate, emitted, subtree_names):
+                    # Belongs to another leg and provably inert here — keep it
+                    # collected. If the traversal never reaches its leg (it was
+                    # visited BEFORE this barrier), complete() restores it via
+                    # plan_path to exactly where the branch below would have put
+                    # it, under the same _unplaced counter.
+                    self.telemetry.optimization_predicate_pushdown_barrier_retained += 1
+                    retained_predicates.append(predicate)
+                    continue
                 # A deep-restore target is always BELOW the point the predicate was
                 # collected, and this node is a barrier a filter must not cross, so
                 # the target is now unreachable — the inlined condition cannot be
@@ -571,7 +739,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         if nid in context.optimized_plan:
                             context.optimized_plan.insert_node_before(predicate.nid, predicate, nid)
                             break
-            context.collected_predicates = []
+            context.collected_predicates = retained_predicates
 
         elif node.node_type == LogicalPlanStepType.Filter:
             self._inline_project_alias_predicates(node, context)
@@ -683,12 +851,35 @@ class PredicatePushdownStrategy(OptimizationStrategy):
         elif node.node_type == LogicalPlanStepType.Unnest:
             # if we're a CROSS JOIN UNNEST, we can push some filters into the UNNEST
             remaining_predicates = []
+            # Every clause below MOVES the predicate — below the unnest, into it, or
+            # above it — and each is only valid for a predicate this node can
+            # actually answer. The traversal shares one predicate list across all of
+            # a join's children, so predicates belonging to a SIBLING leg arrive here
+            # too, and the column-vs-column clause (`query_columns == known_columns`)
+            # is trivially true for ANY `a.x = b.y` predicate: it was placing a
+            # sibling leg's predicate above this unnest, where the stream does not
+            # carry its columns, and the physical compile died with "expression
+            # references column ... which the stream does not carry" (repro: a
+            # CROSS JOIN UNNEST leg joined to a relation carrying a column-vs-column
+            # filter — it survived only when the DFS happened to reach the filter's
+            # own leg first). Availability is the ground truth, as everywhere else in
+            # this strategy: the unnest TARGET is minted by this node so it is not in
+            # the subtree's emitted set, and is added explicitly.
+            _emit_memo = {}
+            available_identities = _emitted_identities(
+                context.optimized_plan, context.node_id, _emit_memo
+            ) | {node.unnest_target.schema_column.identity}
             for predicate in context.collected_predicates:
                 # NOT conditions don't have a left/right so need special handling
                 if predicate.condition.centre is not None:
                     remaining_predicates.append(predicate)
                     continue
                 known_columns = set(col.schema_column.identity for col in predicate.columns)
+                if known_columns and not known_columns <= available_identities:
+                    # Belongs to another leg — this node cannot place it. Keep it
+                    # flowing so it reaches its own leg, or is restored by complete().
+                    remaining_predicates.append(predicate)
+                    continue
                 # `query_columns` is the pair of DIRECT operands, used for exactly one
                 # test below: `query_columns == known_columns` identifies a
                 # column-vs-column predicate. A condition that is not a binary
@@ -1038,7 +1229,6 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     # IMPROVE: add predicates to INNER JOIN conditions
                     # we may be able to rewrite as an inner join or non-equi join
                     remaining_predicates = []
-                    non_equi_ops = {"NotEq", "Gt", "GtEq", "Lt", "LtEq"}
 
                     all_join_rels = set(node.left_relation_names) | set(node.right_relation_names)
                     for predicate in context.collected_predicates:
@@ -1069,6 +1259,28 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                                 node.type = "inner"
                                 node.on = _add_condition(node.on, predicate.condition)
                                 self.telemetry.optimization_predicate_pushdown_cross_join_to_inner_join += 1
+                            elif _is_absorbable_theta(predicate.condition):
+                                # A cross-relation NON-EQUALITY is a join condition
+                                # too: `CROSS JOIN b WHERE a.x < b.y` IS
+                                # `INNER JOIN b ON a.x < b.y`. Converting makes the
+                                # theta an INNER join's per-pair residual instead of a
+                                # Filter over a fully materialised cartesian product
+                                # (see the INNER block below for the mechanism).
+                                #
+                                # It contributes no join key, so a theta-ONLY
+                                # conversion leaves left_columns/right_columns empty
+                                # and lands on the compiler's `zero_key` path -- the
+                                # same build/probe shape CROSS already compiles to,
+                                # now with the residual applied inside the join. An
+                                # Eq conjunct absorbed alongside it keys the join
+                                # properly and the cartesian product never forms.
+                                #
+                                # Counted as a theta absorption, not as a cross-join
+                                # conversion: both counters are per-PREDICATE, so
+                                # incrementing both would count this predicate twice.
+                                node.type = "inner"
+                                node.on = _add_condition(node.on, predicate.condition)
+                                self.telemetry.optimization_predicate_pushdown_theta_to_inner_join += 1
                             else:
                                 # DECLINED: unsupported comparison — insert predicate
                                 # above the join rather than into it.
@@ -1098,19 +1310,87 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                         node.columns = get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))
                     context.collected_predicates = remaining_predicates
 
-                for predicate in context.collected_predicates:
+                if node.type == "inner":
+                    # A WHERE-clause equality spanning exactly the two legs of an
+                    # INNER JOIN is an additional equi-join key. Fold it into
+                    # `node.on` -- the same field the ON-clause form writes -- so
+                    # the join emits the filtered result directly instead of
+                    # materialising the unfiltered product first (S12).
+                    #
+                    # This must write `node.on`, never `node.condition`: the
+                    # execution compiler reads `on`/`residual` and nothing reads a
+                    # Join's `condition`, so a predicate routed there is silently
+                    # dropped and the query returns the answer to the unfiltered
+                    # join.
+                    #
+                    # A cross-relation NON-EQUALITY over the same two legs is folded
+                    # in as well, into a join that already has an `on`. It supplies no
+                    # join key -- extract_join_fields reads Eq conjuncts only -- so the
+                    # join stays KEYED on its equi conjuncts, JoinOrderingStrategy
+                    # re-types it "nested loop", and the compiler applies the whole ON
+                    # as a per-pair residual (compiler.py's `residual`). The temporal
+                    # BAND JOIN is what this is for:
+                    #
+                    #   ON f.k = l.k WHERE l.t <= f.t AND l.t > f.t - INTERVAL '20' SECOND
+                    #
+                    # As a Filter above the join, the join first materialises the whole
+                    # equi product (measured: 948M rows / 42.4GB for a 1.3M-row answer)
+                    # for the Filter to discard >99% of. As ON conjuncts the product is
+                    # never built.
+                    #
+                    # ONLY INNER. Every other join type has no residual channel and
+                    # SILENTLY DROPS a theta conjunct, returning the equi-only answer --
+                    # see the table in compiler.py's `_compile_join`. Do not widen this
+                    # to outer/semi/anti.
                     remaining_predicates = []
+                    join_relations = set(node.right_relation_names + node.left_relation_names)
                     for predicate in context.collected_predicates:
-                        if (
-                            len(predicate.relations) == 2
-                            and predicate.condition.value == "Eq"
-                            and set(node.right_relation_names + node.left_relation_names)
-                            == set(predicate.relations)
+                        condition = predicate.condition
+                        if len(predicate.relations) != 2 or join_relations != set(
+                            predicate.relations
                         ):
+                            remaining_predicates.append(predicate)
+                            continue
+                        if condition.value == "Eq":
+                            # Only fold when the equality is representable as join
+                            # fields; expressions like `s = e + INTERVAL '1' MONTH`
+                            # must stay as filters.
+                            try:
+                                extract_join_fields(
+                                    condition,
+                                    node.left_relation_names,
+                                    node.right_relation_names,
+                                )
+                            except UnsupportedSyntaxError:
+                                # DECLINED: keep it collected so complete()
+                                # restores it as a Filter above the join.
+                                self.telemetry.optimization_predicate_pushdown_declined += 1
+                                remaining_predicates.append(predicate)
+                                continue
                             self.telemetry.optimization_predicate_pushdown_add_to_inner_join += 1
-                            node.condition = _add_condition(node.condition, predicate)
+                            node.on = _add_condition(node.on, condition)
+                        elif node.on is not None and _is_absorbable_theta(condition):
+                            self.telemetry.optimization_predicate_pushdown_theta_to_inner_join += 1
+                            node.on = _add_condition(node.on, condition)
+                        elif (
+                            condition.node_type == NodeType.COMPARISON_OPERATOR
+                            and condition.value in _THETA_COMPARATORS
+                        ):
+                            # DECLINED: a cross-relation non-equality the residual path
+                            # cannot be trusted to evaluate (see
+                            # `_THETA_ABSORBABLE_NODE_TYPES`), or a join with no `on`
+                            # to hang it off. Keep it collected so complete() restores
+                            # it as a Filter above the join.
+                            self.telemetry.optimization_predicate_pushdown_declined += 1
+                            remaining_predicates.append(predicate)
                         else:
                             remaining_predicates.append(predicate)
+
+                    if node.on:
+                        node.left_columns, node.right_columns = extract_join_fields(
+                            node.on, node.left_relation_names, node.right_relation_names
+                        )
+                        node.columns = get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))
                     context.collected_predicates = remaining_predicates
 
                 # For INNER equi-joins, derive implied predicates: if col_A op literal

@@ -375,6 +375,15 @@ def _create_join_node(logical_node, query_properties, registry):
         raise InvalidInternalStateError(f"Unsupported JOIN type '{join_type}'")
 
 
+def _create_scalar_guard_node(logical_node, query_properties, registry):
+    node_config = logical_node.properties
+    return registry.create(
+        "Scalar Guard",
+        query_properties,
+        **{k: v for k, v in node_config.items() if k in ("all_relations",)},
+    )
+
+
 def _create_limit_node(logical_node, query_properties, registry):
     node_config = logical_node.properties
     return registry.create(
@@ -455,6 +464,10 @@ def _create_scan_node(logical_node, query_properties, registry):
         raise UnsupportedSyntaxError(
             "Scans require a file manifest. Non-manifest external scan paths have been removed."
         )
+
+
+def _create_materialized_cte_ref_node(logical_node, query_properties, registry):
+    return registry.create("CTE Reference", query_properties, **logical_node.properties)
 
 
 def _create_set_node(logical_node, query_properties, registry):
@@ -597,9 +610,11 @@ _DISPATCH = {
     LogicalPlanStepType.HeapSort:         _create_heap_sort_node,
     LogicalPlanStepType.Join:             _create_join_node,
     LogicalPlanStepType.Limit:            _create_limit_node,
+    LogicalPlanStepType.ScalarSubqueryGuard: _create_scalar_guard_node,
     LogicalPlanStepType.Order:            _create_order_node,
     LogicalPlanStepType.Project:          _create_project_node,
     LogicalPlanStepType.Scan:             _create_scan_node,
+    LogicalPlanStepType.MaterializedCteRef: _create_materialized_cte_ref_node,
     LogicalPlanStepType.Set:              _create_set_node,
     LogicalPlanStepType.Show:             _create_show_node,
     LogicalPlanStepType.CreateView:       _create_create_view_node,
@@ -635,7 +650,7 @@ _DISPATCH = {
 }
 
 
-def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
+def create_physical_plan(logical_plan, query_properties, shared_ctes=None) -> PhysicalPlan:
     plan = PhysicalPlan()
     registry = get_registry()
 
@@ -656,5 +671,14 @@ def create_physical_plan(logical_plan, query_properties) -> PhysicalPlan:
 
     for source, destination, relation in logical_plan.edges():
         plan.add_edge(source, destination, relation)
+
+    # Shared CTE bodies become physical plans of their own, carried on the main
+    # physical plan (dependencies first — the plan compiler lowers each body into
+    # a producer pipeline before any pipeline that reads it). A body has no Exit
+    # node: its head feeds a buffer-append sink, not the output queue.
+    plan.shared_ctes = {
+        cte_key: create_physical_plan(body, query_properties)
+        for cte_key, body in (shared_ctes or {}).items()
+    }
 
     return plan

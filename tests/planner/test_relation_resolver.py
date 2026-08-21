@@ -48,8 +48,8 @@ def _planned(sql):
     """Resolve then rewrite — the plan exactly as the Binder receives it."""
     ast = sqloxide.parse_sql(sql, _dialect="opteryx")[0]
     plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, QueryTelemetry())
-    return do_plan_rewrite(plan, QueryTelemetry())
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached())
+    return do_plan_rewrite(plan, QueryTelemetry.detached())
 
 
 def _surviving_subquery_nodes(plan):
@@ -327,7 +327,7 @@ def _join_legs(sql):
     """(left_relation_names, right_relation_names) for every Join in the resolved plan."""
     ast = sqloxide.parse_sql(sql, _dialect="opteryx")[0]
     plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, QueryTelemetry())
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached())
     return [
         (list(node.left_relation_names or []), list(node.right_relation_names or []))
         for _, node in plan.nodes(True)
@@ -414,7 +414,7 @@ def test_rename_relations_re_aliases_subquery_nodes():
         "SELECT name FROM (SELECT * FROM $planets) AS s", _dialect="opteryx"
     )[0]
     plan, _, ctes = do_logical_planning_phase(ast)
-    plan = do_resolve_relations(plan, ctes, QueryTelemetry())
+    plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached())
 
     def _subquery_aliases(p):
         return {

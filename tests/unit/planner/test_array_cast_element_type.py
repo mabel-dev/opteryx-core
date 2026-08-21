@@ -62,7 +62,7 @@ FOLDED_SOURCES = [
 
 
 def _logical_plan(sql: str):
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     plan, _, ctes = do_logical_planning_phase(
         do_ast_rewriter(
             sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx"), parameters=[]

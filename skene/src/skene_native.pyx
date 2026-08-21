@@ -74,6 +74,7 @@ cdef extern from "skene/format.h" namespace "skene" nogil:
         uint64_t null_count
         int64_t  sum_low
         int64_t  sum_high
+        uint64_t ndv
 
     cdef cppclass ZoneMapEntry:
         int64_t min_ordinal
@@ -107,6 +108,7 @@ cdef extern from "skene/reader.h" namespace "skene" nogil:
         uint64_t byte_bytes
         cbool    has_statistics
         ColumnStatistics statistics
+        vector[uint64_t] sketch
         ZoneMap  zone_map
         vector[uint8_t] bloom
         vector[ColumnMetadata] children
@@ -122,6 +124,7 @@ cdef extern from "skene/reader.h" namespace "skene" nogil:
     cdef cppclass RowGroupColumnStatistics:
         cbool present
         ColumnStatistics statistics
+        vector[uint64_t] sketch
 
     cdef cppclass RowGroupSummary:
         uint64_t row_count
@@ -264,7 +267,34 @@ cdef dict _schema_to_dict(const ColumnSchema& c):
     return out
 
 
-cdef dict _statistics_to_dict(const ColumnStatistics& s):
+# skene format.h StatFlag bits this emitter reads by name rather than by number.
+cdef enum:
+    _K_STAT_NDV = 0x40        # kStatNdv       — `ndv` holds a distinct count
+    _K_STAT_NDV_EXACT = 0x80  # kStatNdvExact  — ...and it is a BOUND, not a sketch
+    _K_STAT_SKETCH = 0x100    # kStatSketch    — KMV min-hashes follow the struct
+
+
+cdef dict _statistics_to_dict(const ColumnStatistics& s, const vector[uint64_t]& sketch):
+    """One statistics blob as a plain dict.
+
+    `ndv` is a v2 growth field. A v1 blob is a 48-byte PREFIX of the struct and
+    the reader memcpy's only the bytes it was given, so `s.ndv` on a v1 blob is
+    the zero-init and means nothing — kStatNdv is the only honest reader of it.
+    Absent is NOT TRACKED, never 0 (draken's cardinal statistics rule), so an
+    untracked NDV is spelled None.
+
+    The value travels with WHICH FLAG produced it, because the two are not the
+    same kind of number and a consumer must not have to guess:
+      * ndv_exact True  — value ordering deduplicated the column, so the count
+        is EXACT for this row group. A consumer needing a BOUND requires this.
+      * ndv_exact False — the write-side KMV sketch measured it and ordering
+        declined. An ESTIMATE, ~+/-3% at K=1024.
+    """
+    cdef object ndv = None
+    cdef object ndv_exact = None
+    if s.flags & _K_STAT_NDV:
+        ndv = s.ndv
+        ndv_exact = bool(s.flags & _K_STAT_NDV_EXACT)
     return {
         "flags": s.flags,
         "min_ordinal": s.min_ordinal,
@@ -273,6 +303,14 @@ cdef dict _statistics_to_dict(const ColumnStatistics& s):
         # int128 from little-endian int64 halves — as Python big-int math
         # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
         "sum": ((<object>s.sum_high) << 64) + ((<object>s.sum_low) & 0xFFFFFFFFFFFFFFFF),
+        "ndv": ndv,
+        "ndv_exact": ndv_exact,
+        # The MERGEABLE form of the same fact: the K smallest value hashes,
+        # ascending. None when untracked; a list (possibly shorter than K, which
+        # means the column holds exactly that many distinct values) otherwise.
+        # skene's own XXH3 dedup hashes — never mix with an ANALYZE/catalog
+        # sketch, which is hashed differently (format.h, ColumnSketchHeader).
+        "sketch": [sketch[i] for i in range(sketch.size())] if (s.flags & _K_STAT_SKETCH) else None,
     }
 
 
@@ -281,7 +319,8 @@ cdef dict _row_group_to_dict(const RowGroupSummary& g):
     cdef size_t i
     for i in range(g.column_statistics.size()):
         if g.column_statistics[i].present:
-            stats.append(_statistics_to_dict(g.column_statistics[i].statistics))
+            stats.append(_statistics_to_dict(g.column_statistics[i].statistics,
+                                             g.column_statistics[i].sketch))
         else:
             # Absent means NOT TRACKED, never zero — draken's cardinal
             # statistics rule. None is the only honest spelling of that.
@@ -326,17 +365,10 @@ cdef dict _column_to_dict(const ColumnMetadata& c):
             "dimension": c.logical.dimension,
         }
     if c.has_statistics:
-        # int128 sum from little-endian int64 halves.
-        out["statistics"] = {
-            "flags": c.statistics.flags,
-            "min_ordinal": c.statistics.min_ordinal,
-            "max_ordinal": c.statistics.max_ordinal,
-            "null_count": c.statistics.null_count,
-            # int128 from little-endian int64 halves — as Python big-int math
-            # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
-            "sum": ((<object>c.statistics.sum_high) << 64)
-                   + ((<object>c.statistics.sum_low) & 0xFFFFFFFFFFFFFFFF),
-        }
+        # ONE emitter for the blob (the row-group path uses the same call): a
+        # second inline copy is how the two dict shapes drift apart on the next
+        # growth field.
+        out["statistics"] = _statistics_to_dict(c.statistics, c.sketch)
     if c.zone_map.present():
         out["zone_map"] = {
             "chunk_rows": c.zone_map.chunk_rows,

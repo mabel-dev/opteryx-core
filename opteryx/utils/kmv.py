@@ -53,7 +53,47 @@ class ColumnSketch:
         return sorted(heapq.nsmallest(K, self._seen))
 
 
+def merge_min_k(sketches: Iterable[Iterable[int]], k: int = K) -> List[int]:
+    """Union of KMV sketches: the k smallest DISTINCT hashes across all of them.
+
+    This is the whole reason a sketch is stored rather than a scalar. The union
+    is EXACT: if a hash is among the k smallest of the combined set and it came
+    from sketch A, it is necessarily among the k smallest of A, so no input can
+    hide a hash the answer needs.
+
+    ⛔ Every input must come from the SAME hash function. skene's stored sketches
+    are XXH3 over value bytes; ANALYZE's are draken's ``Vector.hash()``. Merging
+    across those two produces a number with no meaning — see skene format.h,
+    ColumnSketchHeader.
+    """
+    seen: set = set()
+    for sketch in sketches:
+        seen.update(sketch)
+    return sorted(seen)[:k]
+
+
+def estimate_from_min_k(min_k: List[int], k: int = K) -> tuple:
+    """``(distinct_count, is_exact)`` from a merged sketch.
+
+    Fewer than k hashes means the sketch never filled, so it holds EVERY distinct
+    value and its length is the exact answer — the regime that matters most,
+    because it covers every low-cardinality column. At or above k it is the
+    standard KMV estimator ``(k-1)/v`` with v the k-th smallest hash normalised
+    into [0,1), relative standard error ~1/sqrt(k-2) (~18% at k=32).
+    """
+    if len(min_k) < k:
+        return len(min_k), True
+    v = min_k[k - 1] / 18446744073709551616.0  # 2^64
+    if v <= 0.0:
+        # Needs the k-th smallest hash to be 0 — report k rather than infinity,
+        # matching skene's own estimator (value_order.cpp).
+        return k, False
+    return int((k - 1) / v + 0.5), False
+
+
 __all__ = [
     "K",
     "ColumnSketch",
+    "estimate_from_min_k",
+    "merge_min_k",
 ]

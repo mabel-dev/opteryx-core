@@ -20,8 +20,8 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
-from opteryx.planner.cost_estimation.join_cardinality import KeyStats
 from opteryx.planner.cost_estimation.join_cardinality import _inner_estimate
+from opteryx.planner.cost_estimation.join_cardinality import apply_occupancy_bound
 from opteryx.planner.cost_estimation.join_cardinality import estimate_join_cardinality  # noqa: F401
 from opteryx.planner.cost_estimation.join_graph import JoinEdge
 from opteryx.planner.cost_estimation.join_graph import JoinGraph
@@ -72,58 +72,6 @@ def _tree_subset(tree: JoinTree) -> int:
     return _tree_subset(tree.left) | _tree_subset(tree.right)
 
 
-def _apply_occupancy_bound(
-    equi_keys: List[Tuple[KeyStats, KeyStats]],
-    left: JoinTree,
-    right: JoinTree,
-) -> List[Tuple[KeyStats, KeyStats]]:
-    """Bound a COMPOSITE key's domain by the rows available to hold it.
-
-    Port of ``statistics_refresh._apply_occupancy_bound`` to the enumerator —
-    see that function for the full rationale. The two paths must agree, or the
-    tree-picker and the build-side chooser cost the same join differently.
-
-    ``_inner_estimate`` multiplies one selectivity per surviving class under an
-    independence assumption, so N classes divide by the PRODUCT of their
-    domains. For a genuinely composite key that product counts *possible* key
-    tuples, and it can exceed the number that could physically exist. TPC-H
-    Q09's ``partsupp ⋈ lineitem`` keys on ``(ps_partkey, ps_suppkey)`` — two
-    distinct classes, 200,000 x 100,000 = 2e10 possible tuples against 8,000,000
-    rows to hold them — and estimated **23,994 rows against a true 59,986,052**.
-    Being 2,500x under made the cheapest-looking first join the single most
-    expensive one available, and DPccp built the whole tree off it.
-
-    A relation cannot contain more distinct key tuples than it has rows, so the
-    composite domain is capped at the smaller side's PRE-filter row count.
-    Collapsing to a single pair is exactly equivalent when the product is
-    already under the bound (one divisor of P == N divisors multiplying to P).
-
-    Bails out unchanged when any class has an unknown NDV: ``_key_selectivity``
-    falls back to a flat constant for those, so there is no product to bound and
-    inventing one would silently overwrite that fallback.
-    """
-    if len(equi_keys) < 2:
-        return equi_keys
-
-    composite = 1
-    for left_stat, right_stat in equi_keys:
-        if left_stat.ndv is None or right_stat.ndv is None:
-            return equi_keys
-        # The per-pair divisor _key_selectivity actually applies.
-        composite *= max(left_stat.ndv, right_stat.ndv)
-
-    bound = max(1, min(_domain_rows(left), _domain_rows(right)))
-    if composite <= bound:
-        return equi_keys
-
-    left_null = [k[0].null_fraction for k in equi_keys if k[0].null_fraction is not None]
-    right_null = [k[1].null_fraction for k in equi_keys if k[1].null_fraction is not None]
-    return [(
-        KeyStats(ndv=bound, null_fraction=max(left_null) if left_null else None),
-        KeyStats(ndv=bound, null_fraction=max(right_null) if right_null else None),
-    )]
-
-
 def _combine(
     left: JoinTree,
     right: JoinTree,
@@ -148,7 +96,7 @@ def _combine(
             seen_classes.add(e.class_id)
         equi_keys.extend(e.equi_keys)
         extra_sel *= e.extra_selectivity
-    equi_keys = _apply_occupancy_bound(equi_keys, left, right)
+    equi_keys = apply_occupancy_bound(equi_keys, _domain_rows(left), _domain_rows(right))
     # Skip the public wrapper's validation — inputs originate inside the
     # enumerator and are well-formed by construction.
     raw = _inner_estimate(

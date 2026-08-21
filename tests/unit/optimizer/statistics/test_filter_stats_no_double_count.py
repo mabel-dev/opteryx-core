@@ -24,7 +24,7 @@ def _build_refreshed_plan(sql):
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     query_id = str(uuid.uuid4())
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
 
@@ -70,6 +70,74 @@ def test_filter_above_scan_does_not_double_count():
     assert min(filter_rows) >= min(scan_rows), (
         f"Filter row count {min(filter_rows)} dropped below Scan row count "
         f"{min(scan_rows)} — _filter_stats is double-counting selectivity"
+    )
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("testdata/tpch_001"),
+    reason="testdata/tpch_001 not populated",
+)
+def test_filter_above_cross_join_applies_selectivity_once():
+    """A single-relation conjunct above a CROSS join is folded into its Scan
+    by the upward walk (cross joins are transparent to it). The Filter must
+    then skip that conjunct — before the fold registry, _filter_stats
+    re-derived "already folded" with a downward walk that stopped at ANY
+    join, saw nothing folded, and applied the same selectivity a second time.
+    """
+    plan = _build_refreshed_plan(
+        "SELECT * FROM testdata.tpch_001.nation, testdata.tpch_001.region "
+        "WHERE n_regionkey = 1"
+    )
+    by_type = _stats_by_node_type(plan)
+    scan_rows = by_type.get("Scan", [])
+    join_rows = by_type.get("Join", [])
+    filter_rows = by_type.get("Filter", [])
+    assert len(scan_rows) == 2, f"expected two Scan nodes; got {scan_rows}"
+    assert join_rows and filter_rows, "expected Join and Filter statistics"
+    # The conjunct folded into the nation Scan (25 rows -> fewer); region (5
+    # rows) is untouched.
+    assert min(scan_rows) < 25, f"conjunct was not folded into a Scan: {scan_rows}"
+    assert 5 in scan_rows, f"region scan should be unfiltered at 5 rows: {scan_rows}"
+    # The cross join is the product of the (already filtered) scans, and the
+    # Filter adds NOTHING on top — its one conjunct is already in the fold
+    # registry. filter < join means the selectivity was applied twice.
+    assert min(filter_rows) == min(join_rows), (
+        f"Filter row count {min(filter_rows)} != Join row count {min(join_rows)} "
+        "— the folded conjunct's selectivity was applied a second time"
+    )
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("testdata/tpch_001"),
+    reason="testdata/tpch_001 not populated",
+)
+def test_self_join_filter_folds_into_one_scan_only():
+    """Two Scans of the same relation both name-match a conjunct on that
+    relation. Before fold claiming was keyed to the scan NODE, both folded it
+    and its selectivity was squared. Exactly one Scan may claim the fold; the
+    Filter then applies nothing further.
+    """
+    plan = _build_refreshed_plan(
+        "SELECT nation.n_name FROM testdata.tpch_001.nation "
+        "CROSS JOIN testdata.tpch_001.nation AS n2 "
+        "WHERE nation.n_regionkey = 1"
+    )
+    by_type = _stats_by_node_type(plan)
+    scan_rows = by_type.get("Scan", [])
+    join_rows = by_type.get("Join", [])
+    filter_rows = by_type.get("Filter", [])
+    assert len(scan_rows) == 2, f"expected two Scan nodes; got {scan_rows}"
+    assert join_rows and filter_rows, "expected Join and Filter statistics"
+    # One scan folds the conjunct; its twin must keep the full 25-row count.
+    assert max(scan_rows) == 25, (
+        f"both self-join Scans folded the same conjunct (rows {scan_rows}) "
+        "— selectivity squared"
+    )
+    assert min(scan_rows) < 25, f"conjunct was not folded into either Scan: {scan_rows}"
+    # And the Filter must not apply it a third time.
+    assert min(filter_rows) == min(join_rows), (
+        f"Filter row count {min(filter_rows)} != Join row count {min(join_rows)} "
+        "— the folded conjunct's selectivity was re-applied"
     )
 
 

@@ -21,7 +21,7 @@ The correction has two halves, and they pull in opposite directions:
 
   * every key class's selectivity must be applied (above), and
   * their product must not claim more distinct key tuples than there are rows
-    to hold them (`_apply_occupancy_bound`).
+    to hold them (`apply_occupancy_bound`).
 
 Without the second half the first overshoots: TPC-H Q09's
 `(ps_partkey, ps_suppkey)` multiplies to a 2e9 domain over 800,000 partsupp
@@ -63,14 +63,14 @@ def _estimate(n_keys, rows):
     """Both sides `rows` rows; each key column has NDV 100 (per-key selectivity
     1/100), independent of the other key."""
     left = RelationStatistics(
-        row_count=rows,
+        row_count_estimate=rows,
         columns={
             _LK1: ColumnStatistics(column_name="lk1", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
             _LK2: ColumnStatistics(column_name="lk2", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
         },
     )
     right = RelationStatistics(
-        row_count=rows,
+        row_count_estimate=rows,
         columns={
             _RK1: ColumnStatistics(column_name="rk1", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
             _RK2: ColumnStatistics(column_name="rk2", data_type="INTEGER", distinct_count=100, null_fraction=0.0),
@@ -107,7 +107,7 @@ def test_composite_domain_cannot_exceed_the_rows_that_hold_it():
 
     Two NDV-100 key columns over 1000-row relations multiply to a composite
     domain of 10,000 -- ten distinct key tuples for every row available to hold
-    one. `_apply_occupancy_bound` caps the domain at the row count, so the
+    one. `apply_occupancy_bound` caps the domain at the row count, so the
     estimate is 1000 * 1000 / 1000 = 1000 rather than the 100 that the
     unbounded product gives.
 

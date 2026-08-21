@@ -43,6 +43,7 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
 
     This strategy optimizes SELECT * FROM table LIMIT n by selecting
     only the largest files needed to satisfy the limit.
+
     """
 
     requires = ("limits-pushed",)
@@ -55,31 +56,48 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
         """Visitor method - process each node."""
         if node.node_type == LogicalPlanStepType.Scan and node.limit is not None:
             if node.predicates:
-                # We only optimize when there are no filters
+                # We only optimize when there are no filters.
+                # `node.predicates` covers only predicates the connector ACCEPTED,
+                # but a DECLINED one cannot reach here either: LimitPushdownStrategy
+                # refuses to push a LIMIT past a Filter node, so `node.limit` above
+                # is None whenever one survives. Verified 2026-08-21 on a declined
+                # disjunction. Same situation, and same "do not widen this guard"
+                # note, as TopNManifestPruningStrategy.
                 return context
 
             limit_value = node.limit
             if limit_value is None or limit_value <= 0:
                 return context
 
-            # Sort files by size descending
-            sorted_files = sorted(
-                node.manifest.files,
-                key=lambda f: f.record_count,
+            # Sort file POSITIONS by row count descending — positions, not the
+            # FileEntry objects, so the surviving set can be handed to
+            # Manifest.subset, which keeps the sketch-vector row mapping
+            # aligned with the reordered/truncated file list.
+            sorted_positions = sorted(
+                range(len(node.manifest.files)),
+                key=lambda p: node.manifest.files[p].record_count,
                 reverse=True,
             )
 
-            selected_files = []
+            selected_positions = []
             accumulated_rows = 0
 
-            for file in sorted_files:
-                selected_files.append(file)
-                accumulated_rows += file.record_count
+            for position in sorted_positions:
+                selected_positions.append(position)
+                accumulated_rows += node.manifest.files[position].record_count
                 if accumulated_rows >= limit_value:
                     break
 
-            # Update manifest to only include selected files
-            node.manifest.files = selected_files
+            if len(selected_positions) == len(node.manifest.files):
+                # Nothing dropped — a pure reorder changes no answer, and
+                # writing the node back would force a redundant statistics
+                # refresh for a plan that didn't change.
+                return context
+
+            # Copy-on-write: subset returns a NEW Manifest so the optimizer's
+            # id()-keyed scan statistics cache misses and recomputes over the
+            # selected file set.
+            node.manifest = node.manifest.subset(selected_positions)
             self.telemetry.optimization_limit_file_pruning += 1
             context.optimized_plan[context.node_id] = node
 

@@ -24,11 +24,18 @@ according to their semantics:
   * Cross Join — product of inputs; histograms drop.
   * Outer joins — bounded by the appropriate input.
   * Semi/anti — bounded by the left side; right columns dropped.
-  * AggregateAndGroup — output rows = product of group-key NDVs (capped);
-    only group-key columns survive; their histograms drop.
+  * ASOF — EQUAL to the left side (the operator emits exactly one row per
+    left row, null-filled on no match), with or without a partition key;
+    both sides' columns survive.
+  * AggregateAndGroup — output rows = min(input rows, product of group-key
+    NDVs); a key with NO NDV (even after the manifest's range-derived
+    fallback) makes the estimate the input row count — the only sound cap —
+    rather than a fabricated per-key factor. Only group-key columns survive;
+    their histograms drop.
   * Aggregate (no groups) — 1 row.
   * Limit / HeapSort (OperatorFusion's fused Order+Limit) — min(input, limit);
-    NDVs cap at the new row count.
+    NDVs cap at the new row count. A LIMIT pushed into a Scan (which deletes
+    the Limit node) caps that scan's count the same way.
   * Distinct — group-by over the columns the child actually outputs (not every
     column statistics_refresh still has attached); histograms drop; NDVs cap.
   * Union — sum of row counts; ranges widen (min lower / max upper); NDVs
@@ -38,6 +45,13 @@ according to their semantics:
 Histograms are never rebuilt — they are kept while the underlying
 distribution shape is preserved (Filter, Limit) and dropped at the first
 operator that distorts it (Join, Group-by output, Distinct, Union).
+
+Every ``RelationStatistics`` carries its row count as either
+``row_count_metric`` (a number we claim to KNOW: a manifest count, or exact
+arithmetic over metric inputs — cross-join product, LIMIT min, UNION ALL sum,
+no-group aggregate = 1) or ``row_count_estimate`` (anything touched by a
+selectivity or NDV heuristic). The plan-time result-size guard acts only on
+metrics; estimates defer to the runtime row counter.
 
 Consumers (JoinOrderingStrategy, JoinPlanningStrategy) currently still
 read ``node.left_size`` / manifest directly; rewiring them to consume
@@ -54,6 +68,9 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.cost_estimation import KeyStats
+from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
+from opteryx.planner.cost_estimation import apply_occupancy_bound
+from opteryx.planner.cost_estimation import composite_key_ndv
 from opteryx.planner.cost_estimation import estimate_after_filter
 from opteryx.planner.cost_estimation import estimate_group_by_cardinality
 from opteryx.planner.cost_estimation import estimate_join_cardinality
@@ -93,14 +110,24 @@ _JOIN_TYPE_FOR_CARDINALITY = {
 
 
 def _split_and_conjuncts(node):
-    """Split an AND-tree into a flat list of conjuncts. Returns [node] for non-AND."""
-    from opteryx.expression import NodeType  # lazy: avoid touching module-level imports
+    """Split an AND-tree into a flat list of conjuncts. Returns [node] for non-AND.
+
+    Delegates to ``_inner_split`` — the one existing definition of this split
+    (split_conjunctive_predicates.py), also used by compiler.py and mermaid.py —
+    so the statistics pass sees the same terms the physical FILTER does.
+
+    Writing the AND recursion here a second time is what caused the gap this
+    delegation closes: PredicateOrderingStrategy folds a filter chain into a
+    single n-ary AND (``NodeType.DNF``, terms in ``parameters``), which the local
+    recursion returned WHOLE as one opaque conjunct. Every consumer downstream —
+    the leaf-local scan fold, per-conjunct range narrowing, the predicate
+    telemetry — then saw one unreadable term instead of the real conditions.
+    """
+    from .strategies.split_conjunctive_predicates import _inner_split  # lazy: import cycle
 
     if node is None:
         return []
-    if node.node_type != NodeType.AND:
-        return [node]
-    return _split_and_conjuncts(node.left) + _split_and_conjuncts(node.right)
+    return _inner_split(node)
 
 
 def _identifier_sources(node):
@@ -196,8 +223,14 @@ def _collect_leaf_local_conjuncts(plan, scan_id, scan_names):
     return out
 
 
-def _empty_stats(row_count: int = 0) -> RelationStatistics:
-    return RelationStatistics(row_count=max(0, int(row_count)), columns={})
+def _empty_stats(row_count: int = 0, metric: bool = False) -> RelationStatistics:
+    """Stand-in statistics. ``metric=True`` only where the count is exact by
+    construction (a no-group aggregate emits exactly one row); the default is
+    an estimate — a missing child's stats are a fabrication, not knowledge."""
+    count = max(0, int(row_count))
+    if metric:
+        return RelationStatistics(columns={}, row_count_metric=count)
+    return RelationStatistics(columns={}, row_count_estimate=count)
 
 
 def _column_identity(col) -> Optional[bytes]:
@@ -329,16 +362,26 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
     manifest = node.manifest
 
     # Row count: prefer manifest record count, fall back to schema estimates.
+    # Track PROVENANCE alongside the number: a manifest record count or a
+    # schema row_count_metric is a metric (we claim to know it); a schema
+    # row_count_estimate is an estimate; the _UNKNOWN_ROW_COUNT stand-in is
+    # the most fabricated estimate of all.
     row_count: Optional[int] = None
+    row_count_is_metric = False
     if manifest is not None:
         try:
             row_count = manifest.get_record_count()
         except Exception:
             row_count = None
+        row_count_is_metric = row_count is not None
     if row_count is None and schema is not None:
-        row_count = schema.row_count_metric or schema.row_count_estimate
+        row_count = schema.row_count_metric
+        row_count_is_metric = row_count is not None
+        if row_count is None:
+            row_count = schema.row_count_estimate
     if row_count is None or row_count <= 0:
         row_count = _UNKNOWN_ROW_COUNT
+        row_count_is_metric = False
 
     columns: dict = {}
     has_null_counts = (
@@ -371,6 +414,16 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
                     distinct_count = manifest.estimate_cardinality(col_name)
                 except Exception:
                     distinct_count = None
+                if distinct_count is None:
+                    # No KMV sketch (nothing ANALYZE'd — the norm for plain
+                    # parquet). Fall back to the range-derived estimate built
+                    # from per-file row counts and min/max bounds; costing
+                    # only — the KMV method keeps its near-exact semantics
+                    # for the execution-variant strategies that rely on it.
+                    try:
+                        distinct_count = manifest.estimate_range_cardinality(col_name)
+                    except Exception:
+                        distinct_count = None
                 try:
                     histogram = manifest.get_distogram(col_name)
                 except Exception:
@@ -457,8 +510,12 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
     # `row_count` here is the relation's pre-filter size -- the domain the two
     # selectivity passes below shrink. Carry it as base_row_count so join-key
     # tdom estimates divide by the domain rather than by the filtered count.
+    if row_count_is_metric:
+        return RelationStatistics(
+            columns=columns, row_count_metric=int(row_count), base_row_count=int(row_count)
+        )
     return RelationStatistics(
-        row_count=int(row_count), columns=columns, base_row_count=int(row_count)
+        columns=columns, row_count_estimate=int(row_count), base_row_count=int(row_count)
     )
 
 
@@ -468,14 +525,19 @@ def _scan_stats(
     nid: Optional[str] = None,
     predicate_notes: Optional[list] = None,
     base_stats_cache: Optional[dict] = None,
+    fold_registry: Optional[Dict[int, object]] = None,
 ) -> RelationStatistics:
     # The base (pre-narrowing) statistics depend only on the scan's schema and
     # manifest. Both are shared by reference across plan copies and the node's
     # uuid is preserved by LogicalPlanNode.copy, so within one optimization run
-    # the base is memoizable — keyed by object identity so a strategy that
-    # REPLACES the schema or manifest (statistics_only_response does both)
-    # naturally misses and recomputes. The narrowing below is predicate- and
-    # plan-shape-dependent and always re-runs.
+    # the base is memoizable — keyed by object identity. Manifests are
+    # immutable by contract: every prune (ManifestPruning/TopNManifestPruning/
+    # LimitFilesPruning/statistics_only_response) is copy-on-write and assigns
+    # a NEW Manifest to node.manifest (see Manifest.subset), so id(manifest)
+    # misses here and the base recomputes over the pruned file set — an
+    # in-place prune would have kept serving pre-pruning statistics. A
+    # strategy that replaces the schema misses the same way. The narrowing
+    # below is predicate- and plan-shape-dependent and always re-runs.
     wanted = _referenced_scan_identities(node)
     base = None
     cache_key = None
@@ -495,6 +557,20 @@ def _scan_stats(
         scan_names = _scan_relation_names(node)
         if scan_names:
             conjuncts = _collect_leaf_local_conjuncts(plan, nid, scan_names)
+            if fold_registry is not None:
+                # Claim each conjunct for THIS scan node. A self-join scans the
+                # same relation twice under the same name, so the name test in
+                # _collect_leaf_local_conjuncts matches the identical conjunct
+                # from BOTH scans — folding it into both squares its
+                # selectivity. First scan visited claims it; the twin skips it.
+                # Keyed by conjunct object identity: _split_and_conjuncts
+                # returns references into the Filter's own condition tree, so
+                # the same id() is seen when _filter_stats splits the same
+                # condition later in the walk. Values are the claiming scan's
+                # uuid, diagnostic only.
+                conjuncts = [c for c in conjuncts if id(c) not in fold_registry]
+                for conj in conjuncts:
+                    fold_registry[id(conj)] = node.uuid
             if conjuncts:
                 from opteryx.planner.cost_estimation.selectivity import (
                     estimate_selectivity,
@@ -525,10 +601,15 @@ def _scan_stats(
                 )
                 if new_rows != base.row_count or narrowed_columns is not base.columns:
                     base = RelationStatistics(
-                        row_count=new_rows,
                         columns=narrowed_columns,
+                        row_count_estimate=new_rows,
                         base_row_count=base.domain_row_count,
                     )
+                else:
+                    # A predicate constrains this scan even though its
+                    # estimated selectivity came out at 1.0 — the output
+                    # count is no longer a number we claim to know.
+                    base = base.as_estimate()
 
     # Predicates already pushed onto this scan (post-PredicatePushdown) have no
     # Filter node for the leaf-local walk to find, so apply the same selectivity
@@ -562,45 +643,46 @@ def _scan_stats(
         narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
         if new_rows != base.row_count or narrowed_columns is not base.columns:
             base = RelationStatistics(
-                row_count=new_rows,
                 columns=narrowed_columns,
+                row_count_estimate=new_rows,
                 base_row_count=base.domain_row_count,
             )
+        else:
+            # Same honesty rule as the leaf-local conjuncts above: a pushed
+            # predicate makes the output count an estimate even at s == 1.0.
+            base = base.as_estimate()
+
+    # A LIMIT pushed INTO the scan (LimitPushdownStrategy removes the Limit
+    # node once `connector.supports_limit_pushdown`, so there is no Limit node
+    # left for _limit_stats to see) is still a hard cap on the rows this scan
+    # emits. Applied last: pushdown refuses to add a limit to a scan that
+    # already carries predicates, but the reverse order can happen, and
+    # min(filtered, limit) is the count either way.
+    scan_limit = getattr(node, "limit", None)
+    if scan_limit is not None and int(scan_limit) >= 0:
+        capped_rows = min(int(base.row_count), int(scan_limit))
+        if capped_rows != base.row_count:
+            capped_cols = _cap_ndvs(
+                _scale_total_bytes(base.columns, _ratio(capped_rows, base.row_count)),
+                capped_rows,
+            )
+            # Same provenance rule as _limit_stats: min() over a metric count
+            # is exact arithmetic and stays a metric; over an estimate it
+            # stays an estimate.
+            if base.row_count_is_metric:
+                base = RelationStatistics(
+                    columns=capped_cols,
+                    row_count_metric=capped_rows,
+                    base_row_count=base.domain_row_count,
+                )
+            else:
+                base = RelationStatistics(
+                    columns=capped_cols,
+                    row_count_estimate=capped_rows,
+                    base_row_count=base.domain_row_count,
+                )
 
     return base
-
-
-def _find_underlying_scan(plan: LogicalPlan, nid: str):
-    """Walk the ingoing chain looking for a single underlying Scan node.
-
-    Returns the Scan LogicalPlanNode when exactly one Scan is reachable
-    through pass-through edges; returns None if a Join, Union, Aggregate,
-    Set op, or branching is encountered (selectivity from a single-table
-    fold doesn't apply cleanly in those cases).
-    """
-    current = nid
-    seen: set = set()
-    while True:
-        if current in seen:
-            return None
-        seen.add(current)
-        node = plan[current]
-        if node.node_type == LogicalPlanStepType.Scan:
-            return node
-        if node.node_type in (
-            LogicalPlanStepType.Join,
-            LogicalPlanStepType.DependentJoin,
-            LogicalPlanStepType.Union,
-            LogicalPlanStepType.Intersect,
-            LogicalPlanStepType.Except,
-            LogicalPlanStepType.AggregateAndGroup,
-            LogicalPlanStepType.Aggregate,
-        ):
-            return None
-        edges = list(plan.ingoing_edges(current))
-        if len(edges) != 1:
-            return None
-        current = edges[0][0]
 
 
 def _filter_stats(
@@ -609,37 +691,39 @@ def _filter_stats(
     plan: LogicalPlan,
     nid: str,
     predicate_notes: Optional[list] = None,
+    fold_registry: Optional[Dict[int, object]] = None,
 ) -> RelationStatistics:
     """Apply selectivity for conjuncts that haven't already been folded into
-    the underlying Scan stats by ``_scan_stats``.
+    an underlying Scan's stats by ``_scan_stats``.
 
-    A conjunct is considered already-folded when both:
-      * the Filter has a single underlying Scan reachable through
-        pass-through nodes (``_find_underlying_scan`` returns it), and
-      * every identifier in the conjunct binds to that Scan's relation.
+    "Already folded" is not re-derived here — it is read from
+    ``fold_registry``, the record ``_scan_stats`` writes as it folds (keyed by
+    conjunct object identity, values the claiming scan's uuid). A previous
+    version re-derived it with a second, downward traversal that disagreed
+    with the upward walk about cross-join transparency: the upward walk folded
+    a single-relation conjunct through a cross join, the downward walk stopped
+    at ANY join, and the same conjunct's selectivity was applied twice. One
+    traversal, one record, nothing to keep in agreement.
 
-    Conjuncts not satisfying both conditions still have an effect on row
-    count and need their selectivity applied here.
+    Conjuncts not in the registry still affect row count and have their
+    selectivity applied here.
     """
     base = _first_child_stats(child_stats) or _empty_stats()
     condition = getattr(node, "condition", None)
     if condition is None:
         return base
 
-    underlying_scan = _find_underlying_scan(plan, nid)
-    folded_names = (
-        _scan_relation_names(underlying_scan) if underlying_scan is not None else set()
-    )
-
     from opteryx.planner.cost_estimation.selectivity import estimate_selectivity
 
     selectivity = 1.0
     narrowed_columns = base.columns
+    applied_any = False
     for conj in _split_and_conjuncts(condition):
-        sources = _identifier_sources(conj)
-        if folded_names and sources and sources <= folded_names:
-            # Already folded into Scan.statistics (row count AND range) by _scan_stats.
+        if fold_registry is not None and id(conj) in fold_registry:
+            # Already folded into a Scan's statistics (row count AND range) by
+            # _scan_stats; that reduction reached `base` via the child chain.
             continue
+        applied_any = True
         try:
             s = float(estimate_selectivity(conj, base))
         except Exception:
@@ -649,15 +733,21 @@ def _filter_stats(
             predicate_notes.append(_predicate_note(nid, "Filter", None, conj, s, base))
         narrowed_columns = _narrow_filter_columns(narrowed_columns, conj)
 
-    if selectivity == 1.0 and narrowed_columns is base.columns:
+    if not applied_any:
+        # Every conjunct was folded into the Scan's own stats; nothing new to
+        # apply here — the child's count (and its provenance) stand.
         return base
+    if selectivity == 1.0 and narrowed_columns is base.columns:
+        # A predicate was applied but estimated no reduction — the number
+        # stands, the claim to KNOW it does not.
+        return base.as_estimate()
     new_rows = base.row_count
     if selectivity != 1.0:
         new_rows = estimate_after_filter(base.row_count, selectivity)
     narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
     # Filtering shrinks the cardinality, never the key domain it was drawn from.
     return RelationStatistics(
-        row_count=new_rows, columns=narrowed_columns, base_row_count=base.domain_row_count
+        columns=narrowed_columns, row_count_estimate=new_rows, base_row_count=base.domain_row_count
     )
 
 
@@ -799,76 +889,49 @@ def _equi_key_classes(
         # outright. Estimated per side and combined with max(), the same query
         # divides by the OTHER side's real domain and lands on 20,000.
         fallback = min(left.domain_row_count, right.domain_row_count)
-        side_tdoms: List[int] = []
+        # (tdom, is_measured) per side. A side's number is MEASURED only when
+        # it is a composed distinct_count that no upper bound overrode -- the
+        # domain fallback is a relation size and a range span is a bound on
+        # the NDV, neither is a count of anything.
+        side_tdoms: List[Tuple[int, bool]] = []
         for side in ("left", "right"):
             # A side that reports no NDV falls back to the domain bound -- the
             # smaller relation's PRE-filter size, per this function's docstring.
-            side_tdom = max(known_ndvs[side]) if known_ndvs[side] else fallback
+            # Composition across the side's endpoints is the shared helper --
+            # the same one join_ordering._key_ndv uses for the build-side pick.
+            side_ndv = composite_key_ndv(known_ndvs[side])
+            side_measured = side_ndv is not None
+            side_tdom = side_ndv if side_ndv is not None else fallback
             # A range span is an upper bound on the NDV of the column it came
             # from (see _value_range_span) -- never a substitute for a real
             # distinct_count, and never a bound on the other side's column.
             if spans[side]:
-                side_tdom = min(side_tdom, min(spans[side]))
-            side_tdoms.append(side_tdom)
-        tdom = max(1, max(side_tdoms))
+                capped = min(side_tdom, min(spans[side]))
+                if capped != side_tdom:
+                    # The number in play is now the span, not the count.
+                    side_measured = False
+                side_tdom = capped
+            side_tdoms.append((side_tdom, side_measured))
+        tdom = max(1, max(t for t, _ in side_tdoms))
+        # tdom stands in for max(ndv_left, ndv_right); its provenance is the
+        # provenance of the side that supplied that max. A measured value
+        # tying the max still counts as measured.
+        measured = any(is_measured for t, is_measured in side_tdoms if t == tdom)
+        provenance = NdvProvenance.MEASURED if measured else NdvProvenance.DOMAIN_STANDIN
         equi_keys.append((
-            KeyStats(ndv=tdom, null_fraction=max(left_nulls) if left_nulls else None),
-            KeyStats(ndv=tdom, null_fraction=max(right_nulls) if right_nulls else None),
+            KeyStats(
+                ndv=tdom,
+                null_fraction=max(left_nulls) if left_nulls else None,
+                ndv_provenance=provenance,
+            ),
+            KeyStats(
+                ndv=tdom,
+                null_fraction=max(right_nulls) if right_nulls else None,
+                ndv_provenance=provenance,
+            ),
         ))
 
     return equi_keys
-
-
-def _apply_occupancy_bound(
-    equi_keys: List[Tuple[KeyStats, KeyStats]],
-    left: RelationStatistics,
-    right: RelationStatistics,
-) -> List[Tuple[KeyStats, KeyStats]]:
-    """Bound a COMPOSITE key's domain by the rows available to hold it.
-
-    ``estimate_join_cardinality`` multiplies one selectivity per class under an
-    independence assumption, so N classes divide by the PRODUCT of their
-    domains. For a composite key that product counts *possible* key tuples, and
-    it can exceed the number that could physically exist: TPC-H's
-    ``(ps_partkey, ps_suppkey)`` gives 200,000 x 10,000 = 2e9 against 800,000
-    rows to hold them, so the join estimated 2,400 rows instead of 6,001,215 --
-    and being 2,500x under put a 6-million-row input on the BUILD side of three
-    consecutive joins.
-
-    A relation cannot contain more distinct key tuples than it has rows, so the
-    composite domain is capped at the smaller side's row count. This is the
-    row-group occupancy bound evaluated at relation granularity: the per-row-
-    group form is ``sum(min(rows_rg, cells_rg))``, which collapses to
-    ``sum(rows_rg) = |R|`` whenever a row group holds fewer rows than its key
-    space has cells -- true for every row group of every relation measured here
-    (partsupp: 65,536 rows against 16,384 x 10,000 cells). The per-row-group
-    form is strictly tighter only for a composite key with heavy duplication
-    inside a narrow box; nothing in TPC-H or JOB has that shape.
-
-    Collapsing to a single pair is exactly equivalent when the product is
-    already under the bound (one divisor of P == N divisors multiplying to P),
-    and null fractions keep their worst-case-per-side composition because
-    ``_effective_rows`` takes the max across the key list either way.
-
-    Callers must note the PRE-bound class count in telemetry: after a collapse
-    the returned list no longer reveals that the join had a composite key.
-    """
-    if len(equi_keys) < 2:
-        return equi_keys
-
-    composite = 1
-    for left_stat, _ in equi_keys:
-        composite *= left_stat.ndv
-    bound = max(1, min(left.domain_row_count, right.domain_row_count))
-    if composite <= bound:
-        return equi_keys
-
-    left_null = [k[0].null_fraction for k in equi_keys if k[0].null_fraction is not None]
-    right_null = [k[1].null_fraction for k in equi_keys if k[1].null_fraction is not None]
-    return [(
-        KeyStats(ndv=bound, null_fraction=max(left_null) if left_null else None),
-        KeyStats(ndv=bound, null_fraction=max(right_null) if right_null else None),
-    )]
 
 
 def _join_stats(
@@ -891,7 +954,16 @@ def _join_stats(
             )
         merged = _drop_histograms(_merge_columns(left, right))
         merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
-        return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
+        # A cross-join product of two KNOWN counts is itself exact — this is
+        # the "accidental cross join" shape the plan-time result-size guard
+        # exists to refuse, so its metric-ness must survive.
+        if left.row_count_is_metric and right.row_count_is_metric:
+            return RelationStatistics(
+                columns=_cap_ndvs(merged, out_rows), row_count_metric=out_rows
+            )
+        return RelationStatistics(
+            columns=_cap_ndvs(merged, out_rows), row_count_estimate=out_rows
+        )
 
     # Map planner join names to the estimator's vocabulary.
     estimator_type = "inner"
@@ -913,9 +985,39 @@ def _join_stats(
             join_notes.append(
                 _join_note(nid, join_type, left.row_count, right.row_count, left.row_count, 0)
             )
+        # Bounded by the left side, not equal to it — an estimate.
         return RelationStatistics(
-            row_count=left.row_count,
             columns=_cap_ndvs(left.columns, left.row_count),
+            row_count_estimate=left.row_count,
+        )
+
+    if join_type == "asof":
+        # ASOF is LEFT-PRESERVING: the operator emits EXACTLY one row per left
+        # row, null-filled when nothing matches (see the AsofJoinNode docstring
+        # and tests/operators/test_asof_join.py). That is true with or without
+        # the optional USING/ON partition key, so it is settled here, before
+        # the equi-key lookup -- a no-ON ASOF has empty left_columns /
+        # right_columns (the MATCH_CONDITION populates asof_left_column /
+        # asof_right_column instead), and would otherwise fall into the keyless
+        # cross-product upper bound below and be estimated at |L| x |R|.
+        out_rows = max(0, left.row_count)
+        if join_notes is not None:
+            join_notes.append(
+                _join_note(nid, join_type, left.row_count, right.row_count, out_rows, 0)
+            )
+        # Both sides' columns survive (unlike semi/anti), but the right side
+        # contributes at most one value per left row.
+        merged = _drop_histograms(_merge_columns(left, right))
+        merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
+        # EQUAL to the left count, not bounded by it -- no selectivity or NDV
+        # heuristic is involved, so a metric left count yields a metric here,
+        # the same exact-arithmetic rule the cross-join product follows.
+        if left.row_count_is_metric:
+            return RelationStatistics(
+                columns=_cap_ndvs(merged, out_rows), row_count_metric=out_rows
+            )
+        return RelationStatistics(
+            columns=_cap_ndvs(merged, out_rows), row_count_estimate=out_rows
         )
 
     left_keys = _join_key_identities(getattr(node, "left_columns", None))
@@ -931,7 +1033,11 @@ def _join_stats(
             )
         merged = _drop_histograms(_merge_columns(left, right))
         merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
-        return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(merged, out_rows))
+        # Cross-product UPPER BOUND for a keyless non-cross join — a bound is
+        # an estimate even when both inputs were metric.
+        return RelationStatistics(
+            columns=_cap_ndvs(merged, out_rows), row_count_estimate=out_rows
+        )
 
     # A composite equi-key (`ON a.x = b.x AND a.y = b.y`) must have EVERY key
     # pair's selectivity multiplied in -- estimate_join_cardinality already
@@ -945,7 +1051,9 @@ def _join_stats(
     # one pair, and telemetry reporting "1 key" for a two-column join would
     # hide exactly the shape a reader needs to see to understand the estimate.
     key_class_count = len(equi_keys)
-    equi_keys = _apply_occupancy_bound(equi_keys, left, right)
+    equi_keys = apply_occupancy_bound(
+        equi_keys, left.domain_row_count, right.domain_row_count
+    )
 
     out_rows = estimate_join_cardinality(
         left_rows=left.row_count,
@@ -968,8 +1076,8 @@ def _join_stats(
     # the conservative choice, since it under-claims rather than over-claims
     # the reduction at the next join.
     return RelationStatistics(
-        row_count=out_rows,
         columns=_cap_ndvs(merged, out_rows),
+        row_count_estimate=out_rows,
         base_row_count=max(left.domain_row_count, right.domain_row_count),
     )
 
@@ -1010,7 +1118,8 @@ def _aggregate_stats(
     groups = getattr(node, "groups", None) or []
     group_keys = [k for k in (_column_identity(g) for g in groups) if k]
     if not group_keys:
-        return _empty_stats(row_count=1)
+        # No group keys → exactly one output row, whatever the input. Metric.
+        return _empty_stats(row_count=1, metric=True)
     ndvs = [
         base.columns[key].distinct_count if key in base.columns else None
         for key in group_keys
@@ -1048,7 +1157,11 @@ def _aggregate_stats(
             distinct_count=single_key_ndv if single_key_ndv is not None else col.distinct_count,
         )
     out_cols = _scale_total_bytes(out_cols, _ratio(out_rows, base.row_count))
-    return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(out_cols, out_rows))
+    # A grouped aggregate's output count is ALWAYS an estimate — even NDV-backed
+    # products rest on an independence assumption between the keys.
+    return RelationStatistics(
+        columns=_cap_ndvs(out_cols, out_rows), row_count_estimate=out_rows
+    )
 
 
 def _limit_stats(
@@ -1057,17 +1170,29 @@ def _limit_stats(
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
     limit = getattr(node, "limit", None)
-    if limit is None:
+    offset = getattr(node, "offset", None)
+    if limit is None and offset is None:
         return base
     try:
-        capped = min(int(base.row_count), int(limit))
+        # OFFSET consumes rows before LIMIT counts: only the rows past the
+        # offset are available, so LIMIT 10 OFFSET 1_000_000 over 1_000_005
+        # rows yields 5, not 10. An OFFSET with no LIMIT emits everything past
+        # the offset.
+        available = int(base.row_count) - (0 if offset is None else int(offset))
+        capped = available if limit is None else min(int(limit), available)
     except (TypeError, ValueError):
         return base
     new_rows = max(0, capped)
     # Limit doesn't change ranges or distributions of *which* values appear,
     # but it does cap how many distinct values can be present.
     columns = _scale_total_bytes(base.columns, _ratio(new_rows, base.row_count))
-    return RelationStatistics(row_count=new_rows, columns=_cap_ndvs(columns, new_rows))
+    capped_cols = _cap_ndvs(columns, new_rows)
+    # min(count - offset, limit) is exact arithmetic: the output inherits the
+    # INPUT's provenance — a limited metric count stays a metric ("LIMIT
+    # rescues the query" from the plan-time guard by genuinely bounding it).
+    if base.row_count_is_metric:
+        return RelationStatistics(columns=capped_cols, row_count_metric=new_rows)
+    return RelationStatistics(columns=capped_cols, row_count_estimate=new_rows)
 
 
 def _child_output_identities(plan: Optional["LogicalPlan"], nid: Optional[str]) -> Optional[set]:
@@ -1101,7 +1226,9 @@ def _distinct_stats(
 ) -> RelationStatistics:
     base = _first_child_stats(child_stats) or _empty_stats()
     if not base.columns:
-        return base
+        # No column stats to estimate a reduction from, but DISTINCT still
+        # collapses duplicates — the input count is now only a bound.
+        return base.as_estimate()
 
     # Scope the NDV product to the columns actually being distinct-ed. Without
     # this, a `SELECT DISTINCT n_name` still sees every column statistics_refresh
@@ -1123,7 +1250,9 @@ def _distinct_stats(
     # invalid); each column's NDV is bounded by the output row count.
     out_cols = _drop_histograms(base.columns)
     out_cols = _scale_total_bytes(out_cols, _ratio(out_rows, base.row_count))
-    return RelationStatistics(row_count=out_rows, columns=_cap_ndvs(out_cols, out_rows))
+    return RelationStatistics(
+        columns=_cap_ndvs(out_cols, out_rows), row_count_estimate=out_rows
+    )
 
 
 def _union_stats(
@@ -1136,10 +1265,16 @@ def _union_stats(
     Distinct on top of this and the NDV cap will tighten.
     """
     rows = 0
+    # UNION ALL's sum is exact arithmetic — metric only when EVERY input is
+    # present and metric; one missing or estimated input makes the sum a guess.
+    all_metric = bool(child_stats)
     columns: Dict[bytes, ColumnStatistics] = {}
     for cs, _ in child_stats:
         if cs is None:
+            all_metric = False
             continue
+        if not cs.row_count_is_metric:
+            all_metric = False
         rows += cs.row_count
         for k, v in cs.columns.items():
             existing = columns.get(k)
@@ -1166,7 +1301,9 @@ def _union_stats(
                 histogram=None,
                 total_bytes=new_total_bytes,
             )
-    return RelationStatistics(row_count=rows, columns=_cap_ndvs(columns, rows))
+    if all_metric:
+        return RelationStatistics(columns=_cap_ndvs(columns, rows), row_count_metric=rows)
+    return RelationStatistics(columns=_cap_ndvs(columns, rows), row_count_estimate=rows)
 
 
 def _min_or_none(a, b):
@@ -1195,11 +1332,11 @@ def _set_op_stats(
     node: LogicalPlanNode,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
 ) -> RelationStatistics:
-    """INTERSECT / EXCEPT — bounded by the left input."""
+    """INTERSECT / EXCEPT — bounded by the left input; a bound is an estimate."""
     left, _ = _split_join_children(child_stats) if len(child_stats) >= 2 else (None, None)
     if left is None:
-        return _first_child_stats(child_stats) or _empty_stats()
-    return left
+        return (_first_child_stats(child_stats) or _empty_stats()).as_estimate()
+    return left.as_estimate()
 
 
 # ---- helpers -----------------------------------------------------------------
@@ -1583,6 +1720,11 @@ class StatisticsRefreshVisitor:
         self.scan_stats_cache = scan_stats_cache
         self.predicate_notes: Optional[list] = [] if telemetry is not None else None
         self.join_notes: Optional[list] = [] if telemetry is not None else None
+        # id(conjunct) -> claiming scan uuid, written by _scan_stats as it
+        # folds leaf-local Filter conjuncts, read by _filter_stats to skip
+        # exactly those conjuncts. Per-refresh: conjunct object ids are only
+        # stable while this visitor holds the plan alive.
+        self.fold_registry: Dict[int, object] = {}
 
     def run(self) -> None:
         for nid in self.plan.get_exit_points():
@@ -1602,6 +1744,12 @@ class StatisticsRefreshVisitor:
                 "node_type": node.node_type.name,
                 "relation": node.relation,
                 "row_count": stats.row_count,
+                # Provenance, following the metric/estimate lingo on
+                # RelationStatistics: "metric" is a number we claim to KNOW,
+                # "estimate" passed through a selectivity/NDV heuristic. The
+                # estimate-vs-actual harness needs this to score only the
+                # numbers the estimators actually produced.
+                "row_count_kind": "metric" if stats.row_count_is_metric else "estimate",
             })
             # Node-level total, summing only the columns with a known
             # total_bytes -- a variable-width column with no ANALYZE pass and
@@ -1646,15 +1794,34 @@ class StatisticsRefreshVisitor:
         nt = node.node_type
 
         if nt == LogicalPlanStepType.Scan:
-            return _scan_stats(node, self.plan, nid, self.predicate_notes, self.scan_stats_cache)
+            return _scan_stats(
+                node,
+                self.plan,
+                nid,
+                self.predicate_notes,
+                self.scan_stats_cache,
+                self.fold_registry,
+            )
+        if nt == LogicalPlanStepType.MaterializedCteRef:
+            # A reference to a shared CTE is a leaf with no manifest of its own;
+            # its cardinality is the shared body's output estimate, stamped by
+            # do_optimizer before the main plan is optimized (see shared_cte.py).
+            # Absent a stamp, UNKNOWN — the same posture as a scan with no
+            # manifest counts. Zero would be a claim of provable emptiness and
+            # propagates multiplicatively: any join against a 0-row side
+            # collapses to ~1 row, poisoning every cost decision above it.
+            stamped = getattr(node, "cte_statistics", None)
+            return stamped if stamped is not None else _empty_stats(_UNKNOWN_ROW_COUNT)
         if nt == LogicalPlanStepType.Filter:
-            return _filter_stats(node, child_stats, self.plan, nid, self.predicate_notes)
+            return _filter_stats(
+                node, child_stats, self.plan, nid, self.predicate_notes, self.fold_registry
+            )
         if nt in (LogicalPlanStepType.Join, LogicalPlanStepType.DependentJoin):
             return _join_stats(node, child_stats, nid, self.join_notes)
         if nt == LogicalPlanStepType.AggregateAndGroup:
             return _aggregate_stats(node, child_stats)
         if nt == LogicalPlanStepType.Aggregate:
-            return _empty_stats(row_count=1)
+            return _empty_stats(row_count=1, metric=True)
         if nt in (LogicalPlanStepType.Limit, LogicalPlanStepType.HeapSort):
             return _limit_stats(node, child_stats)
         if nt == LogicalPlanStepType.Distinct:

@@ -21,6 +21,8 @@ Join Ordering Rules (from COST-BASED-OPTIMIZER.md):
 1. If one table is more than 3x the bytes of the other, larger table goes right (memory pressure heuristic)
 2. If cardinalities are within 1%, larger table goes right
 3. Otherwise, use cardinality estimation of join column(s) to decide left/right tables
+   -- but only where it does not contradict the row counts: a cardinality
+   preference may break a row-count near-tie, never overturn it (see _decide_swap)
 4. If table sizes and cardinalities are the same (e.g. self join), don't change order
 
 Historical note: this strategy used to ALSO route a pure equi join to
@@ -40,6 +42,7 @@ was removed rather than re-tuned.
 """
 
 from opteryx.expression import NodeType, binary_operands
+from opteryx.planner.cost_estimation import composite_key_ndv
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -103,6 +106,11 @@ def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_nu
     1% thresholds are unchanged from the previous size-only implementation, and
     with unknown NDV/null this reduces to "smaller side on the left" exactly as
     before.
+
+    Rule 3's cardinality preference is subordinate to the row counts: it may pick
+    a side when the rows are close, but it may never move the larger side onto the
+    build leg. Rule 1's own direction (the >3x memory-pressure swap) is decided
+    before any NDV is read and is unaffected.
     """
     # Rule 1: memory pressure — one side dominates the other in rows.
     if left_rows > 3 * right_rows:
@@ -122,7 +130,25 @@ def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_nu
             # Rule 2: near-equal cardinality — smaller effective rows on the left.
             return left_eff > right_eff
         # Rule 3: prefer smaller cardinality left; tie-break on effective rows.
-        return left_ndv > right_ndv or (left_ndv == right_ndv and left_eff > right_eff)
+        swap = left_ndv > right_ndv or (left_ndv == right_ndv and left_eff > right_eff)
+        # ...but never on NDV alone against the row counts. An NDV is an ESTIMATE
+        # and the range-derived fallback (Manifest.estimate_range_cardinality, used
+        # whenever nothing has been ANALYZE'd) is routinely wrong by multiples and
+        # in either direction; the row count is the thing the build side actually
+        # has to materialise. TPC-H Q18 at SF100 is the case that named this rule:
+        # left 286M rows / ndv 53.3M against right 600M rows / ndv 37.3M — both
+        # sides key on orderkey, whose true NDV is 150M — so Rule 1 abstained at
+        # 2.1x and Rule 3 moved the 600M-row lineitem scan onto the build leg
+        # (3.3s -> 13.6s; Q10 likewise 1.5s -> 2.5s). A cardinality preference may
+        # break a row-count near-tie, never overturn it.
+        if swap and right_eff > left_eff:
+            return False
+        # NOTE the guard is deliberately one-directional. Its mirror -- Rule 3
+        # DECLINING a swap and so leaving the larger side on the build leg -- is a
+        # real hole (reachable: left 600M/ndv 37M vs right 286M/ndv 53M) but
+        # closing it was measured NET NEGATIVE at SF100: Q10 1.7s -> 3.1s and
+        # Q09 4.2s -> 5.3s against Q07's gain. Surfaced, not fixed.
+        return swap
 
     # Fallback: no cardinality data — smaller effective rows on the left.
     return right_eff < left_eff
@@ -326,7 +352,14 @@ class JoinOrderingStrategy(OptimizationStrategy):
 
     @staticmethod
     def _key_ndv(stats, key_columns):
-        """Smallest known join-key NDV for a side, or None when unavailable."""
+        """Composite join-key NDV for a side, or None when unavailable.
+
+        Composition across the key columns is ``composite_key_ndv`` (max of
+        the known per-column NDVs) -- the same helper the cardinality
+        estimator uses, so the build-side chooser and the estimator read the
+        SAME NDV for the same join. This used to take ``min``, which
+        understates a composite key's domain.
+        """
         if stats is None:
             return None
         ndvs = []
@@ -335,7 +368,7 @@ class JoinOrderingStrategy(OptimizationStrategy):
             col_stats = stats.get_column(identity) if identity is not None else None
             if col_stats is not None and col_stats.distinct_count is not None:
                 ndvs.append(col_stats.distinct_count)
-        return min(ndvs) if ndvs else None
+        return composite_key_ndv(ndvs)
 
     @staticmethod
     def _key_null_fraction(stats, key_columns):

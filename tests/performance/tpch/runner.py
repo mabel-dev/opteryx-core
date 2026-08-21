@@ -7,16 +7,17 @@ best Opteryx time to the DuckDB baseline at the same scale factor, and writes
 per-iteration results to `results/<sha>-<ts>.csv`.
 
 Usage:
-    make tpch                                  # default: SF=1, 3 warm iterations
-    python tests/performance/tpch/runner.py
+    make tpch-sf1 | tpch-sf10 | tpch-sf100     # skene v2 mirror, 3 warm iterations
+    python tests/performance/tpch/runner.py --scale 1 --variant skene
     python tests/performance/tpch/runner.py --scale 001
     python tests/performance/tpch/runner.py --iterations 5
 
 Inputs:
-    tests/integration/sql_battery/test_data/tests/tpch/*.sql   — query bodies
+    tests/performance/tpch/opteryx/queries/query*.sql          — query bodies
     tests/performance/tpch/duckdb/results.sf{scale}.json       — DuckDB baseline
 
-The DuckDB baseline is regenerated separately via `make tpch-bench-duckdb`.
+The DuckDB baseline is regenerated separately, per scale, via
+`make tpch-sf1-duckdb` / `tpch-sf10-duckdb` / `tpch-sf100-duckdb`.
 """
 
 from __future__ import annotations

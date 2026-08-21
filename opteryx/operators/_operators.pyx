@@ -223,7 +223,17 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[string]* column_names,
                                           const cppvector[string]* out_identities,
                                           const cppvector[int]* column_types,
-                                          const cppvector[int]* retag_units)
+                                          const cppvector[int]* retag_units,
+                                          const cppvector[int]* emit_indices,
+                                          void* instrs, int count,
+                                          cppvector[int] col_idx,
+                                          cppvector[void*] lit_dv,
+                                          ExprFilterFn fn,
+                                          const cppvector[string]* zone_columns,
+                                          const cppvector[int]* zone_ops,
+                                          const cppvector[int64_t]* zone_ordinals,
+                                          int64_t* row_groups_total,
+                                          int64_t* row_groups_pruned)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* p1_column_names,
@@ -236,7 +246,12 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           void* pred_fn, void* pred_ctx,
                                           const cppvector[int]* pred_col_to_p1,
                                           int sort_p1_index, bint sort_ascending,
-                                          int64_t topn_limit)
+                                          int64_t topn_limit,
+                                          const cppvector[string]* zone_columns,
+                                          const cppvector[int]* zone_ops,
+                                          const cppvector[int64_t]* zone_ordinals,
+                                          int64_t* row_groups_total,
+                                          int64_t* row_groups_pruned)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -276,6 +291,14 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     cppvector[int] out_from_p2,
                                     cppvector[string] out_names)
         void set_buffer_source(size_t p, size_t buf)
+        void set_scalar_guard_source(size_t p, size_t buf,
+                                     cppvector[string] names,
+                                     cppvector[DrakenType] types,
+                                     cppvector[int] lt_kind, cppvector[int] lt_unit,
+                                     cppvector[int] lt_precision,
+                                     cppvector[int] lt_scale,
+                                     cppvector[int] lt_dimension,
+                                     cppvector[cppvector[int]] elem_chain)
         void add_expr_filter(size_t p, void* instrs, int count, cppvector[int] col_idx,
                              cppvector[void*] lit_dv, ExprFilterFn fn,
                              cppvector[int] const_col_idx, cppvector[void*] const_scalar_dv)
@@ -2002,8 +2025,9 @@ cdef class SkeneScanPlan:
     """Owns the C++ vectors NativeSkeneScanSource borrows for a skene scan.
 
     A plain holder, not a planner: the physical planner already resolved the
-    file list (from the pruned manifest), the projected in-file column names,
-    the identities to emit them under, and each column's bound physical type.
+    file list (from the pruned manifest), the in-file column names the scan
+    READS (projection ∪ pushed-predicate columns), the identities to emit them
+    under, each column's bound physical type, and which of them the scan emits.
     This just pins them in C++ storage that outlives the driver — the Source
     holds raw pointers into these vectors and NativePlan holds this object.
     """
@@ -2015,15 +2039,45 @@ cdef class SkeneScanPlan:
     # Per column: the draken timestamp unit when the plan declares TIMESTAMP64
     # (permitting a verbatim retag of an INT64-stored column), else -1.
     cdef cppvector[int] retag_units
+    # Positions in the four vectors above that the scan EMITS, in emit order.
+    # The four describe the READ SET — the projection plus any column only a
+    # pushed predicate touches — so this is what narrows a predicate-only column
+    # back out. Without a pushed predicate it is simply 0..n-1.
+    cdef cppvector[int] emit_indices
+    # ROW-GROUP zone map: a CONJUNCTION of (physical column name, op, ordinal)
+    # terms, from Manifest.ordinal_zone_map_terms. Parallel, and empty when
+    # nothing is prunable. Names are the FILE's names, not identities — the Source
+    # matches them against each file's own footer schema.
+    cdef cppvector[string] zone_columns
+    cdef cppvector[int] zone_ops
+    cdef cppvector[int64_t] zone_ordinals
+    # Written ONCE by the Source's claim builder (under its call_once) and read
+    # from Python only after the driver has finished — see
+    # `_fold_skene_scan_facts`. -1 distinguishes "the scan never ran" (an
+    # optimized-away pipeline, an error before execution) from "ran and pruned
+    # nothing", which a 0 would silently conflate.
+    cdef int64_t row_groups_total
+    cdef int64_t row_groups_pruned
+    # The plan node this scan belongs to, so the post-run fold can find its
+    # scan_facts entry. Set by the compiler; None means "do not report".
+    cdef public object scan_identity
 
     def __init__(self, list files, list column_names, list out_identities,
-                 list column_types, list retag_units):
+                 list column_types, list retag_units, list emit_indices,
+                 list zone_terms=None):
         if not (len(column_names) == len(out_identities) == len(column_types)
                 == len(retag_units)):
             raise ValueError(
                 "SkeneScanPlan: column_names/out_identities/column_types/retag_units "
                 "must be parallel — the Source indexes all four by the same position."
             )
+        for emit_index in emit_indices:
+            if not 0 <= emit_index < len(column_names):
+                raise ValueError(
+                    "SkeneScanPlan: emit_indices must index the read set "
+                    f"(0..{len(column_names) - 1}); got {emit_index}."
+                )
+            self.emit_indices.push_back(<int>emit_index)
         for path in files:
             self.files.push_back(<string>(path.encode("utf-8") if isinstance(path, str) else path))
         for name in column_names:
@@ -2034,6 +2088,26 @@ cdef class SkeneScanPlan:
             self.column_types.push_back(<int>physical_type)
         for retag_unit in retag_units:
             self.retag_units.push_back(<int>retag_unit)
+        self.row_groups_total = -1
+        self.row_groups_pruned = -1
+        self.scan_identity = None
+        for zone_term in zone_terms or []:
+            zone_name, zone_op, zone_ordinal = zone_term
+            self.zone_columns.push_back(
+                <string>(zone_name.encode("utf-8") if isinstance(zone_name, str) else zone_name))
+            self.zone_ops.push_back(<int>zone_op)
+            self.zone_ordinals.push_back(<int64_t>zone_ordinal)
+
+    @property
+    def row_group_counts(self):
+        """``(total, pruned)`` after the scan has run, or None before it has.
+
+        Read only once the driver is finished — the claim builder writes both
+        inside its ``call_once``, and the driver's completion is what orders that
+        write before this read."""
+        if self.row_groups_total < 0:
+            return None
+        return (int(self.row_groups_total), int(self.row_groups_pruned))
 
 
 cdef class SkeneLatmatScanPlan:
@@ -2062,10 +2136,24 @@ cdef class SkeneLatmatScanPlan:
     # pred_col_to_p1[k] = position in p1_column_names of the predicate's k-th column,
     # in the order the Pass1PredCtx's col_idx expects.
     cdef cppvector[int] pred_col_to_p1
+    # ROW-GROUP zone map, same shape and same source as SkeneScanPlan's: a
+    # CONJUNCTION of (physical column name, op, ordinal) terms. Pass 1 sweeps every
+    # row group, so a row group excluded here is one pass 1 never opens — and pass 2
+    # only ever revisits row groups pass 1 kept, so pruning at claim time covers
+    # both passes with one decision.
+    cdef cppvector[string] zone_columns
+    cdef cppvector[int] zone_ops
+    cdef cppvector[int64_t] zone_ordinals
+    # Written once by the shared claim builder; see SkeneScanPlan for the ordering
+    # argument and why -1 rather than 0 is the "never ran" marker.
+    cdef int64_t row_groups_total
+    cdef int64_t row_groups_pruned
+    cdef public object scan_identity
 
     def __init__(self, list files, list p1_column_names, list p1_column_types,
                  list p1_retag_units, list out_column_names, list out_identities,
-                 list out_column_types, list out_retag_units, list pred_col_to_p1):
+                 list out_column_types, list out_retag_units, list pred_col_to_p1,
+                 list zone_terms=None):
         if not (len(p1_column_names) == len(p1_column_types) == len(p1_retag_units)):
             raise ValueError(
                 "SkeneLatmatScanPlan: p1_column_names/p1_column_types/p1_retag_units "
@@ -2096,6 +2184,24 @@ cdef class SkeneLatmatScanPlan:
             self.out_retag_units.push_back(<int>retag_unit)
         for position in pred_col_to_p1:
             self.pred_col_to_p1.push_back(<int>position)
+        self.row_groups_total = -1
+        self.row_groups_pruned = -1
+        self.scan_identity = None
+        for zone_term in zone_terms or []:
+            zone_name, zone_op, zone_ordinal = zone_term
+            self.zone_columns.push_back(
+                <string>(zone_name.encode("utf-8") if isinstance(zone_name, str) else zone_name))
+            self.zone_ops.push_back(<int>zone_op)
+            self.zone_ordinals.push_back(<int64_t>zone_ordinal)
+
+    @property
+    def row_group_counts(self):
+        """``(total, pruned)`` after the scan has run, or None before it has —
+        the same contract as SkeneScanPlan.row_group_counts, read by the same
+        post-run fold."""
+        if self.row_groups_total < 0:
+            return None
+        return (int(self.row_groups_total), int(self.row_groups_pruned))
 
 
 cdef void _fill_payload_types(list types, object logical, object element,
@@ -2245,16 +2351,55 @@ cdef class NativePlan:
         self._e.set_scan_source(p, <void*><PyObject*>scan, _scan_pull_trampoline,
                                 serialize_pull)
 
-    def set_native_skene_scan_source(self, size_t p, SkeneScanPlan splan):
+    def set_native_skene_scan_source(self, size_t p, SkeneScanPlan splan,
+                                     CompiledBytecode filter_bc=None,
+                                     list read_layout=None):
         """Source = the fully-native skene scan (NativeSkeneScanSource): workers
-        claim files from an atomic counter and decode them independently — no
+        claim row groups from an atomic counter and decode them independently — no
         GIL trampoline, no compile-time materialization, memory O(morsels in
         flight) rather than O(table). The Source borrows every vector from
-        ``splan``; this plan holds it alive for the driver's lifetime."""
+        ``splan``; this plan holds it alive for the driver's lifetime.
+
+        ``filter_bc`` is the PUSHED predicate (architect ruling 2026-08-21 — skene
+        accepts predicate pushdown), resolved here against ``read_layout``: the
+        read set's identities, parallel to ``splan.column_names``. It is the same
+        program, run through the same span, that ``add_expr_filter`` would have
+        built for the Filter node the pushdown strategy consumed — the difference
+        is only WHERE it runs, which is now the decode worker. Gated identically
+        (``bytecode_is_c_native_predicate``), so a predicate admissible as a Filter
+        is admissible here and there is no shape that pushes but cannot run.
+
+        ``splan`` also carries the ROW-GROUP zone map, and the Source writes its
+        run-time row-group counts back into ``splan`` for telemetry — the plan is
+        held here for the driver's lifetime, which is what makes those two raw
+        int64 pointers safe."""
+        cdef cppvector[int] col_idx
+        cdef cppvector[void*] lit_dv
         self.skene_scan_plans.append(splan)
-        self._e.set_native_skene_scan_source(p, &splan.files, &splan.column_names,
-                                             &splan.out_identities, &splan.column_types,
-                                             &splan.retag_units)
+        if filter_bc is None:
+            self._e.set_native_skene_scan_source(
+                p, &splan.files, &splan.column_names, &splan.out_identities,
+                &splan.column_types, &splan.retag_units, &splan.emit_indices,
+                NULL, 0, col_idx, lit_dv, _expr_filter_tramp,
+                &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
+                &splan.row_groups_total, &splan.row_groups_pruned)
+            return
+        if not bytecode_is_c_native_predicate(filter_bc):
+            raise ValueError("set_native_skene_scan_source requires a c-native "
+                             "bool-final pushed predicate — the compiler must "
+                             "reject earlier")
+        if read_layout is None:
+            raise ValueError("set_native_skene_scan_source: a pushed predicate "
+                             "needs the read-set layout to resolve against")
+        _resolve_bc_for_layout(filter_bc, read_layout, col_idx, lit_dv)
+        self.held.append(filter_bc)
+        self._e.set_native_skene_scan_source(
+            p, &splan.files, &splan.column_names, &splan.out_identities,
+            &splan.column_types, &splan.retag_units, &splan.emit_indices,
+            <void*>filter_bc.instrs, <int>filter_bc.count, col_idx, lit_dv,
+            _expr_filter_tramp,
+            &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
+            &splan.row_groups_total, &splan.row_groups_pruned)
 
     def set_skene_latmat_scan_source(self, size_t p, SkeneLatmatScanPlan splan,
                                      size_t pred_fn, size_t pred_ctx,
@@ -2277,7 +2422,9 @@ cdef class NativePlan:
             &splan.p1_retag_units, &splan.out_column_names, &splan.out_identities,
             &splan.out_column_types, &splan.out_retag_units,
             <void*>pred_fn, <void*>pred_ctx, &splan.pred_col_to_p1,
-            sort_p1_index, sort_ascending, topn_limit)
+            sort_p1_index, sort_ascending, topn_limit,
+            &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
+            &splan.row_groups_total, &splan.row_groups_pruned)
 
     def set_native_scan_source(self, size_t p, NativeScanPlan splan, object row_limit=None):
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers
@@ -2378,6 +2525,25 @@ cdef class NativePlan:
 
     def set_buffer_source(self, size_t p, size_t buf):
         self._e.set_buffer_source(p, buf)
+
+    def set_scalar_guard_source(self, size_t p, size_t buf, list names,
+                                list types, list logical=None, list element=None):
+        """Scalar-subquery cardinality guard over finalized buffer ``buf`` (see
+        native_scalar_guard.hpp): >1 row raises SQL's cardinality violation as a
+        user-facing DataError, 1 row passes through, 0 rows emits ONE all-NULL
+        row. ``names`` are the leg's column identities; ``types``/``logical``/
+        ``element`` its plan-known column types — same plumbing (and reason) as
+        :meth:`set_unmatched_build_source`: the NULL row needs a typed schema
+        precisely when the subquery streamed nothing."""
+        cdef cppvector[string] nms
+        cdef cppvector[DrakenType] ts
+        cdef cppvector[int] lk, lu, lp, lsc, ld
+        cdef cppvector[cppvector[int]] ec
+        for n in names:
+            nms.push_back(<string>(n if isinstance(n, bytes)
+                                   else (<str>n).encode("utf-8")))
+        _fill_payload_types(types, logical, element, ts, lk, lu, lp, lsc, ld, ec)
+        self._e.set_scalar_guard_source(p, buf, nms, ts, lk, lu, lp, lsc, ld, ec)
 
     def add_select(self, size_t p, list indices, list names):
         cdef cppvector[size_t] idx
@@ -3136,6 +3302,14 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
         exc = (<BasePlanNode>scan_obj)._take_exc()
         if exc is not None:
             return exc
+    # Code 2 (kErrCodeDataError, native_scalar_guard.hpp) marks a USER-FACING data
+    # error: the native message is the complete, user-presentable text (e.g. the
+    # SQL-standard "more than one row returned by a subquery used as an
+    # expression"), so it is raised verbatim as DataError — no engine framing.
+    # Code 1 remains the internal-fault channel and keeps the bracketed code.
+    if errslot.code == 2:
+        from opteryx.exceptions import DataError
+        return DataError(errslot.message() or "unknown data error")
     return RuntimeError(
         "[%d]: %s" % (errslot.code, errslot.message() or "unknown")
     )
@@ -3408,6 +3582,7 @@ include "read/read.pyx"
 
 include "asof_join/asof_join.pyx"
 include "cross_join/cross_join.pyx"
+include "cte_ref/cte_ref.pyx"
 include "csv_read/csv_read.pyx"
 include "distinct/distinct.pyx"
 include "hashed_inner_join/hashed_inner_join.pyx"
@@ -3420,6 +3595,7 @@ include "heap_sort/heap_sort.pyx"
 include "jsonl_read/jsonl_read.pyx"
 include "skene_read/skene_read.pyx"
 include "limit/limit.pyx"
+include "scalar_guard/scalar_guard.pyx"
 include "window/window_node.pyx"
 include "nested_loop_join/nested_loop_join.pyx"
 include "null_reader/null_reader.pyx"

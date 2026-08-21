@@ -92,7 +92,7 @@ def test_no_reducer_without_a_candidate_join():
     from opteryx.planner.logical_planner import LogicalPlan
     from opteryx.planner.optimizer.strategies.semi_join_reducer import SemiJoinReducerStrategy
 
-    strategy = SemiJoinReducerStrategy(QueryTelemetry())
+    strategy = SemiJoinReducerStrategy(QueryTelemetry.detached())
     assert strategy.should_i_run(LogicalPlan()) is False
 
 

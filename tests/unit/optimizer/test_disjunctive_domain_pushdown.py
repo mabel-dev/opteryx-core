@@ -186,6 +186,34 @@ def test_derived_predicates_preserve_results():
     assert on_result > 0
 
 
+def test_derived_temporal_predicate_is_fully_bound():
+    """A derived predicate's synthesized nodes must carry `schema_column`, not
+    just `.type`.
+
+    The bytecode compiler reads operand types exclusively off
+    `schema_column.column_type`, so a literal stamped with only `.type` is a
+    half-bound node. On a TEMPORAL column that is not a slow path but a hard
+    failure: `_validate_temporal_at_bind` saw `right_type is None`, decided the
+    literal was un-cast, and refused the whole query with "literals must be
+    explicitly cast to temporal types" — for a query whose literals were all
+    explicitly cast. Any temporal column reachable by this strategy reproduces
+    it; `Lauched_at` is a stored TIMESTAMP64.
+    """
+    sql = (
+        "SELECT COUNT(*) AS c FROM testdata.missions "
+        "WHERE Lauched_at = CAST('2020-08-07 05:12:00' AS TIMESTAMP) "
+        "   OR Lauched_at = CAST('1957-10-04 19:28:00' AS TIMESTAMP)"
+    )
+    assert _count(sql) == 2
+
+    plan, _ = _optimized_plan(sql)
+    for predicates in (_scan_predicates(plan, "missions") or [],):
+        for predicate in predicates:
+            assert predicate.schema_column is not None, predicate
+            assert predicate.right.schema_column is not None, predicate
+            assert predicate.right.schema_column.column_type is not None, predicate
+
+
 def test_feature_flag_disables_strategy():
     from opteryx import config
 

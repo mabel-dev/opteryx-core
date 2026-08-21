@@ -559,7 +559,23 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
     # still typeless, leaving the arithmetic with no result type and the engine
     # unable to select a kernel. Decorrelation later swaps this node for a
     # reference to the very same column, so the types agree by construction.
-    top = bound_subplan[bound_subplan.get_exit_points()[0]]
+    # The column-declaring node is not always the head: LIMIT / ORDER BY /
+    # DISTINCT bind as pass-through steps carrying no columns of their own, so
+    # `(SELECT x FROM t LIMIT 1)` heads with a column-less Limit node. Descend
+    # through single-input, column-less steps to the node that declares the
+    # output (the Project). Publishing nothing here is not a safe fallback —
+    # the SELECT-list binder requires every top-level column to carry a
+    # schema_column, so a silently unpublished one crashed project.py with an
+    # AttributeError instead of binding the LIMIT/DISTINCT shapes the runtime
+    # cardinality guard exists to admit.
+    top_nid = bound_subplan.get_exit_points()[0]
+    top = bound_subplan[top_nid]
+    while not top.columns:
+        feeders = bound_subplan.ingoing_edges(top_nid)
+        if len(feeders) != 1:
+            break
+        top_nid = feeders[0][0]
+        top = bound_subplan[top_nid]
     columns = list(top.columns or [])
     if len(columns) == 1 and columns[0].schema_column is not None:
         node.schema_column = columns[0].schema_column
@@ -1355,9 +1371,16 @@ def inner_binder(
                 column_type=_ct,
                 aliases=aliases,
             )
-            schema_column.identity = (
-                column_name.encode("utf-8") if isinstance(column_name, str) else column_name
-            )
+            # NO identity override here. Identity is the engine's per-column handle
+            # and MUST be unique; FunctionColumn.__post_init__ mints `$derived_<rand>`
+            # for exactly that reason. This arm used to stamp the RENDERED EXPRESSION
+            # TEXT over that minted id, so every CAST that rendered the same string
+            # became the SAME column — across scopes, across relations, across join
+            # legs. Two derived tables each computing `CAST(ts AS TIMESTAMP)` over
+            # their own `ts` both got identity `ts::TIMESTAMP`, and the join then
+            # emitted one leg's values for both columns: a SILENT wrong answer.
+            # Expression REUSE is matched by NAME (the `schema.find_column(column_name)`
+            # lookup above), never by identity, so minting is safe here.
             schemas["$derived"].columns.append(schema_column)
             node.derived_from = []
             node.schema_column = schema_column

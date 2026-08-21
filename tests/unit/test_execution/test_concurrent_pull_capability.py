@@ -35,7 +35,7 @@ def _plan(sql):
         visibility_filters=None,
         execution_context=opteryx.session().context,
         query_id="t",
-        telemetry=QueryTelemetry(),
+        telemetry=QueryTelemetry.detached(),
     )
 
 

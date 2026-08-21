@@ -63,7 +63,7 @@ def _pred(condition):
 
 
 _STATS = RelationStatistics(
-    row_count=1000,
+    row_count_estimate=1000,
     columns={
         # low-cardinality column: Eq matches ~1/2 of rows
         _LOW: ColumnStatistics(column_name="low", data_type="INTEGER", distinct_count=2),
@@ -107,7 +107,7 @@ def test_order_prefers_more_selective_predicate_with_statistics():
     # (far more selective) must be ordered first.
     low = _pred(_cmp("Eq", _LOW, 1, "low"))
     high = _pred(_cmp("Eq", _HIGH, 1, "high"))
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
 
     # input order: [low, high] -> statistics should reorder to [high, low]
     ordered = _order_simple_predicates([low, high], telemetry, _STATS)
@@ -120,7 +120,7 @@ def test_order_without_statistics_keeps_constant_tie_order():
     # ordering must not spuriously reorder a genuine tie.
     a = _pred(_cmp("Eq", _LOW, 1, "low"))
     b = _pred(_cmp("Eq", _HIGH, 1, "high"))
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     ordered = _order_simple_predicates([a, b], telemetry, None)
     assert ordered == [a, b]
 
@@ -171,14 +171,14 @@ def _sw_stats(col_min="a", col_max="m", identity=_SW_IDENTITY):
     lo, hi = VARCHAR.ordinalize(col_min), VARCHAR.ordinalize(col_max)
     dgram = load_counts_i64(array.array("q", [0] * 63 + [1000]), float(lo), float(hi))
     col = ColumnStatistics(column_name="col", data_type="VARCHAR", histogram=dgram)
-    return RelationStatistics(row_count=1000, columns={identity: col})
+    return RelationStatistics(row_count_estimate=1000, columns={identity: col})
 
 
 def test_selective_starts_with_moves_ahead_of_cheaper_function_with_statistics():
     stats = _sw_stats(col_min="a", col_max="m")
     cheap = _cheap_no_model_func_pred()  # LENGTH -- cheap, no model, selectivity 1.0
     sw = _starts_with_pred(b"zzz")  # entirely outside [a, m] -> selectivity ~0
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
 
     ordered = _order_complex_predicates([cheap, sw], telemetry, stats)
     assert ordered[0] is sw, "highly selective STARTS_WITH should run first despite higher cost"
@@ -191,7 +191,7 @@ def test_complex_ordering_without_statistics_keeps_cost_only_order():
     # _STARTS_WITH), unchanged from before this feature existed.
     cheap = _cheap_no_model_func_pred()
     sw = _starts_with_pred(b"zzz")
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
 
     ordered = _order_complex_predicates([cheap, sw], telemetry, None)
     assert ordered[0] is cheap
@@ -210,7 +210,7 @@ def test_complex_ordering_no_model_predicates_keep_cost_order_even_with_statisti
         parameters=[Node(NodeType.IDENTIFIER, source_column="col3", schema_column=Node(NodeType.IDENTIFIER, identity=_HIGH))],
     )
     b = _pred(b_condition)
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
 
     ordered = _order_complex_predicates([a, b], telemetry, stats)
     # LENGTH's catalog cost is lower than UPPER's -- cost order preserved.

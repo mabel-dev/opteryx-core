@@ -122,6 +122,7 @@ cdef extern from "metadata.hpp":
         string max_bytes
         int64_t null_count
         int64_t total_uncompressed_size
+        int64_t distinct_count
         bint has_min
         bint has_max
         bint null_count_complete

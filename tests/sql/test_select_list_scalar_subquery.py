@@ -61,6 +61,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", ".."))
 import pytest
 
 import opteryx
+from opteryx.exceptions import DataError
 from opteryx.exceptions import UnsupportedSyntaxError
 
 _SESSION = opteryx.session()
@@ -120,12 +121,31 @@ def test_select_list_scalar_subquery_still_refuses_correlation():
         )
 
 
-def test_select_list_scalar_subquery_still_refuses_unprovable_row_count():
-    with pytest.raises(UnsupportedSyntaxError, match="must return exactly one row"):
+def test_select_list_scalar_subquery_enforces_cardinality_at_runtime():
+    # Statically unprovable single-row shapes now RUN behind a runtime
+    # ScalarSubqueryGuard rather than refusing at plan time; a subquery that
+    # genuinely returns several rows raises SQL's cardinality violation.
+    with pytest.raises(DataError, match="more than one row returned by a subquery"):
         _rows(
             "SELECT (SELECT number_of_moons FROM $planets) AS x FROM $planets WHERE id = 1",
             ["x"],
         )
+
+    # A data-fact single row is admitted and yields the value ...
+    rows = _rows(
+        "SELECT (SELECT number_of_moons FROM $planets WHERE name = 'Saturn') AS x "
+        "FROM $planets WHERE id = 1",
+        ["x"],
+    )
+    assert rows == [(82,)]
+
+    # ... and a zero-row subquery is NULL per outer row, never an emptied result.
+    rows = _rows(
+        "SELECT (SELECT number_of_moons FROM $planets WHERE name = 'Krypton' LIMIT 1) AS x "
+        "FROM $planets WHERE id = 1",
+        ["x"],
+    )
+    assert rows == [(None,)]
 
 
 def test_select_list_still_refuses_exists_and_in_subqueries():

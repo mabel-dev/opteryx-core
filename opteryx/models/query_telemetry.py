@@ -153,11 +153,48 @@ class _QueryTelemetry:
 
 
 class QueryTelemetry(_QueryTelemetry):
+    """Per-query readings, shared BY QUERY ID.
+
+    This is a registry, not a constructor: two calls with the same `query_id`
+    return the SAME object, which is how an operator deep in the engine records
+    onto the readings the Session will later hand back. It follows that a caller
+    who does not supply a query_id is asking for "whatever instance the last
+    caller made" — every such call in a process aliases to one shared object and
+    its counters accumulate across unrelated queries.
+
+    That produced order-dependent green in the test suite: a test asserting a
+    reading is ABSENT passed only while it happened to run before the tests that
+    populate the shared instance, and failed — blaming the product — as soon as
+    the order changed. A telemetry object with no owner is a bug at the call
+    site, so it is refused here rather than silently aliased.
+
+    Need a readings sink that belongs to nobody (constructing a strategy in a
+    unit test, a throwaway during expression building)? Ask for one explicitly
+    with `QueryTelemetry.detached()` — it is never registered, so nothing else
+    can write to it and it cannot leak into another query's numbers.
+    """
+
     slots = "_instances"
 
     _instances: dict[str, _QueryTelemetry] = {}
 
+    @classmethod
+    def detached(cls) -> _QueryTelemetry:
+        """A readings sink that is NOT registered against any query id."""
+        return _QueryTelemetry()
+
     def __new__(cls, query_id=""):
+        if not query_id:
+            raise InvalidInternalStateError(
+                compose(
+                    "QueryTelemetry requires a query_id — it is a registry keyed by"
+                    " that id, and an empty id aliases every caller onto one shared,"
+                    " accumulating instance.",
+                    md_cause("no query_id was supplied"),
+                    f"Pass the query's id, or ask for an unregistered sink with"
+                    f" {md_code('QueryTelemetry.detached()')}",
+                )
+            )
         if cls._instances.get(query_id) is None:
             cls._instances[query_id] = _QueryTelemetry()
             if len(cls._instances.keys()) > 16:

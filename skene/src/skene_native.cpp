@@ -1835,6 +1835,19 @@ struct __pyx_opt_args_6draken_7morsels_6morsel_6Morsel__cxx_column {
   PyObject *name;
 };
 
+/* "skene/src/skene_native.pyx":271
+ * 
+ * # skene format.h StatFlag bits this emitter reads by name rather than by number.
+ * cdef enum:             # <<<<<<<<<<<<<<
+ *     _K_STAT_NDV = 0x40        # kStatNdv        `ndv` holds a distinct count
+ *     _K_STAT_NDV_EXACT = 0x80  # kStatNdvExact   ...and it is a BOUND, not a sketch
+*/
+enum  {
+  __pyx_e_5skene_12skene_native__K_STAT_NDV = 0x40,
+  __pyx_e_5skene_12skene_native__K_STAT_NDV_EXACT = 0x80,
+  __pyx_e_5skene_12skene_native__K_STAT_SKETCH = 0x100
+};
+
 /* "draken/vectors/vector.pxd":22
  *     return (current ^ value) * MIX_HASH_CONSTANT + 1
  * 
@@ -1868,7 +1881,7 @@ struct __pyx_obj_6draken_7morsels_6morsel_Morsel {
 };
 
 
-/* "skene/src/skene_native.pyx":499
+/* "skene/src/skene_native.pyx":531
  * 
  * 
  * cdef class SkeneWriter:             # <<<<<<<<<<<<<<
@@ -2007,7 +2020,7 @@ struct __pyx_vtabstruct_6draken_7morsels_6morsel_Morsel {
 static struct __pyx_vtabstruct_6draken_7morsels_6morsel_Morsel *__pyx_vtabptr_6draken_7morsels_6morsel_Morsel;
 
 
-/* "skene/src/skene_native.pyx":499
+/* "skene/src/skene_native.pyx":531
  * 
  * 
  * cdef class SkeneWriter:             # <<<<<<<<<<<<<<
@@ -3315,10 +3328,10 @@ static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int16_t(int16_t value);
 static CYTHON_INLINE size_t __Pyx_PyLong_As_size_t(PyObject *);
 
 /* CIntToPy.proto */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int64_t(int64_t value);
+static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint64_t(uint64_t value);
 
 /* CIntToPy.proto */
-static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint64_t(uint64_t value);
+static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int64_t(int64_t value);
 
 /* CIntToPy.proto */
 static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint16_t(uint16_t value);
@@ -3487,7 +3500,7 @@ static int __pyx_memoryview_thread_locks_used;
 static PyThread_type_lock __pyx_memoryview_thread_locks[8];
 static int __pyx_f_5skene_12skene_native__check(skene::Status const &); /*proto*/
 static PyObject *__pyx_f_5skene_12skene_native__schema_to_dict(skene::ColumnSchema const &); /*proto*/
-static PyObject *__pyx_f_5skene_12skene_native__statistics_to_dict(skene::ColumnStatistics const &); /*proto*/
+static PyObject *__pyx_f_5skene_12skene_native__statistics_to_dict(skene::ColumnStatistics const &, std::vector<uint64_t>  const &); /*proto*/
 static PyObject *__pyx_f_5skene_12skene_native__row_group_to_dict(skene::RowGroupSummary const &); /*proto*/
 static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMetadata const &); /*proto*/
 static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions *, PyObject *, PyObject *, PyObject *, PyObject *, PyObject *, PyObject *, PyObject *, PyObject *); /*proto*/
@@ -3651,7 +3664,7 @@ typedef struct {
   PyObject *__pyx_slice[1];
   PyObject *__pyx_tuple[4];
   PyObject *__pyx_codeobj_tab[13];
-  PyObject *__pyx_string_tab[235];
+  PyObject *__pyx_string_tab[238];
   PyObject *__pyx_number_tab[7];
 /* #### Code section: module_state_contents ### */
 /* CommonTypesMetaclass.module_state_decls */
@@ -3846,88 +3859,91 @@ static __pyx_mstatetype * const __pyx_mstate_global = &__pyx_mstate_global_stati
 #define __pyx_n_u_name_2 __pyx_string_tab[150]
 #define __pyx_n_u_nbytes __pyx_string_tab[151]
 #define __pyx_n_u_ndim __pyx_string_tab[152]
-#define __pyx_n_u_new __pyx_string_tab[153]
-#define __pyx_n_u_none __pyx_string_tab[154]
-#define __pyx_n_u_null_count __pyx_string_tab[155]
-#define __pyx_n_u_obj __pyx_string_tab[156]
-#define __pyx_n_u_offset __pyx_string_tab[157]
-#define __pyx_n_u_offset_minutes __pyx_string_tab[158]
-#define __pyx_n_u_options __pyx_string_tab[159]
-#define __pyx_n_u_out __pyx_string_tab[160]
-#define __pyx_n_u_pack __pyx_string_tab[161]
-#define __pyx_n_u_path __pyx_string_tab[162]
-#define __pyx_n_u_pop __pyx_string_tab[163]
-#define __pyx_n_u_precision __pyx_string_tab[164]
-#define __pyx_n_u_prepare __pyx_string_tab[165]
-#define __pyx_n_u_probe_version __pyx_string_tab[166]
-#define __pyx_n_u_pyx_checksum __pyx_string_tab[167]
-#define __pyx_n_u_pyx_state __pyx_string_tab[168]
-#define __pyx_n_u_pyx_type __pyx_string_tab[169]
-#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[170]
-#define __pyx_n_u_pyx_vtable __pyx_string_tab[171]
-#define __pyx_n_u_qualname __pyx_string_tab[172]
-#define __pyx_n_u_read_acceleration __pyx_string_tab[173]
-#define __pyx_n_u_read_metadata __pyx_string_tab[174]
-#define __pyx_n_u_read_morsel __pyx_string_tab[175]
-#define __pyx_n_u_read_row_group_metadata __pyx_string_tab[176]
-#define __pyx_n_u_reduce __pyx_string_tab[177]
-#define __pyx_n_u_reduce_cython __pyx_string_tab[178]
-#define __pyx_n_u_reduce_ex __pyx_string_tab[179]
-#define __pyx_n_u_register __pyx_string_tab[180]
-#define __pyx_n_u_row_count __pyx_string_tab[181]
-#define __pyx_n_u_row_group __pyx_string_tab[182]
-#define __pyx_n_u_row_groups __pyx_string_tab[183]
-#define __pyx_n_u_scale __pyx_string_tab[184]
-#define __pyx_n_u_selection_kind __pyx_string_tab[185]
-#define __pyx_n_u_self __pyx_string_tab[186]
-#define __pyx_n_u_set_name __pyx_string_tab[187]
-#define __pyx_n_u_setdefault __pyx_string_tab[188]
-#define __pyx_n_u_setstate __pyx_string_tab[189]
-#define __pyx_n_u_setstate_cython __pyx_string_tab[190]
-#define __pyx_n_u_shape __pyx_string_tab[191]
-#define __pyx_n_u_size __pyx_string_tab[192]
-#define __pyx_n_u_skene_skene_native __pyx_string_tab[193]
-#define __pyx_n_u_sp __pyx_string_tab[194]
-#define __pyx_n_u_st __pyx_string_tab[195]
-#define __pyx_n_u_start __pyx_string_tab[196]
-#define __pyx_n_u_statistics __pyx_string_tab[197]
-#define __pyx_n_u_step __pyx_string_tab[198]
-#define __pyx_n_u_stop __pyx_string_tab[199]
-#define __pyx_n_u_struct __pyx_string_tab[200]
-#define __pyx_n_u_sum __pyx_string_tab[201]
-#define __pyx_n_u_super __pyx_string_tab[202]
-#define __pyx_n_u_tail __pyx_string_tab[203]
-#define __pyx_n_u_target __pyx_string_tab[204]
-#define __pyx_n_u_test __pyx_string_tab[205]
-#define __pyx_n_u_type __pyx_string_tab[206]
-#define __pyx_n_u_unit __pyx_string_tab[207]
-#define __pyx_n_u_unpack __pyx_string_tab[208]
-#define __pyx_n_u_update __pyx_string_tab[209]
-#define __pyx_n_u_value_order __pyx_string_tab[210]
-#define __pyx_n_u_values __pyx_string_tab[211]
-#define __pyx_n_u_vector_flags __pyx_string_tab[212]
-#define __pyx_n_u_version __pyx_string_tab[213]
-#define __pyx_n_u_write_morsel __pyx_string_tab[214]
-#define __pyx_n_u_write_to __pyx_string_tab[215]
-#define __pyx_n_u_writer_tag __pyx_string_tab[216]
-#define __pyx_n_u_x __pyx_string_tab[217]
-#define __pyx_n_u_zone_map __pyx_string_tab[218]
-#define __pyx_n_u_zstd __pyx_string_tab[219]
-#define __pyx_n_u_zstd_level __pyx_string_tab[220]
-#define __pyx_kp_b_iso88591_A_HA_Ry_1G1A __pyx_string_tab[221]
-#define __pyx_kp_b_iso88591_A_M_E_a_5T_e1 __pyx_string_tab[222]
-#define __pyx_kp_b_iso88591_A_Qa_X_1F_aq __pyx_string_tab[223]
-#define __pyx_kp_b_iso88591_A_T_M_Qhd_aq_xt5_Q __pyx_string_tab[224]
-#define __pyx_kp_b_iso88591_A_q_Q_7q_q_5WA_B_A_M_1F_y_1_AWC __pyx_string_tab[225]
-#define __pyx_kp_b_iso88591_A_t6_S_j_a_at1D_F_4q_1_1 __pyx_string_tab[226]
-#define __pyx_kp_b_iso88591_K_t6_S_j_a_xwa_HA_8_Qd_Qd_fAQ_i __pyx_string_tab[227]
-#define __pyx_kp_b_iso88591_N_q_5WA_fF_Q_1M_at84vQa_Qa_1_AW __pyx_string_tab[228]
-#define __pyx_kp_b_iso88591_Q __pyx_string_tab[229]
-#define __pyx_kp_b_iso88591_q_t6_S_j_a_at1D_F_1_Qhaq_1_81 __pyx_string_tab[230]
-#define __pyx_kp_b_iso88591_t6_S_j_a__A_4q_HD_at1A_1_4q_T_a __pyx_string_tab[231]
-#define __pyx_kp_b_iso88591_t6_S_j_a_a_AT_hd_PQQR_2_1_1_T_1 __pyx_string_tab[232]
-#define __pyx_kp_b_std_shared_ptr_CxxMorsel_struct __pyx_string_tab[233]
-#define __pyx_n_b_O __pyx_string_tab[234]
+#define __pyx_n_u_ndv __pyx_string_tab[153]
+#define __pyx_n_u_ndv_exact __pyx_string_tab[154]
+#define __pyx_n_u_new __pyx_string_tab[155]
+#define __pyx_n_u_none __pyx_string_tab[156]
+#define __pyx_n_u_null_count __pyx_string_tab[157]
+#define __pyx_n_u_obj __pyx_string_tab[158]
+#define __pyx_n_u_offset __pyx_string_tab[159]
+#define __pyx_n_u_offset_minutes __pyx_string_tab[160]
+#define __pyx_n_u_options __pyx_string_tab[161]
+#define __pyx_n_u_out __pyx_string_tab[162]
+#define __pyx_n_u_pack __pyx_string_tab[163]
+#define __pyx_n_u_path __pyx_string_tab[164]
+#define __pyx_n_u_pop __pyx_string_tab[165]
+#define __pyx_n_u_precision __pyx_string_tab[166]
+#define __pyx_n_u_prepare __pyx_string_tab[167]
+#define __pyx_n_u_probe_version __pyx_string_tab[168]
+#define __pyx_n_u_pyx_checksum __pyx_string_tab[169]
+#define __pyx_n_u_pyx_state __pyx_string_tab[170]
+#define __pyx_n_u_pyx_type __pyx_string_tab[171]
+#define __pyx_n_u_pyx_unpickle_Enum __pyx_string_tab[172]
+#define __pyx_n_u_pyx_vtable __pyx_string_tab[173]
+#define __pyx_n_u_qualname __pyx_string_tab[174]
+#define __pyx_n_u_read_acceleration __pyx_string_tab[175]
+#define __pyx_n_u_read_metadata __pyx_string_tab[176]
+#define __pyx_n_u_read_morsel __pyx_string_tab[177]
+#define __pyx_n_u_read_row_group_metadata __pyx_string_tab[178]
+#define __pyx_n_u_reduce __pyx_string_tab[179]
+#define __pyx_n_u_reduce_cython __pyx_string_tab[180]
+#define __pyx_n_u_reduce_ex __pyx_string_tab[181]
+#define __pyx_n_u_register __pyx_string_tab[182]
+#define __pyx_n_u_row_count __pyx_string_tab[183]
+#define __pyx_n_u_row_group __pyx_string_tab[184]
+#define __pyx_n_u_row_groups __pyx_string_tab[185]
+#define __pyx_n_u_scale __pyx_string_tab[186]
+#define __pyx_n_u_selection_kind __pyx_string_tab[187]
+#define __pyx_n_u_self __pyx_string_tab[188]
+#define __pyx_n_u_set_name __pyx_string_tab[189]
+#define __pyx_n_u_setdefault __pyx_string_tab[190]
+#define __pyx_n_u_setstate __pyx_string_tab[191]
+#define __pyx_n_u_setstate_cython __pyx_string_tab[192]
+#define __pyx_n_u_shape __pyx_string_tab[193]
+#define __pyx_n_u_size __pyx_string_tab[194]
+#define __pyx_n_u_skene_skene_native __pyx_string_tab[195]
+#define __pyx_n_u_sketch __pyx_string_tab[196]
+#define __pyx_n_u_sp __pyx_string_tab[197]
+#define __pyx_n_u_st __pyx_string_tab[198]
+#define __pyx_n_u_start __pyx_string_tab[199]
+#define __pyx_n_u_statistics __pyx_string_tab[200]
+#define __pyx_n_u_step __pyx_string_tab[201]
+#define __pyx_n_u_stop __pyx_string_tab[202]
+#define __pyx_n_u_struct __pyx_string_tab[203]
+#define __pyx_n_u_sum __pyx_string_tab[204]
+#define __pyx_n_u_super __pyx_string_tab[205]
+#define __pyx_n_u_tail __pyx_string_tab[206]
+#define __pyx_n_u_target __pyx_string_tab[207]
+#define __pyx_n_u_test __pyx_string_tab[208]
+#define __pyx_n_u_type __pyx_string_tab[209]
+#define __pyx_n_u_unit __pyx_string_tab[210]
+#define __pyx_n_u_unpack __pyx_string_tab[211]
+#define __pyx_n_u_update __pyx_string_tab[212]
+#define __pyx_n_u_value_order __pyx_string_tab[213]
+#define __pyx_n_u_values __pyx_string_tab[214]
+#define __pyx_n_u_vector_flags __pyx_string_tab[215]
+#define __pyx_n_u_version __pyx_string_tab[216]
+#define __pyx_n_u_write_morsel __pyx_string_tab[217]
+#define __pyx_n_u_write_to __pyx_string_tab[218]
+#define __pyx_n_u_writer_tag __pyx_string_tab[219]
+#define __pyx_n_u_x __pyx_string_tab[220]
+#define __pyx_n_u_zone_map __pyx_string_tab[221]
+#define __pyx_n_u_zstd __pyx_string_tab[222]
+#define __pyx_n_u_zstd_level __pyx_string_tab[223]
+#define __pyx_kp_b_iso88591_A_HA_Ry_1G1A __pyx_string_tab[224]
+#define __pyx_kp_b_iso88591_A_M_E_a_5T_e1 __pyx_string_tab[225]
+#define __pyx_kp_b_iso88591_A_Qa_X_1F_aq __pyx_string_tab[226]
+#define __pyx_kp_b_iso88591_A_T_M_Qhd_aq_xt5_Q __pyx_string_tab[227]
+#define __pyx_kp_b_iso88591_A_q_Q_7q_q_5WA_B_A_M_1F_y_1_AWC __pyx_string_tab[228]
+#define __pyx_kp_b_iso88591_A_t6_S_j_a_at1D_F_4q_1_1 __pyx_string_tab[229]
+#define __pyx_kp_b_iso88591_K_t6_S_j_a_xwa_HA_8_Qd_Qd_fAQ_i __pyx_string_tab[230]
+#define __pyx_kp_b_iso88591_N_q_5WA_fF_Q_1M_at84vQa_Qa_1_AW __pyx_string_tab[231]
+#define __pyx_kp_b_iso88591_Q __pyx_string_tab[232]
+#define __pyx_kp_b_iso88591_q_t6_S_j_a_at1D_F_1_Qhaq_1_81 __pyx_string_tab[233]
+#define __pyx_kp_b_iso88591_t6_S_j_a__A_4q_HD_at1A_1_4q_T_a __pyx_string_tab[234]
+#define __pyx_kp_b_iso88591_t6_S_j_a_a_AT_hd_PQQR_2_1_1_T_1 __pyx_string_tab[235]
+#define __pyx_kp_b_std_shared_ptr_CxxMorsel_struct __pyx_string_tab[236]
+#define __pyx_n_b_O __pyx_string_tab[237]
 #define __pyx_float_0_05 __pyx_number_tab[0]
 #define __pyx_int_0 __pyx_number_tab[1]
 #define __pyx_int_neg_1 __pyx_number_tab[2]
@@ -3965,7 +3981,7 @@ static CYTHON_SMALL_CODE int __pyx_m_clear(PyObject *m) {
   for (int i=0; i<1; ++i) { Py_CLEAR(clear_module_state->__pyx_slice[i]); }
   for (int i=0; i<4; ++i) { Py_CLEAR(clear_module_state->__pyx_tuple[i]); }
   for (int i=0; i<13; ++i) { Py_CLEAR(clear_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<235; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<238; ++i) { Py_CLEAR(clear_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<7; ++i) { Py_CLEAR(clear_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_clear_contents ### */
 /* CommonTypesMetaclass.module_state_clear */
@@ -4005,7 +4021,7 @@ static CYTHON_SMALL_CODE int __pyx_m_traverse(PyObject *m, visitproc visit, void
   for (int i=0; i<1; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_slice[i]); }
   for (int i=0; i<4; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_tuple[i]); }
   for (int i=0; i<13; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_codeobj_tab[i]); }
-  for (int i=0; i<235; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
+  for (int i=0; i<238; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_string_tab[i]); }
   for (int i=0; i<7; ++i) { __Pyx_VISIT_CONST(traverse_module_state->__pyx_number_tab[i]); }
 /* #### Code section: module_state_traverse_contents ### */
 /* CommonTypesMetaclass.module_state_traverse */
@@ -17158,7 +17174,7 @@ static CYTHON_INLINE uint64_t __pyx_f_6draken_7vectors_6vector_mix_hash(uint64_t
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":209
+/* "skene/src/skene_native.pyx":212
  *     """A skene read or write failed. `code` is the Status code name."""
  * 
  *     def __init__(self, code, message):             # <<<<<<<<<<<<<<
@@ -17207,38 +17223,38 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_self,&__pyx_mstate_global->__pyx_n_u_code,&__pyx_mstate_global->__pyx_n_u_message,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 209, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 212, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 209, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 212, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 209, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 212, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 209, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 212, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__init__", 0) < (0)) __PYX_ERR(0, 209, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "__init__", 0) < (0)) __PYX_ERR(0, 212, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 3; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__init__", 1, 3, 3, i); __PYX_ERR(0, 209, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("__init__", 1, 3, 3, i); __PYX_ERR(0, 212, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 3)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 209, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 212, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 209, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 212, __pyx_L3_error)
       values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 209, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 212, __pyx_L3_error)
     }
     __pyx_v_self = values[0];
     __pyx_v_code = values[1];
@@ -17246,7 +17262,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__init__", 1, 3, 3, __pyx_nargs); __PYX_ERR(0, 209, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__init__", 1, 3, 3, __pyx_nargs); __PYX_ERR(0, 212, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -17283,16 +17299,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_10SkeneError___init__(CYTHON_UNU
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__init__", 0);
 
-  /* "skene/src/skene_native.pyx":210
+  /* "skene/src/skene_native.pyx":213
  * 
  *     def __init__(self, code, message):
  *         self.code = code             # <<<<<<<<<<<<<<
  *         super().__init__(f"{code}: {message}")
  * 
 */
-  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_code, __pyx_v_code) < (0)) __PYX_ERR(0, 210, __pyx_L1_error)
+  if (__Pyx_PyObject_SetAttrStr(__pyx_v_self, __pyx_mstate_global->__pyx_n_u_code, __pyx_v_code) < (0)) __PYX_ERR(0, 213, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":211
+  /* "skene/src/skene_native.pyx":214
  *     def __init__(self, code, message):
  *         self.code = code
  *         super().__init__(f"{code}: {message}")             # <<<<<<<<<<<<<<
@@ -17301,7 +17317,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_10SkeneError___init__(CYTHON_UNU
 */
   __pyx_t_4 = NULL;
   __pyx_t_5 = __Pyx_CyFunction_GetClassObj(__pyx_self);
-  if (!__pyx_t_5) { PyErr_SetString(PyExc_RuntimeError, "super(): empty __class__ cell"); __PYX_ERR(0, 211, __pyx_L1_error) }
+  if (!__pyx_t_5) { PyErr_SetString(PyExc_RuntimeError, "super(): empty __class__ cell"); __PYX_ERR(0, 214, __pyx_L1_error) }
   __Pyx_INCREF(__pyx_t_5);
   __pyx_t_6 = 1;
   {
@@ -17309,20 +17325,20 @@ static PyObject *__pyx_pf_5skene_12skene_native_10SkeneError___init__(CYTHON_UNU
     __pyx_t_3 = __Pyx_PyObject_FastCall((PyObject*)__pyx_builtin_super, __pyx_callargs+__pyx_t_6, (3-__pyx_t_6) | (__pyx_t_6*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_4); __pyx_t_4 = 0;
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 211, __pyx_L1_error)
+    if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 214, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
   }
   __pyx_t_2 = __pyx_t_3;
   __Pyx_INCREF(__pyx_t_2);
-  __pyx_t_5 = __Pyx_PyObject_FormatSimple(__pyx_v_code, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 211, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyObject_FormatSimple(__pyx_v_code, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 214, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_4 = __Pyx_PyObject_FormatSimple(__pyx_v_message, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 211, __pyx_L1_error)
+  __pyx_t_4 = __Pyx_PyObject_FormatSimple(__pyx_v_message, __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 214, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_7[0] = __pyx_t_5;
   __pyx_t_7[1] = __pyx_mstate_global->__pyx_kp_u_;
   __pyx_t_7[2] = __pyx_t_4;
   __pyx_t_8 = __Pyx_PyUnicode_Join(__pyx_t_7, 3, __Pyx_PyUnicode_GET_LENGTH(__pyx_t_5) + 2 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_4), 127 | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_5) | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_4));
-  if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 211, __pyx_L1_error)
+  if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 214, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
@@ -17333,12 +17349,12 @@ static PyObject *__pyx_pf_5skene_12skene_native_10SkeneError___init__(CYTHON_UNU
     __Pyx_XDECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 211, __pyx_L1_error)
+    if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 214, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
   }
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-  /* "skene/src/skene_native.pyx":209
+  /* "skene/src/skene_native.pyx":212
  *     """A skene read or write failed. `code` is the Status code name."""
  * 
  *     def __init__(self, code, message):             # <<<<<<<<<<<<<<
@@ -17364,7 +17380,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_10SkeneError___init__(CYTHON_UNU
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":229
+/* "skene/src/skene_native.pyx":232
  * 
  * 
  * cdef int _check(const Status& st) except -1:             # <<<<<<<<<<<<<<
@@ -17391,7 +17407,7 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_check", 0);
 
-  /* "skene/src/skene_native.pyx":230
+  /* "skene/src/skene_native.pyx":233
  * 
  * cdef int _check(const Status& st) except -1:
  *     if st.is_ok():             # <<<<<<<<<<<<<<
@@ -17401,7 +17417,7 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
   __pyx_t_1 = (__pyx_v_st.is_ok() != 0);
   if (__pyx_t_1) {
 
-    /* "skene/src/skene_native.pyx":231
+    /* "skene/src/skene_native.pyx":234
  * cdef int _check(const Status& st) except -1:
  *     if st.is_ok():
  *         return 0             # <<<<<<<<<<<<<<
@@ -17411,7 +17427,7 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
     __pyx_r = 0;
     goto __pyx_L0;
 
-    /* "skene/src/skene_native.pyx":230
+    /* "skene/src/skene_native.pyx":233
  * 
  * cdef int _check(const Status& st) except -1:
  *     if st.is_ok():             # <<<<<<<<<<<<<<
@@ -17420,7 +17436,7 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
 */
   }
 
-  /* "skene/src/skene_native.pyx":232
+  /* "skene/src/skene_native.pyx":235
  *     if st.is_ok():
  *         return 0
  *     raise SkeneError(_CODE_NAMES.get(<int>st.code(), str(<int>st.code())),             # <<<<<<<<<<<<<<
@@ -17428,19 +17444,19 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
  * 
 */
   __pyx_t_3 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_4, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 235, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_t_6 = NULL;
-  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_CODE_NAMES); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __Pyx_GetModuleGlobalName(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_CODE_NAMES); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 235, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_get); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_GetAttrStr(__pyx_t_7, __pyx_mstate_global->__pyx_n_u_get); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 235, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
-  __pyx_t_7 = __Pyx_PyLong_From_int(((int)__pyx_v_st.code())); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_From_int(((int)__pyx_v_st.code())); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 235, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)__pyx_v_st.code())); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)__pyx_v_st.code())); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 235, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  __pyx_t_10 = __Pyx_PyObject_Unicode(__pyx_t_9); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 232, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_PyObject_Unicode(__pyx_t_9); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 235, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
   __pyx_t_11 = 1;
@@ -17462,18 +17478,18 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
     __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
     __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
-    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 232, __pyx_L1_error)
+    if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 235, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_5);
   }
 
-  /* "skene/src/skene_native.pyx":233
+  /* "skene/src/skene_native.pyx":236
  *         return 0
  *     raise SkeneError(_CODE_NAMES.get(<int>st.code(), str(<int>st.code())),
  *                      st.message().decode("utf-8", "replace"))             # <<<<<<<<<<<<<<
  * 
  * 
 */
-  __pyx_t_8 = __Pyx_decode_cpp_string(__pyx_v_st.message(), 0, PY_SSIZE_T_MAX, NULL, __pyx_k_replace, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 233, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_decode_cpp_string(__pyx_v_st.message(), 0, PY_SSIZE_T_MAX, NULL, __pyx_k_replace, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 236, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_8);
   __pyx_t_11 = 1;
   #if CYTHON_UNPACK_METHODS
@@ -17494,14 +17510,14 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
     __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
     __Pyx_DECREF(__pyx_t_8); __pyx_t_8 = 0;
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 232, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 235, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
   __Pyx_Raise(__pyx_t_2, 0, 0, 0);
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __PYX_ERR(0, 232, __pyx_L1_error)
+  __PYX_ERR(0, 235, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":229
+  /* "skene/src/skene_native.pyx":232
  * 
  * 
  * cdef int _check(const Status& st) except -1:             # <<<<<<<<<<<<<<
@@ -17527,7 +17543,7 @@ static int __pyx_f_5skene_12skene_native__check(skene::Status const &__pyx_v_st)
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":238
+/* "skene/src/skene_native.pyx":241
  * #  Metadata marshalling
  * 
  * cdef dict _schema_to_dict(const ColumnSchema& c):             # <<<<<<<<<<<<<<
@@ -17552,68 +17568,68 @@ static PyObject *__pyx_f_5skene_12skene_native__schema_to_dict(skene::ColumnSche
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_schema_to_dict", 0);
 
-  /* "skene/src/skene_native.pyx":246
+  /* "skene/src/skene_native.pyx":249
  *     """
  *     cdef dict out = {
  *         "name": c.name.decode("utf-8"),             # <<<<<<<<<<<<<<
  *         "field_id": c.field_id,
  *         "type": c.type,  # DrakenType tag
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 246, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 249, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_decode_cpp_string(__pyx_v_c.name, 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 246, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_decode_cpp_string(__pyx_v_c.name, 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 249, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_name, __pyx_t_2) < (0)) __PYX_ERR(0, 246, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_name, __pyx_t_2) < (0)) __PYX_ERR(0, 249, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":247
+  /* "skene/src/skene_native.pyx":250
  *     cdef dict out = {
  *         "name": c.name.decode("utf-8"),
  *         "field_id": c.field_id,             # <<<<<<<<<<<<<<
  *         "type": c.type,  # DrakenType tag
  *         "logical": None,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.field_id); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 247, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.field_id); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 250, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_field_id, __pyx_t_2) < (0)) __PYX_ERR(0, 246, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_field_id, __pyx_t_2) < (0)) __PYX_ERR(0, 249, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":248
+  /* "skene/src/skene_native.pyx":251
  *         "name": c.name.decode("utf-8"),
  *         "field_id": c.field_id,
  *         "type": c.type,  # DrakenType tag             # <<<<<<<<<<<<<<
  *         "logical": None,
  *         "children": [],
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 248, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 251, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_2) < (0)) __PYX_ERR(0, 246, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_2) < (0)) __PYX_ERR(0, 249, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":249
+  /* "skene/src/skene_native.pyx":252
  *         "field_id": c.field_id,
  *         "type": c.type,  # DrakenType tag
  *         "logical": None,             # <<<<<<<<<<<<<<
  *         "children": [],
  *     }
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_logical, Py_None) < (0)) __PYX_ERR(0, 246, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_logical, Py_None) < (0)) __PYX_ERR(0, 249, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":250
+  /* "skene/src/skene_native.pyx":253
  *         "type": c.type,  # DrakenType tag
  *         "logical": None,
  *         "children": [],             # <<<<<<<<<<<<<<
  *     }
  *     if c.logical_present:
 */
-  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 250, __pyx_L1_error)
+  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 253, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_children, __pyx_t_2) < (0)) __PYX_ERR(0, 246, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_children, __pyx_t_2) < (0)) __PYX_ERR(0, 249, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_v_out = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "skene/src/skene_native.pyx":252
+  /* "skene/src/skene_native.pyx":255
  *         "children": [],
  *     }
  *     if c.logical_present:             # <<<<<<<<<<<<<<
@@ -17623,91 +17639,91 @@ static PyObject *__pyx_f_5skene_12skene_native__schema_to_dict(skene::ColumnSche
   __pyx_t_3 = (__pyx_v_c.logical_present != 0);
   if (__pyx_t_3) {
 
-    /* "skene/src/skene_native.pyx":254
+    /* "skene/src/skene_native.pyx":257
  *     if c.logical_present:
  *         out["logical"] = {
  *             "kind": c.logical.kind,             # <<<<<<<<<<<<<<
  *             "unit": c.logical.unit,
  *             "offset_minutes": c.logical.offset_minutes,
 */
-    __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 254, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.kind); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 254, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.kind); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_kind, __pyx_t_2) < (0)) __PYX_ERR(0, 254, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_kind, __pyx_t_2) < (0)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":255
+    /* "skene/src/skene_native.pyx":258
  *         out["logical"] = {
  *             "kind": c.logical.kind,
  *             "unit": c.logical.unit,             # <<<<<<<<<<<<<<
  *             "offset_minutes": c.logical.offset_minutes,
  *             "precision": c.logical.precision,
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.unit); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 255, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.unit); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 258, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_unit, __pyx_t_2) < (0)) __PYX_ERR(0, 254, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_unit, __pyx_t_2) < (0)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":256
+    /* "skene/src/skene_native.pyx":259
  *             "kind": c.logical.kind,
  *             "unit": c.logical.unit,
  *             "offset_minutes": c.logical.offset_minutes,             # <<<<<<<<<<<<<<
  *             "precision": c.logical.precision,
  *             "scale": c.logical.scale,
 */
-    __pyx_t_2 = __Pyx_PyLong_From_int16_t(__pyx_v_c.logical.offset_minutes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 256, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_int16_t(__pyx_v_c.logical.offset_minutes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 259, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_offset_minutes, __pyx_t_2) < (0)) __PYX_ERR(0, 254, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_offset_minutes, __pyx_t_2) < (0)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":257
+    /* "skene/src/skene_native.pyx":260
  *             "unit": c.logical.unit,
  *             "offset_minutes": c.logical.offset_minutes,
  *             "precision": c.logical.precision,             # <<<<<<<<<<<<<<
  *             "scale": c.logical.scale,
  *             "dimension": c.logical.dimension,
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.precision); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 257, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.precision); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 260, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_precision, __pyx_t_2) < (0)) __PYX_ERR(0, 254, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_precision, __pyx_t_2) < (0)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":258
+    /* "skene/src/skene_native.pyx":261
  *             "offset_minutes": c.logical.offset_minutes,
  *             "precision": c.logical.precision,
  *             "scale": c.logical.scale,             # <<<<<<<<<<<<<<
  *             "dimension": c.logical.dimension,
  *         }
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.scale); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 258, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.scale); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 261, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_scale, __pyx_t_2) < (0)) __PYX_ERR(0, 254, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_scale, __pyx_t_2) < (0)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":259
+    /* "skene/src/skene_native.pyx":262
  *             "precision": c.logical.precision,
  *             "scale": c.logical.scale,
  *             "dimension": c.logical.dimension,             # <<<<<<<<<<<<<<
  *         }
  *     cdef size_t i
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.logical.dimension); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 259, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.logical.dimension); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 262, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_dimension, __pyx_t_2) < (0)) __PYX_ERR(0, 254, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_dimension, __pyx_t_2) < (0)) __PYX_ERR(0, 257, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":253
+    /* "skene/src/skene_native.pyx":256
  *     }
  *     if c.logical_present:
  *         out["logical"] = {             # <<<<<<<<<<<<<<
  *             "kind": c.logical.kind,
  *             "unit": c.logical.unit,
 */
-    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_logical, __pyx_t_1) < 0))) __PYX_ERR(0, 253, __pyx_L1_error)
+    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_logical, __pyx_t_1) < 0))) __PYX_ERR(0, 256, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "skene/src/skene_native.pyx":252
+    /* "skene/src/skene_native.pyx":255
  *         "children": [],
  *     }
  *     if c.logical_present:             # <<<<<<<<<<<<<<
@@ -17716,7 +17732,7 @@ static PyObject *__pyx_f_5skene_12skene_native__schema_to_dict(skene::ColumnSche
 */
   }
 
-  /* "skene/src/skene_native.pyx":262
+  /* "skene/src/skene_native.pyx":265
  *         }
  *     cdef size_t i
  *     for i in range(c.children.size()):             # <<<<<<<<<<<<<<
@@ -17728,23 +17744,23 @@ static PyObject *__pyx_f_5skene_12skene_native__schema_to_dict(skene::ColumnSche
   for (__pyx_t_6 = 0; __pyx_t_6 < __pyx_t_5; __pyx_t_6+=1) {
     __pyx_v_i = __pyx_t_6;
 
-    /* "skene/src/skene_native.pyx":263
+    /* "skene/src/skene_native.pyx":266
  *     cdef size_t i
  *     for i in range(c.children.size()):
  *         out["children"].append(_schema_to_dict(c.children[i]))             # <<<<<<<<<<<<<<
  *     return out
  * 
 */
-    __pyx_t_1 = __Pyx_PyDict_GetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_children); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 263, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyDict_GetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_children); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 266, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = __pyx_f_5skene_12skene_native__schema_to_dict((__pyx_v_c.children[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 263, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_5skene_12skene_native__schema_to_dict((__pyx_v_c.children[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 266, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_7 = __Pyx_PyObject_Append(__pyx_t_1, __pyx_t_2); if (unlikely(__pyx_t_7 == ((int)-1))) __PYX_ERR(0, 263, __pyx_L1_error)
+    __pyx_t_7 = __Pyx_PyObject_Append(__pyx_t_1, __pyx_t_2); if (unlikely(__pyx_t_7 == ((int)-1))) __PYX_ERR(0, 266, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   }
 
-  /* "skene/src/skene_native.pyx":264
+  /* "skene/src/skene_native.pyx":267
  *     for i in range(c.children.size()):
  *         out["children"].append(_schema_to_dict(c.children[i]))
  *     return out             # <<<<<<<<<<<<<<
@@ -17756,7 +17772,7 @@ static PyObject *__pyx_f_5skene_12skene_native__schema_to_dict(skene::ColumnSche
   __pyx_r = __pyx_v_out;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":238
+  /* "skene/src/skene_native.pyx":241
  * #  Metadata marshalling
  * 
  * cdef dict _schema_to_dict(const ColumnSchema& c):             # <<<<<<<<<<<<<<
@@ -17777,135 +17793,256 @@ static PyObject *__pyx_f_5skene_12skene_native__schema_to_dict(skene::ColumnSche
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":267
+/* "skene/src/skene_native.pyx":277
  * 
  * 
- * cdef dict _statistics_to_dict(const ColumnStatistics& s):             # <<<<<<<<<<<<<<
- *     return {
- *         "flags": s.flags,
+ * cdef dict _statistics_to_dict(const ColumnStatistics& s, const vector[uint64_t]& sketch):             # <<<<<<<<<<<<<<
+ *     """One statistics blob as a plain dict.
+ * 
 */
 
-static PyObject *__pyx_f_5skene_12skene_native__statistics_to_dict(skene::ColumnStatistics const &__pyx_v_s) {
+static PyObject *__pyx_f_5skene_12skene_native__statistics_to_dict(skene::ColumnStatistics const &__pyx_v_s, std::vector<uint64_t>  const &__pyx_v_sketch) {
+  PyObject *__pyx_v_ndv = 0;
+  PyObject *__pyx_v_ndv_exact = 0;
+  std::vector<uint64_t> ::size_type __pyx_7genexpr__pyx_v_i;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
-  PyObject *__pyx_t_1 = NULL;
+  int __pyx_t_1;
   PyObject *__pyx_t_2 = NULL;
   PyObject *__pyx_t_3 = NULL;
   PyObject *__pyx_t_4 = NULL;
+  PyObject *__pyx_t_5 = NULL;
+  std::vector<uint64_t> ::size_type __pyx_t_6;
+  std::vector<uint64_t> ::size_type __pyx_t_7;
+  std::vector<uint64_t> ::size_type __pyx_t_8;
   int __pyx_lineno = 0;
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_statistics_to_dict", 0);
 
-  /* "skene/src/skene_native.pyx":268
- * 
- * cdef dict _statistics_to_dict(const ColumnStatistics& s):
+  /* "skene/src/skene_native.pyx":293
+ *         declined. An ESTIMATE, ~+/-3% at K=1024.
+ *     """
+ *     cdef object ndv = None             # <<<<<<<<<<<<<<
+ *     cdef object ndv_exact = None
+ *     if s.flags & _K_STAT_NDV:
+*/
+  __Pyx_INCREF(Py_None);
+  __pyx_v_ndv = Py_None;
+
+  /* "skene/src/skene_native.pyx":294
+ *     """
+ *     cdef object ndv = None
+ *     cdef object ndv_exact = None             # <<<<<<<<<<<<<<
+ *     if s.flags & _K_STAT_NDV:
+ *         ndv = s.ndv
+*/
+  __Pyx_INCREF(Py_None);
+  __pyx_v_ndv_exact = Py_None;
+
+  /* "skene/src/skene_native.pyx":295
+ *     cdef object ndv = None
+ *     cdef object ndv_exact = None
+ *     if s.flags & _K_STAT_NDV:             # <<<<<<<<<<<<<<
+ *         ndv = s.ndv
+ *         ndv_exact = bool(s.flags & _K_STAT_NDV_EXACT)
+*/
+  __pyx_t_1 = ((__pyx_v_s.flags & __pyx_e_5skene_12skene_native__K_STAT_NDV) != 0);
+  if (__pyx_t_1) {
+
+    /* "skene/src/skene_native.pyx":296
+ *     cdef object ndv_exact = None
+ *     if s.flags & _K_STAT_NDV:
+ *         ndv = s.ndv             # <<<<<<<<<<<<<<
+ *         ndv_exact = bool(s.flags & _K_STAT_NDV_EXACT)
+ *     return {
+*/
+    __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_s.ndv); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 296, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_2);
+    __Pyx_DECREF_SET(__pyx_v_ndv, __pyx_t_2);
+    __pyx_t_2 = 0;
+
+    /* "skene/src/skene_native.pyx":297
+ *     if s.flags & _K_STAT_NDV:
+ *         ndv = s.ndv
+ *         ndv_exact = bool(s.flags & _K_STAT_NDV_EXACT)             # <<<<<<<<<<<<<<
+ *     return {
+ *         "flags": s.flags,
+*/
+    __pyx_t_2 = __Pyx_PyBool_FromLong((!(!((__pyx_v_s.flags & __pyx_e_5skene_12skene_native__K_STAT_NDV_EXACT) != 0)))); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 297, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_2);
+    __Pyx_DECREF_SET(__pyx_v_ndv_exact, __pyx_t_2);
+    __pyx_t_2 = 0;
+
+    /* "skene/src/skene_native.pyx":295
+ *     cdef object ndv = None
+ *     cdef object ndv_exact = None
+ *     if s.flags & _K_STAT_NDV:             # <<<<<<<<<<<<<<
+ *         ndv = s.ndv
+ *         ndv_exact = bool(s.flags & _K_STAT_NDV_EXACT)
+*/
+  }
+
+  /* "skene/src/skene_native.pyx":298
+ *         ndv = s.ndv
+ *         ndv_exact = bool(s.flags & _K_STAT_NDV_EXACT)
  *     return {             # <<<<<<<<<<<<<<
  *         "flags": s.flags,
  *         "min_ordinal": s.min_ordinal,
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "skene/src/skene_native.pyx":269
- * cdef dict _statistics_to_dict(const ColumnStatistics& s):
+  /* "skene/src/skene_native.pyx":299
+ *         ndv_exact = bool(s.flags & _K_STAT_NDV_EXACT)
  *     return {
  *         "flags": s.flags,             # <<<<<<<<<<<<<<
  *         "min_ordinal": s.min_ordinal,
  *         "max_ordinal": s.max_ordinal,
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 269, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_s.flags); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 269, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyDict_NewPresized(8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 299, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_flags, __pyx_t_2) < (0)) __PYX_ERR(0, 269, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_3 = __Pyx_PyLong_From_uint32_t(__pyx_v_s.flags); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_flags, __pyx_t_3) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-  /* "skene/src/skene_native.pyx":270
+  /* "skene/src/skene_native.pyx":300
  *     return {
  *         "flags": s.flags,
  *         "min_ordinal": s.min_ordinal,             # <<<<<<<<<<<<<<
  *         "max_ordinal": s.max_ordinal,
  *         "null_count": s.null_count,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_s.min_ordinal); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 270, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_min_ordinal, __pyx_t_2) < (0)) __PYX_ERR(0, 269, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_3 = __Pyx_PyLong_From_int64_t(__pyx_v_s.min_ordinal); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 300, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_min_ordinal, __pyx_t_3) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-  /* "skene/src/skene_native.pyx":271
+  /* "skene/src/skene_native.pyx":301
  *         "flags": s.flags,
  *         "min_ordinal": s.min_ordinal,
  *         "max_ordinal": s.max_ordinal,             # <<<<<<<<<<<<<<
  *         "null_count": s.null_count,
  *         # int128 from little-endian int64 halves  as Python big-int math
 */
-  __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_s.max_ordinal); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 271, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_max_ordinal, __pyx_t_2) < (0)) __PYX_ERR(0, 269, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_3 = __Pyx_PyLong_From_int64_t(__pyx_v_s.max_ordinal); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 301, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_max_ordinal, __pyx_t_3) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-  /* "skene/src/skene_native.pyx":272
+  /* "skene/src/skene_native.pyx":302
  *         "min_ordinal": s.min_ordinal,
  *         "max_ordinal": s.max_ordinal,
  *         "null_count": s.null_count,             # <<<<<<<<<<<<<<
  *         # int128 from little-endian int64 halves  as Python big-int math
  *         # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_s.null_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 272, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_null_count, __pyx_t_2) < (0)) __PYX_ERR(0, 269, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
+  __pyx_t_3 = __Pyx_PyLong_From_uint64_t(__pyx_v_s.null_count); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 302, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_null_count, __pyx_t_3) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
 
-  /* "skene/src/skene_native.pyx":275
+  /* "skene/src/skene_native.pyx":305
  *         # int128 from little-endian int64 halves  as Python big-int math
  *         # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
  *         "sum": ((<object>s.sum_high) << 64) + ((<object>s.sum_low) & 0xFFFFFFFFFFFFFFFF),             # <<<<<<<<<<<<<<
+ *         "ndv": ndv,
+ *         "ndv_exact": ndv_exact,
+*/
+  __pyx_t_3 = __Pyx_PyLong_From_int64_t(__pyx_v_s.sum_high); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 305, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __pyx_t_4 = PyNumber_Lshift(__pyx_t_3, __pyx_mstate_global->__pyx_int_64); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 305, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_4);
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __pyx_t_3 = __Pyx_PyLong_From_int64_t(__pyx_v_s.sum_low); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 305, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __pyx_t_5 = PyNumber_And(__pyx_t_3, __pyx_mstate_global->__pyx_int_0xffffffffffffffff); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 305, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_5);
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+  __pyx_t_3 = PyNumber_Add(__pyx_t_4, __pyx_t_5); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 305, __pyx_L1_error)
+  __Pyx_GOTREF(__pyx_t_3);
+  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+  __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_sum, __pyx_t_3) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+  __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
+
+  /* "skene/src/skene_native.pyx":306
+ *         # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
+ *         "sum": ((<object>s.sum_high) << 64) + ((<object>s.sum_low) & 0xFFFFFFFFFFFFFFFF),
+ *         "ndv": ndv,             # <<<<<<<<<<<<<<
+ *         "ndv_exact": ndv_exact,
+ *         # The MERGEABLE form of the same fact: the K smallest value hashes,
+*/
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_ndv, __pyx_v_ndv) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+
+  /* "skene/src/skene_native.pyx":307
+ *         "sum": ((<object>s.sum_high) << 64) + ((<object>s.sum_low) & 0xFFFFFFFFFFFFFFFF),
+ *         "ndv": ndv,
+ *         "ndv_exact": ndv_exact,             # <<<<<<<<<<<<<<
+ *         # The MERGEABLE form of the same fact: the K smallest value hashes,
+ *         # ascending. None when untracked; a list (possibly shorter than K, which
+*/
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_ndv_exact, __pyx_v_ndv_exact) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
+
+  /* "skene/src/skene_native.pyx":313
+ *         # skene's own XXH3 dedup hashes  never mix with an ANALYZE/catalog
+ *         # sketch, which is hashed differently (format.h, ColumnSketchHeader).
+ *         "sketch": [sketch[i] for i in range(sketch.size())] if (s.flags & _K_STAT_SKETCH) else None,             # <<<<<<<<<<<<<<
  *     }
  * 
 */
-  __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_s.sum_high); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_3 = PyNumber_Lshift(__pyx_t_2, __pyx_mstate_global->__pyx_int_64); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_3);
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_s.sum_low); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_4 = PyNumber_And(__pyx_t_2, __pyx_mstate_global->__pyx_int_0xffffffffffffffff); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_4);
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_t_2 = PyNumber_Add(__pyx_t_3, __pyx_t_4); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 275, __pyx_L1_error)
-  __Pyx_GOTREF(__pyx_t_2);
+  __pyx_t_1 = ((__pyx_v_s.flags & __pyx_e_5skene_12skene_native__K_STAT_SKETCH) != 0);
+  if (__pyx_t_1) {
+    { /* enter inner scope */
+      __pyx_t_5 = PyList_New(0); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 313, __pyx_L1_error)
+      __Pyx_GOTREF(__pyx_t_5);
+      __pyx_t_6 = __pyx_v_sketch.size();
+      __pyx_t_7 = __pyx_t_6;
+      for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_7; __pyx_t_8+=1) {
+        __pyx_7genexpr__pyx_v_i = __pyx_t_8;
+        __pyx_t_4 = __Pyx_PyLong_From_uint64_t((__pyx_v_sketch[__pyx_7genexpr__pyx_v_i])); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 313, __pyx_L1_error)
+        __Pyx_GOTREF(__pyx_t_4);
+        if (unlikely(__Pyx_ListComp_Append(__pyx_t_5, (PyObject*)__pyx_t_4))) __PYX_ERR(0, 313, __pyx_L1_error)
+        __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
+      }
+    } /* exit inner scope */
+    __pyx_t_3 = __pyx_t_5;
+    __pyx_t_5 = 0;
+  } else {
+    __Pyx_INCREF(Py_None);
+    __pyx_t_3 = Py_None;
+  }
+  if (PyDict_SetItem(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_sketch, __pyx_t_3) < (0)) __PYX_ERR(0, 299, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-  __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sum, __pyx_t_2) < (0)) __PYX_ERR(0, 269, __pyx_L1_error)
-  __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-  __pyx_r = ((PyObject*)__pyx_t_1);
-  __pyx_t_1 = 0;
+  __pyx_r = ((PyObject*)__pyx_t_2);
+  __pyx_t_2 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":267
+  /* "skene/src/skene_native.pyx":277
  * 
  * 
- * cdef dict _statistics_to_dict(const ColumnStatistics& s):             # <<<<<<<<<<<<<<
- *     return {
- *         "flags": s.flags,
+ * cdef dict _statistics_to_dict(const ColumnStatistics& s, const vector[uint64_t]& sketch):             # <<<<<<<<<<<<<<
+ *     """One statistics blob as a plain dict.
+ * 
 */
 
   /* function exit code */
   __pyx_L1_error:;
-  __Pyx_XDECREF(__pyx_t_1);
   __Pyx_XDECREF(__pyx_t_2);
   __Pyx_XDECREF(__pyx_t_3);
   __Pyx_XDECREF(__pyx_t_4);
+  __Pyx_XDECREF(__pyx_t_5);
   __Pyx_AddTraceback("skene.skene_native._statistics_to_dict", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = 0;
   __pyx_L0:;
+  __Pyx_XDECREF(__pyx_v_ndv);
+  __Pyx_XDECREF(__pyx_v_ndv_exact);
   __Pyx_XGIVEREF(__pyx_r);
   __Pyx_RefNannyFinishContext();
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":279
+/* "skene/src/skene_native.pyx":317
  * 
  * 
  * cdef dict _row_group_to_dict(const RowGroupSummary& g):             # <<<<<<<<<<<<<<
@@ -17930,63 +18067,63 @@ static PyObject *__pyx_f_5skene_12skene_native__row_group_to_dict(skene::RowGrou
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_row_group_to_dict", 0);
 
-  /* "skene/src/skene_native.pyx":280
+  /* "skene/src/skene_native.pyx":318
  * 
  * cdef dict _row_group_to_dict(const RowGroupSummary& g):
  *     cdef list stats = []             # <<<<<<<<<<<<<<
  *     cdef size_t i
  *     for i in range(g.column_statistics.size()):
 */
-  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 280, __pyx_L1_error)
+  __pyx_t_1 = PyList_New(0); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 318, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_v_stats = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "skene/src/skene_native.pyx":282
+  /* "skene/src/skene_native.pyx":320
  *     cdef list stats = []
  *     cdef size_t i
  *     for i in range(g.column_statistics.size()):             # <<<<<<<<<<<<<<
  *         if g.column_statistics[i].present:
- *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics))
+ *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics,
 */
   __pyx_t_2 = __pyx_v_g.column_statistics.size();
   __pyx_t_3 = __pyx_t_2;
   for (__pyx_t_4 = 0; __pyx_t_4 < __pyx_t_3; __pyx_t_4+=1) {
     __pyx_v_i = __pyx_t_4;
 
-    /* "skene/src/skene_native.pyx":283
+    /* "skene/src/skene_native.pyx":321
  *     cdef size_t i
  *     for i in range(g.column_statistics.size()):
  *         if g.column_statistics[i].present:             # <<<<<<<<<<<<<<
- *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics))
- *         else:
+ *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics,
+ *                                              g.column_statistics[i].sketch))
 */
     __pyx_t_5 = ((__pyx_v_g.column_statistics[__pyx_v_i]).present != 0);
     if (__pyx_t_5) {
 
-      /* "skene/src/skene_native.pyx":284
+      /* "skene/src/skene_native.pyx":322
  *     for i in range(g.column_statistics.size()):
  *         if g.column_statistics[i].present:
- *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics))             # <<<<<<<<<<<<<<
+ *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics,             # <<<<<<<<<<<<<<
+ *                                              g.column_statistics[i].sketch))
  *         else:
- *             # Absent means NOT TRACKED, never zero  draken's cardinal
 */
-      __pyx_t_1 = __pyx_f_5skene_12skene_native__statistics_to_dict((__pyx_v_g.column_statistics[__pyx_v_i]).statistics); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 284, __pyx_L1_error)
+      __pyx_t_1 = __pyx_f_5skene_12skene_native__statistics_to_dict((__pyx_v_g.column_statistics[__pyx_v_i]).statistics, (__pyx_v_g.column_statistics[__pyx_v_i]).sketch); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 322, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_1);
-      __pyx_t_6 = __Pyx_PyList_Append(__pyx_v_stats, __pyx_t_1); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(0, 284, __pyx_L1_error)
+      __pyx_t_6 = __Pyx_PyList_Append(__pyx_v_stats, __pyx_t_1); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(0, 322, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-      /* "skene/src/skene_native.pyx":283
+      /* "skene/src/skene_native.pyx":321
  *     cdef size_t i
  *     for i in range(g.column_statistics.size()):
  *         if g.column_statistics[i].present:             # <<<<<<<<<<<<<<
- *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics))
- *         else:
+ *             stats.append(_statistics_to_dict(g.column_statistics[i].statistics,
+ *                                              g.column_statistics[i].sketch))
 */
       goto __pyx_L5;
     }
 
-    /* "skene/src/skene_native.pyx":288
+    /* "skene/src/skene_native.pyx":327
  *             # Absent means NOT TRACKED, never zero  draken's cardinal
  *             # statistics rule. None is the only honest spelling of that.
  *             stats.append(None)             # <<<<<<<<<<<<<<
@@ -17994,12 +18131,12 @@ static PyObject *__pyx_f_5skene_12skene_native__row_group_to_dict(skene::RowGrou
  *         "row_count": g.row_count,
 */
     /*else*/ {
-      __pyx_t_6 = __Pyx_PyList_Append(__pyx_v_stats, Py_None); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(0, 288, __pyx_L1_error)
+      __pyx_t_6 = __Pyx_PyList_Append(__pyx_v_stats, Py_None); if (unlikely(__pyx_t_6 == ((int)-1))) __PYX_ERR(0, 327, __pyx_L1_error)
     }
     __pyx_L5:;
   }
 
-  /* "skene/src/skene_native.pyx":289
+  /* "skene/src/skene_native.pyx":328
  *             # statistics rule. None is the only honest spelling of that.
  *             stats.append(None)
  *     return {             # <<<<<<<<<<<<<<
@@ -18008,93 +18145,93 @@ static PyObject *__pyx_f_5skene_12skene_native__row_group_to_dict(skene::RowGrou
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "skene/src/skene_native.pyx":290
+  /* "skene/src/skene_native.pyx":329
  *             stats.append(None)
  *     return {
  *         "row_count": g.row_count,             # <<<<<<<<<<<<<<
  *         "first_row": g.first_row,
  *         "byte_offset": g.byte_offset,
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(7); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 290, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(7); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.row_count); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 290, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.row_count); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_row_count, __pyx_t_7) < (0)) __PYX_ERR(0, 290, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_row_count, __pyx_t_7) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "skene/src/skene_native.pyx":291
+  /* "skene/src/skene_native.pyx":330
  *     return {
  *         "row_count": g.row_count,
  *         "first_row": g.first_row,             # <<<<<<<<<<<<<<
  *         "byte_offset": g.byte_offset,
  *         "byte_bytes": g.byte_bytes,
 */
-  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.first_row); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 291, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.first_row); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 330, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_first_row, __pyx_t_7) < (0)) __PYX_ERR(0, 290, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_first_row, __pyx_t_7) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "skene/src/skene_native.pyx":292
+  /* "skene/src/skene_native.pyx":331
  *         "row_count": g.row_count,
  *         "first_row": g.first_row,
  *         "byte_offset": g.byte_offset,             # <<<<<<<<<<<<<<
  *         "byte_bytes": g.byte_bytes,
  *         "footer_offset": g.footer_offset,
 */
-  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.byte_offset); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 292, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.byte_offset); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 331, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_offset, __pyx_t_7) < (0)) __PYX_ERR(0, 290, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_offset, __pyx_t_7) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "skene/src/skene_native.pyx":293
+  /* "skene/src/skene_native.pyx":332
  *         "first_row": g.first_row,
  *         "byte_offset": g.byte_offset,
  *         "byte_bytes": g.byte_bytes,             # <<<<<<<<<<<<<<
  *         "footer_offset": g.footer_offset,
  *         "footer_bytes": g.footer_bytes,
 */
-  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.byte_bytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 293, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.byte_bytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 332, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_bytes, __pyx_t_7) < (0)) __PYX_ERR(0, 290, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_bytes, __pyx_t_7) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "skene/src/skene_native.pyx":294
+  /* "skene/src/skene_native.pyx":333
  *         "byte_offset": g.byte_offset,
  *         "byte_bytes": g.byte_bytes,
  *         "footer_offset": g.footer_offset,             # <<<<<<<<<<<<<<
  *         "footer_bytes": g.footer_bytes,
  *         # Depth-first over `columns`, ARRAY children included.
 */
-  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.footer_offset); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 294, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_From_uint64_t(__pyx_v_g.footer_offset); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 333, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_footer_offset, __pyx_t_7) < (0)) __PYX_ERR(0, 290, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_footer_offset, __pyx_t_7) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "skene/src/skene_native.pyx":295
+  /* "skene/src/skene_native.pyx":334
  *         "byte_bytes": g.byte_bytes,
  *         "footer_offset": g.footer_offset,
  *         "footer_bytes": g.footer_bytes,             # <<<<<<<<<<<<<<
  *         # Depth-first over `columns`, ARRAY children included.
  *         "column_statistics": stats,
 */
-  __pyx_t_7 = __Pyx_PyLong_From_uint32_t(__pyx_v_g.footer_bytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 295, __pyx_L1_error)
+  __pyx_t_7 = __Pyx_PyLong_From_uint32_t(__pyx_v_g.footer_bytes); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 334, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_7);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_footer_bytes, __pyx_t_7) < (0)) __PYX_ERR(0, 290, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_footer_bytes, __pyx_t_7) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_7); __pyx_t_7 = 0;
 
-  /* "skene/src/skene_native.pyx":297
+  /* "skene/src/skene_native.pyx":336
  *         "footer_bytes": g.footer_bytes,
  *         # Depth-first over `columns`, ARRAY children included.
  *         "column_statistics": stats,             # <<<<<<<<<<<<<<
  *     }
  * 
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_column_statistics, __pyx_v_stats) < (0)) __PYX_ERR(0, 290, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_column_statistics, __pyx_v_stats) < (0)) __PYX_ERR(0, 329, __pyx_L1_error)
   __pyx_r = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":279
+  /* "skene/src/skene_native.pyx":317
  * 
  * 
  * cdef dict _row_group_to_dict(const RowGroupSummary& g):             # <<<<<<<<<<<<<<
@@ -18115,7 +18252,7 @@ static PyObject *__pyx_f_5skene_12skene_native__row_group_to_dict(skene::RowGrou
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":301
+/* "skene/src/skene_native.pyx":340
  * 
  * 
  * cdef dict _column_to_dict(const ColumnMetadata& c):             # <<<<<<<<<<<<<<
@@ -18126,17 +18263,17 @@ static PyObject *__pyx_f_5skene_12skene_native__row_group_to_dict(skene::RowGrou
 static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMetadata const &__pyx_v_c) {
   PyObject *__pyx_v_out = 0;
   size_t __pyx_v_i;
-  size_t __pyx_7genexpr__pyx_v_i;
+  size_t __pyx_8genexpr1__pyx_v_i;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   PyObject *__pyx_t_1 = NULL;
   PyObject *__pyx_t_2 = NULL;
   int __pyx_t_3;
-  PyObject *__pyx_t_4 = NULL;
-  PyObject *__pyx_t_5 = NULL;
-  std::vector<skene::ZoneMapEntry> ::size_type __pyx_t_6;
-  std::vector<skene::ZoneMapEntry> ::size_type __pyx_t_7;
-  size_t __pyx_t_8;
+  std::vector<skene::ZoneMapEntry> ::size_type __pyx_t_4;
+  std::vector<skene::ZoneMapEntry> ::size_type __pyx_t_5;
+  size_t __pyx_t_6;
+  PyObject *__pyx_t_7 = NULL;
+  PyObject *__pyx_t_8 = NULL;
   PyObject *__pyx_t_9 = NULL;
   std::vector<skene::ColumnMetadata> ::size_type __pyx_t_10;
   std::vector<skene::ColumnMetadata> ::size_type __pyx_t_11;
@@ -18146,182 +18283,182 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_column_to_dict", 0);
 
-  /* "skene/src/skene_native.pyx":303
+  /* "skene/src/skene_native.pyx":342
  * cdef dict _column_to_dict(const ColumnMetadata& c):
  *     cdef dict out = {
  *         "name": c.name.decode("utf-8"),             # <<<<<<<<<<<<<<
  *         "field_id": c.field_id,
  *         "type": c.type,  # DrakenType tag
 */
-  __pyx_t_1 = __Pyx_PyDict_NewPresized(15); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 303, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyDict_NewPresized(15); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __Pyx_decode_cpp_string(__pyx_v_c.name, 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 303, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_decode_cpp_string(__pyx_v_c.name, 0, PY_SSIZE_T_MAX, NULL, NULL, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_name, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_name, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":304
+  /* "skene/src/skene_native.pyx":343
  *     cdef dict out = {
  *         "name": c.name.decode("utf-8"),
  *         "field_id": c.field_id,             # <<<<<<<<<<<<<<
  *         "type": c.type,  # DrakenType tag
  *         "logical": None,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.field_id); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 304, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.field_id); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 343, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_field_id, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_field_id, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":305
+  /* "skene/src/skene_native.pyx":344
  *         "name": c.name.decode("utf-8"),
  *         "field_id": c.field_id,
  *         "type": c.type,  # DrakenType tag             # <<<<<<<<<<<<<<
  *         "logical": None,
  *         "length": c.length,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 305, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.type); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 344, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_type, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":306
+  /* "skene/src/skene_native.pyx":345
  *         "field_id": c.field_id,
  *         "type": c.type,  # DrakenType tag
  *         "logical": None,             # <<<<<<<<<<<<<<
  *         "length": c.length,
  *         "data_length": c.data_length,  # under value ordering: exact distinct count
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_logical, Py_None) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_logical, Py_None) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":307
+  /* "skene/src/skene_native.pyx":346
  *         "type": c.type,  # DrakenType tag
  *         "logical": None,
  *         "length": c.length,             # <<<<<<<<<<<<<<
  *         "data_length": c.data_length,  # under value ordering: exact distinct count
  *         "vector_flags": c.vector_flags,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.length); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 307, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.length); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 346, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_length, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_length, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":308
+  /* "skene/src/skene_native.pyx":347
  *         "logical": None,
  *         "length": c.length,
  *         "data_length": c.data_length,  # under value ordering: exact distinct count             # <<<<<<<<<<<<<<
  *         "vector_flags": c.vector_flags,
  *         "selection_kind": <int>c.selection_kind,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.data_length); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 308, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.data_length); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 347, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_data_length, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_data_length, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":309
+  /* "skene/src/skene_native.pyx":348
  *         "length": c.length,
  *         "data_length": c.data_length,  # under value ordering: exact distinct count
  *         "vector_flags": c.vector_flags,             # <<<<<<<<<<<<<<
  *         "selection_kind": <int>c.selection_kind,
  *         "value_order": <int>c.value_order,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.vector_flags); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 309, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.vector_flags); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 348, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_vector_flags, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_vector_flags, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":310
+  /* "skene/src/skene_native.pyx":349
  *         "data_length": c.data_length,  # under value ordering: exact distinct count
  *         "vector_flags": c.vector_flags,
  *         "selection_kind": <int>c.selection_kind,             # <<<<<<<<<<<<<<
  *         "value_order": <int>c.value_order,
  *         "byte_offset": c.byte_offset,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_int(((int)__pyx_v_c.selection_kind)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 310, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_int(((int)__pyx_v_c.selection_kind)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 349, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_selection_kind, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_selection_kind, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":311
+  /* "skene/src/skene_native.pyx":350
  *         "vector_flags": c.vector_flags,
  *         "selection_kind": <int>c.selection_kind,
  *         "value_order": <int>c.value_order,             # <<<<<<<<<<<<<<
  *         "byte_offset": c.byte_offset,
  *         "byte_bytes": c.byte_bytes,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_int(((int)__pyx_v_c.value_order)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 311, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_int(((int)__pyx_v_c.value_order)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 350, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_value_order, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_value_order, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":312
+  /* "skene/src/skene_native.pyx":351
  *         "selection_kind": <int>c.selection_kind,
  *         "value_order": <int>c.value_order,
  *         "byte_offset": c.byte_offset,             # <<<<<<<<<<<<<<
  *         "byte_bytes": c.byte_bytes,
  *         "statistics": None,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_c.byte_offset); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 312, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_c.byte_offset); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 351, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_offset, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_offset, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":313
+  /* "skene/src/skene_native.pyx":352
  *         "value_order": <int>c.value_order,
  *         "byte_offset": c.byte_offset,
  *         "byte_bytes": c.byte_bytes,             # <<<<<<<<<<<<<<
  *         "statistics": None,
  *         "zone_map": None,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_c.byte_bytes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 313, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_c.byte_bytes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 352, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_bytes, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_byte_bytes, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":314
+  /* "skene/src/skene_native.pyx":353
  *         "byte_offset": c.byte_offset,
  *         "byte_bytes": c.byte_bytes,
  *         "statistics": None,             # <<<<<<<<<<<<<<
  *         "zone_map": None,
  *         "has_bloom": c.bloom.size() > 0,
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_statistics, Py_None) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_statistics, Py_None) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":315
+  /* "skene/src/skene_native.pyx":354
  *         "byte_bytes": c.byte_bytes,
  *         "statistics": None,
  *         "zone_map": None,             # <<<<<<<<<<<<<<
  *         "has_bloom": c.bloom.size() > 0,
  *         "children": [],
 */
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_zone_map, Py_None) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_zone_map, Py_None) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":316
+  /* "skene/src/skene_native.pyx":355
  *         "statistics": None,
  *         "zone_map": None,
  *         "has_bloom": c.bloom.size() > 0,             # <<<<<<<<<<<<<<
  *         "children": [],
  *     }
 */
-  __pyx_t_2 = __Pyx_PyBool_FromLong((__pyx_v_c.bloom.size() > 0)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 316, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyBool_FromLong((__pyx_v_c.bloom.size() > 0)); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 355, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_has_bloom, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_has_bloom, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":317
+  /* "skene/src/skene_native.pyx":356
  *         "zone_map": None,
  *         "has_bloom": c.bloom.size() > 0,
  *         "children": [],             # <<<<<<<<<<<<<<
  *     }
  *     if c.logical_present:
 */
-  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 317, __pyx_L1_error)
+  __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 356, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_children, __pyx_t_2) < (0)) __PYX_ERR(0, 303, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_children, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_v_out = ((PyObject*)__pyx_t_1);
   __pyx_t_1 = 0;
 
-  /* "skene/src/skene_native.pyx":319
+  /* "skene/src/skene_native.pyx":358
  *         "children": [],
  *     }
  *     if c.logical_present:             # <<<<<<<<<<<<<<
@@ -18331,91 +18468,91 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
   __pyx_t_3 = (__pyx_v_c.logical_present != 0);
   if (__pyx_t_3) {
 
-    /* "skene/src/skene_native.pyx":321
+    /* "skene/src/skene_native.pyx":360
  *     if c.logical_present:
  *         out["logical"] = {
  *             "kind": c.logical.kind,             # <<<<<<<<<<<<<<
  *             "unit": c.logical.unit,
  *             "offset_minutes": c.logical.offset_minutes,
 */
-    __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 321, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyDict_NewPresized(6); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.kind); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 321, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.kind); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_kind, __pyx_t_2) < (0)) __PYX_ERR(0, 321, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_kind, __pyx_t_2) < (0)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":322
+    /* "skene/src/skene_native.pyx":361
  *         out["logical"] = {
  *             "kind": c.logical.kind,
  *             "unit": c.logical.unit,             # <<<<<<<<<<<<<<
  *             "offset_minutes": c.logical.offset_minutes,
  *             "precision": c.logical.precision,
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.unit); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 322, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.unit); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 361, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_unit, __pyx_t_2) < (0)) __PYX_ERR(0, 321, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_unit, __pyx_t_2) < (0)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":323
+    /* "skene/src/skene_native.pyx":362
  *             "kind": c.logical.kind,
  *             "unit": c.logical.unit,
  *             "offset_minutes": c.logical.offset_minutes,             # <<<<<<<<<<<<<<
  *             "precision": c.logical.precision,
  *             "scale": c.logical.scale,
 */
-    __pyx_t_2 = __Pyx_PyLong_From_int16_t(__pyx_v_c.logical.offset_minutes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 323, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_int16_t(__pyx_v_c.logical.offset_minutes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 362, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_offset_minutes, __pyx_t_2) < (0)) __PYX_ERR(0, 321, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_offset_minutes, __pyx_t_2) < (0)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":324
+    /* "skene/src/skene_native.pyx":363
  *             "unit": c.logical.unit,
  *             "offset_minutes": c.logical.offset_minutes,
  *             "precision": c.logical.precision,             # <<<<<<<<<<<<<<
  *             "scale": c.logical.scale,
  *             "dimension": c.logical.dimension,
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.precision); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 324, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.precision); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 363, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_precision, __pyx_t_2) < (0)) __PYX_ERR(0, 321, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_precision, __pyx_t_2) < (0)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":325
+    /* "skene/src/skene_native.pyx":364
  *             "offset_minutes": c.logical.offset_minutes,
  *             "precision": c.logical.precision,
  *             "scale": c.logical.scale,             # <<<<<<<<<<<<<<
  *             "dimension": c.logical.dimension,
  *         }
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.scale); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 325, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint8_t(__pyx_v_c.logical.scale); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 364, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_scale, __pyx_t_2) < (0)) __PYX_ERR(0, 321, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_scale, __pyx_t_2) < (0)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":326
+    /* "skene/src/skene_native.pyx":365
  *             "precision": c.logical.precision,
  *             "scale": c.logical.scale,
  *             "dimension": c.logical.dimension,             # <<<<<<<<<<<<<<
  *         }
  *     if c.has_statistics:
 */
-    __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.logical.dimension); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 326, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.logical.dimension); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 365, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_dimension, __pyx_t_2) < (0)) __PYX_ERR(0, 321, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_dimension, __pyx_t_2) < (0)) __PYX_ERR(0, 360, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":320
+    /* "skene/src/skene_native.pyx":359
  *     }
  *     if c.logical_present:
  *         out["logical"] = {             # <<<<<<<<<<<<<<
  *             "kind": c.logical.kind,
  *             "unit": c.logical.unit,
 */
-    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_logical, __pyx_t_1) < 0))) __PYX_ERR(0, 320, __pyx_L1_error)
+    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_logical, __pyx_t_1) < 0))) __PYX_ERR(0, 359, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "skene/src/skene_native.pyx":319
+    /* "skene/src/skene_native.pyx":358
  *         "children": [],
  *     }
  *     if c.logical_present:             # <<<<<<<<<<<<<<
@@ -18424,120 +18561,40 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
 */
   }
 
-  /* "skene/src/skene_native.pyx":328
+  /* "skene/src/skene_native.pyx":367
  *             "dimension": c.logical.dimension,
  *         }
  *     if c.has_statistics:             # <<<<<<<<<<<<<<
- *         # int128 sum from little-endian int64 halves.
- *         out["statistics"] = {
+ *         # ONE emitter for the blob (the row-group path uses the same call): a
+ *         # second inline copy is how the two dict shapes drift apart on the next
 */
   __pyx_t_3 = (__pyx_v_c.has_statistics != 0);
   if (__pyx_t_3) {
 
-    /* "skene/src/skene_native.pyx":331
- *         # int128 sum from little-endian int64 halves.
- *         out["statistics"] = {
- *             "flags": c.statistics.flags,             # <<<<<<<<<<<<<<
- *             "min_ordinal": c.statistics.min_ordinal,
- *             "max_ordinal": c.statistics.max_ordinal,
-*/
-    __pyx_t_1 = __Pyx_PyDict_NewPresized(5); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 331, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.statistics.flags); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 331, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_flags, __pyx_t_2) < (0)) __PYX_ERR(0, 331, __pyx_L1_error)
-    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-    /* "skene/src/skene_native.pyx":332
- *         out["statistics"] = {
- *             "flags": c.statistics.flags,
- *             "min_ordinal": c.statistics.min_ordinal,             # <<<<<<<<<<<<<<
- *             "max_ordinal": c.statistics.max_ordinal,
- *             "null_count": c.statistics.null_count,
-*/
-    __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_c.statistics.min_ordinal); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 332, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_min_ordinal, __pyx_t_2) < (0)) __PYX_ERR(0, 331, __pyx_L1_error)
-    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-    /* "skene/src/skene_native.pyx":333
- *             "flags": c.statistics.flags,
- *             "min_ordinal": c.statistics.min_ordinal,
- *             "max_ordinal": c.statistics.max_ordinal,             # <<<<<<<<<<<<<<
- *             "null_count": c.statistics.null_count,
- *             # int128 from little-endian int64 halves  as Python big-int math
-*/
-    __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_c.statistics.max_ordinal); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 333, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_max_ordinal, __pyx_t_2) < (0)) __PYX_ERR(0, 331, __pyx_L1_error)
-    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-    /* "skene/src/skene_native.pyx":334
- *             "min_ordinal": c.statistics.min_ordinal,
- *             "max_ordinal": c.statistics.max_ordinal,
- *             "null_count": c.statistics.null_count,             # <<<<<<<<<<<<<<
- *             # int128 from little-endian int64 halves  as Python big-int math
- *             # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
-*/
-    __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_c.statistics.null_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 334, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_null_count, __pyx_t_2) < (0)) __PYX_ERR(0, 331, __pyx_L1_error)
-    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-    /* "skene/src/skene_native.pyx":337
- *             # int128 from little-endian int64 halves  as Python big-int math
- *             # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
- *             "sum": ((<object>c.statistics.sum_high) << 64)             # <<<<<<<<<<<<<<
- *                    + ((<object>c.statistics.sum_low) & 0xFFFFFFFFFFFFFFFF),
- *         }
-*/
-    __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_c.statistics.sum_high); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 337, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_4 = PyNumber_Lshift(__pyx_t_2, __pyx_mstate_global->__pyx_int_64); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 337, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_4);
-    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-    /* "skene/src/skene_native.pyx":338
- *             # (<object> casts; a C shift of an int64 by 64 is UB, not a widening).
- *             "sum": ((<object>c.statistics.sum_high) << 64)
- *                    + ((<object>c.statistics.sum_low) & 0xFFFFFFFFFFFFFFFF),             # <<<<<<<<<<<<<<
- *         }
+    /* "skene/src/skene_native.pyx":371
+ *         # second inline copy is how the two dict shapes drift apart on the next
+ *         # growth field.
+ *         out["statistics"] = _statistics_to_dict(c.statistics, c.sketch)             # <<<<<<<<<<<<<<
  *     if c.zone_map.present():
+ *         out["zone_map"] = {
 */
-    __pyx_t_2 = __Pyx_PyLong_From_int64_t(__pyx_v_c.statistics.sum_low); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 338, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_5 = PyNumber_And(__pyx_t_2, __pyx_mstate_global->__pyx_int_0xffffffffffffffff); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 338, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_5);
-    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __pyx_t_2 = PyNumber_Add(__pyx_t_4, __pyx_t_5); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 338, __pyx_L1_error)
-    __Pyx_GOTREF(__pyx_t_2);
-    __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_sum, __pyx_t_2) < (0)) __PYX_ERR(0, 331, __pyx_L1_error)
-    __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-
-    /* "skene/src/skene_native.pyx":330
- *     if c.has_statistics:
- *         # int128 sum from little-endian int64 halves.
- *         out["statistics"] = {             # <<<<<<<<<<<<<<
- *             "flags": c.statistics.flags,
- *             "min_ordinal": c.statistics.min_ordinal,
-*/
-    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_statistics, __pyx_t_1) < 0))) __PYX_ERR(0, 330, __pyx_L1_error)
+    __pyx_t_1 = __pyx_f_5skene_12skene_native__statistics_to_dict(__pyx_v_c.statistics, __pyx_v_c.sketch); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 371, __pyx_L1_error)
+    __Pyx_GOTREF(__pyx_t_1);
+    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_statistics, __pyx_t_1) < 0))) __PYX_ERR(0, 371, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "skene/src/skene_native.pyx":328
+    /* "skene/src/skene_native.pyx":367
  *             "dimension": c.logical.dimension,
  *         }
  *     if c.has_statistics:             # <<<<<<<<<<<<<<
- *         # int128 sum from little-endian int64 halves.
- *         out["statistics"] = {
+ *         # ONE emitter for the blob (the row-group path uses the same call): a
+ *         # second inline copy is how the two dict shapes drift apart on the next
 */
   }
 
-  /* "skene/src/skene_native.pyx":340
- *                    + ((<object>c.statistics.sum_low) & 0xFFFFFFFFFFFFFFFF),
- *         }
+  /* "skene/src/skene_native.pyx":372
+ *         # growth field.
+ *         out["statistics"] = _statistics_to_dict(c.statistics, c.sketch)
  *     if c.zone_map.present():             # <<<<<<<<<<<<<<
  *         out["zone_map"] = {
  *             "chunk_rows": c.zone_map.chunk_rows,
@@ -18545,89 +18602,89 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
   __pyx_t_3 = (__pyx_v_c.zone_map.present() != 0);
   if (__pyx_t_3) {
 
-    /* "skene/src/skene_native.pyx":342
+    /* "skene/src/skene_native.pyx":374
  *     if c.zone_map.present():
  *         out["zone_map"] = {
  *             "chunk_rows": c.zone_map.chunk_rows,             # <<<<<<<<<<<<<<
  *             "chunks": [(c.zone_map.chunks[i].min_ordinal, c.zone_map.chunks[i].max_ordinal)
  *                        for i in range(c.zone_map.chunks.size())],
 */
-    __pyx_t_1 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 342, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 374, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.zone_map.chunk_rows); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 342, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyLong_From_uint32_t(__pyx_v_c.zone_map.chunk_rows); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 374, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_chunk_rows, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_chunk_rows, __pyx_t_2) < (0)) __PYX_ERR(0, 374, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     { /* enter inner scope */
 
-      /* "skene/src/skene_native.pyx":343
+      /* "skene/src/skene_native.pyx":375
  *         out["zone_map"] = {
  *             "chunk_rows": c.zone_map.chunk_rows,
  *             "chunks": [(c.zone_map.chunks[i].min_ordinal, c.zone_map.chunks[i].max_ordinal)             # <<<<<<<<<<<<<<
  *                        for i in range(c.zone_map.chunks.size())],
  *         }
 */
-      __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 343, __pyx_L1_error)
+      __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 375, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
 
-      /* "skene/src/skene_native.pyx":344
+      /* "skene/src/skene_native.pyx":376
  *             "chunk_rows": c.zone_map.chunk_rows,
  *             "chunks": [(c.zone_map.chunks[i].min_ordinal, c.zone_map.chunks[i].max_ordinal)
  *                        for i in range(c.zone_map.chunks.size())],             # <<<<<<<<<<<<<<
  *         }
  *     cdef size_t i
 */
-      __pyx_t_6 = __pyx_v_c.zone_map.chunks.size();
-      __pyx_t_7 = __pyx_t_6;
-      for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_7; __pyx_t_8+=1) {
-        __pyx_7genexpr__pyx_v_i = __pyx_t_8;
+      __pyx_t_4 = __pyx_v_c.zone_map.chunks.size();
+      __pyx_t_5 = __pyx_t_4;
+      for (__pyx_t_6 = 0; __pyx_t_6 < __pyx_t_5; __pyx_t_6+=1) {
+        __pyx_8genexpr1__pyx_v_i = __pyx_t_6;
 
-        /* "skene/src/skene_native.pyx":343
+        /* "skene/src/skene_native.pyx":375
  *         out["zone_map"] = {
  *             "chunk_rows": c.zone_map.chunk_rows,
  *             "chunks": [(c.zone_map.chunks[i].min_ordinal, c.zone_map.chunks[i].max_ordinal)             # <<<<<<<<<<<<<<
  *                        for i in range(c.zone_map.chunks.size())],
  *         }
 */
-        __pyx_t_5 = __Pyx_PyLong_From_int64_t((__pyx_v_c.zone_map.chunks[__pyx_7genexpr__pyx_v_i]).min_ordinal); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 343, __pyx_L1_error)
-        __Pyx_GOTREF(__pyx_t_5);
-        __pyx_t_4 = __Pyx_PyLong_From_int64_t((__pyx_v_c.zone_map.chunks[__pyx_7genexpr__pyx_v_i]).max_ordinal); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 343, __pyx_L1_error)
-        __Pyx_GOTREF(__pyx_t_4);
-        __pyx_t_9 = PyTuple_New(2); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 343, __pyx_L1_error)
+        __pyx_t_7 = __Pyx_PyLong_From_int64_t((__pyx_v_c.zone_map.chunks[__pyx_8genexpr1__pyx_v_i]).min_ordinal); if (unlikely(!__pyx_t_7)) __PYX_ERR(0, 375, __pyx_L1_error)
+        __Pyx_GOTREF(__pyx_t_7);
+        __pyx_t_8 = __Pyx_PyLong_From_int64_t((__pyx_v_c.zone_map.chunks[__pyx_8genexpr1__pyx_v_i]).max_ordinal); if (unlikely(!__pyx_t_8)) __PYX_ERR(0, 375, __pyx_L1_error)
+        __Pyx_GOTREF(__pyx_t_8);
+        __pyx_t_9 = PyTuple_New(2); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 375, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_9);
-        __Pyx_GIVEREF(__pyx_t_5);
-        if (__Pyx_PyTuple_SET_ITEM(__pyx_t_9, 0, __pyx_t_5) != (0)) __PYX_ERR(0, 343, __pyx_L1_error);
-        __Pyx_GIVEREF(__pyx_t_4);
-        if (__Pyx_PyTuple_SET_ITEM(__pyx_t_9, 1, __pyx_t_4) != (0)) __PYX_ERR(0, 343, __pyx_L1_error);
-        __pyx_t_5 = 0;
-        __pyx_t_4 = 0;
-        if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 343, __pyx_L1_error)
+        __Pyx_GIVEREF(__pyx_t_7);
+        if (__Pyx_PyTuple_SET_ITEM(__pyx_t_9, 0, __pyx_t_7) != (0)) __PYX_ERR(0, 375, __pyx_L1_error);
+        __Pyx_GIVEREF(__pyx_t_8);
+        if (__Pyx_PyTuple_SET_ITEM(__pyx_t_9, 1, __pyx_t_8) != (0)) __PYX_ERR(0, 375, __pyx_L1_error);
+        __pyx_t_7 = 0;
+        __pyx_t_8 = 0;
+        if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 375, __pyx_L1_error)
         __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
       }
     } /* exit inner scope */
-    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_chunks, __pyx_t_2) < (0)) __PYX_ERR(0, 342, __pyx_L1_error)
+    if (PyDict_SetItem(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_chunks, __pyx_t_2) < (0)) __PYX_ERR(0, 374, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":341
- *         }
+    /* "skene/src/skene_native.pyx":373
+ *         out["statistics"] = _statistics_to_dict(c.statistics, c.sketch)
  *     if c.zone_map.present():
  *         out["zone_map"] = {             # <<<<<<<<<<<<<<
  *             "chunk_rows": c.zone_map.chunk_rows,
  *             "chunks": [(c.zone_map.chunks[i].min_ordinal, c.zone_map.chunks[i].max_ordinal)
 */
-    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_zone_map, __pyx_t_1) < 0))) __PYX_ERR(0, 341, __pyx_L1_error)
+    if (unlikely((PyDict_SetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_zone_map, __pyx_t_1) < 0))) __PYX_ERR(0, 373, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
 
-    /* "skene/src/skene_native.pyx":340
- *                    + ((<object>c.statistics.sum_low) & 0xFFFFFFFFFFFFFFFF),
- *         }
+    /* "skene/src/skene_native.pyx":372
+ *         # growth field.
+ *         out["statistics"] = _statistics_to_dict(c.statistics, c.sketch)
  *     if c.zone_map.present():             # <<<<<<<<<<<<<<
  *         out["zone_map"] = {
  *             "chunk_rows": c.zone_map.chunk_rows,
 */
   }
 
-  /* "skene/src/skene_native.pyx":347
+  /* "skene/src/skene_native.pyx":379
  *         }
  *     cdef size_t i
  *     for i in range(c.children.size()):             # <<<<<<<<<<<<<<
@@ -18636,26 +18693,26 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
 */
   __pyx_t_10 = __pyx_v_c.children.size();
   __pyx_t_11 = __pyx_t_10;
-  for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_11; __pyx_t_8+=1) {
-    __pyx_v_i = __pyx_t_8;
+  for (__pyx_t_6 = 0; __pyx_t_6 < __pyx_t_11; __pyx_t_6+=1) {
+    __pyx_v_i = __pyx_t_6;
 
-    /* "skene/src/skene_native.pyx":348
+    /* "skene/src/skene_native.pyx":380
  *     cdef size_t i
  *     for i in range(c.children.size()):
  *         out["children"].append(_column_to_dict(c.children[i]))             # <<<<<<<<<<<<<<
  *     return out
  * 
 */
-    __pyx_t_1 = __Pyx_PyDict_GetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_children); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 348, __pyx_L1_error)
+    __pyx_t_1 = __Pyx_PyDict_GetItem(__pyx_v_out, __pyx_mstate_global->__pyx_n_u_children); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 380, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = __pyx_f_5skene_12skene_native__column_to_dict((__pyx_v_c.children[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 348, __pyx_L1_error)
+    __pyx_t_2 = __pyx_f_5skene_12skene_native__column_to_dict((__pyx_v_c.children[__pyx_v_i])); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 380, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_12 = __Pyx_PyObject_Append(__pyx_t_1, __pyx_t_2); if (unlikely(__pyx_t_12 == ((int)-1))) __PYX_ERR(0, 348, __pyx_L1_error)
+    __pyx_t_12 = __Pyx_PyObject_Append(__pyx_t_1, __pyx_t_2); if (unlikely(__pyx_t_12 == ((int)-1))) __PYX_ERR(0, 380, __pyx_L1_error)
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   }
 
-  /* "skene/src/skene_native.pyx":349
+  /* "skene/src/skene_native.pyx":381
  *     for i in range(c.children.size()):
  *         out["children"].append(_column_to_dict(c.children[i]))
  *     return out             # <<<<<<<<<<<<<<
@@ -18667,7 +18724,7 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
   __pyx_r = __pyx_v_out;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":301
+  /* "skene/src/skene_native.pyx":340
  * 
  * 
  * cdef dict _column_to_dict(const ColumnMetadata& c):             # <<<<<<<<<<<<<<
@@ -18679,8 +18736,8 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
   __pyx_L1_error:;
   __Pyx_XDECREF(__pyx_t_1);
   __Pyx_XDECREF(__pyx_t_2);
-  __Pyx_XDECREF(__pyx_t_4);
-  __Pyx_XDECREF(__pyx_t_5);
+  __Pyx_XDECREF(__pyx_t_7);
+  __Pyx_XDECREF(__pyx_t_8);
   __Pyx_XDECREF(__pyx_t_9);
   __Pyx_AddTraceback("skene.skene_native._column_to_dict", __pyx_clineno, __pyx_lineno, __pyx_filename);
   __pyx_r = 0;
@@ -18691,7 +18748,7 @@ static PyObject *__pyx_f_5skene_12skene_native__column_to_dict(skene::ColumnMeta
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":354
+/* "skene/src/skene_native.pyx":386
  * #  Public API
  * 
  * def probe_version(const unsigned char[::1] head not None):             # <<<<<<<<<<<<<<
@@ -18739,32 +18796,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_head,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 354, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 386, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 354, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 386, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "probe_version", 0) < (0)) __PYX_ERR(0, 354, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "probe_version", 0) < (0)) __PYX_ERR(0, 386, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("probe_version", 1, 1, 1, i); __PYX_ERR(0, 354, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("probe_version", 1, 1, 1, i); __PYX_ERR(0, 386, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 354, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 386, __pyx_L3_error)
     }
-    __pyx_v_head = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_head.memview)) __PYX_ERR(0, 354, __pyx_L3_error)
+    __pyx_v_head = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_head.memview)) __PYX_ERR(0, 386, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("probe_version", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 354, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("probe_version", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 386, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -18777,7 +18834,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return NULL;
   __pyx_L4_argument_unpacking_done:;
   if (unlikely(((PyObject *)__pyx_v_head.memview) == Py_None)) {
-    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "head"); __PYX_ERR(0, 354, __pyx_L1_error)
+    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "head"); __PYX_ERR(0, 386, __pyx_L1_error)
   }
   __pyx_r = __pyx_pf_5skene_12skene_native_probe_version(__pyx_self, __pyx_v_head);
 
@@ -18814,7 +18871,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_probe_version(CYTHON_UNUSED PyOb
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("probe_version", 0);
 
-  /* "skene/src/skene_native.pyx":360
+  /* "skene/src/skene_native.pyx":392
  *     Raises SkeneError(NotSkene) when the bytes are not a skene file.
  *     """
  *     cdef uint16_t version = 0             # <<<<<<<<<<<<<<
@@ -18823,7 +18880,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_probe_version(CYTHON_UNUSED PyOb
 */
   __pyx_v_version = 0;
 
-  /* "skene/src/skene_native.pyx":362
+  /* "skene/src/skene_native.pyx":394
  *     cdef uint16_t version = 0
  *     cdef Status st
  *     if head.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -18833,23 +18890,23 @@ static PyObject *__pyx_pf_5skene_12skene_native_probe_version(CYTHON_UNUSED PyOb
   __pyx_t_1 = ((__pyx_v_head.shape[0]) == 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "skene/src/skene_native.pyx":363
+    /* "skene/src/skene_native.pyx":395
  *     cdef Status st
  *     if head.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")             # <<<<<<<<<<<<<<
  *     st = c_probe_version(<const void*>&head[0], <size_t>head.shape[0], &version)
  *     _check(st)
 */
-    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 363, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 395, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 363, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 395, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_Raise(__pyx_t_3, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __PYX_ERR(0, 363, __pyx_L1_error)
+    __PYX_ERR(0, 395, __pyx_L1_error)
 
-    /* "skene/src/skene_native.pyx":362
+    /* "skene/src/skene_native.pyx":394
  *     cdef uint16_t version = 0
  *     cdef Status st
  *     if head.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -18858,7 +18915,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_probe_version(CYTHON_UNUSED PyOb
 */
   }
 
-  /* "skene/src/skene_native.pyx":364
+  /* "skene/src/skene_native.pyx":396
  *     if head.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     st = c_probe_version(<const void*>&head[0], <size_t>head.shape[0], &version)             # <<<<<<<<<<<<<<
@@ -18868,16 +18925,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_probe_version(CYTHON_UNUSED PyOb
   __pyx_t_4 = 0;
   __pyx_v_st = skene::probe_version(((void const *)(&(*((unsigned char const  *) ( /* dim=0 */ ((char *) (((unsigned char const  *) __pyx_v_head.data) + __pyx_t_4)) ))))), ((size_t)(__pyx_v_head.shape[0])), (&__pyx_v_version));
 
-  /* "skene/src/skene_native.pyx":365
+  /* "skene/src/skene_native.pyx":397
  *         raise SkeneError("Truncated", "empty buffer")
  *     st = c_probe_version(<const void*>&head[0], <size_t>head.shape[0], &version)
  *     _check(st)             # <<<<<<<<<<<<<<
  *     return version
  * 
 */
-  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 365, __pyx_L1_error)
+  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 397, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":366
+  /* "skene/src/skene_native.pyx":398
  *     st = c_probe_version(<const void*>&head[0], <size_t>head.shape[0], &version)
  *     _check(st)
  *     return version             # <<<<<<<<<<<<<<
@@ -18885,13 +18942,13 @@ static PyObject *__pyx_pf_5skene_12skene_native_probe_version(CYTHON_UNUSED PyOb
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_3 = __Pyx_PyLong_From_uint16_t(__pyx_v_version); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 366, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyLong_From_uint16_t(__pyx_v_version); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 398, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_r = __pyx_t_3;
   __pyx_t_3 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":354
+  /* "skene/src/skene_native.pyx":386
  * #  Public API
  * 
  * def probe_version(const unsigned char[::1] head not None):             # <<<<<<<<<<<<<<
@@ -18911,7 +18968,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_probe_version(CYTHON_UNUSED PyOb
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":369
+/* "skene/src/skene_native.pyx":401
  * 
  * 
  * def footer_extent(const unsigned char[::1] tail not None, uint64_t file_bytes):             # <<<<<<<<<<<<<<
@@ -18960,39 +19017,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_tail,&__pyx_mstate_global->__pyx_n_u_file_bytes,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 369, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 401, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 369, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 401, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 369, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 401, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "footer_extent", 0) < (0)) __PYX_ERR(0, 369, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "footer_extent", 0) < (0)) __PYX_ERR(0, 401, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("footer_extent", 1, 2, 2, i); __PYX_ERR(0, 369, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("footer_extent", 1, 2, 2, i); __PYX_ERR(0, 401, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 369, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 401, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 369, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 401, __pyx_L3_error)
     }
-    __pyx_v_tail = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_tail.memview)) __PYX_ERR(0, 369, __pyx_L3_error)
-    __pyx_v_file_bytes = __Pyx_PyLong_As_uint64_t(values[1]); if (unlikely((__pyx_v_file_bytes == ((uint64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 369, __pyx_L3_error)
+    __pyx_v_tail = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_tail.memview)) __PYX_ERR(0, 401, __pyx_L3_error)
+    __pyx_v_file_bytes = __Pyx_PyLong_As_uint64_t(values[1]); if (unlikely((__pyx_v_file_bytes == ((uint64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 401, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("footer_extent", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 369, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("footer_extent", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 401, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -19005,7 +19062,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return NULL;
   __pyx_L4_argument_unpacking_done:;
   if (unlikely(((PyObject *)__pyx_v_tail.memview) == Py_None)) {
-    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "tail"); __PYX_ERR(0, 369, __pyx_L1_error)
+    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "tail"); __PYX_ERR(0, 401, __pyx_L1_error)
   }
   __pyx_r = __pyx_pf_5skene_12skene_native_2footer_extent(__pyx_self, __pyx_v_tail, __pyx_v_file_bytes);
 
@@ -19044,7 +19101,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("footer_extent", 0);
 
-  /* "skene/src/skene_native.pyx":372
+  /* "skene/src/skene_native.pyx":404
  *     """Given the last kFileTailBytes of an object and its total size, return
  *     (offset, nbytes) of the footer  the tail-then-footer remote read path."""
  *     cdef uint64_t offset = 0, nbytes = 0             # <<<<<<<<<<<<<<
@@ -19054,7 +19111,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
   __pyx_v_offset = 0;
   __pyx_v_nbytes = 0;
 
-  /* "skene/src/skene_native.pyx":374
+  /* "skene/src/skene_native.pyx":406
  *     cdef uint64_t offset = 0, nbytes = 0
  *     cdef Status st
  *     if tail.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -19064,23 +19121,23 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
   __pyx_t_1 = ((__pyx_v_tail.shape[0]) == 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "skene/src/skene_native.pyx":375
+    /* "skene/src/skene_native.pyx":407
  *     cdef Status st
  *     if tail.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")             # <<<<<<<<<<<<<<
  *     st = c_footer_extent(<const void*>&tail[0], <size_t>tail.shape[0],
  *                          file_bytes, &offset, &nbytes)
 */
-    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 375, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 407, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 375, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 407, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_Raise(__pyx_t_3, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __PYX_ERR(0, 375, __pyx_L1_error)
+    __PYX_ERR(0, 407, __pyx_L1_error)
 
-    /* "skene/src/skene_native.pyx":374
+    /* "skene/src/skene_native.pyx":406
  *     cdef uint64_t offset = 0, nbytes = 0
  *     cdef Status st
  *     if tail.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -19089,7 +19146,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
 */
   }
 
-  /* "skene/src/skene_native.pyx":376
+  /* "skene/src/skene_native.pyx":408
  *     if tail.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     st = c_footer_extent(<const void*>&tail[0], <size_t>tail.shape[0],             # <<<<<<<<<<<<<<
@@ -19098,7 +19155,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
 */
   __pyx_t_4 = 0;
 
-  /* "skene/src/skene_native.pyx":377
+  /* "skene/src/skene_native.pyx":409
  *         raise SkeneError("Truncated", "empty buffer")
  *     st = c_footer_extent(<const void*>&tail[0], <size_t>tail.shape[0],
  *                          file_bytes, &offset, &nbytes)             # <<<<<<<<<<<<<<
@@ -19107,16 +19164,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
 */
   __pyx_v_st = skene::footer_extent(((void const *)(&(*((unsigned char const  *) ( /* dim=0 */ ((char *) (((unsigned char const  *) __pyx_v_tail.data) + __pyx_t_4)) ))))), ((size_t)(__pyx_v_tail.shape[0])), __pyx_v_file_bytes, (&__pyx_v_offset), (&__pyx_v_nbytes));
 
-  /* "skene/src/skene_native.pyx":378
+  /* "skene/src/skene_native.pyx":410
  *     st = c_footer_extent(<const void*>&tail[0], <size_t>tail.shape[0],
  *                          file_bytes, &offset, &nbytes)
  *     _check(st)             # <<<<<<<<<<<<<<
  *     return offset, nbytes
  * 
 */
-  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 378, __pyx_L1_error)
+  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 410, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":379
+  /* "skene/src/skene_native.pyx":411
  *                          file_bytes, &offset, &nbytes)
  *     _check(st)
  *     return offset, nbytes             # <<<<<<<<<<<<<<
@@ -19124,23 +19181,23 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_3 = __Pyx_PyLong_From_uint64_t(__pyx_v_offset); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 379, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyLong_From_uint64_t(__pyx_v_offset); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 411, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_nbytes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 379, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_nbytes); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 411, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  __pyx_t_6 = PyTuple_New(2); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 379, __pyx_L1_error)
+  __pyx_t_6 = PyTuple_New(2); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 411, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_6);
   __Pyx_GIVEREF(__pyx_t_3);
-  if (__Pyx_PyTuple_SET_ITEM(__pyx_t_6, 0, __pyx_t_3) != (0)) __PYX_ERR(0, 379, __pyx_L1_error);
+  if (__Pyx_PyTuple_SET_ITEM(__pyx_t_6, 0, __pyx_t_3) != (0)) __PYX_ERR(0, 411, __pyx_L1_error);
   __Pyx_GIVEREF(__pyx_t_2);
-  if (__Pyx_PyTuple_SET_ITEM(__pyx_t_6, 1, __pyx_t_2) != (0)) __PYX_ERR(0, 379, __pyx_L1_error);
+  if (__Pyx_PyTuple_SET_ITEM(__pyx_t_6, 1, __pyx_t_2) != (0)) __PYX_ERR(0, 411, __pyx_L1_error);
   __pyx_t_3 = 0;
   __pyx_t_2 = 0;
   __pyx_r = __pyx_t_6;
   __pyx_t_6 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":369
+  /* "skene/src/skene_native.pyx":401
  * 
  * 
  * def footer_extent(const unsigned char[::1] tail not None, uint64_t file_bytes):             # <<<<<<<<<<<<<<
@@ -19161,7 +19218,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_2footer_extent(CYTHON_UNUSED PyO
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":382
+/* "skene/src/skene_native.pyx":414
  * 
  * 
  * def read_metadata(const unsigned char[::1] file not None):             # <<<<<<<<<<<<<<
@@ -19209,32 +19266,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_file,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 382, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 414, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 382, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 414, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_metadata", 0) < (0)) __PYX_ERR(0, 382, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_metadata", 0) < (0)) __PYX_ERR(0, 414, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_metadata", 1, 1, 1, i); __PYX_ERR(0, 382, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_metadata", 1, 1, 1, i); __PYX_ERR(0, 414, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 382, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 414, __pyx_L3_error)
     }
-    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 382, __pyx_L3_error)
+    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 414, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("read_metadata", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 382, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("read_metadata", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 414, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -19247,7 +19304,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return NULL;
   __pyx_L4_argument_unpacking_done:;
   if (unlikely(((PyObject *)__pyx_v_file.memview) == Py_None)) {
-    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 382, __pyx_L1_error)
+    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 414, __pyx_L1_error)
   }
   __pyx_r = __pyx_pf_5skene_12skene_native_4read_metadata(__pyx_self, __pyx_v_file);
 
@@ -19272,8 +19329,8 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyObject *__pyx_self, __Pyx_memviewslice __pyx_v_file) {
   skene::FileMetadata __pyx_v_meta;
   skene::Status __pyx_v_st;
-  size_t __pyx_8genexpr1__pyx_v_i;
   size_t __pyx_8genexpr2__pyx_v_i;
+  size_t __pyx_8genexpr3__pyx_v_i;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   int __pyx_t_1;
@@ -19292,7 +19349,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("read_metadata", 0);
 
-  /* "skene/src/skene_native.pyx":397
+  /* "skene/src/skene_native.pyx":429
  *     cdef FileMetadata meta
  *     cdef Status st
  *     if file.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -19302,23 +19359,23 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
   __pyx_t_1 = ((__pyx_v_file.shape[0]) == 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "skene/src/skene_native.pyx":398
+    /* "skene/src/skene_native.pyx":430
  *     cdef Status st
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")             # <<<<<<<<<<<<<<
  *     with nogil:
  *         st = c_read_metadata(<const void*>&file[0], <size_t>file.shape[0], &meta)
 */
-    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 398, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 430, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 398, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 430, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_Raise(__pyx_t_3, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __PYX_ERR(0, 398, __pyx_L1_error)
+    __PYX_ERR(0, 430, __pyx_L1_error)
 
-    /* "skene/src/skene_native.pyx":397
+    /* "skene/src/skene_native.pyx":429
  *     cdef FileMetadata meta
  *     cdef Status st
  *     if file.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -19327,7 +19384,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
 */
   }
 
-  /* "skene/src/skene_native.pyx":399
+  /* "skene/src/skene_native.pyx":431
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -19340,7 +19397,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":400
+        /* "skene/src/skene_native.pyx":432
  *         raise SkeneError("Truncated", "empty buffer")
  *     with nogil:
  *         st = c_read_metadata(<const void*>&file[0], <size_t>file.shape[0], &meta)             # <<<<<<<<<<<<<<
@@ -19351,7 +19408,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
         __pyx_v_st = skene::read_metadata(((void const *)(&(*((unsigned char const  *) ( /* dim=0 */ ((char *) (((unsigned char const  *) __pyx_v_file.data) + __pyx_t_4)) ))))), ((size_t)(__pyx_v_file.shape[0])), (&__pyx_v_meta));
       }
 
-      /* "skene/src/skene_native.pyx":399
+      /* "skene/src/skene_native.pyx":431
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -19368,16 +19425,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
       }
   }
 
-  /* "skene/src/skene_native.pyx":401
+  /* "skene/src/skene_native.pyx":433
  *     with nogil:
  *         st = c_read_metadata(<const void*>&file[0], <size_t>file.shape[0], &meta)
  *     _check(st)             # <<<<<<<<<<<<<<
  *     cdef size_t i
  *     return {
 */
-  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 401, __pyx_L1_error)
+  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 433, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":403
+  /* "skene/src/skene_native.pyx":435
  *     _check(st)
  *     cdef size_t i
  *     return {             # <<<<<<<<<<<<<<
@@ -19386,103 +19443,103 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "skene/src/skene_native.pyx":404
+  /* "skene/src/skene_native.pyx":436
  *     cdef size_t i
  *     return {
  *         "version": meta.version,             # <<<<<<<<<<<<<<
  *         "row_count": meta.row_count,
  *         "file_uuid": PyBytes_FromStringAndSize(<char*>meta.file_uuid, 16),
 */
-  __pyx_t_3 = __Pyx_PyDict_NewPresized(7); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 404, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyDict_NewPresized(7); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_2 = __Pyx_PyLong_From_uint16_t(__pyx_v_meta.version); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 404, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint16_t(__pyx_v_meta.version); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_version, __pyx_t_2) < (0)) __PYX_ERR(0, 404, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_version, __pyx_t_2) < (0)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":405
+  /* "skene/src/skene_native.pyx":437
  *     return {
  *         "version": meta.version,
  *         "row_count": meta.row_count,             # <<<<<<<<<<<<<<
  *         "file_uuid": PyBytes_FromStringAndSize(<char*>meta.file_uuid, 16),
  *         "created_at_unix_us": meta.created_at_unix_us,
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_meta.row_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 405, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_meta.row_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 437, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_row_count, __pyx_t_2) < (0)) __PYX_ERR(0, 404, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_row_count, __pyx_t_2) < (0)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":406
+  /* "skene/src/skene_native.pyx":438
  *         "version": meta.version,
  *         "row_count": meta.row_count,
  *         "file_uuid": PyBytes_FromStringAndSize(<char*>meta.file_uuid, 16),             # <<<<<<<<<<<<<<
  *         "created_at_unix_us": meta.created_at_unix_us,
  *         "writer_tag": meta.writer_tag.decode("utf-8", "replace"),
 */
-  __pyx_t_2 = PyBytes_FromStringAndSize(((char *)__pyx_v_meta.file_uuid), 16); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 406, __pyx_L1_error)
+  __pyx_t_2 = PyBytes_FromStringAndSize(((char *)__pyx_v_meta.file_uuid), 16); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 438, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_file_uuid, __pyx_t_2) < (0)) __PYX_ERR(0, 404, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_file_uuid, __pyx_t_2) < (0)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":407
+  /* "skene/src/skene_native.pyx":439
  *         "row_count": meta.row_count,
  *         "file_uuid": PyBytes_FromStringAndSize(<char*>meta.file_uuid, 16),
  *         "created_at_unix_us": meta.created_at_unix_us,             # <<<<<<<<<<<<<<
  *         "writer_tag": meta.writer_tag.decode("utf-8", "replace"),
  *         "columns": [_schema_to_dict(meta.columns[i]) for i in range(meta.columns.size())],
 */
-  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_meta.created_at_unix_us); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 407, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_meta.created_at_unix_us); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 439, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_created_at_unix_us, __pyx_t_2) < (0)) __PYX_ERR(0, 404, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_created_at_unix_us, __pyx_t_2) < (0)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-  /* "skene/src/skene_native.pyx":408
+  /* "skene/src/skene_native.pyx":440
  *         "file_uuid": PyBytes_FromStringAndSize(<char*>meta.file_uuid, 16),
  *         "created_at_unix_us": meta.created_at_unix_us,
  *         "writer_tag": meta.writer_tag.decode("utf-8", "replace"),             # <<<<<<<<<<<<<<
  *         "columns": [_schema_to_dict(meta.columns[i]) for i in range(meta.columns.size())],
  *         "row_groups": [_row_group_to_dict(meta.row_groups[i])
 */
-  __pyx_t_2 = __Pyx_decode_cpp_string(__pyx_v_meta.writer_tag, 0, PY_SSIZE_T_MAX, NULL, __pyx_k_replace, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 408, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_decode_cpp_string(__pyx_v_meta.writer_tag, 0, PY_SSIZE_T_MAX, NULL, __pyx_k_replace, PyUnicode_DecodeUTF8); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 440, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_writer_tag, __pyx_t_2) < (0)) __PYX_ERR(0, 404, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_writer_tag, __pyx_t_2) < (0)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   { /* enter inner scope */
 
-    /* "skene/src/skene_native.pyx":409
+    /* "skene/src/skene_native.pyx":441
  *         "created_at_unix_us": meta.created_at_unix_us,
  *         "writer_tag": meta.writer_tag.decode("utf-8", "replace"),
  *         "columns": [_schema_to_dict(meta.columns[i]) for i in range(meta.columns.size())],             # <<<<<<<<<<<<<<
  *         "row_groups": [_row_group_to_dict(meta.row_groups[i])
  *                        for i in range(meta.row_groups.size())],
 */
-    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 409, __pyx_L1_error)
+    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 441, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __pyx_t_6 = __pyx_v_meta.columns.size();
     __pyx_t_7 = __pyx_t_6;
     for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_7; __pyx_t_8+=1) {
-      __pyx_8genexpr1__pyx_v_i = __pyx_t_8;
-      __pyx_t_9 = __pyx_f_5skene_12skene_native__schema_to_dict((__pyx_v_meta.columns[__pyx_8genexpr1__pyx_v_i])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 409, __pyx_L1_error)
+      __pyx_8genexpr2__pyx_v_i = __pyx_t_8;
+      __pyx_t_9 = __pyx_f_5skene_12skene_native__schema_to_dict((__pyx_v_meta.columns[__pyx_8genexpr2__pyx_v_i])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 441, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
-      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 409, __pyx_L1_error)
+      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 441, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
     }
   } /* exit inner scope */
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_2) < (0)) __PYX_ERR(0, 404, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_2) < (0)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   { /* enter inner scope */
 
-    /* "skene/src/skene_native.pyx":410
+    /* "skene/src/skene_native.pyx":442
  *         "writer_tag": meta.writer_tag.decode("utf-8", "replace"),
  *         "columns": [_schema_to_dict(meta.columns[i]) for i in range(meta.columns.size())],
  *         "row_groups": [_row_group_to_dict(meta.row_groups[i])             # <<<<<<<<<<<<<<
  *                        for i in range(meta.row_groups.size())],
  *     }
 */
-    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 410, __pyx_L1_error)
+    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 442, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
 
-    /* "skene/src/skene_native.pyx":411
+    /* "skene/src/skene_native.pyx":443
  *         "columns": [_schema_to_dict(meta.columns[i]) for i in range(meta.columns.size())],
  *         "row_groups": [_row_group_to_dict(meta.row_groups[i])
  *                        for i in range(meta.row_groups.size())],             # <<<<<<<<<<<<<<
@@ -19492,28 +19549,28 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
     __pyx_t_10 = __pyx_v_meta.row_groups.size();
     __pyx_t_11 = __pyx_t_10;
     for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_11; __pyx_t_8+=1) {
-      __pyx_8genexpr2__pyx_v_i = __pyx_t_8;
+      __pyx_8genexpr3__pyx_v_i = __pyx_t_8;
 
-      /* "skene/src/skene_native.pyx":410
+      /* "skene/src/skene_native.pyx":442
  *         "writer_tag": meta.writer_tag.decode("utf-8", "replace"),
  *         "columns": [_schema_to_dict(meta.columns[i]) for i in range(meta.columns.size())],
  *         "row_groups": [_row_group_to_dict(meta.row_groups[i])             # <<<<<<<<<<<<<<
  *                        for i in range(meta.row_groups.size())],
  *     }
 */
-      __pyx_t_9 = __pyx_f_5skene_12skene_native__row_group_to_dict((__pyx_v_meta.row_groups[__pyx_8genexpr2__pyx_v_i])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 410, __pyx_L1_error)
+      __pyx_t_9 = __pyx_f_5skene_12skene_native__row_group_to_dict((__pyx_v_meta.row_groups[__pyx_8genexpr3__pyx_v_i])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 442, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
-      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 410, __pyx_L1_error)
+      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 442, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
     }
   } /* exit inner scope */
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_row_groups, __pyx_t_2) < (0)) __PYX_ERR(0, 404, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_row_groups, __pyx_t_2) < (0)) __PYX_ERR(0, 436, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_r = __pyx_t_3;
   __pyx_t_3 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":382
+  /* "skene/src/skene_native.pyx":414
  * 
  * 
  * def read_metadata(const unsigned char[::1] file not None):             # <<<<<<<<<<<<<<
@@ -19534,7 +19591,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_4read_metadata(CYTHON_UNUSED PyO
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":415
+/* "skene/src/skene_native.pyx":447
  * 
  * 
  * def read_row_group_metadata(const unsigned char[::1] file not None, uint32_t row_group):             # <<<<<<<<<<<<<<
@@ -19583,39 +19640,39 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_file,&__pyx_mstate_global->__pyx_n_u_row_group,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 415, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 447, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 415, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 447, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 415, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 447, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_row_group_metadata", 0) < (0)) __PYX_ERR(0, 415, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_row_group_metadata", 0) < (0)) __PYX_ERR(0, 447, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_row_group_metadata", 1, 2, 2, i); __PYX_ERR(0, 415, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_row_group_metadata", 1, 2, 2, i); __PYX_ERR(0, 447, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 2)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 415, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 447, __pyx_L3_error)
       values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 415, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 447, __pyx_L3_error)
     }
-    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 415, __pyx_L3_error)
-    __pyx_v_row_group = __Pyx_PyLong_As_uint32_t(values[1]); if (unlikely((__pyx_v_row_group == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 415, __pyx_L3_error)
+    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 447, __pyx_L3_error)
+    __pyx_v_row_group = __Pyx_PyLong_As_uint32_t(values[1]); if (unlikely((__pyx_v_row_group == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 447, __pyx_L3_error)
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("read_row_group_metadata", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 415, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("read_row_group_metadata", 1, 2, 2, __pyx_nargs); __PYX_ERR(0, 447, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -19628,7 +19685,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return NULL;
   __pyx_L4_argument_unpacking_done:;
   if (unlikely(((PyObject *)__pyx_v_file.memview) == Py_None)) {
-    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 415, __pyx_L1_error)
+    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 447, __pyx_L1_error)
   }
   __pyx_r = __pyx_pf_5skene_12skene_native_6read_row_group_metadata(__pyx_self, __pyx_v_file, __pyx_v_row_group);
 
@@ -19653,7 +19710,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_UNUSED PyObject *__pyx_self, __Pyx_memviewslice __pyx_v_file, uint32_t __pyx_v_row_group) {
   skene::RowGroupMetadata __pyx_v_meta;
   skene::Status __pyx_v_st;
-  size_t __pyx_8genexpr3__pyx_v_i;
+  size_t __pyx_8genexpr4__pyx_v_i;
   PyObject *__pyx_r = NULL;
   __Pyx_RefNannyDeclarations
   int __pyx_t_1;
@@ -19670,7 +19727,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("read_row_group_metadata", 0);
 
-  /* "skene/src/skene_native.pyx":425
+  /* "skene/src/skene_native.pyx":457
  *     cdef RowGroupMetadata meta
  *     cdef Status st
  *     if file.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -19680,23 +19737,23 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
   __pyx_t_1 = ((__pyx_v_file.shape[0]) == 0);
   if (unlikely(__pyx_t_1)) {
 
-    /* "skene/src/skene_native.pyx":426
+    /* "skene/src/skene_native.pyx":458
  *     cdef Status st
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")             # <<<<<<<<<<<<<<
  *     with nogil:
  *         st = c_read_row_group_metadata(<const void*>&file[0], <size_t>file.shape[0],
 */
-    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 426, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_2, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 458, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
-    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 426, __pyx_L1_error)
+    __pyx_t_3 = __Pyx_PyObject_Call(__pyx_t_2, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 458, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
     __Pyx_Raise(__pyx_t_3, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
-    __PYX_ERR(0, 426, __pyx_L1_error)
+    __PYX_ERR(0, 458, __pyx_L1_error)
 
-    /* "skene/src/skene_native.pyx":425
+    /* "skene/src/skene_native.pyx":457
  *     cdef RowGroupMetadata meta
  *     cdef Status st
  *     if file.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -19705,7 +19762,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
 */
   }
 
-  /* "skene/src/skene_native.pyx":427
+  /* "skene/src/skene_native.pyx":459
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -19718,7 +19775,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":428
+        /* "skene/src/skene_native.pyx":460
  *         raise SkeneError("Truncated", "empty buffer")
  *     with nogil:
  *         st = c_read_row_group_metadata(<const void*>&file[0], <size_t>file.shape[0],             # <<<<<<<<<<<<<<
@@ -19727,7 +19784,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
 */
         __pyx_t_4 = 0;
 
-        /* "skene/src/skene_native.pyx":429
+        /* "skene/src/skene_native.pyx":461
  *     with nogil:
  *         st = c_read_row_group_metadata(<const void*>&file[0], <size_t>file.shape[0],
  *                                        row_group, &meta)             # <<<<<<<<<<<<<<
@@ -19737,7 +19794,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
         __pyx_v_st = skene::read_row_group_metadata(((void const *)(&(*((unsigned char const  *) ( /* dim=0 */ ((char *) (((unsigned char const  *) __pyx_v_file.data) + __pyx_t_4)) ))))), ((size_t)(__pyx_v_file.shape[0])), __pyx_v_row_group, (&__pyx_v_meta));
       }
 
-      /* "skene/src/skene_native.pyx":427
+      /* "skene/src/skene_native.pyx":459
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -19754,16 +19811,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
       }
   }
 
-  /* "skene/src/skene_native.pyx":430
+  /* "skene/src/skene_native.pyx":462
  *         st = c_read_row_group_metadata(<const void*>&file[0], <size_t>file.shape[0],
  *                                        row_group, &meta)
  *     _check(st)             # <<<<<<<<<<<<<<
  *     cdef size_t i
  *     return {
 */
-  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 430, __pyx_L1_error)
+  __pyx_t_5 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_5 == ((int)-1))) __PYX_ERR(0, 462, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":432
+  /* "skene/src/skene_native.pyx":464
  *     _check(st)
  *     cdef size_t i
  *     return {             # <<<<<<<<<<<<<<
@@ -19772,47 +19829,47 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "skene/src/skene_native.pyx":433
+  /* "skene/src/skene_native.pyx":465
  *     cdef size_t i
  *     return {
  *         "row_count": meta.row_count,             # <<<<<<<<<<<<<<
  *         "columns": [_column_to_dict(meta.columns[i]) for i in range(meta.columns.size())],
  *     }
 */
-  __pyx_t_3 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 433, __pyx_L1_error)
+  __pyx_t_3 = __Pyx_PyDict_NewPresized(2); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 465, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
-  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_meta.row_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 433, __pyx_L1_error)
+  __pyx_t_2 = __Pyx_PyLong_From_uint64_t(__pyx_v_meta.row_count); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 465, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_row_count, __pyx_t_2) < (0)) __PYX_ERR(0, 433, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_row_count, __pyx_t_2) < (0)) __PYX_ERR(0, 465, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   { /* enter inner scope */
 
-    /* "skene/src/skene_native.pyx":434
+    /* "skene/src/skene_native.pyx":466
  *     return {
  *         "row_count": meta.row_count,
  *         "columns": [_column_to_dict(meta.columns[i]) for i in range(meta.columns.size())],             # <<<<<<<<<<<<<<
  *     }
  * 
 */
-    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 434, __pyx_L1_error)
+    __pyx_t_2 = PyList_New(0); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 466, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __pyx_t_6 = __pyx_v_meta.columns.size();
     __pyx_t_7 = __pyx_t_6;
     for (__pyx_t_8 = 0; __pyx_t_8 < __pyx_t_7; __pyx_t_8+=1) {
-      __pyx_8genexpr3__pyx_v_i = __pyx_t_8;
-      __pyx_t_9 = __pyx_f_5skene_12skene_native__column_to_dict((__pyx_v_meta.columns[__pyx_8genexpr3__pyx_v_i])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 434, __pyx_L1_error)
+      __pyx_8genexpr4__pyx_v_i = __pyx_t_8;
+      __pyx_t_9 = __pyx_f_5skene_12skene_native__column_to_dict((__pyx_v_meta.columns[__pyx_8genexpr4__pyx_v_i])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 466, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_9);
-      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 434, __pyx_L1_error)
+      if (unlikely(__Pyx_ListComp_Append(__pyx_t_2, (PyObject*)__pyx_t_9))) __PYX_ERR(0, 466, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
     }
   } /* exit inner scope */
-  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_2) < (0)) __PYX_ERR(0, 433, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_columns, __pyx_t_2) < (0)) __PYX_ERR(0, 465, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_r = __pyx_t_3;
   __pyx_t_3 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":415
+  /* "skene/src/skene_native.pyx":447
  * 
  * 
  * def read_row_group_metadata(const unsigned char[::1] file not None, uint32_t row_group):             # <<<<<<<<<<<<<<
@@ -19833,7 +19890,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_6read_row_group_metadata(CYTHON_
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":438
+/* "skene/src/skene_native.pyx":470
  * 
  * 
  * def read_morsel(const unsigned char[::1] file not None, uint32_t row_group,             # <<<<<<<<<<<<<<
@@ -19883,28 +19940,28 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_file,&__pyx_mstate_global->__pyx_n_u_row_group,&__pyx_mstate_global->__pyx_n_u_columns,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 438, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 470, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 438, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 470, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 438, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 470, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 438, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 470, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_morsel", 0) < (0)) __PYX_ERR(0, 438, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "read_morsel", 0) < (0)) __PYX_ERR(0, 470, __pyx_L3_error)
 
-      /* "skene/src/skene_native.pyx":439
+      /* "skene/src/skene_native.pyx":471
  * 
  * def read_morsel(const unsigned char[::1] file not None, uint32_t row_group,
  *                 columns=None):             # <<<<<<<<<<<<<<
@@ -19913,31 +19970,31 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
 */
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)Py_None));
       for (Py_ssize_t i = __pyx_nargs; i < 2; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_morsel", 0, 2, 3, i); __PYX_ERR(0, 438, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("read_morsel", 0, 2, 3, i); __PYX_ERR(0, 470, __pyx_L3_error) }
       }
     } else {
       switch (__pyx_nargs) {
         case  3:
         values[2] = __Pyx_ArgRef_FASTCALL(__pyx_args, 2);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 438, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[2])) __PYX_ERR(0, 470, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  2:
         values[1] = __Pyx_ArgRef_FASTCALL(__pyx_args, 1);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 438, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[1])) __PYX_ERR(0, 470, __pyx_L3_error)
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 438, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 470, __pyx_L3_error)
         break;
         default: goto __pyx_L5_argtuple_error;
       }
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)Py_None));
     }
-    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 438, __pyx_L3_error)
-    __pyx_v_row_group = __Pyx_PyLong_As_uint32_t(values[1]); if (unlikely((__pyx_v_row_group == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 438, __pyx_L3_error)
+    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 470, __pyx_L3_error)
+    __pyx_v_row_group = __Pyx_PyLong_As_uint32_t(values[1]); if (unlikely((__pyx_v_row_group == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 470, __pyx_L3_error)
     __pyx_v_columns = values[2];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("read_morsel", 0, 2, 3, __pyx_nargs); __PYX_ERR(0, 438, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("read_morsel", 0, 2, 3, __pyx_nargs); __PYX_ERR(0, 470, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -19950,11 +20007,11 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return NULL;
   __pyx_L4_argument_unpacking_done:;
   if (unlikely(((PyObject *)__pyx_v_file.memview) == Py_None)) {
-    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 438, __pyx_L1_error)
+    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 470, __pyx_L1_error)
   }
   __pyx_r = __pyx_pf_5skene_12skene_native_8read_morsel(__pyx_self, __pyx_v_file, __pyx_v_row_group, __pyx_v_columns);
 
-  /* "skene/src/skene_native.pyx":438
+  /* "skene/src/skene_native.pyx":470
  * 
  * 
  * def read_morsel(const unsigned char[::1] file not None, uint32_t row_group,             # <<<<<<<<<<<<<<
@@ -20003,7 +20060,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("read_morsel", 0);
 
-  /* "skene/src/skene_native.pyx":448
+  /* "skene/src/skene_native.pyx":480
  *     """
  *     cdef ReadOptions options
  *     cdef shared_ptr[CxxMorsel] sp = make_shared[CxxMorsel]()             # <<<<<<<<<<<<<<
@@ -20014,11 +20071,11 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
     __pyx_t_1 = std::make_shared<CxxMorsel>();
   } catch(...) {
     __Pyx_CppExn2PyErr();
-    __PYX_ERR(0, 448, __pyx_L1_error)
+    __PYX_ERR(0, 480, __pyx_L1_error)
   }
   __pyx_v_sp = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_1);
 
-  /* "skene/src/skene_native.pyx":450
+  /* "skene/src/skene_native.pyx":482
  *     cdef shared_ptr[CxxMorsel] sp = make_shared[CxxMorsel]()
  *     cdef Status st
  *     if file.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -20028,23 +20085,23 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
   __pyx_t_2 = ((__pyx_v_file.shape[0]) == 0);
   if (unlikely(__pyx_t_2)) {
 
-    /* "skene/src/skene_native.pyx":451
+    /* "skene/src/skene_native.pyx":483
  *     cdef Status st
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")             # <<<<<<<<<<<<<<
  *     if columns is not None:
  *         for name in columns:
 */
-    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 451, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_3, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 483, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_3);
-    __pyx_t_4 = __Pyx_PyObject_Call(__pyx_t_3, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 451, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_Call(__pyx_t_3, __pyx_mstate_global->__pyx_tuple[1], NULL); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 483, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
     __Pyx_Raise(__pyx_t_4, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-    __PYX_ERR(0, 451, __pyx_L1_error)
+    __PYX_ERR(0, 483, __pyx_L1_error)
 
-    /* "skene/src/skene_native.pyx":450
+    /* "skene/src/skene_native.pyx":482
  *     cdef shared_ptr[CxxMorsel] sp = make_shared[CxxMorsel]()
  *     cdef Status st
  *     if file.shape[0] == 0:             # <<<<<<<<<<<<<<
@@ -20053,7 +20110,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
 */
   }
 
-  /* "skene/src/skene_native.pyx":452
+  /* "skene/src/skene_native.pyx":484
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     if columns is not None:             # <<<<<<<<<<<<<<
@@ -20063,7 +20120,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
   __pyx_t_2 = (__pyx_v_columns != Py_None);
   if (__pyx_t_2) {
 
-    /* "skene/src/skene_native.pyx":453
+    /* "skene/src/skene_native.pyx":485
  *         raise SkeneError("Truncated", "empty buffer")
  *     if columns is not None:
  *         for name in columns:             # <<<<<<<<<<<<<<
@@ -20075,9 +20132,9 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
       __pyx_t_5 = 0;
       __pyx_t_6 = NULL;
     } else {
-      __pyx_t_5 = -1; __pyx_t_4 = PyObject_GetIter(__pyx_v_columns); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 453, __pyx_L1_error)
+      __pyx_t_5 = -1; __pyx_t_4 = PyObject_GetIter(__pyx_v_columns); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 485, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_4);
-      __pyx_t_6 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_4); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 453, __pyx_L1_error)
+      __pyx_t_6 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_4); if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 485, __pyx_L1_error)
     }
     for (;;) {
       if (likely(!__pyx_t_6)) {
@@ -20085,7 +20142,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_4);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 453, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 485, __pyx_L1_error)
             #endif
             if (__pyx_t_5 >= __pyx_temp) break;
           }
@@ -20095,7 +20152,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_4);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 453, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 485, __pyx_L1_error)
             #endif
             if (__pyx_t_5 >= __pyx_temp) break;
           }
@@ -20106,13 +20163,13 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
           #endif
           ++__pyx_t_5;
         }
-        if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 453, __pyx_L1_error)
+        if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 485, __pyx_L1_error)
       } else {
         __pyx_t_3 = __pyx_t_6(__pyx_t_4);
         if (unlikely(!__pyx_t_3)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 453, __pyx_L1_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 485, __pyx_L1_error)
             PyErr_Clear();
           }
           break;
@@ -20122,7 +20179,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
       __Pyx_XDECREF_SET(__pyx_v_name, __pyx_t_3);
       __pyx_t_3 = 0;
 
-      /* "skene/src/skene_native.pyx":454
+      /* "skene/src/skene_native.pyx":486
  *     if columns is not None:
  *         for name in columns:
  *             options.columns.push_back(name.encode("utf-8"))             # <<<<<<<<<<<<<<
@@ -20136,19 +20193,19 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
         PyObject *__pyx_callargs[2] = {__pyx_t_7, __pyx_mstate_global->__pyx_kp_u_utf_8};
         __pyx_t_3 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_8, (2-__pyx_t_8) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_7); __pyx_t_7 = 0;
-        if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 454, __pyx_L1_error)
+        if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 486, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_3);
       }
-      __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 454, __pyx_L1_error)
+      __pyx_t_9 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_3); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 486, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_3); __pyx_t_3 = 0;
       try {
         __pyx_v_options.columns.push_back(__pyx_t_9);
       } catch(...) {
         __Pyx_CppExn2PyErr();
-        __PYX_ERR(0, 454, __pyx_L1_error)
+        __PYX_ERR(0, 486, __pyx_L1_error)
       }
 
-      /* "skene/src/skene_native.pyx":453
+      /* "skene/src/skene_native.pyx":485
  *         raise SkeneError("Truncated", "empty buffer")
  *     if columns is not None:
  *         for name in columns:             # <<<<<<<<<<<<<<
@@ -20158,7 +20215,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
     }
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-    /* "skene/src/skene_native.pyx":452
+    /* "skene/src/skene_native.pyx":484
  *     if file.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")
  *     if columns is not None:             # <<<<<<<<<<<<<<
@@ -20167,7 +20224,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
 */
   }
 
-  /* "skene/src/skene_native.pyx":455
+  /* "skene/src/skene_native.pyx":487
  *         for name in columns:
  *             options.columns.push_back(name.encode("utf-8"))
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -20180,7 +20237,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":456
+        /* "skene/src/skene_native.pyx":488
  *             options.columns.push_back(name.encode("utf-8"))
  *     with nogil:
  *         st = c_read_morsel(<const void*>&file[0], <size_t>file.shape[0],             # <<<<<<<<<<<<<<
@@ -20189,7 +20246,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
 */
         __pyx_t_10 = 0;
 
-        /* "skene/src/skene_native.pyx":457
+        /* "skene/src/skene_native.pyx":489
  *     with nogil:
  *         st = c_read_morsel(<const void*>&file[0], <size_t>file.shape[0],
  *                            row_group, options, sp.get())             # <<<<<<<<<<<<<<
@@ -20199,7 +20256,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
         __pyx_v_st = skene::read_morsel(((void const *)(&(*((unsigned char const  *) ( /* dim=0 */ ((char *) (((unsigned char const  *) __pyx_v_file.data) + __pyx_t_10)) ))))), ((size_t)(__pyx_v_file.shape[0])), __pyx_v_row_group, __pyx_v_options, __pyx_v_sp.get());
       }
 
-      /* "skene/src/skene_native.pyx":455
+      /* "skene/src/skene_native.pyx":487
  *         for name in columns:
  *             options.columns.push_back(name.encode("utf-8"))
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -20216,16 +20273,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
       }
   }
 
-  /* "skene/src/skene_native.pyx":458
+  /* "skene/src/skene_native.pyx":490
  *         st = c_read_morsel(<const void*>&file[0], <size_t>file.shape[0],
  *                            row_group, options, sp.get())
  *     _check(st)             # <<<<<<<<<<<<<<
  *     return cxx_to_morsel(sp)
  * 
 */
-  __pyx_t_11 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 458, __pyx_L1_error)
+  __pyx_t_11 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_11 == ((int)-1))) __PYX_ERR(0, 490, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":459
+  /* "skene/src/skene_native.pyx":491
  *                            row_group, options, sp.get())
  *     _check(st)
  *     return cxx_to_morsel(sp)             # <<<<<<<<<<<<<<
@@ -20233,13 +20290,13 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_4 = ((PyObject *)__pyx_f_6draken_7morsels_6morsel_cxx_to_morsel(__pyx_v_sp)); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 459, __pyx_L1_error)
+  __pyx_t_4 = ((PyObject *)__pyx_f_6draken_7morsels_6morsel_cxx_to_morsel(__pyx_v_sp)); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 491, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
   __pyx_r = __pyx_t_4;
   __pyx_t_4 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":438
+  /* "skene/src/skene_native.pyx":470
  * 
  * 
  * def read_morsel(const unsigned char[::1] file not None, uint32_t row_group,             # <<<<<<<<<<<<<<
@@ -20261,7 +20318,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_8read_morsel(CYTHON_UNUSED PyObj
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":468
+/* "skene/src/skene_native.pyx":500
  * # single-row-group write_morsel and the multi-row-group SkeneWriter  so the two
  * # cannot come to disagree about what a codec name or a level means.
  * cdef int _fill_write_options(WriteOptions* options, read_acceleration, codec,             # <<<<<<<<<<<<<<
@@ -20295,17 +20352,17 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_fill_write_options", 0);
 
-  /* "skene/src/skene_native.pyx":473
+  /* "skene/src/skene_native.pyx":505
  *     cdef SectionCodec chosen
  * 
  *     if codec == "none":             # <<<<<<<<<<<<<<
  *         chosen = kCodecNone
  *     elif codec == "zstd":
 */
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_v_codec, __pyx_mstate_global->__pyx_n_u_none, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 473, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_v_codec, __pyx_mstate_global->__pyx_n_u_none, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 505, __pyx_L1_error)
   if (__pyx_t_1) {
 
-    /* "skene/src/skene_native.pyx":474
+    /* "skene/src/skene_native.pyx":506
  * 
  *     if codec == "none":
  *         chosen = kCodecNone             # <<<<<<<<<<<<<<
@@ -20314,7 +20371,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
 */
     __pyx_v_chosen = skene::SectionCodec::kNone;
 
-    /* "skene/src/skene_native.pyx":473
+    /* "skene/src/skene_native.pyx":505
  *     cdef SectionCodec chosen
  * 
  *     if codec == "none":             # <<<<<<<<<<<<<<
@@ -20324,17 +20381,17 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
     goto __pyx_L3;
   }
 
-  /* "skene/src/skene_native.pyx":475
+  /* "skene/src/skene_native.pyx":507
  *     if codec == "none":
  *         chosen = kCodecNone
  *     elif codec == "zstd":             # <<<<<<<<<<<<<<
  *         chosen = kCodecZstd
  *     elif codec == "lz4":
 */
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_v_codec, __pyx_mstate_global->__pyx_n_u_zstd, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 475, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_v_codec, __pyx_mstate_global->__pyx_n_u_zstd, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 507, __pyx_L1_error)
   if (__pyx_t_1) {
 
-    /* "skene/src/skene_native.pyx":476
+    /* "skene/src/skene_native.pyx":508
  *         chosen = kCodecNone
  *     elif codec == "zstd":
  *         chosen = kCodecZstd             # <<<<<<<<<<<<<<
@@ -20343,7 +20400,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
 */
     __pyx_v_chosen = skene::SectionCodec::kZstd;
 
-    /* "skene/src/skene_native.pyx":475
+    /* "skene/src/skene_native.pyx":507
  *     if codec == "none":
  *         chosen = kCodecNone
  *     elif codec == "zstd":             # <<<<<<<<<<<<<<
@@ -20353,17 +20410,17 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
     goto __pyx_L3;
   }
 
-  /* "skene/src/skene_native.pyx":477
+  /* "skene/src/skene_native.pyx":509
  *     elif codec == "zstd":
  *         chosen = kCodecZstd
  *     elif codec == "lz4":             # <<<<<<<<<<<<<<
  *         chosen = kCodecLz4
  *     else:
 */
-  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_v_codec, __pyx_mstate_global->__pyx_n_u_lz4, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 477, __pyx_L1_error)
+  __pyx_t_1 = (__Pyx_PyUnicode_Equals(__pyx_v_codec, __pyx_mstate_global->__pyx_n_u_lz4, Py_EQ)); if (unlikely((__pyx_t_1 < 0))) __PYX_ERR(0, 509, __pyx_L1_error)
   if (likely(__pyx_t_1)) {
 
-    /* "skene/src/skene_native.pyx":478
+    /* "skene/src/skene_native.pyx":510
  *         chosen = kCodecZstd
  *     elif codec == "lz4":
  *         chosen = kCodecLz4             # <<<<<<<<<<<<<<
@@ -20372,7 +20429,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
 */
     __pyx_v_chosen = skene::SectionCodec::kLz4;
 
-    /* "skene/src/skene_native.pyx":477
+    /* "skene/src/skene_native.pyx":509
  *     elif codec == "zstd":
  *         chosen = kCodecZstd
  *     elif codec == "lz4":             # <<<<<<<<<<<<<<
@@ -20382,7 +20439,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
     goto __pyx_L3;
   }
 
-  /* "skene/src/skene_native.pyx":480
+  /* "skene/src/skene_native.pyx":512
  *         chosen = kCodecLz4
  *     else:
  *         raise ValueError(             # <<<<<<<<<<<<<<
@@ -20392,20 +20449,20 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
   /*else*/ {
     __pyx_t_3 = NULL;
 
-    /* "skene/src/skene_native.pyx":481
+    /* "skene/src/skene_native.pyx":513
  *     else:
  *         raise ValueError(
  *             f"unknown section codec {codec!r}  expected 'none', 'zstd' or 'lz4'"             # <<<<<<<<<<<<<<
  *         )
  * 
 */
-    __pyx_t_4 = __Pyx_PyObject_FormatSimpleAndDecref(PyObject_Repr(__pyx_v_codec), __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 481, __pyx_L1_error)
+    __pyx_t_4 = __Pyx_PyObject_FormatSimpleAndDecref(PyObject_Repr(__pyx_v_codec), __pyx_mstate_global->__pyx_empty_unicode); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 513, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_4);
     __pyx_t_5[0] = __pyx_mstate_global->__pyx_kp_u_unknown_section_codec;
     __pyx_t_5[1] = __pyx_t_4;
     __pyx_t_5[2] = __pyx_mstate_global->__pyx_kp_u_expected_none_zstd_or_lz4;
     __pyx_t_6 = __Pyx_PyUnicode_Join(__pyx_t_5, 3, 22 + __Pyx_PyUnicode_GET_LENGTH(__pyx_t_4) + 35, 65535 | __Pyx_PyUnicode_MAX_CHAR_VALUE(__pyx_t_4));
-    if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 481, __pyx_L1_error)
+    if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 513, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_6);
     __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
     __pyx_t_7 = 1;
@@ -20414,26 +20471,26 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
       __pyx_t_2 = __Pyx_PyObject_FastCall((PyObject*)(((PyTypeObject*)PyExc_ValueError)), __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (__pyx_t_7*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
       __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
-      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 480, __pyx_L1_error)
+      if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 512, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
     }
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 480, __pyx_L1_error)
+    __PYX_ERR(0, 512, __pyx_L1_error)
   }
   __pyx_L3:;
 
-  /* "skene/src/skene_native.pyx":484
+  /* "skene/src/skene_native.pyx":516
  *         )
  * 
  *     options.read_acceleration = read_acceleration             # <<<<<<<<<<<<<<
  *     options.codec = chosen
  *     options.zstd_level = zstd_level
 */
-  __pyx_t_8 = __Pyx_PyObject_IsTrue(__pyx_v_read_acceleration); if (unlikely((__pyx_t_8 == ((bool)-1)) && PyErr_Occurred())) __PYX_ERR(0, 484, __pyx_L1_error)
+  __pyx_t_8 = __Pyx_PyObject_IsTrue(__pyx_v_read_acceleration); if (unlikely((__pyx_t_8 == ((bool)-1)) && PyErr_Occurred())) __PYX_ERR(0, 516, __pyx_L1_error)
   __pyx_v_options->read_acceleration = __pyx_t_8;
 
-  /* "skene/src/skene_native.pyx":485
+  /* "skene/src/skene_native.pyx":517
  * 
  *     options.read_acceleration = read_acceleration
  *     options.codec = chosen             # <<<<<<<<<<<<<<
@@ -20442,37 +20499,37 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
 */
   __pyx_v_options->codec = __pyx_v_chosen;
 
-  /* "skene/src/skene_native.pyx":486
+  /* "skene/src/skene_native.pyx":518
  *     options.read_acceleration = read_acceleration
  *     options.codec = chosen
  *     options.zstd_level = zstd_level             # <<<<<<<<<<<<<<
  *     options.bloom_false_positive_rate = bloom_false_positive_rate
  *     options.created_at_unix_us = created_at_unix_us
 */
-  __pyx_t_9 = __Pyx_PyLong_As_int(__pyx_v_zstd_level); if (unlikely((__pyx_t_9 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 486, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_As_int(__pyx_v_zstd_level); if (unlikely((__pyx_t_9 == (int)-1) && PyErr_Occurred())) __PYX_ERR(0, 518, __pyx_L1_error)
   __pyx_v_options->zstd_level = __pyx_t_9;
 
-  /* "skene/src/skene_native.pyx":487
+  /* "skene/src/skene_native.pyx":519
  *     options.codec = chosen
  *     options.zstd_level = zstd_level
  *     options.bloom_false_positive_rate = bloom_false_positive_rate             # <<<<<<<<<<<<<<
  *     options.created_at_unix_us = created_at_unix_us
  *     options.writer_tag = writer_tag.encode("utf-8")
 */
-  __pyx_t_10 = __Pyx_PyFloat_AsDouble(__pyx_v_bloom_false_positive_rate); if (unlikely((__pyx_t_10 == (double)-1) && PyErr_Occurred())) __PYX_ERR(0, 487, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_PyFloat_AsDouble(__pyx_v_bloom_false_positive_rate); if (unlikely((__pyx_t_10 == (double)-1) && PyErr_Occurred())) __PYX_ERR(0, 519, __pyx_L1_error)
   __pyx_v_options->bloom_false_positive_rate = __pyx_t_10;
 
-  /* "skene/src/skene_native.pyx":488
+  /* "skene/src/skene_native.pyx":520
  *     options.zstd_level = zstd_level
  *     options.bloom_false_positive_rate = bloom_false_positive_rate
  *     options.created_at_unix_us = created_at_unix_us             # <<<<<<<<<<<<<<
  *     options.writer_tag = writer_tag.encode("utf-8")
  *     if bloom_columns is not None:
 */
-  __pyx_t_11 = __Pyx_PyLong_As_uint64_t(__pyx_v_created_at_unix_us); if (unlikely((__pyx_t_11 == ((uint64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 488, __pyx_L1_error)
+  __pyx_t_11 = __Pyx_PyLong_As_uint64_t(__pyx_v_created_at_unix_us); if (unlikely((__pyx_t_11 == ((uint64_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 520, __pyx_L1_error)
   __pyx_v_options->created_at_unix_us = __pyx_t_11;
 
-  /* "skene/src/skene_native.pyx":489
+  /* "skene/src/skene_native.pyx":521
  *     options.bloom_false_positive_rate = bloom_false_positive_rate
  *     options.created_at_unix_us = created_at_unix_us
  *     options.writer_tag = writer_tag.encode("utf-8")             # <<<<<<<<<<<<<<
@@ -20486,14 +20543,14 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
     PyObject *__pyx_callargs[2] = {__pyx_t_6, __pyx_mstate_global->__pyx_kp_u_utf_8};
     __pyx_t_2 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
     __Pyx_XDECREF(__pyx_t_6); __pyx_t_6 = 0;
-    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 489, __pyx_L1_error)
+    if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 521, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
   }
-  __pyx_t_12 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_2); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 489, __pyx_L1_error)
+  __pyx_t_12 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_2); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 521, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
   __pyx_v_options->writer_tag = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_12);
 
-  /* "skene/src/skene_native.pyx":490
+  /* "skene/src/skene_native.pyx":522
  *     options.created_at_unix_us = created_at_unix_us
  *     options.writer_tag = writer_tag.encode("utf-8")
  *     if bloom_columns is not None:             # <<<<<<<<<<<<<<
@@ -20503,7 +20560,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
   __pyx_t_1 = (__pyx_v_bloom_columns != Py_None);
   if (__pyx_t_1) {
 
-    /* "skene/src/skene_native.pyx":491
+    /* "skene/src/skene_native.pyx":523
  *     options.writer_tag = writer_tag.encode("utf-8")
  *     if bloom_columns is not None:
  *         for name in bloom_columns:             # <<<<<<<<<<<<<<
@@ -20515,9 +20572,9 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
       __pyx_t_13 = 0;
       __pyx_t_14 = NULL;
     } else {
-      __pyx_t_13 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_v_bloom_columns); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 491, __pyx_L1_error)
+      __pyx_t_13 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_v_bloom_columns); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 523, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
-      __pyx_t_14 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_14)) __PYX_ERR(0, 491, __pyx_L1_error)
+      __pyx_t_14 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_14)) __PYX_ERR(0, 523, __pyx_L1_error)
     }
     for (;;) {
       if (likely(!__pyx_t_14)) {
@@ -20525,7 +20582,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_2);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 491, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 523, __pyx_L1_error)
             #endif
             if (__pyx_t_13 >= __pyx_temp) break;
           }
@@ -20535,7 +20592,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_2);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 491, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 523, __pyx_L1_error)
             #endif
             if (__pyx_t_13 >= __pyx_temp) break;
           }
@@ -20546,13 +20603,13 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
           #endif
           ++__pyx_t_13;
         }
-        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 491, __pyx_L1_error)
+        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 523, __pyx_L1_error)
       } else {
         __pyx_t_6 = __pyx_t_14(__pyx_t_2);
         if (unlikely(!__pyx_t_6)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 491, __pyx_L1_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 523, __pyx_L1_error)
             PyErr_Clear();
           }
           break;
@@ -20562,7 +20619,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
       __Pyx_XDECREF_SET(__pyx_v_name, __pyx_t_6);
       __pyx_t_6 = 0;
 
-      /* "skene/src/skene_native.pyx":492
+      /* "skene/src/skene_native.pyx":524
  *     if bloom_columns is not None:
  *         for name in bloom_columns:
  *             options.bloom_columns.push_back(name.encode("utf-8"))             # <<<<<<<<<<<<<<
@@ -20576,19 +20633,19 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
         PyObject *__pyx_callargs[2] = {__pyx_t_3, __pyx_mstate_global->__pyx_kp_u_utf_8};
         __pyx_t_6 = __Pyx_PyObject_FastCallMethod((PyObject*)__pyx_mstate_global->__pyx_n_u_encode, __pyx_callargs+__pyx_t_7, (2-__pyx_t_7) | (1*__Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET));
         __Pyx_XDECREF(__pyx_t_3); __pyx_t_3 = 0;
-        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 492, __pyx_L1_error)
+        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 524, __pyx_L1_error)
         __Pyx_GOTREF(__pyx_t_6);
       }
-      __pyx_t_12 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_6); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 492, __pyx_L1_error)
+      __pyx_t_12 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_6); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 524, __pyx_L1_error)
       __Pyx_DECREF(__pyx_t_6); __pyx_t_6 = 0;
       try {
         __pyx_v_options->bloom_columns.push_back(__pyx_t_12);
       } catch(...) {
         __Pyx_CppExn2PyErr();
-        __PYX_ERR(0, 492, __pyx_L1_error)
+        __PYX_ERR(0, 524, __pyx_L1_error)
       }
 
-      /* "skene/src/skene_native.pyx":491
+      /* "skene/src/skene_native.pyx":523
  *     options.writer_tag = writer_tag.encode("utf-8")
  *     if bloom_columns is not None:
  *         for name in bloom_columns:             # <<<<<<<<<<<<<<
@@ -20598,7 +20655,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
     }
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":490
+    /* "skene/src/skene_native.pyx":522
  *     options.created_at_unix_us = created_at_unix_us
  *     options.writer_tag = writer_tag.encode("utf-8")
  *     if bloom_columns is not None:             # <<<<<<<<<<<<<<
@@ -20607,7 +20664,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
 */
   }
 
-  /* "skene/src/skene_native.pyx":493
+  /* "skene/src/skene_native.pyx":525
  *         for name in bloom_columns:
  *             options.bloom_columns.push_back(name.encode("utf-8"))
  *     if field_ids is not None:             # <<<<<<<<<<<<<<
@@ -20617,7 +20674,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
   __pyx_t_1 = (__pyx_v_field_ids != Py_None);
   if (__pyx_t_1) {
 
-    /* "skene/src/skene_native.pyx":494
+    /* "skene/src/skene_native.pyx":526
  *             options.bloom_columns.push_back(name.encode("utf-8"))
  *     if field_ids is not None:
  *         for fid in field_ids:             # <<<<<<<<<<<<<<
@@ -20629,9 +20686,9 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
       __pyx_t_13 = 0;
       __pyx_t_14 = NULL;
     } else {
-      __pyx_t_13 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_v_field_ids); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 494, __pyx_L1_error)
+      __pyx_t_13 = -1; __pyx_t_2 = PyObject_GetIter(__pyx_v_field_ids); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 526, __pyx_L1_error)
       __Pyx_GOTREF(__pyx_t_2);
-      __pyx_t_14 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_14)) __PYX_ERR(0, 494, __pyx_L1_error)
+      __pyx_t_14 = (CYTHON_COMPILING_IN_LIMITED_API) ? PyIter_Next : __Pyx_PyObject_GetIterNextFunc(__pyx_t_2); if (unlikely(!__pyx_t_14)) __PYX_ERR(0, 526, __pyx_L1_error)
     }
     for (;;) {
       if (likely(!__pyx_t_14)) {
@@ -20639,7 +20696,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
           {
             Py_ssize_t __pyx_temp = __Pyx_PyList_GET_SIZE(__pyx_t_2);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 494, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 526, __pyx_L1_error)
             #endif
             if (__pyx_t_13 >= __pyx_temp) break;
           }
@@ -20649,7 +20706,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
           {
             Py_ssize_t __pyx_temp = __Pyx_PyTuple_GET_SIZE(__pyx_t_2);
             #if !CYTHON_ASSUME_SAFE_SIZE
-            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 494, __pyx_L1_error)
+            if (unlikely((__pyx_temp < 0))) __PYX_ERR(0, 526, __pyx_L1_error)
             #endif
             if (__pyx_t_13 >= __pyx_temp) break;
           }
@@ -20660,13 +20717,13 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
           #endif
           ++__pyx_t_13;
         }
-        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 494, __pyx_L1_error)
+        if (unlikely(!__pyx_t_6)) __PYX_ERR(0, 526, __pyx_L1_error)
       } else {
         __pyx_t_6 = __pyx_t_14(__pyx_t_2);
         if (unlikely(!__pyx_t_6)) {
           PyObject* exc_type = PyErr_Occurred();
           if (exc_type) {
-            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 494, __pyx_L1_error)
+            if (unlikely(!__Pyx_PyErr_GivenExceptionMatches(exc_type, PyExc_StopIteration))) __PYX_ERR(0, 526, __pyx_L1_error)
             PyErr_Clear();
           }
           break;
@@ -20676,22 +20733,22 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
       __Pyx_XDECREF_SET(__pyx_v_fid, __pyx_t_6);
       __pyx_t_6 = 0;
 
-      /* "skene/src/skene_native.pyx":495
+      /* "skene/src/skene_native.pyx":527
  *     if field_ids is not None:
  *         for fid in field_ids:
  *             options.field_ids.push_back(<uint32_t>fid)             # <<<<<<<<<<<<<<
  *     return 0
  * 
 */
-      __pyx_t_15 = __Pyx_PyLong_As_uint32_t(__pyx_v_fid); if (unlikely((__pyx_t_15 == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 495, __pyx_L1_error)
+      __pyx_t_15 = __Pyx_PyLong_As_uint32_t(__pyx_v_fid); if (unlikely((__pyx_t_15 == ((uint32_t)-1)) && PyErr_Occurred())) __PYX_ERR(0, 527, __pyx_L1_error)
       try {
         __pyx_v_options->field_ids.push_back(((uint32_t)__pyx_t_15));
       } catch(...) {
         __Pyx_CppExn2PyErr();
-        __PYX_ERR(0, 495, __pyx_L1_error)
+        __PYX_ERR(0, 527, __pyx_L1_error)
       }
 
-      /* "skene/src/skene_native.pyx":494
+      /* "skene/src/skene_native.pyx":526
  *             options.bloom_columns.push_back(name.encode("utf-8"))
  *     if field_ids is not None:
  *         for fid in field_ids:             # <<<<<<<<<<<<<<
@@ -20701,7 +20758,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
     }
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
 
-    /* "skene/src/skene_native.pyx":493
+    /* "skene/src/skene_native.pyx":525
  *         for name in bloom_columns:
  *             options.bloom_columns.push_back(name.encode("utf-8"))
  *     if field_ids is not None:             # <<<<<<<<<<<<<<
@@ -20710,7 +20767,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
 */
   }
 
-  /* "skene/src/skene_native.pyx":496
+  /* "skene/src/skene_native.pyx":528
  *         for fid in field_ids:
  *             options.field_ids.push_back(<uint32_t>fid)
  *     return 0             # <<<<<<<<<<<<<<
@@ -20720,7 +20777,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":468
+  /* "skene/src/skene_native.pyx":500
  * # single-row-group write_morsel and the multi-row-group SkeneWriter  so the two
  * # cannot come to disagree about what a codec name or a level means.
  * cdef int _fill_write_options(WriteOptions* options, read_acceleration, codec,             # <<<<<<<<<<<<<<
@@ -20743,7 +20800,7 @@ static int __pyx_f_5skene_12skene_native__fill_write_options(skene::WriteOptions
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":520
+/* "skene/src/skene_native.pyx":552
  *     cdef bint _finished
  * 
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,             # <<<<<<<<<<<<<<
@@ -20780,18 +20837,18 @@ static int __pyx_pw_5skene_12skene_native_11SkeneWriter_1__cinit__(PyObject *__p
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_read_acceleration,&__pyx_mstate_global->__pyx_n_u_codec,&__pyx_mstate_global->__pyx_n_u_zstd_level,&__pyx_mstate_global->__pyx_n_u_bloom_columns,&__pyx_mstate_global->__pyx_n_u_bloom_false_positive_rate,&__pyx_mstate_global->__pyx_n_u_field_ids,&__pyx_mstate_global->__pyx_n_u_created_at_unix_us,&__pyx_mstate_global->__pyx_n_u_writer_tag,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_VARARGS(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 520, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 552, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, 0, __pyx_kwds_len, "__cinit__", 0) < (0)) __PYX_ERR(0, 520, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, 0, __pyx_kwds_len, "__cinit__", 0) < (0)) __PYX_ERR(0, 552, __pyx_L3_error)
       if (!values[0]) values[0] = __Pyx_NewRef(((PyObject *)Py_False));
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)__pyx_mstate_global->__pyx_n_u_none));
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)__pyx_mstate_global->__pyx_int_0));
 
-      /* "skene/src/skene_native.pyx":521
+      /* "skene/src/skene_native.pyx":553
  * 
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,
  *                   bloom_columns=None, bloom_false_positive_rate=0.05,             # <<<<<<<<<<<<<<
@@ -20801,7 +20858,7 @@ static int __pyx_pw_5skene_12skene_native_11SkeneWriter_1__cinit__(PyObject *__p
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)Py_None));
       if (!values[4]) values[4] = __Pyx_NewRef(((PyObject *)__pyx_mstate_global->__pyx_float_0_05));
 
-      /* "skene/src/skene_native.pyx":522
+      /* "skene/src/skene_native.pyx":554
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,
  *                   bloom_columns=None, bloom_false_positive_rate=0.05,
  *                   field_ids=None, created_at_unix_us=0, writer_tag=""):             # <<<<<<<<<<<<<<
@@ -20815,7 +20872,7 @@ static int __pyx_pw_5skene_12skene_native_11SkeneWriter_1__cinit__(PyObject *__p
       goto __pyx_L5_argtuple_error;
     } else {
 
-      /* "skene/src/skene_native.pyx":520
+      /* "skene/src/skene_native.pyx":552
  *     cdef bint _finished
  * 
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,             # <<<<<<<<<<<<<<
@@ -20826,7 +20883,7 @@ static int __pyx_pw_5skene_12skene_native_11SkeneWriter_1__cinit__(PyObject *__p
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)__pyx_mstate_global->__pyx_n_u_none));
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)__pyx_mstate_global->__pyx_int_0));
 
-      /* "skene/src/skene_native.pyx":521
+      /* "skene/src/skene_native.pyx":553
  * 
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,
  *                   bloom_columns=None, bloom_false_positive_rate=0.05,             # <<<<<<<<<<<<<<
@@ -20836,7 +20893,7 @@ static int __pyx_pw_5skene_12skene_native_11SkeneWriter_1__cinit__(PyObject *__p
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)Py_None));
       if (!values[4]) values[4] = __Pyx_NewRef(((PyObject *)__pyx_mstate_global->__pyx_float_0_05));
 
-      /* "skene/src/skene_native.pyx":522
+      /* "skene/src/skene_native.pyx":554
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,
  *                   bloom_columns=None, bloom_false_positive_rate=0.05,
  *                   field_ids=None, created_at_unix_us=0, writer_tag=""):             # <<<<<<<<<<<<<<
@@ -20858,7 +20915,7 @@ static int __pyx_pw_5skene_12skene_native_11SkeneWriter_1__cinit__(PyObject *__p
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 0, 0, __pyx_nargs); __PYX_ERR(0, 520, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("__cinit__", 1, 0, 0, __pyx_nargs); __PYX_ERR(0, 552, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -20871,7 +20928,7 @@ static int __pyx_pw_5skene_12skene_native_11SkeneWriter_1__cinit__(PyObject *__p
   __pyx_L4_argument_unpacking_done:;
   __pyx_r = __pyx_pf_5skene_12skene_native_11SkeneWriter___cinit__(((struct __pyx_obj_5skene_12skene_native_SkeneWriter *)__pyx_v_self), __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, __pyx_v_bloom_columns, __pyx_v_bloom_false_positive_rate, __pyx_v_field_ids, __pyx_v_created_at_unix_us, __pyx_v_writer_tag);
 
-  /* "skene/src/skene_native.pyx":520
+  /* "skene/src/skene_native.pyx":552
  *     cdef bint _finished
  * 
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,             # <<<<<<<<<<<<<<
@@ -20895,16 +20952,16 @@ static int __pyx_pf_5skene_12skene_native_11SkeneWriter___cinit__(struct __pyx_o
   const char *__pyx_filename = NULL;
   int __pyx_clineno = 0;
 
-  /* "skene/src/skene_native.pyx":524
+  /* "skene/src/skene_native.pyx":556
  *                   field_ids=None, created_at_unix_us=0, writer_tag=""):
  *         cdef WriteOptions options
  *         _fill_write_options(&options, read_acceleration, codec, zstd_level,             # <<<<<<<<<<<<<<
  *                             bloom_columns, bloom_false_positive_rate, field_ids,
  *                             created_at_unix_us, writer_tag)
 */
-  __pyx_t_1 = __pyx_f_5skene_12skene_native__fill_write_options((&__pyx_v_options), __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, __pyx_v_bloom_columns, __pyx_v_bloom_false_positive_rate, __pyx_v_field_ids, __pyx_v_created_at_unix_us, __pyx_v_writer_tag); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 524, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_5skene_12skene_native__fill_write_options((&__pyx_v_options), __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, __pyx_v_bloom_columns, __pyx_v_bloom_false_positive_rate, __pyx_v_field_ids, __pyx_v_created_at_unix_us, __pyx_v_writer_tag); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 556, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":527
+  /* "skene/src/skene_native.pyx":559
  *                             bloom_columns, bloom_false_positive_rate, field_ids,
  *                             created_at_unix_us, writer_tag)
  *         self._writer = new CFileWriter()             # <<<<<<<<<<<<<<
@@ -20913,7 +20970,7 @@ static int __pyx_pf_5skene_12skene_native_11SkeneWriter___cinit__(struct __pyx_o
 */
   __pyx_v_self->_writer = new skene::FileWriter();
 
-  /* "skene/src/skene_native.pyx":528
+  /* "skene/src/skene_native.pyx":560
  *                             created_at_unix_us, writer_tag)
  *         self._writer = new CFileWriter()
  *         self._finished = False             # <<<<<<<<<<<<<<
@@ -20922,16 +20979,16 @@ static int __pyx_pf_5skene_12skene_native_11SkeneWriter___cinit__(struct __pyx_o
 */
   __pyx_v_self->_finished = 0;
 
-  /* "skene/src/skene_native.pyx":529
+  /* "skene/src/skene_native.pyx":561
  *         self._writer = new CFileWriter()
  *         self._finished = False
  *         _check(self._writer.begin(options, &self._out))             # <<<<<<<<<<<<<<
  * 
  *     def __dealloc__(self):
 */
-  __pyx_t_1 = __pyx_f_5skene_12skene_native__check(__pyx_v_self->_writer->begin(__pyx_v_options, (&__pyx_v_self->_out))); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 529, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_5skene_12skene_native__check(__pyx_v_self->_writer->begin(__pyx_v_options, (&__pyx_v_self->_out))); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 561, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":520
+  /* "skene/src/skene_native.pyx":552
  *     cdef bint _finished
  * 
  *     def __cinit__(self, *, read_acceleration=False, codec="none", zstd_level=0,             # <<<<<<<<<<<<<<
@@ -20949,7 +21006,7 @@ static int __pyx_pf_5skene_12skene_native_11SkeneWriter___cinit__(struct __pyx_o
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":531
+/* "skene/src/skene_native.pyx":563
  *         _check(self._writer.begin(options, &self._out))
  * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
@@ -20973,7 +21030,7 @@ static void __pyx_pw_5skene_12skene_native_11SkeneWriter_3__dealloc__(PyObject *
 static void __pyx_pf_5skene_12skene_native_11SkeneWriter_2__dealloc__(struct __pyx_obj_5skene_12skene_native_SkeneWriter *__pyx_v_self) {
   int __pyx_t_1;
 
-  /* "skene/src/skene_native.pyx":532
+  /* "skene/src/skene_native.pyx":564
  * 
  *     def __dealloc__(self):
  *         if self._writer != NULL:             # <<<<<<<<<<<<<<
@@ -20983,7 +21040,7 @@ static void __pyx_pf_5skene_12skene_native_11SkeneWriter_2__dealloc__(struct __p
   __pyx_t_1 = (__pyx_v_self->_writer != NULL);
   if (__pyx_t_1) {
 
-    /* "skene/src/skene_native.pyx":533
+    /* "skene/src/skene_native.pyx":565
  *     def __dealloc__(self):
  *         if self._writer != NULL:
  *             del self._writer             # <<<<<<<<<<<<<<
@@ -20992,7 +21049,7 @@ static void __pyx_pf_5skene_12skene_native_11SkeneWriter_2__dealloc__(struct __p
 */
     delete __pyx_v_self->_writer;
 
-    /* "skene/src/skene_native.pyx":534
+    /* "skene/src/skene_native.pyx":566
  *         if self._writer != NULL:
  *             del self._writer
  *             self._writer = NULL             # <<<<<<<<<<<<<<
@@ -21001,7 +21058,7 @@ static void __pyx_pf_5skene_12skene_native_11SkeneWriter_2__dealloc__(struct __p
 */
     __pyx_v_self->_writer = NULL;
 
-    /* "skene/src/skene_native.pyx":532
+    /* "skene/src/skene_native.pyx":564
  * 
  *     def __dealloc__(self):
  *         if self._writer != NULL:             # <<<<<<<<<<<<<<
@@ -21010,7 +21067,7 @@ static void __pyx_pf_5skene_12skene_native_11SkeneWriter_2__dealloc__(struct __p
 */
   }
 
-  /* "skene/src/skene_native.pyx":531
+  /* "skene/src/skene_native.pyx":563
  *         _check(self._writer.begin(options, &self._out))
  * 
  *     def __dealloc__(self):             # <<<<<<<<<<<<<<
@@ -21021,7 +21078,7 @@ static void __pyx_pf_5skene_12skene_native_11SkeneWriter_2__dealloc__(struct __p
   /* function exit code */
 }
 
-/* "skene/src/skene_native.pyx":536
+/* "skene/src/skene_native.pyx":568
  *             self._writer = NULL
  * 
  *     def add_row_group(self, Morsel morsel not None):             # <<<<<<<<<<<<<<
@@ -21068,32 +21125,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_morsel,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 536, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 568, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 536, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 568, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "add_row_group", 0) < (0)) __PYX_ERR(0, 536, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "add_row_group", 0) < (0)) __PYX_ERR(0, 568, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("add_row_group", 1, 1, 1, i); __PYX_ERR(0, 536, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("add_row_group", 1, 1, 1, i); __PYX_ERR(0, 568, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 536, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 568, __pyx_L3_error)
     }
     __pyx_v_morsel = ((struct __pyx_obj_6draken_7morsels_6morsel_Morsel *)values[0]);
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("add_row_group", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 536, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("add_row_group", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 568, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -21104,7 +21161,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel, 0, "morsel", 0))) __PYX_ERR(0, 536, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel, 0, "morsel", 0))) __PYX_ERR(0, 568, __pyx_L1_error)
   __pyx_r = __pyx_pf_5skene_12skene_native_11SkeneWriter_4add_row_group(((struct __pyx_obj_5skene_12skene_native_SkeneWriter *)__pyx_v_self), __pyx_v_morsel);
 
   /* function exit code */
@@ -21136,17 +21193,17 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_4add_row_group(str
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("add_row_group", 0);
 
-  /* "skene/src/skene_native.pyx":537
+  /* "skene/src/skene_native.pyx":569
  * 
  *     def add_row_group(self, Morsel morsel not None):
  *         cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)             # <<<<<<<<<<<<<<
  *         cdef Status st
  *         with nogil:
 */
-  __pyx_t_1 = __pyx_f_6draken_7morsels_6morsel_morsel_to_cxx(__pyx_v_morsel); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 537, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_6draken_7morsels_6morsel_morsel_to_cxx(__pyx_v_morsel); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 569, __pyx_L1_error)
   __pyx_v_sp = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_1);
 
-  /* "skene/src/skene_native.pyx":539
+  /* "skene/src/skene_native.pyx":571
  *         cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)
  *         cdef Status st
  *         with nogil:             # <<<<<<<<<<<<<<
@@ -21159,7 +21216,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_4add_row_group(str
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":540
+        /* "skene/src/skene_native.pyx":572
  *         cdef Status st
  *         with nogil:
  *             st = self._writer.add_row_group(deref(sp))             # <<<<<<<<<<<<<<
@@ -21169,7 +21226,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_4add_row_group(str
         __pyx_v_st = __pyx_v_self->_writer->add_row_group((*__pyx_v_sp));
       }
 
-      /* "skene/src/skene_native.pyx":539
+      /* "skene/src/skene_native.pyx":571
  *         cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)
  *         cdef Status st
  *         with nogil:             # <<<<<<<<<<<<<<
@@ -21186,16 +21243,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_4add_row_group(str
       }
   }
 
-  /* "skene/src/skene_native.pyx":541
+  /* "skene/src/skene_native.pyx":573
  *         with nogil:
  *             st = self._writer.add_row_group(deref(sp))
  *         _check(st)             # <<<<<<<<<<<<<<
  * 
  *     @property
 */
-  __pyx_t_2 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_2 == ((int)-1))) __PYX_ERR(0, 541, __pyx_L1_error)
+  __pyx_t_2 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_2 == ((int)-1))) __PYX_ERR(0, 573, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":536
+  /* "skene/src/skene_native.pyx":568
  *             self._writer = NULL
  * 
  *     def add_row_group(self, Morsel morsel not None):             # <<<<<<<<<<<<<<
@@ -21215,7 +21272,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_4add_row_group(str
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":543
+/* "skene/src/skene_native.pyx":575
  *         _check(st)
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -21247,7 +21304,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_15row_group_count_
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "skene/src/skene_native.pyx":545
+  /* "skene/src/skene_native.pyx":577
  *     @property
  *     def row_group_count(self):
  *         return self._writer.row_group_count()             # <<<<<<<<<<<<<<
@@ -21255,13 +21312,13 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_15row_group_count_
  *     @property
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __Pyx_PyLong_From_uint32_t(__pyx_v_self->_writer->row_group_count()); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 545, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyLong_From_uint32_t(__pyx_v_self->_writer->row_group_count()); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 577, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __pyx_r = __pyx_t_1;
   __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":543
+  /* "skene/src/skene_native.pyx":575
  *         _check(st)
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -21280,7 +21337,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_15row_group_count_
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":547
+/* "skene/src/skene_native.pyx":579
  *         return self._writer.row_group_count()
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -21312,7 +21369,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_6nbytes___get__(st
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("__get__", 0);
 
-  /* "skene/src/skene_native.pyx":551
+  /* "skene/src/skene_native.pyx":583
  *         """Bytes written so far. Meaningful before finish() as well as after
  *         it is what a caller watches to decide a file is big enough."""
  *         return <object>self._out.size()             # <<<<<<<<<<<<<<
@@ -21320,14 +21377,14 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_6nbytes___get__(st
  *     cdef int _finish_once(self) except -1:
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __Pyx_PyLong_FromSize_t(__pyx_v_self->_out.size()); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 551, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyLong_FromSize_t(__pyx_v_self->_out.size()); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 583, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_INCREF(((PyObject *)__pyx_t_1));
   __pyx_r = __pyx_t_1;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":547
+  /* "skene/src/skene_native.pyx":579
  *         return self._writer.row_group_count()
  * 
  *     @property             # <<<<<<<<<<<<<<
@@ -21346,7 +21403,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_6nbytes___get__(st
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":553
+/* "skene/src/skene_native.pyx":585
  *         return <object>self._out.size()
  * 
  *     cdef int _finish_once(self) except -1:             # <<<<<<<<<<<<<<
@@ -21366,7 +21423,7 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("_finish_once", 0);
 
-  /* "skene/src/skene_native.pyx":555
+  /* "skene/src/skene_native.pyx":587
  *     cdef int _finish_once(self) except -1:
  *         cdef Status st
  *         if self._finished:             # <<<<<<<<<<<<<<
@@ -21375,23 +21432,23 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
 */
   if (unlikely(__pyx_v_self->_finished)) {
 
-    /* "skene/src/skene_native.pyx":556
+    /* "skene/src/skene_native.pyx":588
  *         cdef Status st
  *         if self._finished:
  *             raise SkeneError("Malformed", "this SkeneWriter is already finished")             # <<<<<<<<<<<<<<
  *         with nogil:
  *             st = self._writer.finish()
 */
-    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 556, __pyx_L1_error)
+    __Pyx_GetModuleGlobalName(__pyx_t_1, __pyx_mstate_global->__pyx_n_u_SkeneError); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 588, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_1);
-    __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_1, __pyx_mstate_global->__pyx_tuple[2], NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 556, __pyx_L1_error)
+    __pyx_t_2 = __Pyx_PyObject_Call(__pyx_t_1, __pyx_mstate_global->__pyx_tuple[2], NULL); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 588, __pyx_L1_error)
     __Pyx_GOTREF(__pyx_t_2);
     __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
     __Pyx_Raise(__pyx_t_2, 0, 0, 0);
     __Pyx_DECREF(__pyx_t_2); __pyx_t_2 = 0;
-    __PYX_ERR(0, 556, __pyx_L1_error)
+    __PYX_ERR(0, 588, __pyx_L1_error)
 
-    /* "skene/src/skene_native.pyx":555
+    /* "skene/src/skene_native.pyx":587
  *     cdef int _finish_once(self) except -1:
  *         cdef Status st
  *         if self._finished:             # <<<<<<<<<<<<<<
@@ -21400,7 +21457,7 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
 */
   }
 
-  /* "skene/src/skene_native.pyx":557
+  /* "skene/src/skene_native.pyx":589
  *         if self._finished:
  *             raise SkeneError("Malformed", "this SkeneWriter is already finished")
  *         with nogil:             # <<<<<<<<<<<<<<
@@ -21413,7 +21470,7 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":558
+        /* "skene/src/skene_native.pyx":590
  *             raise SkeneError("Malformed", "this SkeneWriter is already finished")
  *         with nogil:
  *             st = self._writer.finish()             # <<<<<<<<<<<<<<
@@ -21423,7 +21480,7 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
         __pyx_v_st = __pyx_v_self->_writer->finish();
       }
 
-      /* "skene/src/skene_native.pyx":557
+      /* "skene/src/skene_native.pyx":589
  *         if self._finished:
  *             raise SkeneError("Malformed", "this SkeneWriter is already finished")
  *         with nogil:             # <<<<<<<<<<<<<<
@@ -21440,16 +21497,16 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
       }
   }
 
-  /* "skene/src/skene_native.pyx":559
+  /* "skene/src/skene_native.pyx":591
  *         with nogil:
  *             st = self._writer.finish()
  *         _check(st)             # <<<<<<<<<<<<<<
  *         self._finished = True
  *         return 0
 */
-  __pyx_t_3 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 559, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 591, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":560
+  /* "skene/src/skene_native.pyx":592
  *             st = self._writer.finish()
  *         _check(st)
  *         self._finished = True             # <<<<<<<<<<<<<<
@@ -21458,7 +21515,7 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
 */
   __pyx_v_self->_finished = 1;
 
-  /* "skene/src/skene_native.pyx":561
+  /* "skene/src/skene_native.pyx":593
  *         _check(st)
  *         self._finished = True
  *         return 0             # <<<<<<<<<<<<<<
@@ -21468,7 +21525,7 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
   __pyx_r = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":553
+  /* "skene/src/skene_native.pyx":585
  *         return <object>self._out.size()
  * 
  *     cdef int _finish_once(self) except -1:             # <<<<<<<<<<<<<<
@@ -21487,7 +21544,7 @@ static int __pyx_f_5skene_12skene_native_11SkeneWriter__finish_once(struct __pyx
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":563
+/* "skene/src/skene_native.pyx":595
  *         return 0
  * 
  *     def finish(self):             # <<<<<<<<<<<<<<
@@ -21548,16 +21605,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_6finish(struct __p
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("finish", 0);
 
-  /* "skene/src/skene_native.pyx":570
+  /* "skene/src/skene_native.pyx":602
  *         the peak for no reason.
  *         """
  *         self._finish_once()             # <<<<<<<<<<<<<<
  *         return PyBytes_FromStringAndSize(<char*>self._out.data(),
  *                                          <Py_ssize_t>self._out.size())
 */
-  __pyx_t_1 = ((struct __pyx_vtabstruct_5skene_12skene_native_SkeneWriter *)__pyx_v_self->__pyx_vtab)->_finish_once(__pyx_v_self); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 570, __pyx_L1_error)
+  __pyx_t_1 = ((struct __pyx_vtabstruct_5skene_12skene_native_SkeneWriter *)__pyx_v_self->__pyx_vtab)->_finish_once(__pyx_v_self); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 602, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":571
+  /* "skene/src/skene_native.pyx":603
  *         """
  *         self._finish_once()
  *         return PyBytes_FromStringAndSize(<char*>self._out.data(),             # <<<<<<<<<<<<<<
@@ -21566,20 +21623,20 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_6finish(struct __p
 */
   __Pyx_XDECREF(__pyx_r);
 
-  /* "skene/src/skene_native.pyx":572
+  /* "skene/src/skene_native.pyx":604
  *         self._finish_once()
  *         return PyBytes_FromStringAndSize(<char*>self._out.data(),
  *                                          <Py_ssize_t>self._out.size())             # <<<<<<<<<<<<<<
  * 
  *     def write_to(self, str path not None):
 */
-  __pyx_t_2 = PyBytes_FromStringAndSize(((char *)__pyx_v_self->_out.data()), ((Py_ssize_t)__pyx_v_self->_out.size())); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 571, __pyx_L1_error)
+  __pyx_t_2 = PyBytes_FromStringAndSize(((char *)__pyx_v_self->_out.data()), ((Py_ssize_t)__pyx_v_self->_out.size())); if (unlikely(!__pyx_t_2)) __PYX_ERR(0, 603, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_2);
   __pyx_r = __pyx_t_2;
   __pyx_t_2 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":563
+  /* "skene/src/skene_native.pyx":595
  *         return 0
  * 
  *     def finish(self):             # <<<<<<<<<<<<<<
@@ -21598,7 +21655,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_6finish(struct __p
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":574
+/* "skene/src/skene_native.pyx":606
  *                                          <Py_ssize_t>self._out.size())
  * 
  *     def write_to(self, str path not None):             # <<<<<<<<<<<<<<
@@ -21646,32 +21703,32 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_path,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 574, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 606, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 574, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 606, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "write_to", 0) < (0)) __PYX_ERR(0, 574, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "write_to", 0) < (0)) __PYX_ERR(0, 606, __pyx_L3_error)
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("write_to", 1, 1, 1, i); __PYX_ERR(0, 574, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("write_to", 1, 1, 1, i); __PYX_ERR(0, 606, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 574, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 606, __pyx_L3_error)
     }
     __pyx_v_path = ((PyObject*)values[0]);
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("write_to", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 574, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("write_to", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 606, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -21682,7 +21739,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_path), (&PyUnicode_Type), 0, "path", 1))) __PYX_ERR(0, 574, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_path), (&PyUnicode_Type), 0, "path", 1))) __PYX_ERR(0, 606, __pyx_L1_error)
   __pyx_r = __pyx_pf_5skene_12skene_native_11SkeneWriter_8write_to(((struct __pyx_obj_5skene_12skene_native_SkeneWriter *)__pyx_v_self), __pyx_v_path);
 
   /* function exit code */
@@ -21715,29 +21772,29 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_8write_to(struct _
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("write_to", 0);
 
-  /* "skene/src/skene_native.pyx":580
+  /* "skene/src/skene_native.pyx":612
  *         reader never observes a half-written file.
  *         """
  *         cdef string target = path.encode("utf-8")             # <<<<<<<<<<<<<<
  *         cdef Status st
  *         self._finish_once()
 */
-  __pyx_t_1 = PyUnicode_AsUTF8String(__pyx_v_path); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 580, __pyx_L1_error)
+  __pyx_t_1 = PyUnicode_AsUTF8String(__pyx_v_path); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 612, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
-  __pyx_t_2 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_1); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 580, __pyx_L1_error)
+  __pyx_t_2 = __pyx_convert_string_from_py_6libcpp_6string_std__in_string(__pyx_t_1); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 612, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   __pyx_v_target = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_2);
 
-  /* "skene/src/skene_native.pyx":582
+  /* "skene/src/skene_native.pyx":614
  *         cdef string target = path.encode("utf-8")
  *         cdef Status st
  *         self._finish_once()             # <<<<<<<<<<<<<<
  *         with nogil:
  *             st = c_write_file(target, self._out)
 */
-  __pyx_t_3 = ((struct __pyx_vtabstruct_5skene_12skene_native_SkeneWriter *)__pyx_v_self->__pyx_vtab)->_finish_once(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 582, __pyx_L1_error)
+  __pyx_t_3 = ((struct __pyx_vtabstruct_5skene_12skene_native_SkeneWriter *)__pyx_v_self->__pyx_vtab)->_finish_once(__pyx_v_self); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 614, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":583
+  /* "skene/src/skene_native.pyx":615
  *         cdef Status st
  *         self._finish_once()
  *         with nogil:             # <<<<<<<<<<<<<<
@@ -21750,7 +21807,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_8write_to(struct _
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":584
+        /* "skene/src/skene_native.pyx":616
  *         self._finish_once()
  *         with nogil:
  *             st = c_write_file(target, self._out)             # <<<<<<<<<<<<<<
@@ -21760,7 +21817,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_8write_to(struct _
         __pyx_v_st = skene::write_file(__pyx_v_target, __pyx_v_self->_out);
       }
 
-      /* "skene/src/skene_native.pyx":583
+      /* "skene/src/skene_native.pyx":615
  *         cdef Status st
  *         self._finish_once()
  *         with nogil:             # <<<<<<<<<<<<<<
@@ -21777,16 +21834,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_8write_to(struct _
       }
   }
 
-  /* "skene/src/skene_native.pyx":585
+  /* "skene/src/skene_native.pyx":617
  *         with nogil:
  *             st = c_write_file(target, self._out)
  *         _check(st)             # <<<<<<<<<<<<<<
  *         return <object>self._out.size()
  * 
 */
-  __pyx_t_3 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 585, __pyx_L1_error)
+  __pyx_t_3 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_3 == ((int)-1))) __PYX_ERR(0, 617, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":586
+  /* "skene/src/skene_native.pyx":618
  *             st = c_write_file(target, self._out)
  *         _check(st)
  *         return <object>self._out.size()             # <<<<<<<<<<<<<<
@@ -21794,14 +21851,14 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_8write_to(struct _
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_1 = __Pyx_PyLong_FromSize_t(__pyx_v_self->_out.size()); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 586, __pyx_L1_error)
+  __pyx_t_1 = __Pyx_PyLong_FromSize_t(__pyx_v_self->_out.size()); if (unlikely(!__pyx_t_1)) __PYX_ERR(0, 618, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_1);
   __Pyx_INCREF(((PyObject *)__pyx_t_1));
   __pyx_r = __pyx_t_1;
   __Pyx_DECREF(__pyx_t_1); __pyx_t_1 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":574
+  /* "skene/src/skene_native.pyx":606
  *                                          <Py_ssize_t>self._out.size())
  * 
  *     def write_to(self, str path not None):             # <<<<<<<<<<<<<<
@@ -22024,7 +22081,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_11SkeneWriter_12__setstate_cytho
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":589
+/* "skene/src/skene_native.pyx":621
  * 
  * 
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,             # <<<<<<<<<<<<<<
@@ -22080,23 +22137,23 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_morsel,&__pyx_mstate_global->__pyx_n_u_read_acceleration,&__pyx_mstate_global->__pyx_n_u_codec,&__pyx_mstate_global->__pyx_n_u_zstd_level,&__pyx_mstate_global->__pyx_n_u_bloom_columns,&__pyx_mstate_global->__pyx_n_u_bloom_false_positive_rate,&__pyx_mstate_global->__pyx_n_u_field_ids,&__pyx_mstate_global->__pyx_n_u_created_at_unix_us,&__pyx_mstate_global->__pyx_n_u_writer_tag,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 589, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 621, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 589, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 621, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "write_morsel", 0) < (0)) __PYX_ERR(0, 589, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "write_morsel", 0) < (0)) __PYX_ERR(0, 621, __pyx_L3_error)
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_False)));
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_n_u_none)));
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_0)));
 
-      /* "skene/src/skene_native.pyx":591
+      /* "skene/src/skene_native.pyx":623
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,             # <<<<<<<<<<<<<<
@@ -22106,7 +22163,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
       if (!values[4]) values[4] = __Pyx_NewRef(((PyObject *)Py_None));
       if (!values[5]) values[5] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_float_0_05)));
 
-      /* "skene/src/skene_native.pyx":592
+      /* "skene/src/skene_native.pyx":624
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,
  *                  field_ids=None, created_at_unix_us=0, writer_tag=""):             # <<<<<<<<<<<<<<
@@ -22117,18 +22174,18 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
       if (!values[7]) values[7] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_0)));
       if (!values[8]) values[8] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_kp_u__6)));
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("write_morsel", 1, 1, 1, i); __PYX_ERR(0, 589, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("write_morsel", 1, 1, 1, i); __PYX_ERR(0, 621, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 589, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 621, __pyx_L3_error)
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_False)));
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_n_u_none)));
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_0)));
 
-      /* "skene/src/skene_native.pyx":591
+      /* "skene/src/skene_native.pyx":623
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,             # <<<<<<<<<<<<<<
@@ -22138,7 +22195,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
       if (!values[4]) values[4] = __Pyx_NewRef(((PyObject *)Py_None));
       if (!values[5]) values[5] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_float_0_05)));
 
-      /* "skene/src/skene_native.pyx":592
+      /* "skene/src/skene_native.pyx":624
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,
  *                  field_ids=None, created_at_unix_us=0, writer_tag=""):             # <<<<<<<<<<<<<<
@@ -22161,7 +22218,7 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("write_morsel", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 589, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("write_morsel", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 621, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -22172,10 +22229,10 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   __Pyx_RefNannyFinishContext();
   return NULL;
   __pyx_L4_argument_unpacking_done:;
-  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel, 0, "morsel", 0))) __PYX_ERR(0, 589, __pyx_L1_error)
+  if (unlikely(!__Pyx_ArgTypeTest(((PyObject *)__pyx_v_morsel), __pyx_mstate_global->__pyx_ptype_6draken_7morsels_6morsel_Morsel, 0, "morsel", 0))) __PYX_ERR(0, 621, __pyx_L1_error)
   __pyx_r = __pyx_pf_5skene_12skene_native_10write_morsel(__pyx_self, __pyx_v_morsel, __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, __pyx_v_bloom_columns, __pyx_v_bloom_false_positive_rate, __pyx_v_field_ids, __pyx_v_created_at_unix_us, __pyx_v_writer_tag);
 
-  /* "skene/src/skene_native.pyx":589
+  /* "skene/src/skene_native.pyx":621
  * 
  * 
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,             # <<<<<<<<<<<<<<
@@ -22215,26 +22272,26 @@ static PyObject *__pyx_pf_5skene_12skene_native_10write_morsel(CYTHON_UNUSED PyO
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("write_morsel", 0);
 
-  /* "skene/src/skene_native.pyx":608
+  /* "skene/src/skene_native.pyx":640
  *     cdef Status st
  * 
  *     _fill_write_options(&options, read_acceleration, codec, zstd_level,             # <<<<<<<<<<<<<<
  *                         bloom_columns, bloom_false_positive_rate, field_ids,
  *                         created_at_unix_us, writer_tag)
 */
-  __pyx_t_1 = __pyx_f_5skene_12skene_native__fill_write_options((&__pyx_v_options), __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, __pyx_v_bloom_columns, __pyx_v_bloom_false_positive_rate, __pyx_v_field_ids, __pyx_v_created_at_unix_us, __pyx_v_writer_tag); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 608, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_5skene_12skene_native__fill_write_options((&__pyx_v_options), __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, __pyx_v_bloom_columns, __pyx_v_bloom_false_positive_rate, __pyx_v_field_ids, __pyx_v_created_at_unix_us, __pyx_v_writer_tag); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 640, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":611
+  /* "skene/src/skene_native.pyx":643
  *                         bloom_columns, bloom_false_positive_rate, field_ids,
  *                         created_at_unix_us, writer_tag)
  *     cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)             # <<<<<<<<<<<<<<
  *     with nogil:
  *         st = c_write_morsel(deref(sp), options, &out)
 */
-  __pyx_t_2 = __pyx_f_6draken_7morsels_6morsel_morsel_to_cxx(__pyx_v_morsel); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 611, __pyx_L1_error)
+  __pyx_t_2 = __pyx_f_6draken_7morsels_6morsel_morsel_to_cxx(__pyx_v_morsel); if (unlikely(PyErr_Occurred())) __PYX_ERR(0, 643, __pyx_L1_error)
   __pyx_v_sp = __PYX_STD_MOVE_IF_SUPPORTED(__pyx_t_2);
 
-  /* "skene/src/skene_native.pyx":612
+  /* "skene/src/skene_native.pyx":644
  *                         created_at_unix_us, writer_tag)
  *     cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -22247,7 +22304,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_10write_morsel(CYTHON_UNUSED PyO
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":613
+        /* "skene/src/skene_native.pyx":645
  *     cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)
  *     with nogil:
  *         st = c_write_morsel(deref(sp), options, &out)             # <<<<<<<<<<<<<<
@@ -22257,7 +22314,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_10write_morsel(CYTHON_UNUSED PyO
         __pyx_v_st = skene::write_morsel((*__pyx_v_sp), __pyx_v_options, (&__pyx_v_out));
       }
 
-      /* "skene/src/skene_native.pyx":612
+      /* "skene/src/skene_native.pyx":644
  *                         created_at_unix_us, writer_tag)
  *     cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -22274,16 +22331,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_10write_morsel(CYTHON_UNUSED PyO
       }
   }
 
-  /* "skene/src/skene_native.pyx":614
+  /* "skene/src/skene_native.pyx":646
  *     with nogil:
  *         st = c_write_morsel(deref(sp), options, &out)
  *     _check(st)             # <<<<<<<<<<<<<<
  *     return PyBytes_FromStringAndSize(<char*>out.data(), <Py_ssize_t>out.size())
  * 
 */
-  __pyx_t_1 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 614, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 646, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":615
+  /* "skene/src/skene_native.pyx":647
  *         st = c_write_morsel(deref(sp), options, &out)
  *     _check(st)
  *     return PyBytes_FromStringAndSize(<char*>out.data(), <Py_ssize_t>out.size())             # <<<<<<<<<<<<<<
@@ -22291,13 +22348,13 @@ static PyObject *__pyx_pf_5skene_12skene_native_10write_morsel(CYTHON_UNUSED PyO
  * 
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_3 = PyBytes_FromStringAndSize(((char *)__pyx_v_out.data()), ((Py_ssize_t)__pyx_v_out.size())); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 615, __pyx_L1_error)
+  __pyx_t_3 = PyBytes_FromStringAndSize(((char *)__pyx_v_out.data()), ((Py_ssize_t)__pyx_v_out.size())); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 647, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_r = __pyx_t_3;
   __pyx_t_3 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":589
+  /* "skene/src/skene_native.pyx":621
  * 
  * 
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,             # <<<<<<<<<<<<<<
@@ -22316,7 +22373,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_10write_morsel(CYTHON_UNUSED PyO
   return __pyx_r;
 }
 
-/* "skene/src/skene_native.pyx":618
+/* "skene/src/skene_native.pyx":650
  * 
  * 
  * def migrate(const unsigned char[::1] file not None, *,             # <<<<<<<<<<<<<<
@@ -22367,20 +22424,20 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   {
     PyObject ** const __pyx_pyargnames[] = {&__pyx_mstate_global->__pyx_n_u_file,&__pyx_mstate_global->__pyx_n_u_read_acceleration,&__pyx_mstate_global->__pyx_n_u_codec,&__pyx_mstate_global->__pyx_n_u_zstd_level,0};
     const Py_ssize_t __pyx_kwds_len = (__pyx_kwds) ? __Pyx_NumKwargs_FASTCALL(__pyx_kwds) : 0;
-    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 618, __pyx_L3_error)
+    if (unlikely(__pyx_kwds_len < 0)) __PYX_ERR(0, 650, __pyx_L3_error)
     if (__pyx_kwds_len > 0) {
       switch (__pyx_nargs) {
         case  1:
         values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 618, __pyx_L3_error)
+        if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 650, __pyx_L3_error)
         CYTHON_FALLTHROUGH;
         case  0: break;
         default: goto __pyx_L5_argtuple_error;
       }
       const Py_ssize_t kwd_pos_args = __pyx_nargs;
-      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "migrate", 0) < (0)) __PYX_ERR(0, 618, __pyx_L3_error)
+      if (__Pyx_ParseKeywords(__pyx_kwds, __pyx_kwvalues, __pyx_pyargnames, 0, values, kwd_pos_args, __pyx_kwds_len, "migrate", 0) < (0)) __PYX_ERR(0, 650, __pyx_L3_error)
 
-      /* "skene/src/skene_native.pyx":619
+      /* "skene/src/skene_native.pyx":651
  * 
  * def migrate(const unsigned char[::1] file not None, *,
  *             read_acceleration=True, codec="none", zstd_level=0):             # <<<<<<<<<<<<<<
@@ -22391,25 +22448,25 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_n_u_none)));
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_0)));
       for (Py_ssize_t i = __pyx_nargs; i < 1; i++) {
-        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("migrate", 1, 1, 1, i); __PYX_ERR(0, 618, __pyx_L3_error) }
+        if (unlikely(!values[i])) { __Pyx_RaiseArgtupleInvalid("migrate", 1, 1, 1, i); __PYX_ERR(0, 650, __pyx_L3_error) }
       }
     } else if (unlikely(__pyx_nargs != 1)) {
       goto __pyx_L5_argtuple_error;
     } else {
       values[0] = __Pyx_ArgRef_FASTCALL(__pyx_args, 0);
-      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 618, __pyx_L3_error)
+      if (!CYTHON_ASSUME_SAFE_MACROS && unlikely(!values[0])) __PYX_ERR(0, 650, __pyx_L3_error)
       if (!values[1]) values[1] = __Pyx_NewRef(((PyObject *)((PyObject*)Py_True)));
       if (!values[2]) values[2] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_n_u_none)));
       if (!values[3]) values[3] = __Pyx_NewRef(((PyObject *)((PyObject*)__pyx_mstate_global->__pyx_int_0)));
     }
-    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 618, __pyx_L3_error)
+    __pyx_v_file = __Pyx_PyObject_to_MemoryviewSlice_dc_unsigned_char__const__(values[0], 0); if (unlikely(!__pyx_v_file.memview)) __PYX_ERR(0, 650, __pyx_L3_error)
     __pyx_v_read_acceleration = values[1];
     __pyx_v_codec = values[2];
     __pyx_v_zstd_level = values[3];
   }
   goto __pyx_L6_skip;
   __pyx_L5_argtuple_error:;
-  __Pyx_RaiseArgtupleInvalid("migrate", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 618, __pyx_L3_error)
+  __Pyx_RaiseArgtupleInvalid("migrate", 1, 1, 1, __pyx_nargs); __PYX_ERR(0, 650, __pyx_L3_error)
   __pyx_L6_skip:;
   goto __pyx_L4_argument_unpacking_done;
   __pyx_L3_error:;
@@ -22422,11 +22479,11 @@ PyObject *__pyx_args, PyObject *__pyx_kwds
   return NULL;
   __pyx_L4_argument_unpacking_done:;
   if (unlikely(((PyObject *)__pyx_v_file.memview) == Py_None)) {
-    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 618, __pyx_L1_error)
+    PyErr_Format(PyExc_TypeError, "Argument '%.200s' must not be None", "file"); __PYX_ERR(0, 650, __pyx_L1_error)
   }
   __pyx_r = __pyx_pf_5skene_12skene_native_12migrate(__pyx_self, __pyx_v_file, __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level);
 
-  /* "skene/src/skene_native.pyx":618
+  /* "skene/src/skene_native.pyx":650
  * 
  * 
  * def migrate(const unsigned char[::1] file not None, *,             # <<<<<<<<<<<<<<
@@ -22466,16 +22523,16 @@ static PyObject *__pyx_pf_5skene_12skene_native_12migrate(CYTHON_UNUSED PyObject
   int __pyx_clineno = 0;
   __Pyx_RefNannySetupContext("migrate", 0);
 
-  /* "skene/src/skene_native.pyx":633
+  /* "skene/src/skene_native.pyx":665
  *     cdef Status st
  * 
  *     _fill_write_options(&options, read_acceleration, codec, zstd_level,             # <<<<<<<<<<<<<<
  *                         None, 0.05, None, 0, "")
  *     with nogil:
 */
-  __pyx_t_1 = __pyx_f_5skene_12skene_native__fill_write_options((&__pyx_v_options), __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, Py_None, __pyx_mstate_global->__pyx_float_0_05, Py_None, __pyx_mstate_global->__pyx_int_0, __pyx_mstate_global->__pyx_kp_u__6); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 633, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_5skene_12skene_native__fill_write_options((&__pyx_v_options), __pyx_v_read_acceleration, __pyx_v_codec, __pyx_v_zstd_level, Py_None, __pyx_mstate_global->__pyx_float_0_05, Py_None, __pyx_mstate_global->__pyx_int_0, __pyx_mstate_global->__pyx_kp_u__6); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 665, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":635
+  /* "skene/src/skene_native.pyx":667
  *     _fill_write_options(&options, read_acceleration, codec, zstd_level,
  *                         None, 0.05, None, 0, "")
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -22488,7 +22545,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_12migrate(CYTHON_UNUSED PyObject
       __Pyx_FastGIL_Remember();
       /*try:*/ {
 
-        /* "skene/src/skene_native.pyx":636
+        /* "skene/src/skene_native.pyx":668
  *                         None, 0.05, None, 0, "")
  *     with nogil:
  *         st = c_migrate_file(<const void*>&file[0], <size_t>file.shape[0],             # <<<<<<<<<<<<<<
@@ -22497,7 +22554,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_12migrate(CYTHON_UNUSED PyObject
 */
         __pyx_t_2 = 0;
 
-        /* "skene/src/skene_native.pyx":637
+        /* "skene/src/skene_native.pyx":669
  *     with nogil:
  *         st = c_migrate_file(<const void*>&file[0], <size_t>file.shape[0],
  *                             options, &out)             # <<<<<<<<<<<<<<
@@ -22507,7 +22564,7 @@ static PyObject *__pyx_pf_5skene_12skene_native_12migrate(CYTHON_UNUSED PyObject
         __pyx_v_st = skene::migrate_file(((void const *)(&(*((unsigned char const  *) ( /* dim=0 */ ((char *) (((unsigned char const  *) __pyx_v_file.data) + __pyx_t_2)) ))))), ((size_t)(__pyx_v_file.shape[0])), __pyx_v_options, (&__pyx_v_out));
       }
 
-      /* "skene/src/skene_native.pyx":635
+      /* "skene/src/skene_native.pyx":667
  *     _fill_write_options(&options, read_acceleration, codec, zstd_level,
  *                         None, 0.05, None, 0, "")
  *     with nogil:             # <<<<<<<<<<<<<<
@@ -22524,27 +22581,27 @@ static PyObject *__pyx_pf_5skene_12skene_native_12migrate(CYTHON_UNUSED PyObject
       }
   }
 
-  /* "skene/src/skene_native.pyx":638
+  /* "skene/src/skene_native.pyx":670
  *         st = c_migrate_file(<const void*>&file[0], <size_t>file.shape[0],
  *                             options, &out)
  *     _check(st)             # <<<<<<<<<<<<<<
  *     return PyBytes_FromStringAndSize(<char*>out.data(), <Py_ssize_t>out.size())
 */
-  __pyx_t_1 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 638, __pyx_L1_error)
+  __pyx_t_1 = __pyx_f_5skene_12skene_native__check(__pyx_v_st); if (unlikely(__pyx_t_1 == ((int)-1))) __PYX_ERR(0, 670, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":639
+  /* "skene/src/skene_native.pyx":671
  *                             options, &out)
  *     _check(st)
  *     return PyBytes_FromStringAndSize(<char*>out.data(), <Py_ssize_t>out.size())             # <<<<<<<<<<<<<<
 */
   __Pyx_XDECREF(__pyx_r);
-  __pyx_t_3 = PyBytes_FromStringAndSize(((char *)__pyx_v_out.data()), ((Py_ssize_t)__pyx_v_out.size())); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 639, __pyx_L1_error)
+  __pyx_t_3 = PyBytes_FromStringAndSize(((char *)__pyx_v_out.data()), ((Py_ssize_t)__pyx_v_out.size())); if (unlikely(!__pyx_t_3)) __PYX_ERR(0, 671, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_3);
   __pyx_r = __pyx_t_3;
   __pyx_t_3 = 0;
   goto __pyx_L0;
 
-  /* "skene/src/skene_native.pyx":618
+  /* "skene/src/skene_native.pyx":650
  * 
  * 
  * def migrate(const unsigned char[::1] file not None, *,             # <<<<<<<<<<<<<<
@@ -23637,15 +23694,15 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
   __pyx_vtabptr_5skene_12skene_native_SkeneWriter = &__pyx_vtable_5skene_12skene_native_SkeneWriter;
   __pyx_vtable_5skene_12skene_native_SkeneWriter._finish_once = (int (*)(struct __pyx_obj_5skene_12skene_native_SkeneWriter *))__pyx_f_5skene_12skene_native_11SkeneWriter__finish_once;
   #if CYTHON_USE_TYPE_SPECS
-  __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_5skene_12skene_native_SkeneWriter_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter)) __PYX_ERR(0, 499, __pyx_L1_error)
-  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_5skene_12skene_native_SkeneWriter_spec, __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 499, __pyx_L1_error)
+  __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter = (PyTypeObject *) __Pyx_PyType_FromModuleAndSpec(__pyx_m, &__pyx_type_5skene_12skene_native_SkeneWriter_spec, NULL); if (unlikely(!__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter)) __PYX_ERR(0, 531, __pyx_L1_error)
+  if (__Pyx_fix_up_extension_type_from_spec(&__pyx_type_5skene_12skene_native_SkeneWriter_spec, __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 531, __pyx_L1_error)
   #else
   __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter = &__pyx_type_5skene_12skene_native_SkeneWriter;
   #endif
   #if !CYTHON_COMPILING_IN_LIMITED_API
   #endif
   #if !CYTHON_USE_TYPE_SPECS
-  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 499, __pyx_L1_error)
+  if (__Pyx_PyType_Ready(__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 531, __pyx_L1_error)
   #endif
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount((PyObject*)__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter);
@@ -23655,10 +23712,10 @@ static int __Pyx_modinit_type_init_code(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter->tp_getattro = PyObject_GenericGetAttr;
   }
   #endif
-  if (__Pyx_SetVtable(__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_vtabptr_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 499, __pyx_L1_error)
-  if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 499, __pyx_L1_error)
-  if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_SkeneWriter, (PyObject *) __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 499, __pyx_L1_error)
-  if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 499, __pyx_L1_error)
+  if (__Pyx_SetVtable(__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_vtabptr_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 531, __pyx_L1_error)
+  if (__Pyx_MergeVtables(__pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 531, __pyx_L1_error)
+  if (PyObject_SetAttr(__pyx_m, __pyx_mstate_global->__pyx_n_u_SkeneWriter, (PyObject *) __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 531, __pyx_L1_error)
+  if (__Pyx_setup_reduce((PyObject *) __pyx_mstate->__pyx_ptype_5skene_12skene_native_SkeneWriter) < (0)) __PYX_ERR(0, 531, __pyx_L1_error)
   __pyx_vtabptr_array = &__pyx_vtable_array;
   __pyx_vtable_array.get_memview = (PyObject *(*)(struct __pyx_array_obj *))__pyx_array_get_memview;
   #if CYTHON_USE_TYPE_SPECS
@@ -24660,319 +24717,319 @@ __Pyx_RefNannySetupContext("PyInit_skene_native", 0);
   if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_pyx_unpickle_Enum, __pyx_t_4) < (0)) __PYX_ERR(1, 4, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
 
-  /* "skene/src/skene_native.pyx":206
+  /* "skene/src/skene_native.pyx":209
  * #  Error model
  * 
  * class SkeneError(Exception):             # <<<<<<<<<<<<<<
  *     """A skene read or write failed. `code` is the Status code name."""
  * 
 */
-  __pyx_t_4 = PyTuple_Pack(1, ((PyObject *)(((PyTypeObject*)PyExc_Exception)))); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 206, __pyx_L1_error)
+  __pyx_t_4 = PyTuple_Pack(1, ((PyObject *)(((PyTypeObject*)PyExc_Exception)))); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
-  __pyx_t_5 = __Pyx_PEP560_update_bases(__pyx_t_4); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 206, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PEP560_update_bases(__pyx_t_4); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_9 = __Pyx_CalculateMetaclass(NULL, __pyx_t_5); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 206, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_CalculateMetaclass(NULL, __pyx_t_5); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  __pyx_t_10 = __Pyx_Py3MetaclassPrepare(__pyx_t_9, __pyx_t_5, __pyx_mstate_global->__pyx_n_u_SkeneError, __pyx_mstate_global->__pyx_n_u_SkeneError, (PyObject *) NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_kp_u_A_skene_read_or_write_failed_cod); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 206, __pyx_L1_error)
+  __pyx_t_10 = __Pyx_Py3MetaclassPrepare(__pyx_t_9, __pyx_t_5, __pyx_mstate_global->__pyx_n_u_SkeneError, __pyx_mstate_global->__pyx_n_u_SkeneError, (PyObject *) NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_kp_u_A_skene_read_or_write_failed_cod); if (unlikely(!__pyx_t_10)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_10);
   if (__pyx_t_5 != __pyx_t_4) {
-    if (unlikely((PyDict_SetItemString(__pyx_t_10, "__orig_bases__", __pyx_t_4) < 0))) __PYX_ERR(0, 206, __pyx_L1_error)
+    if (unlikely((PyDict_SetItemString(__pyx_t_10, "__orig_bases__", __pyx_t_4) < 0))) __PYX_ERR(0, 209, __pyx_L1_error)
   }
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  __pyx_t_4 = PyList_New(0); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 206, __pyx_L1_error)
+  __pyx_t_4 = PyList_New(0); if (unlikely(!__pyx_t_4)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_4);
 
-  /* "skene/src/skene_native.pyx":209
+  /* "skene/src/skene_native.pyx":212
  *     """A skene read or write failed. `code` is the Status code name."""
  * 
  *     def __init__(self, code, message):             # <<<<<<<<<<<<<<
  *         self.code = code
  *         super().__init__(f"{code}: {message}")
 */
-  __pyx_t_11 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_10SkeneError_1__init__, 0, __pyx_mstate_global->__pyx_n_u_SkeneError___init, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 209, __pyx_L1_error)
+  __pyx_t_11 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_10SkeneError_1__init__, 0, __pyx_mstate_global->__pyx_n_u_SkeneError___init, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[0])); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 212, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_11);
   #endif
   PyList_Append(__pyx_t_4, __pyx_t_11);
-  if (__Pyx_SetNameInClass(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_init, __pyx_t_11) < (0)) __PYX_ERR(0, 209, __pyx_L1_error)
+  if (__Pyx_SetNameInClass(__pyx_t_10, __pyx_mstate_global->__pyx_n_u_init, __pyx_t_11) < (0)) __PYX_ERR(0, 212, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
 
-  /* "skene/src/skene_native.pyx":206
+  /* "skene/src/skene_native.pyx":209
  * #  Error model
  * 
  * class SkeneError(Exception):             # <<<<<<<<<<<<<<
  *     """A skene read or write failed. `code` is the Status code name."""
  * 
 */
-  __pyx_t_11 = __Pyx_Py3ClassCreate(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_SkeneError, __pyx_t_5, __pyx_t_10, NULL, 0, 0); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 206, __pyx_L1_error)
+  __pyx_t_11 = __Pyx_Py3ClassCreate(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_SkeneError, __pyx_t_5, __pyx_t_10, NULL, 0, 0); if (unlikely(!__pyx_t_11)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_11);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_11);
   #endif
-  if (__Pyx_CyFunction_InitClassCell(__pyx_t_4, __pyx_t_11) < (0)) __PYX_ERR(0, 206, __pyx_L1_error)
+  if (__Pyx_CyFunction_InitClassCell(__pyx_t_4, __pyx_t_11) < (0)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_4); __pyx_t_4 = 0;
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_SkeneError, __pyx_t_11) < (0)) __PYX_ERR(0, 206, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_SkeneError, __pyx_t_11) < (0)) __PYX_ERR(0, 209, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_11); __pyx_t_11 = 0;
   __Pyx_DECREF(__pyx_t_10); __pyx_t_10 = 0;
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":215
+  /* "skene/src/skene_native.pyx":218
  * 
  * _CODE_NAMES = {
  *     <int>Code.kNotSkene: "NotSkene",             # <<<<<<<<<<<<<<
  *     <int>Code.kTruncated: "Truncated",
  *     <int>Code.kUnsupportedVersion: "UnsupportedVersion",
 */
-  __pyx_t_5 = __Pyx_PyDict_NewPresized(11); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 215, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyDict_NewPresized(11); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kNotSkene)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 215, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kNotSkene)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_NotSkene) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_NotSkene) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":216
+  /* "skene/src/skene_native.pyx":219
  * _CODE_NAMES = {
  *     <int>Code.kNotSkene: "NotSkene",
  *     <int>Code.kTruncated: "Truncated",             # <<<<<<<<<<<<<<
  *     <int>Code.kUnsupportedVersion: "UnsupportedVersion",
  *     <int>Code.kWrongEndianness: "WrongEndianness",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kTruncated)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 216, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kTruncated)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 219, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_Truncated) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_Truncated) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":217
+  /* "skene/src/skene_native.pyx":220
  *     <int>Code.kNotSkene: "NotSkene",
  *     <int>Code.kTruncated: "Truncated",
  *     <int>Code.kUnsupportedVersion: "UnsupportedVersion",             # <<<<<<<<<<<<<<
  *     <int>Code.kWrongEndianness: "WrongEndianness",
  *     <int>Code.kUnknownChecksum: "UnknownChecksum",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedVersion)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 217, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedVersion)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 220, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedVersion) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedVersion) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":218
+  /* "skene/src/skene_native.pyx":221
  *     <int>Code.kTruncated: "Truncated",
  *     <int>Code.kUnsupportedVersion: "UnsupportedVersion",
  *     <int>Code.kWrongEndianness: "WrongEndianness",             # <<<<<<<<<<<<<<
  *     <int>Code.kUnknownChecksum: "UnknownChecksum",
  *     <int>Code.kChecksumMismatch: "ChecksumMismatch",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kWrongEndianness)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 218, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kWrongEndianness)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 221, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_WrongEndianness) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_WrongEndianness) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":219
+  /* "skene/src/skene_native.pyx":222
  *     <int>Code.kUnsupportedVersion: "UnsupportedVersion",
  *     <int>Code.kWrongEndianness: "WrongEndianness",
  *     <int>Code.kUnknownChecksum: "UnknownChecksum",             # <<<<<<<<<<<<<<
  *     <int>Code.kChecksumMismatch: "ChecksumMismatch",
  *     <int>Code.kMalformed: "Malformed",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnknownChecksum)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 219, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnknownChecksum)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 222, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnknownChecksum) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnknownChecksum) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":220
+  /* "skene/src/skene_native.pyx":223
  *     <int>Code.kWrongEndianness: "WrongEndianness",
  *     <int>Code.kUnknownChecksum: "UnknownChecksum",
  *     <int>Code.kChecksumMismatch: "ChecksumMismatch",             # <<<<<<<<<<<<<<
  *     <int>Code.kMalformed: "Malformed",
  *     <int>Code.kUnsupportedSection: "UnsupportedSection",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kChecksumMismatch)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 220, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kChecksumMismatch)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 223, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_ChecksumMismatch) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_ChecksumMismatch) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":221
+  /* "skene/src/skene_native.pyx":224
  *     <int>Code.kUnknownChecksum: "UnknownChecksum",
  *     <int>Code.kChecksumMismatch: "ChecksumMismatch",
  *     <int>Code.kMalformed: "Malformed",             # <<<<<<<<<<<<<<
  *     <int>Code.kUnsupportedSection: "UnsupportedSection",
  *     <int>Code.kUnsupportedEncoding: "UnsupportedEncoding",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kMalformed)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 221, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kMalformed)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 224, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_Malformed) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_Malformed) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":222
+  /* "skene/src/skene_native.pyx":225
  *     <int>Code.kChecksumMismatch: "ChecksumMismatch",
  *     <int>Code.kMalformed: "Malformed",
  *     <int>Code.kUnsupportedSection: "UnsupportedSection",             # <<<<<<<<<<<<<<
  *     <int>Code.kUnsupportedEncoding: "UnsupportedEncoding",
  *     <int>Code.kUnsupportedType: "UnsupportedType",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedSection)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 222, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedSection)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 225, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedSection) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedSection) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":223
+  /* "skene/src/skene_native.pyx":226
  *     <int>Code.kMalformed: "Malformed",
  *     <int>Code.kUnsupportedSection: "UnsupportedSection",
  *     <int>Code.kUnsupportedEncoding: "UnsupportedEncoding",             # <<<<<<<<<<<<<<
  *     <int>Code.kUnsupportedType: "UnsupportedType",
  *     <int>Code.kOutOfMemory: "OutOfMemory",
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedEncoding)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 223, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedEncoding)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 226, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedEncoding) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedEncoding) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":224
+  /* "skene/src/skene_native.pyx":227
  *     <int>Code.kUnsupportedSection: "UnsupportedSection",
  *     <int>Code.kUnsupportedEncoding: "UnsupportedEncoding",
  *     <int>Code.kUnsupportedType: "UnsupportedType",             # <<<<<<<<<<<<<<
  *     <int>Code.kOutOfMemory: "OutOfMemory",
  * }
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedType)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 224, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kUnsupportedType)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 227, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedType) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_UnsupportedType) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":225
+  /* "skene/src/skene_native.pyx":228
  *     <int>Code.kUnsupportedEncoding: "UnsupportedEncoding",
  *     <int>Code.kUnsupportedType: "UnsupportedType",
  *     <int>Code.kOutOfMemory: "OutOfMemory",             # <<<<<<<<<<<<<<
  * }
  * 
 */
-  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kOutOfMemory)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 225, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyLong_From_int(((int)skene::Code::kOutOfMemory)); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 228, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_OutOfMemory) < (0)) __PYX_ERR(0, 215, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_t_9, __pyx_mstate_global->__pyx_n_u_OutOfMemory) < (0)) __PYX_ERR(0, 218, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_CODE_NAMES, __pyx_t_5) < (0)) __PYX_ERR(0, 214, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_CODE_NAMES, __pyx_t_5) < (0)) __PYX_ERR(0, 217, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":354
+  /* "skene/src/skene_native.pyx":386
  * #  Public API
  * 
  * def probe_version(const unsigned char[::1] head not None):             # <<<<<<<<<<<<<<
  *     """Format/version probe on the first bytes of a file (needs >= 8 bytes).
  * 
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_1probe_version, 0, __pyx_mstate_global->__pyx_n_u_probe_version, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 354, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_1probe_version, 0, __pyx_mstate_global->__pyx_n_u_probe_version, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[1])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 386, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_probe_version, __pyx_t_5) < (0)) __PYX_ERR(0, 354, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_probe_version, __pyx_t_5) < (0)) __PYX_ERR(0, 386, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":369
+  /* "skene/src/skene_native.pyx":401
  * 
  * 
  * def footer_extent(const unsigned char[::1] tail not None, uint64_t file_bytes):             # <<<<<<<<<<<<<<
  *     """Given the last kFileTailBytes of an object and its total size, return
  *     (offset, nbytes) of the footer  the tail-then-footer remote read path."""
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_3footer_extent, 0, __pyx_mstate_global->__pyx_n_u_footer_extent, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 369, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_3footer_extent, 0, __pyx_mstate_global->__pyx_n_u_footer_extent, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[2])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 401, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_footer_extent, __pyx_t_5) < (0)) __PYX_ERR(0, 369, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_footer_extent, __pyx_t_5) < (0)) __PYX_ERR(0, 401, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":382
+  /* "skene/src/skene_native.pyx":414
  * 
  * 
  * def read_metadata(const unsigned char[::1] file not None):             # <<<<<<<<<<<<<<
  *     """Parse the FILE footer only  cheap; touches no data region and no row
  *     group footer.
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_5read_metadata, 0, __pyx_mstate_global->__pyx_n_u_read_metadata, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 382, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_5read_metadata, 0, __pyx_mstate_global->__pyx_n_u_read_metadata, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[3])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 414, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_metadata, __pyx_t_5) < (0)) __PYX_ERR(0, 382, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_metadata, __pyx_t_5) < (0)) __PYX_ERR(0, 414, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":415
+  /* "skene/src/skene_native.pyx":447
  * 
  * 
  * def read_row_group_metadata(const unsigned char[::1] file not None, uint32_t row_group):             # <<<<<<<<<<<<<<
  *     """Parse ONE row group's own footer: per-column lengths, encoding shape,
  *     byte extents, zone maps and blooms.
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_7read_row_group_metadata, 0, __pyx_mstate_global->__pyx_n_u_read_row_group_metadata, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[4])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 415, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_7read_row_group_metadata, 0, __pyx_mstate_global->__pyx_n_u_read_row_group_metadata, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[4])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 447, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_row_group_metadata, __pyx_t_5) < (0)) __PYX_ERR(0, 415, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_row_group_metadata, __pyx_t_5) < (0)) __PYX_ERR(0, 447, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":438
+  /* "skene/src/skene_native.pyx":470
  * 
  * 
  * def read_morsel(const unsigned char[::1] file not None, uint32_t row_group,             # <<<<<<<<<<<<<<
  *                 columns=None):
  *     """Reconstruct ONE row group as a Morsel. `columns` narrows to those
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_9read_morsel, 0, __pyx_mstate_global->__pyx_n_u_read_morsel, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 438, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_9read_morsel, 0, __pyx_mstate_global->__pyx_n_u_read_morsel, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[5])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 470, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
   __Pyx_CyFunction_SetDefaultsTuple(__pyx_t_5, __pyx_mstate_global->__pyx_tuple[3]);
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_morsel, __pyx_t_5) < (0)) __PYX_ERR(0, 438, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_read_morsel, __pyx_t_5) < (0)) __PYX_ERR(0, 470, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":536
+  /* "skene/src/skene_native.pyx":568
  *             self._writer = NULL
  * 
  *     def add_row_group(self, Morsel morsel not None):             # <<<<<<<<<<<<<<
  *         cdef shared_ptr[CxxMorsel] sp = morsel_to_cxx(morsel)
  *         cdef Status st
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11SkeneWriter_5add_row_group, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_SkeneWriter_add_row_group, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 536, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11SkeneWriter_5add_row_group, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_SkeneWriter_add_row_group, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[6])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 568, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_mstate_global->__pyx_n_u_add_row_group, __pyx_t_5) < (0)) __PYX_ERR(0, 536, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_mstate_global->__pyx_n_u_add_row_group, __pyx_t_5) < (0)) __PYX_ERR(0, 568, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":563
+  /* "skene/src/skene_native.pyx":595
  *         return 0
  * 
  *     def finish(self):             # <<<<<<<<<<<<<<
  *         """Complete the file and return it as bytes.
  * 
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11SkeneWriter_7finish, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_SkeneWriter_finish, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[7])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 563, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11SkeneWriter_7finish, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_SkeneWriter_finish, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[7])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 595, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_mstate_global->__pyx_n_u_finish, __pyx_t_5) < (0)) __PYX_ERR(0, 563, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_mstate_global->__pyx_n_u_finish, __pyx_t_5) < (0)) __PYX_ERR(0, 595, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":574
+  /* "skene/src/skene_native.pyx":606
  *                                          <Py_ssize_t>self._out.size())
  * 
  *     def write_to(self, str path not None):             # <<<<<<<<<<<<<<
  *         """Complete the file and write it to `path`, with no intermediate copy.
  * 
 */
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11SkeneWriter_9write_to, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_SkeneWriter_write_to, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[8])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 574, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11SkeneWriter_9write_to, __Pyx_CYFUNCTION_CCLASS, __pyx_mstate_global->__pyx_n_u_SkeneWriter_write_to, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[8])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 606, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
-  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_mstate_global->__pyx_n_u_write_to, __pyx_t_5) < (0)) __PYX_ERR(0, 574, __pyx_L1_error)
+  if (__Pyx_SetItemOnTypeDict(__pyx_mstate_global->__pyx_ptype_5skene_12skene_native_SkeneWriter, __pyx_mstate_global->__pyx_n_u_write_to, __pyx_t_5) < (0)) __PYX_ERR(0, 606, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
   /* "(tree fragment)":1
@@ -25002,77 +25059,77 @@ __Pyx_RefNannySetupContext("PyInit_skene_native", 0);
   if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_setstate_cython, __pyx_t_5) < (0)) __PYX_ERR(1, 3, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
-  /* "skene/src/skene_native.pyx":589
+  /* "skene/src/skene_native.pyx":621
  * 
  * 
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,             # <<<<<<<<<<<<<<
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,
 */
-  __pyx_t_5 = __Pyx_PyDict_NewPresized(8); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 589, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_PyDict_NewPresized(8); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 621, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_read_acceleration, ((PyObject*)Py_False)) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_codec, ((PyObject*)__pyx_mstate_global->__pyx_n_u_none)) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_zstd_level, ((PyObject*)__pyx_mstate_global->__pyx_int_0)) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_read_acceleration, ((PyObject*)Py_False)) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_codec, ((PyObject*)__pyx_mstate_global->__pyx_n_u_none)) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_zstd_level, ((PyObject*)__pyx_mstate_global->__pyx_int_0)) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":591
+  /* "skene/src/skene_native.pyx":623
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,             # <<<<<<<<<<<<<<
  *                  field_ids=None, created_at_unix_us=0, writer_tag=""):
  *     """Serialize a draken Morsel to .skene bytes.
 */
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_bloom_columns, Py_None) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_bloom_false_positive_rate, ((PyObject*)__pyx_mstate_global->__pyx_float_0_05)) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_bloom_columns, Py_None) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_bloom_false_positive_rate, ((PyObject*)__pyx_mstate_global->__pyx_float_0_05)) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":592
+  /* "skene/src/skene_native.pyx":624
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,
  *                  field_ids=None, created_at_unix_us=0, writer_tag=""):             # <<<<<<<<<<<<<<
  *     """Serialize a draken Morsel to .skene bytes.
  * 
 */
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_field_ids, Py_None) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_created_at_unix_us, ((PyObject*)__pyx_mstate_global->__pyx_int_0)) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_writer_tag, ((PyObject*)__pyx_mstate_global->__pyx_kp_u__6)) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_field_ids, Py_None) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_created_at_unix_us, ((PyObject*)__pyx_mstate_global->__pyx_int_0)) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_5, __pyx_mstate_global->__pyx_n_u_writer_tag, ((PyObject*)__pyx_mstate_global->__pyx_kp_u__6)) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
 
-  /* "skene/src/skene_native.pyx":589
+  /* "skene/src/skene_native.pyx":621
  * 
  * 
  * def write_morsel(Morsel morsel not None, *, read_acceleration=False,             # <<<<<<<<<<<<<<
  *                  codec="none", zstd_level=0,
  *                  bloom_columns=None, bloom_false_positive_rate=0.05,
 */
-  __pyx_t_9 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11write_morsel, 0, __pyx_mstate_global->__pyx_n_u_write_morsel, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[11])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 589, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_11write_morsel, 0, __pyx_mstate_global->__pyx_n_u_write_morsel, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[11])); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 621, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_9);
   #endif
   __Pyx_CyFunction_SetDefaultsKwDict(__pyx_t_9, __pyx_t_5);
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_write_morsel, __pyx_t_9) < (0)) __PYX_ERR(0, 589, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_write_morsel, __pyx_t_9) < (0)) __PYX_ERR(0, 621, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
 
-  /* "skene/src/skene_native.pyx":618
+  /* "skene/src/skene_native.pyx":650
  * 
  * 
  * def migrate(const unsigned char[::1] file not None, *,             # <<<<<<<<<<<<<<
  *             read_acceleration=True, codec="none", zstd_level=0):
  *     """Rewrite a version-(N-1) .skene file as version N, returning the bytes.
 */
-  __pyx_t_9 = __Pyx_PyDict_NewPresized(3); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 618, __pyx_L1_error)
+  __pyx_t_9 = __Pyx_PyDict_NewPresized(3); if (unlikely(!__pyx_t_9)) __PYX_ERR(0, 650, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_9);
-  if (PyDict_SetItem(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_read_acceleration, ((PyObject*)Py_True)) < (0)) __PYX_ERR(0, 618, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_codec, ((PyObject*)__pyx_mstate_global->__pyx_n_u_none)) < (0)) __PYX_ERR(0, 618, __pyx_L1_error)
-  if (PyDict_SetItem(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_zstd_level, ((PyObject*)__pyx_mstate_global->__pyx_int_0)) < (0)) __PYX_ERR(0, 618, __pyx_L1_error)
-  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_13migrate, 0, __pyx_mstate_global->__pyx_n_u_migrate, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[12])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 618, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_read_acceleration, ((PyObject*)Py_True)) < (0)) __PYX_ERR(0, 650, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_codec, ((PyObject*)__pyx_mstate_global->__pyx_n_u_none)) < (0)) __PYX_ERR(0, 650, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_t_9, __pyx_mstate_global->__pyx_n_u_zstd_level, ((PyObject*)__pyx_mstate_global->__pyx_int_0)) < (0)) __PYX_ERR(0, 650, __pyx_L1_error)
+  __pyx_t_5 = __Pyx_CyFunction_New(&__pyx_mdef_5skene_12skene_native_13migrate, 0, __pyx_mstate_global->__pyx_n_u_migrate, NULL, __pyx_mstate_global->__pyx_n_u_skene_skene_native, __pyx_mstate_global->__pyx_d, ((PyObject *)__pyx_mstate_global->__pyx_codeobj_tab[12])); if (unlikely(!__pyx_t_5)) __PYX_ERR(0, 650, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_t_5);
   #if CYTHON_COMPILING_IN_CPYTHON && PY_VERSION_HEX >= 0x030E0000
   PyUnstable_Object_EnableDeferredRefcount(__pyx_t_5);
   #endif
   __Pyx_CyFunction_SetDefaultsKwDict(__pyx_t_5, __pyx_t_9);
   __Pyx_DECREF(__pyx_t_9); __pyx_t_9 = 0;
-  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_migrate, __pyx_t_5) < (0)) __PYX_ERR(0, 618, __pyx_L1_error)
+  if (PyDict_SetItem(__pyx_mstate_global->__pyx_d, __pyx_mstate_global->__pyx_n_u_migrate, __pyx_t_5) < (0)) __PYX_ERR(0, 650, __pyx_L1_error)
   __Pyx_DECREF(__pyx_t_5); __pyx_t_5 = 0;
 
   /* "skene/src/skene_native.pyx":1
@@ -25125,7 +25182,7 @@ __Pyx_RefNannySetupContext("PyInit_skene_native", 0);
 
 static int __Pyx_InitCachedBuiltins(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
-  __pyx_builtin_super = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_super); if (!__pyx_builtin_super) __PYX_ERR(0, 211, __pyx_L1_error)
+  __pyx_builtin_super = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_super); if (!__pyx_builtin_super) __PYX_ERR(0, 214, __pyx_L1_error)
   __pyx_builtin___import__ = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_import); if (!__pyx_builtin___import__) __PYX_ERR(1, 109, __pyx_L1_error)
   __pyx_builtin_enumerate = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_enumerate); if (!__pyx_builtin_enumerate) __PYX_ERR(1, 165, __pyx_L1_error)
   __pyx_builtin_Ellipsis = __Pyx_GetBuiltinName(__pyx_mstate->__pyx_n_u_Ellipsis); if (!__pyx_builtin_Ellipsis) __PYX_ERR(1, 418, __pyx_L1_error)
@@ -25174,36 +25231,36 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_slice[0]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_slice[0]);
 
-  /* "skene/src/skene_native.pyx":363
+  /* "skene/src/skene_native.pyx":395
  *     cdef Status st
  *     if head.shape[0] == 0:
  *         raise SkeneError("Truncated", "empty buffer")             # <<<<<<<<<<<<<<
  *     st = c_probe_version(<const void*>&head[0], <size_t>head.shape[0], &version)
  *     _check(st)
 */
-  __pyx_mstate_global->__pyx_tuple[1] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_n_u_Truncated, __pyx_mstate_global->__pyx_kp_u_empty_buffer); if (unlikely(!__pyx_mstate_global->__pyx_tuple[1])) __PYX_ERR(0, 363, __pyx_L1_error)
+  __pyx_mstate_global->__pyx_tuple[1] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_n_u_Truncated, __pyx_mstate_global->__pyx_kp_u_empty_buffer); if (unlikely(!__pyx_mstate_global->__pyx_tuple[1])) __PYX_ERR(0, 395, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[1]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[1]);
 
-  /* "skene/src/skene_native.pyx":556
+  /* "skene/src/skene_native.pyx":588
  *         cdef Status st
  *         if self._finished:
  *             raise SkeneError("Malformed", "this SkeneWriter is already finished")             # <<<<<<<<<<<<<<
  *         with nogil:
  *             st = self._writer.finish()
 */
-  __pyx_mstate_global->__pyx_tuple[2] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_n_u_Malformed, __pyx_mstate_global->__pyx_kp_u_this_SkeneWriter_is_already_fini); if (unlikely(!__pyx_mstate_global->__pyx_tuple[2])) __PYX_ERR(0, 556, __pyx_L1_error)
+  __pyx_mstate_global->__pyx_tuple[2] = PyTuple_Pack(2, __pyx_mstate_global->__pyx_n_u_Malformed, __pyx_mstate_global->__pyx_kp_u_this_SkeneWriter_is_already_fini); if (unlikely(!__pyx_mstate_global->__pyx_tuple[2])) __PYX_ERR(0, 588, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[2]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[2]);
 
-  /* "skene/src/skene_native.pyx":438
+  /* "skene/src/skene_native.pyx":470
  * 
  * 
  * def read_morsel(const unsigned char[::1] file not None, uint32_t row_group,             # <<<<<<<<<<<<<<
  *                 columns=None):
  *     """Reconstruct ONE row group as a Morsel. `columns` narrows to those
 */
-  __pyx_mstate_global->__pyx_tuple[3] = PyTuple_Pack(1, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_tuple[3])) __PYX_ERR(0, 438, __pyx_L1_error)
+  __pyx_mstate_global->__pyx_tuple[3] = PyTuple_Pack(1, Py_None); if (unlikely(!__pyx_mstate_global->__pyx_tuple[3])) __PYX_ERR(0, 470, __pyx_L1_error)
   __Pyx_GOTREF(__pyx_mstate_global->__pyx_tuple[3]);
   __Pyx_GIVEREF(__pyx_mstate_global->__pyx_tuple[3]);
   #if CYTHON_IMMORTAL_CONSTANTS
@@ -25263,39 +25320,39 @@ static int __Pyx_InitCachedConstants(__pyx_mstatetype *__pyx_mstate) {
 static int __Pyx_InitConstants(__pyx_mstatetype *__pyx_mstate) {
   CYTHON_UNUSED_VAR(__pyx_mstate);
   {
-    const struct { const unsigned int length: 8; } index[] = {{2},{61},{35},{54},{37},{60},{24},{52},{26},{34},{33},{45},{22},{15},{179},{37},{32},{1},{1},{1},{1},{0},{1},{8},{5},{6},{15},{23},{25},{7},{12},{6},{37},{2},{6},{35},{9},{30},{50},{8},{26},{20},{32},{22},{14},{36},{30},{37},{22},{5},{5},{11},{16},{8},{9},{8},{11},{20},{8},{10},{19},{11},{29},{31},{25},{18},{20},{9},{15},{19},{18},{15},{18},{15},{15},{3},{13},{15},{12},{6},{18},{4},{13},{25},{10},{11},{1},{8},{10},{6},{9},{17},{18},{4},{5},{17},{7},{5},{18},{11},{8},{9},{7},{15},{6},{9},{5},{8},{9},{4},{10},{9},{6},{9},{5},{12},{13},{13},{6},{7},{8},{3},{12},{9},{4},{1},{2},{10},{5},{8},{13},{5},{8},{4},{6},{7},{3},{8},{11},{7},{7},{4},{13},{7},{11},{4},{10},{6},{15},{4},{8},{6},{4},{7},{4},{10},{3},{6},{14},{7},{3},{4},{4},{3},{9},{11},{13},{14},{11},{10},{19},{14},{12},{17},{13},{11},{23},{10},{17},{13},{8},{9},{9},{10},{5},{14},{4},{12},{10},{12},{19},{5},{4},{18},{2},{2},{5},{10},{4},{4},{6},{3},{5},{4},{6},{8},{4},{4},{6},{6},{11},{6},{12},{7},{12},{8},{10},{1},{8},{4},{10},{28},{40},{36},{58},{114},{78},{132},{106},{9},{89},{196},{122},{188},{1}};
-    #if (CYTHON_COMPRESS_STRINGS) == 3 && __PYX_LIMITED_VERSION_HEX >= 0x030e0000 /* compression: zstd (2212 bytes) */
-const char* const cstring = "(\265/\375`\027\017\325D\000\032i\370\024E\360\222\250\r\314@\353\304O\227U&~\272\254b\024\215\006\323\270\361\323eU\267\231a\223\\\331$\205Gnk\224\"-+\230\212\320\207\224\261\207\201O\225\257\001\336eU\201o\016M\004\210\210\214\003\374\023tF?\037\001&\0016\001*\263$A\326\342\251\352\000_\302\033)\225$N>+\240\022\326\374+\374\354)\374w\306\004j\355s\312K\357\306\277c@\256\255t\361T\375\230n\215\027\327\227\037\370\256\341\325r\243\356\027n\274\202\331\013\004\351[\337\326]\322\256\265\264\263\244\177:\r\317\220^\tQRP6\250\030\251\200\367\347\312\372\313\354\245j\235\262\370\343\0240\303-`T\240\256*i\202\032>\237\317\374@\352\032\234b\r\322je\352\276P\377\214\267m\353\227\225\314Y\202.>\375j\332m\277<i\270\372M\033UH-\300\026}q\325\327\265J\341O\317U_\231\377\003}[=<}\255\201*\247\267j8gnKr\003~xMUk\tZe\254\271\006o\305\333T\377V\370\362\364%(\241\277\364<\341\312^\014\257d\321Nk~\r]\343M\345\360\361\205\3321\2055^S0{\226\355\022 \327\344\205P\357\227/\003\375\364PW8\303)\2363 \210\272\2552\203\3765\327\300\214!\225\236\241_\247\321P\004E\004\023G\032\343\351M\327m\324;\252\352\335\361e\244\177\267\236\365u\2154S\226|\312\374\361\335\024\243\3264w\237\346\365Lm=\315\371\256\263\014\353\350\277*\305\252\361\0263}\265m\361\214\032\306\266\344Z\226\264\337\372x\202p\235w\245%\275\276m\036c\234%\251\265\337++\275#\323\305\331\005({\013\337V,d(\236wtgf\350\335\231\005\376\270m\234M\261\006\347\227\257\3375(FP\3069\217|^\337(\227\311|\305\253<E\374Y[T+\0251f1\277c\250kV\302\350\252\267j\355\3504_j\272\302h[\323L?\261\310\214`D)\342\250%\206%\276\274\260\310\210R6d\277\341\324\360\326\340K\003\222/)\234\330Zy\322\365\326\014\256\254\254\331\205\014\324\365\364+>\363\306\372V\252\242Zm y#\207\2315\207\225\030\277\336:\255\254\251\232\177\303\2460F\237\233z\216\021\276\3352s\n\361\355\000G\250@\257Q5\375\353_\251\t\234\246\017J\rK_\327\370\370\305\027\207\215\016w]\351\255+\001\255\006 \034\270\003\365\205\360\300<\235\030\251\263\320\211\241\270\t\235\230\310\323\300\201""\221:\220\356\003\367-\025\313\243\335\211#q\020rt\030t,8\t\0028\"(\226d\025\010\211y>\027/\344\311\340^\264HZ\035\221X\201\221\034\362#}#\236I\350\345,\276\017'1\351R\340\032}\037\037\003\317\30331\0003\020\022\353p0\254\021\001\234\002;D6\242.\324\231\340B\034\002\316\203[\261V\260FZ'X\"!1\221\215\365\224\333\270\311\213k\250L\362c\216\031\377\364\224\316\356\333\312\224\277\244\333\276\373m\225\237\375\347\316\370\263\3364(f\321\265k\235\375u5\251<\273\215Vn\324\247\356(\272\245\231u\273{fOE/a\317r\253\323\363\266\341\355\364r\3336\254\375\367\215\326\356\353\027\327\370uM^\257\371\257G\234\255\353lw\214\267j\246\252\305(\33757i\232kV\336J3\216\252[\245\026\243\225\263\232\260\245\321j\214\264V*\375\024\265<\3518\357\316b|\231\3751\316\264I\332\354u\256\031\255{\273\255\231\2465R\3535s\327\366\365\353Q\327\0301\034\225jF\374\234\023\023\316\t\006\030AD\035\"^\247\221\231\202\210\320\004\302\025\030\225\212E%\377\026\251gy\322\"D\204>\317\347\341\023[A\202\221T\300.\334\320\327\251#\372n\\\030\201\221x\\3_\206\007\014b\036W\307Es\302\000&[\314\300fT\300BnZ^$!^K\027\352bZ!\371\301\360D\0318\332Z\320QN\302K\203\213~5 \005\260\016\307\242\245\240\205\322J\020\022\003\371\310!\272\t\335\374K\276\000\274Z\\'P\036\212\347\361bp\".\206\200p$\204Z)\250\223\203X\010\325\251p\020@8\000H\255\014\262\203\020\223/\322+\345Bq\245|\357I\257\304\353x0$\257\202\347\322e\234\004\010;<_\212\256D\2443\202\364\221|\331\253\335\205\0071\322K\364\312\\%.\223\217z$\217d\004\347\341b|H\235\010.\245\225@D\266jX*\217\313\206\207\242\263\000\302A\260\243s \346a\023by\334\240^(/\317\313\305\365\341\n\371Z\276\233\300\022\360\021\223]\004\032\036\234L\253B\253\323\002\301z\233\000\0379D\\\004\020\017\033\321\315~\261\274D\\-\337\366X<\027\235\250+!\000#\360\021\013\261<\254\001\037\261\316\347\361\255:\013\235\213\214\001\002:\037LW\362\321 \346y\225\370\300>\rb\"\227\213\357\003\005\230\003T\201\214\250!!SJ\231\241\021\021I\222\244\320\001!\010\302Q\020J/\037\002\342\240\t\2252&\022\211HIAI""\212R\3308\330,f\177{\022\016\344\303\267\353!^oy\177Y$\271\177\203\271\241;\211\2315<\3707\030\220\317X\010h\226\235S.\3513\312\363Q\037\233\314\340=\263j\204\333\265\314\010s|\342\366B\\W\264\304X\30423\007\365\033gg\217\316I+\3568\313Td9KE\317\016\267e\377\037\245R$<R\226\177&\031\230\367.'\354\034\376\203\332G\3369\030J\252\325\023\243\307\341[\362\365\212\002\014\373D\262f_\356\256\3640\206\332\244W\023\266\027o\365\203\322A\333\204Y2&L\370+\343\264\2578\306\204\227x\354\037~=l*\005\273\037\373y\206\370\023\010),\323\034On\271\375\203)\335\204\356\261\305m\235\261*&\221Bk\234K\3505\274\304\205+\177\233#\253\223\023w\345\201\023\224\250\232\234^'\272[\267\257\312\211(\233W]]\024pS}\230\311\240\013\177\213\327Q\305cd\244\016#\003\203\242\330-\241\3408D\2344~\254T\344M78\240\tLm\326Czi,\254\2310\016\357\351\326\317Y\024\227~V\346\265\327\356\257\303v)G1/\335t\0179`#b\223\303\365\354y\202P\273\001\"\033sMr\027\202by\310\341\221\371rq\373p\313=\003\216Y\334\366<\010\215\246\240\251\034\263\261aqh\220%\216|\360\3201\322\335C\351R)\215v3\337\001\227\234\342\356\311\321N]T4\250\341\3478z\030^&\314\364f\313\2378\n68\002\362\321%\200Y\261\216b@P\331p\032\264[\217u\312\016\253\205\353\357\250#\262J\205\270\0377\337\313B\220il\311\254\316\304g\024\033%3\200~\227Q\021\215q\366s\262\240o\212\344+}-\224`\2145\250^m8\365&.\262\235x\030\304\200\244\322u\217\036!\037\246\263\"7\003\250\311\036!5yD\323\265\367\342\235\nz\"\276\005\350R\025\021/\014\n\253t\3429\320\336\344(\226\324[\000o\306\2457\304\n\360f\245\264\201\320\215\262\003\365\323\363\241\2032\267\027\343\033\310\325\205\006:(\200\302\226\217\230A\3245\010\020C\266\362\006\340\375/@\257\353\271'V\273\335P\326\331\222\302\254N\370\340z\371\367$\355\035\366l\216\277\205\241\360\032\272J\242\034\232\034\003\234\031\331$ #\n\201\0162h\025\001\355\314\006\252\226\260\001\000\305\345\334\017\356\007\270\332\242w\326\357=U\256\321\206j\000n\030\334\317\267\237\211\007D\272(I\220\362S\332\375pVt\245\001#\000\246[\322L\260\222""\205\000\227\252\301~\004\255=g\354\203\200~\037\300\204j\27121\206I\270\351\203\275\274,\302\010u\237\241\344\246\330\353\225\33003\200\014\274M\310\034;R\220\272)\370 \347_u\246?\261_\250\202/\262A\206\2314\233-rE\346I@u\020\376\232E\324/\025 [A\231\333\334\315\361\3330\361G\024xg\234\001\272\333\363J\333\0059\"\211\303\206\374\0147\037\321\035\031\033\252\272\306P\005";
-    PyObject *data = __Pyx_DecompressString(cstring, 2212, 3);
+    const struct { const unsigned int length: 8; } index[] = {{2},{61},{35},{54},{37},{60},{24},{52},{26},{34},{33},{45},{22},{15},{179},{37},{32},{1},{1},{1},{1},{0},{1},{8},{5},{6},{15},{23},{25},{7},{12},{6},{37},{2},{6},{35},{9},{30},{50},{8},{26},{20},{32},{22},{14},{36},{30},{37},{22},{5},{5},{11},{16},{8},{9},{8},{11},{20},{8},{10},{19},{11},{29},{31},{25},{18},{20},{9},{15},{19},{18},{15},{18},{15},{15},{3},{13},{15},{12},{6},{18},{4},{13},{25},{10},{11},{1},{8},{10},{6},{9},{17},{18},{4},{5},{17},{7},{5},{18},{11},{8},{9},{7},{15},{6},{9},{5},{8},{9},{4},{10},{9},{6},{9},{5},{12},{13},{13},{6},{7},{8},{3},{12},{9},{4},{1},{2},{10},{5},{8},{13},{5},{8},{4},{6},{7},{3},{8},{11},{7},{7},{4},{13},{7},{11},{4},{10},{6},{15},{4},{8},{6},{4},{3},{9},{7},{4},{10},{3},{6},{14},{7},{3},{4},{4},{3},{9},{11},{13},{14},{11},{10},{19},{14},{12},{17},{13},{11},{23},{10},{17},{13},{8},{9},{9},{10},{5},{14},{4},{12},{10},{12},{19},{5},{4},{18},{6},{2},{2},{5},{10},{4},{4},{6},{3},{5},{4},{6},{8},{4},{4},{6},{6},{11},{6},{12},{7},{12},{8},{10},{1},{8},{4},{10},{28},{40},{36},{58},{114},{78},{132},{106},{9},{89},{196},{122},{188},{1}};
+    #if (CYTHON_COMPRESS_STRINGS) == 3 && __PYX_LIMITED_VERSION_HEX >= 0x030e0000 /* compression: zstd (2223 bytes) */
+const char* const cstring = "(\265/\375`)\017-E\000ji\004\025E\360\222\250\r\314@\353\304O\227U&~\272\254b\024\215\006\323\270\361\323eU\267\231a\223\\\331$\205Gnk\224\"-+\230\212\320\207\224\261\207\201O\225\257\001\336eU\201o\016M\004\210\210\214\003\374\023tF?\037\001'\0016\001\326\342\251\352\000_\302\033)\225$N>+\240\022\326\374+\374\354)\374w\306\004j\355s\312K\357\306\277c@\256\255t\361T\375\230n\215\027\327\227\037\370\256\341\325r\243\356\027n\274\202\331\013\004\351[\337\326]\322\256\265\264\263\244\177:\r\317\220^\tQRP6\250\030\251\200\367\347\312\372\313\354\245j\235\262\370\343\0240\303-`T\240\256*i\202\032>\237\317\374@\352\032\234b\r\322je\352\276P\377\214\267m\353\227\225\314Y\202.>\375j\302\2143\350v\333/O\032\256~\323F\025R\013\260E_\\\365u\255R\370\323s\325W\346\377@\337V\017O_k\240\312\351\255\032\316\231\333\222\334\200\037^S\325Z\202V\031k\256\301[\3616\325\277\025\276<}\tJ\350/=O\270\262\027\303+Y\264\323\232_C\327xS9||\241vLa\215\327\024\314\236e\273\004\3105y!\324\373\345\313@?=\324\025\316p\212\347\014\010\242n\253\314\240\177\31550cH\245g\350\327i4\024A\021\0018\322\030Oo\272n\243\336QU\357\216/#\375\273\365\254\257k\244\231\262\344S\346\217\357\246\030\265>\315\353\231\332z\232\363]g\031\326\321\177U\212U\343-f\372j\333\342\0315\214m\311\265,i\277\365\361\004\341:\357JKz}\333<\3068KRk\277WVzG\246\213\263\013P\366\026\276\255X\310P<\357\350\316\314\320\2733\013\374q\3338\233b\r\316/_\277kP\214\240\214s\036\371\274\276Q.\223\371\212Wy\212\370\263\266\250V*b\314b~\307P\327\254\204\321Uo\325\332\321i\276\324t\205\321\266\246\231~b\221\031\301\210R\304QK\014K|ya\221\021\245l\310~\303\251\341\255\301\227\006$_R8\261\265\362\244\353\255\031\\YY\263\013\031\250\353\351W|\346\215\365\255TE\265\332@\362F\0163k\016+1~\275uZYS5\377\206Ma\214>7\365\034#|\273e\346\024\342\333\001\216P\201^\243j\372\327\277R\0238M\037\224\032\226\276\256\361\361\213/\016\033\035\356\272\322[WTfI\202\002 \034\270\003\365\205\360\300<\235\030\251\263\320\211\241\270\t\235\230\310\323\300\201\221:""\220\356\003\367-\025\313\243\335\211#q\020rt\030t,8\t\0028\"(\226d\025\010\211y>\027/\344\311\340^\264HZ\035\221X\201\221\034\362#}#\236I\350\345,\276\017'1\351R\340\032}\037\037\003\317\30331\0003\020\022\353p0\254\021\001\234\002;D6\242.\324\231\340B\034\002\316\203[\261V\260FZ'X\"!1\221\215\365\224\333\270\311\213k\250L\362c\216\031\377\364\224\316\356\333\312\224\277\244\333\276\373m\225\237\375\347\316\370\263\3364(f\321\265k\235\375u5\251<\273\215Vn\324\247\356(\272\245\231u\273{fOE/a\317r\253\323\363\266\341\355\364r\3336\254\375\367\215\326^\\\343W\246\350\275\256\311\3535\377\365\210\263u\235\355\216\361V\315T\265\030\345\273\346&Ms\315\312[i\306Qu\253\324b\264rV\023\2664Z\215\221\326J\245\237\242\226'\035\347\335Y\214/\263?\306\2316I\233\275\3165\243uo\2675\323\264Fj\275f\356\332\276~=\352\032g1\034\225jF\374\234\023\023\316\t\006\030AD\035\"^\247\221\231\202\210\320\004\302\025\030\225\212E%\377\026\251gy\322\"D\204>\317\347\341\023[A\202\221T\300.\334\320\327\251#\372n\\\030\201\221x\\3_\206\007\014b\036W\307Es\302\000&[\314\300fT\300BnZ^$!^K\027\352bZ!\371\301\360D\0318\332Z\320QN\302K\203\213~5 \005\260\016\307\242\245\240\205\322J\020\022\003\371\310!\272\t\335\374K\276\000\274Z\\'P\036\212\347\361bp\".\206\200p$\204Z)\250\223\203X\010\325\251p\020@8\000H\255\014\262\203\020\223/\322+\345Bq\245|\357I\257\304\353x0$\257\202\347\322e\234\004\010;<_\212\256D\2443\202\364\221|\331\253\335\205\0071\322K\364\312\\%.\223\217z$\217d\004\347\341b|H\235\010.\245\225@D\266jX*\217\313\206\207\242\263\000\302A\260\243s \346a\023by\334\240^(/\317\313\305\365\341\n\371Z\276\233\300\022\360\021\223]\004\032\036\234L\253B\253\323\002\301z\233\000\0379D\\\004\020\017\033\321\315~\261\274D\\-\337\366X<\027\235\250+!\000#\360\021\013\261<\254\001\037\261\316\347\361\255:\013\235\213\214\001\002:\037LW\362\321 \346y\225\370\300>\rb\"\227\213\357\003\005\230\003T\253A\201\220\250!%cH\231\231\021\021I\222\244\320\001!\010\302Q\020J/\037\002\342\240\351\2242'\022\211HIAI""\212R\3308\330,f\177{\010\356\344\303\267\333\241_/x\203Y$\335\177C\272a;\211\3575<\3707\030\220\317X\010h\326\235\023\224h\031e\020\210\217Mf\360>\263\305\010gj\231\021F\376\304\300\005d]\206%\316\020\273gn\3528\316\316\036\375\223V\322q\235\251Hp\226\213\336\037\216e\2535J\245H8\244\354\375L20\367.\357\357\034\256\203\322G\036;XJ*\350I\271\307AYr\367>\027\014\373D\362f?\337\245\364\342\206\312\244W\027\266\266\267\244A\315A\333\204Y2&\316\360I\306h\2478\230\t\325\361\270?<8\354+\005r7\377\303\014\201'\220VP\251%\247\314~\253O\250\252&\337\223\021\275]\317\036MpB]\257e\002\254a*.b\371\331\004\251\243\244L\254\307.l\323\256,\272*\212\3521\243\261x\313)\236\210\313yJ\327\255p=\265\236\231\016j\373\207\325\216\212\0363\203u\000\031\030\024\225\335\t\212\204I\304\t\344\257JE\341\260\261\017\312\300\3133\335\322\224\326\222\315Kr(\251k-\r\256\030Jhf^K\355\025,\260\335\313S\314\n8\231DN\260\351\331\347vm{~\020\232\267\005e\343\257InD\260,O\235\373\273\t\nNc\"\314\024-\276\037\356\017w\300q\033\344\016\005\246Qg\264\212c36\234\035\n\262\222#_<,\217\364\360\320\260$K#\326\3149\340\262S\334{bhg\226\336\0061\374\314Go\301\326\2049\275\331\364\347\211\202\005\\\200<}Qc&\326\2010 Q\002\234\036\366\300\3434e\211\325\300\365{\324\351\2542F\320w\236\357\"B\240il\315\254n\304\274\024\036e7\200\266}\251\270\306(\373\225l\350\033\0239\224\265\026\312:np\240\n\036*6\236\274\t\214l\027\017\023\016\360T\232\366NF\010\316tv\344f\n5\331#\244&\217\030]{U\034R\241'\202Z\202.a\0211\306 \263Jz\236\323\355\315W1\244\336\262x?.\275&V\200\203\225\247\315\200n\274N\327O\317\207n\3135^\274o W\037\032\356\240\260\010[>b\016Q\227#X\206,\362b\200\027\347\000\271\256\342\2368\355&\206r\315\226\024fu\202\002\327\313\277'i\357\260gs\374-\014\205\267\320U\022\345\333\244\014p\316\310z\001\207\3500:\310\240U\004\2643\033T-y\003V\212\313\2719\270\024\340j\t\275\257~\337P\305I\233\272\001\265As?\364~\"\236\023uI\222F\312Ii\364C/Q\225\026F\000\230n\3653\301J\034\001\006U\303\351\010\220\366\024c\037\004""\270\372\240 \264\224\253?#\231\204\217\236\322Ke\021\376Q\267\034j7%_\257\210\r5\203\365\300\233\243\347\230K\241\3522\360Z9\360\2525\275\211\375B\025|\221\r2\314J'y\320H7\002\241q\023\325K\031d\r(\323\233\273&\372\026L\274\020\021\357}\316\006]\366\350Rj\301\267H\342\020C>\206\233s\364\347\214\215\252\2564T\001";
+    PyObject *data = __Pyx_DecompressString(cstring, 2223, 3);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (2382 bytes) */
-const char* const cstring = "BZh91AY&SY\321\260\334\375\000\0017\177\377\347\377\377\357\377\377\367\327\277\353\377\343\377\377\377\372@@D@@@@@@@@@P\000@\000`\010\316r\260q\270\306\306\220%\000)\020\217\274\016\360\224HS#j\236MOL\230\231\222L\323FBz\233L\2204d\320z\023F&\020`\201\246\233I\241\211\3524\331&\202Q\002h\000L@\247\243$\236\"zM=&\232\r4\r\000\000\000\000\00044\000\00050\211\221OS\324h\231\242`F\004i\210\030\230\230\0044`\010\3010C\010\r\014&L\000\221\020 B#\025?#T\336\232\0054\310\375I\264\201\352\000h\000\000\000\000\000\r\006\217P\320\203\000\000\000\000\000\000\000\000\t\200\000\000\000\214\000\004\300\001ILOSh\004\311\200&\004\302\030L\000L\230\002`\230\0020\010`&\000\t\221}\032\\\3300\357\"\262\326\267\333\021\200\266Q\017\342s\245\253-\240\242t\241\322\2008[/\021-\234\307\376\366 .a\240]\006\306f\305\021\231q\035(\343!\032\025\016\225\270\326mz\243Gv\227QX,\034\\\207\375F\r\346\243\250O\177I\311bqk\254\354 \00124\244r2p)\001ZHk!5\214Y\243\265\352\026m\366o\177>\240\370\301`r}\354\337\375\031\237\350\342\314N?Y\360L\350\212\rc\226g\207$\306@\262\220EC\034\205\372\347G\251F\261H\016iJ\263D\376O\233\263\223\330\257\255\303W\364\261{SR?\256\375\207;\247\326\211\274=\n\307\233\2134\350\245\202\210Q\204\204P.dpS\223\\\215 \037B\204h\021\201\355{Vd\253|%\274\211d3\027\033\001\022\206.=b\203\032\354\260\200\342\262\t\214\205\307\210\253\220\321\000\237O/\315\016\035j\375\334K\347\373R^\255\"\3541\325#d\260\325_.T\306\233\271\245\334l\277\277\204\344Ew\2777\207\0069y\212\312WTh\263\021.\026\001\216\306\312\2565\236\363\221\310\364\261T\275I\351%\0330&\300A\245%\355[\331XW7\320]3\265\n\300\352\njPu\270Q,>f\016\307\224,\232Ee\034\335u\231\246l\361\036\221\n\304\307\207\356\224\233\036c\215W\222\252\307\210-\221'q\277\200\335\001\307(I#:D\037\303\205\030p\214E\200Q\342\337\360\314\346\3651\330On\212\353\254n\371\017\233\353\216jY7_\014\265\362\365\3568\212\313&qE\r\341\263\0320\334}\021\352\244\342\272\211\303>[\033\261\256k\251\267\261\236\253\361\344\27276\343\371\336c\257C\2513\014""\327\206\004\037\247\177\233\\\231\310o={$\0218\364\244J\265i\261E\271\023\3707\024\234\024m5\352\335*\001\2519\340\325\202\r\nKTs\333?\272\350\256H\216)\347\336\226\203\312\373\312\010\n31-K\220\246)#q}4\357Wjb\r\333\207\255\227\026UZ\327v\356\254\005\202#\027t.\354\207\220\354\301\351\272\224\243;\323\033=\034\326\025 \205;\031\323G9\305\213\r(h\205\1774\242\326\274\337ub\261H\274\224\037Dq\224\016-b\340\334b\271\377\255\344\222\242)\330\233\027\023TC\005\302s\371\217C\373+*u\247\234\356\315\022\017C_B\202@(ha\334>\000\332\352\261\302\313\230cq}\350CJ\274\225\241.9\205\230\030\245\014k\021\357\232\016R\301n\037?\323\004\320q\247\ntx\332\013\316kE\345m\2338\r\207\0071Dh\003[OD\302 \210\214\245\361-\\\352\250\334o\221X\262\nx=e`mHt\246\330\320\336\350\334'G\3615'\177\323v\361dx\265\276\276C\004\365\322\t7\3578\032\244@\323iEw\330\200\326\250h\375W\342\230t\312\204@\322\244\307|\244\235t\034;e:\276\266\271R\315:\344\371h`c\332\227\230\226T\275\tM3\340k6\247\3617P\316\260B\021d\323\357r\357\246\335\355\267p\365\326Q\252Z\305\303\033\336\325\347=4\310\346\302N(\305\306\305G\210J\362\336\026'\007E/$\024\2646\357W,y\347\234\227\353\323D\265a\246/R\225Q\013\323hoR-\345\314\256\225\310\302\346\264\233\332.KF\233\346\365\374\3306\017[i@\326-\213\"\204\265)\304\264\235\262*V\324e|%2\340\310fz\"ZE\007o-\323\305\270r0QDU\t2\225\304\217\375nJo\337\264kLk\214\352?&\022\345\n\335\232|\205\034\n\214QT\225\363N\004V\2036\324\360X\316D\265:\223u\260\242H\264\304K\220\246`\321T-9\363;_N\210\025\300Z\272,ma\016\033\360\t8\337b\226\333t\347+\036\204\222\252\215FRj\261\202\211\006\006\256\220\367\271X\301\005,\347[\263,6l\224\353?\030\026\261\0135\256\201\263\233UTU\215\267\320\215\327\023\005Y\335R\205\031\326-\225*V\030x\016\0277\361^5\\\271\031\306\3746\301\246\333y`E\375\307\007\262-\231i\347Y\370\271u(\267\"\323\335\306u\003\316\"\366\nD\256\217\n0\374\210}8\222'\020\202\222X\370\n\252\034\216$Q0\\\007\240\303\231\236\2244.\247\017\214Pz\366\353\244\3046g|u\373\312\245E\334\321b""\214e\315\0100\251\301?\006QGq\336\t58\371c4G:2\3021\317\236\026n\035\025\357'`\3757\375\007p3|s\013'\236\326\201\261\306\264\351\245*\252\312\214&\220\017\251\305\317-\212\033\3637\260\261S\312\366\320\010\301<~\214\242\356\272\260Q\020i2\3714\202YQ\212\301\263\242\321-r\344\3132F\332\216\203\006\003\201\252#=\002\264\242\210l\336\366\334T\357\006\254(\316f\3667\016{\235\245\334\34019\262\255\217J\367\014h\263\303\356\275`\201\246\233#\261\332\276\251T`\036K\251un\350\301A\231\024\336\242\206G\2048\320d*\020\004.\235\303ck\322i\361\256\236\274\326\210\337\320\240\206\226\r\361B&9\370\272g>\224\327\214\341I\243\303\236~;#lretqZ\204\363=\325\303\251\221\331\te\337\277\217\324<~G3\331\350z\233\030i\203\032=\221\020\rFsEJZl]Iu\361Ku$t\267i\314M\032\004\034A2\0264\331$\362X\210\367\347\243\327I\305N\345\372\355\332]\264X\215\226/\006\213\332\032\227Bk\203\206\322\245\327\257J\001\335\346\270s&^\"\334\317\265[V\205X\343\230\247[\256\265\226\333\2338\303;\247\244\230\227+\320&\251\201E\003\361\275UE3\3068\2622$<a\244\265\223\253X\301r\321b\223L\275\337gt\316*\234c\326\340Rv&\r\247:Z\242\257?\247\3350\276\244\236\336\252(\271H\341\306\264\233\013\234\251]\367&7\232X\214\024\033\233S\235\"\260\006\3616x\323\255\261\035\246<\210e\275\324\256k\326\3672`\331\356o]\324\tsW\233\206/A\223\014\215L\302\033R6\247b\363,WNn\033\266\304i\244\334\337\300]\330\311*\346ap\314\331T|\220k1\253\324\r\226V\316\364\313\"8\030\260\260\373\"\023\304d\026\235/\246dg\347D\036\252=\257\236x}\036_\371\300\315\033\323\355\321\366\037\335\230\253\360\270\225\030H\214w\017\034\364e\177o\005\332\327\246\264T\335;\325\006\240\305\177|U\241\310\354LG\224\325\251'l\214{\211M\211\301\016\254P(D\200\306\014#v\016:U\360F\206\n\301S:\265J\227\335p\3617u\205\317\272|\365G[\006\256G\210\366&va\016UCx\tR\240\017PT\214 BQA@\032\017c\243\002\234\026\035\0351\207I\034LE\243\360\206\200\004\376\272\014`\000-\014\024\226\203\r\343mU\016\004I\305\356\337\243I\010\350\233\034a\316H,\363!\266}\3714Wx\332\273\247b\255""\371\314l!]\016]\232\242\260B\336?O*\360\317\231\305C\307e\344n\315;l*G\350/\"\375-i\016\377E58\032\027w\225\212\264\242\221\216\205H\252k\261\032\334\252A_\315\r\313\002\317\374a&\024\251U\206\030&\026\016\375\221I\251\223Z\\\247\266o\231RV\212\351\213o&\270\365W\215'\246\351\251m\347\216'\346\277\325\3579\314\367\336\250\303\031\207\371\374\356Id\223\345\225\306\251\311#\252\233/s1\215\t\006\200R)D|\340\370$\343/T\250qN\352\254\365Xy\025\nqI4q\010wZ\345\035iN\307\264T\314\303.\247\220\023#\256\333^\016~\026h\202\217\354\243b\250\305\313|bg\371\332\270\2039>\321L\256\342\270\274\217E~\231 W9\355\372@(Sq;\264]\311\024\341BCF\303s\364";
-    PyObject *data = __Pyx_DecompressString(cstring, 2382, 2);
+    #elif (CYTHON_COMPRESS_STRINGS) == 2 /* compression: bz2 (2411 bytes) */
+const char* const cstring = "BZh91AY&SYD\221\206\354\000\0017\177\377\347\377\377\357\377\377\367\327\277\353\377\343\377\377\377\372@@D@@@@@@@@@P\000@\000`\010\317\275\345\357\004\367\267\222\242\210\252\264\016\226q\304\355\274\r\341(\224\312de<\232\236\023\0232I\232jl\024\3656\231 h\311\240\302h\304\302\014\010\323M6\2041=F\231\244\365\006\202\023\004\000$S\364hS\324\362\236S\312z\236\243OSG\251\240zM\000\000\000\000\000\032\0002\001\246\223F\221\250\247\351M\244yG\244\017Pd\000\003A\240\000\006\2004\000\000\000\0324\000\022\232 @\231\024\237\244\311=\251OO\3224\365P\364\237\252oI2=M\2502\0000\232\032421\014\020i\221\223d\201\006\000\000\000\000\000\000\000\000\023\000\000\000\001\030\000\t\200\001$\224\364\tOd\223\324<2\247\224z4 \320\000\014 4b\r\006\214@\031\000hh\311\243@/\342J\230\372\014Xl\352\324\343\304`-\244C\370\235\t\325i\244\024N\264:\320\006\313dTKe\203\375\375pDF\310\024\344\2452Q\350\246D\"\332+\016F\320\200-\251\212\221J\315\214\025S7`\233\224\r{O\370\305\214\314E0\216l\"\346\264Z\225k\350*\000\245p\273(& 4\007\"\212\3241Dk+\326\377\006<y^\177\217\244.h<\017\257\257\036\177!\227\366\255\362\341\233\311_}\222sTRMd\304\241b\220y\360\017\236\256\207\335\371\204\330\326\317@\261)M\0302\373\376\016\215\277\366\177\016\230\257F\325\244\261\037\342\317!F\250\370^*\353\002o\340\327{+)\203\004-\013\n \177\312\2701%\357\032,\003\352SE\nA\355{YZ\354>\024\364\350dvR\247\202\211>\225K\004\366<\3560z\332\261\361M\013\257)_\025\340\364\235W#\323\006\r\214\317\006%\373\275\331\016X\217z\025\025\"c0\323_F<\267\215]\321\357\264``?n\022\300\361L\341\302\214E\244\3127\224(3\021.\225\351Q\215\025\333y\232\343q\210\324i)|\223\222B4`\314z\203\305%l[\327W\367w\357\240\031zE\200\200\202\232S\3404\376\025\227L\222\004i\"\310\242XQ\275\270\014\3122\247\010\344w\366e\270;x\244\310\322\333y\231!U\216\017\232!M\344w\005\251\343m\317\220D\200B\035\355\277\2106D!\275(qo\371%\356\363e\262%n\265u\326\027h;\347\373\037\205)\036\214s\323\313\321p\337\025\213\"\3019\256\365\231O\035\301\364\277\234\244\r\223""\220\0323\331]\225b\262\233~\355\025_\227\025\317\271n\037\336\244e\3449\242\203\013\300\304\206\t\367w\252\305d\207u\003j\220\245\274\235FMD\367\3145d\266K\362S\002\245\323sE\374\210\021\206$\302\262\n\242\030\2662\337\215\374\022}\241*\367\327\r\273[y\344\332\250g\325EZ9@\330+Pf\217\234\366\333\006=\005U\003\233\212\3304\246\332\252\332x\016\001\023\263\007\233C\316\206\025\342\252\005\216r\224\221\276\037R\305D\335\244\343\264j/\226\n/z\024\0233\246\035\253\341\206)J\305s\233\315\344\365\202B\361_\250H6b\365\004\236\323\277\301X\242Q\"A\367\3136\tT\035\221\3431\330\177s\240X+e\303\317g^t\006\220\323\3071@\002j\006]\343\\\002\327U\214\007\014\002.m\274\203\265\315\242\n\0042\300\034@C\023Hv\234\357\244\221\240\266\023\303\334\243u\216\r\316\335\034 \027\317\210\027\221\032u\371\216\271\315\271\014\240\006\267;\010\314*\251a\306\315\213\264\305\310\3710\231!\234\036\312H7\\:\224F\305\211j^\235\224\227\333\304\214\375%N{\216|\253\217t\261\033\344\344\031\346hb\3149\243\263\246h\246\225\0342\233\t\217n\266\207R\272C\270\231\245\017\314J\r\362\023\252]\030\255\351\270\231\257e;\227\024\213\010YJ\251\321\023*\3442dw\361\212K\373\032\230\"\327\020s\321\2422\325\313\264[z\266\356\336\3508\0051j\0369T\325>\006\226\275\014WQ\276\373H\353\246Vvj\302VkE\216\264\253\003\222\243\244\2535\010W\337|\025\337\206\014\330\240\302\325\231)\263\273t\246\022\304zw\257'\204\356,\335ZA\232b\244&0\316+?\362\344Rk^L\034\242\321U\005\332\221\333Y\037I\223g\014\371\363\231]\265\335\203H\212\320\362\014\324wI\353\217\022\003\006\010\314\n3\203\005\r\375\356*o\332\264*\214\253|\21478(\315\325\256\022\314\030`\007\211\2050f\"\351L\001\003\244b6\313\304D\342+\213\232=L\247C\324f\n\362\024\304\rz\235h\341\2134\364\246\341[\201\325\310\213X\016\336\352m\n\360\236\210\327\257f\007\220\363b\267$C>G.\216!\250\341\313\322NrN\340\201\225\234\026\352\317\035\235\230\016\243rp\265\010Y\244\365\202\310n\031\2303}\267\314\227K\306&\260\32561\343kR\351L\233\240\361\215*g\256\257\213q\\^\371\331$\t\222IA""\340\205\034\266\035$\035\020\345\326(\357e0\302\250\203\227K\342\320\006\240\2248\006\"\226\277i\213.\353\023\313\210\253v\306\023WI\320I\007rEP\333V\322l9\273\217&\032#\201\204f\254\r\254X\322\n\244\212\336xrb\210\311\202\2116 \207\024\n&\215\243.\315\317%Q!\314M\234Os\017\310\305\260b\334\227\331\257N\2454V\262:\005\322\277\300\254\005\226\310v\271_\225\034HO\214\267JSi\242b\010\223\202\354'\251\336\241#;\314\320P\231\336Y`\003\330\215\235\310b\253\265\252\272\2204\235\314\242\027\026NB&!\254\031\2516L\332\256\342\272\362\004\223?\212X\260bb\303\337\200NRgt\215\026Y\2237\206($\2164\2625\n9|F\345\320C(\243N\207\323\255B\3305\366[\226.8\2312C\364*O\356\023b\300\256o\031\256\315Dc\306$\037U9\344\206\020VA \2368\007+\223\014\3032\341\262m\215\273\232\366\301\214\372\314\343\246k\031\274\207\207\344\327\272/\334\311\270\032J$\254\243\223e\030\312\333n\253\032\351\":\253T\354\246\\t;5\335\232\360\362N\035\325\021\321\334\362r,\231\002\031\026G8\031\207^\031KH\270\324*\333h\326\326\205\034\364\256\226\325\253B\036B\254\006v\356=\036\342$N\271\006r!X\214\017\206WS\025\004\202\333I\272\212&@\264\035\002\024\270T\224Ft\316f\000c^p/!\016\253+\306\354e\026\021 \255\340\330Lf\32533W\032c\241\222\244DC;\310\010\324\200Na\271^f`\306\207\277$}\004\356\260Q\n\304\215Q\001\347\255a\210\304\372}}\305\211\212\2447\\\313\30014,\226\255b\270\301\237\017K\276A\205e+\271\310\301\350\241\201\203`\243\225\3542\257\013\213;\307h\204\200\300\\9e*\247\0028Dle:=\243\250\205p\350\247L7V\323\255K\220$}J\315j\220:\211\253\323\241\276\212!\320\370\227\203\244\320$\321\221X\2045YECVV|0\212\231\3506\347\271\232w\226m/2i\213k\230\303\342\261\003&\271\321\241\220\200K\003\334\t\347\310\210F\364\200\016YQ(\204\216\322 \352\220\3568F\367\036]\233\004HVG\203\017\220~\30626\343p\201 \240\221\233\374\022\236w\366\356=\265ii#-\3114\321I\016h1I\255=>\271\\\276\204\232\255\n\245(\335\003\312e\305\201$\\\351\020J\224C\270\345\335M\262:t\346\266N'\023q\250Fj_\272c\215\277\276.M\370rj\267\210\344\036c\252\324-""\t\213\271L\206\240UT\t\345\333D\310\251\335\244`X\363\333Ftu\275\177\323\312_9ft\032\262\232\242\334\3368\300\335\274D\224\203\r\303eU\016\004I\245\366\317\257A\010\310\232\334\201\320G-s\241\262}\371s\327p\330\275\253f\276\001\316k!\230\2076\275qX!n\247_2\360\316\227\305?\315i\304j\325[l+F\351\"\303\372\365h\020?\242\232\\\017\005\333\346b\255\030dC\245R\032\232\254G\233U\307\313\371\237\265dY\337\2144\303\223&\300\303\010\303\302\337\264)11\254J\222\346\275\373+I\317]\021m\343f\016Wp\320rf\212\226\334p\342vc\2677N\2035\327+0\246\303\374\356_,\242A\275\217\310\251\313\036\345V_d\3233\243\231\301D\243\t\323\203\344\223L\2152\261\3056\345\207+\301\305\254U\206H\241\210A\274\325(jI\307o\204\356\375\256\005\375\242\255\323\262Q\331\344\322\211\207$\275F2&\305\252S\316\">\nN\316W\001\230\032\247+\031\274\001\243O0\3004\2458\371*\014\031de\377\027rE8P\220D\221\206\354";
+    PyObject *data = __Pyx_DecompressString(cstring, 2411, 2);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (2200 bytes) */
-const char* const cstring = "x\332\235V\317s\023G\026\266\253\354\304$\206\254\022XH\205\220\326\006\220Y@\211\267\014\241(\343-\3056\033j\313\2000\206\335C\322i\315\364H\035\217\272\307\323=\266\304\326V\371\250\243\016{\320Q\3079\316QG\0359\352\250#\225\277\200?a\337\353\036\311baI\355\036f\346M\317\353\367\343{\337{=wI\205\350}.9\2119\363\211\212\311Q,\014'\001\023!\367\313\344gO\371\374g\"41\rNv\r3\211&\270F$k\362\362\367I\020\360\230\034\n~D|\3055\221\312\020\336\212\224\346D\233X\370\\o2I\224\014\333\304\003\017`\231\221\232\333d\032\314\240aOI#\352\211\002\303B\222&o\252\270]\206]h\212i-\352\222\030e\303\273i\3558\rt\231+\345\2061pV\013y\256\340\202\nb\325|\337^!}\336\"G\3024\210iG\234\224\362u\0233\251m\032'[\234\032\354\0201\367\014\361E\223K-\224\324[\023\211\\\3611#4\340\224\266\233\221i\023\335``\332$\021\004\027\000\304^\3334\224,\2638f\355\007o\233\263\373u\022E*6\334\177 \017Y(|\322\004\320o \266\240\314}R\362JX\255\022\330\303XK7H\035vM\224\235G\200\223\265 \236\365\035\233\3033\314A\005\344\241\002\264,\372\2336\020\014\331\347\241\250\361\030p\004\224\260r\340\304\226H\222\307\333\217o\256\335Y#L\372\200\344/\340^Ct5/\204\342@\305\301`-\021\241\001g\210\240.\223\007\001i\253\204H\016aB\345\"\320\233\335\000D\222Dsc\031U\262p3\003yS\330.d\275\224C'\0169\356\276\317B\315\313\217\022c\035\251D\372\340RN8\304<\217\203\365\025\233\346\236\264\345\207M@\251C\036Cu\ro\342\273\252a\330\345\215\322\265?3\337\247\022\001\300t\010`\360m\313Sa\210\016\001\3722\253y\3533\204D%\027\316\306\177.Ox\260\341\013\215~\271-\265\213\213\273H~=\376\327L\301\244\222\034\312Tz\241\215\357j\027\276X+\325=\262\202\225\253[\316\340f\300\000v\031.\215m\210)/\240L\316\256\217ii\361\202\223\365{\344\333\267\030%\025T3`Ih\010\2451\367\023\217SJ\374\304\"\003A\334\204\352\036\n\026\302WOHa\340\243\303g\303\016\202ot\354}c%*\031V\241\034\265[\353\256\231\3757\000y{\r\263\232\342\362\306\3677We]\253$\366\370\206i@\335v\321\331s\034;1R\221\205\330\257m\022@p\272\001\361O\313\312\302Pyv\206`\236\304g\206\225""\337\361\325\221\037\275\346#\010\224\366\245:B\326\3312\333\001\346\221\304\0047\357Tv7\037<\240\233\217\266\266\351\303\312\316\366\356f\203{\373:i\356\010\335d\306kl\207\241\210\264\320;,\004\240\233\334\207\356\261\001\003%\037\005\256\261(}\334n\301\265\005]C\037B\355\236\360`\227\037$\\z\334\352n\307\261\212O\2442\245\016\370\231\314g\304\362\264l\256\254o\350\301G\350\035\r-\363\356\317\310\357X\035\321z\254\222h\366\203\203sv\305Nzj\324\3238\221\010\234\277\347`\232@\260'\247Ch[\002dP\266\231\245]\207\345\314\312Sh\377\231\327g<F\332\342\324)\237\014\240\347\261\222\365m`\0034>\264.\364\333\033\021O\212H]#Q\232\317\007\2400\213\".}\246\333\322\023\252\354)P\207\241\303u\215i^\013\225jRh\344\244)\265{\tppP\030\341\002ILq\264\325\332h\030n\332J*\010\000J\317k\210\320\207\226\365\032@\023\214D[IC{\340\304\242t\"\324\271\301\316\303W\360\013%\2440y=^c\336\276%\024^.\004\212\365\021\332\010O\3471y0\271\214;\250|\312\014M\244h\321D#\205i\310e\3354(\365\221>t\332\357 *\017n8U\251\320\3245)\307Jp.\223\246\235\326\034\371\024\010\036\372T\370\223\247\016\340\360\306\313%k\245$\301\357H\201@\304\332`\236A\310\352:P0\014\343\\\321\311n\370\344/\016$\244>3\371YCi\000\204\241\210\207\27592\322\006\323\324B\337\200\366\025\302\007\2227\221\tHv8d'\234\307T\246\305s\223,\037g\373\240\347\260\010U]x@\205\027k\2246\031\000\r\367\026U1P\220\205p \343i\334D\366\324y\223\003\202\024\357y\265\232\242\216\3004a\327d\003\000\006\353\312OB\373\2145\017\341\031+\ni\306\202\303&\374\231\231\336-\026\300P\250\264\344Gp\203\301-\2230\244\266\210P\006\207\211\273\203?\231\200\276\212\354\001\002iE\300\207\210\231F\244\242\010F\236p\265\0041b1GA\3258=t\315\001\25709\274\274\341\334[\016'\212\266\364VJd$\274}\210\177[N\364\016\355\337\016\322\363 a\241\213\035''\305C1Dv\200\003\273\200\350 \323\334\213\315\337\212\323\256\233j\234\034\030o\315\240\351\002\2262\346u\2407\222\357\310\241255\025\264\206\nrp\345\346\004\305\352\302[`\347W\0165H\371Q53\325\350;&\234\035\351\310\021{0\225g\217'""\035iT\216\315I\317Ad\260\250\340\212\023\370[I\2320\223\340w\000~iA\317\262\026\n\206w\200\027\032\321\000\270P\263$\002\0048\374?%\034\231\303c+\352C\210_\305\3246K^578\035\220\223!j\23715\254\336z\001|\001\302Fx\320\343\005\r~\310\303\343\312xi\271\363C\027\036\247;O:\355\336|\357\323\336j\357/\375\325~\345\270\362\372\314\334\251\323\235\235^a\274\364\311\350\223\225t>=\237-d\333\203s\0036\276v+{\n\002\037\256\242\215\225\364tV\315\330\253\323g\306\313\205\356\331\356\337z?\245\253\351\375\2548^:\323a\235\003\260\265<w\352R\357i\377<X)\274\002\247h\326\251_\354U{\215\276\237N\224\301[\247\3255\275[\375\305~u4w#\255\214\013_\365\016\306\205+\375\352\270P\034\025\277\313\016^\223\271\305\013\335\003\210\367\363\321\037ne\317\007\225\361\205\322\250\364\375\2608\276\200\033\026.\367w\262\002\370?\365\021\246\366\023$u\277\177\245\337\316\346\263\302x\341\243N\261\263:^\370x\364\361\345~\245\377<\335L\223lk\260<\334\034&/+\307\363\020\353\342\227\275\312\253\205\017\217M\347v\267\320\375\272\273\333\233\307\350~\001\207_\366\331x\341T\347+'\366\r$\272\225-\r\026\006\367\207\305\341\332\360\340\345\374\211\203\316\352\361\374\370w\205\327\237\316-^\351\3775\375\307\240\370>\243\037\036\267:G]6)\311\362g\335;\275\273\375*@S\232\311\345\307^\261w\017P<\233VS?[\031\\\036\004\303\312\260:\376\342j_\244qv6\253\316\370\277\007\266\013\020\303\362\345\376\303\254\370\372\342\333\250]\352\005\375\373\351\327iu\006\252\235\264\220^NYj\262;\203\265\301\341\260:d\343\213\200>\006\371\033\330\241\302\365n\025@\374`n\361bo\275\177\360\377\300\270:\376\034\3355 \206\203\231l\356t\001\317\327\227\346\026\227\376\233E\227\003\355Uz?\246\305t-=\000\302\3760\330\032~0dC\363r\365e%\267\366jaq\274\364Yw\255\013l;\327}\212\024?7:W\006\177G\231?\270\001\371.]\352\371}\240\344\357\273~\357:\344YI\377\2361\334\263\332}\004\355\261\225.\001\227\316N\232`\270\365ri\364xo\264\367\014w\260\321\371k\026\302\375AaP\034\237\377\302q\031\ny=\333\033\024!\207\263\277\225\303\350\364U@\345\237Y\005<""\024\240\306\215\241\377\362\352\350quT}2.\375)+f\253\263\231\344)\374fp\320\370w\357\302\334\202\251I#\023\257o\266Z;vbl\020\262\342&\023q\203\034N\024z\333\217\031\0145\372\235\233*\232\336\316\317)\267\207\374\361\332\334\377\276g\345=1\\\233\313\225\215\242^\2535\007\027\212n\361\321\277\001\300\316N\330";
-    PyObject *data = __Pyx_DecompressString(cstring, 2200, 1);
+    #elif (CYTHON_COMPRESS_STRINGS) != 0 /* compression: zlib (2210 bytes) */
+const char* const cstring = "x\332\235V\317s\023G\026\266\253\354\304$\206\254\022XH\205\220\326\006\220Y@\211\267\014\241(\343-\3056\033j\313\2000\206\335C\322i\315\364H\023\317t\217\247{d\211\255\255\362QG\035\366\240\243\216s\234\243\216:\372\250\243\216T\376\002\376\204}\257{$\213\205\205J\2524\243\236\236\367\363{\337{=wI\205\250}.8\2119s\211\214\311a\354kN<\346\007\334-\223\237\035\351\362\237\211\257\210np\262\253\231N\024\301=\"X\310\313\337'\236\307c\322\364\371!q%WDHMx+\222\212\023\245c\337\345j\223\t\"E\320&\016x\000\313\214\324\254\222n0\215\206\035)\264_O$\030\366\005\ty(\343v\031\264\320\024S\312\257\013\242\245\t\357\246\261c%\320e.\224\033\306\300Y-\340\271\200\r\312\213e\370.]_\270\274E\016}\335 \272\035qR\312\367u\314\2042i\234\250X1\320\360c\356h\342\372!\027\312\227BmMV\344\212\213\031\241\001+\264\035F\272MT\203\201i\235D\020\234\007\020;m\335\220\242\314\342\230\265\037\274i\316\350\253$\212d\254\271\373@4Y\340\273$\004\320o \266 \314]RrJX\255\022\330\303XK7H\035\264&\302\326#\300\311Z\020\317\372\216\311\341\031\346 =\362P\002Z\006\375M\023\010\206\354\362\300\257\361\030p\004\224\260r\340\304\224H\220\307\333\217o\256\335Y#L\270\200\344/\340^At5'\200\342@\305\301`-\361\003\r\316\020AU&\017<\322\226\t\021\034\302\204\312E 7\253\000D\022Dqm\030U2p3\rySP\367E\275\224C\34779j\337g\201\342\345G\2116\216d\"\\p)&\034b\216\303\301\372\212IsO\230\362\203\022P\252\311c\250\256\346!>\313\032\206]\336(]\373+s]*\020\000L\207\000\006\337\266\034\031\004\350\020\240/\263\232\263>CH\024\262\341l\374\357\366\204\007\033\256\257\320/7\245\266qq\033\311\257G\377\231)\230\220\202C\231J/\224vm\355\202\027k\245\272CV\260ru\303\031T\006\014@Ks\241MCLy\001e\262v]LK\371/8Y\277G\276}\203QBB5=\226\004\232P\032s7q8\245\304M\0142\020\304M\250n\323g\001\274u|\341kxi\361\3310\203\340\033\025;\337\230\025\025\014\253P\216\332\255u\333\314\356k\200\274\271\207YMqy\355\375\353\273\242\256d\022;|C7\240n\273\350\3549\216\235\030\251\310\002\354\3276\361 8\325\200\370\247eeA \0353C0O\3422\315\312oyk\311""\217^\363\021\004B\373B\036\"\353L\231\315\000sH\242\275\233w*\273\233\017\036\320\315G[\333\364aeg{w\263\301\235}\225\204;\276\n\231v\032\333A\340G\312W;,\000\240C\356B\367\230\200\201\222\217<\333X\224>n\267\340\332\202\256\241\017\241vO\270\267\313\017\022.\034nd\267\343X\306'\2532\245\026\370\231\314g\226\345i\331lY_\223\203\227\320;\nZ\346\355\257\221\337\261<\244\365X&\321\354\013\013\347\354\216\231\364T\313\247q\"\0208w\317\3024\201`OL\207\320\266\000\310\240l3[\273\026\313\231\235\247\320\3763\217\317x\214\264\305\251S>\031@\317c)\352\333\300\006h|h]\350\267\327\"\236\024\221\332F\2424\237\017@a\026E\\\270L\265\205\343\313\262#A\034\206\016W5\246x-\2202\244\320\310I(\224}\360ppP\030\341>\222\230\342h\253\265\3210\334\224YI\317\003(\035\247\341\007.\264\254\323\000\232`$\312\254\024\264\007N,J'\213:\327\330y\370\010~\241\204\024&\257\303k\314\3317\204\302\313\206@\261>\276\322\276\243\362\230\034\230\\\332\036T.e\232&\302o\321D!\205i\300E]7(u\221>t\332\357\260\224\016\334p\252R_Q\333\244\034+\301\271HB3\2559\362\311\363y\340R\337\235\374+\017\016o\274l\262f\225$\370\036)\340\371\261\322\230\247\027\260\272\362$\014\3038\027\264k;|\362\007\013\022R\237\351\374\254\241\324\003\302P\304\303\334,\031i\203)j\240o@\373\372\276\013$\017\221\tHv8d'\234\307T\246\305\263\223,\037g\373 g\261\010d\335w\200\n/\326(\r\031\000\r\367\026\2251P\220\005p \343i\034\"{\352<\344\200 \305{^\255\320\257#0!hM\024\0000\330\227n\022\230\377X\361\000\376cI!\315\330\347\240\204\0373\323\273\301\002\030\032\n\267\t?\300\203aa\004?\204\033\014q\221\004\0015\005\205\222X|\354\035|\213\004ted\016\023H1\002nDL7\"\031E0\376|[WXF,\346\270\2205N\233\266Q\340\021\246\210\2237\237}\312\241\305\245\241\201Y%\"\362\235}\310e[L\344\232\346\313\007\251z\220\260\300\346\201S\224\342\001\031 S\300\201\331@\244\220u\366\301`a\226\323\016\234J\234\034\036o\314\243\351\006\2265\346u\240:\022\361\320\242255](\005\325\344\340\312\316\014\212\225\206'\317\314\262\034vX\345\307\326\314\204\243o\231vf\274#_""\314!U\236=\252`\r#[E\nUb}\322\205\020\037lJ\270\342\004\276_\222\020\246\024| \300G.\310\031\036C\331\360\016 Ckj\200\030*\227D\200\003\207/\252\204#\227xl\226\252\tY\310\230\232\366\311kgG\251\205s2V\315\177L5\253\267^\000k\200\302\021\036\375xA\3137ypT\031/-w~\350\302\337\351\316\223N\2737\337\373\264\267\332\373[\177\265_9\252\274:3w\352tg\247W\030/}2\372d%\235O\317g\013\331\366\340\334\200\215\257\335\312\236\302\202\017W\321\306Jz:\253f\354\345\3513\343\345B\367l\367\037\275\237\322\325\364~V\034/\235\351\260\316\001\330Z\236;u\251\367\264\177\036\254\024^\202S4k\305/\366\252\275F\337M'\302\340\255\323\352\352\336\255\376b\277:\232\273\221V\306\205\257z\007\343\302\225~u\\(\216\212\337e\007\257\310\334\342\205\356\001\304\373\371\350O\267\262\347\203\312\370BiT\372~X\034_@\205\205\313\375\235\254\000\376O}\204\251\375\004I\335\357_\351\267\263\371\2540^\370\250S\354\254\216\027>\036}|\271_\351?O7\323$\333\032,\0177\207\311q\345h\036b]\374\262Wy\271\360\341\221\356\334\356\026\272_ww{\363\030\335/\340\360\313>\033/\234\352|e\227}\r\211neK\203\205\301\375aq\2706<8\236?q\320Y=\232\037\377\241\360\352\323\271\305+\375\277\247\377\032\024\337e\364\303\243V\347\260\313&%Y\376\254{\247w\267_\005hJ3\271\374\330+\366\356\001\212g\323j\352f+\203\313\003oX\031V\307_\\\355\373i\234\235\315\2523\376\357\201\355\002\304\260|\271\3770+\276\272\370&j\227z^\377~\372uZ\235\201j'-\244\227S\226\352\354\316`m\320\034V\207l|\021\320\307 \337\203\035\n\\\357V\001\304\017\346\026/\366\326\373\007\277\007\306\325\361\347\350\256\0011\034\314ds\247\013x\276\2724\267\270\364\377,\332\034h\257\322\3731-\246k\351\001\020\366\207\301\326\360\203!\033\352\343\325\343Jn\355\345\302\342x\351\263\356Z\027\330v\256\373\024)~nt\256\014\376\0163wp\003\362]\272\324s\373@\311?v\335\336u\310\263\222\3763c\250\263\332}\004\355\261\225.\001\227\316N\232`\270u\2744z\2747\332{\206\032lt\376\232\201p\177P\030\024\307\347\277\260\\\206B^\317\366\006E\310\341\354\373r\030\235\276\n\250\374;\253\200\207""\002\324\2701t\217\257\216\036WG\325'\343\322_\262b\266:\233I\236\302{\203\203\306\277{\027\246\027\314N\032\351x}\263\325\3321\023c\203\220\025;\231\210\035\347p\256\320\333n\314`\264\321\357\354TQ\364v~rY\035\362\347ks\277]g\345\0351\\\233\313\205\265\244N\2535\007\027.\355\346\243\377\002\322)V^";
+    PyObject *data = __Pyx_DecompressString(cstring, 2210, 1);
     if (unlikely(!data)) __PYX_ERR(0, 1, __pyx_L1_error)
     const char* const bytes = __Pyx_PyBytes_AsString(data);
     #if !CYTHON_ASSUME_SAFE_MACROS
     if (likely(bytes)); else { Py_DECREF(data); __PYX_ERR(0, 1, __pyx_L1_error) }
     #endif
-    #else /* compression: none (4119 bytes) */
-const char* const bytes = ": A skene read or write failed. `code` is the Status code name.Buffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.arrayIndirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Unable to convert item to object.>')?add_note and  at 0xcollections.abc<contiguous and direct><contiguous and indirect>disableempty bufferenable \342\200\224 expected 'none', 'zstd' or 'lz4'gc (got got differing extents in dimension isenableditemsize <= 0 for cython.arrayno default __reduce__ due to non-trivial __cinit__ object>skene/src/skene_native.pyx<strided and direct><strided and direct or indirect><strided and indirect><stringsource>this SkeneWriter is already finishedunable to allocate array data.unable to allocate shape and strides.unknown section codec utf-8ASCII_CODE_NAMESChecksumMismatchEllipsisMalformedNotSkeneOutOfMemory__Pyx_PyDict_NextRefSequenceSkeneErrorSkeneError.__init__SkeneWriterSkeneWriter.__reduce_cython__SkeneWriter.__setstate_cython__SkeneWriter.add_row_groupSkeneWriter.finishSkeneWriter.write_toTruncatedUnknownChecksumUnsupportedEncodingUnsupportedSectionUnsupportedTypeUnsupportedVersionView.MemoryViewWrongEndiannessabcadd_row_groupallocate_buffer__annotate__appendasyncio.coroutinesbasebloom_columnsbloom_false_positive_ratebyte_bytesbyte_offsetcchildrenchunk_rowschunks__class____class_getitem__cline_in_tracebackcodecodeccolumn_statisticscolumnscountcreated_at_unix_usdata_length__dict__dimension__doc__dtype_is_objectencodeenumerateerrorfi""eld_idfield_idsfilefile_bytesfile_uuidfinishfirst_rowflagsfooter_bytesfooter_extentfooter_offsetformatfortran__func__get__getstate__has_bloomheadiid__import__index__init___is_coroutineitemsitemsizekindlengthlogicallz4__main__max_ordinalmemviewmessagemeta__metaclass__migratemin_ordinalmode__module__morsel__mro_entries__name__name__nbytesndim__new__nonenull_countobjoffsetoffset_minutesoptionsoutpackpathpopprecision__prepare__probe_version__pyx_checksum__pyx_state__pyx_type__pyx_unpickle_Enum__pyx_vtable____qualname__read_accelerationread_metadataread_morselread_row_group_metadata__reduce____reduce_cython____reduce_ex__registerrow_countrow_grouprow_groupsscaleselection_kindself__set_name__setdefault__setstate____setstate_cython__shapesizeskene.skene_nativespststartstatisticsstepstopstructsumsupertailtarget__test__typeunitunpackupdatevalue_ordervaluesvector_flagsversionwrite_morselwrite_towriter_tagxzone_mapzstdzstd_level\200A\330\010\014\210H\220A\330\010\r\210R\210y\230\001\230\022\2301\230G\2401\240A\200A\360\016\000\t\r\210M\230\021\330\010\017\320\017(\250\001\250\027\260\004\260E\270\025\270a\330)5\260T\270\025\270e\3001\200A\330\010(\250\r\260Q\260a\340\r\016\330\014\021\220\024\220X\230^\2501\250F\260!\330\010\016\210a\210q\200A\360\014\000\t\036\230T\240\027\250\001\250\021\340\010\014\210M\230\021\330\r\016\330\014\021\220\034\230Q\230h\240d\250!\330\010\016\210a\210q\330\010\017\210x\220t\2305\240\005\240Q\320\000,\250A\330\021\037\230q\330\021%\240Q\330\021!\320!7\260q\360 \000\005\030\220q\230\001\230\031\320\"5\260W\270A\330\030'\320'B\300!\330\030,\250A\330\004$\240M\260\021\260!\330\t\n\330\010\r\210^\2301\230F\240%\240y\260\001\260\021\330\004\n\210!\2101\330\004\013\320\013$\240A\240W\250C\250u\260D\270\014\300C\300u\310A\200\001\360\014\000\005\035\230A\340\004\007\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\004\t\210\037\230\001\230\035\240a\240t\2501\250D\260\010\270\004\270F\300!\3004\300q\310\001\330\004\n\210!""\2101\330\004\013\2101\200\001\330\020\021\360\022\000\005%\240K\250{\270!\340\004\007\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\004\007\200x\210w\220a\330\010\014\210H\220A\330\014\023\2208\230:\240Q\240d\250'\260\021\260!\330\t\n\330\010\r\210]\230!\230=\250\001\250\024\250Q\250d\260(\270$\270f\300A\300Q\330\033&\240i\250r\260\024\260Q\330\004\n\210!\2101\330\004\013\210=\230\001\230\021\200\001\330\014$\240N\260!\360\034\000\005\030\220q\230\001\230\031\320\"5\260W\270A\330\030\036\230f\240F\250#\250Q\330\t\n\330\010\r\210^\2301\230M\250\021\250$\250a\250t\2608\2704\270v\300Q\300a\330\034%\240Q\240a\330\004\n\210!\2101\330\004\013\320\013$\240A\240W\250C\250u\260D\270\014\300C\300u\310A\200\001\330\004\n\210+\220Q\200\001\360\006\000\005\034\230<\240q\340\004\007\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\004\t\210\037\230\001\230\035\240a\240t\2501\250D\260\010\270\004\270F\300!\3001\330\031%\240Q\240h\250a\250q\330\004\n\210!\2101\330\004\013\2108\2201\200\001\360\036\000\005\010\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\t\n\330\010\r\210_\230A\230]\250!\2504\250q\260\004\260H\270D\300\006\300a\300t\3101\310A\330\004\n\210!\2101\340\004\005\330\010\023\2204\220q\330\010\025\220T\230\021\330\010\025\320\025.\250a\250w\260d\270,\300a\330\010\036\230d\240!\330\010\026\220d\230+\240W\250A\250Y\260a\330\010\023\2201\220O\2401\240D\250\010\260\001\260\024\260T\270\025\270e\3001\300D\310\010\320PU\320UV\330\010\026\220a\320\027)\250\021\250$\250k\270\021\270!\330\027\033\2305\240\005\240Q\240d\250+\260U\270!\200\001\360\024\000\005\010\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\t\n\330\010\r\320\r&\240a\240}\260A\260T\270\021\270$\270h\300d\310&\320PQ\320QR\330'2\260!\2601\330\004\n\210!\2101\340\004\005\330\010\025\220T\230\021\330\010\023\2201\220O\2401\240D\250\010\260\001\260\024\260T\270\025\270e\3001\300D\310\010\320PU""\320UVstd::shared_ptr<CxxMorsel>  (struct __pyx_obj_6draken_7morsels_6morsel_Morsel *)\000struct __pyx_obj_6draken_7morsels_6morsel_Morsel *(std::shared_ptr<CxxMorsel> )\000morsel_to_cxx\000cxx_to_morselO";
+    #else /* compression: none (4137 bytes) */
+const char* const bytes = ": A skene read or write failed. `code` is the Status code name.Buffer view does not expose stridesCan only create a buffer that is contiguous in memory.Cannot assign to read-only memoryviewCannot create writable memory view from read-only memoryviewCannot index with type 'Cannot transpose memoryview with indirect dimensionsDimension %d is not directEmpty shape tuple for cython.arrayIndirect dimensions not supportedInvalid mode, expected 'c' or 'fortran', got Invalid shape in axis <MemoryView of Note that Cython is deliberately stricter than PEP-484 and rejects subclasses of builtin types. If you need to pass subclasses then set the 'annotation_typing' directive to False.Out of bounds on buffer access (axis Unable to convert item to object.>')?add_note and  at 0xcollections.abc<contiguous and direct><contiguous and indirect>disableempty bufferenable \342\200\224 expected 'none', 'zstd' or 'lz4'gc (got got differing extents in dimension isenableditemsize <= 0 for cython.arrayno default __reduce__ due to non-trivial __cinit__ object>skene/src/skene_native.pyx<strided and direct><strided and direct or indirect><strided and indirect><stringsource>this SkeneWriter is already finishedunable to allocate array data.unable to allocate shape and strides.unknown section codec utf-8ASCII_CODE_NAMESChecksumMismatchEllipsisMalformedNotSkeneOutOfMemory__Pyx_PyDict_NextRefSequenceSkeneErrorSkeneError.__init__SkeneWriterSkeneWriter.__reduce_cython__SkeneWriter.__setstate_cython__SkeneWriter.add_row_groupSkeneWriter.finishSkeneWriter.write_toTruncatedUnknownChecksumUnsupportedEncodingUnsupportedSectionUnsupportedTypeUnsupportedVersionView.MemoryViewWrongEndiannessabcadd_row_groupallocate_buffer__annotate__appendasyncio.coroutinesbasebloom_columnsbloom_false_positive_ratebyte_bytesbyte_offsetcchildrenchunk_rowschunks__class____class_getitem__cline_in_tracebackcodecodeccolumn_statisticscolumnscountcreated_at_unix_usdata_length__dict__dimension__doc__dtype_is_objectencodeenumerateerrorfi""eld_idfield_idsfilefile_bytesfile_uuidfinishfirst_rowflagsfooter_bytesfooter_extentfooter_offsetformatfortran__func__get__getstate__has_bloomheadiid__import__index__init___is_coroutineitemsitemsizekindlengthlogicallz4__main__max_ordinalmemviewmessagemeta__metaclass__migratemin_ordinalmode__module__morsel__mro_entries__name__name__nbytesndimndvndv_exact__new__nonenull_countobjoffsetoffset_minutesoptionsoutpackpathpopprecision__prepare__probe_version__pyx_checksum__pyx_state__pyx_type__pyx_unpickle_Enum__pyx_vtable____qualname__read_accelerationread_metadataread_morselread_row_group_metadata__reduce____reduce_cython____reduce_ex__registerrow_countrow_grouprow_groupsscaleselection_kindself__set_name__setdefault__setstate____setstate_cython__shapesizeskene.skene_nativesketchspststartstatisticsstepstopstructsumsupertailtarget__test__typeunitunpackupdatevalue_ordervaluesvector_flagsversionwrite_morselwrite_towriter_tagxzone_mapzstdzstd_level\200A\330\010\014\210H\220A\330\010\r\210R\210y\230\001\230\022\2301\230G\2401\240A\200A\360\016\000\t\r\210M\230\021\330\010\017\320\017(\250\001\250\027\260\004\260E\270\025\270a\330)5\260T\270\025\270e\3001\200A\330\010(\250\r\260Q\260a\340\r\016\330\014\021\220\024\220X\230^\2501\250F\260!\330\010\016\210a\210q\200A\360\014\000\t\036\230T\240\027\250\001\250\021\340\010\014\210M\230\021\330\r\016\330\014\021\220\034\230Q\230h\240d\250!\330\010\016\210a\210q\330\010\017\210x\220t\2305\240\005\240Q\320\000,\250A\330\021\037\230q\330\021%\240Q\330\021!\320!7\260q\360 \000\005\030\220q\230\001\230\031\320\"5\260W\270A\330\030'\320'B\300!\330\030,\250A\330\004$\240M\260\021\260!\330\t\n\330\010\r\210^\2301\230F\240%\240y\260\001\260\021\330\004\n\210!\2101\330\004\013\320\013$\240A\240W\250C\250u\260D\270\014\300C\300u\310A\200\001\360\014\000\005\035\230A\340\004\007\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\004\t\210\037\230\001\230\035\240a\240t\2501\250D\260\010\270\004\270F\300!\3004\300q\310""\001\330\004\n\210!\2101\330\004\013\2101\200\001\330\020\021\360\022\000\005%\240K\250{\270!\340\004\007\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\004\007\200x\210w\220a\330\010\014\210H\220A\330\014\023\2208\230:\240Q\240d\250'\260\021\260!\330\t\n\330\010\r\210]\230!\230=\250\001\250\024\250Q\250d\260(\270$\270f\300A\300Q\330\033&\240i\250r\260\024\260Q\330\004\n\210!\2101\330\004\013\210=\230\001\230\021\200\001\330\014$\240N\260!\360\034\000\005\030\220q\230\001\230\031\320\"5\260W\270A\330\030\036\230f\240F\250#\250Q\330\t\n\330\010\r\210^\2301\230M\250\021\250$\250a\250t\2608\2704\270v\300Q\300a\330\034%\240Q\240a\330\004\n\210!\2101\330\004\013\320\013$\240A\240W\250C\250u\260D\270\014\300C\300u\310A\200\001\330\004\n\210+\220Q\200\001\360\006\000\005\034\230<\240q\340\004\007\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\004\t\210\037\230\001\230\035\240a\240t\2501\250D\260\010\270\004\270F\300!\3001\330\031%\240Q\240h\250a\250q\330\004\n\210!\2101\330\004\013\2108\2201\200\001\360\036\000\005\010\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\t\n\330\010\r\210_\230A\230]\250!\2504\250q\260\004\260H\270D\300\006\300a\300t\3101\310A\330\004\n\210!\2101\340\004\005\330\010\023\2204\220q\330\010\025\220T\230\021\330\010\025\320\025.\250a\250w\260d\270,\300a\330\010\036\230d\240!\330\010\026\220d\230+\240W\250A\250Y\260a\330\010\023\2201\220O\2401\240D\250\010\260\001\260\024\260T\270\025\270e\3001\300D\310\010\320PU\320UV\330\010\026\220a\320\027)\250\021\250$\250k\270\021\270!\330\027\033\2305\240\005\240Q\240d\250+\260U\270!\200\001\360\024\000\005\010\200t\2106\220\021\220#\220S\230\001\330\010\016\210j\230\001\230\035\240a\330\t\n\330\010\r\320\r&\240a\240}\260A\260T\270\021\270$\270h\300d\310&\320PQ\320QR\330'2\260!\2601\330\004\n\210!\2101\340\004\005\330\010\025\220T\230\021\330\010\023\2201\220O\2401\240D\250\010\260\001\260\024\260T\270\025\270e\3001""\300D\310\010\320PU\320UVstd::shared_ptr<CxxMorsel>  (struct __pyx_obj_6draken_7morsels_6morsel_Morsel *)\000struct __pyx_obj_6draken_7morsels_6morsel_Morsel *(std::shared_ptr<CxxMorsel> )\000morsel_to_cxx\000cxx_to_morselO";
     PyObject *data = NULL;
     CYTHON_UNUSED_VAR(__Pyx_DecompressString);
     #endif
     PyObject **stringtab = __pyx_mstate->__pyx_string_tab;
     Py_ssize_t pos = 0;
-    for (int i = 0; i < 221; i++) {
+    for (int i = 0; i < 224; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyUnicode_DecodeUTF8(bytes + pos, bytes_length, NULL);
       if (likely(string) && i >= 50) PyUnicode_InternInPlace(&string);
@@ -25306,7 +25363,7 @@ const char* const bytes = ": A skene read or write failed. `code` is the Status 
       stringtab[i] = string;
       pos += bytes_length;
     }
-    for (int i = 221; i < 235; i++) {
+    for (int i = 224; i < 238; i++) {
       Py_ssize_t bytes_length = index[i].length;
       PyObject *string = PyBytes_FromStringAndSize(bytes + pos, bytes_length);
       stringtab[i] = string;
@@ -25317,14 +25374,14 @@ const char* const bytes = ": A skene read or write failed. `code` is the Status 
       }
     }
     Py_XDECREF(data);
-    for (Py_ssize_t i = 0; i < 235; i++) {
+    for (Py_ssize_t i = 0; i < 238; i++) {
       if (unlikely(PyObject_Hash(stringtab[i]) == -1)) {
         __PYX_ERR(0, 1, __pyx_L1_error)
       }
     }
     #if CYTHON_IMMORTAL_CONSTANTS
     {
-      PyObject **table = stringtab + 221;
+      PyObject **table = stringtab + 224;
       for (Py_ssize_t i=0; i<14; ++i) {
         #if PY_VERSION_HEX >= 0x030F0000
         PyUnstable_SetImmortal(table[i]);
@@ -25424,47 +25481,47 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
   PyObject* tuple_dedup_map = PyDict_New();
   if (unlikely(!tuple_dedup_map)) return -1;
   {
-    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 209};
+    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 212};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_code, __pyx_mstate->__pyx_n_u_message};
     __pyx_mstate_global->__pyx_codeobj_tab[0] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_init, __pyx_mstate->__pyx_kp_b_iso88591_A_HA_Ry_1G1A, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[0])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 354};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 3, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 386};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_head, __pyx_mstate->__pyx_n_u_version, __pyx_mstate->__pyx_n_u_st};
     __pyx_mstate_global->__pyx_codeobj_tab[1] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_probe_version, __pyx_mstate->__pyx_kp_b_iso88591_A_t6_S_j_a_at1D_F_4q_1_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[1])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 369};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 5, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 401};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_tail, __pyx_mstate->__pyx_n_u_file_bytes, __pyx_mstate->__pyx_n_u_offset, __pyx_mstate->__pyx_n_u_nbytes, __pyx_mstate->__pyx_n_u_st};
     __pyx_mstate_global->__pyx_codeobj_tab[2] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_footer_extent, __pyx_mstate->__pyx_kp_b_iso88591_q_t6_S_j_a_at1D_F_1_Qhaq_1_81, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[2])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 382};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 414};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_file, __pyx_mstate->__pyx_n_u_meta, __pyx_mstate->__pyx_n_u_st, __pyx_mstate->__pyx_n_u_i, __pyx_mstate->__pyx_n_u_i, __pyx_mstate->__pyx_n_u_i};
     __pyx_mstate_global->__pyx_codeobj_tab[3] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_read_metadata, __pyx_mstate->__pyx_kp_b_iso88591_t6_S_j_a__A_4q_HD_at1A_1_4q_T_a, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[3])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 415};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 6, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 447};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_file, __pyx_mstate->__pyx_n_u_row_group, __pyx_mstate->__pyx_n_u_meta, __pyx_mstate->__pyx_n_u_st, __pyx_mstate->__pyx_n_u_i, __pyx_mstate->__pyx_n_u_i};
     __pyx_mstate_global->__pyx_codeobj_tab[4] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_read_row_group_metadata, __pyx_mstate->__pyx_kp_b_iso88591_t6_S_j_a_a_AT_hd_PQQR_2_1_1_T_1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[4])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 438};
+    const __Pyx_PyCode_New_function_description descr = {3, 0, 0, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 470};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_file, __pyx_mstate->__pyx_n_u_row_group, __pyx_mstate->__pyx_n_u_columns, __pyx_mstate->__pyx_n_u_options, __pyx_mstate->__pyx_n_u_sp, __pyx_mstate->__pyx_n_u_st, __pyx_mstate->__pyx_n_u_name};
     __pyx_mstate_global->__pyx_codeobj_tab[5] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_read_morsel, __pyx_mstate->__pyx_kp_b_iso88591_K_t6_S_j_a_xwa_HA_8_Qd_Qd_fAQ_i, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[5])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 536};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 568};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_morsel, __pyx_mstate->__pyx_n_u_sp, __pyx_mstate->__pyx_n_u_st};
     __pyx_mstate_global->__pyx_codeobj_tab[6] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_add_row_group, __pyx_mstate->__pyx_kp_b_iso88591_A_Qa_X_1F_aq, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[6])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 563};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 0, 1, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 595};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self};
     __pyx_mstate_global->__pyx_codeobj_tab[7] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_finish, __pyx_mstate->__pyx_kp_b_iso88591_A_M_E_a_5T_e1, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[7])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 574};
+    const __Pyx_PyCode_New_function_description descr = {2, 0, 0, 4, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 606};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_self, __pyx_mstate->__pyx_n_u_path, __pyx_mstate->__pyx_n_u_target, __pyx_mstate->__pyx_n_u_st};
     __pyx_mstate_global->__pyx_codeobj_tab[8] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_write_to, __pyx_mstate->__pyx_kp_b_iso88591_A_T_M_Qhd_aq_xt5_Q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[8])) goto bad;
   }
@@ -25479,12 +25536,12 @@ static int __Pyx_CreateCodeObjects(__pyx_mstatetype *__pyx_mstate) {
     __pyx_mstate_global->__pyx_codeobj_tab[10] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_stringsource, __pyx_mstate->__pyx_n_u_setstate_cython, __pyx_mstate->__pyx_kp_b_iso88591_Q, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[10])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 8, 13, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 589};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 8, 13, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 621};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_morsel, __pyx_mstate->__pyx_n_u_read_acceleration, __pyx_mstate->__pyx_n_u_codec, __pyx_mstate->__pyx_n_u_zstd_level, __pyx_mstate->__pyx_n_u_bloom_columns, __pyx_mstate->__pyx_n_u_bloom_false_positive_rate, __pyx_mstate->__pyx_n_u_field_ids, __pyx_mstate->__pyx_n_u_created_at_unix_us, __pyx_mstate->__pyx_n_u_writer_tag, __pyx_mstate->__pyx_n_u_options, __pyx_mstate->__pyx_n_u_out, __pyx_mstate->__pyx_n_u_st, __pyx_mstate->__pyx_n_u_sp};
     __pyx_mstate_global->__pyx_codeobj_tab[11] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_write_morsel, __pyx_mstate->__pyx_kp_b_iso88591_A_q_Q_7q_q_5WA_B_A_M_1F_y_1_AWC, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[11])) goto bad;
   }
   {
-    const __Pyx_PyCode_New_function_description descr = {1, 0, 3, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 618};
+    const __Pyx_PyCode_New_function_description descr = {1, 0, 3, 7, (unsigned int)(CO_OPTIMIZED|CO_NEWLOCALS), 650};
     PyObject* const varnames[] = {__pyx_mstate->__pyx_n_u_file, __pyx_mstate->__pyx_n_u_read_acceleration, __pyx_mstate->__pyx_n_u_codec, __pyx_mstate->__pyx_n_u_zstd_level, __pyx_mstate->__pyx_n_u_options, __pyx_mstate->__pyx_n_u_out, __pyx_mstate->__pyx_n_u_st};
     __pyx_mstate_global->__pyx_codeobj_tab[12] = __Pyx_PyCode_New(descr, varnames, __pyx_mstate->__pyx_kp_u_skene_src_skene_native_pyx, __pyx_mstate->__pyx_n_u_migrate, __pyx_mstate->__pyx_kp_b_iso88591_N_q_5WA_fF_Q_1M_at84vQa_Qa_1_AW, tuple_dedup_map); if (unlikely(!__pyx_mstate_global->__pyx_codeobj_tab[12])) goto bad;
   }
@@ -33518,75 +33575,6 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
   }
   
 /* CIntToPy */
-  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int64_t(int64_t value) {
-  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wconversion"
-  #endif
-      const int64_t neg_one = (int64_t) -1, const_zero = (int64_t) 0;
-  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
-  #pragma GCC diagnostic pop
-  #endif
-      const int is_unsigned = neg_one > const_zero;
-      if (is_unsigned) {
-          if (sizeof(int64_t) < sizeof(long)) {
-              return PyLong_FromLong((long) value);
-          } else if (sizeof(int64_t) <= sizeof(unsigned long)) {
-              return PyLong_FromUnsignedLong((unsigned long) value);
-  #if !CYTHON_COMPILING_IN_PYPY
-          } else if (sizeof(int64_t) <= sizeof(unsigned PY_LONG_LONG)) {
-              return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
-  #endif
-          }
-      } else {
-          if (sizeof(int64_t) <= sizeof(long)) {
-              return PyLong_FromLong((long) value);
-          } else if (sizeof(int64_t) <= sizeof(PY_LONG_LONG)) {
-              return PyLong_FromLongLong((PY_LONG_LONG) value);
-          }
-      }
-      {
-          unsigned char *bytes = (unsigned char *)&value;
-  #if !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x030d00A4
-          if (is_unsigned) {
-              return PyLong_FromUnsignedNativeBytes(bytes, sizeof(value), -1);
-          } else {
-              return PyLong_FromNativeBytes(bytes, sizeof(value), -1);
-          }
-  #elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
-          int one = 1; int little = (int)*(unsigned char *)&one;
-          return _PyLong_FromByteArray(bytes, sizeof(int64_t),
-                                       little, !is_unsigned);
-  #else
-          int one = 1; int little = (int)*(unsigned char *)&one;
-          PyObject *from_bytes, *result = NULL, *kwds = NULL;
-          PyObject *py_bytes = NULL, *order_str = NULL;
-          from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
-          if (!from_bytes) return NULL;
-          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(int64_t));
-          if (!py_bytes) goto limited_bad;
-          order_str = PyUnicode_FromString(little ? "little" : "big");
-          if (!order_str) goto limited_bad;
-          {
-              PyObject *args[3+(CYTHON_VECTORCALL ? 1 : 0)] = { NULL, py_bytes, order_str };
-              if (!is_unsigned) {
-                  kwds = __Pyx_MakeVectorcallBuilderKwds(1);
-                  if (!kwds) goto limited_bad;
-                  if (__Pyx_VectorcallBuilder_AddArgStr("signed", __Pyx_NewRef(Py_True), kwds, args+3, 0) < 0) goto limited_bad;
-              }
-              result = __Pyx_Object_Vectorcall_CallFromBuilder(from_bytes, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET, kwds);
-          }
-          limited_bad:
-          Py_XDECREF(kwds);
-          Py_XDECREF(order_str);
-          Py_XDECREF(py_bytes);
-          Py_XDECREF(from_bytes);
-          return result;
-  #endif
-      }
-  }
-  
-/* CIntToPy */
   static CYTHON_INLINE PyObject* __Pyx_PyLong_From_uint64_t(uint64_t value) {
   #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
   #pragma GCC diagnostic push
@@ -33633,6 +33621,75 @@ static const char* __Pyx_BufFmt_CheckString(__Pyx_BufFmt_Context* ctx, const cha
           from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
           if (!from_bytes) return NULL;
           py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(uint64_t));
+          if (!py_bytes) goto limited_bad;
+          order_str = PyUnicode_FromString(little ? "little" : "big");
+          if (!order_str) goto limited_bad;
+          {
+              PyObject *args[3+(CYTHON_VECTORCALL ? 1 : 0)] = { NULL, py_bytes, order_str };
+              if (!is_unsigned) {
+                  kwds = __Pyx_MakeVectorcallBuilderKwds(1);
+                  if (!kwds) goto limited_bad;
+                  if (__Pyx_VectorcallBuilder_AddArgStr("signed", __Pyx_NewRef(Py_True), kwds, args+3, 0) < 0) goto limited_bad;
+              }
+              result = __Pyx_Object_Vectorcall_CallFromBuilder(from_bytes, args+1, 2 | __Pyx_PY_VECTORCALL_ARGUMENTS_OFFSET, kwds);
+          }
+          limited_bad:
+          Py_XDECREF(kwds);
+          Py_XDECREF(order_str);
+          Py_XDECREF(py_bytes);
+          Py_XDECREF(from_bytes);
+          return result;
+  #endif
+      }
+  }
+  
+/* CIntToPy */
+  static CYTHON_INLINE PyObject* __Pyx_PyLong_From_int64_t(int64_t value) {
+  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wconversion"
+  #endif
+      const int64_t neg_one = (int64_t) -1, const_zero = (int64_t) 0;
+  #ifdef __Pyx_HAS_GCC_DIAGNOSTIC
+  #pragma GCC diagnostic pop
+  #endif
+      const int is_unsigned = neg_one > const_zero;
+      if (is_unsigned) {
+          if (sizeof(int64_t) < sizeof(long)) {
+              return PyLong_FromLong((long) value);
+          } else if (sizeof(int64_t) <= sizeof(unsigned long)) {
+              return PyLong_FromUnsignedLong((unsigned long) value);
+  #if !CYTHON_COMPILING_IN_PYPY
+          } else if (sizeof(int64_t) <= sizeof(unsigned PY_LONG_LONG)) {
+              return PyLong_FromUnsignedLongLong((unsigned PY_LONG_LONG) value);
+  #endif
+          }
+      } else {
+          if (sizeof(int64_t) <= sizeof(long)) {
+              return PyLong_FromLong((long) value);
+          } else if (sizeof(int64_t) <= sizeof(PY_LONG_LONG)) {
+              return PyLong_FromLongLong((PY_LONG_LONG) value);
+          }
+      }
+      {
+          unsigned char *bytes = (unsigned char *)&value;
+  #if !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX >= 0x030d00A4
+          if (is_unsigned) {
+              return PyLong_FromUnsignedNativeBytes(bytes, sizeof(value), -1);
+          } else {
+              return PyLong_FromNativeBytes(bytes, sizeof(value), -1);
+          }
+  #elif !CYTHON_COMPILING_IN_LIMITED_API && PY_VERSION_HEX < 0x030d0000
+          int one = 1; int little = (int)*(unsigned char *)&one;
+          return _PyLong_FromByteArray(bytes, sizeof(int64_t),
+                                       little, !is_unsigned);
+  #else
+          int one = 1; int little = (int)*(unsigned char *)&one;
+          PyObject *from_bytes, *result = NULL, *kwds = NULL;
+          PyObject *py_bytes = NULL, *order_str = NULL;
+          from_bytes = PyObject_GetAttrString((PyObject*)&PyLong_Type, "from_bytes");
+          if (!from_bytes) return NULL;
+          py_bytes = PyBytes_FromStringAndSize((char*)bytes, sizeof(int64_t));
           if (!py_bytes) goto limited_bad;
           order_str = PyUnicode_FromString(little ? "little" : "big");
           if (!order_str) goto limited_bad;

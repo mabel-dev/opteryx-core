@@ -77,6 +77,7 @@ struct ParsedColumn {
     LogicalTypeDescriptor     logical{};
     bool                      has_statistics = false;
     ColumnStatistics          statistics{};
+    std::vector<uint64_t>     sketch;
     std::vector<ParsedColumn> children;
 };
 
@@ -156,6 +157,47 @@ Status parse_column(Cursor& cursor, ParsedColumn* out, int depth) {
 // remainder skipped. That is deliberate and is what lets a statistic be added
 // with no version bump: an older reader takes the fields it knows and ignores
 // the rest, which costs it a pruning opportunity and nothing else.
+// Reads one statistics blob: the fixed prefix this build understands, then the
+// KMV sketch when the blob carries one.
+//
+// A blob LONGER than this build understands is read prefix-first and the
+// remainder skipped — that is what lets a statistic be added with no version
+// bump, and it is why the sketch is gated on kStatSketch rather than on the
+// blob merely being long. A blob that CLAIMS a sketch it cannot hold is
+// corruption, not growth, and fails.
+Status parse_statistics_blob(const uint8_t* blob, uint32_t declared,
+                             const char* what,
+                             ColumnStatistics* statistics,
+                             std::vector<uint64_t>* sketch) {
+    const size_t known = declared < sizeof(ColumnStatistics)
+                       ? declared : sizeof(ColumnStatistics);
+    std::memcpy(statistics, blob, known);
+
+    if ((statistics->flags & kStatSketch) == 0) return Status::ok();
+    if (declared < sizeof(ColumnStatistics) + sizeof(ColumnSketchHeader))
+        return fail(Code::kTruncated,
+                    "%s declares a KMV sketch but its %u statistics bytes cannot "
+                    "hold the sketch header", what, declared);
+
+    ColumnSketchHeader header;
+    std::memcpy(&header, blob + sizeof(ColumnStatistics), sizeof(header));
+    const uint64_t need = static_cast<uint64_t>(sizeof(ColumnStatistics))
+                        + sizeof(ColumnSketchHeader)
+                        + static_cast<uint64_t>(header.count) * sizeof(uint64_t);
+    if (need > declared)
+        return fail(Code::kTruncated,
+                    "%s declares a %u-hash KMV sketch needing %llu statistics "
+                    "bytes but only %u were written", what, header.count,
+                    static_cast<unsigned long long>(need), declared);
+
+    sketch->resize(header.count);
+    if (header.count != 0)
+        std::memcpy(sketch->data(),
+                    blob + sizeof(ColumnStatistics) + sizeof(ColumnSketchHeader),
+                    static_cast<size_t>(header.count) * sizeof(uint64_t));
+    return Status::ok();
+}
+
 Status parse_statistics(Cursor& cursor, ParsedColumn* column) {
     const uint32_t declared = column->head.stats_bytes;
     if (declared > 0) {
@@ -165,9 +207,10 @@ Status parse_statistics(Cursor& cursor, ParsedColumn* column) {
                         "column '%s' declares %u statistics bytes but only %zu "
                         "remain in the footer", column->name.c_str(), declared,
                         cursor.remaining());
-        const size_t known = declared < sizeof(ColumnStatistics)
-                           ? declared : sizeof(ColumnStatistics);
-        std::memcpy(&column->statistics, blob, known);
+        SKENE_RETURN_IF_ERROR(parse_statistics_blob(blob, declared,
+                                                    column->name.c_str(),
+                                                    &column->statistics,
+                                                    &column->sketch));
         column->has_statistics = true;
     }
     for (ParsedColumn& child : column->children)
@@ -482,9 +525,11 @@ Status parse_file_footer(const uint8_t* footer, uint32_t footer_bytes,
                             "row group %u column %u declares %u statistics bytes "
                             "but only %zu remain in the file footer", g, c,
                             declared, cursor.remaining());
-            const size_t known = declared < sizeof(ColumnStatistics)
-                               ? declared : sizeof(ColumnStatistics);
-            std::memcpy(&out->statistics[g][c].statistics, blob, known);
+            char what[64];
+            std::snprintf(what, sizeof(what), "row group %u column %u", g, c);
+            SKENE_RETURN_IF_ERROR(parse_statistics_blob(
+                blob, declared, what, &out->statistics[g][c].statistics,
+                &out->statistics[g][c].sketch));
             out->statistics[g][c].present = true;
         }
     }
@@ -1382,6 +1427,7 @@ Status fill_metadata(const ParsedColumn& parsed,
     out->value_order     = static_cast<ValueOrder>(head.value_order);
     out->has_statistics  = parsed.has_statistics;
     out->statistics      = parsed.statistics;
+    out->sketch          = parsed.sketch;
 
     // Extent covering this column AND its descendants, so a caller can fetch a
     // whole column subtree with one range request.

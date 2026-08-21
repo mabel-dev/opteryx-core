@@ -63,6 +63,24 @@ def test_decide_swap_prefers_smaller_ndv():
     assert _decide_swap(200, 200, 50, 150, None, None) is False
 
 
+def test_decide_swap_ndv_may_not_overturn_row_counts():
+    # Regression: TPC-H Q18/Q10 at SF100. Inside the 3x band, Rule 3 used to
+    # decide on NDV alone and would move the far larger relation onto the build
+    # (left) leg when its join-key NDV estimate came out smaller — which the
+    # range-derived NDV fallback routinely gets wrong by multiples. The
+    # cardinality preference may break a row-count near-tie, never overturn it.
+    # Q18's numbers, in millions of rows / distinct orderkeys:
+    assert _decide_swap(286, 600, 53, 37, None, None) is False
+    # The MIRROR is deliberately NOT guarded: Rule 3 declining a swap can still
+    # leave the larger side on the build leg. Closing that measured net negative
+    # at SF100 (Q10 1.7s -> 3.1s, Q09 4.2s -> 5.3s) -- see _decide_swap. This
+    # asserts today's behaviour so a future change to it is a visible decision.
+    assert _decide_swap(600, 286, 37, 53, None, None) is False
+    # Rule 1 (>3x) is decided before any NDV is read and is unaffected.
+    assert _decide_swap(100, 600, 53, 37, None, None) is False
+    assert _decide_swap(600, 100, 37, 53, None, None) is True
+
+
 def test_decide_swap_null_fraction_breaks_cardinality_tie():
     # Equal NDV (within 1%): smaller effective (null-discounted) rows on the left.
     # Left has a heavy null key -> fewer effective rows -> should NOT swap.
@@ -83,7 +101,7 @@ def _scan_with_stats(relation, row_count):
     n.all_relations = {relation}
     n.columns = []
     n.statistics = RelationStatistics(
-        row_count=row_count,
+        row_count_estimate=row_count,
         columns={
             _K: ColumnStatistics(column_name="k", data_type="INTEGER")
         },
@@ -145,7 +163,7 @@ def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
     right_scan = _scan_with_stats("small", row_count=1000)
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
-    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry())
+    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan)
     context.node_id = "j"
 
@@ -166,7 +184,7 @@ def test_visit_swaps_when_statistics_show_left_is_larger():
     right_scan = _scan_with_stats("small", row_count=100)
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
-    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry())
+    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan)
     context.node_id = "j"
 
@@ -191,7 +209,7 @@ def test_visit_falls_back_to_pre_filter_size_without_statistics():
     right_scan.columns = []
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
-    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry())
+    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan)
     context.node_id = "j"
 

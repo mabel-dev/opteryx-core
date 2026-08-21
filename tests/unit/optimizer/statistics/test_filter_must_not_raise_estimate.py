@@ -39,7 +39,7 @@ OTHER_KEY = b"tes_grp_SasR64jX"
 
 def _relation(rows, ndv, lower=None, upper=None, base=None, key=KEY):
     return RelationStatistics(
-        row_count=rows,
+        row_count_estimate=rows,
         columns={
             key: ColumnStatistics(
                 column_name="grp_wide",
@@ -111,7 +111,7 @@ def _exit_estimate(sql):
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
 
     parsed = sqloxide.parse_sql(do_sql_rewrite(sql), _dialect="opteryx")

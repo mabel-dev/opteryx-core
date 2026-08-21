@@ -476,7 +476,30 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
 
         # Create Manifest with files and schema.
         #
-        # bounds_are_ordinal: the catalog's stats builder stores min/max as
+        # bounds_are_ordinal is asked of the DATASET, never assumed here. This
+        # connector serves every metastore opteryx-catalog's `Dataset` interface
+        # covers -- the native catalog (ordinal keys) and external catalogs such
+        # as opteryx-iceberg (real decoded values, `from_bytes` off the Iceberg
+        # manifest) -- and the encoding travels with whoever produced the bounds.
+        # Hardcoding True here read an Iceberg VARCHAR's real `str` bound as an
+        # ordinal int64: `SELECT * ... WHERE <int col> ... ORDER BY ... LIMIT n`
+        # raised "'<' not supported between instances of 'str' and 'int'" out of
+        # the unguarded max/min in the planner's _narrow_filter_columns, and --
+        # worse, because it was silent -- `WHERE <double col> >= 250.0` pruned
+        # every file and returned ZERO rows.
+        #
+        # A dataset that declares nothing is an ERROR, not a defaulting case:
+        # True and False are each silently wrong for one of the two producers.
+        bounds_are_ordinal = getattr(self.table, "bounds_are_ordinal", None)
+        if bounds_are_ordinal is None:
+            raise DatasetReadError(
+                f"{type(self.table).__name__} does not declare `bounds_are_ordinal`, so the "
+                "encoding of its manifest min/max bounds is unknown. Implementations of "
+                "opteryx-catalog's `Dataset` must set it (True for Vector.ordinalize() keys, "
+                "False for real decoded values); guessing either way silently corrupts pruning."
+            )
+        #
+        # For the native catalog (True) the stats builder stores min/max as
         # `Vector.ordinalize()` keys, not real values (see the catalog's
         # _compute_column_stats). For most types that key IS the value — an
         # identity widen for signed ints, and for DATE/TIMESTAMP/TIME the raw
@@ -495,7 +518,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             min_k_vector=sketch_vectors.get("min_k_hashes"),
             histogram_vector=sketch_vectors.get("histogram_counts"),
             char_class_vector=sketch_vectors.get("char_class_counts"),
-            bounds_are_ordinal=True,
+            bounds_are_ordinal=bounds_are_ordinal,
         )
 
         return self.schema, self.manifest

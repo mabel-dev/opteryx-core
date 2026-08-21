@@ -48,7 +48,7 @@ def _build_optimized_and_refreshed_plan_with_telemetry(sql):
     from opteryx.planner.sql_rewriter import do_sql_rewrite
     from opteryx.third_party import sqloxide
 
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     query_id = str(uuid.uuid4())
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
 
@@ -86,7 +86,7 @@ def test_omitting_telemetry_does_not_change_the_computed_statistics():
     from opteryx.third_party import sqloxide
 
     sql = "SELECT n_name FROM testdata.tpch_001.nation WHERE n_name = 'BRAZIL'"
-    telemetry = QueryTelemetry()
+    telemetry = QueryTelemetry.detached()
     ctx = ExecutionContext(access_policies=[{"pattern": "testdata.*", "role": "reader"}])
     clean = do_sql_rewrite(sql)
     parsed = sqloxide.parse_sql(clean, _dialect="opteryx")

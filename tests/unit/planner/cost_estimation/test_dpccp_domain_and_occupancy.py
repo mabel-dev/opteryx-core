@@ -19,9 +19,18 @@ from opteryx.planner.cost_estimation import JoinGraph
 from opteryx.planner.cost_estimation import JoinTreeLeaf
 from opteryx.planner.cost_estimation import JoinVertex
 from opteryx.planner.cost_estimation import KeyStats
+from opteryx.planner.cost_estimation import NdvProvenance
 from opteryx.planner.cost_estimation import dpccp
 from opteryx.planner.cost_estimation.dpccp import _combine
 from opteryx.planner.cost_estimation.plan_adapter import _build_equiv_tdoms
+
+
+def _ks(ndv):
+    """A KeyStats with a MEASURED NDV -- these tests exercise the arithmetic,
+    not the domain-size stand-in path."""
+    if ndv is None:
+        return KeyStats(ndv=None, null_fraction=0.0)
+    return KeyStats(ndv=ndv, null_fraction=0.0, ndv_provenance=NdvProvenance.MEASURED)
 
 
 def _leaf(vertex_id, rows, domain_rows=None):
@@ -32,7 +41,7 @@ def _edge(left, right, ndv, class_id):
     return JoinEdge(
         left=left,
         right=right,
-        equi_keys=((KeyStats(ndv=ndv, null_fraction=0.0), KeyStats(ndv=ndv, null_fraction=0.0)),),
+        equi_keys=((_ks(ndv), _ks(ndv)),),
         class_id=class_id,
     )
 
@@ -84,7 +93,7 @@ def test_unknown_ndv_disables_the_bound_rather_than_inventing_one():
     unknown = JoinEdge(
         left=0,
         right=1,
-        equi_keys=((KeyStats(ndv=None, null_fraction=0.0), KeyStats(ndv=None, null_fraction=0.0)),),
+        equi_keys=((_ks(None), _ks(None)),),
         class_id=1,
     )
 

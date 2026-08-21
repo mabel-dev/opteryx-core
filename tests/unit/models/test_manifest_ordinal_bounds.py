@@ -89,7 +89,7 @@ def test_int_ordinal_bounds_prune_out_of_range_value():
     entry = _file_entry(INT64.ordinalize(10), INT64.ordinalize(20))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_comparison("value", "Gt", 100)])
+    manifest = manifest.prune_files([_comparison("value", "Gt", 100)])
 
     assert manifest.files == []
 
@@ -99,7 +99,7 @@ def test_int_ordinal_bounds_keep_in_range_value():
     entry = _file_entry(INT64.ordinalize(10), INT64.ordinalize(20))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_comparison("value", "Gt", 5)])
+    manifest = manifest.prune_files([_comparison("value", "Gt", 5)])
 
     assert len(manifest.files) == 1
 
@@ -121,8 +121,8 @@ def test_int_ordinal_bounds_match_real_value_bounds_behaviour():
             bounds_are_ordinal=False,
         )
 
-        ordinal_manifest.prune_files([_comparison("value", op, literal)])
-        real_manifest.prune_files([_comparison("value", op, literal)])
+        ordinal_manifest = ordinal_manifest.prune_files([_comparison("value", op, literal)])
+        real_manifest = real_manifest.prune_files([_comparison("value", op, literal)])
 
         assert (ordinal_manifest.files == []) == (real_manifest.files == []), (op, literal)
 
@@ -132,7 +132,7 @@ def test_int_ordinal_bounds_between_prunes_out_of_range():
     entry = _file_entry(INT64.ordinalize(10), INT64.ordinalize(20))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_between("value", 100, 200)])
+    manifest = manifest.prune_files([_between("value", 100, 200)])
 
     assert manifest.files == []
 
@@ -156,7 +156,7 @@ def test_float_ordinal_bounds_prune_out_of_range_value():
 
     # 100.0 is well outside [10.0, 20.0] — must prune despite the bounds being
     # stored as unrelated-looking ordinal integers.
-    manifest.prune_files([_comparison("value", "Gt", 100.0)])
+    manifest = manifest.prune_files([_comparison("value", "Gt", 100.0)])
 
     assert manifest.files == []
 
@@ -166,7 +166,7 @@ def test_float_ordinal_bounds_keep_in_range_value():
     entry = _file_entry(FLOAT64.ordinalize(10.0), FLOAT64.ordinalize(20.0))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_comparison("value", "Eq", 15.5)])
+    manifest = manifest.prune_files([_comparison("value", "Eq", 15.5)])
 
     assert len(manifest.files) == 1
 
@@ -179,7 +179,7 @@ def test_float_ordinal_bounds_prune_negative_values_correctly():
     entry = _file_entry(FLOAT64.ordinalize(-5.0), FLOAT64.ordinalize(5.0))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_comparison("value", "Lt", -100.0)])
+    manifest = manifest.prune_files([_comparison("value", "Lt", -100.0)])
 
     assert manifest.files == []
 
@@ -189,7 +189,7 @@ def test_float_ordinal_bounds_between_keeps_overlapping_range():
     entry = _file_entry(FLOAT64.ordinalize(10.0), FLOAT64.ordinalize(20.0))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_between("value", 15.0, 16.0)])
+    manifest = manifest.prune_files([_between("value", 15.0, 16.0)])
 
     assert len(manifest.files) == 1
 
@@ -199,7 +199,7 @@ def test_float_ordinal_bounds_between_prunes_disjoint_range():
     entry = _file_entry(FLOAT64.ordinalize(10.0), FLOAT64.ordinalize(20.0))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_between("value", 1000.0, 2000.0)])
+    manifest = manifest.prune_files([_between("value", 1000.0, 2000.0)])
 
     assert manifest.files == []
 
@@ -220,7 +220,7 @@ def test_varchar_ordinal_bounds_prune_out_of_range_value():
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
     # "apple" sorts before "banana" — out of [banana, cherry] range.
-    manifest.prune_files([_comparison("value", "Eq", "apple")])
+    manifest = manifest.prune_files([_comparison("value", "Eq", "apple")])
 
     assert manifest.files == []
 
@@ -230,7 +230,7 @@ def test_varchar_ordinal_bounds_keep_in_range_value():
     entry = _file_entry(VARCHAR.ordinalize("banana"), VARCHAR.ordinalize("cherry"))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_comparison("value", "Eq", "banana")])
+    manifest = manifest.prune_files([_comparison("value", "Eq", "banana")])
 
     assert len(manifest.files) == 1
 
@@ -240,7 +240,7 @@ def test_varchar_ordinal_bounds_between_prunes_disjoint_range():
     entry = _file_entry(VARCHAR.ordinalize("banana"), VARCHAR.ordinalize("cherry"))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_between("value", "xylophone", "zebra")])
+    manifest = manifest.prune_files([_between("value", "xylophone", "zebra")])
 
     assert manifest.files == []
 
@@ -250,7 +250,7 @@ def test_varchar_ordinal_bounds_gt_prunes_correctly():
     entry = _file_entry(VARCHAR.ordinalize("banana"), VARCHAR.ordinalize("cherry"))
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
-    manifest.prune_files([_comparison("value", "Gt", "zebra")])
+    manifest = manifest.prune_files([_comparison("value", "Gt", "zebra")])
 
     assert manifest.files == []
 
@@ -285,7 +285,7 @@ def test_real_value_bounds_still_compare_literal_directly_for_float():
     # 15.0 is well within the REAL range [10.0, 20.0], but the stored bounds
     # are huge ordinal integers — a direct (non-ordinalized) comparison finds
     # 15.0 far below both bounds and prunes the file.
-    manifest.prune_files([_comparison("value", "Lt", 15.0)])
+    manifest = manifest.prune_files([_comparison("value", "Lt", 15.0)])
 
     assert manifest.files == [], "literal must not have been ordinalized"
 
@@ -297,11 +297,11 @@ def test_real_value_bounds_pruning_matches_pre_existing_behaviour():
     entry = _file_entry(10, 20)
     manifest = Manifest(files=[entry], schema=schema)  # bounds_are_ordinal defaults False
 
-    manifest.prune_files([_comparison("value", "Gt", 25)])
+    manifest = manifest.prune_files([_comparison("value", "Gt", 25)])
     assert manifest.files == []
 
     manifest = Manifest(files=[_file_entry(10, 20)], schema=schema)
-    manifest.prune_files([_comparison("value", "Gt", 5)])
+    manifest = manifest.prune_files([_comparison("value", "Gt", 5)])
     assert len(manifest.files) == 1
 
 
@@ -317,7 +317,7 @@ def test_real_value_varchar_bounds_unaffected():
     )
     manifest = Manifest(files=[entry], schema=schema)
 
-    manifest.prune_files([_comparison("value", "Eq", "apple")])
+    manifest = manifest.prune_files([_comparison("value", "Eq", "apple")])
 
     assert manifest.files == []
 
@@ -333,7 +333,7 @@ def test_unsupported_ordinalize_type_skips_pruning_without_crashing():
     manifest = Manifest(files=[entry], schema=schema, bounds_are_ordinal=True)
 
     predicate = _comparison("value", "Gt", datetime.datetime(2099, 1, 1))
-    manifest.prune_files([predicate])
+    manifest = manifest.prune_files([predicate])
 
     # Can't safely ordinalize a TIMESTAMP literal at this entry point — the
     # predicate is skipped (file kept), not used to wrongly prune or crash.

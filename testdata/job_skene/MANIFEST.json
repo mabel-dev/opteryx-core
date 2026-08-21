@@ -1,0 +1,8 @@
+{
+  "codec": "lz4",
+  "generator": "libskene 0.2.0 / parquet_to_skene (format v2)",
+  "listing_sha256": "8c28ebadfded22defc57e7fa34ed43bf23e4b04d8d52ad297d33180bab746134",
+  "name": "job_skene",
+  "object_count": 33,
+  "total_bytes": 1942334858
+}
