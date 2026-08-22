@@ -164,6 +164,10 @@ if __name__ == "__main__":  # pragma: no cover
     import subprocess
     import time
 
+    # Shared with the JOB/TPC-H runners so one analysis tool reads every history.
+    sys.path.insert(1, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+    from _common import open_results_csv
+
     parser = argparse.ArgumentParser(description="ClickBench Performance Test")
     parser.add_argument(
         "--iterations",
@@ -326,6 +330,39 @@ if __name__ == "__main__":  # pragma: no cover
     timings: dict = {index: [] for index in range(len(STATEMENTS))}
     dead: set = set()
 
+    # Per-run history, one file per invocation, named <sha>-<utc>.csv — the same
+    # convention and (minus row_count, which this battery does not collect) the
+    # same columns as tests/performance/job/results, so the two histories can be
+    # diffed by the same script.
+    #
+    # Split by DATASET, not pooled: the parquet and skene batteries are the same
+    # queries over different storage, and their totals differ by enough that one
+    # pooled directory would invite comparing a run of one against a run of the
+    # other. Two directories make that mistake impossible rather than merely
+    # discouraged.
+    csv_writer, csv_path, csv_handle = open_results_csv(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", DATASET.name),
+        fieldnames=["query", "run", "status", "elapsed_ms", "duckdb_min_ms", "error"],
+    )
+
+    def record(query_num: str, run_ix: int, status: str, elapsed_ms: float, index: int, error: str) -> None:
+        """Append one measured run. Flushed per row so an interrupted or crashed
+        battery still leaves the rounds it did complete on disk."""
+        duckdb_ms = ""
+        if duckdb_results and index < len(duckdb_results):
+            duckdb_ms = f"{duckdb_results[index] * 1000:.3f}"
+        csv_writer.writerow(
+            {
+                "query": query_num,
+                "run": run_ix,
+                "status": status,
+                "elapsed_ms": f"{elapsed_ms:.3f}",
+                "duckdb_min_ms": duckdb_ms,
+                "error": error,
+            }
+        )
+        csv_handle.flush()
+
     for round_no in range(args.iterations):
         round_start = time.monotonic_ns()
         for index, (statement, _err) in enumerate(STATEMENTS):
@@ -342,7 +379,9 @@ if __name__ == "__main__":  # pragma: no cover
                 start = time.monotonic_ns()
                 for _ in session.execute_to_morsels(statement):
                     pass
-                timings[index].append((time.monotonic_ns() - start) / 1e6)
+                elapsed_ms = (time.monotonic_ns() - start) / 1e6
+                timings[index].append(elapsed_ms)
+                record(query_num, round_no + 1, "ok", elapsed_ms, index, "")
             except Exception as error:
                 # A query that cannot run is a failure with its error attached,
                 # never a skip and never a fast time. Drop it from later rounds
@@ -351,6 +390,14 @@ if __name__ == "__main__":  # pragma: no cover
                 timings[index] = []
                 failures.append((statement, error))
                 failed += 1
+                record(
+                    query_num,
+                    round_no + 1,
+                    "error",
+                    (time.monotonic_ns() - start) / 1e6,
+                    index,
+                    f"{type(error).__name__}: {error}",
+                )
                 print(f"  {query_num} FAILED (round {round_no + 1}): {type(error).__name__}: {str(error)[:70]}")
             finally:
                 session.close()
@@ -359,7 +406,10 @@ if __name__ == "__main__":  # pragma: no cover
             f"({(time.monotonic_ns() - round_start) / 1e9:.2f}s)"
         )
 
+    csv_handle.close()
+
     print()
+    print(f"History: {os.path.relpath(csv_path, repo_root)}\n")
     header = f"{'Query':<7} {'Min':>11} {'Median':>11} {'Max':>11} {'Spread':>9}  {'Rounds':<8}"
     if duckdb_results:
         header += " vs DuckDB"
