@@ -44,8 +44,9 @@ from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from .aggregate_catalog import _GLOBAL_SUPPORTED
 from .aggregate_catalog import _GROUPED_SUPPORTED
 
-# The dedicated Window operator's functions: ranking (ROW_NUMBER/RANK/
-# DENSE_RANK) and navigation (LAG/LEAD). The set is closed and small: the
+# The dedicated Window operator's functions: ranking (ROW_NUMBER/RANK/DENSE_RANK/
+# NTILE/PERCENT_RANK/CUME_DIST), navigation (LAG/LEAD) and value (FIRST_VALUE/
+# LAST_VALUE/NTH_VALUE). The set is closed and small: the
 # window-function registry (opteryx/operators/window/helpers.py) — which
 # WindowNode's `_KIND_CODES` and the planner's routing both derive from — holds
 # exactly these, and anything else is refused. export_window_catalog() fails
@@ -62,7 +63,8 @@ from .aggregate_catalog import _GROUPED_SUPPORTED
 #
 # Entries may carry optional `category` (default "ranking"), `sql_forms`,
 # `parameters` (default none) and `returns` (default "INTEGER") overrides —
-# the navigation functions differ from the ranking three on all four.
+# the navigation and value functions differ from the argument-less ranking ones
+# on all four, and PERCENT_RANK/CUME_DIST override `returns` alone.
 _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
     "ROW_NUMBER": {
         "friendly_name": "Row Number",
@@ -150,6 +152,146 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
             {"label": "expr", "type": "any"},
             {"label": "offset", "type": "integer", "constant_only": True,
              "optional": True, "minimum": 0},
+        ],
+        "returns": "same as `expr`",
+    },
+    "NTILE": {
+        "friendly_name": "N-Tile",
+        "category": "ranking",
+        "summary": "Divides each window partition into `buckets` contiguous groups in the window's ORDER BY order, numbered 1..buckets.",
+        "documentation": (
+            "NTILE(buckets) splits a partition of n rows into `buckets` groups as "
+            "evenly as n divides: the first (n mod buckets) groups take one row more "
+            "than the rest, and every group is contiguous in the ORDER BY order. When "
+            "buckets is GREATER than n the first n buckets take one row each and the "
+            "remainder are empty - no row is ever given a bucket number above n, so a "
+            "10-bucket decile over 3 rows yields 1, 2, 3 and not 1, 4, 8. The bucket "
+            "count must be an integer literal of 1 or more; it cannot be a column, "
+            "because the bucket sizes depend on it before any row is read. Rows that "
+            "tie on the ORDER BY key are NOT kept together - tied rows sit in an "
+            "unspecified order and can fall either side of a bucket boundary - so the "
+            "result is only reproducible when the ORDER BY is a total order over the "
+            "partition."
+        ),
+        "deterministic": False,
+        "sql_forms": [
+            "NTILE(buckets) OVER (ORDER BY expr [ASC|DESC] [, ...])",
+            "NTILE(buckets) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+        ],
+        "parameters": [
+            {"label": "buckets", "type": "integer", "constant_only": True, "minimum": 1},
+        ],
+        "returns": "INTEGER",
+    },
+    "PERCENT_RANK": {
+        "friendly_name": "Percent Rank",
+        "category": "ranking",
+        "summary": "The row's RANK expressed as a fraction of the partition, from 0 for the first row to 1 for the last.",
+        "documentation": (
+            "(RANK - 1) / (partition rows - 1). The first row of every partition is 0 "
+            "and the last is 1, so the value spans the CLOSED interval [0, 1] - unlike "
+            "CUME_DIST, which is never 0. A partition of ONE row has no spread to be a "
+            "fraction of and the result is 0, not a division by zero. Rows equal on the "
+            "ORDER BY key share a RANK and therefore share a percent rank, so the answer "
+            "does not depend on the order tied rows arrive in."
+        ),
+        "deterministic": True,
+        "returns": "FLOAT",
+    },
+    "CUME_DIST": {
+        "friendly_name": "Cumulative Distribution",
+        "category": "ranking",
+        "summary": "The proportion of the partition at or before the current row in the window's ORDER BY order, counting all of its tied peers.",
+        "documentation": (
+            "The number of rows up to and including the current row's LAST TIED PEER, "
+            "divided by the number of rows in the partition. The value spans the "
+            "HALF-OPEN interval (0, 1]: the last row is always 1, and no row is ever 0 "
+            "because every row counts itself - which is the difference from "
+            "PERCENT_RANK. Rows equal on the ORDER BY key all take the value of their "
+            "group's last member, so the answer does not depend on the order tied rows "
+            "arrive in."
+        ),
+        "deterministic": True,
+        "returns": "FLOAT",
+    },
+    "FIRST_VALUE": {
+        "friendly_name": "First Value",
+        "category": "value",
+        "summary": "The argument's value from the FIRST row of the partition, in the window's ORDER BY order.",
+        "documentation": (
+            "FIRST_VALUE(expr) evaluates `expr` on the partition's first row and repeats "
+            "it on every row of that partition. The result's type is the ARGUMENT's "
+            "type. IGNORE NULLS / RESPECT NULLS is not supported - it changes WHICH row "
+            "is read, so it is refused rather than accepted and ignored; a NULL first "
+            "row yields NULL. Computed over the WHOLE ordered partition: this engine "
+            "rejects a frame clause on the window functions, so the standard's default "
+            "frame (RANGE UNBOUNDED PRECEDING AND CURRENT ROW) has no spelling here. For "
+            "FIRST_VALUE the two readings agree. Rows that tie on the ORDER BY key sit "
+            "in an unspecified order, so over a non-total ORDER BY which row is first - "
+            "and therefore the answer - is not deterministic."
+        ),
+        "deterministic": False,
+        "sql_forms": [
+            "FIRST_VALUE(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
+            "FIRST_VALUE(expr) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+        ],
+        "parameters": [{"label": "expr", "type": "any"}],
+        "returns": "same as `expr`",
+    },
+    "LAST_VALUE": {
+        "friendly_name": "Last Value",
+        "category": "value",
+        "summary": "The argument's value from the LAST row of the partition, in the window's ORDER BY order.",
+        "documentation": (
+            "LAST_VALUE(expr) evaluates `expr` on the partition's last row and repeats it "
+            "on every row of that partition. The result's type is the ARGUMENT's type. "
+            "IGNORE NULLS / RESPECT NULLS is not supported - it changes WHICH row is "
+            "read, so it is refused rather than accepted and ignored; a NULL last row "
+            "yields NULL. IMPORTANT - this is the WHOLE-PARTITION reading, which "
+            "DIFFERS from the SQL standard's default frame: under RANGE UNBOUNDED "
+            "PRECEDING AND CURRENT ROW, LAST_VALUE returns the CURRENT row's last tied "
+            "peer rather than the partition's last row, which is why LAST_VALUE is a "
+            "well-known footgun elsewhere. This engine rejects a frame clause on the "
+            "window functions, so that frame-relative reading has no spelling here and "
+            "the whole-partition reading - what ROWS BETWEEN UNBOUNDED PRECEDING AND "
+            "UNBOUNDED FOLLOWING means, and what callers almost always intend - is the "
+            "only one. Rows that tie on the ORDER BY key sit in an unspecified order, so "
+            "over a non-total ORDER BY which row is last - and therefore the answer - is "
+            "not deterministic."
+        ),
+        "deterministic": False,
+        "sql_forms": [
+            "LAST_VALUE(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
+            "LAST_VALUE(expr) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+        ],
+        "parameters": [{"label": "expr", "type": "any"}],
+        "returns": "same as `expr`",
+    },
+    "NTH_VALUE": {
+        "friendly_name": "Nth Value",
+        "category": "value",
+        "summary": "The argument's value from the nth row of the partition (1-based), in the window's ORDER BY order.",
+        "documentation": (
+            "NTH_VALUE(expr, n) evaluates `expr` on the partition's nth row - counting "
+            "from 1 - and repeats it on every row of that partition. A partition with "
+            "FEWER THAN n rows yields NULL for all of them. The position must be an "
+            "integer literal of 1 or more; it cannot be a column, because the row it "
+            "selects must be known before any row is read. The result's type is the "
+            "ARGUMENT's type. IGNORE NULLS / RESPECT NULLS is not supported, and neither "
+            "is FROM FIRST / FROM LAST - counting is always from the first row. Computed "
+            "over the WHOLE ordered partition, which DIFFERS from the SQL standard's "
+            "default frame - see LAST_VALUE for why. Rows that tie on the ORDER BY key "
+            "sit in an unspecified order, so over a non-total ORDER BY which row is nth - "
+            "and therefore the answer - is not deterministic."
+        ),
+        "deterministic": False,
+        "sql_forms": [
+            "NTH_VALUE(expr, n) OVER (ORDER BY expr [ASC|DESC] [, ...])",
+            "NTH_VALUE(expr, n) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+        ],
+        "parameters": [
+            {"label": "expr", "type": "any"},
+            {"label": "n", "type": "integer", "constant_only": True, "minimum": 1},
         ],
         "returns": "same as `expr`",
     },

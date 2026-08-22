@@ -14,6 +14,7 @@ from opteryx.planner.binder.join_helpers import (
     convert_using_to_on,
     extract_join_fields,
     get_mismatched_condition_column_types,
+    reject_unhoistable_join_operands,
 )
 from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import RelationSchema
@@ -158,9 +159,16 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             )
         if node.on:
             node.on, context = inner_binder(node.on, context)
-            node.left_columns, node.right_columns = extract_join_fields(
+            node.left_columns, node.right_columns, unkeyed = extract_join_fields(
                 node.on, node.left_relation_names, node.right_relation_names
             )
+            # ASOF's ON is a partition key the engine reads directly; nothing
+            # rewrites it later, so an expression operand here is rejected outright
+            # rather than deferred to JoinKeyMaterializationStrategy.
+            if unkeyed:
+                raise UnsupportedSyntaxError(
+                    "ASOF **JOIN** partition keys must be columns, not expressions."
+                )
             node.columns += list(get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,)))
 
         node.schemas = context.schemas
@@ -246,8 +254,15 @@ def visit_join(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             if left_sources:
                 node.left_relation_names = list(left_sources)
 
-        node.left_columns, node.right_columns = extract_join_fields(
+        node.left_columns, node.right_columns, unkeyed = extract_join_fields(
             node.on, node.left_relation_names, node.right_relation_names
+        )
+        # An Eq conjunct with an expression operand is not a key YET. Reject only
+        # the ones no projection can rescue; the rest are turned into real keys by
+        # JoinKeyMaterializationStrategy, which shares this decision (see
+        # join_helpers.hoistable_operand_leg) so the two cannot drift apart.
+        reject_unhoistable_join_operands(
+            unkeyed, node.left_relation_names, node.right_relation_names
         )
         mismatches = get_mismatched_condition_column_types(
             node.on,

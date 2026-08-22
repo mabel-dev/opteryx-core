@@ -24,6 +24,12 @@ WINDOW_FUNCTIONS: dict[str, int] = {
     "DENSE_RANK": 2,
     "LAG": 3,
     "LEAD": 4,
+    "NTILE": 5,
+    "PERCENT_RANK": 6,
+    "CUME_DIST": 7,
+    "FIRST_VALUE": 8,
+    "LAST_VALUE": 9,
+    "NTH_VALUE": 10,
 }
 
 # The rank-valued subset: outputs that ARE a rank over the window's ORDER BY,
@@ -31,12 +37,51 @@ WINDOW_FUNCTIONS: dict[str, int] = {
 # fusable (WindowTopKFusionStrategy). LAG/LEAD outputs are VALUES from another
 # row — `LAG(x) <= K` is an ordinary filter, and fusing it as a top-K would be
 # a silent wrong answer.
+#
+# NTILE is deliberately NOT here. Its output is monotonic in the rank, so
+# `NTILE(k) <= b` does describe a prefix — but the prefix LENGTH depends on the
+# PARTITION SIZE, which a top-K rewrite does not know, so there is no constant K
+# to fuse. PERCENT_RANK/CUME_DIST are excluded for the same reason plus a second:
+# their outputs are fractions, not row counts.
 RANK_VALUED: frozenset = frozenset({"ROW_NUMBER", "RANK", "DENSE_RANK"})
 
-# Navigation functions: evaluate their argument expression on a row at a fixed
-# offset within the partition (in the window's ORDER BY order). They take
-# arguments; the ranking functions take none.
+# Navigation functions: evaluate their argument expression on a row at a RELATIVE
+# offset from the current row (in the window's ORDER BY order).
 NAVIGATION_FUNCTIONS: frozenset = frozenset({"LAG", "LEAD"})
+
+# Value functions: evaluate their argument expression on a row at a position
+# ANCHORED TO THE PARTITION rather than relative to the current row.
+#
+# These are computed over the WHOLE ordered partition, which for LAST_VALUE and
+# NTH_VALUE is a DELIBERATE DIVERGENCE from the SQL standard's default frame
+# (RANGE UNBOUNDED PRECEDING AND CURRENT ROW, under which LAST_VALUE returns the
+# current row's last peer rather than the partition's last row). This engine
+# REJECTS a frame clause on every function in WINDOW_FUNCTIONS, so the
+# standard's frame-relative reading has no spelling here and the
+# whole-partition reading is the only coherent one — it is also what
+# `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` means, which is
+# what callers writing LAST_VALUE almost always intend. Documented in
+# reference/windows.json rather than left to be discovered.
+VALUE_FUNCTIONS: frozenset = frozenset({"FIRST_VALUE", "LAST_VALUE", "NTH_VALUE"})
+
+# Every function whose output is a VALUE gathered from another row, and whose
+# output type is therefore its ARGUMENT's type rather than a fixed type. The
+# sink computes all of them through one path (a per-row source row id, then the
+# canonical row gather), so this — not NAVIGATION_FUNCTIONS — is the set the
+# binder and the compiler discriminate on.
+GATHERED_FUNCTIONS: frozenset = NAVIGATION_FUNCTIONS | VALUE_FUNCTIONS
+
+# The functions whose output is a FRACTION, not a count: FLOAT64, where every
+# other non-gathered window output is INT64.
+FLOAT_VALUED: frozenset = frozenset({"PERCENT_RANK", "CUME_DIST"})
+
+# Functions taking a trailing constant-only integer that is NOT a row offset:
+# NTILE's bucket count and NTH_VALUE's 1-based position. Both must be >= 1 (a
+# zero bucket count has no meaning, and positions are 1-based), unlike LAG/LEAD's
+# offset which may be 0. They travel in the same `offset` slot through the plan
+# and into WindowFnSpec — one constant-integer parameter per function — so the
+# minimum is the only thing that differs.
+POSITIVE_INT_PARAM: frozenset = frozenset({"NTILE", "NTH_VALUE"})
 
 # name -> engine kind code (must match WinAggFn in src/cpp/engine/native_window_frame.hpp).
 # A SEPARATE registry from WINDOW_FUNCTIONS above, deliberately: a framed aggregate

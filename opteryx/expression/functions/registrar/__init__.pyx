@@ -366,19 +366,6 @@ def _check_blend_compatible(branches, func_name):
     )
 
 
-def _datepart_return_type(arg_nodes):
-    """EXTRACT/DATEPART return type depends on the part name literal."""
-    part_val = getattr(arg_nodes[0], "value", None) if arg_nodes else None
-    if part_val is None:
-        return _CT_INT64
-    part = str(part_val).lower()
-    if part in ("epoch", "julian"):
-        return _CT_FLOAT64
-    if part == "date":
-        return _CT_DATE
-    return _CT_INT64
-
-
 # ---------------------------------------------------------------------------
 # Consolidated leaf includes.
 #
@@ -426,7 +413,6 @@ def get_builtin_functions() -> list[FunctionDefinition]:
 # Re-export helpers for domain modules to use
 __all__ = [
     "_coalesce_return_type",
-    "_datepart_return_type",
     "_iterate_double_parameter",
     "_iterate_double_parameter_swapped",
     "_iterate_single_parameter",

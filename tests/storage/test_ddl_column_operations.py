@@ -767,6 +767,9 @@ class _RecordingCapability:
     def can_principal_perform_action(self, principal, resource, action):
         return True
 
+    def can_principal_own_materialized_view(self, principal):
+        return True
+
     def grants(self, identity, policies):
         return []
 

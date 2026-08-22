@@ -19,28 +19,21 @@ intermediate materialization of the full cross product.
 
 from typing import Dict, List, Optional, Set, Tuple
 
-from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
-from opteryx.models import LogicalColumn, Node
+from opteryx.models import Node
 from opteryx.planner.binder.common import extract_join_fields
+from opteryx.planner.optimizer.strategies.join_key_materialization import (
+    materialize_operand_as_column,
+    split_and_conditions as _split_and_conditions,
+)
 from opteryx.planner.logical_planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext, OptimizationStrategy
-from opteryx.utils import random_string
 
 # Arithmetic operators an equi-join key is allowed to be hoisted through, e.g.
 # `a.x = b.y - 53` (TPC-DS Q02's `d_week_seq1 = d_week_seq2 - 53`). Restricted
 # to plain IDENTIFIER <op> LITERAL (or the mirror) -- a deterministic,
 # side-effect-free shape -- never a function call or a multi-column expression.
 _HOISTABLE_ARITH_OPS = {"Plus", "Minus", "Multiply", "Divide"}
-
-
-def _split_and_conditions(node: Optional[Node]) -> List[Node]:
-    """Recursively split AND nodes into a list of predicates."""
-    if node is None:
-        return []
-    if node.node_type != NodeType.AND:
-        return [node]
-    return _split_and_conditions(node.left) + _split_and_conditions(node.right)
 
 
 def _build_and_condition_tree(predicates: List[Node]) -> Optional[Node]:
@@ -147,56 +140,6 @@ def _affine_hoist_target(expr: Optional[Node], relations: List[str]) -> bool:
     return _get_table_from_identifier(ident) in relations
 
 
-def _passthrough_column(schema_column, source: Optional[str] = None) -> LogicalColumn:
-    """A bare IDENTIFIER referencing an already-computed column by identity.
-
-    `source` defaults to the column's own origin, but the caller may pin it
-    explicitly -- needed for a freshly materialised column, whose relation
-    membership is which SIDE of the join it was projected onto (one of that
-    side's `left_relation_names`/`right_relation_names` entries), not
-    anything `schema_column.origin` (an expression column has none) could
-    supply.
-    """
-    return LogicalColumn(
-        node_type=NodeType.IDENTIFIER,
-        source_column=schema_column.name,
-        source=source
-        if source is not None
-        else (schema_column.origin[0] if getattr(schema_column, "origin", None) else None),
-        schema_column=schema_column,
-    )
-
-
-def _materialize_operand_as_column(
-    plan: LogicalPlan, child_id: str, expr: Node, relation_names: List[str]
-) -> Optional[Node]:
-    """Insert a Project above `child_id` that emits everything it already
-    emits PLUS `expr` as a new column. Returns a passthrough IDENTIFIER
-    referencing that new column, or None if `child_id`'s output schema
-    isn't available (defensive -- leaves the plan untouched).
-
-    `expr` keeps the `schema_column` it was bound with -- no new identity is
-    minted here, so every downstream consumer keyed by that identity (join-key
-    extraction, statistics) resolves to the same column this projects.
-
-    The returned reference's `.source` is pinned to `relation_names[0]` --
-    any member of the join leg's own relation-name list is a valid match for
-    `extract_join_fields`'s `source in left/right_relation_names` check;
-    which specific member is irrelevant, only set membership is.
-    """
-    schema = getattr(plan[child_id], "schema", None)
-    columns = getattr(schema, "columns", None)
-    if not columns or not relation_names:
-        return None
-    project_columns: List[Node] = [_passthrough_column(col) for col in columns]
-    project_columns.append(expr)
-    project_node = LogicalPlanNode(node_type=LogicalPlanStepType.Project)
-    project_node.columns = project_columns
-    project_node.passthrough_columns = []
-    plan.insert_node_after(random_string(), project_node, child_id)
-    return _passthrough_column(expr.schema_column, source=relation_names[0])
-
-
 def _hoist_arithmetic_join_key(
     plan: LogicalPlan, join_id: str, join_node: LogicalPlanNode, pred: Node
 ) -> bool:
@@ -244,7 +187,7 @@ def _hoist_arithmetic_join_key(
         if target_child_id is None:
             return False
 
-        new_ref = _materialize_operand_as_column(plan, target_child_id, other, expr_relations)
+        new_ref = materialize_operand_as_column(plan, target_child_id, other, expr_relations)
         if new_ref is None:
             return False
         setattr(pred, other_attr, new_ref)
@@ -415,14 +358,17 @@ def _try_dissolve_cross_join_in_inner_join(
     new_left_rels = list(cross_left_rels | other_rels)
     new_right_rels = list(cross_right_rels)
 
-    try:
-        new_cross_l_cols, new_cross_r_cols = extract_join_fields(
-            left_on, list(cross_left_rels), list(other_rels)
-        )
-        new_outer_l_cols, new_outer_r_cols = extract_join_fields(
-            right_on, new_left_rels, new_right_rels
-        )
-    except UnsupportedSyntaxError:
+    new_cross_l_cols, new_cross_r_cols, cross_unkeyed = extract_join_fields(
+        left_on, list(cross_left_rels), list(other_rels)
+    )
+    new_outer_l_cols, new_outer_r_cols, outer_unkeyed = extract_join_fields(
+        right_on, new_left_rels, new_right_rels
+    )
+    if cross_unkeyed or outer_unkeyed:
+        # An operand that is an expression is not a key at this shape, so the
+        # restructure would produce a join the engine cannot run. Leave the plan
+        # alone; the conjunct classification above already proved every condition
+        # is an Eq, so nothing is silently dropped by declining.
         return False
 
     # All checks passed — rewire the graph.
@@ -582,7 +528,7 @@ class CrossJoinFilterPushdownStrategy(OptimizationStrategy):
                 on_condition = _build_and_condition_tree(join_preds)
                 join_node.type = "inner"
                 join_node.on = on_condition
-                join_node.left_columns, join_node.right_columns = extract_join_fields(
+                join_node.left_columns, join_node.right_columns, _unkeyed = extract_join_fields(
                     on_condition,
                     join_node.left_relation_names or [],
                     join_node.right_relation_names or [],

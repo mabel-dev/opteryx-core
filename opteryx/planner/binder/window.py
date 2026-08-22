@@ -4,7 +4,9 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Binder for ranking-window nodes (ROW_NUMBER / RANK / DENSE_RANK).
+Binder for ranking-window nodes (every function in WINDOW_FUNCTIONS:
+ROW_NUMBER / RANK / DENSE_RANK / NTILE / PERCENT_RANK / CUME_DIST /
+LAG / LEAD / FIRST_VALUE / LAST_VALUE / NTH_VALUE).
 
 A whole-partition aggregate window (`SUM(x) OVER (PARTITION BY p)`, no ORDER BY) is
 lowered to a join by the plan rewriter and never reaches the binder. A FRAMED
@@ -31,7 +33,10 @@ from typing import Tuple
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.binder import inner_binder
+from opteryx.operators.window.helpers import FLOAT_VALUED
+from opteryx.operators.window.helpers import GATHERED_FUNCTIONS
 from opteryx.planner.binder.binding_context import BindingContext
+from opteryx.types import logical_type as _plt
 from opteryx.types.schema import RelationSchema
 
 
@@ -50,23 +55,47 @@ def visit_window(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         bound_order.append((bound, ascending))
     node.order_by = bound_order
 
-    # `outputs` is a list of (kind, pre-minted SchemaColumn, params). Ranking
-    # functions carry no params and their pre-minted INT64 type is final.
-    # LAG/LEAD carry (argument expression[, offset literal]): the argument is
-    # bound here, and the output column TAKES THE ARGUMENT'S TYPE — the INT64 the
-    # planner minted is a placeholder, overwritten before the schema is
-    # registered so everything downstream sees the true type.
+    # `outputs` is a list of (kind, pre-minted SchemaColumn, params). What the
+    # params MEAN, and what the output's type is, both depend on the kind — the
+    # planner mints every one of them as INT64 because the true type is not always
+    # knowable before binding, so this is where each is settled:
+    #
+    #   ROW_NUMBER/RANK/DENSE_RANK/NTILE  no bound argument; INT64 is final.
+    #     NTILE's single param is its bucket COUNT — a constant validated by the
+    #     builder, carried in the offset slot, NEVER bound as an expression.
+    #   PERCENT_RANK/CUME_DIST            no params; the output is a FRACTION of
+    #     the partition, so the minted INT64 is corrected to FLOAT64 here.
+    #   LAG/LEAD/FIRST_VALUE/LAST_VALUE/NTH_VALUE
+    #     params[0] is an ARGUMENT EXPRESSION, bound here, and the output column
+    #     TAKES ITS TYPE. params[1], where present, is the constant offset
+    #     (LAG/LEAD) or 1-based position (NTH_VALUE).
+    #
+    # Every overwrite happens before the schema is registered below, so everything
+    # downstream sees the true type.
     bound_outputs = []
+    rebuilt_outputs = []
     for kind, sc, params in node.outputs:
         arg_node = None
         offset = 1
-        if params:
+        if kind in GATHERED_FUNCTIONS:
             arg_node, context = inner_binder(params[0], context)
             if len(params) > 1:
                 offset = int(params[1].value)
             sc.column_type = arg_node.schema_column.column_type
+        elif kind == "NTILE":
+            offset = int(params[0].value)
+        elif kind in FLOAT_VALUED:
+            sc.column_type = _plt.FLOAT64
         bound_outputs.append((kind, sc, arg_node, offset))
-    node.outputs = [(kind, sc, [a] if a is not None else []) for kind, sc, a, _ in bound_outputs]
+        # `outputs` is rebuilt with the argument expression REPLACED BY ITS BOUND
+        # form, and every other param left exactly as it was — the constants
+        # (LAG/LEAD's offset, NTILE's bucket count, NTH_VALUE's position) are not
+        # expressions to bind, and dropping them here would silently reset them to
+        # their defaults for anything that reads `outputs` after this point.
+        rebuilt_outputs.append(
+            (kind, sc, ([arg_node] + list(params[1:])) if arg_node is not None else list(params))
+        )
+    node.outputs = rebuilt_outputs
 
     # Register the outputs under a dedicated relation so the downstream
     # projection / join condition resolves, and hand the operator

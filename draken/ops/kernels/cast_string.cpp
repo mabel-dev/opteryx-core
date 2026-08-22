@@ -370,8 +370,12 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
         const auto* c = static_cast<const format_ctx*>(ctx);
         const bool use_fmt = c != nullptr && c->fmt_len > 0;
         std::vector<SqlToken> prog;
+        // `fmt` MUST outlive `prog` — see the identical note in
+        // draken_cast_string_to_timestamp (cast_temporal.cpp). SqlToken.lit points
+        // into this buffer and is dereferenced by the per-row parse below.
+        std::string fmt;
         if (use_fmt) {
-            const std::string fmt(format_ctx_fmt(c), static_cast<size_t>(c->fmt_len));
+            fmt.assign(format_ctx_fmt(c), static_cast<size_t>(c->fmt_len));
             size_t max_len = 0;
             const char* bad_run = nullptr;
             uint32_t bad_run_len = 0;

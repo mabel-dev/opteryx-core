@@ -55,17 +55,8 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "CURRENT_TIME",
                 "CURRENT_TIMESTAMP",
                 "NOW",
-                "TODAY",
                 "DATE",
                 "EXTRACT",
-                "YEAR",
-                "MONTH",
-                "DAY",
-                "HOUR",
-                "MINUTE",
-                "SECOND",
-                "WEEK",
-                "QUARTER",
                 "FORMAT_TIMESTAMP",
                 "FORMAT_DATE",
                 "TRUNC",
@@ -104,7 +95,6 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "UPPER",
                 "LOWER",
                 "TITLE",
-                "TITLECASE",
                 "INITCAP",
                 "TRIM",
                 "LTRIM",
@@ -122,7 +112,6 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
                 "LPAD",
                 "RPAD",
                 "ASCII",
-                "CHAR",
                 "CASE",
                 "GET_STRING",
                 "SOUNDEX",
@@ -206,6 +195,68 @@ _DOCUMENTATION_CATEGORIES = OrderedDict(
         ),
     ]
 )
+
+# _DOCUMENTATION_CATEGORIES groups names by SUBJECT, and a subject spans more
+# than one callable namespace: a user reading "Date & Time Functions" expects
+# CURRENT_DATE (a scalar function) and `x::TIMESTAMP` (a cast) in the same place.
+# So some names above are deliberately NOT scalar functions, and the export
+# machinery must not read their absence from the function catalog as a mistake.
+#
+# The danger this table exists to close is the opposite one. A name here that is
+# callable in NO namespace is worse than an omission: it is a documented dead
+# end. GENERATE_SERIES was reported as exactly that — listed under "Utility
+# Functions", which reads as a scalar call, while the only spelling that ran was
+# the TABLE function `FROM GENERATE_SERIES(...) AS g`. It now has both spellings
+# and is an ordinary catalog entry; the eleven names that were callable NOWHERE
+# (TODAY, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, WEEK, QUARTER, TITLECASE,
+# CHAR — none of which was ever registered) have been removed.
+#
+# Every entry below is CHECKED against the live registry for its namespace by
+# tests/unit/reference/test_documented_names_are_callable.py, which also fails on
+# a name in _DOCUMENTATION_CATEGORIES that appears in neither the function
+# catalog nor this table. Add a name here only with the namespace it really is
+# reachable in — the test resolves it, so a wrong namespace fails too.
+_NON_SCALAR_DOCUMENTED_NAMES: dict[str, tuple[str, ...]] = {
+    # Reduce a group of rows; reachable only in a SELECT list with GROUP BY.
+    # Checked against opteryx.operators.aggregate.helpers.AGGREGATORS.
+    "aggregate": (
+        "COUNT",
+        "SUM",
+        "AVG",
+        "MIN",
+        "MAX",
+        "ARRAY_AGG",
+        "ANY_VALUE",
+        "APPROX_COUNT_DISTINCT",
+        "APPROX_PERCENTILE",
+    ),
+    # Produce ROWS; reachable in a FROM clause. Checked against
+    # opteryx.utils.query_parser._TABLE_FUNCTIONS. GENERATE_SERIES is NOT here:
+    # it is a table function AND a scalar function, and the scalar catalog
+    # already answers for it.
+    "table_function": ("UNNEST",),
+    # TYPE names, not functions. `INTEGER(x)` is refused with a message pointing
+    # at `x::INT64`; they are documented because a caller looking for the
+    # conversion looks under this subject. Checked against reference/types.json.
+    "type_name": (
+        "BOOLEAN",
+        "VARBINARY",
+        "INTEGER",
+        "FLOAT",
+        "VARCHAR",
+        "TIMESTAMP",
+        "DATE",
+    ),
+    # Grammar, not a catalog entry — there is no registry to check these against,
+    # so the test asserts only that each one RUNS as the construct it claims to
+    # be, which is the strongest check available for a syntax form.
+    "syntax": ("CAST", "TRY_CAST"),
+    # Internal spellings deliberately withheld from the published catalog
+    # (_HIDDEN_FUNCTIONS below). They stay in the category table so the category
+    # is complete, and the exporter filters them out of every published list.
+    "hidden": ("CASE", "GET_STRING"),
+}
+
 
 _FALLBACK_CATEGORY_LABELS = {
     "arithmetic": "Numeric Functions",
@@ -300,7 +351,7 @@ _PARAMETER_DOCUMENTATION_OVERRIDES = {
         "vec": "Second vector or text input.",
     },
     "EXTRACT": {
-        "part": "Date or time part to extract, such as `year`, `month`, `day`, or `epoch`.",
+        "part": "Date or time part to extract: `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` or `epoch`.",
     },
     "FORMAT_TIMESTAMP": {
         "pattern": "Format string used to render the temporal value as text.",
@@ -361,8 +412,8 @@ _RETURN_OVERRIDES = {
         "Returns the first non-null argument using a type compatible with the supplied values.",
     ),
     "EXTRACT": (
-        "integer | double | date",
-        "Returns `double` for parts such as `epoch` and `julian`, `date` for `date`, and `integer` for most other parts.",
+        "integer",
+        "Returns the requested part as an `integer`; `epoch` returns whole Unix epoch seconds.",
     ),
     "EMBED": (
         "vector",
@@ -399,7 +450,7 @@ _FUNCTION_NOTES = {
     "CURRENT_DATE": "Canonical SQL-92 form is `CURRENT_DATE`. Opteryx also accepts `CURRENT_DATE()`.",
     "CURRENT_TIME": "Canonical SQL-92 form is `CURRENT_TIME`. Opteryx also accepts `CURRENT_TIME()`.",
     "CURRENT_TIMESTAMP": "Canonical SQL-92 form is `CURRENT_TIMESTAMP`. Opteryx also accepts `CURRENT_TIMESTAMP()`.",
-    "EXTRACT": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. Return type depends on `part`: `epoch` and `julian` produce `double`, `date` produces `date`, and most other parts produce `integer`.",
+    "EXTRACT": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. The supported parts are `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` and `epoch`; each returns an `integer`. `epoch` is whole Unix epoch seconds - `EXTRACT(EPOCH FROM ts)` is the same value as `TO_UNIXTIME(ts)`, and is planned as that call. Sub-day parts require a TIMESTAMP operand.",
     "EMBED": "This function depends on the configured embedding provider and returns a numeric `vector`.",
     "FLOOR": "When `scale` is provided, positive values affect digits to the right of the decimal point and negative values affect tens, hundreds, and larger positions.",
     "_MATCH_AGAINST": "Canonical form is `MATCH(str) AGAINST(pattern)`. Opteryx normalizes this syntax to an internal helper.",
@@ -867,10 +918,15 @@ def _export_overload(
                 "constant expression. This overload is reachable only for a DATE LITERAL, which "
                 "is constant-folded at plan time: over a DATE COLUMN there is no native kernel "
                 "and the call is refused with \"outside the c-native kernel set\". Cast the "
-                "column to TIMESTAMP to truncate it."
+                "column to TIMESTAMP to truncate it. Also spelled "
+                "`DATE_TRUNC(unit, value)` - unit FIRST."
             )
         elif overload.id == "TRUNC_timestamp":
-            notes = "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
+            notes = (
+                "Truncates to the start of the specified unit. The `unit` argument must be a "
+                "constant expression. Also spelled `DATE_TRUNC(unit, value)` - unit FIRST, the "
+                "Postgres/Snowflake/DuckDB order - which is planned as this call."
+            )
         else:
             notes = "Truncation is performed toward zero rather than toward negative infinity."
     if notes:

@@ -32,12 +32,22 @@ def _dedup_key(aggregate):
     rejected upstream as an ambiguous output name — but keying on them costs
     nothing and means a dedup here can never be the thing that silently loses an
     aggregate.
+
+    The arguments AFTER the operand are part of the key for the same reason again,
+    and this one was live: an aggregate is not identified by its operand alone.
+    `APPROX_PERCENTILE(x, 0.5)` and `APPROX_PERCENTILE(x, 0.95)` differ only in a
+    literal the old key never read, so the second collapsed onto the first and the
+    projection then asked for a column nothing computed — the natural
+    `p50, p95, p99 of one column` died with "projecting a column the engine could
+    not resolve", or, wrapped in a CAST, with a raw stream-layout KeyError.
+    `CORR(x, y)` vs `CORR(x, z)` is the same defect on the same key.
     """
     from opteryx.expression import format_expression
 
     return (
         aggregate.value.upper(),
         aggregate.parameters[0].qualified_name,
+        tuple(format_expression(p, True) for p in aggregate.parameters[1:]),
         aggregate.duplicate_treatment,
         aggregate.null_treatment,
         None if aggregate.condition is None else format_expression(aggregate.condition),

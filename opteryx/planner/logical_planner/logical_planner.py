@@ -975,6 +975,106 @@ def _refuse_window_in_having(having) -> None:
         )
 
 
+def _refuse_window_group_key(key, window_outputs: set, position: int = 0) -> None:
+    """Refuse a window function used as a GROUP BY key.
+
+    Standard SQL does not allow one, for the same evaluation-order reason HAVING does
+    not (`_refuse_window_in_having` above): grouping happens FIRST and window functions
+    are computed over the grouped result, so a window's value does not exist yet when
+    the grouping runs. There is no semantics to implement — refusing is the fix, not a
+    gap. DuckDB refuses it too, as "GROUP BY clause cannot contain window functions".
+
+    The message it replaces named the wrong thing entirely. `GROUP BY <window>` fell
+    through to the window-over-grouped-result lowering, which rebased the window's own
+    ORDER BY over the grouped rows, found that column was not a group key, and reported
+    the STANDARD's other rule:
+
+        SELECT NTILE(4) OVER (ORDER BY gravity) AS decile, COUNT(*)
+        FROM $planets GROUP BY decile
+        -> Column 'gravity' must appear in the `GROUP BY` clause ...
+
+    `gravity` is not what the caller got wrong, adding it to the GROUP BY does not help,
+    and the advice to wrap it in `MIN()` produces a different query. This is the same
+    defect ORDER BY had before the hoist covered it (see the note at the ORDER BY hoist,
+    which was refused with "Column 'name' must appear in the `GROUP BY` clause" for the
+    same reason); GROUP BY was the remaining clause without a guard.
+
+    Two shapes reach here, and both are refused:
+
+    * a window written DIRECTLY in GROUP BY, which is still a raw AGGREGATOR carrying
+      its `over` — GROUP BY is not run through `_hoist_windows`, so nothing has
+      rewritten it. Without this it reached the compiler as "a GROUP BY key the engine
+      could not resolve here", which names nothing.
+    * a key that RESOLVED to a window's output, by alias (`GROUP BY decile`) or by
+      position (`GROUP BY 1`). The hoist has already replaced the window with an
+      identifier reference to its minted output column, so the test is the one
+      `_group_by_all_keys` uses for the same question — deliberately the same set and
+      the same walk, so the two cannot decide it differently. Walking every identifier
+      also catches an EXPRESSION over a window output (`GROUP BY decile + 1`), which is
+      no more groupable than the output itself.
+
+    `position` is the 1-based SELECT position when the key came from one, so the message
+    can name what the caller actually wrote rather than an alias they never typed.
+    """
+    def _refuse(display: str, is_reference: bool = False) -> None:
+        # A position is named the way the aggregate refusal beside this one names it —
+        # `GROUP BY 1` is a spelling the caller can see in their own query, whereas the
+        # expression it resolved to may be one they never wrote.
+        # Four sentences, written out rather than assembled from fragments. An ALIAS
+        # is not itself a window function, it NAMES one, and a position is named the
+        # way the aggregate refusal beside this one names it — `GROUP BY 1` is a
+        # spelling the caller can see in their own query, whereas the expression it
+        # resolved to may be one they never wrote.
+        if position and is_reference:
+            _what = (
+                f"{md_syntax('group by')} position {position} refers to "
+                f"{md_code(display)}, a window function's output, in the "
+                f"{md_syntax('select')} list"
+            )
+        elif position:
+            _what = (
+                f"{md_syntax('group by')} position {position} refers to the window "
+                f"function {md_code(display)} in the {md_syntax('select')} list"
+            )
+        elif is_reference:
+            _what = (
+                f"{md_code(display)} is a window function's output and cannot be a "
+                f"{md_syntax('group by')} key"
+            )
+        else:
+            _what = (
+                f"Window function {md_code(display)} cannot be a "
+                f"{md_syntax('group by')} key"
+            )
+        raise UnsupportedSyntaxError(
+            compose(
+                _what,
+                f"{md_syntax('group by')} groups the rows FIRST and a window function is "
+                "computed over the grouped result — so the window's value does not exist "
+                "yet when the grouping runs",
+                f"Compute the window in a subquery and {md_syntax('group by')} its result",
+            )
+        )
+
+    for _node in get_all_nodes_of_type(key, select_nodes=(NodeType.AGGREGATOR,)):
+        _is_window = getattr(_node, "over", None) is not None
+        if not _is_window and _node.value not in _RANKING_FUNCTIONS:
+            continue
+        # Rendered as WRITTEN — with its spec if it has one, bare if it does not —
+        # rather than being given an `OVER ()` the caller did not type.
+        _refuse(_rendered_window(_node) if _is_window else format_expression(_node))
+
+    if not window_outputs:
+        return
+
+    for _identifier in get_all_nodes_of_type(key, select_nodes=(NodeType.IDENTIFIER,)):
+        if (_identifier.source_column or "") not in window_outputs:
+            continue
+        # The name the caller WROTE. `source_column` is the minted `$win_` alias for an
+        # unaliased window — random per execution, and a column nobody typed.
+        _refuse(_identifier.query_column or _identifier.source_column, is_reference=True)
+
+
 def _replace_node(tree, target, replacement):
     """Swap `target` for `replacement` inside an expression tree, by IDENTITY.
 
@@ -1686,32 +1786,13 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
             "Qualified wild cards (`table.*`) must be the first column when used with additional columns. Move it to the start of the projection."
         )
 
-    # EXISTS / IN subqueries used as a SELECT-list value are not yet supported —
-    # they are a boolean existence test, not a value, and decorrelating one needs
-    # a zero-key semi/anti join the join compiler does not admit (see the "Known
-    # gaps" section of decorrelate_subquery.py). A bare SCALAR subquery in the
-    # SELECT list (`SELECT (SELECT ...) ...`, including one nested in a CASE
-    # branch) is NOT refused here: correlation cannot be told apart from an
-    # uncorrelated single-row subquery until binding has resolved every name, so
-    # that decision is deferred to DecorrelateSubqueryStrategy, which rewrites the
-    # uncorrelated, provably-single-row case into a CROSS JOIN and raises,
-    # cleanly, for anything else (correlated, or not provably one row).
-    for _existence_node in get_all_nodes_of_type(
-        _projection, select_nodes=(NodeType.UNARY_OPERATOR, NodeType.COMPARISON_OPERATOR)
-    ):
-        is_select_exists = (
-            _existence_node.node_type == NodeType.UNARY_OPERATOR
-            and _existence_node.value == "Exists"
-        )
-        is_select_in_subquery = (
-            _existence_node.node_type == NodeType.COMPARISON_OPERATOR
-            and _existence_node.value == "InSubQuery"
-        )
-        if is_select_exists or is_select_in_subquery:
-            raise UnsupportedSyntaxError(
-                "**EXISTS** and **IN** subqueries are supported in the **WHERE** clause "
-                "but not yet in the **SELECT** list."
-            )
+    # A SELECT-list EXISTS / IN is NOT refused here. Which shapes are supported
+    # cannot be decided before binding — the answer turns on whether the subquery
+    # correlates, and on what it correlates BY, neither of which is knowable until
+    # every name has been resolved. DecorrelateSubqueryStrategy decides it on the
+    # bound plan (an existence join for the shapes it can lower, one explicit
+    # refusal for the rest), exactly as it already did for a SELECT-list scalar
+    # subquery.
 
     # Detect window functions (AGGREGATOR nodes with an OVER clause) before aggregate extraction.
     # Replace each window function in _projection with a plain column reference to its output alias,
@@ -1934,52 +2015,10 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     )
     _having_passthrough: list = []
     if _having:
-        # Before the aggregates below are collected — that walk cannot tell a window from
-        # a plain aggregate, and appending one to `_aggregates` is what silently threw its
-        # OVER spec away.
+        # Before the aggregates are collected (below, once the group keys are resolved) —
+        # that walk cannot tell a window from a plain aggregate, and appending one to
+        # `_aggregates` is what silently threw its OVER spec away.
         _refuse_window_in_having(_having)
-        _projection_aliases = {p.alias.lower() for p in _projection if p.alias}
-        _seen_expressions = {format_expression(p).lower() for p in _projection}
-        _seen_expressions.update(
-            p.qualified_name.lower() for p in _projection if p.qualified_name
-        )
-
-        _having_aggregates = get_all_nodes_of_type(
-            _having, select_nodes=(NodeType.AGGREGATOR,)
-        )
-
-        # Identifiers INSIDE an aggregate are pre-aggregation operands (SUM(x) consumes
-        # raw x) — hoisting them past the aggregate step is meaningless and they must be
-        # skipped. Only bare identifiers (group keys) are pass-through candidates.
-        _aggregate_operands = {
-            id(identifier)
-            for aggregate in _having_aggregates
-            for identifier in get_all_nodes_of_type(
-                aggregate, select_nodes=(NodeType.IDENTIFIER,)
-            )
-        }
-
-        for _aggregate in _having_aggregates:
-            # The binder dedups the aggregate list by schema_column.identity, so an
-            # aggregate already named in the SELECT is not computed twice.
-            _aggregates.append(_aggregate)
-            _key = format_expression(_aggregate).lower()
-            if _key not in _seen_expressions:
-                _seen_expressions.add(_key)
-                _having_passthrough.append(_aggregate)
-
-        for _identifier in get_all_nodes_of_type(_having, select_nodes=(NodeType.IDENTIFIER,)):
-            if id(_identifier) in _aggregate_operands:
-                continue
-            # A bare identifier naming a SELECT alias (`SUM(q) AS x ... HAVING x > 300`)
-            # resolves against the Project's own output — the Project creates it, so it
-            # must not be hoisted from below it.
-            if (_identifier.source_column or "").lower() in _projection_aliases:
-                continue
-            _key = format_expression(_identifier).lower()
-            if _key not in _seen_expressions:
-                _seen_expressions.add(_key)
-                _having_passthrough.append(_identifier)
 
     _groups = logical_planner_builders.build(ast_branch["Select"].get("group_by"))[0]
 
@@ -2024,6 +2063,12 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # (opteryx/planner/binder/aggregate.py) runs — otherwise a computed
     # expression's (e.g. CASE) inner columns get pruned from the schema as unused
     # and a later ColumnNotFoundError follows.
+    # `_minted` is complete by here — the projection and ORDER BY hoists above are the
+    # only writers — so the window outputs are known, which the GROUP BY resolution
+    # immediately below needs (a key may resolve to one) as well as the HAVING
+    # resolution and the windowed-grouping branch further down.
+    _window_output_aliases = {_alias for _alias, _display in _minted.values()}
+
     if isinstance(_groups, list) and _groups:
         _rewritten_groups = []
         for _group_expr in _groups:
@@ -2040,6 +2085,12 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                             f"**GROUP BY** position {_position} is out of range — **SELECT** has {len(_projection)} column(s). Positions count the **SELECT** columns and start at 1."
                         )
                     _target = _projection[_position - 1]
+                    # A window is tested BEFORE the aggregate: the hoist has already
+                    # replaced a window with an identifier reference, but a FRAMED or
+                    # whole-partition aggregate window is still an AGGREGATOR node here,
+                    # and reporting that as "an aggregate in the SELECT list" would name
+                    # the wrong rule for it.
+                    _refuse_window_group_key(_target, _window_output_aliases, _position)
                     if get_all_nodes_of_type(_target, select_nodes=(NodeType.AGGREGATOR,)):
                         raise UnsupportedSyntaxError(
                             f"**GROUP BY** position {_position} refers to an aggregate in the **SELECT** "
@@ -2057,8 +2108,199 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 )
                 if _alias_match is not None:
                     _group_expr = _alias_match
+            # On the RESOLVED key, so one call covers all three spellings: a window
+            # written directly in GROUP BY (unchanged by the arms above), one reached
+            # through an output alias, and one reached by position (already refused
+            # above, with its position named).
+            _refuse_window_group_key(_group_expr, _window_output_aliases)
             _rewritten_groups.append(_group_expr)
         _groups = _rewritten_groups
+
+
+    # ---- HAVING, resolved against the group keys ------------------------------------
+    #
+    # Deferred to HERE, below the GROUP BY resolution, because a HAVING sub-expression
+    # has to be matched against the FINAL key list — positions and aliases resolved —
+    # and that list did not exist at the point HAVING was built.
+    #
+    # `GROUP BY UPPER(name) HAVING UPPER(name) > 'A'` is standard SQL: HAVING may name a
+    # grouping EXPRESSION, not just an alias for one. It was refused, because the
+    # pass-through walk below saw only the bare identifier `name` at the leaf and asked
+    # the Project ABOVE the aggregate to carry it — a column the aggregate legitimately
+    # does not emit. The compiler then failed with "projecting a column the engine could
+    # not resolve here", naming nothing. Worse, `GROUP BY UPPER(name) HAVING name > 'A'`
+    # — which is NOT legal, `name` surviving neither grouping nor aggregation — produced
+    # the identical message, so the legal query and the illegal one were indistinguishable.
+    #
+    # An identifier inside a grouping expression is consumed by the GROUPING, exactly as
+    # one inside an aggregate is consumed by the AGGREGATE, and the existing
+    # `_aggregate_operands` skip is the precedent this mirrors. What rides through the
+    # Project is the KEY EXPRESSION, which the aggregate does emit — never its leaves.
+    if _having:
+        _projection_aliases = {p.alias.lower() for p in _projection if p.alias}
+        _seen_expressions = {format_expression(p).lower() for p in _projection}
+        _seen_expressions.update(
+            p.qualified_name.lower() for p in _projection if p.qualified_name
+        )
+
+        _having_aggregates = get_all_nodes_of_type(
+            _having, select_nodes=(NodeType.AGGREGATOR,)
+        )
+
+        # Identifiers INSIDE an aggregate are pre-aggregation operands (SUM(x) consumes
+        # raw x) — hoisting them past the aggregate step is meaningless and they must be
+        # skipped. Only bare identifiers (group keys) are pass-through candidates.
+        _aggregate_operands = {
+            id(identifier)
+            for aggregate in _having_aggregates
+            for identifier in get_all_nodes_of_type(
+                aggregate, select_nodes=(NodeType.IDENTIFIER,)
+            )
+        }
+
+        for _aggregate in _having_aggregates:
+            # The binder dedups the aggregate list by schema_column.identity, so an
+            # aggregate already named in the SELECT is not computed twice.
+            _aggregates.append(_aggregate)
+            _key = format_expression(_aggregate).lower()
+            if _key not in _seen_expressions:
+                _seen_expressions.add(_key)
+                _having_passthrough.append(_aggregate)
+
+        # The grouping keys, by rendering. `format_expression` is the expression identity
+        # this function already matches on (`_seen_expressions`, and the pass-through
+        # dedup further down) — one convention, not a second one invented here.
+        #
+        # GROUP BY ALL stands for the projection expressions that are neither aggregates
+        # nor window outputs, and HAVING may name one of those the same way. Derived here
+        # for MATCHING only — `_groups` stays WILDCARD and is resolved in its own place
+        # below, so there is still one resolution of ALL, not two.
+        if _groups == NodeType.WILDCARD:
+            _explicit_groups = _group_by_all_keys(_projection, _window_output_aliases)
+        elif isinstance(_groups, list):
+            _explicit_groups = list(_groups)
+        else:
+            _explicit_groups = []
+        # Resolve to the PROJECTION's node where the SELECT list carries the same
+        # expression, and to the GROUP BY's node otherwise.
+        #
+        # `GROUP BY UPPER(name)` and `SELECT UPPER(name) AS u` are two AST objects for
+        # one expression, and they bind to two different identities. Which one HAVING
+        # must share depends on where its Filter ends up: pushed BELOW the aggregate
+        # (legal for a key, and what predicate_pushdown does with a simple compare) the
+        # group key's identity is what the stream carries; left ABOVE the Project — a
+        # CASE, which pushdown does not move — only the projection's is. Binding to the
+        # group key and being left above the Project asked the compiler to recompute
+        # `UPPER(name)` from a `name` the aggregate had dropped, and it failed with
+        # "references a column the stream does not carry".
+        #
+        # Preferring the projection is safe for both: a projected key is emitted by the
+        # Project, and pushdown simply declines to move a predicate it cannot resolve
+        # below. An unprojected key keeps the GROUP BY's node and rides through as a
+        # pass-through column below.
+        _projection_by_rendering = {}
+        for _column in _projection:
+            _projection_by_rendering.setdefault(format_expression(_column).lower(), _column)
+        _group_key_renderings = {}
+        for _key in _explicit_groups:
+            _rendering = format_expression(_key).lower()
+            _group_key_renderings[_rendering] = _projection_by_rendering.get(_rendering, _key)
+
+        # Largest-first, and SUBSTITUTING: the whole `UPPER(name)` matches before its
+        # leaf `name` is reached, and the matched subtree is REPLACED by the group key's
+        # own Node - the same object the GROUP BY (and, where it is selected, the
+        # projection) holds. Sharing the object is what makes it resolve: HAVING's copy
+        # of the expression is a separate AST node that nothing else binds, so leaving it
+        # in place bound nothing and failed with "IDENTIFIER node missing schema_column".
+        # One object reachable from two clauses is the same rule `_rebase_memo` keeps for
+        # everything computed above the grouping.
+        _matched_keys: list = []
+
+        def _substitute_group_keys(_node):
+            if _node is None or not isinstance(_node, (Node, LogicalColumn)):
+                return _node
+            _rendering = format_expression(_node).lower()
+            _key_node = _group_key_renderings.get(_rendering)
+            if _key_node is not None:
+                _matched_keys.append((_rendering, _key_node))
+                return _key_node
+            # The child set is `get_all_nodes_of_type`'s, exactly: parameters, CASE's
+            # conditions/results/else_result, and left/right/centre. A walker that knows
+            # a smaller set silently stops matching inside whatever it skips — a CASE
+            # branch here would have left its `UPPER(name)` unresolved and then had the
+            # leaf rejected as ungrouped, which is a WRONG error on a legal query.
+            if _node.parameters:
+                _node.parameters = [
+                    _substitute_group_keys(_child) if isinstance(_child, (Node, LogicalColumn))
+                    else _child
+                    for _child in _node.parameters
+                ]
+            if _node.node_type == NodeType.CASE:
+                if _node.conditions:
+                    _node.conditions = [
+                        _substitute_group_keys(_c) if isinstance(_c, (Node, LogicalColumn)) else _c
+                        for _c in _node.conditions
+                    ]
+                if _node.results:
+                    _node.results = [
+                        _substitute_group_keys(_r) if isinstance(_r, (Node, LogicalColumn)) else _r
+                        for _r in _node.results
+                    ]
+                if isinstance(_node.else_result, (Node, LogicalColumn)):
+                    _node.else_result = _substitute_group_keys(_node.else_result)
+            for _attr in ("left", "right", "centre"):
+                _child = getattr(_node, _attr, None)
+                if _child is not None:
+                    setattr(_node, _attr, _substitute_group_keys(_child))
+            return _node
+
+        _having = _substitute_group_keys(_having)
+
+        # Everything the substituted keys consume. Collected AFTER the rewrite, off the
+        # keys themselves, so the leaf-identifier walk below cannot mistake a grouping
+        # operand for an ungrouped column.
+        _grouped_operands = {
+            id(_inner)
+            for _rendering, _key_node in _matched_keys
+            for _inner in get_all_nodes_of_type(_key_node, select_nodes=(NodeType.IDENTIFIER,))
+        }
+        _grouped_operands.update(id(_key_node) for _rendering, _key_node in _matched_keys)
+
+        # A matched key that the SELECT list does not already carry rides through the
+        # Project as the KEY, so the Filter above can read the column the aggregate
+        # emitted. `GROUP BY UPPER(name) HAVING UPPER(name) > 'A'` with no `UPPER(name)`
+        # selected is the case this exists for.
+        for _rendering, _key_node in _matched_keys:
+            if _rendering not in _seen_expressions:
+                _seen_expressions.add(_rendering)
+                _having_passthrough.append(_key_node)
+
+        for _identifier in get_all_nodes_of_type(_having, select_nodes=(NodeType.IDENTIFIER,)):
+            if id(_identifier) in _aggregate_operands or id(_identifier) in _grouped_operands:
+                continue
+            # A bare identifier naming a SELECT alias (`SUM(q) AS x ... HAVING x > 300`)
+            # resolves against the Project's own output — the Project creates it, so it
+            # must not be hoisted from below it.
+            if (_identifier.source_column or "").lower() in _projection_aliases:
+                continue
+            # Under an EXPLICIT GROUP BY, an identifier left over here survives neither
+            # the grouping nor an aggregate, so there is no value for it in a grouped
+            # row - `GROUP BY UPPER(name) HAVING name > 'A'`. That is a bind error, and
+            # naming the column is the whole point: it used to be hoisted into the
+            # Project and reported by the compiler as an unresolvable column, in the same
+            # words the LEGAL form above got.
+            if _explicit_groups:
+                _display = format_expression(_identifier)
+                raise UnsupportedSyntaxError(
+                    f"Column {md_code(_display)} in **HAVING** is not grouped and is not "
+                    "aggregated, so a grouped row has no single value for it. Add it to "
+                    f"**GROUP BY**, wrap it in an aggregate, or filter on it in **WHERE** "
+                    "(which runs before the grouping)."
+                )
+            _key = format_expression(_identifier).lower()
+            if _key not in _seen_expressions:
+                _seen_expressions.add(_key)
+                _having_passthrough.append(_identifier)
 
     # ---- a window computed OVER the grouped result -----------------------------------
     #
@@ -2090,7 +2332,6 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
     # Everything above the grouping is then re-pointed at that relation's columns
     # (`_rebase_over_aggregate`), because past the boundary the source columns are gone
     # and only the group keys and the aggregates have names.
-    _window_output_aliases = {_alias for _alias, _display in _minted.values()}
     if (_window_specs or _ranking_specs) and (
         (_groups is not None and _groups != []) or _aggregates
     ):

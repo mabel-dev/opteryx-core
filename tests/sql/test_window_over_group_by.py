@@ -46,6 +46,7 @@ import pytest
 import opteryx
 from opteryx.exceptions import SqlError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import UnsupportedSyntaxError
 
 
 def rows(statement):
@@ -280,6 +281,114 @@ def test_ungrouped_column_is_refused_by_name(statement, column):
     message = str(raised.value)
     assert f"Column '{column}' must appear in the `GROUP BY` clause" in message, message
     assert "$win_" not in message, message
+
+
+@pytest.mark.parametrize(
+    "statement, named",
+    [
+        # (1) THE REPORTED SHAPE — GROUP BY an output ALIAS of a window.
+        (
+            "SELECT NTILE(4) OVER (ORDER BY gravity) AS decile, COUNT(*) "
+            "FROM $planets GROUP BY decile",
+            "`decile`",
+        ),
+        (
+            "SELECT ROW_NUMBER() OVER (ORDER BY id) AS rn, COUNT(*) "
+            "FROM $planets GROUP BY rn",
+            "`rn`",
+        ),
+        # An EXPRESSION over a window's output is no more groupable than the output.
+        (
+            "SELECT ROW_NUMBER() OVER (ORDER BY id) AS rn, COUNT(*) "
+            "FROM $planets GROUP BY rn + 1",
+            "`rn`",
+        ),
+        # (2) GROUP BY a POSITION landing on a window.
+        (
+            "SELECT NTILE(4) OVER (ORDER BY gravity), COUNT(*) FROM $planets GROUP BY 1",
+            "position 1",
+        ),
+        # An AGGREGATE window is still an AGGREGATOR node at this point, not a
+        # hoisted reference — the arm that refuses "an aggregate in the SELECT list"
+        # sits right beside this one and would name the wrong rule for it.
+        (
+            "SELECT SUM(id) OVER (PARTITION BY name) AS w, COUNT(*) "
+            "FROM $planets GROUP BY 1",
+            "position 1",
+        ),
+        # (3) A window written DIRECTLY in GROUP BY. Reached the compiler as
+        # "a GROUP BY key the engine could not resolve here", which names nothing.
+        (
+            "SELECT COUNT(*) FROM $planets GROUP BY NTILE(4) OVER (ORDER BY gravity)",
+            "`NTILE(4) OVER (ORDER BY gravity)`",
+        ),
+        (
+            "SELECT COUNT(*) FROM $planets GROUP BY SUM(id) OVER (PARTITION BY name)",
+            "`SUM(id) OVER (PARTITION BY name)`",
+        ),
+    ],
+)
+def test_window_as_a_group_by_key_is_refused_by_name(statement, named):
+    """A window cannot BE a group key, and the refusal must say so.
+
+    This is the counterpart of `test_ungrouped_column_is_refused_by_name` above, and
+    the two were being answered by the SAME message — which is right for exactly one
+    of them. `GROUP BY <window>` fell through to the window-over-grouped-result
+    lowering, which rebased the window's own ORDER BY over the grouped rows, found
+    that column was not a group key, and reported the OTHER rule:
+
+        SELECT NTILE(4) OVER (ORDER BY gravity) AS decile, COUNT(*)
+        FROM $planets GROUP BY decile
+        -> Column 'gravity' must appear in the `GROUP BY` clause ...
+
+    Everything about that is a dead end. `gravity` is not what the caller got wrong;
+    adding it to the GROUP BY does not help; and the suggested `MIN(gravity)` produces
+    a different query. The reader is sent to fix the half that was fine.
+
+    DuckDB refuses all of these too ("GROUP BY clause cannot contain window
+    functions"), so the rule is not an Opteryx narrowing — only the message was.
+    """
+    with pytest.raises(UnsupportedSyntaxError) as raised:
+        rows(statement)
+    message = str(raised.value)
+
+    assert named in message, message
+    assert "window function" in message.lower(), message
+    # The remedy has to be the one that works. The subquery rewrite is the ONLY way
+    # to group on a window's output, and the test below proves it runs.
+    assert "subquery" in message, message
+    # The old message's advice, which does not apply here — naming a column the caller
+    # cannot act on is the whole defect.
+    assert "must appear in the `GROUP BY` clause" not in message, message
+    # A minted `$win_<random>` join key is a column nobody typed and differs per run.
+    assert "$win_" not in message, message
+
+
+def test_the_subquery_rewrite_the_refusal_recommends_actually_runs():
+    """The remedy named in the message, executed.
+
+    A refusal that recommends a rewrite is only honest if the rewrite works — so the
+    query the caller is sent to write is pinned here, not just described.
+    """
+    assert rows(
+        "SELECT decile, COUNT(*) AS n FROM ("
+        "  SELECT NTILE(4) OVER (ORDER BY gravity) AS decile FROM $planets"
+        ") AS d GROUP BY decile ORDER BY decile"
+    ) == [(1, 3), (2, 2), (3, 2), (4, 2)]
+
+
+def test_group_by_all_still_ignores_window_outputs():
+    """`GROUP BY ALL` already excluded window outputs, and must keep doing so.
+
+    The new refusal shares its test — and its `_window_output_aliases` set — with
+    `_group_by_all_keys`, deliberately, so the two cannot decide differently about
+    what a window output is. If that sharing ever turned ALL's silent exclusion into
+    an error, this is what would catch it.
+    """
+    assert rows(
+        "SELECT name, ROW_NUMBER() OVER (ORDER BY name) AS rn FROM $planets "
+        "GROUP BY ALL ORDER BY name LIMIT 2"
+    ) == [("Earth", 1), ("Jupiter", 2)]
 
 
 def test_cumulative_window_over_groups():

@@ -218,6 +218,10 @@ _FILTER_JOIN_DIRECTIONS = {
     "left semi not-distinct": "LEFT SEMI (NULL=NULL)",
     "left anti not-distinct": "LEFT ANTI (NULL=NULL)",
 }
+_EXISTENCE_JOIN_DIRECTIONS = {
+    "left existence": "EXISTS",
+    "left existence anti": "NOT EXISTS",
+}
 
 
 def _get_operator_label(node):
@@ -228,6 +232,9 @@ def _get_operator_label(node):
     if class_name == "FilterJoinNode":
         direction = _FILTER_JOIN_DIRECTIONS.get(node.join_type, node.join_type)
         return f"FILTER JOIN ({direction})"
+    if class_name == "ExistenceJoinNode":
+        direction = _EXISTENCE_JOIN_DIRECTIONS.get(node.join_type, node.join_type)
+        return f"EXISTENCE JOIN ({direction})"
     return _OPERATOR_LABELS.get(class_name)
 
 

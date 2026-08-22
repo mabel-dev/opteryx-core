@@ -42,7 +42,9 @@ from opteryx.expression.operator_catalog import get_operator_for_sql_symbol
 from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn, Node
 from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
-from opteryx.operators.window.helpers import NAVIGATION_FUNCTIONS, WINDOW_FUNCTIONS
+from opteryx.operators.window.helpers import GATHERED_FUNCTIONS
+from opteryx.operators.window.helpers import NAVIGATION_FUNCTIONS
+from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 from opteryx.types.logical_type import (
     ARRAY as _CT_ARRAY,
 )
@@ -135,6 +137,23 @@ _SENTINEL_TIME = _CT_TIME()
 _COMMON_FUNCTION_ERRORS = {
     "LEN": "LENGTH",
 }
+
+
+def _is_string_literal(node) -> bool:
+    """True when `node` is a plain string literal - the shape a unit name has."""
+    return node.node_type == NodeType.LITERAL and isinstance(node.value, (str, bytes))
+
+
+def _literal_word(node) -> str:
+    """A string literal's text, upper-cased; "" for anything that is not one.
+
+    Unit and part names arrive as `str` or `bytes` depending on how the literal
+    was built; both spellings mean the same word.
+    """
+    if not _is_string_literal(node):
+        return ""
+    value = node.value
+    return (value.decode("utf-8") if isinstance(value, bytes) else value).upper()
 
 
 def _unknown_function(func: str, span=None) -> FunctionNotFoundError:
@@ -1726,6 +1745,24 @@ def extract(branch, alias: Optional[List[str]] = None, key=None):
     datepart = Node(NodeType.LITERAL, type=_CT_VARCHAR, value=datepart_value)
     identifier = build(branch["expr"])
 
+    # EXTRACT(EPOCH FROM x) -> UNIXTIME(x). `epoch` is not one of the part ids
+    # draken_date_part implements, so an EXTRACT node carrying it is refused at
+    # bytecode-build time as "outside the c-native kernel set" - but UNIXTIME is
+    # the same value (whole epoch SECONDS) and IS native.
+    #
+    # Normalised HERE, before binding, and not in the optimizer's function
+    # rewriter: that pass reaches a Project/Aggregate expression's own root, and
+    # never descends into a function's or an aggregate's parameters, so
+    # `MAX(EXTRACT(EPOCH FROM ts))` and `ABS(EXTRACT(EPOCH FROM ts))` would still
+    # be refused, as would an ORDER BY expression that is not also projected.
+    if _literal_word(datepart) == "EPOCH":
+        return Node(
+            NodeType.FUNCTION,
+            value="UNIXTIME",
+            parameters=[identifier],
+            alias=alias,
+        )
+
     return Node(
         NodeType.FUNCTION,
         value="EXTRACT",
@@ -1738,6 +1775,30 @@ def floor(value, alias: Optional[List[str]] = None, key=None):
     data_value = build(value["expr"])
     scale = build(value["field"]["Scale"]) if "Scale" in value["field"] else literal_number([0])
     return Node(NodeType.FUNCTION, value="FLOOR", parameters=[data_value, scale], alias=alias)
+
+
+def _validate_window_int_literal(func: str, node, role: str, minimum: int) -> None:
+    """A window function's constant integer parameter — LAG/LEAD's row offset,
+    NTILE's bucket count, NTH_VALUE's position.
+
+    All three must be known BEFORE any row is read: the offset picks a row, and the
+    bucket count and the position are resolved against the partition, so neither can
+    vary per row. A column reference here is refused rather than being evaluated on
+    some arbitrary row.
+
+    `minimum` is the only thing that differs between them — LAG/LEAD accept 0 (the
+    current row), while a bucket count or a 1-based position of 0 has no meaning.
+    """
+    if (
+        node.node_type != NodeType.LITERAL
+        or isinstance(node.value, bool)
+        or not isinstance(node.value, int)
+        or node.value < minimum
+    ):
+        bound = "non-negative integer literal" if minimum == 0 else (
+            f"integer literal of {minimum} or more"
+        )
+        raise UnsupportedSyntaxError(f"{func}()'s {role} must be a {bound}.")
 
 
 def function(branch, alias: Optional[List[str]] = None, key=None):
@@ -1771,6 +1832,49 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
         null_treatment = branch["args"].get("null_treatment")
         filter_condition = branch.get("filter")
 
+    # EXTRACT('epoch', x) -> UNIXTIME(x). EXTRACT is a registered function, so it
+    # is also reachable as an ordinary call that never passes through `extract()`
+    # above; the same normalisation has to happen on both spellings or the two
+    # disagree about what EXTRACT accepts.
+    if func == "EXTRACT" and len(args) == 2 and _literal_word(args[0]) == "EPOCH":
+        func = "UNIXTIME"
+        args = [args[1]]
+
+    # DATE_TRUNC(unit, value) → TRUNC(value, unit).
+    #
+    # DATE_TRUNC is the spelling Postgres/Snowflake/DuckDB/Redshift/Spark users
+    # reach for, and the capability already exists as TRUNC's temporal overloads
+    # — the ONLY difference is argument order. It is normalised to TRUNC HERE,
+    # before binding, rather than registered as a function in its own right, so
+    # that every downstream arm keyed on `value == "TRUNC"` (the comparison →
+    # range rewrite in predicate_rewriter, and the scan-level pruning guards in
+    # predicate_pushdown) applies to it unchanged. A separate registration would
+    # bind and execute, but would silently lose that pruning.
+    #
+    # The order is FIXED as (unit, value); it is not sniffed from the arguments.
+    # BigQuery spells the same function the other way round (DATE_TRUNC(value,
+    # unit)), so the swapped form is named and refused rather than guessed at —
+    # guessing would make argument order depend on which operand happened to be
+    # a literal.
+    if func in ("DATE_TRUNC", "DATETRUNC"):
+        if len(args) != 2:
+            raise UnsupportedSyntaxError(
+                f"{md_syntax(func)} takes exactly two arguments: "
+                f"{md_code(func + '(unit, value)')}."
+            )
+        unit_node, value_node = args
+        if not _is_string_literal(unit_node) and _is_string_literal(value_node):
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"{md_syntax(func)} takes the unit FIRST, as "
+                    f"{md_code(func + '(unit, value)')}",
+                    f"Swap the arguments, or write the value-first spelling as "
+                    f"{md_code('TRUNC(value, unit)')}",
+                )
+            )
+        func = "TRUNC"
+        args = [value_node, unit_node]
+
     if func == "MATCH_AGAINST" or func.startswith("_"):
         raise UnsupportedSyntaxError(f"`{func}` is internal. Use documented SQL syntax instead.")
 
@@ -1783,33 +1887,52 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             raise UnsupportedSyntaxError(
                 f"Filters are not supported with window function '{func}'. Filter in a subquery first, then apply the window to its result."
             )
-        if func in NAVIGATION_FUNCTIONS:
-            # LAG(expr[, offset]) / LEAD(expr[, offset]). The 3-argument default
-            # form and null treatment are refused, never silently ignored.
+        if func in GATHERED_FUNCTIONS:
+            # The functions whose output is a VALUE read from another row:
+            #   LAG(expr[, offset]) / LEAD(expr[, offset])
+            #   FIRST_VALUE(expr) / LAST_VALUE(expr)
+            #   NTH_VALUE(expr, n)
+            # Null treatment is refused for all of them, never silently ignored:
+            # IGNORE NULLS changes WHICH row is read, so accepting and dropping it
+            # would be a wrong answer rather than a missing feature.
             if null_treatment is not None:
                 raise UnsupportedSyntaxError(
                     f"**IGNORE NULLS** / **RESPECT NULLS** are not supported with {func}()."
                 )
-            if len(args) == 3:
-                raise UnsupportedSyntaxError(
-                    f"{func}(expr, offset, default) — the 3-argument form is not supported. "
-                    f"Wrap the result instead: `COALESCE({func}(expr, offset), default)`."
-                )
-            if len(args) not in (1, 2):
-                raise UnsupportedSyntaxError(
-                    f"{func}() takes 1 or 2 arguments: {func}(expr) or {func}(expr, offset)."
-                )
-            if len(args) == 2:
-                _offset = args[1]
-                if (
-                    _offset.node_type != NodeType.LITERAL
-                    or not isinstance(_offset.value, int)
-                    or isinstance(_offset.value, bool)
-                    or _offset.value < 0
-                ):
+            if func in NAVIGATION_FUNCTIONS:
+                if len(args) == 3:
                     raise UnsupportedSyntaxError(
-                        f"{func}()'s offset must be a non-negative integer literal."
+                        f"{func}(expr, offset, default) — the 3-argument form is not supported. "
+                        f"Wrap the result instead: `COALESCE({func}(expr, offset), default)`."
                     )
+                if len(args) not in (1, 2):
+                    raise UnsupportedSyntaxError(
+                        f"{func}() takes 1 or 2 arguments: {func}(expr) or {func}(expr, offset)."
+                    )
+                if len(args) == 2:
+                    _validate_window_int_literal(func, args[1], "offset", minimum=0)
+            elif func == "NTH_VALUE":
+                if len(args) != 2:
+                    raise UnsupportedSyntaxError(
+                        f"{func}() takes 2 arguments: {func}(expr, n) — the expression to read "
+                        f"and the 1-based position within the partition."
+                    )
+                _validate_window_int_literal(func, args[1], "position", minimum=1)
+            elif len(args) != 1:
+                # FIRST_VALUE / LAST_VALUE
+                raise UnsupportedSyntaxError(
+                    f"{func}() takes exactly one argument: the expression to read."
+                )
+        elif func == "NTILE":
+            # NTILE(buckets) — the argument is the bucket COUNT, not an expression
+            # to evaluate per row, so it must be a constant known before any row is
+            # read (the bucket sizes depend on it and on the partition size).
+            if len(args) != 1:
+                raise UnsupportedSyntaxError(
+                    "NTILE() takes exactly one argument: the number of buckets to "
+                    "divide each partition into, for example `NTILE(10)`."
+                )
+            _validate_window_int_literal(func, args[0], "bucket count", minimum=1)
         elif args:
             raise UnsupportedSyntaxError(
                 f"{func}() takes no arguments — the window's **ORDER BY** is its input."
@@ -1872,8 +1995,6 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             "TIME": "TIME",
         }
         if func in _TYPE_CAST_NAMES and len(args) == 1:
-            from opteryx.exceptions import md_code, md_syntax
-
             raise UnsupportedSyntaxError(
                 compose(
                     f"{md_syntax(func)} is a type name, not a function, so "
@@ -2161,6 +2282,11 @@ def in_subquery(branch, alias: Optional[List[str]] = None, key=None):
         value="InSubQuery",
         left=left,
         right=sub_query,
+        # `AS x` on the IN itself. Every sibling builder carries this; this one
+        # dropped it, which was invisible while an IN-subquery could only be a
+        # WHERE-clause predicate (nothing names a predicate) and became a wrong
+        # output column name the moment it could be a SELECT-list value.
+        alias=alias,
     )
     node.negated = branch["negated"]
     return node

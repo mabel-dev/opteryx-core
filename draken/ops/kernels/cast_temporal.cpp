@@ -384,8 +384,14 @@ VecResult draken_cast_string_to_timestamp(void* ctx, const DrakenVector* v) {
         const auto* c = static_cast<const format_ctx*>(ctx);
         std::vector<SqlToken> prog;
         bool use_fmt = c != nullptr && c->fmt_len > 0;
+        // `fmt` MUST outlive `prog`: sql_compile fills SqlToken.lit with pointers
+        // INTO this buffer (see sql_temporal_format.h), and the per-row parse below
+        // dereferences them. Declaring it inside the `if` left those pointers
+        // dangling into reclaimed stack — patterns with no literal token parsed
+        // fine, patterns with one read clobbered bytes and failed at random.
+        std::string fmt;
         if (use_fmt) {
-            const std::string fmt(format_ctx_fmt(c), static_cast<size_t>(c->fmt_len));
+            fmt.assign(format_ctx_fmt(c), static_cast<size_t>(c->fmt_len));
             size_t max_len = 0;
             const char* bad_run = nullptr;
             uint32_t bad_run_len = 0;

@@ -1316,9 +1316,9 @@
                 "related_functions": [
                     "CURRENT_TIME",
                     "CURRENT_TIMESTAMP",
-                    "TODAY",
                     "DATE",
-                    "EXTRACT"
+                    "EXTRACT",
+                    "FORMAT_TIMESTAMP"
                 ],
                 "return_type": "DATE",
                 "returns": {
@@ -1365,9 +1365,9 @@
                 "related_functions": [
                     "CURRENT_DATE",
                     "CURRENT_TIMESTAMP",
-                    "TODAY",
                     "DATE",
-                    "EXTRACT"
+                    "EXTRACT",
+                    "FORMAT_TIMESTAMP"
                 ],
                 "return_type": "TIME[US]",
                 "returns": {
@@ -1416,9 +1416,9 @@
                 "related_functions": [
                     "CURRENT_DATE",
                     "CURRENT_TIME",
-                    "TODAY",
                     "DATE",
-                    "EXTRACT"
+                    "EXTRACT",
+                    "FORMAT_TIMESTAMP"
                 ],
                 "return_type": "TIMESTAMP[US]",
                 "returns": {
@@ -1726,7 +1726,7 @@
                 "id": "EXTRACT_2",
                 "label": "EXTRACT(part FROM date)",
                 "category": "Date & Time Functions",
-                "documentation": "Extracts a named part (year, month, day, epoch, etc.) from a date or timestamp.",
+                "documentation": "Extracts a named part from a date or timestamp. The supported parts are year, quarter, month, day, hour, minute, second and epoch - the list is closed, and a part outside it is refused.",
                 "related_functions": [
                     "TRUNC",
                     "DATEDIFF",
@@ -1734,10 +1734,10 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME"
                 ],
-                "return_type": "integer | double | date",
+                "return_type": "integer",
                 "returns": {
-                    "type": "integer | double | date",
-                    "documentation": "Returns `double` for parts such as `epoch` and `julian`, `date` for `date`, and `integer` for most other parts."
+                    "type": "integer",
+                    "documentation": "Returns the requested part as an `integer`; `epoch` returns whole Unix epoch seconds."
                 },
                 "arity": {
                     "minimum": 2,
@@ -1754,7 +1754,7 @@
                     {
                         "label": "part",
                         "type": "varchar",
-                        "documentation": "Date or time part to extract, such as `year`, `month`, `day`, or `epoch`. Must be a constant expression.",
+                        "documentation": "Date or time part to extract: `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` or `epoch`. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
@@ -1766,7 +1766,8 @@
                             "day",
                             "hour",
                             "minute",
-                            "second"
+                            "second",
+                            "epoch"
                         ],
                         "minimum": null,
                         "maximum": null,
@@ -1790,13 +1791,13 @@
                         "excludes": []
                     }
                 ],
-                "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. Return type depends on `part`: `epoch` and `julian` produce `double`, `date` produces `date`, and most other parts produce `integer`."
+                "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. The supported parts are `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` and `epoch`; each returns an `integer`. `epoch` is whole Unix epoch seconds - `EXTRACT(EPOCH FROM ts)` is the same value as `TO_UNIXTIME(ts)`, and is planned as that call. Sub-day parts require a TIMESTAMP operand."
             },
             {
                 "id": "EXTRACT_INT",
                 "label": "EXTRACT(part FROM date)",
                 "category": "Date & Time Functions",
-                "documentation": "Extracts a named part (year, month, day, epoch, etc.) from a date or timestamp.",
+                "documentation": "Extracts a named part from a date or timestamp. The supported parts are year, quarter, month, day, hour, minute, second and epoch - the list is closed, and a part outside it is refused.",
                 "related_functions": [
                     "TRUNC",
                     "DATEDIFF",
@@ -1804,10 +1805,10 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME"
                 ],
-                "return_type": "integer | double | date",
+                "return_type": "integer",
                 "returns": {
-                    "type": "integer | double | date",
-                    "documentation": "Returns `double` for parts such as `epoch` and `julian`, `date` for `date`, and `integer` for most other parts."
+                    "type": "integer",
+                    "documentation": "Returns the requested part as an `integer`; `epoch` returns whole Unix epoch seconds."
                 },
                 "arity": {
                     "minimum": 2,
@@ -1824,7 +1825,7 @@
                     {
                         "label": "part",
                         "type": "varchar",
-                        "documentation": "Date or time part to extract, such as `year`, `month`, `day`, or `epoch`. Must be a constant expression.",
+                        "documentation": "Date or time part to extract: `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` or `epoch`. Must be a constant expression.",
                         "optional": false,
                         "variadic": false,
                         "constant_only": true,
@@ -1852,7 +1853,7 @@
                         "excludes": []
                     }
                 ],
-                "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. Return type depends on `part`: `epoch` and `julian` produce `double`, `date` produces `date`, and most other parts produce `integer`."
+                "notes": "Canonical SQL-92 form is `EXTRACT(part FROM date)`. The supported parts are `year`, `quarter`, `month`, `day`, `hour`, `minute`, `second` and `epoch`; each returns an `integer`. `epoch` is whole Unix epoch seconds - `EXTRACT(EPOCH FROM ts)` is the same value as `TO_UNIXTIME(ts)`, and is planned as that call. Sub-day parts require a TIMESTAMP operand."
             }
         ]
     },
@@ -1963,8 +1964,8 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME",
                     "CURRENT_TIMESTAMP",
-                    "TODAY",
-                    "DATE"
+                    "DATE",
+                    "EXTRACT"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -2042,8 +2043,8 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME",
                     "CURRENT_TIMESTAMP",
-                    "TODAY",
-                    "DATE"
+                    "DATE",
+                    "EXTRACT"
                 ],
                 "return_type": "TIMESTAMP[US]",
                 "returns": {
@@ -2073,6 +2074,207 @@
                         "domain": [],
                         "minimum": -62135596800,
                         "maximum": 253402300799,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            }
+        ]
+    },
+    "GENERATE_SERIES": {
+        "catalog_name": "GENERATE_SERIES",
+        "aliases": [],
+        "summary": "Build an array of evenly spaced integers.",
+        "volatility": "immutable",
+        "deterministic": true,
+        "foldable": false,
+        "pushdown_safe": false,
+        "lifecycle": {
+            "status": "active",
+            "introduced": null,
+            "deprecated_in": null,
+            "remove_after": null,
+            "replacement": null
+        },
+        "overloads": [
+            {
+                "id": "GENERATE_SERIES_1",
+                "label": "GENERATE_SERIES(stop)",
+                "category": "Utility Functions",
+                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be integer CONSTANTS. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and, with an INTERVAL step, timestamps.",
+                "related_functions": [
+                    "COALESCE",
+                    "IFNULL",
+                    "IFNOTNULL",
+                    "NULLIF",
+                    "IIF"
+                ],
+                "return_type": "ARRAY<INT64>",
+                "returns": {
+                    "type": "ARRAY<INT64>",
+                    "documentation": "Returns the computed result as `ARRAY<INT64>`."
+                },
+                "arity": {
+                    "minimum": 1,
+                    "maximum": 1,
+                    "variadic": false
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 120.0
+                },
+                "parameters": [
+                    {
+                        "label": "stop",
+                        "type": "integer",
+                        "documentation": "Last value of the series, included when it falls on a step boundary. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            },
+            {
+                "id": "GENERATE_SERIES_2",
+                "label": "GENERATE_SERIES(start, stop)",
+                "category": "Utility Functions",
+                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be integer CONSTANTS. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and, with an INTERVAL step, timestamps.",
+                "related_functions": [
+                    "COALESCE",
+                    "IFNULL",
+                    "IFNOTNULL",
+                    "NULLIF",
+                    "IIF"
+                ],
+                "return_type": "ARRAY<INT64>",
+                "returns": {
+                    "type": "ARRAY<INT64>",
+                    "documentation": "Returns the computed result as `ARRAY<INT64>`."
+                },
+                "arity": {
+                    "minimum": 2,
+                    "maximum": 2,
+                    "variadic": false
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 130.0
+                },
+                "parameters": [
+                    {
+                        "label": "start",
+                        "type": "integer",
+                        "documentation": "First value of the series. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "stop",
+                        "type": "integer",
+                        "documentation": "Last value of the series, included when it falls on a step boundary. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    }
+                ]
+            },
+            {
+                "id": "GENERATE_SERIES_3",
+                "label": "GENERATE_SERIES(start, stop, step)",
+                "category": "Utility Functions",
+                "documentation": "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` start where they say. `stop` is included when it falls on a step boundary. A step pointing away from `stop` yields an EMPTY array; a step of zero is refused. Arguments must be integer CONSTANTS. To get one ROW per value instead - which is what gap-filling and joining against a dense axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, which also accepts floats and, with an INTERVAL step, timestamps.",
+                "related_functions": [
+                    "COALESCE",
+                    "IFNULL",
+                    "IFNOTNULL",
+                    "NULLIF",
+                    "IIF"
+                ],
+                "return_type": "ARRAY<INT64>",
+                "returns": {
+                    "type": "ARRAY<INT64>",
+                    "documentation": "Returns the computed result as `ARRAY<INT64>`."
+                },
+                "arity": {
+                    "minimum": 3,
+                    "maximum": 3,
+                    "variadic": false
+                },
+                "homogeneous": false,
+                "execution": {
+                    "kernel_id": "default",
+                    "engine": "draken",
+                    "cost_us_per_million": 140.0
+                },
+                "parameters": [
+                    {
+                        "label": "start",
+                        "type": "integer",
+                        "documentation": "First value of the series. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "stop",
+                        "type": "integer",
+                        "documentation": "Last value of the series, included when it falls on a step boundary. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
+                        "value_format": null,
+                        "element_of": null,
+                        "excludes": []
+                    },
+                    {
+                        "label": "step",
+                        "type": "integer",
+                        "documentation": "Distance between consecutive values; may be negative, never zero. Must be a constant expression.",
+                        "optional": false,
+                        "variadic": false,
+                        "constant_only": true,
+                        "null_handling": "strict",
+                        "domain": [],
+                        "minimum": null,
+                        "maximum": null,
                         "value_format": null,
                         "element_of": null,
                         "excludes": []
@@ -2714,8 +2916,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "TRIM"
+                    "TRIM",
+                    "LTRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -2977,8 +3179,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -3058,9 +3260,9 @@
                 "related_functions": [
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
                     "INITCAP",
-                    "TRIM"
+                    "TRIM",
+                    "LTRIM"
                 ],
                 "return_type": "INTEGER",
                 "returns": {
@@ -3104,9 +3306,9 @@
                 "related_functions": [
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
                     "INITCAP",
-                    "TRIM"
+                    "TRIM",
+                    "LTRIM"
                 ],
                 "return_type": "INTEGER",
                 "returns": {
@@ -3169,8 +3371,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "INTEGER",
                 "returns": {
@@ -3329,8 +3531,8 @@
                     "UPPER",
                     "INITCAP",
                     "LENGTH",
-                    "TITLECASE",
-                    "TRIM"
+                    "TRIM",
+                    "LTRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -3393,8 +3595,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -3566,8 +3768,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "BOOLEAN",
                 "returns": {
@@ -3891,8 +4093,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "INTEGER",
                 "returns": {
@@ -4375,8 +4577,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -4565,8 +4767,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -4629,8 +4831,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -4835,8 +5037,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -5454,8 +5656,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -5513,13 +5715,13 @@
                 "id": "SPLIT_2",
                 "label": "SPLIT(string, delimiter)",
                 "category": "String Functions",
-                "documentation": "Splits a string into an array using the specified delimiter.",
+                "documentation": "Splits a string into an array using the specified delimiter. The resulting array is subscripted ZERO-based, with negative indexes counting back from the end: SPLIT('a.b.c.d','.')[0] is 'a', [1] is 'b' and [-1] is 'd'. Most SQL dialects index from 1, so a query ported from one of those returns the wrong element rather than an error - an out-of-range index gives NULL, not a failure.",
                 "related_functions": [
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "array<element type of `string`>",
                 "returns": {
@@ -5574,13 +5776,13 @@
                 "id": "SPLIT_3",
                 "label": "SPLIT(string, delimiter, limit)",
                 "category": "String Functions",
-                "documentation": "Splits a string into an array using the specified delimiter.",
+                "documentation": "Splits a string into an array using the specified delimiter. The resulting array is subscripted ZERO-based, with negative indexes counting back from the end: SPLIT('a.b.c.d','.')[0] is 'a', [1] is 'b' and [-1] is 'd'. Most SQL dialects index from 1, so a query ported from one of those returns the wrong element rather than an error - an out-of-range index gives NULL, not a failure.",
                 "related_functions": [
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "array<element type of `string`>",
                 "returns": {
@@ -5898,8 +6100,8 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME",
                     "CURRENT_TIMESTAMP",
-                    "TODAY",
-                    "DATE"
+                    "DATE",
+                    "EXTRACT"
                 ],
                 "return_type": "INTEGER",
                 "returns": {
@@ -6085,8 +6287,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "INTEGER",
                 "returns": {
@@ -6151,8 +6353,8 @@
                     "LENGTH",
                     "UPPER",
                     "LOWER",
-                    "TITLECASE",
-                    "INITCAP"
+                    "INITCAP",
+                    "TRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {
@@ -6419,7 +6621,7 @@
                         "excludes": []
                     }
                 ],
-                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression. This overload is reachable only for a DATE LITERAL, which is constant-folded at plan time: over a DATE COLUMN there is no native kernel and the call is refused with \"outside the c-native kernel set\". Cast the column to TIMESTAMP to truncate it."
+                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression. This overload is reachable only for a DATE LITERAL, which is constant-folded at plan time: over a DATE COLUMN there is no native kernel and the call is refused with \"outside the c-native kernel set\". Cast the column to TIMESTAMP to truncate it. Also spelled `DATE_TRUNC(unit, value)` - unit FIRST."
             },
             {
                 "id": "TRUNC_timestamp",
@@ -6490,7 +6692,7 @@
                         "excludes": []
                     }
                 ],
-                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression."
+                "notes": "Truncates to the start of the specified unit. The `unit` argument must be a constant expression. Also spelled `DATE_TRUNC(unit, value)` - unit FIRST, the Postgres/Snowflake/DuckDB order - which is planned as this call."
             }
         ]
     },
@@ -6521,8 +6723,8 @@
                     "CURRENT_DATE",
                     "CURRENT_TIME",
                     "CURRENT_TIMESTAMP",
-                    "TODAY",
-                    "DATE"
+                    "DATE",
+                    "EXTRACT"
                 ],
                 "return_type": "INTEGER",
                 "returns": {
@@ -6587,8 +6789,8 @@
                     "LOWER",
                     "INITCAP",
                     "LENGTH",
-                    "TITLECASE",
-                    "TRIM"
+                    "TRIM",
+                    "LTRIM"
                 ],
                 "return_type": "VARCHAR",
                 "returns": {

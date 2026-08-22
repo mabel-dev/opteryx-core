@@ -1322,16 +1322,40 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
     // means something ELSE: the columns build_output puts in the PAIR morsel a
     // correlated residual reads. The residual needs the full pair layout even when
     // the output can be narrow, so the two must not be conflated into one field.
+    // EXISTENCE-FLAG mode: emit EVERY probe row plus one BOOL column holding the
+    // verdict, instead of emitting the rows the verdict kept. The verdict itself is
+    // unchanged — this operator already computes exactly the boolean a projected
+    // `EXISTS` needs, residual path included; only the emit differs. That is why it
+    // is a flag here rather than a second operator.
+    //
+    // NOT to be confused with Join2MarkSink below, which marks BUILD rows for the
+    // swapped RIGHT SEMI/ANTI path and emits nothing at all.
+    bool emit_existence = false;
+    // Is the emitted flag THREE-valued? `EXISTS` is not — an outer row either has a
+    // matching inner row or it does not — but a projected `IN` is: `x IN (SELECT y)`
+    // is UNKNOWN when x is NULL, and when x matched nothing while some y was NULL.
+    // Only ever set for the single-key uncorrelated IN/NOT IN shape; a correlated IN
+    // in the SELECT list is refused in the planner rather than guessed at here.
+    bool existence_three_valued = false;
+    // Output identity of the flag column, appended after the emitted probe columns.
+    std::string existence_name;
+
     SemiAntiProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
                           const Join2Ref* r, bool anti_, bool null_aware_,
                           ExprProgram res, ExprEvalFn res_fn,
                           bool emit_prune_ = false,
                           std::vector<uint32_t> emit_cols_ = {},
-                          bool null_eq = false)
+                          bool null_eq = false,
+                          bool emit_existence_ = false,
+                          bool existence_three_valued_ = false,
+                          std::string existence_name_ = {})
         : Join2ProbeOperator(std::move(keys), std::move(payload), r, /*outer=*/false,
                              /*track=*/false, null_eq),
           anti(anti_), null_aware(null_aware_),
-          residual(std::move(res)), residual_fn(res_fn) {
+          residual(std::move(res)), residual_fn(res_fn),
+          emit_existence(emit_existence_),
+          existence_three_valued(existence_three_valued_),
+          existence_name(std::move(existence_name_)) {
         emit_prune = emit_prune_;
         emit_cols = std::move(emit_cols_);
     }
@@ -1393,6 +1417,111 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
         probe_rows.clear();
         return true;
     }
+    // EXISTENCE-FLAG emit: every probe row, plus one BOOL column carrying the same
+    // verdict the filter path would have applied. `anti` inverts the bit rather than
+    // inverting which rows survive, so NOT EXISTS shares this path exactly.
+    //
+    // The probe columns are SHARED, not gathered: every input row is emitted, in
+    // order, so the output column IS the input column (CxxColumn copies the 40-byte
+    // view and shares the owner — see cxx_morsel.h). Only the flag is allocated.
+    OpResult emit_flag(const MorselPtr& in, const Join2BuildGlobal& g,
+                       const std::vector<uint64_t>& rowh,
+                       const std::vector<uint8_t>& matched, bool keys_nullable,
+                       bool build_empty, uint32_t n, MorselPtr& out, ErrCtx& err) {
+        const size_t bytes = (static_cast<size_t>(n) + 7) / 8;
+        uint8_t* bits = static_cast<uint8_t*>(draken_malloc(bytes == 0 ? 1 : bytes));
+        uint32_t* sel = static_cast<uint32_t*>(
+            draken_malloc((n == 0 ? 1 : static_cast<size_t>(n)) * sizeof(uint32_t)));
+        if (bits == nullptr || sel == nullptr) {
+            if (bits) draken_free(bits);
+            if (sel) draken_free(sel);
+            err.code = 1;
+            err.msg = "SemiAntiProbe: out of memory allocating the existence flag";
+            return OpResult::NEED_INPUT;
+        }
+        std::memset(bits, 0, bytes == 0 ? 1 : bytes);
+        uint8_t* vbits = nullptr;   // stays NULL while every row is valid
+
+        for (uint32_t i = 0; i < n; ++i) {
+            sel[i] = i;
+            bool any_null = false;
+            if (keys_nullable) {
+                for (size_t k : probe_key_idx) {
+                    if (!sort_row_valid(in->columns[k].view, i)) { any_null = true; break; }
+                }
+            }
+            // Same existence verdict as the filter path: a NULL probe key never
+            // equi-matches, so it simply finds nothing.
+            const bool found = any_null
+                                   ? false
+                                   : (residual_fn != nullptr
+                                          ? (matched[i] != 0)
+                                          : (!build_empty && g.probe_row_count(rowh[i]) > 0));
+            // UNKNOWN, for a projected IN/NOT IN only. An EMPTY build is never
+            // unknown: `x IN ()` is FALSE and `x NOT IN ()` is TRUE even for a NULL
+            // x, so the rules below are gated on there being something to compare to.
+            if (existence_three_valued && !build_empty && (any_null || (!found && g.saw_null_key))) {
+                if (vbits == nullptr) {
+                    vbits = static_cast<uint8_t*>(draken_malloc(bytes == 0 ? 1 : bytes));
+                    if (vbits == nullptr) {
+                        draken_free(bits);
+                        draken_free(sel);
+                        err.code = 1;
+                        err.msg = "SemiAntiProbe: out of memory allocating the "
+                                  "existence flag validity mask";
+                        return OpResult::NEED_INPUT;
+                    }
+                    std::memset(vbits, 0xFF, bytes == 0 ? 1 : bytes);
+                }
+                vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                continue;   // data bit already 0; validity is what makes it NULL
+            }
+            // `anti` inverts the ANSWER here, where the filter path inverts which
+            // rows it keeps. NOT is NULL-preserving, so an UNKNOWN row took the
+            // branch above and never reaches this.
+            if (found != anti) bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+        }
+
+        DrakenVector v;
+        v.data = bits;
+        v.selection = sel;
+        v.data_length = n;
+        v.length = n;
+        v.validity = vbits;
+        v.type = DRAKEN_BOOL;
+        v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        CxxColumn flag;
+        flag.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(bits),
+                                                 OwnedBuffer<uint8_t>(vbits),
+                                                 OwnedBuffer<void>(sel));
+        flag.view = flag.own->vec;
+
+        auto morsel = std::make_shared<CxxMorsel>();
+        morsel->zero_col_rows = n;
+        const std::vector<uint32_t>* keep = emit_ptr();
+        if (keep == nullptr) {
+            morsel->columns = in->columns;   // CxxColumn is a view + shared owner
+            morsel->names = in->names;
+        } else {
+            morsel->columns.reserve(keep->size() + 1);
+            morsel->names.reserve(keep->size() + 1);
+            for (uint32_t c : *keep) {
+                if (c >= in->columns.size()) {
+                    err.code = 1;
+                    err.msg = "SemiAntiProbe: existence emit column index outside the "
+                              "probe morsel — fail loud, never silent corruption";
+                    return OpResult::NEED_INPUT;
+                }
+                morsel->columns.push_back(in->columns[c]);
+                morsel->names.push_back(in->names[c]);
+            }
+        }
+        morsel->columns.push_back(std::move(flag));
+        morsel->names.push_back(existence_name);
+        out = std::move(morsel);
+        return OpResult::EMIT;
+    }
+
     OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
                      ErrCtx& err) override {
         (void)st_;
@@ -1403,7 +1532,13 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
         // NOT IN only: a NULL anywhere in the build makes every comparison UNKNOWN.
         // Plain ANTI (NOT EXISTS) must NOT do this — a NULL build key is just a row
         // that matches nothing.
-        if (anti && null_aware && g.saw_null_key) return OpResult::NEED_INPUT;
+        //
+        // Dropping the whole morsel is how a FILTER expresses UNKNOWN. An existence
+        // FLAG expresses it as a NULL in the flag column and must still emit every
+        // row, so this early-out is a wrong answer there — `existence_three_valued`
+        // reproduces the same rule per row below.
+        if (anti && null_aware && g.saw_null_key && !emit_existence)
+            return OpResult::NEED_INPUT;
         bool build_empty = (g.total_rows == 0 && !g.saw_null_key);
 
         std::vector<uint64_t> rowh;
@@ -1450,6 +1585,9 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
                     return OpResult::NEED_INPUT;
             }
         }
+
+        if (emit_existence) return emit_flag(in, g, rowh, matched, keys_nullable,
+                                             build_empty, n, out, err);
 
         std::vector<uint32_t> survivors;
         survivors.reserve(n);
@@ -1832,6 +1970,11 @@ struct DeferredJoin2Probe : Operator {
     // here only to hand to the inner operator when it is constructed.
     bool emit_prune = false;
     std::vector<uint32_t> emit_cols;
+    // SEMI/ANTI only: emit the existence verdict as a BOOL column over every probe
+    // row instead of filtering (see SemiAntiProbeOperator::emit_existence).
+    bool emit_existence = false;
+    bool existence_three_valued = false;
+    std::string existence_name;
     std::once_flag once;
     std::unique_ptr<Operator> inner;
 
@@ -1839,11 +1982,17 @@ struct DeferredJoin2Probe : Operator {
                        const Join2Ref* r, JoinMode m,
                        int asof_idx = -1, int asof_op_code = 0,
                        ExprProgram res = ExprProgram(), ExprEvalFn res_fn = nullptr,
-                       bool emit_prune_ = false, std::vector<uint32_t> emit_cols_ = {})
+                       bool emit_prune_ = false, std::vector<uint32_t> emit_cols_ = {},
+                       bool emit_existence_ = false,
+                       bool existence_three_valued_ = false,
+                       std::string existence_name_ = {})
         : key_idx(std::move(keys)), payload_idx(std::move(payload)), ref(r), mode(m),
           asof_probe_idx(asof_idx), asof_op(asof_op_code),
           residual(std::move(res)), residual_fn(res_fn),
-          emit_prune(emit_prune_), emit_cols(std::move(emit_cols_)) {}
+          emit_prune(emit_prune_), emit_cols(std::move(emit_cols_)),
+          emit_existence(emit_existence_),
+          existence_three_valued(existence_three_valued_),
+          existence_name(std::move(existence_name_)) {}
 
     std::unique_ptr<OperatorState> make_state() override {
         std::call_once(once, [this] {
@@ -1860,7 +2009,8 @@ struct DeferredJoin2Probe : Operator {
                 inner = std::make_unique<SemiAntiProbeOperator>(
                     key_idx, payload_idx, ref, is_anti,
                     mode == JoinMode::AntiNullAware, residual, residual_fn,
-                    emit_prune, emit_cols, join_mode_null_equal(mode));
+                    emit_prune, emit_cols, join_mode_null_equal(mode),
+                    emit_existence, existence_three_valued, existence_name);
             } else {
                 // FULL OUTER probes exactly like LEFT OUTER (preserved probe side,
                 // NULL build half on miss) and additionally marks matched build

@@ -13,13 +13,17 @@ from opteryx.expression.functions import (
 def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
     """Temporal functions with parameter-dependent return types.
 
-    This module provides registrar entries for temporal functions whose return
-    type depends on input parameters (e.g. EXTRACT/DATEPART). The actual kernel
-    implementations live in the `implementations.temporal` module.
+    The actual kernel implementations live in the `implementations.temporal`
+    module.
+
+    EXTRACT's return type used to be computed by a resolver over the `part`
+    literal, for parts that produced a `double` (`julian`) or a `date` (`date`).
+    Neither part exists: the `part` domain below is CLOSED, and every part in it
+    returns an INT64, so the resolver only hid a fixed type behind a function
+    call. It is declared fixed here instead.
     """
     # Local import to avoid heavy top-level imports / circular deps.
     from opteryx.expression.functions.implementations import temporal as date_functions
-    from opteryx.expression.functions.registrar import _datepart_return_type
 
     return [
         FunctionDefinition(
@@ -30,7 +34,11 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
             summary="Extract a part from a date/timestamp.",
-            documentation="Extracts a named part (year, month, day, epoch, etc.) from a date or timestamp.",
+            documentation=(
+                "Extracts a named part from a date or timestamp. The supported parts are "
+                "year, quarter, month, day, hour, minute, second and epoch - the list is "
+                "closed, and a part outside it is refused."
+            ),
             overloads=(
                 FunctionOverload(
                     id="EXTRACT_2",
@@ -39,25 +47,33 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                             name="part",
                             type_family="string",
                             constant_only=True,
-                            # The parts draken_date_part actually implements —
-                            # narrower than the "year, month, day, epoch, etc."
-                            # the documentation implies. `week`, `epoch`, `dow`
-                            # and `doy` are NOT among them; each is refused as
-                            # "outside the c-native kernel set".
+                            # The parts draken_date_part actually implements,
+                            # plus `epoch`. This IS the closed set: `week`,
+                            # `dow`, `doy`, `julian` and `date` are NOT among
+                            # them; each is refused as "outside the c-native
+                            # kernel set".
+                            #
+                            # `epoch` has no draken_date_part part id and never
+                            # reaches that kernel — EXTRACT(EPOCH FROM x) is
+                            # normalised to UNIXTIME(x) while the logical plan is
+                            # built, which is the same value and is native. It is
+                            # in the domain because it is accepted SQL, not
+                            # because the kernel answers it.
                             domain=(
                                 "year", "quarter", "month", "day",
-                                "hour", "minute", "second",
+                                "hour", "minute", "second", "epoch",
                             ),
                             documentation=(
                                 "The part to extract. Sub-day parts (hour, minute, second) "
                                 "require a TIMESTAMP operand — over a DATE the kernel refuses "
                                 "them ('sub-day part of a DATE'), so a DATE operand accepts "
-                                "only year, quarter, month and day."
+                                "only year, quarter, month, day and epoch. `epoch` is Unix "
+                                "epoch SECONDS as an INTEGER, identical to TO_UNIXTIME."
                             ),
                         ),
                         ParameterSpec(name="date", type_family="temporal"),
                     ),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_datepart_return_type),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_INT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",
@@ -71,7 +87,7 @@ def get_builtin_temporal_extra_functions() -> List[FunctionDefinition]:
                         ParameterSpec(name="part", type_family="string", constant_only=True),
                         ParameterSpec(name="date", type_family="integer"),
                     ),
-                    return_spec=ReturnSpec(mode="resolver", resolver=_datepart_return_type),
+                    return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_INT64),
                     kernel=KernelSpec(
                         engine="draken",
                         id="default",

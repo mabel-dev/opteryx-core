@@ -50,13 +50,16 @@ class ScriptedCapability:
         allow_principal=(),
         rows=(),
         allow_local_read=True,
+        refuse_ownership=(),
     ):
         self.allow = set(allow)
         self.allow_workspace = set(allow_workspace)
         self.allow_principal = set(allow_principal)
         self.rows = list(rows)
         self.allow_local_read = allow_local_read
+        self.refuse_ownership = set(refuse_ownership)
         self.asked = []
+        self.asked_ownership = []
         self.asked_workspace = []
         self.asked_principal = []
 
@@ -82,6 +85,12 @@ class ScriptedCapability:
         # running the query, and this session was never issued their policies.
         self.asked_principal.append((principal, resource, action))
         return (principal, resource, action) in self.allow_principal
+
+    def can_principal_own_materialized_view(self, principal):
+        # No resource and no context: whether an identity may be pinned as a
+        # view's owner is not a question about what it can reach.
+        self.asked_ownership.append(principal)
+        return principal not in self.refuse_ownership
 
     def grants(self, identity, policies):
         return self.rows
@@ -149,6 +158,7 @@ def test_the_intrinsic_capability_is_permit_all():
     assert capability.can_perform_action(None, "anything.at.all", "DROP")
     assert capability.can_perform_workspace_action(None, "anything", "ALTER")
     assert capability.can_principal_perform_action("anybody", "anything.at.all", "READ")
+    assert capability.can_principal_own_materialized_view("anybody")
 
 
 def test_an_incomplete_capability_is_refused_at_registration(install):
@@ -657,6 +667,70 @@ def test_owner_to_current_user_is_judged_on_the_session(tmp_path, install):
     assert ("ws.b", "READ") in capability.asked
     assert capability.asked_principal == []
     assert _runs_as(tmp_path) == "mallory"
+
+
+def test_alter_owner_refuses_a_principal_the_deployment_will_not_pin_work_on(
+    tmp_path, install
+):
+    """A platform identity can read everything the view reads and is still
+    refused. It is an identity rather than an account, so a view refreshing as
+    it would be standing compute billed to nobody - which is why this cannot be
+    answered by asking what the principal can read."""
+    _materialized_view(tmp_path, install)
+    capability = install(
+        ScriptedCapability(
+            allow_workspace={("ws", "ALTER")},
+            allow_principal={("federator", "ws.b", "READ")},
+            refuse_ownership={"federator"},
+        )
+    )
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError, match="federator"):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO federator"))
+
+    assert capability.asked_ownership == ["federator"]
+    assert _runs_as(tmp_path) == "olive"  # the transfer left nothing behind
+
+
+def test_the_refusal_does_not_depend_on_how_the_owner_was_spelled(tmp_path, install):
+    """CURRENT_USER is resolved before it is asked about, so a session running
+    AS the refused identity cannot transfer a view to itself by naming itself
+    differently."""
+    _materialized_view(tmp_path, install)
+    capability = install(
+        ScriptedCapability(
+            allow={("ws.b", "READ")},
+            allow_workspace={("ws", "ALTER")},
+            refuse_ownership={"federator"},
+        )
+    )
+    session = opteryx.session(user="federator")
+
+    with pytest.raises(PermissionError, match="federator"):
+        list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO CURRENT_USER"))
+
+    assert capability.asked_ownership == ["federator"]
+    assert _runs_as(tmp_path) == "olive"
+
+
+def test_an_ordinary_principal_is_asked_about_and_permitted(tmp_path, install):
+    """The gate is asked on every transfer, not only the refused ones - a check
+    that ran for some owners and not others would be no check at all."""
+    _materialized_view(tmp_path, install)
+    capability = install(
+        ScriptedCapability(
+            allow_workspace={("ws", "ALTER")},
+            allow_principal={("ginny", "ws.b", "READ")},
+            refuse_ownership={"federator"},
+        )
+    )
+    session = opteryx.session(user="olive")
+
+    list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO ginny"))
+
+    assert capability.asked_ownership == ["ginny"]
+    assert _runs_as(tmp_path) == "ginny"
 
 
 def test_every_source_is_checked_not_just_the_first(tmp_path, install):

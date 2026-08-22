@@ -7,20 +7,10 @@ Date Utilities
 """
 
 import datetime
-import re
 from typing import Union
 
-TIMEDELTA_REGEX = (
-    r"((?P<years>\d+)\s?(?:ys?|yrs?|years?))?\s*"
-    r"((?P<months>\d+)\s?(?:mo|mons?|mths?|months?))?\s*"
-    r"((?P<weeks>\d+)\s?(?:w|wks?|weeks?))?\s*"
-    r"((?P<days>\d+)\s?(?:d|days?))?\s*"
-    r"((?P<hours>\d+)\s?(?:h|hrs?|hours?))?\s*"
-    r"((?P<minutes>\d+)\s?(?:m|mins?|minutes?))?\s*"
-    r"((?P<seconds>\d+)\s?(?:s|secs?|seconds?))?\s*"
-)
+from opteryx.exceptions import InvalidFunctionParameterError
 
-TIMEDELTA_PATTERN = re.compile(TIMEDELTA_REGEX, re.IGNORECASE)
 UNIX_EPOCH: datetime.date = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
@@ -49,46 +39,81 @@ def add_months(start_date: datetime.datetime, number_of_months: int):
 
 
 def add_interval(
-    current_date: datetime.datetime, interval: str
+    current_date: datetime.datetime, interval: tuple
 ) -> Union[datetime.date, datetime.datetime]:
     """
-    Parses a human readable timedelta (3d5h19m) into a datetime.timedelta.
+    Add one INTERVAL to a datetime.
+
+    `interval` is the engine's canonical INTERVAL literal value: a
+    ``(months, microseconds)`` pair, which is how the logical planner builds
+    every INTERVAL and what `_apply_interval_scalar` already applies elsewhere.
+    The two components are separate because they are not interconvertible - a
+    month is 28 to 31 days - so months are applied by calendar arithmetic
+    (`add_months`, which clamps 31st-of-the-month to the target month's last
+    day) and microseconds by exact duration. Both may be negative.
+
+    This used to parse a human-readable string ("3d5h19m"). Nothing ever
+    produced one: its only caller is `date_range`, whose only caller is
+    GENERATE_SERIES, which is handed a planner INTERVAL - so the string
+    contract had no live input and the temporal series raised a raw TypeError
+    instead of running.
     """
-    match = TIMEDELTA_PATTERN.match(interval)
-    if match:
-        parts = {k: int(v) for k, v in match.groupdict().items() if v}
-        # time delta doesn't include weeks, months or years
-        if "weeks" in parts:
-            weeks = parts.pop("weeks")
-            current_date = current_date + datetime.timedelta(days=weeks * 7)
-        if "months" in parts:
-            months = parts.pop("months")
-            current_date = add_months(current_date, months)
-        if "years" in parts:
-            # need to avoid 29th Feb problems, so can't just say year - year
-            years = parts.pop("years")
-            current_date = add_months(current_date, 12 * years)
-        if parts:
-            return current_date + datetime.timedelta(**parts)
-        return current_date
-    raise ValueError(f"Unable to interpret interval - {interval}")  # pragma: no cover
+    months, microseconds = interval
+    if months:
+        current_date = add_months(current_date, int(months))
+    if microseconds:
+        current_date = current_date + datetime.timedelta(microseconds=int(microseconds))
+    return current_date
 
 
-def date_range(start_date, end_date, interval: str):
-    """Create a series of dates between two dates with a given interval"""
+def date_range(start_date, end_date, interval: tuple):
+    """Every timestamp from `start_date` to `end_date` inclusive, one INTERVAL apart.
+
+    `interval` is a ``(months, microseconds)`` pair - see `add_interval`.
+
+    The interval must move the cursor TOWARDS `end_date`, and it must move it at
+    all. An interval of zero, or one pointing the wrong way, describes a series
+    with no end: the loop below would run until the process died. Both are
+    refused up front, by name, rather than being allowed to hang.
+    """
     start_date = parse_iso(start_date)
     end_date = parse_iso(end_date)
 
-    if start_date > end_date:  # pragma: no cover
-        raise ValueError("Cannot create an series with the provided start and end dates")
+    if start_date is None or end_date is None:
+        raise InvalidFunctionParameterError(
+            "GENERATE_SERIES over timestamps needs a start and an end that are "
+            "timestamps. Cast them if they are strings: "
+            "`GENERATE_SERIES(CAST('2020-01-01' AS TIMESTAMP), "
+            "CAST('2020-01-02' AS TIMESTAMP), INTERVAL '1' HOUR)`."
+        )
 
-    # if the dates are the same, return that date
-    if start_date == end_date:  # pragma: no cover
-        yield start_date
-        return
+    months, microseconds = interval
+    if not months and not microseconds:
+        raise InvalidFunctionParameterError(
+            "GENERATE_SERIES cannot use an INTERVAL of zero - the series would never "
+            "reach its end."
+        )
+
+    descending = start_date > end_date
+    if descending:
+        # A descending series needs a NEGATIVE interval, and vice versa. The step
+        # is tested by applying it once rather than by reading the sign off the
+        # pair, because the two components can disagree (INTERVAL '1' MONTH minus
+        # a day carries a positive month and negative microseconds) and only the
+        # calendar knows which wins.
+        if add_interval(start_date, interval) >= start_date:
+            raise InvalidFunctionParameterError(
+                "GENERATE_SERIES was given a start after its end and an INTERVAL that "
+                "does not count down. Swap the bounds, or negate the INTERVAL."
+            )
+    elif add_interval(start_date, interval) <= start_date:
+        raise InvalidFunctionParameterError(
+            "GENERATE_SERIES was given a start before its end and an INTERVAL that "
+            "does not count up. Swap the bounds, or negate the INTERVAL."
+        )
 
     cursor = start_date
-    while cursor <= end_date:
+    while (cursor >= end_date) if descending else (cursor <= end_date):
         yield cursor
         cursor = add_interval(cursor, interval)
 

@@ -210,7 +210,12 @@ def get_builtin_arithmetic_extended_functions() -> list[FunctionDefinition]:
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
             summary="Truncate a numeric or temporal value.",
-            documentation="Truncates numeric values toward zero or temporal values to the start of a unit.",
+            documentation=(
+                "Truncates numeric values toward zero or temporal values to the start of a unit. "
+                "The temporal form is also spelled `DATE_TRUNC(unit, value)` - unit FIRST, the "
+                "Postgres/Snowflake/DuckDB order - which is normalised to `TRUNC(value, unit)` "
+                "when the query is planned."
+            ),
             overloads=(
                 FunctionOverload(
                     id="TRUNC_numeric",

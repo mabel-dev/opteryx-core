@@ -34,7 +34,7 @@ from opteryx.expression import (
     get_all_nodes_of_type,
 )
 from opteryx.expression.formatter import ExpressionColumn
-from opteryx.models import Node
+from opteryx.models import LogicalColumn, Node
 from opteryx.planner.binder.common import extract_join_fields
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.types.logical_type import LogicalCategory, ColumnType, BOOLEAN as _CT_BOOLEAN
@@ -98,6 +98,72 @@ def _predicate_column_ids(predicate):
         sc = getattr(ident, "schema_column", None)
         if sc is not None and sc.identity is not None:
             out.add(sc.identity)
+    return out
+
+
+def _outside_aggregate_column_ids(predicate, emitted=None):
+    """
+    The column identities a predicate references OUTSIDE any aggregator.
+
+    A HAVING predicate is folded onto an AggregateAndGroup node, so it is
+    evaluated against that node's OUTPUT stream — group keys and aggregate
+    results. The columns it reads through an aggregator (`SUM(mass) > 1`) are
+    not in that stream and must not be: the aggregate computes them from its
+    INPUT, and the fold appends the aggregator to `node.aggregates` precisely so
+    it exists there. Everything the predicate reads directly, though, has to be
+    emitted by this node or the folded condition names a column the stream does
+    not carry.
+
+    So this walks the expression exactly as `get_all_nodes_of_type` does but
+    PRUNES aggregator subtrees rather than subtracting their identities
+    afterwards: a column read both inside and outside one (`SUM(x) > x`) is
+    still a direct read, and subtracting would lose it.
+
+    `emitted` — the identities that stream DOES carry — prunes a second kind of
+    subtree, for the same reason: a GROUP BY key. `GROUP BY UPPER(name) HAVING
+    UPPER(name) > 'B' OR COUNT(*) > 1` reads `UPPER(name)`, and the aggregate emits
+    exactly that, under the key's own identity. Descending into it anyway reported the
+    LEAF `name` as a direct read — a column the aggregate does not emit — so the fold
+    was refused and the predicate, aggregator and all, was left to flow BELOW the
+    aggregate, where it referenced the COUNT the aggregate had not computed yet. A
+    plain-column key hid this completely: there the key identity and the leaf identity
+    are the same thing, so the two answers agreed.
+
+    Omitting `emitted` keeps the old leaf-only behaviour, for callers asking the
+    question of no particular stream.
+    """
+    cond = predicate.condition if getattr(predicate, "condition", None) is not None else predicate
+    out: set = set()
+    stack = [cond] if cond is not None else []
+    while stack:
+        node = stack.pop()
+        if node.node_type == NodeType.AGGREGATOR:
+            continue
+        if emitted:
+            sc = node.schema_column
+            if sc is not None and sc.identity is not None and sc.identity in emitted:
+                out.add(sc.identity)
+                continue
+        if node.node_type == NodeType.IDENTIFIER:
+            sc = node.schema_column
+            if sc is not None and sc.identity is not None:
+                out.add(sc.identity)
+        if node.parameters:
+            stack.extend(
+                param for param in node.parameters if isinstance(param, (Node, LogicalColumn))
+            )
+        if node.node_type == NodeType.CASE:
+            if node.conditions:
+                stack.extend(c for c in node.conditions if isinstance(c, (Node, LogicalColumn)))
+            if node.results:
+                stack.extend(r for r in node.results if isinstance(r, (Node, LogicalColumn)))
+            if node.else_result is not None and isinstance(
+                node.else_result, (Node, LogicalColumn)
+            ):
+                stack.append(node.else_result)
+        for child in (node.right, node.centre, node.left):
+            if child is not None:
+                stack.append(child)
     return out
 
 
@@ -977,9 +1043,20 @@ class PredicatePushdownStrategy(OptimizationStrategy):
             # Handle HAVING predicates (filters with aggregators) by attaching to the aggregate node
             remaining_predicates = []
             having_predicates = []
+            # Folding puts the condition ON this node, so it is evaluated against
+            # this node's OUTPUT stream. Carrying an aggregator is necessary but
+            # NOT sufficient: everything the predicate reads directly (i.e. not
+            # through an aggregator this fold will compute) must be emitted here
+            # too. `HAVING COUNT(*) > (SELECT ...)` is the shape that proves it —
+            # decorrelation turns the subquery into a value produced by a join
+            # ABOVE this aggregate, so folding named a column the stream cannot
+            # carry and the physical compile died on it. Every other arm in this
+            # file already gates on `_emitted_identities`; this one did not.
+            _emit_memo: dict = {}
+            emitted = _emitted_identities(context.optimized_plan, context.node_id, _emit_memo)
             for predicate in context.collected_predicates:
                 has_agg = get_all_nodes_of_type(predicate.condition, (NodeType.AGGREGATOR,))
-                if has_agg:
+                if has_agg and _outside_aggregate_column_ids(predicate, emitted) <= emitted:
                     # This is a HAVING predicate — push into the aggregate
                     having_predicates.append(predicate)
                 else:
@@ -1241,15 +1318,17 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                             if predicate.condition.value == "Eq":
                                 # Only convert when the predicate can be represented as join fields.
                                 # Expressions like `s = e + INTERVAL '1' MONTH` must stay as filters.
-                                try:
-                                    extract_join_fields(
-                                        predicate.condition,
-                                        node.left_relation_names,
-                                        node.right_relation_names,
-                                    )
-                                except UnsupportedSyntaxError:
+                                _l, _r, unkeyed = extract_join_fields(
+                                    predicate.condition,
+                                    node.left_relation_names,
+                                    node.right_relation_names,
+                                )
+                                if unkeyed:
                                     # DECLINED: not representable as join fields, so it
-                                    # stays a Filter above the join.
+                                    # stays a Filter above the join. An operand that
+                                    # JoinKeyMaterializationStrategy could project is
+                                    # still declined here — that strategy reads ON
+                                    # clauses, and this predicate is not one yet.
                                     self.telemetry.optimization_predicate_pushdown_declined += 1
                                     context.optimized_plan.insert_node_after(
                                         predicate.nid, predicate, context.node_id
@@ -1304,7 +1383,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                             remaining_predicates.append(predicate)
 
                     if node.on:
-                        node.left_columns, node.right_columns = extract_join_fields(
+                        node.left_columns, node.right_columns, _unkeyed = extract_join_fields(
                             node.on, node.left_relation_names, node.right_relation_names
                         )
                         node.columns = get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))
@@ -1355,13 +1434,12 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                             # Only fold when the equality is representable as join
                             # fields; expressions like `s = e + INTERVAL '1' MONTH`
                             # must stay as filters.
-                            try:
-                                extract_join_fields(
-                                    condition,
-                                    node.left_relation_names,
-                                    node.right_relation_names,
-                                )
-                            except UnsupportedSyntaxError:
+                            _l, _r, unkeyed = extract_join_fields(
+                                condition,
+                                node.left_relation_names,
+                                node.right_relation_names,
+                            )
+                            if unkeyed:
                                 # DECLINED: keep it collected so complete()
                                 # restores it as a Filter above the join.
                                 self.telemetry.optimization_predicate_pushdown_declined += 1
@@ -1387,7 +1465,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                             remaining_predicates.append(predicate)
 
                     if node.on:
-                        node.left_columns, node.right_columns = extract_join_fields(
+                        node.left_columns, node.right_columns, _unkeyed = extract_join_fields(
                             node.on, node.left_relation_names, node.right_relation_names
                         )
                         node.columns = get_all_nodes_of_type(node.on, (NodeType.IDENTIFIER,))

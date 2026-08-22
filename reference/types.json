@@ -187,8 +187,7 @@
             ],
             "limitations": [
                 "You cannot cast an integer COLUMN to DATE directly (only integer literals are accepted). To convert an epoch column, cast to TIMESTAMP first then to DATE: `FROM_UNIXTIME(n)::DATE`.",
-                "MM/DD/YYYY or DD-MM-YYYY string formats fail against the default parser \u2014 use `CAST(... AS DATE FORMAT 'MM/DD/YYYY')` (or the matching pattern) instead.",
-                "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST."
+                "MM/DD/YYYY or DD-MM-YYYY string formats fail against the default parser \u2014 use `CAST(... AS DATE FORMAT 'MM/DD/YYYY')` (or the matching pattern) instead."
             ]
         },
         "parameterized_forms": [],
@@ -456,8 +455,7 @@
             "notes": "Sub-month components (days, hours, minutes, seconds, microseconds) are stored as a microsecond count. Month and year components are stored separately and applied calendar-accurately during arithmetic. You cannot mix month-based and sub-month intervals in a single expression.",
             "limitations": [
                 "There is no INTERVAL literal that combines months and days in one expression (e.g. '1 month 3 days' is not supported). Use separate additions.",
-                "CAST(literal AS INTERVAL) is rejected. INTERVAL can only be cast TO VARCHAR (see cast_to above); it cannot be cast FROM another type.",
-                "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST."
+                "CAST(literal AS INTERVAL) is rejected. INTERVAL can only be cast TO VARCHAR (see cast_to above); it cannot be cast FROM another type."
             ]
         },
         "parameterized_forms": [],
@@ -758,8 +756,7 @@
             "limitations": [
                 "`1::TIMESTAMP` is not valid \u2014 you must specify the scale: `1::TIMESTAMP[s]`.",
                 "Timestamps outside 1677\u20132262 are not representable at `TIMESTAMP[ns]` scale (nanosecond storage overflows outside that range); the default microsecond scale does not have this restriction.",
-                "No scale represents a year outside 1..9999. This bounds the RESULT of temporal arithmetic too, not just literals and casts: an expression whose value falls outside the window raises rather than saturating.",
-                "CAST ... FORMAT is not yet supported combined with TRY_CAST/SAFE_CAST."
+                "No scale represents a year outside 1..9999. This bounds the RESULT of temporal arithmetic too, not just literals and casts: an expression whose value falls outside the window raises rather than saturating."
             ]
         },
         "parameterized_forms": [],

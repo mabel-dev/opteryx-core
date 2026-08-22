@@ -161,6 +161,7 @@ VecResult draken_array_contains_all(void* ctx, const DrakenVector* const* args, 
 VecResult draken_greatest(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_least(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t nargs);
+VecResult draken_generate_series(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 VecResult draken_array_contains(void* ctx, const DrakenVector* const* args, uint32_t nargs);
 // Phase 9a-fn: DATEDIFF/TIMEDIFF/FORMAT_TIMESTAMP/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
 VecResult draken_datediff(void* ctx, const DrakenVector* const* args, uint32_t nargs);
@@ -212,6 +213,9 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_round_2", (kernel_fn_t)&draken_round},
     {"draken_split_2", (kernel_fn_t)&draken_split},
     {"draken_split_3", (kernel_fn_t)&draken_split},
+    {"draken_generate_series_1", (kernel_fn_t)&draken_generate_series},
+    {"draken_generate_series_2", (kernel_fn_t)&draken_generate_series},
+    {"draken_generate_series_3", (kernel_fn_t)&draken_generate_series},
     {"draken_substring_2", (kernel_fn_t)&draken_substring},
     {"draken_substring_3", (kernel_fn_t)&draken_substring},
     {"draken_random_default", (kernel_fn_t)&draken_random},
@@ -656,6 +660,7 @@ static std::map<std::string, kernel_fn_t> _kernel_registry = {
     {"draken_greatest", (kernel_fn_t)&draken_greatest},
     {"draken_least", (kernel_fn_t)&draken_least},
     {"draken_split", (kernel_fn_t)&draken_split},
+    {"draken_generate_series", (kernel_fn_t)&draken_generate_series},
 
     // DATEDIFF/TIMEDIFF/FORMAT_TIMESTAMP/UNIXTIME/TIME_BUCKET (function_temporal.cpp)
     {"draken_datediff", (kernel_fn_t)&draken_datediff},

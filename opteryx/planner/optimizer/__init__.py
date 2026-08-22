@@ -57,6 +57,7 @@ from opteryx.planner.optimizer.strategies import (
     HashMapVariantStrategy,
     JoinBuildShapeStrategy,
     JoinEliminationStrategy,
+    JoinKeyMaterializationStrategy,
     JoinOrderingStrategy,
     JoinPlanningStrategy,
     JoinRewriteStrategy,
@@ -113,6 +114,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "HashMapVariantStrategy": "disable_hash_map_variant",
     "JoinBuildShapeStrategy": "disable_join_build_shape",
     "JoinEliminationStrategy": "disable_join_elimination",
+    "JoinKeyMaterializationStrategy": "disable_join_key_materialization",
     "JoinOrderingStrategy": "disable_join_ordering",
     "JoinPlanningStrategy": "disable_join_planning",
     "JoinRewriteStrategy": "disable_join_rewrite",
@@ -211,6 +213,13 @@ class OptimizerVisitor:
             FunctionRewriteStrategy(telemetry),
             GroupKeyReductionStrategy(telemetry),
             PredicateCompactionStrategy(telemetry),
+            # Projects an ON-clause expression operand as a real column on its own
+            # leg, so `ON CAST(f.client AS VARCHAR) = l.client` becomes an ordinary
+            # equi-join. Before every strategy that reasons about join keys (DPccp
+            # edge classification, predicate pushdown, projection pushdown) and
+            # after the expression simplifiers, so a cast or arithmetic that folds
+            # away is never materialised as a column in the first place.
+            JoinKeyMaterializationStrategy(telemetry),
             JoinPlanningStrategy(telemetry),  # Cost-based DPccp; no-op when flag off
             PredicatePushdownStrategy(telemetry),
             CrossJoinFilterPushdownStrategy(

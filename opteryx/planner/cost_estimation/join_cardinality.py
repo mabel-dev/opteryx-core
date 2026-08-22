@@ -189,7 +189,14 @@ def apply_occupancy_bound(
         # above has) was measured and is worse: TPC-H Q20's hash join estimates
         # 894 against an actual 5,843 with this widening, and 1 without it --
         # the unbounded product of two stand-in domains collapses the join to
-        # nothing, which is the failure the bound exists to stop.
+        # nothing, which is the failure the bound exists to stop. Full strength
+        # instead of widened puts it at 800,000.
+        #
+        # Q20 is the ONLY query in TPC-H, TPC-DS and ClickBench whose estimates
+        # this branch moves at all (measured 2026-08-21, every other query
+        # byte-identical under all three treatments). Do not expect broad
+        # movement from touching it, and do not read a suite-wide change after
+        # editing here as having come from here.
         bound = max(bound, isqrt(composite * bound))
     if composite <= bound:
         return equi_keys

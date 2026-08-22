@@ -1905,6 +1905,198 @@ VecResult draken_split(void* ctx, const DrakenVector* const* args, uint32_t narg
     }
 }
 
+// GENERATE_SERIES(stop) / (start, stop) / (start, stop, step) -> ARRAY<INT64>
+//
+// The SCALAR spelling of GENERATE_SERIES. The engine has a second, older one:
+// the TABLE function `FROM GENERATE_SERIES(...) AS g`, which produces one ROW per
+// value and lives entirely in the planner (opteryx/utils/series.py). This kernel
+// produces one ARRAY per row instead, so `SELECT GENERATE_SERIES(1, 3)` answers
+// with `[1, 2, 3]`.
+//
+// The bounds are INCLUSIVE of `stop` when `stop` is on a step boundary and
+// exclusive of anything past it, `start` defaults to 1 and `step` to 1 — the same
+// series the table function's `numeric_range` produces, so the two spellings of
+// one name cannot answer differently.
+//
+// INTEGER ARGUMENTS ONLY, deliberately. The table function also accepts floats,
+// where the last element's membership is decided by an accumulate-and-tolerance
+// rule; reimplementing a fuzzy boundary a second time is how two spellings of one
+// function start disagreeing at the edges. The catalog declares these parameters
+// `integer`, so a float argument is refused by the binder with a type error rather
+// than silently rounded here.
+//
+// Every argument is CONSTANT-ONLY (enforced at lowering by the catalog's
+// ParameterSpec, and re-checked here). A per-row series would make each row's
+// array a different length, driven by column values with no bound on them — a
+// genuinely different computation, not this one relaxed.
+//
+// NOTE: explicit try/catch rather than DRAKEN_KERNEL_TRY — see the note on
+// draken_jsonb_object_keys for why (the macro is one-argument and braces do not
+// protect commas).
+namespace {
+
+// The most elements ONE row's series may hold. A series is materialized in full,
+// so an unbounded one is an out-of-memory crash reported as a segfault rather than
+// as the mistake it is (`GENERATE_SERIES(1, 10000000000)`). Failing loud at a
+// stated limit is the honest answer; the table-function spelling streams rows and
+// is the right tool past this size.
+constexpr int64_t kGsMaxElements = 1000000;
+
+// One integer-family operand, required to be a scalar (constant) and non-null.
+// `present` is false when the operand's single value is NULL, which makes the
+// whole series NULL rather than an error - a NULL bound has no series, the same
+// way it has no comparison.
+inline bool gs_scalar_int(const DrakenVector* v, const char* who, const char* role,
+                          int64_t& out, bool& present, std::string& err) {
+    if (!v) { err = std::string(who) + ": missing " + role; return false; }
+    if (v->data_length != 1u) {
+        err = std::string(who) + ": " + role +
+              " must be a constant, not a column - a per-row series is not supported";
+        return false;
+    }
+    if (v->length == 0u || !aj_row_valid(v, 0u)) { present = false; return true; }
+    if (!acm_elem_int64(v, v->selection[0], out)) {
+        err = std::string(who) + ": " + role + " must be an integer";
+        return false;
+    }
+    present = true;
+    return true;
+}
+
+}  // namespace
+
+VecResult draken_generate_series(void* ctx, const DrakenVector* const* args, uint32_t nargs) {
+    (void)ctx;
+    try {
+        if (!args || nargs < 1u || nargs > 3u || !args[0])
+            return draken_error_sentinel(
+                "draken_generate_series: expects (stop), (start, stop) or (start, stop, step)");
+
+        std::string err;
+        int64_t v0 = 0, v1 = 0, v2 = 1;
+        bool p0 = false, p1 = false, p2 = true;
+        if (!gs_scalar_int(args[0], "draken_generate_series",
+                           nargs == 1u ? "stop" : "start", v0, p0, err))
+            return draken_error_sentinel(err.c_str());
+        if (nargs >= 2u &&
+            !gs_scalar_int(args[1], "draken_generate_series", "stop", v1, p1, err))
+            return draken_error_sentinel(err.c_str());
+        if (nargs == 3u &&
+            !gs_scalar_int(args[2], "draken_generate_series", "step", v2, p2, err))
+            return draken_error_sentinel(err.c_str());
+
+        // GENERATE_SERIES(stop) is GENERATE_SERIES(1, stop): the ONE argument is
+        // the END, not the start.
+        int64_t start = 1, stop = 0;
+        if (nargs == 1u) { stop = v0; }
+        else             { start = v0; stop = v1; }
+        const int64_t step = v2;
+        const bool null_row = !p0 || (nargs >= 2u && !p1) || (nargs == 3u && !p2);
+
+        if (!null_row && step == 0)
+            return draken_error_sentinel(
+                "draken_generate_series: step must not be zero - the series would never "
+                "reach its end");
+
+        // Element count first, so an oversized series is refused BEFORE it is built.
+        // Computed in a wider type: (stop - start) overflows int64 for bounds at
+        // opposite ends of the range, and the subtraction would wrap to a small
+        // positive count instead of a huge one - a silent wrong answer where the
+        // guard below is the whole point.
+        int64_t count = 0;
+        if (!null_row) {
+            const __int128 span = static_cast<__int128>(stop) - static_cast<__int128>(start);
+            const __int128 istep = static_cast<__int128>(step);
+            if ((step > 0 && span >= 0) || (step < 0 && span <= 0)) {
+                const __int128 c = span / istep + 1;
+                if (c > static_cast<__int128>(kGsMaxElements))
+                    return draken_error_sentinel_fmt(
+                        "draken_generate_series: the series has more than %lld elements. "
+                        "Narrow the bounds, widen the step, or use the table form "
+                        "`FROM GENERATE_SERIES(...) AS g`, which streams rows instead of "
+                        "building one array.",
+                        (long long)kGsMaxElements);
+                count = static_cast<int64_t>(c);
+            }
+            // A step pointing away from `stop` yields an EMPTY series, not an error -
+            // the same answer `range()` gives, and what a caller computing bounds
+            // expects when they happen to cross.
+        }
+
+        // One row per input row. The arguments are constants, so every row's array
+        // holds the SAME values; they are materialized per row rather than shared,
+        // which is the uniform §11 access pattern every consumer already handles.
+        const uint32_t n = args[0]->length;
+        const uint64_t total64 = static_cast<uint64_t>(n) * static_cast<uint64_t>(count);
+        if (total64 > 0xFFFFFFFFull)
+            return draken_error_sentinel(
+                "draken_generate_series: the series is too large to materialize once per "
+                "row. Use the table form `FROM GENERATE_SERIES(...) AS g`.");
+        const uint32_t total = static_cast<uint32_t>(total64);
+
+        int32_t* offsets = static_cast<int32_t*>(
+            draken_malloc((static_cast<size_t>(n) + 1u) * sizeof(int32_t)));
+        if (!offsets) throw std::bad_alloc();
+        struct OffGuard {
+            int32_t* p; bool released = false;
+            ~OffGuard() { if (!released) draken_free(p); }
+        } og{offsets};
+        for (uint32_t i = 0u; i <= n; ++i)
+            offsets[i] = static_cast<int32_t>(static_cast<int64_t>(i) * count);
+
+        const size_t cbytes = static_cast<size_t>(total) * sizeof(int64_t);
+        int64_t* cdata = static_cast<int64_t*>(draken_malloc(cbytes > 0u ? cbytes : 8u));
+        if (!cdata) throw std::bad_alloc();
+        struct ChildGuard {
+            int64_t* p; bool released = false;
+            ~ChildGuard() { if (!released) draken_free(p); }
+        } cg{cdata};
+        // Values are computed as start + k*step rather than by accumulation: the
+        // same answer for integers, and it keeps ONE definition of the k-th element.
+        for (int64_t k = 0; k < count; ++k) cdata[k] = start + k * step;
+        for (uint32_t i = 1u; i < n; ++i)
+            std::memcpy(cdata + static_cast<size_t>(i) * count, cdata,
+                        static_cast<size_t>(count) * sizeof(int64_t));
+
+        VecResult cr{};
+        cr.data           = cdata;
+        cr.validity       = nullptr;      // a generated series has no null elements
+        cr.selection      = draken_identity_sel(total);
+        cr.owns_selection = false;
+        cr.data_length    = total;
+        cr.length         = total;
+        cr.type           = DRAKEN_INT64;
+        cr.flags          = DRAKEN_SEL_IDENTITY;
+        cg.released       = true;
+        VecResult* child  = new VecResult(cr);
+
+        uint8_t* validity = nullptr;
+        if (null_row && n > 0u) {
+            validity = ar_alloc_validity(n);
+            if (!validity) { delete child; throw std::bad_alloc(); }
+            for (uint32_t i = 0u; i < n; ++i)
+                validity[i >> 3] &= ~static_cast<uint8_t>(1u << (i & 7u));
+        }
+
+        og.released = true;
+        VecResult r{};
+        r.data           = offsets;
+        r.validity       = validity;
+        r.selection      = draken_identity_sel(n);
+        r.owns_selection = false;
+        r.data_length    = n;
+        r.length         = n;
+        r.type           = DRAKEN_ARRAY;
+        r.flags          = DRAKEN_SEL_IDENTITY;
+        r.child          = child;
+        return r;
+    } catch (const std::exception& e) {
+        return draken_error_sentinel(e.what());
+    } catch (...) {
+        return draken_error_sentinel("Unknown error in draken_generate_series");
+    }
+}
+
 // CAST(<json text> AS ARRAY<element_type>) — VARCHAR/VARIANT -> ARRAY.
 //
 // Declared in cast_kernels.h; lives here rather than in cast_dispatch.cpp because

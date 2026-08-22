@@ -16,6 +16,7 @@ operator registry based on the node type and its properties:
 - Scan         → ParquetReadNode (all-parquet manifests), Reader (internal datasets),
                  NullReaderNode (empty-result scans with contradictory predicates)
 - Join         → DrakenInnerJoinNode, OuterJoinNode, FilterJoinNode (semi/anti),
+                 ExistenceJoinNode (SELECT-list EXISTS / IN),
                  CrossJoinNode, NestedLoopJoinNode, AsofJoinNode
 - Aggregate    → Aggregate or AggregateAndGroupNode
 - Project      → ProjectionNode
@@ -367,6 +368,10 @@ def _create_join_node(logical_node, query_properties, registry):
         # LEFT SEMI, LEFT ANTI, LEFT ANTI NULL-AWARE (NOT IN), and the two
         # not-distinct forms (INTERSECT / EXCEPT, where NULL equals NULL) JOIN
         return registry.create("Filter Join", query_properties, **node_config)
+    elif join_type in ("left existence", "left existence anti"):
+        # The same existence test as the filter joins above, EMITTED as a BOOL
+        # column instead of applied — what a SELECT-list EXISTS / IN reads.
+        return registry.create("Existence Join", query_properties, **node_config)
     elif join_type == "asof":
         # ASOF JOIN — nearest-neighbour time-series join
         return registry.create("ASOF Join", query_properties, **node_config)

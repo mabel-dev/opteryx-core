@@ -23,11 +23,12 @@ Registration is the ONLY sanctioned way to change what a permission check
 means. There is no capability sniffing on the check path and no fallback:
 whatever is registered when a query binds is what decides it.
 
-A capability answers four questions:
+A capability answers five questions:
 
     can_perform_action(execution_context, resource, action) -> bool
     can_perform_workspace_action(execution_context, workspace, action) -> bool
     can_principal_perform_action(principal, resource, action) -> bool
+    can_principal_own_materialized_view(principal) -> bool
     grants(identity, policies) -> list[dict]
 
 The first two are the gates the binder and `information_schema` call, and both
@@ -42,7 +43,16 @@ that principal's policies and interpreting them both belong to the capability:
 the engine is never handed policies it was not issued, and there is no second
 implementation of what a policy means to drift away from this one.
 
-The fourth backs `SHOW GRANTS` ($grants), so that what is reported and what is
+The fourth asks whether a principal may be PINNED as a materialized view's
+owner at all, which is a different question from what they may read. A
+deployment has identities that are not accounts - the platform's own
+automation - and they are uncosted: nothing bills them, because nothing sells
+them. Pinning a view's refresh to one is a way to have work done for free, and
+no reading check catches it, because those identities can read plenty. Which
+names those are is the deployment's to know, not the engine's, so the engine
+asks rather than holding a list.
+
+The fifth backs `SHOW GRANTS` ($grants), so that what is reported and what is
 enforced come from one place and cannot drift into disagreeing.
 
 Returning `False` is how a capability denies; the callers turn that into the
@@ -62,6 +72,7 @@ __all__ = (
     "active_permissions_capability",
     "can_perform_action",
     "can_perform_workspace_action",
+    "can_principal_own_materialized_view",
     "can_principal_perform_action",
     "register_permissions_capability",
 )
@@ -73,6 +84,7 @@ _REQUIRED_MEMBERS = (
     "can_perform_action",
     "can_perform_workspace_action",
     "can_principal_perform_action",
+    "can_principal_own_materialized_view",
     "grants",
 )
 
@@ -94,6 +106,9 @@ class PermitAll:
         return True
 
     def can_principal_perform_action(self, principal: str, resource: str, action: str) -> bool:
+        return True
+
+    def can_principal_own_materialized_view(self, principal: str) -> bool:
         return True
 
     def grants(self, identity: str, policies: List[dict]) -> List[Dict[str, Any]]:
@@ -200,3 +215,19 @@ def can_principal_perform_action(principal: str, table: str, action: str = "READ
     caller can hand out by naming somebody who has it.
     """
     return _capability().can_principal_perform_action(principal, table, action)
+
+
+def can_principal_own_materialized_view(principal: str) -> bool:
+    """Whether `principal` may be pinned as the identity a materialized view
+    refreshes as.
+
+    Not a question about a resource, and not answerable from one: a principal
+    who can read every source of a view may still be one this deployment
+    refuses to pin work on. The platform's own automation is the case that
+    matters - those identities are not accounts, nothing bills them, and a view
+    pinned to one refreshes forever at nobody's expense.
+
+    Which names those are belongs to the deployment. The engine holds no list
+    and recognises no name - it asks, and refuses when the answer is no.
+    """
+    return _capability().can_principal_own_materialized_view(principal)

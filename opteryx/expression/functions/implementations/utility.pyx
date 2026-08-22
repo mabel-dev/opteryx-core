@@ -313,6 +313,26 @@ def embed(arr):
     return out
 
 
+def generate_series(*args):
+    """GENERATE_SERIES(stop | start, stop [, step]) — NATIVE ONLY.
+
+    This is a fail-loud guard, not an implementation. The scalar GENERATE_SERIES
+    is executed by `draken_generate_series`
+    (draken/ops/kernels/function_array_json.cpp), and an ARRAY-returning function
+    is never constant-folded, so nothing should ever reach here.
+
+    It exists because the catalog reads a missing `callable_ref` as "this function
+    is rewrite-only, desugar it" — so a None would send GENERATE_SERIES to a
+    rewrite that does not exist. Answering in Python instead would be a silent
+    fallback, which this engine does not have.
+    """
+    raise NotImplementedError(
+        "GENERATE_SERIES is executed by a native kernel (draken_generate_series). "
+        "Reaching this Python guard means the call was not lowered to it — a bug, "
+        "not a supported path."
+    )
+
+
 def jsonb_object_keys(arr):
     """Extract the keys from an array of JSON objects or JSON strings/bytes."""
     from draken.interop.vector_sequence import vector_from_sequence

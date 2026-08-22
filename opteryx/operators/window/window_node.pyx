@@ -14,18 +14,31 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Window Node — ranking (ROW_NUMBER / RANK / DENSE_RANK) and navigation
-(LAG / LEAD) window functions.
+Window Node — ranking (ROW_NUMBER / RANK / DENSE_RANK / NTILE / PERCENT_RANK /
+CUME_DIST), navigation (LAG / LEAD) and value (FIRST_VALUE / LAST_VALUE /
+NTH_VALUE) window functions.
 
 One execution path: WindowSink (src/cpp/engine/native_sort.hpp) is a pipeline
 breaker. All input is buffered, sorted by (partition keys ASC, order keys with
 their direction), and a single pass assigns:
-    ROW_NUMBER  — 1..n within each partition
-    RANK        — 1-based, ties (equal order key) share, next skips      (1,1,3)
-    DENSE_RANK  — 1-based, ties share, next does not skip                (1,1,2)
-    LAG/LEAD    — the argument column's value from the row `offset` before/after
-                  the current row within its partition; NULL when that row falls
-                  outside the partition
+    ROW_NUMBER   — 1..n within each partition
+    RANK         — 1-based, ties (equal order key) share, next skips     (1,1,3)
+    DENSE_RANK   — 1-based, ties share, next does not skip               (1,1,2)
+    NTILE(k)     — 1..k, the partition split into k contiguous buckets as
+                   evenly as it divides; the first (n mod k) buckets take one
+                   row more than the rest
+    PERCENT_RANK — (RANK - 1) / (partition rows - 1), FLOAT64 in [0, 1]; 0 for
+                   a one-row partition
+    CUME_DIST    — rows through the current row's LAST TIED PEER / partition
+                   rows, FLOAT64 in (0, 1]
+    LAG/LEAD     — the argument column's value from the row `offset` before/after
+                   the current row within its partition; NULL when that row falls
+                   outside the partition
+    FIRST_VALUE/LAST_VALUE/NTH_VALUE
+                 — the argument column's value from the partition's first, last,
+                   or nth row (1-based); NULL when the partition has no such row.
+                   Computed over the WHOLE ordered partition — see
+                   VALUE_FUNCTIONS in opteryx/operators/window/helpers.py
 Output is emitted in sorted order (the compiler pins the downstream pipeline to
 dop 1 to preserve it). A no-ORDER-BY window — used internally by the
 INTERSECT/EXCEPT ALL rewrite, single ROW_NUMBER only — compiles to the same sink
@@ -60,8 +73,10 @@ cdef class WindowNode(BasePlanNode):
     cdef public list _order_columns       # order-key column identities (bytes)
     cdef public list _order_ascending     # bool per order column
     # _functions entries: (kind_code:int, output_identity:bytes,
-    # arg_identity:bytes|None, offset:int) — the last two are only meaningful
-    # for the navigation kinds (LAG/LEAD).
+    # arg_identity:bytes|None, offset:int). `arg_identity` is set only for the
+    # kinds that read a value from another row (GATHERED_FUNCTIONS); `offset` is
+    # the kind's single constant integer parameter — LAG/LEAD's row shift,
+    # NTILE's bucket count, NTH_VALUE's 1-based position — and unused otherwise.
     cdef public list _functions
     cdef public bint _has_order_by        # ORDER BY present in the OVER clause
     cdef public long long _top_k          # WindowTopKFusionStrategy hint; -1 = unset
@@ -84,7 +99,10 @@ cdef class WindowNode(BasePlanNode):
         self._functions = []
         for kind, output_identity, arg_node, offset in functions:
             if kind not in _KIND_CODES:
-                raise UnsupportedSyntaxError(f"Unsupported window function '{kind}'. **ROW_NUMBER**, **RANK**, **DENSE_RANK**, **LAG** and **LEAD** are the supported window functions.")
+                # The supported set is listed FROM the registry, so this message
+                # cannot drift out of date the way a hand-written list did.
+                _supported = ", ".join(f"**{name}**" for name in sorted(_KIND_CODES))
+                raise UnsupportedSyntaxError(f"Unsupported window function '{kind}'. The supported window functions are {_supported}.")
             arg_identity = None if arg_node is None else arg_node.schema_column.identity
             self._functions.append((_KIND_CODES[kind], output_identity, arg_identity, int(offset)))
 

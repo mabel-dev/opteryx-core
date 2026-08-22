@@ -330,7 +330,9 @@ def _computed_array_subexpression(node, _depth=0):
         found = _computed_array_subexpression(child, _depth + 1)
         if found is not None:
             return found
-    for attr in ("left", "right"):
+    # `centre` too: a unary operator (IS NULL / IS NOT NULL / NOT) holds its
+    # operand there, and a refusal under one still needs the array named.
+    for attr in ("left", "right", "centre"):
         found = _computed_array_subexpression(getattr(node, attr, None), _depth + 1)
         if found is not None:
             return found
@@ -860,6 +862,84 @@ class _Compiler:
                 rebuilt.parameters = new_params
         return rebuilt if rebuilt is not None else expr
 
+    def _bind_precomputed_subexpressions(self, expr, layout):
+        """Return `expr` with every sub-expression the stream ALREADY CARRIES replaced
+        by a reference to that column, as a COPY — the caller's tree is not touched.
+
+        A filter predicate is lowered against the layout it sits on, and a computed
+        sub-expression whose identity is already IN that layout has a value there; the
+        lowering has no reason to recompute it, and above an aggregate it CANNOT — the
+        operands are gone. `GROUP BY UPPER(name) HAVING CASE WHEN UPPER(name) > 'A' ...`
+        is the shape: `UPPER(name)` is the group key, the aggregate emits it, and the
+        Filter that stayed above the Project (pushdown moves a plain compare below the
+        aggregate, but not a CASE) asked to rebuild it from a `name` the aggregate had
+        legitimately dropped — "references a column the stream does not carry".
+
+        EVALUATED is the node type that lowers to BC_LOAD_COL against a node's own
+        already-bound identity, which is exactly what _hoist_array_in_tree flips an
+        operand to once it has materialized it. The difference here is that nothing
+        needs materializing: the column exists, so only the reference has to change.
+
+        COPIED, not mutated in place: the group key, the projection's copy of the same
+        expression and this predicate can be ONE object (the logical planner shares them
+        deliberately), and stamping EVALUATED onto it would tell the Project that
+        computes the column to load a column that does not exist yet.
+
+        Identifiers and already-EVALUATED nodes are left alone — they lower to a column
+        load already — and so is anything not in the layout.
+        """
+        from opteryx.compiled.structures.node import Node
+
+        if not isinstance(expr, Node):
+            return expr
+        if expr.node_type in (
+            NodeType.IDENTIFIER, NodeType.EVALUATED, NodeType.AGGREGATOR, NodeType.LITERAL
+        ):
+            return expr
+        sc = getattr(expr, "schema_column", None)
+        if sc is not None and sc.identity is not None and sc.identity in layout:
+            reference = expr.copy()
+            reference.node_type = NodeType.EVALUATED
+            return reference
+
+        rebuilt = None
+        params = expr.parameters
+        if isinstance(params, list):
+            new_params = [self._bind_precomputed_subexpressions(c, layout)
+                          if isinstance(c, Node) else c for c in params]
+            if any(x is not y for x, y in zip(new_params, params)):
+                rebuilt = expr.copy()
+                rebuilt.parameters = new_params
+        if expr.node_type == NodeType.CASE:
+            # CASE holds its branches outside `parameters`; a walk that does not know
+            # that stops matching inside every CASE it meets.
+            for attr in ("conditions", "results"):
+                branch = getattr(expr, attr, None)
+                if not isinstance(branch, list):
+                    continue
+                new_branch = [self._bind_precomputed_subexpressions(c, layout)
+                              if isinstance(c, Node) else c for c in branch]
+                if any(x is not y for x, y in zip(new_branch, branch)):
+                    if rebuilt is None:
+                        rebuilt = expr.copy()
+                    setattr(rebuilt, attr, new_branch)
+            els = getattr(expr, "else_result", None)
+            if isinstance(els, Node):
+                new_els = self._bind_precomputed_subexpressions(els, layout)
+                if new_els is not els:
+                    if rebuilt is None:
+                        rebuilt = expr.copy()
+                    rebuilt.else_result = new_els
+        for attr in ("left", "right", "centre"):
+            child = getattr(expr, attr)
+            if isinstance(child, Node):
+                new_child = self._bind_precomputed_subexpressions(child, layout)
+                if new_child is not child:
+                    if rebuilt is None:
+                        rebuilt = expr.copy()
+                    setattr(rebuilt, attr, new_child)
+        return rebuilt if rebuilt is not None else expr
+
     def _lower_bytecode(self, expr):
         """Lower `expr` to a `CompiledBytecode` through the standard plan-time
         rewrites (CASE→IF_THEN_ELSE, BETWEEN→compares, decimal-literal rescale).
@@ -1097,12 +1177,20 @@ class _Compiler:
     def _hoist_array_in_tree(self, p, node, layout):
         """Depth-first: inner arrays hoist before the outer ones that read them, so
         SORT(SORT(SPLIT(x)))[0] resolves one level at a time. Returns the grown
-        layout."""
+        layout.
+
+        `centre` is walked, not just left/right/parameters: NOT, IS NULL, IS NOT
+        NULL, IS TRUE/FALSE and BitwiseNot hang their single operand off `centre`.
+        Omitting it made the hoist blind to every array operand under one, so
+        `WHERE SPLIT(x,'.')[0] IS NOT NULL` was refused ("a subscript ... outside
+        the c-native kernel set") while the identical `= 'M'` compare ran - and
+        `LENGTH(SPLIT(x,'.')) IS NOT NULL` was worse, reaching the engine and dying
+        at err_op=-97 on the stale out_child this hoist exists to prevent."""
         if node is None:
             return layout
         for child in (getattr(node, "parameters", None) or []):
             layout = self._hoist_array_in_tree(p, child, layout)
-        for attr in ("left", "right"):
+        for attr in ("left", "right", "centre"):
             layout = self._hoist_array_in_tree(p, getattr(node, attr, None), layout)
 
         operand = self._array_operand_of(node)
@@ -1147,7 +1235,9 @@ class _Compiler:
             return
         for child in (getattr(node, "parameters", None) or []):
             self._collect_json_extractions(child, layout, groups)
-        for attr in ("left", "right"):
+        # `centre` included so extractions under a unary operator (`x->>'a' IS NOT
+        # NULL`) still join the shared-parse group rather than each parsing again.
+        for attr in ("left", "right", "centre"):
             self._collect_json_extractions(getattr(node, attr, None), layout, groups)
 
         if node.node_type != NodeType.EXTRACTION_OPERATOR:
@@ -1783,7 +1873,11 @@ class _Compiler:
             # being 2.6x faster in isolation is NOT sufficient evidence, and was
             # exactly what made the projection version look like a free win.
             hoisted_layout = self._fuse_json_extractions(p, [node.filter], hoisted_layout)
-            bc = self._lower_expression(node.filter, "a filter predicate")
+            # Anything the stream already carries is LOADED, not recomputed — see
+            # _bind_precomputed_subexpressions. Last, so it sees the columns the two
+            # hoists above added as well as the ones the child produced.
+            predicate = self._bind_precomputed_subexpressions(node.filter, hoisted_layout)
+            bc = self._lower_expression(predicate, "a filter predicate")
             const_col_idx, const_scalar_vecs = self._resolve_const_replacements(node, hoisted_layout)
             self.nplan.add_expr_filter(p, bc, hoisted_layout, const_col_idx, const_scalar_vecs)
             if hoisted_layout != layout:
@@ -2082,7 +2176,7 @@ class _Compiler:
             if not funcs:
                 _unsupported("a window node with no functions")
             # PARTITION BY / ORDER BY over a computed key (CAST(...), arithmetic,
-            # etc.), and a LAG/LEAD ARGUMENT that is itself an expression: project
+            # etc.), and a window-function ARGUMENT that is itself an expression: project
             # each to a stream column first, then resolve by identity — mirrors
             # GroupedAggregateHashedNode's computed_keys and _sort_spec's
             # `computed` handling above. The bound argument NODES live in
@@ -2165,7 +2259,7 @@ class _Compiler:
             # PARTITION BY / ORDER BY keys are spent once the ranks are assigned —
             # drop any the plan above does not read, over the INPUT layout only (the
             # window-function columns are appended after the gather, so they are not
-            # in `emit`). A LAG/LEAD argument column is READ at finalize, so it rides
+            # in `emit`). A window function's argument column is READ at finalize, so it rides
             # through the narrowing via `extra_read` even when nothing above emits it.
             sink_layout = layout
             emit, layout = self._emit_subset(node, sink_layout)
@@ -2393,6 +2487,8 @@ class _Compiler:
         # capture a returned layout from this method, so `layout` must stay accurate
         # for whatever runs after add_expr_filter on this same pipeline.
         hoisted_layout = self._hoist_array_operands(p, [having], list(layout))
+        # The group keys the aggregate emitted are columns now; read them as columns.
+        having = self._bind_precomputed_subexpressions(having, hoisted_layout)
         bc = self._lower_expression(having, "a HAVING predicate")
         self.nplan.add_expr_filter(p, bc, hoisted_layout)
         if hoisted_layout != layout:
@@ -3702,10 +3798,19 @@ class _Compiler:
         # Mapping the first two onto each other made NOT EXISTS emit nothing whenever
         # the inner key held a single NULL. Using either in place of the third made
         # `A EXCEPT A` non-empty on any nullable column. See native_join2.hpp's JoinMode.
+        #
+        # The EXISTENCE-FLAG pair reuses the Semi/Anti key rules unchanged and differs
+        # only in the EMIT: every probe row survives and the verdict is appended as a
+        # BOOL column (SemiAntiProbeOperator::emit_existence). They are separate
+        # join_type strings rather than a flag on "left semi"/"left anti" precisely so
+        # that every optimizer strategy switching on the type keeps treating them as
+        # unknown: a rewrite that assumes "left semi" REMOVES rows is a wrong answer
+        # when applied to a join that keeps them all.
         modes = {"inner": 0, "left outer": 1, "left semi": 2,
                  "left anti null-aware": 3, "left anti": 4,
                  "cross": 0, "nested_loop": 0, "full outer": 5,
-                 "left semi not-distinct": 6, "left anti not-distinct": 7}
+                 "left semi not-distinct": 6, "left anti not-distinct": 7,
+                 "left existence": 2, "left existence anti": 4}
         if join_type not in modes:
             _unsupported(f"a {join_type} join")
         mode = modes[join_type]
@@ -3715,6 +3820,17 @@ class _Compiler:
         # shape) and a mode missing from any ONE of them is silently compiled as an
         # inner join — it would emit pair rows and the wrong cardinality.
         semi_anti_modes = (2, 3, 4, 6, 7)
+        # The existence flag's output identity — the BOOL column the probe appends
+        # after the emitted probe columns, which the projection above reads. None for
+        # every filtering mode.
+        existence_column = getattr(node, "existence_column", None) \
+            if join_type in ("left existence", "left existence anti") else None
+        if join_type in ("left existence", "left existence anti") and existence_column is None:
+            _unsupported("an existence join with no output column to flag into")
+        existence_name = existence_column.schema_column.identity \
+            if existence_column is not None else None
+        # UNKNOWN is a NULL in the flag (projected IN / NOT IN); EXISTS is two-valued.
+        existence_three_valued = bool(getattr(node, "existence_three_valued", False))
         is_cross = join_type == "cross"
         legs = {}
         for idx, (provider, _target, label) in enumerate(in_edges):
@@ -3803,7 +3919,11 @@ class _Compiler:
         # NotDistinct set-operation modes read their answer from a property of the
         # BUILD side, and exchanging the legs changes which relation that property
         # describes — a wrong answer, not a slower one.
-        if mode in (2, 4) and getattr(node, "swap_build_side", False):
+        # Never for the existence flag: the swapped path emits the BUILD leg, and the
+        # flag is a value ON the probe leg's rows. Exchanging the legs would emit the
+        # wrong relation entirely, not merely a different plan for the same answer.
+        if mode in (2, 4) and existence_name is None \
+                and getattr(node, "swap_build_side", False):
             return self._compile_swapped_semi_anti(
                 node, legs, mode, left_cols, right_cols, filter_residual
             )
@@ -3933,11 +4053,16 @@ class _Compiler:
                 filter_residual, "a correlated EXISTS residual condition"
             )
             self.nplan.add_join2_probe_residual(pp, ref, probe_key_idx, probe_payload,
-                                                mode, bc, pair_layout, semi_emit)
+                                                mode, bc, pair_layout, semi_emit,
+                                                existence_name, existence_three_valued)
+            if existence_name is not None:
+                return pp, semi_layout + [existence_name]   # rows kept, verdict appended
             return pp, semi_layout            # existence filter — probe rows, narrowed
         self.nplan.add_join2_probe(pp, ref, probe_key_idx,
                                    [] if mode in semi_anti_modes else probe_payload, mode,
-                                   semi_emit)
+                                   semi_emit, existence_name, existence_three_valued)
+        if existence_name is not None:
+            return pp, semi_layout + [existence_name]       # rows kept, verdict appended
         if mode in semi_anti_modes:
             return pp, semi_layout            # existence filter — probe rows, narrowed
         # Join2ProbeOperator emits build payload columns first, then probe payload — in

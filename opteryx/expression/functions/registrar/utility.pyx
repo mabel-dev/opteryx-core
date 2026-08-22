@@ -184,6 +184,9 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     from opteryx.expression.functions.implementations.utility import (
         jsonb_object_keys as _of_jsonb_object_keys,
     )
+    from opteryx.expression.functions.implementations.utility import (
+        generate_series as _of_generate_series,
+    )
 
     class other_functions:
         null_if = staticmethod(_of_null_if)
@@ -192,6 +195,7 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
         embed = staticmethod(_of_embed)
         humanize = staticmethod(_of_humanize)
         jsonb_object_keys = staticmethod(_of_jsonb_object_keys)
+        generate_series = staticmethod(_of_generate_series)
 
     # Parameter short-hands
     _any = ParameterSpec(name="val", type_family="any")
@@ -212,7 +216,81 @@ def get_builtin_array_misc_functions() -> List[FunctionDefinition]:
     # surface and reach the very same draken kernels through their own
     # bind-time lowerings in compiled_expression.pyx. The function names were
     # pure duplicate surface area.
+    # GENERATE_SERIES's three arities are three OVERLOADS, not one variadic
+    # signature, because the single-argument form means something different from
+    # the others: GENERATE_SERIES(10) is GENERATE_SERIES(1, 10) — the lone
+    # argument is the END, not the start. A variadic `stop, [start], [step]`
+    # could not say that.
+    #
+    # Overload ids are GENERATE_SERIES_1/_2/_3 so that each resolves to
+    # `draken_generate_series_{n}` in kernel_registry.cpp — the arity-suffixed
+    # names the bind-time resolver probes (draken_{overload_id.lower()}).
+    #
+    # Every parameter is `constant_only`. A per-row series would give each row an
+    # array of a different length, driven by column values with no bound, which is
+    # a different computation rather than this one relaxed. The declaration is
+    # ENFORCED at lowering (compiled_expression.pyx), so a column argument is
+    # refused by name rather than silently taking row 0's value.
+    #
+    # `integer`, not `numeric`: the TABLE spelling
+    # (`FROM GENERATE_SERIES(...) AS g`, opteryx/utils/series.py) also accepts
+    # floats, deciding the last element's membership by an accumulate-and-
+    # tolerance rule. A second implementation of a fuzzy boundary is how two
+    # spellings of one name start disagreeing at the edges, so the scalar form
+    # takes integers and a float argument is refused at bind time.
+    _gs_docs = (
+        "Builds the series as an ARRAY in a single row. `GENERATE_SERIES(10)` "
+        "starts at 1; `GENERATE_SERIES(1, 10)` and `GENERATE_SERIES(1, 10, 2)` "
+        "start where they say. `stop` is included when it falls on a step "
+        "boundary. A step pointing away from `stop` yields an EMPTY array; a step "
+        "of zero is refused. Arguments must be integer CONSTANTS. To get one ROW "
+        "per value instead - which is what gap-filling and joining against a dense "
+        "axis need - use the table spelling, `FROM GENERATE_SERIES(1, 10) AS g`, "
+        "which also accepts floats and, with an INTERVAL step, timestamps."
+    )
+    _gs_start = ParameterSpec(
+        name="start", type_family="integer", constant_only=True,
+        documentation="First value of the series.",
+    )
+    _gs_stop = ParameterSpec(
+        name="stop", type_family="integer", constant_only=True,
+        documentation="Last value of the series, included when it falls on a step boundary.",
+    )
+    _gs_step = ParameterSpec(
+        name="step", type_family="integer", constant_only=True,
+        documentation="Distance between consecutive values; may be negative, never zero.",
+    )
+
+    def _generate_series_overload(overload_id, params, cost):
+        return FunctionOverload(
+            id=overload_id,
+            parameters=params,
+            return_spec=ReturnSpec(mode="fixed", fixed_type=_CT_ARRAY(_CT_INT64)),
+            kernel=KernelSpec(
+                engine="draken",
+                id="default",
+                callable_ref=other_functions.generate_series,
+                cost_us_per_million=cost,
+            ),
+        )
+
     return [
+        FunctionDefinition(
+            name="GENERATE_SERIES",
+            aliases=(),
+            category="utility",
+            volatility="immutable",
+            deterministic=True,
+            lifecycle=LifecycleSpec(status="active"),
+            summary="Build an array of evenly spaced integers.",
+            documentation=_gs_docs,
+            overloads=(
+                _generate_series_overload("GENERATE_SERIES_1", (_gs_stop,), 120.0),
+                _generate_series_overload("GENERATE_SERIES_2", (_gs_start, _gs_stop), 130.0),
+                _generate_series_overload(
+                    "GENERATE_SERIES_3", (_gs_start, _gs_stop, _gs_step), 140.0),
+            ),
+        ),
         _make(
             "JSONB_OBJECT_KEYS",
             other_functions.jsonb_object_keys,

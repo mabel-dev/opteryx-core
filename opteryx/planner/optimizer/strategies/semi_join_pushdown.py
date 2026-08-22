@@ -322,7 +322,9 @@ class SemiJoinPushdownStrategy(OptimizationStrategy):
         target_relations, target_schemas = _collect_relations(plan, target_root)
         right_names = list(join.right_relation_names or [])
         new_left_names = sorted(target_relations)
-        left_columns, right_columns = extract_join_fields(join.on, new_left_names, right_names)
+        left_columns, right_columns, _unkeyed = extract_join_fields(
+            join.on, new_left_names, right_names
+        )
         if len(left_columns) != len(pairs) or len(right_columns) != len(pairs):
             return None
 

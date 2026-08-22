@@ -1026,8 +1026,9 @@ OPERATOR_DEFINITIONS = {
             OperandDefinition("value", "The array, string or blob to read from."),
             OperandDefinition(
                 "index",
-                "The zero-based position to read. An index past the end gives NULL rather "
-                "than raising.",
+                "The zero-based position to read: 0 is the first element. A negative "
+                "index counts back from the end, so -1 is the last. An index past "
+                "either end gives NULL rather than raising.",
             ),
         ),
         examples=(
@@ -1036,12 +1037,16 @@ OPERATOR_DEFINITIONS = {
                 ("a",),
             ),
             ExampleDefinition(
+                "SELECT ARRAY['a','b','c'][-1];",
+                ("c",),
+            ),
+            ExampleDefinition(
                 "SELECT ARRAY['a','b'][9];",
                 ("NULL",),
             ),
         ),
         see_also=("Arrow",),
-        notes="Subcript access is zero-based, the first element is at index 0. For arrays the result type depends on the array element type, so the exported result type may be dynamic.",
+        notes="Subscript access is ZERO-based and accepts negative indexes, which count back from the end: `[0]` is the first element and `[-1]` the last. Most SQL dialects index arrays from 1, so a query ported from one of those reads the WRONG element rather than erroring - an out-of-range index gives NULL, so nothing signals the mistake. For arrays the result type depends on the array element type, so the exported result type may be dynamic.",
     ),
     "AtQuestion": OperatorDefinition(
         summary="JSON path existence operator.",

@@ -561,7 +561,14 @@ def get_builtin_text_extended_functions() -> List[FunctionDefinition]:
             deterministic=True,
             lifecycle=LifecycleSpec(status="active"),
             summary="Split string into array.",
-            documentation="Splits a string into an array using the specified delimiter.",
+            documentation=(
+                "Splits a string into an array using the specified delimiter. The "
+                "resulting array is subscripted ZERO-based, with negative indexes "
+                "counting back from the end: SPLIT('a.b.c.d','.')[0] is 'a', [1] is "
+                "'b' and [-1] is 'd'. Most SQL dialects index from 1, so a query "
+                "ported from one of those returns the wrong element rather than an "
+                "error - an out-of-range index gives NULL, not a failure."
+            ),
             overloads=(
                 FunctionOverload(
                     id="SPLIT_2",

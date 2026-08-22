@@ -148,14 +148,11 @@ def test_select_list_scalar_subquery_enforces_cardinality_at_runtime():
     assert rows == [(None,)]
 
 
-def test_select_list_still_refuses_exists_and_in_subqueries():
-    with pytest.raises(UnsupportedSyntaxError, match="EXISTS"):
-        _rows(
-            "SELECT EXISTS(SELECT 1 FROM $planets) AS x FROM $planets WHERE id = 1",
-            ["x"],
-        )
-    with pytest.raises(UnsupportedSyntaxError, match="EXISTS"):
-        _rows(
-            "SELECT id IN (SELECT id FROM $planets) AS x FROM $planets WHERE id = 1",
-            ["x"],
-        )
+def test_select_list_exists_and_in_subqueries_are_values():
+    """SELECT-list EXISTS / IN now lower to a value; see test_select_list_existence."""
+    assert _rows(
+        "SELECT EXISTS(SELECT 1 FROM $planets) AS x FROM $planets WHERE id = 1", ["x"]
+    ) == [(True,)]
+    assert _rows(
+        "SELECT id IN (SELECT id FROM $planets) AS x FROM $planets WHERE id = 1", ["x"]
+    ) == [(True,)]

@@ -397,6 +397,19 @@ def _cycle_error(relation: str, path: Tuple[str, ...]) -> UnsupportedSyntaxError
     )
 
 
+# The plan node types whose `columns` property holds a PROJECTION (a list of
+# expression Nodes). Every other node either carries no columns or carries
+# something else under the same name — see `_output_columns`.
+_PROJECTION_NODES = frozenset(
+    {
+        LogicalPlanStepType.Project,
+        LogicalPlanStepType.Exit,
+        LogicalPlanStepType.Subquery,
+        LogicalPlanStepType.Union,
+    }
+)
+
+
 def _output_columns(sub_plan: LogicalPlan, head_nid: str):
     """The projection a relation's body emits, as seen from its plan head.
 
@@ -406,15 +419,33 @@ def _output_columns(sub_plan: LogicalPlan, head_nid: str):
     body's names. Walk down (edges run leaf -> head) past the column-less nodes to the
     projection they wrap.
 
+    Only the node types in `_PROJECTION_NODES` are read for that projection. `columns`
+    is not one property with one meaning: a FunctionDataset (VALUES, UNNEST,
+    GENERATE_SERIES) puts its output NAMES there, as plain strings. `SELECT * FROM
+    (VALUES ...) AS v(c)` leaves no Project at all, so a CTE body of exactly that has
+    the FunctionDataset AT its head — the walk used to return `('c',)` and the Binder
+    died reading `node_type` off a `str`. A body headed by one of those projects
+    everything it produces, which the wildcard says exactly.
+
     Found by walking THIS sub-plan rather than carried from the logical planner: the
     plan is copied per reference and `LogicalColumn.copy()` takes no memo, so a list
     stashed elsewhere would hold objects distinct from this copy's own Project.
     """
     nid = head_nid
     while True:
-        columns = sub_plan[nid].columns
-        if columns:
-            return columns
+        node = sub_plan[nid]
+        if node.node_type in _PROJECTION_NODES:
+            columns = node.columns
+            if columns:
+                return columns
+        elif node.columns:
+            # `columns` does NOT mean the same thing on every node type: on a
+            # FunctionDataset (VALUES, UNNEST, GENERATE_SERIES) it is a tuple of
+            # output NAMES, not projection expressions. Reading it here stamped bare
+            # strings onto the Subquery boundary and the binder died on
+            # `'str' object has no attribute 'node_type'`. The wildcard is the
+            # honest answer for a body headed by one of these.
+            return None
         below = sub_plan.ingoing_edges(nid)
         # a branch (join) or a leaf (bare `SELECT *`, head is the Scan) has no single
         # projection to descend to — the wildcard is the honest answer
@@ -423,14 +454,34 @@ def _output_columns(sub_plan: LogicalPlan, head_nid: str):
         nid = below[0][0]
 
 
+def _boundary_columns(sub_plan: LogicalPlan, head_nid: str, relation: str) -> list:
+    """The projection to stamp on a relation's Subquery boundary node.
+
+    The Binder reads these as expression Nodes (`column.node_type`). Anything else
+    reaching it dies as a bare `AttributeError` inside `binder/project.py` with no
+    mention of the SQL that produced it, so the contract is checked HERE, where the
+    relation is still named.
+    """
+    from opteryx.exceptions import InvalidInternalStateError
+    from opteryx.expression import NodeType
+
+    columns = _output_columns(sub_plan, head_nid) or [Node(NodeType.WILDCARD)]
+    bad = [column for column in columns if not isinstance(column, (Node, LogicalColumn))]
+    if bad:
+        raise InvalidInternalStateError(
+            f"Relation '{relation}' produced a projection the binder cannot read: "
+            f"{', '.join(repr(column) for column in bad)}. "
+            "A relation body's output columns must be expression nodes."
+        )
+    return list(columns)
+
+
 def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> LogicalPlan:
     """Replace a Scan node with a sub-plan, in place.
 
     The Scan becomes a Subquery boundary node keeping its alias — that alias is how the
     outer query addresses the expanded relation.
     """
-    from opteryx.expression import NodeType
-
     sub_plan = rename_relations(sub_plan)
     sub_plan_head = sub_plan.get_exit_points()[0]
 
@@ -441,7 +492,7 @@ def _splice(plan: LogicalPlan, nid: str, node, sub_plan: LogicalPlan) -> Logical
         )
 
     node.node_type = LogicalPlanStepType.Subquery
-    node.columns = _output_columns(sub_plan, sub_plan_head) or [Node(NodeType.WILDCARD)]
+    node.columns = _boundary_columns(sub_plan, sub_plan_head, node.relation or node.alias)
     plan += sub_plan
     plan.add_edge(sub_plan_head, nid, outgoing[0][2])
     return join_leg_preprocess(plan)
@@ -696,7 +747,6 @@ def _finalize_cte_sharing(
 
     Unreachable bodies (a CTE declared but never referenced) are dropped.
     """
-    from opteryx.expression import NodeType
 
     # ---- reachability + reference counts ------------------------------------
     def _refs_in(p: LogicalPlan):
@@ -765,7 +815,7 @@ def _finalize_cte_sharing(
         head = body.get_exit_points()[0]
         boundary = LogicalPlanNode(LogicalPlanStepType.Subquery)
         boundary.alias = names.get(key, key)
-        boundary.columns = _output_columns(body, head) or [Node(NodeType.WILDCARD)]
+        boundary.columns = _boundary_columns(body, head, boundary.alias)
         boundary_nid = random_string()
         body.add_node(boundary_nid, boundary)
         body.add_edge(head, boundary_nid)

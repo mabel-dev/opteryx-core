@@ -3637,13 +3637,17 @@ def test_select_list_scalar_subquery():
         "x",
     ) == [None]
 
-    # Still refused: EXISTS in the SELECT list — a boolean existence test, not a
-    # value; unaffected by this change (the pre-bind guard still refuses it).
-    with pytest.raises(UnsupportedSyntaxError, match="EXISTS"):
-        _col(
-            "SELECT EXISTS(SELECT 1 FROM $planets) AS x FROM $planets WHERE id = 1",
-            "x",
-        )
+    # EXISTS in the SELECT list is now a supported VALUE. Uncorrelated, it is a
+    # COUNT(*) > 0 cross joined on — the count emits exactly one row structurally,
+    # so no cardinality guard is involved. See test_select_list_existence.
+    assert _col(
+        "SELECT EXISTS(SELECT 1 FROM $planets) AS x FROM $planets WHERE id = 1", "x"
+    ) == [True]
+    assert _col(
+        "SELECT EXISTS(SELECT 1 FROM $planets WHERE id > 100) AS x "
+        "FROM $planets WHERE id = 1",
+        "x",
+    ) == [False]
 
 
 def test_select_list_case_scalar_subquery():

@@ -151,6 +151,7 @@ _RETURN_TO_TY: Dict[str, Optional[Ty]] = {
     "VARBINARY": Ty.VARBINARY,
     "VARCHAR": Ty.VARCHAR,
     "ARRAY<VARIANT>": Ty.ARRAY,
+    "ARRAY<INT64>": Ty.ARRAY,
     "array<element type of `string`>": Ty.ARRAY,
     "same as `arr`": Ty.ARRAY,
     # Resolved from argument 0.
@@ -162,7 +163,12 @@ _RETURN_TO_TY: Dict[str, Optional[Ty]] = {
     "TIME[US]": Ty.UNKNOWN,
     "dynamic": Ty.UNKNOWN,
     "element type of `arr`": Ty.UNKNOWN,
-    "integer | double | date": Ty.UNKNOWN,
+    # NOTE: lower-case `integer` is EXTRACT's return override, and it is a second
+    # spelling of the "INTEGER" label above rather than a different type. Both are
+    # mapped so this table matches the catalog as it stands; the two spellings of
+    # one type are worth collapsing at the source (reference/signatures.py's
+    # _RETURN_OVERRIDES), which is not this file's call to make.
+    "integer": Ty.INTEGER,
     "vector": Ty.UNKNOWN,
 }
 

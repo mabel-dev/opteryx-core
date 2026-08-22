@@ -405,7 +405,7 @@ class SemiJoinReducerStrategy(OptimizationStrategy):
         reducer.right_relation_names = sorted(source_relations)
         reducer.all_relations = target_relations | source_relations
         reducer.schemas = {**target_schemas, **source_schemas}
-        reducer.left_columns, reducer.right_columns = extract_join_fields(
+        reducer.left_columns, reducer.right_columns, _unkeyed = extract_join_fields(
             on_condition, reducer.left_relation_names, reducer.right_relation_names
         )
         # A key naming neither leg is the silent-wrong-answer case, not something to

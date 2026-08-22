@@ -539,6 +539,7 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
     The returned context is the CALLER's, unchanged — a subquery's scope must
     not leak outwards.
     """
+    from opteryx.expression import get_all_nodes_of_type
     from opteryx.planner.binder.common import BinderVisitor
 
     subplan = node.value
@@ -552,6 +553,21 @@ def bind_correlated_subquery(node: Node, context: Any) -> Tuple[Node, Dict]:
         subplan, exit_points[0], context=context.open_correlated_scope()
     )
     node.value = bound_subplan
+
+    # A CORRELATED reference is read by the subquery, not by the enclosing SELECT /
+    # GROUP BY, so nothing in the outer query NAMES it — and the bind-time narrowing
+    # in aggregate.py / project.py keeps only what is named. `SUM(CASE WHEN EXISTS
+    # (SELECT 1 FROM q WHERE q.id = p.id) THEN 1 ELSE 0 END) ... GROUP BY g` therefore
+    # dropped `p.id` from the outer scan's schema, and decorrelation later built a
+    # join whose probe key no longer existed in the stream. This is exactly the
+    # "read structurally rather than by name" case `retained_columns` exists for —
+    # the same one CROSS JOIN UNNEST's source column has. Registered on the CALLER's
+    # context, which is the scope that has to keep the column alive.
+    for _nid, subnode in bound_subplan.nodes(True):
+        for expression in list(subnode.columns or []) + [subnode.condition]:
+            for identifier in get_all_nodes_of_type(expression, (NodeType.IDENTIFIER,)):
+                if identifier.is_outer_reference and identifier.schema_column is not None:
+                    context.retained_columns.add(identifier.schema_column.identity)
 
     # A scalar subquery IS a value, so it has a type: that of the single column its
     # plan emits. Publishing it lets the ENCLOSING expression bind normally —

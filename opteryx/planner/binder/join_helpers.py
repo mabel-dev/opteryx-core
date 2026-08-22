@@ -10,14 +10,21 @@ Isolated here to break the circular import between common.py (which imports join
 and join.py (which needs these functions from common.py).
 """
 
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
-from opteryx.exceptions import UnsupportedSyntaxError
-from opteryx.expression import NodeType
+from opteryx.exceptions import UnsupportedSyntaxError, compose, md_code, md_syntax
+from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.expression.formatter import format_expression
 from opteryx.models import LogicalColumn, Node
+from opteryx.planner.expression_traits import has_volatile_function
 from opteryx.types.logical_type import (
     LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES, _LARGE_OBJECT_TYPES, _STRING_TYPES,
 )
+
+# Node types that can never be materialised as a column on ONE join leg, whatever
+# the relation-name arithmetic says: an aggregate is not a per-row value, a
+# subquery is a plan rather than an expression, and a wildcard is not one value.
+_UNHOISTABLE_NODE_TYPES = (NodeType.AGGREGATOR, NodeType.SUBQUERY, NodeType.WILDCARD)
 
 
 def _is_numeric_join_coercible(left_type, right_type) -> bool:
@@ -142,7 +149,7 @@ def extract_join_fields(
     condition_node: Node,
     left_relation_names: List[str],
     right_relation_names: List[str],
-) -> Tuple[List, List]:
+) -> Tuple[List, List, List[Node]]:
     """
     Extracts join fields from a condition node that may have multiple ANDed conditions.
 
@@ -155,17 +162,31 @@ def extract_join_fields(
             Names of the right relations.
 
     Returns:
-        Tuple[List[str], List[str]]
-            Lists of columns participating in the join from the left and right tables.
+        Tuple[List, List, List[Node]]
+            The identities participating in the join from the left and right
+            tables, followed by the Eq conjuncts that could NOT be turned into a
+            key pair because an operand is an expression rather than a column.
+
+    That third list is a RETURN VALUE and not an exception on purpose. An
+    expression operand is not a permanent rejection — `JoinKeyMaterializationStrategy`
+    turns one into a real key by projecting it as a column on its own leg — so the
+    callers need to tell "cannot be a key here" from "cannot be a key at all", and
+    they each answer it differently: the binder rejects only what nothing can hoist,
+    the pushdown strategies decline the conversion and leave a Filter in place. It
+    was previously signalled by raising `UnsupportedSyntaxError`, which those
+    strategies caught to steer themselves — control flow through an exception, which
+    the engineering contract bans, and which cannot carry the "hoistable?" answer
+    anyway.
     """
     left_fields = []
     right_fields = []
+    unkeyed: List[Node] = []
 
     if condition_node.node_type == NodeType.AND:
-        left_fields_1, right_fields_1 = extract_join_fields(
+        left_fields_1, right_fields_1, unkeyed_1 = extract_join_fields(
             condition_node.left, left_relation_names, right_relation_names
         )
-        left_fields_2, right_fields_2 = extract_join_fields(
+        left_fields_2, right_fields_2, unkeyed_2 = extract_join_fields(
             condition_node.right, left_relation_names, right_relation_names
         )
 
@@ -175,6 +196,9 @@ def extract_join_fields(
         right_fields.extend(right_fields_1)
         right_fields.extend(right_fields_2)
 
+        unkeyed.extend(unkeyed_1)
+        unkeyed.extend(unkeyed_2)
+
     elif condition_node.node_type == NodeType.COMPARISON_OPERATOR and condition_node.value == "Eq":
         if any(
             [
@@ -182,7 +206,7 @@ def extract_join_fields(
                 condition_node.right.node_type not in (NodeType.IDENTIFIER, NodeType.LITERAL),
             ]
         ):
-            raise UnsupportedSyntaxError("**JOIN** conditions only support column comparisons.")
+            return left_fields, right_fields, [condition_node]
         if (
             condition_node.left.source in left_relation_names
             and condition_node.right.source in right_relation_names
@@ -196,7 +220,186 @@ def extract_join_fields(
             right_fields.append(condition_node.left.schema_column.identity)
             left_fields.append(condition_node.right.schema_column.identity)
 
-    return left_fields, right_fields
+    return left_fields, right_fields, unkeyed
+
+
+def _identifier_leg(
+    identifier: Node, left_relation_names: List[str], right_relation_names: List[str]
+) -> Optional[str]:
+    """Which join leg a bound IDENTIFIER belongs to, or None if neither.
+
+    `.source` is the alias the identifier was WRITTEN with and is what
+    `extract_join_fields` matches on, so it is what a hoist decision has to agree
+    with. `schema_column.origin` is the fallback for an identifier that resolved
+    without being qualified in the SQL.
+    """
+    candidates: Set[str] = set()
+    if identifier.source is not None:
+        candidates.add(identifier.source)
+    schema_column = identifier.schema_column
+    origin = getattr(schema_column, "origin", None) if schema_column is not None else None
+    if origin:
+        candidates.update(origin)
+    if not candidates:
+        return None
+    if candidates <= set(left_relation_names or ()):
+        return "left"
+    if candidates <= set(right_relation_names or ()):
+        return "right"
+    return None
+
+
+def hoistable_operand_leg(
+    expression: Node, left_relation_names: List[str], right_relation_names: List[str]
+) -> Optional[str]:
+    """The join leg `expression` could be materialised on as a column, or None.
+
+    THE ONE DEFINITION of "this ON-clause operand can become a join key". The
+    Binder asks it to decide whether to reject the query; JoinKeyMaterializationStrategy
+    asks it to decide what to project. They must not drift: a Binder that accepts
+    what the strategy will not hoist leaks a generic "unaligned key lists" refusal
+    from the compiler instead of a message naming the operand.
+
+    None covers three different "no"s the callers do not need to tell apart:
+    nothing to hoist (a bare column or literal), not a deterministic per-row
+    function of one leg, or it straddles both legs — which is a theta condition,
+    not a key.
+    """
+    if expression is None:
+        return None
+    if expression.node_type in (NodeType.IDENTIFIER, NodeType.LITERAL):
+        return None  # already a key, or contributes none — nothing to project
+    if expression.schema_column is None:
+        return None  # unbound: no identity to key the materialised column by
+    if get_all_nodes_of_type(expression, _UNHOISTABLE_NODE_TYPES):
+        return None
+    if has_volatile_function(expression):
+        # Projecting it changes evaluation from once-per-pair to once-per-row.
+        # Same posture as constant folding and group-key reduction: never
+        # relocate an expression whose value is not a function of its inputs.
+        return None
+
+    identifiers = get_all_nodes_of_type(expression, (NodeType.IDENTIFIER,))
+    if not identifiers:
+        return None  # a constant expression names no leg and keys nothing
+
+    legs = {_identifier_leg(identifier, left_relation_names, right_relation_names) for identifier in identifiers}
+    if len(legs) != 1:
+        return None
+    return legs.pop()
+
+
+def plan_join_key_hoists(
+    conjunct: Node, left_relation_names: List[str], right_relation_names: List[str]
+) -> Optional[List[Tuple[Node, str]]]:
+    """How an Eq conjunct carrying expression operand(s) could become an equi-join key.
+
+    Returns the (expression, leg) pairs to materialise — one entry when a single
+    operand is an expression, two when both are — or None when no projection makes
+    this conjunct a key. Never returns an empty list: a conjunct with nothing to
+    hoist is already a key and never reaches here.
+
+    Both operands must land on OPPOSITE legs. `CAST(p.a) = CAST(p.b)` is hoistable
+    twice over and still not a join key — it is a filter on one leg — and folding it
+    into the key lists would pair a leg with itself.
+    """
+    if conjunct.node_type != NodeType.COMPARISON_OPERATOR or conjunct.value != "Eq":
+        return None
+    if conjunct.left is None or conjunct.right is None:
+        return None
+
+    legs: List[str] = []
+    hoists: List[Tuple[Node, str]] = []
+    for operand in (conjunct.left, conjunct.right):
+        if operand.node_type == NodeType.IDENTIFIER:
+            leg = _identifier_leg(operand, left_relation_names, right_relation_names)
+            if leg is None:
+                return None
+            legs.append(leg)
+            continue
+        leg = hoistable_operand_leg(operand, left_relation_names, right_relation_names)
+        if leg is None:
+            return None
+        legs.append(leg)
+        hoists.append((operand, leg))
+
+    if set(legs) != {"left", "right"} or not hoists:
+        return None
+    return hoists
+
+
+def reject_unhoistable_join_operands(
+    unkeyed: List[Node], left_relation_names: List[str], right_relation_names: List[str]
+) -> None:
+    """Raise for any Eq conjunct in `unkeyed` that no projection can turn into a key.
+
+    Conjuncts that CAN be hoisted are left alone — JoinKeyMaterializationStrategy
+    projects them onto their leg and rebuilds the key lists. This is the Binder's
+    half of that split, and it is where the message lands because the Binder is the
+    last phase that still sits next to the user's SQL.
+    """
+    for conjunct in unkeyed:
+        if plan_join_key_hoists(conjunct, left_relation_names, right_relation_names) is not None:
+            continue
+
+        offenders = [
+            operand
+            for operand in (conjunct.left, conjunct.right)
+            if operand is not None
+            and operand.node_type not in (NodeType.IDENTIFIER, NodeType.LITERAL)
+        ]
+
+        # Report the reason this operand is not a key, not the generic one. The
+        # four are genuinely different problems with four different fixes, and a
+        # message that names the wrong one sends the user to rewrite the part of
+        # their query that was fine.
+        for operand in offenders:
+            rendered = md_code(format_expression(operand))
+            if get_all_nodes_of_type(operand, _UNHOISTABLE_NODE_TYPES):
+                raise UnsupportedSyntaxError(
+                    compose(
+                        f"A {md_syntax('JOIN')} condition joins values row by row, and "
+                        f"{rendered} has no per-row value",
+                        f"Compute it in a subquery or {md_syntax('CTE')} and join on the "
+                        f"resulting column",
+                    )
+                )
+            if has_volatile_function(operand):
+                raise UnsupportedSyntaxError(
+                    compose(
+                        f"A {md_syntax('JOIN')} condition needs a key that is the same "
+                        f"every time it is read, and {rendered} is not",
+                        "Materialise the value before the join if you need to join on it",
+                    )
+                )
+
+        # Every operand could be computed on SOME leg, so what is wrong is where
+        # they land: either an operand draws on both relations, or both operands
+        # draw on the same one. Neither is an equi-join key, and neither is fixed
+        # by projecting it — the condition belongs in WHERE.
+        straddling = [
+            md_code(format_expression(operand))
+            for operand in offenders
+            if hoistable_operand_leg(operand, left_relation_names, right_relation_names) is None
+        ]
+        if straddling:
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"A {md_syntax('JOIN')} key is computed from one side of the join, "
+                    f"and {' and '.join(straddling)} draws on both",
+                    f"A condition spanning both relations goes in {md_syntax('WHERE')}, "
+                    f"not {md_syntax('ON')}",
+                )
+            )
+        raise UnsupportedSyntaxError(
+            compose(
+                f"A {md_syntax('JOIN')} matches one relation against the other, and both "
+                f"sides of "
+                f"{md_code(format_expression(conjunct))} come from the same relation",
+                f"A condition over a single relation goes in {md_syntax('WHERE')}, not "
+                f"{md_syntax('ON')}",
+            )
+        )
 
 
 def convert_using_to_on(

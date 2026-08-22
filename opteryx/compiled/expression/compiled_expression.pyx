@@ -2377,11 +2377,15 @@ cdef Py_ssize_t _linearize(
                     slot.ctx_ptr = <void*>(<unsigned long long>_af_ctx.ctx_ptr)
                 return sub_depth - 2 + 1
 
-        # TRUNC(ts, unit) / DATE_TRUNC(unit, ts) — floor a TIMESTAMP to a unit
-        # boundary. Unit literal consumed into a binary_op_ctx (op_code=part id,
-        # left_unit=operand TimestampUnit); only the timestamp operand pushed.
+        # TRUNC(ts, unit) — floor a TIMESTAMP to a unit boundary. Unit literal
+        # consumed into a binary_op_ctx (op_code=part id, left_unit=operand
+        # TimestampUnit); only the timestamp operand pushed.
+        #
+        # DATE_TRUNC(unit, ts) reaches here as TRUNC too: it is normalised to
+        # TRUNC, arguments swapped, while the logical plan is built, so this arm
+        # never sees that name.
         _tr_func = func_val.upper() if func_val else ""
-        if _tr_func in ("TRUNC", "DATE_TRUNC", "DATETRUNC") and n == 2:
+        if _tr_func == "TRUNC" and n == 2:
             _tr_unit = 0
             _tr_operand = -1
             for _ti in range(2):
@@ -2419,7 +2423,7 @@ cdef Py_ssize_t _linearize(
 
         # HUMANIZE(val, mode) — the mode literal names a scale system (bytes, time,
         # odds, ...) and is consumed HERE into binary_op_ctx.op_code, exactly as
-        # DATE_TRUNC's unit is above; only the value operand is pushed, so the
+        # TRUNC's unit is above; only the value operand is pushed, so the
         # kernel still takes one argument.
         #
         # This arm is TOTAL for the 2-argument form: every path below either emits

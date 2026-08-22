@@ -21,24 +21,11 @@ as a bare IDENTIFIER.
 
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import Node
+from opteryx.planner.expression_traits import has_volatile_function
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
-
-_NON_DETERMINISTIC_FUNCTIONS = frozenset(
-    {
-        "RANDOM",
-        "RAND",
-        "NOW",
-        "CURRENT_TIMESTAMP",
-        "CURRENT_DATE",
-        "CURRENT_TIME",
-        "UUID",
-        "NEWID",
-        "GEN_RANDOM_UUID",
-    }
-)
 
 
 def _collect_identifier_names(expr) -> set:
@@ -49,20 +36,13 @@ def _collect_identifier_names(expr) -> set:
     }
 
 
-def _has_non_deterministic_function(expr) -> bool:
-    return any(
-        node.value and node.value.upper() in _NON_DETERMINISTIC_FUNCTIONS
-        for node in get_all_nodes_of_type(expr, (NodeType.FUNCTION,))
-    )
-
-
 def _is_reducible(expr, bare_key_names: set) -> bool:
     """Return True if expr is a deterministic expression that adds nothing to the
     partition: either a pure constant, or one whose only identifier leaves are a
     subset of the bare group key names."""
     if expr.node_type == NodeType.IDENTIFIER:
         return False
-    if _has_non_deterministic_function(expr):
+    if has_volatile_function(expr):
         return False
     identifiers = _collect_identifier_names(expr)
     if not identifiers:

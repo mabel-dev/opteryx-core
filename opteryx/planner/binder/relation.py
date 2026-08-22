@@ -380,7 +380,11 @@ def visit_alter_materialized_view_owner(
     in this engine reads `runs-as`. It only writes it, and this is what writes
     it.
 
-    So this statement asks two things. The caller must hold workspace owner,
+    So this statement asks three things. The incoming owner must be an identity
+    this deployment is willing to pin work on at all - a platform identity is
+    not an account and is billed to nobody, so a view pinned to one refreshes
+    for free forever, which no reading check would ever catch. AND the caller
+    must hold workspace owner,
     deliberately stricter than the view itself: a workspace owner can already
     grant themselves anything in the workspace and so escalates nothing by
     transferring, where a mere relation owner could borrow authority they do
@@ -394,6 +398,7 @@ def visit_alter_materialized_view_owner(
     from opteryx.exceptions import ReadOnlyConnectorError
     from opteryx.managers.permissions import can_perform_action
     from opteryx.managers.permissions import can_perform_workspace_action
+    from opteryx.managers.permissions import can_principal_own_materialized_view
     from opteryx.managers.permissions import can_principal_perform_action
 
     node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
@@ -415,6 +420,25 @@ def visit_alter_materialized_view_owner(
     owner = node.new_owner
     if node.owner_is_current_user:
         owner = context.execution_context.user or "CURRENT_USER"
+
+    # Asked of the RESOLVED owner, so `CURRENT_USER` is judged as the principal
+    # it names rather than exempted for having been spelled differently. A rule
+    # that turns on how an identity was written is not a rule.
+    #
+    # This is not a reading question and the source loop below cannot stand in
+    # for it: the identities refused here can typically read a great deal. What
+    # they cannot do is pay. They are the platform's own automation - identities
+    # rather than accounts, with no billing account behind them - so a view
+    # pinned to one refreshes on a schedule forever and lands on nobody's bill.
+    # Users and service accounts are both costed (a service account cannot exist
+    # without a billing account seat), which is why they are not refused here.
+    if not can_principal_own_materialized_view(owner):
+        raise PermissionError(
+            f"{owner} cannot be made the owner of {node.relation_name}. It is a platform "
+            "identity rather than an account, so work it performs is billed to nobody - "
+            "and a materialized view's refreshes run as its owner. Transfer the view to a "
+            "user or to a service account, both of which carry a billing account."
+        )
 
     sources = node.connector.materialized_view_sources(node.relation_name)
     if not sources:

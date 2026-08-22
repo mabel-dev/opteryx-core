@@ -360,10 +360,14 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                       cppvector[size_t] payload_idx, int mode,
                                       void* instrs, int count, cppvector[int] col_idx,
                                       cppvector[void*] lit_dv, ExprEvalFn fn,
-                                      bint emit_prune, cppvector[uint32_t] emit_cols)
+                                      bint emit_prune, cppvector[uint32_t] emit_cols,
+                                      bint emit_existence, bint existence_three_valued,
+                                      string existence_name)
         void add_join2_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                              cppvector[size_t] payload_idx, int mode,
-                             bint emit_prune, cppvector[uint32_t] emit_cols)
+                             bint emit_prune, cppvector[uint32_t] emit_cols,
+                             bint emit_existence, bint existence_three_valued,
+                             string existence_name)
         void set_asof_build_sink(size_t p, cppvector[size_t] key_idx,
                                  cppvector[size_t] payload_idx, size_t asof_idx,
                                  size_t ref, cppvector[DrakenType] payload_types,
@@ -1871,9 +1875,18 @@ cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
             try:
                 ci = <int>layout.index(ident)
             except ValueError:
-                raise KeyError(
-                    f"expression references column {ident!r} which the "
-                    f"stream does not carry (layout: {layout!r})")
+                # A missing column here is a COMPILER bug, never a bad query: the
+                # layout is the compiler's own record of what this point in the
+                # stream carries. It escaped as a bare `KeyError` naming internal
+                # `$derived_*` identities, which reads to the caller as a crash
+                # rather than as the invariant failure it is. Say what it is.
+                from opteryx.exceptions import InvalidInternalStateError
+                raise InvalidInternalStateError(
+                    "The compiled plan references a column the stream does not "
+                    "carry at this point. This is an internal error in Opteryx's "
+                    "query compiler, not a problem with the query as written. "
+                    f"(column {ident!r}; stream carries {layout!r})"
+                ) from None
         elif slot.opcode == BC_LOAD_LIT_CONST:
             scalar_obj = <object>slot.literal_obj
             lit_dv[lit_dv.size() - 1] = <void*>(<Vector>scalar_obj).unified()
@@ -2705,7 +2718,8 @@ cdef class NativePlan:
         self._e.set_semi_anti_build_source(p, ref, emit_matched)
 
     def add_join2_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
-                        int mode, list emit=None):
+                        int mode, list emit=None, existence_name=None,
+                        bint existence_three_valued=False):
         """mode: 0=inner, 1=left outer (probe side preserved), 2=semi,
         3=null-aware anti (NOT IN), 4=plain anti (NOT EXISTS),
         6=semi not-distinct, 7=anti not-distinct (INTERSECT / EXCEPT).
@@ -2719,7 +2733,14 @@ cdef class NativePlan:
         ``emit`` applies to modes 2/3/4 ONLY — the probe columns an existence filter
         still emits, in output order. Its probe key is read on every row and normally
         wanted by nothing above, so this is what drops it. ``None`` = emit every probe
-        column; ``[]`` = emit none, a real plan for `COUNT(*) ... WHERE x IN (...)`."""
+        column; ``[]`` = emit none, a real plan for `COUNT(*) ... WHERE x IN (...)`.
+
+        ``existence_name`` turns modes 2/3/4 from an existence FILTER into an
+        existence FLAG: every probe row is emitted, and the verdict is appended as a
+        BOOL column under that identity — what a projected `EXISTS`/`IN` reads.
+        ``existence_three_valued`` makes UNKNOWN a NULL in that column (projected
+        `IN`/`NOT IN`); `EXISTS` is two-valued and leaves it False. ``emit`` still
+        narrows the probe columns; the flag is appended after them."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         for i in key_idx:
@@ -2727,11 +2748,14 @@ cdef class NativePlan:
         for i in payload_idx:
             pay.push_back(<size_t>i)
         self._e.add_join2_probe(p, ref, keys, pay, mode,
-                                emit is not None, _emit_cols_from_list(emit))
+                                emit is not None, _emit_cols_from_list(emit),
+                                existence_name is not None, existence_three_valued,
+                                <string>(existence_name or b""))
 
     def add_join2_probe_residual(self, size_t p, size_t ref, list key_idx,
                                  list payload_idx, int mode, CompiledBytecode bc,
-                                 list layout, list emit=None):
+                                 list layout, list emit=None, existence_name=None,
+                                 bint existence_three_valued=False):
         """SEMI/ANTI (mode 2/3/4) whose EXISTENCE test is gated by a correlated
         non-equality residual — TPC-H Q21's `l2.l_suppkey <> l1.l_suppkey`. ``bc`` is
         resolved against ``layout``, the PAIR layout (build payload then probe
@@ -2739,7 +2763,10 @@ cdef class NativePlan:
 
         ``payload_idx`` therefore stays FULL WIDTH here — the residual reads it.
         ``emit`` is the separate question of what the filter outputs, exactly as in
-        :meth:`add_join2_probe`; narrowing it does not touch the pair layout."""
+        :meth:`add_join2_probe`; narrowing it does not touch the pair layout.
+        ``existence_name``/``existence_three_valued``: see :meth:`add_join2_probe` —
+        the residual gates the verdict either way, so a projected correlated
+        non-equality EXISTS takes this path."""
         cdef cppvector[size_t] keys
         cdef cppvector[size_t] pay
         cdef cppvector[int] col_idx
@@ -2753,7 +2780,10 @@ cdef class NativePlan:
         self._e.add_join2_probe_residual(p, ref, keys, pay, mode,
                                          <void*>bc.instrs, <int>bc.count,
                                          col_idx, lit_dv, _expr_eval_tramp,
-                                         emit is not None, _emit_cols_from_list(emit))
+                                         emit is not None, _emit_cols_from_list(emit),
+                                         existence_name is not None,
+                                         existence_three_valued,
+                                         <string>(existence_name or b""))
 
     def set_asof_build_sink(self, size_t p, list key_idx, list payload_idx,
                             size_t asof_idx, size_t ref, list payload_types,
@@ -3588,6 +3618,7 @@ include "distinct/distinct.pyx"
 include "hashed_inner_join/hashed_inner_join.pyx"
 include "exit/exit.pyx"
 include "explain/explain.pyx"
+include "existence_join/existence_join.pyx"
 include "filter_join/filter_join.pyx"
 include "filter/filter.pyx"
 include "function_dataset/function_dataset.pyx"

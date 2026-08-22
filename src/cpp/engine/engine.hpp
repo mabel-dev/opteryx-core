@@ -412,11 +412,15 @@ public:
     // "emit no columns" (a real plan — `COUNT(*) ... WHERE x IN (...)`).
     void add_join2_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
                          std::vector<size_t> payload_idx, int mode,
-                         bool emit_prune, std::vector<uint32_t> emit_cols) {
+                         bool emit_prune, std::vector<uint32_t> emit_cols,
+                         bool emit_existence = false,
+                         bool existence_three_valued = false,
+                         std::string existence_name = {}) {
         add_op_(p, std::make_unique<DeferredJoin2Probe>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             static_cast<JoinMode>(mode), -1, 0, ExprProgram(), nullptr,
-            emit_prune, std::move(emit_cols)));
+            emit_prune, std::move(emit_cols), emit_existence, existence_three_valued,
+            std::move(existence_name)));
     }
     // FULL OUTER tail pipeline source (see UnmatchedBuildSource): emits the build
     // rows no probe matched, NULL-padded on the probe half. probe_types/lt_* are
@@ -488,7 +492,10 @@ public:
                                   std::vector<size_t> payload_idx, int mode,
                                   void* instrs, int count, std::vector<int> col_idx,
                                   std::vector<void*> lit_dv, ExprEvalFn fn,
-                                  bool emit_prune, std::vector<uint32_t> emit_cols) {
+                                  bool emit_prune, std::vector<uint32_t> emit_cols,
+                                  bool emit_existence = false,
+                                  bool existence_three_valued = false,
+                                  std::string existence_name = {}) {
         ExprProgram prog;
         prog.instrs = instrs;
         prog.count = count;
@@ -497,7 +504,8 @@ public:
         add_op_(p, std::make_unique<DeferredJoin2Probe>(
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             static_cast<JoinMode>(mode), -1, 0, std::move(prog), fn,
-            emit_prune, std::move(emit_cols)));
+            emit_prune, std::move(emit_cols), emit_existence, existence_three_valued,
+            std::move(existence_name)));
     }
     // ASOF: build side = Join2BuildSink capturing the asof column's order key;
     // probe side = nearest-match per MATCH_CONDITION op (0 GtEq / 1 Gt / 2 LtEq / 3 Lt).

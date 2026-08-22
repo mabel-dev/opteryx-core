@@ -3,12 +3,21 @@ Function catalog: centralized registry of function definitions, overloads,
 kernels, and metadata."""
 
 from dataclasses import dataclass
+from itertools import permutations
 from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
+from opteryx.exceptions import compose, did_you_mean, md_code, md_syntax
 from opteryx.types.logical_type import LogicalCategory, _NUMERIC_TYPES, _TEMPORAL_TYPES
 from opteryx.types.vectors.vector_types import is_numeric_vector_type, resolve_node_type
 
 Node = Any  # AST node type (duck-typed; no import to avoid circular deps)
+
+#: Largest arity the transposed-argument check will permute. The search is
+#: factorial, so it is bounded rather than trusted to stay small; 5 is 120
+#: orderings on an error path that has already failed to resolve, and every
+#: function whose argument order is unusual enough to be transposed has far
+#: fewer arguments than that.
+_MAX_TRANSPOSITION_ARGC = 5
 
 
 @dataclass(frozen=True)
@@ -360,14 +369,20 @@ class FunctionCatalog:
 
             return 1.0
 
-        def _score_overload(overload: FunctionOverload) -> float:
+        def _score_overload(overload: FunctionOverload, nodes=None) -> float:
+            # `nodes` defaults to the call's arguments in the order they were
+            # written; the transposition check below scores permutations of them
+            # through this same function so the two paths cannot disagree about
+            # what "matches" means.
+            if nodes is None:
+                nodes = arg_nodes
             params = overload.parameters
             if not params:
                 return 0.0
             total = 0.0
             param_iter = iter(params)
             current_param = next(param_iter, None)
-            for node in arg_nodes:
+            for node in nodes:
                 if current_param is None:
                     return _INF  # too many args for non-variadic
                 param_score = _score_parameter(node, current_param.type_family)
@@ -397,6 +412,24 @@ class FunctionCatalog:
                 "array": "ARRAY<VARCHAR>",
             }
             selected_for_error = scored[0]
+
+            def _render_arg(node, index: int) -> str:
+                """How the argument was written, for naming it back to the reader.
+
+                Literals carry their rendered spelling on `schema_column.name`
+                (`'hour'`, `TIMESTAMP '2020-01-01T00:00:00.000000'`), so one
+                accessor covers both columns and constants.
+                """
+                return getattr(
+                    getattr(node, "schema_column", None), "name", None
+                ) or getattr(node, "value", f"arg{index + 1}")
+
+            def _type_name(node) -> str:
+                node_type, _ = resolve_node_type(node)
+                if node_type is None:
+                    return "UNKNOWN"
+                return str(node_type.value).upper()
+
             mismatches = []
             param_iter = iter(selected_for_error.parameters)
             current_param = next(param_iter, None)
@@ -423,15 +456,49 @@ class FunctionCatalog:
                             f"{current_param.type_family.upper()}{cast_hint}"
                         )
                     else:
-                        col_name = getattr(
-                            getattr(node, "schema_column", None), "name", None
-                        ) or getattr(node, "value", f"arg{i + 1}")
+                        col_name = _render_arg(node, i)
                         cast_hint = f" - use `{col_name}::{cast_type}`." if cast_type else "."
                         mismatches.append(
                             f"arg{i + 1} ('{col_name}'): expected {current_param.type_family.upper()}, got {node_type.value}{cast_hint}"
                         )
                 if not current_param.variadic:
                     current_param = next(param_iter, None)
+
+            # A call whose arguments are ALL (or mostly) mistyped is usually one
+            # transposition, not N independent type errors. Every per-argument
+            # cast built above is well-formed on its own and the SET of them is
+            # nonsense - `TIME_BUCKET(flow_start, 1, 'hour')` is told to write
+            # `'hour'::TIMESTAMP`, which cannot be part of any working query, and
+            # a reader who does not already know the signature is led away from
+            # the fix. Where some permutation of the SUPPLIED arguments satisfies
+            # a signature, that permutation IS the remedy, so the casts are
+            # SUPPRESSED rather than appended: in this case they are misleading,
+            # not merely redundant.
+            #
+            # This runs only on the error path, only when several arguments have
+            # already failed, and only for small arities - the factorial is over
+            # at most `_MAX_TRANSPOSITION_ARGC` arguments.
+            reordered = self._detect_transposition(
+                arg_nodes, candidates, len(mismatches), _score_overload, _INF
+            )
+            if reordered is not None:
+                overload, permutation = reordered
+                signature = f"{canonical}({', '.join(p.name for p in overload.parameters)})"
+                expected = ", ".join(p.type_family.upper() for p in overload.parameters)
+                supplied = ", ".join(_type_name(node) for node in arg_nodes)
+                call = (
+                    f"{canonical}("
+                    + ", ".join(str(_render_arg(arg_nodes[i], i)) for i in permutation)
+                    + ")"
+                )
+                raise TypeError(
+                    compose(
+                        f"{md_syntax(canonical)} arguments appear to be in the wrong order",
+                        f"{md_code(signature)} expects ({expected}) but was supplied ({supplied})",
+                        did_you_mean(call),
+                    )
+                )
+
             raise TypeError(f"{canonical} " + "; ".join(mismatches))
 
         tied = [o for o in scored if abs(_score_overload(o) - best_score) < 1e-9]
@@ -488,6 +555,43 @@ class FunctionCatalog:
             inferred_element_type=inferred_element_type,
             inferred_return_type=inferred_type,
         )
+
+    def _detect_transposition(
+        self, arg_nodes, candidates, mismatch_count: int, score_overload, inf: float
+    ):
+        """Find a reordering of the SUPPLIED arguments that satisfies a signature.
+
+        Returns `(overload, permutation)` for the first ordering that resolves, or
+        None. `permutation[i]` is the index of the supplied argument that belongs
+        in position `i`.
+
+        Only called once a call has already failed to resolve, and only when the
+        MAJORITY of arguments were rejected: a single bad argument is a genuine
+        type error whose cast suggestion is the right remedy, and offering a
+        reorder for it would be the same misdirection in the other direction.
+        Scoring goes through the caller's `score_overload` so that "this ordering
+        would have worked" means exactly what resolution means by it.
+        """
+        argc = len(arg_nodes)
+        if mismatch_count < 2 or 2 * mismatch_count <= argc:
+            return None
+        if argc > _MAX_TRANSPOSITION_ARGC:
+            return None
+
+        identity = tuple(range(argc))
+        for overload in candidates:
+            params = overload.parameters
+            # A variadic parameter absorbs any number of arguments, so "a
+            # different order" is not a statement about it; an arity that does
+            # not match exactly is a different error than a transposition.
+            if len(params) != argc or any(p.variadic for p in params):
+                continue
+            for permutation in permutations(identity):
+                if permutation == identity:
+                    continue
+                if score_overload(overload, [arg_nodes[i] for i in permutation]) < inf:
+                    return overload, permutation
+        return None
 
     def get_definition(self, name: str) -> Optional[FunctionDefinition]:
         """Get function definition by name (or alias).

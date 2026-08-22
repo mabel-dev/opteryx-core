@@ -184,6 +184,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.hashed_inner_join import DrakenInnerJoinNode
     from opteryx.operators.exit import ExitNode
     from opteryx.operators.explain import ExplainNode
+    from opteryx.operators.existence_join import ExistenceJoinNode
     from opteryx.operators.filter_join import FilterJoinNode
     from opteryx.operators.filter import FilterNode
     from opteryx.operators.function_dataset import FunctionDatasetNode
@@ -415,6 +416,13 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         FilterJoinNode,
         name="Filter Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        ExistenceJoinNode,
+        name="Existence Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,
