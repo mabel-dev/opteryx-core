@@ -263,11 +263,13 @@ static void ec_date(std::string &o, Col &c, size_t i) {
 }
 // Dotted-decimal, through csv_field so a '.' delimiter quotes the field instead
 // of splitting the address across four columns. Formatted into a stack buffer
-// (an address is at most 15 bytes) rather than the shared scratch string, so
-// the quote-awareness costs one pass over those bytes and no allocation.
+// (FORMAT_SCRATCH_BYTES — format() renders each octet with one 4-byte store, so
+// it touches 16 even though an address is at most 15) rather than the shared
+// scratch string, so the quote-awareness costs one pass over those bytes and no
+// allocation.
 static void ec_ipv4(std::string &o, Col &c, size_t i) {
   if (!row_valid(c.dv->validity, i)) return;
-  char buf[draken::ipv4::MAX_TEXT_LENGTH];
+  char buf[draken::ipv4::FORMAT_SCRATCH_BYTES];
   uint32_t n = draken::ipv4::format(((const uint32_t *)c.dv->data)[c.dv->selection[i]], buf);
   csv_field(o, buf, n, c.delim);
 }

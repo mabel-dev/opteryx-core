@@ -383,8 +383,14 @@ static inline void pass1_run_predicate(MorselRef& result, const Pass1Pred& pred)
     const int rc = pred.fn(pred.ctx, dvp, ncols, nrows, result.survivor_mask.data());
     if (rc != 0) {
         result.survivor_mask.clear();
-        // rc 4 is a KERNEL error — the program ran and the kernel failed. Every other
-        // non-zero rc means the c-native VM does not APPLY to these operands (compare
+        // rc 4 is a KERNEL error — the program ran and the kernel failed. rc 96 is a
+        // kernel DATA error, and it deliberately does NOT join it: its message is the
+        // user-facing text naming the offending value, which the mask callback has no
+        // way to carry back (only `result.error`, a fixed string, reaches the caller).
+        // Declining hands the identical program to the consumer's serial path, which
+        // fails with that message intact — strictly more informative than the fixed
+        // text this arm could set. Every other non-zero rc means the c-native VM does
+        // not APPLY to these operands (compare
         // not-available for the pair of types, a NULL operand, a string result, an
         // arena it could not take). That is a capability statement, not a fault, and
         // the consumer's serial path is strictly more capable — the trampoline drops

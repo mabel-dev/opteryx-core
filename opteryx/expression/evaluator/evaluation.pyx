@@ -1763,12 +1763,21 @@ cdef int c_execute_dv_inner(
 
     Loads read pre-resolved DV* from dv_cache; compute ops call the shared
     _dv_* helpers. Returns 0 on success (result at dv_stack[0]); otherwise the
-    helper rc (1 NULL-operand, 2 alloc, 3 compare-N/A, 4 kernel-error, 5 string)
-    with *err_op set to the failing opcode. On rc 4, *err_msg is the failing
-    kernel's VecResult.error_msg (see vec_result.h — a pointer into THIS
-    thread's error_handling.cpp buffer, valid until the next kernel call on
-    this thread; NULL otherwise). No PyObject, no anchor — the GIL caller
-    materializes dv_stack[0] (an arena result) and maps any error.
+    helper rc (1 NULL-operand, 2 alloc, 3 compare-N/A, 4 kernel-error, 5 string,
+    96 kernel DATA error) with *err_op set to the failing opcode. On rc 4 and rc
+    96, *err_msg is the failing kernel's VecResult.error_msg (see vec_result.h —
+    a pointer into THIS thread's error_handling.cpp buffer, valid until the next
+    kernel call on this thread; NULL otherwise). No PyObject, no anchor — the GIL
+    caller materializes dv_stack[0] (an arena result) and maps any error.
+
+    rc 96 is rc 4 whose message is about the DATA, not the engine: a string that
+    is not a number, a value outside the target's range. The kernel classified it
+    (VecResult.data_error) and the message is complete user-facing text, so every
+    consumer must raise it VERBATIM — no operator name, no opcode — and none may
+    treat it as a decline and fall back to the GIL VM, which would re-run the same
+    bad values through a different implementation. It is deliberately NOT in the
+    0-5 band: 5 and 6 are already taken inside this rc space, and rc 5's
+    fall-back-to-the-VM arm is exactly the treatment a data error must not get.
 
     *out_child is set to NULL, then to a BC_FUNCTION kernel's VecResult.child
     (see vec_result.h) whenever one is produced — currently only possible for
@@ -1993,6 +2002,11 @@ cdef int c_execute_dv_inner(
             err_op[0] = opcode
             if rc == 4:
                 err_msg[0] = vr.error_msg
+                # The kernel's own classification of what it just wrote. Read here,
+                # at the ONE site that turns a sentinel VecResult into an rc for the
+                # caller, so no consumer has to know about VecResult at all.
+                if vr.data_error != 0:
+                    return 96
             elif rc == 3:
                 # rc 3 is _dv_compare_c's exclusive return (see its docstring) —
                 # the fast BC_COMPARE path declined (unsupported operand type or
@@ -2004,6 +2018,43 @@ cdef int c_execute_dv_inner(
                 err_msg[0] = "BC_COMPARE fast path declined (unsupported operand type or cross-type/cross-scale comparison)"
             return rc
     return 0
+
+
+cdef object _vecresult_error_exc(VecResult* vr, str fallback):
+    """The exception for an error sentinel the GIL Morsel VM holds in hand.
+
+    Same classification as _kernel_error_exc, read straight off the sentinel
+    (VecResult.data_error) because this path never converts it to an rc: a kernel
+    that says the DATA failed gets DataError with its message verbatim, anything
+    else stays a ValueError."""
+    cdef object msg = (
+        vr.error_msg.decode("utf-8", "replace")
+        if vr.error_msg != NULL else fallback
+    )
+    if vr.data_error != 0:
+        from opteryx.exceptions import DataError
+
+        return DataError(msg)
+    return ValueError(msg)
+
+
+cdef object _kernel_error_exc(int rc, const char* err_msg_ptr):
+    """The exception for a kernel error out of the DV* VM — rc 4 or rc 96.
+
+    rc 96 is the kernel saying the DATA is what failed (see c_execute_dv_inner):
+    the message is complete user-facing text, so it becomes an opteryx DataError
+    carrying it verbatim, the same class and the same no-framing treatment the
+    native engine gives it through kErrCodeDataError. rc 4 is an engine fault and
+    stays a ValueError."""
+    cdef object msg = (
+        err_msg_ptr.decode("utf-8", "replace")
+        if err_msg_ptr != NULL else "C kernel error"
+    )
+    if rc == 96:
+        from opteryx.exceptions import DataError
+
+        return DataError(msg)
+    return ValueError(msg)
 
 
 cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
@@ -2032,7 +2083,6 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
     cdef const char* err_msg_ptr = NULL
     cdef int rc
     cdef bint use_substrate = (m != NULL)
-    cdef object err_msg
     cdef VecResult* child_vr = NULL
     # GIL prepass: resolve loads. When the morsel is Cxx-backed, resolve columns
     # straight from the substrate (columns[idx].view) — no per-column Vector build;
@@ -2079,12 +2129,8 @@ cpdef object evaluate_c_native(CompiledBytecode bc, Morsel morsel):
                 draken_vecresult_discard_c(child_vr)
             # Gate guarantees the last op is a compute op → arena result, anchor None.
             return _slot_to_pyobj(dv_stack[0], None, arena)
-        if rc == 4:
-            err_msg = (
-                err_msg_ptr.decode("utf-8", "replace")
-                if err_msg_ptr != NULL else "C kernel error"
-            )
-            raise ValueError(err_msg)
+        if rc == 4 or rc == 96:
+            raise _kernel_error_exc(rc, err_msg_ptr)
         if rc == 1:
             raise TypeError("evaluate_c_native: NULL operand")
         if rc == 2:
@@ -3006,7 +3052,6 @@ cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
     cdef const char* err_msg_ptr = NULL
     cdef int rc
     cdef CxxMorsel* filtered = NULL
-    cdef object err_msg
     if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
         return None
     with nogil:
@@ -3014,12 +3059,8 @@ cpdef object filter_morsel_c_native(CompiledBytecode bc, Morsel morsel):
                                  &err_op, &err_msg_ptr)
     if rc == 0:
         return cxx_to_morsel(shared_ptr[CxxMorsel](filtered))
-    if rc == 4:
-        err_msg = (
-            err_msg_ptr.decode("utf-8", "replace")
-            if err_msg_ptr != NULL else "C kernel error"
-        )
-        raise ValueError(err_msg)
+    if rc == 4 or rc == 96:
+        raise _kernel_error_exc(rc, err_msg_ptr)
     # rc 1/2/3/5/99: signal the caller to use the Morsel VM + filter_mask path.
     return None
 
@@ -3044,7 +3085,7 @@ cpdef object predicate_filter_and_mask_c_native(CompiledBytecode bc, Morsel mors
     cdef int rc
     cdef CxxMorsel* filtered = NULL
     cdef uint8_t* mask_buf
-    cdef object err_msg, mask_bytes
+    cdef object mask_bytes
     if _dv_cxx_resolve_caches(bc, m, col_idx, lit_dv) != 0:
         return None
     mask_buf = <uint8_t*>draken_malloc(<size_t>(nbytes if nbytes > 0 else 1))
@@ -3059,12 +3100,8 @@ cpdef object predicate_filter_and_mask_c_native(CompiledBytecode bc, Morsel mors
         draken_free(mask_buf)
         return (cxx_to_morsel(shared_ptr[CxxMorsel](filtered)), mask_bytes)
     draken_free(mask_buf)
-    if rc == 4:
-        err_msg = (
-            err_msg_ptr.decode("utf-8", "replace")
-            if err_msg_ptr != NULL else "C kernel error"
-        )
-        raise ValueError(err_msg)
+    if rc == 4 or rc == 96:
+        raise _kernel_error_exc(rc, err_msg_ptr)
     return None
 
 
@@ -3156,10 +3193,8 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
     cdef VecResult cast_vr
     cdef VecResult binop_vr
     cdef VecResult extr_vr
-    cdef object extr_err_msg
     cdef const DrakenVector* cfargs[16]   # C-native BC_FUNCTION operand scratch
     cdef Py_ssize_t _fj
-    cdef object cast_err_msg
     # Row-count carrier for arity-0 C-native functions (RANDOM/NORMAL): the func_fn_t
     # ABI passes only operand vectors, so a nullary kernel has no way to learn the
     # morsel row count. We hand it a synthetic length-only operand whose `length` IS
@@ -3448,11 +3483,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         dv_left_ptr, dv_right_ptr,
                         dv_store, dv_stack, sp, arena, &binop_vr)
                     if rc == 4:
-                        cast_err_msg = (
-                            binop_vr.error_msg.decode("utf-8", "replace")
-                            if binop_vr.error_msg != NULL else "C binop kernel error"
-                        )
-                        raise ValueError(cast_err_msg)
+                        raise _vecresult_error_exc(&binop_vr, "C binop kernel error")
                     if rc == 5:
                         # String result (e.g. ||): consolidated block with embedded
                         # validity — own it as a Vector (the canonical owner). Stays
@@ -3579,11 +3610,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         slot.kernel_fn, <void*>slot.ctx_ptr, cfargs,
                         _eff_nargs, dv_store, dv_stack, sp, arena, &binop_vr, 1)
                     if rc == 4:
-                        cast_err_msg = (
-                            binop_vr.error_msg.decode("utf-8", "replace")
-                            if binop_vr.error_msg != NULL else "C function kernel error"
-                        )
-                        raise ValueError(cast_err_msg)
+                        raise _vecresult_error_exc(&binop_vr, "C function kernel error")
                     if rc == 5 or rc == 6:
                         # rc 6 = ARRAY result: owned rather than arena-folded so the
                         # elements on VecResult.child survive (vecresult_to_owner
@@ -3727,11 +3754,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                     slot.kernel_fn, <void*>slot.ctx_ptr, dv_left_ptr, NULL,
                     dv_store, dv_stack, sp, arena, &extr_vr)
                 if rc == 4:
-                    extr_err_msg = (
-                        extr_vr.error_msg.decode("utf-8", "replace")
-                        if extr_vr.error_msg != NULL else "C extraction kernel error"
-                    )
-                    raise ValueError(extr_err_msg)
+                    raise _vecresult_error_exc(&extr_vr, "C extraction kernel error")
                 # rc 0: the result (string canonical block or element-typed) is
                 # adopted into the frame arena; _slot_to_pyobj builds a Vector
                 # lazily only if something downstream consumes the object.
@@ -3763,11 +3786,7 @@ cpdef execute_bytecode(CompiledBytecode bc, Morsel morsel):
                         slot.kernel_fn, <void*>slot.ctx_ptr, dv_left_ptr,
                         dv_store, dv_stack, sp, arena, &cast_vr, 1)
                     if rc == 4:
-                        cast_err_msg = (
-                            cast_vr.error_msg.decode("utf-8", "replace")
-                            if cast_vr.error_msg != NULL else "C cast kernel error"
-                        )
-                        raise ValueError(cast_err_msg)
+                        raise _vecresult_error_exc(&cast_vr, "C cast kernel error")
                     if rc == 5 or rc == 6:
                         # String result: consolidated block with embedded validity —
                         # own it as a Vector (the canonical owner; carries the block).

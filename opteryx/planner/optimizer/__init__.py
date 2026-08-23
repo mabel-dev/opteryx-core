@@ -40,7 +40,6 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.plan_validator import validate_plan
 from opteryx.planner.optimizer.strategies import (
     BooleanSimplificationStrategy,
-    CastSimplificationStrategy,
     ConstantFoldingStrategy,
     CorrelatedFiltersStrategy,
     SemiJoinPushdownStrategy,
@@ -98,7 +97,6 @@ __all__ = ["do_optimizer"]
 # too is harmless (same flag, checked twice) and keeps this the complete registry.
 _STRATEGY_DISABLE_FLAGS = {
     "BooleanSimplificationStrategy": "disable_boolean_simplification",
-    "CastSimplificationStrategy": "disable_cast_simplification",
     "ConstantFoldingStrategy": "disable_constant_folding",
     "CorrelatedFiltersStrategy": "disable_correlated_filters",
     "SemiJoinPushdownStrategy": "disable_semi_join_pushdown",
@@ -200,7 +198,6 @@ class OptimizerVisitor:
             StatisticsOnlyResponseStrategy(telemetry),
             BooleanSimplificationStrategy(telemetry),
             RedundantCastEliminationStrategy(telemetry),  # CAST(x AS T) where x is T -> x
-            CastSimplificationStrategy(telemetry),  # DISABLED: Causes plan corruption
             DisjunctionSimplificationStrategy(telemetry),
             # Derives implied-but-weaker per-column domain predicates (IN-list or
             # range) from an OR-of-AND filter that DisjunctionSimplification couldn't

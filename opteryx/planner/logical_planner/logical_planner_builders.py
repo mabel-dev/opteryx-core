@@ -996,7 +996,18 @@ def _normalize_cast_type(data_type: str) -> str:
     if upper_type in ("INT8", "INT16", "INT32", "INT64", "FLOAT32"):
         return upper_type
 
-    # FLOAT and FLOAT64 are DOUBLE — one spelling reaches the tables downstream.
+    # FLOAT and FLOAT64 both normalize to FLOAT64 — one spelling reaches the tables
+    # downstream, and it is the CANONICAL one.
+    #
+    # This used to normalize to "DOUBLE", and that name is USER-VISIBLE: it is what
+    # the cast node carries, so it reached the reader as the auto-generated column
+    # name (`id::DOUBLE`, and `name::TRY_DOUBLE`, which is not a type at all) and as
+    # the target named in the literal-fold failure ("Error casting value '4.3s' to
+    # type 'DOUBLE'"). DOUBLE is a spelling this dialect REJECTS — `CAST(x AS
+    # DOUBLE)` answers "`DOUBLE` is not a type **CAST** can produce. Did you mean
+    # `FLOAT64`?" — so the engine was reporting a type it refuses to accept back,
+    # for a query that never mentioned it. The internal name and the canonical name
+    # are now the same name, which is the only way they cannot drift again.
     #
     # FLOAT means DOUBLE PRECISION here, matching `_SQL_NAME_ALIASES` on the read
     # side: FLOAT is what the catalog persists for the FLOAT category, so pointing
@@ -1004,8 +1015,11 @@ def _normalize_cast_type(data_type: str) -> str:
     # precision spelling per the standard, and FLOAT32 is the canonical name for
     # it. FLOAT(p) never reaches here — _extract_data_type resolves the precision
     # to an exact width first.
+    #
+    # A user-typed DOUBLE is unaffected: it is not in the tuple below, so it still
+    # falls through to the rejection table that suggests FLOAT64.
     if upper_type in ("FLOAT", "FLOAT64"):
-        return "DOUBLE"
+        return "FLOAT64"
 
     # IPv4 — exact match, and it MUST sit ahead of the substring rules below:
     # sqlparser hands this through as a custom type name, and "ipv4" contains no

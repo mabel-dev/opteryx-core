@@ -1421,7 +1421,7 @@ static inline int32_t py_date_to_days(PyObject* d) {
 // through one entry point and 167772161 through another. That means __getitem__,
 // to_pylist, min and max alike: min/max of an address column are addresses.
 static nb::object ipv4_to_py_str(uint32_t value) {
-    char buf[draken::ipv4::MAX_TEXT_LENGTH];
+    char buf[draken::ipv4::FORMAT_SCRATCH_BYTES];
     const uint32_t n = draken::ipv4::format(value, buf);
     return nb::str(buf, static_cast<size_t>(n));
 }

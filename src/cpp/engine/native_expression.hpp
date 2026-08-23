@@ -95,6 +95,41 @@ inline const char* format_kernel_error(const char* op_name, int err_op,
     return buf.c_str();
 }
 
+// The span rc for a kernel error the KERNEL classified as being about the DATA —
+// a string that is not a number, a value outside the target's range — rather than
+// about the engine (see evaluation.pyx's c_execute_dv_inner and
+// draken/ops/vec_result.h's VecResult::data_error). Its message is complete,
+// user-presentable text.
+inline constexpr int kExprRcDataError = 96;
+
+// The ONE place an expression-span rc becomes an ErrCtx. Which of the two error
+// channels a failure takes is a property of the FAILURE, not of the operator that
+// happened to be running, so every operator that drives a span routes through
+// here rather than deciding for itself:
+//
+//   rc 96 -> kErrCodeDataError. The message is raised VERBATIM as opteryx
+//            DataError (build_terminal_exc). No operator name, no err_op: the
+//            reader is being told their data does not fit the cast they asked
+//            for, and neither of those two facts helps them fix it.
+//   else  -> code 1, the internal-fault channel, framed with the operator name
+//            and the failing opcode — the only machine handle on an engine bug.
+//
+// The verbatim path still copies into the thread_local buffer for the same
+// lifetime reason format_kernel_error does: `kernel_msg` points into the failing
+// kernel's own thread_local and is only valid until the next kernel call.
+inline void set_span_error(ErrCtx& err, const char* op_name, int rc, int err_op,
+                           const char* kernel_msg) {
+    if (rc == kExprRcDataError) {
+        static thread_local std::string data_buf;
+        data_buf = (kernel_msg != nullptr ? kernel_msg : "unknown data error");
+        err.code = kErrCodeDataError;
+        err.msg = data_buf.c_str();
+        return;
+    }
+    err.code = 1;
+    err.msg = format_kernel_error(op_name, err_op, kernel_msg);
+}
+
 // ---- ExprFilterOperator: WHERE over an arbitrary c-native predicate --------------
 
 struct ExprFilterOperator : Operator {
@@ -116,9 +151,8 @@ struct ExprFilterOperator : Operator {
                     prog.lit_dv.data(), prog.const_col_idx.data(), prog.const_scalar_dv.data(),
                     static_cast<int>(prog.const_col_idx.size()), &filtered, &err_op, &kernel_msg);
         if (rc != 0) {
-            err.code = 1;
-            err.msg = format_kernel_error("ExprFilterOperator: predicate evaluation failed",
-                                          err_op, kernel_msg);
+            set_span_error(err, "ExprFilterOperator: predicate evaluation failed",
+                           rc, err_op, kernel_msg);
             return OpResult::NEED_INPUT;
         }
         std::shared_ptr<CxxMorsel> result(filtered);
@@ -180,14 +214,15 @@ struct ExprMultiProjectOperator : Operator {
             int rc = fn(progs[k].instrs, progs[k].count, m.get(),
                         progs[k].col_idx.data(), progs[k].lit_dv.data(),
                         &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
-            if (rc != 0) {
+            if (rc == 98) {
                 err.code = 1;
-                err.msg = (rc == 98)
-                    ? "ExprMultiProjectOperator: expression result is not a "
-                      "fixed-width type this span can materialize — fail loud"
-                    : format_kernel_error(
-                          "ExprMultiProjectOperator: expression evaluation failed",
-                          err_op, kernel_msg);
+                err.msg = "ExprMultiProjectOperator: expression result is not a "
+                          "fixed-width type this span can materialize — fail loud";
+                return OpResult::NEED_INPUT;
+            }
+            if (rc != 0) {
+                set_span_error(err, "ExprMultiProjectOperator: expression evaluation failed",
+                               rc, err_op, kernel_msg);
                 return OpResult::NEED_INPUT;
             }
             CxxColumn nc;

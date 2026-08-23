@@ -49,12 +49,22 @@ def test_load_counts_matches_equivalent_bins():
 
 
 def test_load_counts_i64_matches_equivalent_bins():
+    """Bin centres follow the PRODUCER's bucket width, not `span / len(counts)`.
+
+    draken's `Vector.histogram_bucket` -- the only producer of these counts --
+    assigns `bin = int(frac * (n_bins - 1))`, so bins 0..n-2 partition the range
+    into n-1 equal slices and bin n-1 is a singleton holding exactly `maximum`.
+    Spacing centres by `span / len(counts)` put every bin a systematic half-bin
+    too low. This test previously encoded that spacing; it now encodes the
+    producer's.
+    """
     counts = array("q", [0, 3, 5, 0, 7])
     minimum = 10.0
     maximum = 20.0
     span = maximum - minimum
+    slices = len(counts) - 1
     bins = [
-        (minimum + (idx + 0.5) * span / len(counts), count)
+        (min(minimum + (idx + 0.5) * span / slices, maximum), count)
         for idx, count in enumerate(counts)
         if count
     ]

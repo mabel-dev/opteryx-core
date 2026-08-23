@@ -22,7 +22,7 @@ Join Ordering Rules (from COST-BASED-OPTIMIZER.md):
 2. If cardinalities are within 1%, larger table goes right
 3. Otherwise, use cardinality estimation of join column(s) to decide left/right tables
    -- but only where it does not contradict the row counts: a cardinality
-   preference may break a row-count near-tie, never overturn it (see _decide_swap)
+   preference may break a row-count near-tie, never overturn it (see _decide_swap_reasoned)
 4. If table sizes and cardinalities are the same (e.g. self join), don't change order
 
 Historical note: this strategy used to ALSO route a pure equi join to
@@ -95,9 +95,22 @@ def _join_key_identity(col):
     return identity if isinstance(identity, bytes) else None
 
 
-def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_null):
+# Which rule in _decide_swap_reasoned produced the answer. Reported verbatim in the
+# OPTIMIZATIONS block, because "swapped" and "kept" are the same word for five
+# different pieces of reasoning and only the rule says which numbers mattered.
+_RULE_MEMORY_PRESSURE = "rule 1, memory pressure"
+_RULE_CARDINALITY_TIE = "rule 2, near-equal cardinality"
+_RULE_CARDINALITY = "rule 3, cardinality"
+_RULE_CARDINALITY_BLOCKED = "rule 3 overruled by row counts"
+_RULE_ROWS_ONLY = "no cardinality data, row counts only"
+
+
+def _decide_swap_reasoned(
+    left_rows, right_rows, left_ndv, right_ndv, left_null, right_null
+):
     """Decide whether to swap the join's sides so the smaller/cheaper relation
-    ends up on the left (build) side.
+    ends up on the left (build) side. Returns ``(swap, rule)`` — the rule being
+    which of the rules below actually produced the answer.
 
     Pure function of per-side row counts, join-key NDVs and join-key null
     fractions. Row counts are *post-filter* ``statistics.row_count`` when
@@ -114,9 +127,9 @@ def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_nu
     """
     # Rule 1: memory pressure — one side dominates the other in rows.
     if left_rows > 3 * right_rows:
-        return True
+        return True, _RULE_MEMORY_PRESSURE
     if right_rows > 3 * left_rows:
-        return False
+        return False, _RULE_MEMORY_PRESSURE
 
     # Effective rows discount join keys that are partly NULL (worst-case side).
     left_eff = left_rows * (1.0 - left_null) if left_null else left_rows
@@ -128,7 +141,7 @@ def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_nu
         card_diff_pct = (abs(left_ndv - right_ndv) / denom * 100.0) if denom else 0.0
         if card_diff_pct <= 1.0:
             # Rule 2: near-equal cardinality — smaller effective rows on the left.
-            return left_eff > right_eff
+            return left_eff > right_eff, _RULE_CARDINALITY_TIE
         # Rule 3: prefer smaller cardinality left; tie-break on effective rows.
         swap = left_ndv > right_ndv or (left_ndv == right_ndv and left_eff > right_eff)
         # ...but never on NDV alone against the row counts. An NDV is an ESTIMATE
@@ -142,16 +155,16 @@ def _decide_swap(left_rows, right_rows, left_ndv, right_ndv, left_null, right_nu
         # (3.3s -> 13.6s; Q10 likewise 1.5s -> 2.5s). A cardinality preference may
         # break a row-count near-tie, never overturn it.
         if swap and right_eff > left_eff:
-            return False
+            return False, _RULE_CARDINALITY_BLOCKED
         # NOTE the guard is deliberately one-directional. Its mirror -- Rule 3
         # DECLINING a swap and so leaving the larger side on the build leg -- is a
         # real hole (reachable: left 600M/ndv 37M vs right 286M/ndv 53M) but
         # closing it was measured NET NEGATIVE at SF100: Q10 1.7s -> 3.1s and
         # Q09 4.2s -> 5.3s against Q07's gain. Surfaced, not fixed.
-        return swap
+        return swap, _RULE_CARDINALITY
 
     # Fallback: no cardinality data — smaller effective rows on the left.
-    return right_eff < left_eff
+    return right_eff < left_eff, _RULE_ROWS_ONLY
 
 
 # How much larger the build leg must be estimated to be before a SEMI/ANTI join is
@@ -206,6 +219,42 @@ def _limit_can_short_circuit(plan, join_nid) -> bool:
     return False
 
 
+def _ratio_text(larger, smaller) -> str:
+    """A side ratio, at a precision that stays readable across the range it spans.
+    The semi/anti gate compares against a margin of 10 and the real ratios run from
+    0.004 to several thousand, where a single format string renders one end as
+    "0.00x" and the other as "6e+03x" — both unreadable at exactly the moment the
+    number is the whole argument."""
+    ratio = larger / smaller
+    if ratio >= 100:
+        return f"{ratio:,.0f}"
+    if ratio >= 1:
+        return f"{ratio:.2f}"
+    return f"{ratio:.3g}"
+
+
+# "this rule did not consult that number", distinct from a consulted-but-unknown None.
+_NOT_CONSULTED = object()
+
+
+def _side_facts(rows, ndv=_NOT_CONSULTED, null_fraction=None) -> str:
+    """One side's decision inputs, as text.
+
+    A statistic the rule CONSULTED and did not get is spelled "unknown" rather than
+    omitted or defaulted — "ndv unknown" and "ndv 1" send the reader to different
+    places, and the point of recording a decision is that a wrong one is traceable
+    to the number that caused it. A statistic the rule never looks at (the semi/anti
+    exchange reads rows only) is left out entirely, so the record never implies a
+    missing statistic mattered when it did not.
+    """
+    parts = [f"{rows:,} rows" if rows is not None else "rows unknown"]
+    if ndv is not _NOT_CONSULTED:
+        parts.append(f"ndv {ndv:,}" if ndv is not None else "ndv unknown")
+    if null_fraction:
+        parts.append(f"key null {null_fraction:.3f}")
+    return ", ".join(parts)
+
+
 class JoinOrderingStrategy(OptimizationStrategy):
     optimization_technique = "cost"
     requires = ("joins-planned",)
@@ -236,20 +285,42 @@ class JoinOrderingStrategy(OptimizationStrategy):
             right_rows = self._side_rows(right_stats, node.right_size)
             # Absent statistics are fail-safe: keep today's shape rather than exchange
             # a join on a fabricated number.
-            if (
-                left_rows
-                and right_rows
-                and right_rows >= left_rows * _SWAP_BUILD_RATIO
-                and not _limit_can_short_circuit(
-                    context.pre_optimized_tree, context.node_id
+            #
+            # The three ways this declines are recorded apart, because they point at
+            # different work: no statistics is an ESTIMATOR gap, a ratio under
+            # _SWAP_BUILD_RATIO is the rule behaving as designed, and a LIMIT that
+            # could short-circuit is a correctness gate that would refuse the exchange
+            # however large the ratio got.
+            sides = f"left {_side_facts(left_rows)}, right {_side_facts(right_rows)}"
+            if not left_rows or not right_rows:
+                self.record_decision(
+                    f"{node.type} join exchange",
+                    f"declined, no row statistics: {sides}",
                 )
-            ):
+            elif right_rows < left_rows * _SWAP_BUILD_RATIO:
+                self.record_decision(
+                    f"{node.type} join exchange",
+                    f"declined, ratio {_ratio_text(right_rows, left_rows)}x below the"
+                    f" {_SWAP_BUILD_RATIO:g}x margin: {sides}",
+                )
+            elif _limit_can_short_circuit(context.pre_optimized_tree, context.node_id):
+                self.record_decision(
+                    f"{node.type} join exchange",
+                    f"declined, a LIMIT above the join could stop the probe early"
+                    f" (ratio {_ratio_text(right_rows, left_rows)}x): {sides}",
+                )
+            else:
                 node.swap_build_side = True
                 self.telemetry.optimization_semi_anti_build_side_swapped = (
                     getattr(
                         self.telemetry, "optimization_semi_anti_build_side_swapped", 0
                     )
                     + 1
+                )
+                self.record_decision(
+                    f"{node.type} join exchange",
+                    f"exchanged, ratio {_ratio_text(right_rows, left_rows)}x clears the"
+                    f" {_SWAP_BUILD_RATIO:g}x margin: {sides}",
                 )
                 context.optimized_plan[context.node_id] = node
 
@@ -263,7 +334,17 @@ class JoinOrderingStrategy(OptimizationStrategy):
             can_reorder = bool(node.left_readers) and bool(node.right_readers)
 
             should_swap = False
-            if can_reorder:
+            if not can_reorder:
+                # Not "nothing happened": the swap was skipped, and the reason is a
+                # property of the PLAN (a synthetic leg), not of any statistic. A
+                # reader chasing a bad build side needs to know the rules never ran.
+                self.record_decision(
+                    "inner join build side",
+                    "kept, leg has no reader (synthetic relation): "
+                    f"left {_side_facts(node.left_size)},"
+                    f" right {_side_facts(node.right_size)}",
+                )
+            else:
                 # Apply join ordering rules from COST-BASED-OPTIMIZER.md, fed from the
                 # refreshed per-node statistics (post-filter row counts and join-key
                 # NDV/null fractions) rather than the binder's pre-filter size estimate.
@@ -277,8 +358,20 @@ class JoinOrderingStrategy(OptimizationStrategy):
                 left_null = self._key_null_fraction(left_stats, node.left_columns)
                 right_null = self._key_null_fraction(right_stats, node.right_columns)
 
-                should_swap = _decide_swap(
+                should_swap, rule = _decide_swap_reasoned(
                     left_rows, right_rows, left_ndv, right_ndv, left_null, right_null
+                )
+                # BOTH outcomes are recorded, with the same numbers. A build side left
+                # where it was is a decision, not an absence of one — Q18 at SF100 was
+                # 13.6s because rule 3 moved the 600M-row side onto the build leg, and
+                # a report that only spoke when it swapped would have been silent about
+                # every join it got right AND about the row-count guard that now stops
+                # it. The rule names which numbers actually mattered.
+                self.record_decision(
+                    "inner join build side",
+                    f"{'swapped' if should_swap else 'kept'} ({rule}): "
+                    f"left {_side_facts(left_rows, left_ndv, left_null)},"
+                    f" right {_side_facts(right_rows, right_ndv, right_null)}",
                 )
 
             # Perform the swap if needed

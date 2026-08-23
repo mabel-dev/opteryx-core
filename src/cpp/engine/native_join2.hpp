@@ -491,6 +491,49 @@ inline void build_join_csr(Join2BuildGlobal& g) {
     g.hash_chunks.shrink_to_fit();
 }
 
+// Why the build side did (or did not) consolidate — see
+// Join2BuildSink::decide_consolidation. OBSERVABILITY ONLY: every member names a
+// branch that already existed; nothing here changes the decision.
+//
+// The branches are kept apart because they are not diagnostically equivalent. A
+// NoEstimate or NotAmortised decline is an ESTIMATOR fact (the join was told it
+// would emit few rows), and on a real query a join estimated at 3 rows that emitted
+// 2.55 billion took the dense per-row gather for all of them: 70.6s against 18.3s,
+// with a byte-identical plan. Nothing in EXPLAIN or EXPLAIN ANALYZE could show that.
+// PayloadTooNarrow / ArrayPayload / SingleMorsel are by-design refusals that no
+// estimator fix would move.
+enum class ConsolidateOutcome : uint8_t {
+    NotReached = 0,    // finalize never ran (a worker errored first)
+    Consolidated,      // gate passed AND gather_rows produced the block
+    GatherFailed,      // gate passed, gather_rows failed — non-fatal, block declined
+    NoEstimate,        // est_output_rows < 0 (unknown)
+    EmptyBuild,        // no retained morsels, or zero build rows
+    SingleMorsel,      // already one block; consolidating would copy it for nothing
+    ArrayPayload,      // ARRAY payload column — declines by design
+    NoPayload,         // zero payload columns, or zero measured payload bytes
+    PayloadTooNarrow,  // dense_bpr < kMinPerRowRatio * code_bpr
+    NotAmortised,      // the block_bytes + est*code_bpr < est*dense_bpr/kMargin test failed
+};
+
+// Stable wire spellings for the telemetry surface. Kept next to the enum so a new
+// branch cannot be added without a name; the strings are what tests and dashboards
+// key on, so they are part of the contract, not display text.
+inline const char* consolidate_outcome_name(ConsolidateOutcome o) {
+    switch (o) {
+        case ConsolidateOutcome::NotReached:       return "not_reached";
+        case ConsolidateOutcome::Consolidated:     return "consolidated";
+        case ConsolidateOutcome::GatherFailed:     return "gather_failed";
+        case ConsolidateOutcome::NoEstimate:       return "declined_no_estimate";
+        case ConsolidateOutcome::EmptyBuild:       return "declined_empty_build";
+        case ConsolidateOutcome::SingleMorsel:     return "declined_single_morsel";
+        case ConsolidateOutcome::ArrayPayload:     return "declined_array_payload";
+        case ConsolidateOutcome::NoPayload:        return "declined_no_payload";
+        case ConsolidateOutcome::PayloadTooNarrow: return "declined_payload_too_narrow";
+        case ConsolidateOutcome::NotAmortised:     return "declined_not_amortised";
+    }
+    return "unknown";
+}
+
 struct Join2BuildSink : Sink {
     std::vector<size_t> key_idx;
     std::vector<size_t> payload_col_idx;
@@ -527,6 +570,21 @@ struct Join2BuildSink : Sink {
     // consolidate. -1 keeps the pre-existing behaviour exactly, so a plan with no
     // statistics is never moved onto the consolidating path by a fabricated number.
     int64_t est_output_rows = -1;
+
+    // ---- consolidation decision record (observability only) ---------------------
+    // Written ONCE, by decide_consolidation()/finalize(), on the driver thread after
+    // every worker has joined — never per row, never per morsel, never contended.
+    // Harvested after the run by Engine::collect_join2_build_stats(). `NotReached`
+    // is the honest default: a worker error skips finalize entirely (executor.hpp),
+    // so no decision was made and none is reported.
+    ConsolidateOutcome consolidate_outcome = ConsolidateOutcome::NotReached;
+    int64_t  consolidate_est_rows    = -1;   // the estimate the decision was made ON
+    uint64_t consolidate_build_rows  = 0;    // the ACTUAL build rows — an estimate-driven
+                                             // decline is only visible next to this
+    uint64_t consolidate_morsels     = 0;    // retained build morsels
+    uint64_t consolidate_block_bytes = 0;    // measured payload bytes; 0 = not measured
+    double   consolidate_dense_bpr   = 0.0;  // bytes/output row on the dense gather; 0 = n/m
+    double   consolidate_code_bpr    = 0.0;  // bytes/output row on the dict emit;   0 = n/m
 
     Join2BuildSink(std::vector<size_t> keys, std::vector<size_t> payload_idx,
                    std::vector<DrakenType> types, std::vector<const LogicalType*> logical,
@@ -746,13 +804,24 @@ struct Join2BuildSink : Sink {
     // is the shape this optimization is actually for.
     static constexpr double kMinPerRowRatio = 4.0;
 
-    static bool should_consolidate(const Join2BuildGlobal& g, int64_t est_rows) {
-        if (est_rows < 0) return false;            // unknown -> today's behaviour
-        if (g.morsels.empty() || g.total_rows == 0) return false;
+    // The decision, and its reasons. Returns Consolidated for "yes"; every other
+    // value is the branch that refused. Runs ONCE per build sink, from finalize(),
+    // on the driver thread after every worker has joined — so the facts it stamps
+    // onto the sink need no atomics and cost nothing per row.
+    //
+    // The arithmetic below is unchanged: each `return false` became a `return
+    // <reason>`, and the measurements it already made are now also recorded.
+    ConsolidateOutcome decide_consolidation(const Join2BuildGlobal& g) {
+        const int64_t est_rows = est_output_rows;
+        consolidate_est_rows = est_rows;
+        consolidate_build_rows = static_cast<uint64_t>(g.total_rows);
+        consolidate_morsels = static_cast<uint64_t>(g.morsels.size());
+        if (est_rows < 0) return ConsolidateOutcome::NoEstimate;  // unknown -> today's behaviour
+        if (g.morsels.empty() || g.total_rows == 0) return ConsolidateOutcome::EmptyBuild;
         // A single retained morsel is ALREADY one block; consolidating would copy it
         // for nothing. (The dict emit still cannot use it directly — build row ids
         // address it through row_m/row_r, not by position — so v1 simply declines.)
-        if (g.morsels.size() == 1) return false;
+        if (g.morsels.size() == 1) return ConsolidateOutcome::SingleMorsel;
 
         size_t block_bytes = 0;
         size_t ncols = 0;
@@ -765,12 +834,12 @@ struct Join2BuildSink : Sink {
                 // emitted column would carry offsets into nothing. Sharing the child
                 // subtree too is a bigger change than this one; until then an ARRAY
                 // payload stays on the gather that already handles it.
-                if (c.view.type == DRAKEN_ARRAY) return false;
+                if (c.view.type == DRAKEN_ARRAY) return ConsolidateOutcome::ArrayPayload;
                 block_bytes += c.own ? draken_vector_owner_nbytes(c.own.get())
                                      : draken_vector_nbytes(&c.view);
             }
         }
-        if (ncols == 0 || block_bytes == 0) return false;
+        if (ncols == 0 || block_bytes == 0) return ConsolidateOutcome::NoPayload;
 
         // Dense bytes per output row: what one row of every payload column costs when
         // materialized. Derived from the same measured block, so a dict-encoded build
@@ -780,11 +849,17 @@ struct Join2BuildSink : Sink {
         const double dense_bpr =
             static_cast<double>(block_bytes) / static_cast<double>(g.total_rows);
         const double code_bpr = 4.0 * static_cast<double>(ncols);
-        if (dense_bpr < kMinPerRowRatio * code_bpr) return false;  // payload too narrow
+        consolidate_block_bytes = static_cast<uint64_t>(block_bytes);
+        consolidate_dense_bpr = dense_bpr;
+        consolidate_code_bpr = code_bpr;
+        if (dense_bpr < kMinPerRowRatio * code_bpr)
+            return ConsolidateOutcome::PayloadTooNarrow;
 
         const double est = static_cast<double>(est_rows);
-        return static_cast<double>(block_bytes) + est * code_bpr
-               < (est * dense_bpr) / kMargin;
+        const bool amortises = static_cast<double>(block_bytes) + est * code_bpr
+                               < (est * dense_bpr) / kMargin;
+        return amortises ? ConsolidateOutcome::Consolidated
+                         : ConsolidateOutcome::NotAmortised;
     }
 
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
@@ -816,7 +891,8 @@ struct Join2BuildSink : Sink {
         // NULL-keyed rows to row_m/row_r, so the consolidated morsel covers the whole
         // build address space — the unmatched tail gathers those rows too, and a
         // consolidated block that stopped at total_rows would leave them unreachable.
-        if (!should_consolidate(g, est_output_rows)) return;
+        consolidate_outcome = decide_consolidation(g);
+        if (consolidate_outcome != ConsolidateOutcome::Consolidated) return;
         const size_t addressable = g.row_m.size();
         std::vector<uint32_t> order(addressable);
         for (size_t i = 0; i < addressable; ++i) order[i] = static_cast<uint32_t>(i);
@@ -830,9 +906,12 @@ struct Join2BuildSink : Sink {
         if (err.code != 0 || block == nullptr) {
             // Consolidation is an OPTIMIZATION, and a failed one must not fail the
             // query: clear the error and leave `consolidated` null so the probe takes
-            // the same gather it has always taken.
+            // the same gather it has always taken. It is COUNTED, though — a
+            // silently failing optimization is exactly the thing this record exists
+            // to make visible.
             err.code = 0;
             err.msg = nullptr;
+            consolidate_outcome = ConsolidateOutcome::GatherFailed;
             return;
         }
         g.consolidated = std::move(block);
@@ -1385,9 +1464,8 @@ struct SemiAntiProbeOperator : Join2ProbeOperator, EmitSubset {
                              residual.col_idx.data(), residual.lit_dv.data(),
                              &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
         if (rc != 0) {
-            err.code = 1;
-            err.msg = format_kernel_error(
-                "SemiAntiProbe: correlated residual evaluation failed", err_op, kernel_msg);
+            set_span_error(err, "SemiAntiProbe: correlated residual evaluation failed",
+                           rc, err_op, kernel_msg);
             return false;
         }
         // Take ownership of the span's buffers so they are released on every path out.
@@ -1877,9 +1955,8 @@ struct Join2MarkSink : Sink {
                              residual.col_idx.data(), residual.lit_dv.data(),
                              &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
         if (rc != 0) {
-            err.code = 1;
-            err.msg = format_kernel_error(
-                "Join2MarkSink: correlated residual evaluation failed", err_op, kernel_msg);
+            set_span_error(err, "Join2MarkSink: correlated residual evaluation failed",
+                           rc, err_op, kernel_msg);
             return false;
         }
         VectorOwner owner(v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(validity),

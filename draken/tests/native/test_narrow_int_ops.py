@@ -37,6 +37,9 @@ def i8(lst):     return dn.vector_int8_from_sequence(lst)
 def i16(lst):    return dn.vector_int16_from_sequence(lst)
 def i32(lst):    return dn.vector_int32_from_sequence(lst)
 def i64(lst):    return dn.vector_from_sequence(lst)
+def u8(lst):     return dn.vector_uint8_from_sequence(lst)
+def u16(lst):    return dn.vector_uint16_from_sequence(lst)
+def u32(lst):    return dn.vector_uint32_from_sequence(lst)
 def py(v):       return v.to_pylist()
 
 
@@ -233,6 +236,92 @@ class TestBetween:
     def test_i8_boundary_values(self):
         v = i8([INT8_MIN, 0, INT8_MAX])
         assert py(v.between(INT8_MIN, INT8_MAX)) == [True, True, True]
+
+
+class TestBetweenShapesAgree:
+    """BETWEEN dispatches on encoding shape, so every shape must answer alike.
+
+    `fi_between_impl` reads a dense vector as `data[i]` and any other shape as
+    `data[selection[i]]` — a COMPILE-TIME choice, taken so the dense loop can
+    vectorise (§11's ratified identity specialisation; the narrow widths were
+    added 2026-08-22, INT64 has had one for longer). The accessor is the only
+    difference between the two instantiations, and these tests are what says so:
+    a fast path whose answer differs from the uniform path is a bug, never an
+    optimisation.
+
+    `take()` with a shuffled order is the important case — it produces a vector
+    that is NOT identity-selected, so it must take the gather path and still
+    line up row for row with the dense answer.
+
+    The UNSIGNED widths are here even though the rest of this file is signed:
+    uint32 is what an IPv4 column is, and `addr <<= '10.0.0.0/8'` is rewritten
+    into a BETWEEN on that column (predicate_rewriter.rewrite_cidr_to_range), so
+    uint32 BETWEEN is the shape this specialisation was added for.
+    """
+
+    VALUES = [7, -3, 0, 100, -100, 42, 5, 15, 20, -1, 99, 6]
+    UNSIGNED_VALUES = [7, 3, 0, 100, 200, 42, 5, 15, 20, 1, 99, 6]
+
+    @pytest.mark.parametrize("build", [i8, i16, i32])
+    @pytest.mark.parametrize("lo_incl,hi_incl", [(True, True), (True, False),
+                                                 (False, True), (False, False)])
+    def test_dense_dict_and_reordered_agree(self, build, lo_incl, hi_incl):
+        dense = build(self.VALUES)
+        expected = py(dense.between(0, 42, lo_inclusive=lo_incl, hi_inclusive=hi_incl))
+
+        # Same values, dictionary-encoded: a different arm entirely.
+        got = py(build(self.VALUES).dictionary_encode()
+                 .between(0, 42, lo_inclusive=lo_incl, hi_inclusive=hi_incl))
+        assert got == expected
+
+        # Reordered — a non-identity selection, so the gather path must run.
+        order = [3, 0, 11, 7, 1, 9, 4, 2, 10, 5, 8, 6]
+        reordered = build(self.VALUES).take(order)
+        got = py(reordered.between(0, 42, lo_inclusive=lo_incl, hi_inclusive=hi_incl))
+        assert got == [expected[i] for i in order]
+
+    @pytest.mark.parametrize("build", [i8, i16, i32])
+    def test_nulls_survive_every_shape(self, build):
+        values = [None if i % 3 == 0 else v for i, v in enumerate(self.VALUES)]
+        dense = build(values)
+        expected = py(dense.between(0, 42))
+        assert None in expected                      # the test would be vacuous otherwise
+        assert py(build(values).dictionary_encode().between(0, 42)) == expected
+        order = list(reversed(range(len(values))))
+        assert py(build(values).take(order).between(0, 42)) == [expected[i] for i in order]
+
+    @pytest.mark.parametrize("build", [i8, i16, i32])
+    def test_tail_lengths(self, build):
+        """The loop packs eight rows a byte; the ragged tail is a separate path."""
+        for n in (0, 1, 7, 8, 9, 15, 16, 17):
+            values = [(i % 50) - 10 for i in range(n)]
+            expected = [0 <= v <= 20 for v in values]
+            assert py(build(values).between(0, 20)) == expected
+
+    @pytest.mark.parametrize("build", [u8, u16, u32])
+    @pytest.mark.parametrize("lo_incl,hi_incl", [(True, True), (False, False)])
+    def test_unsigned_shapes_agree(self, build, lo_incl, hi_incl):
+        dense = build(self.UNSIGNED_VALUES)
+        expected = py(dense.between(5, 100, lo_inclusive=lo_incl, hi_inclusive=hi_incl))
+        got = py(build(self.UNSIGNED_VALUES).dictionary_encode()
+                 .between(5, 100, lo_inclusive=lo_incl, hi_inclusive=hi_incl))
+        assert got == expected
+        order = [3, 0, 11, 7, 1, 9, 4, 2, 10, 5, 8, 6]
+        got = py(build(self.UNSIGNED_VALUES).take(order)
+                 .between(5, 100, lo_inclusive=lo_incl, hi_inclusive=hi_incl))
+        assert got == [expected[i] for i in order]
+
+    def test_uint32_high_bit_addresses(self):
+        """Above 2^31 the value only survives if it is carried as UNSIGNED — the
+        range an IPv4 predicate lands on is regularly up there (240.0.0.0/4)."""
+        values = [0, 1, 0x7FFFFFFF, 0x80000000, 0xC0A80101, 0xF0000000, 0xFFFFFFFF]
+        lo, hi = 0xF0000000, 0xFFFFFFFF          # 240.0.0.0/4
+        expected = [lo <= v <= hi for v in values]
+        dense = u32(values)
+        assert py(dense.between(lo, hi)) == expected
+        assert py(u32(values).dictionary_encode().between(lo, hi)) == expected
+        order = list(reversed(range(len(values))))
+        assert py(u32(values).take(order).between(lo, hi)) == [expected[i] for i in order]
 
 
 # ---------------------------------------------------------------------------

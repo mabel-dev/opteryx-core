@@ -187,9 +187,8 @@ struct UnnestOperator : Operator {
                            filter_prog.col_idx.data(), filter_prog.lit_dv.data(),
                            &v, &data, &validity, &sel, &err_op, &kernel_msg, &child);
         if (rc != 0) {
-            err.code = 1;
-            err.msg = format_kernel_error(
-                "UnnestOperator: pushed predicate evaluation failed", err_op, kernel_msg);
+            set_span_error(err, "UnnestOperator: pushed predicate evaluation failed",
+                           rc, err_op, kernel_msg);
             return false;
         }
         // Own the span's buffers so they are released on every path out of here.

@@ -84,7 +84,6 @@ from opteryx.planner.optimizer.statistics import RelationStatistics
 _UNKNOWN_ROW_COUNT = 1_000_000
 
 _PASS_THROUGH_TYPES = {
-    LogicalPlanStepType.Project,
     LogicalPlanStepType.Order,
     LogicalPlanStepType.Exit,
     LogicalPlanStepType.Subquery,
@@ -1218,6 +1217,164 @@ def _child_output_identities(plan: Optional["LogicalPlan"], nid: Optional[str]) 
     return out or None
 
 
+# Physical casts that map distinct non-NULL inputs to distinct non-NULL outputs,
+# so NDV crosses the cast EXACTLY rather than as a bound. Two families qualify:
+#
+#   * integer -> VARCHAR. Distinct integers always render as distinct text.
+#   * value-preserving numeric widenings. The target holds every source value
+#     without collision.
+#
+# Excluded on purpose: every narrowing (wraps or saturates, collapsing distinct
+# inputs onto one output); FLOAT -> VARCHAR (0.0 and -0.0 are one value that
+# renders two ways, and the NaN spellings are worse); DECIMAL and temporal
+# renderings (scale/precision truncation collapses values); VARCHAR -> anything
+# (a parse maps every unparseable input onto a single outcome); and every TRY_
+# cast, whose whole contract is to collapse failures onto NULL.
+#
+# Deliberately NOT shared with predicate_rewriter._NULL_PRESERVING_WIDENING.
+# The two tables agree on the numeric family today and mean different things --
+# that one asks "can this turn a value into NULL", this one asks "can this turn
+# two values into one". A future edit to either is not an edit to the other.
+_INTEGER_PHYSICALS = frozenset({
+    "INT8", "INT16", "INT32", "INT64", "UINT8", "UINT16", "UINT32", "UINT64",
+})
+
+_DISTINCTNESS_PRESERVING_WIDENING: Dict[str, frozenset] = {
+    "INT8":    frozenset({"INT8", "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "INT16":   frozenset({"INT16", "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "INT32":   frozenset({"INT32", "INT64", "FLOAT64"}),  # not FLOAT32: 2^31 > 2^24
+    "INT64":   frozenset({"INT64"}),
+    "UINT8":   frozenset({"UINT8", "UINT16", "UINT32", "UINT64",
+                          "INT16", "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "UINT16":  frozenset({"UINT16", "UINT32", "UINT64",
+                          "INT32", "INT64", "FLOAT32", "FLOAT64"}),
+    "UINT32":  frozenset({"UINT32", "UINT64", "INT64", "FLOAT64"}),
+    "UINT64":  frozenset({"UINT64"}),
+    "FLOAT32": frozenset({"FLOAT32", "FLOAT64"}),
+    "FLOAT64": frozenset({"FLOAT64"}),
+}
+
+
+def _physical_type_name(expression) -> str:
+    """Physical DrakenType name bound to an expression, or '' when untyped."""
+    schema_column = getattr(expression, "schema_column", None)
+    column_type = getattr(schema_column, "column_type", None)
+    physical = getattr(column_type, "physical", None)
+    return getattr(physical, "name", "") or ""
+
+
+def _cast_preserves_distinctness(cast_node) -> bool:
+    """True iff this CAST cannot map two distinct values onto one.
+
+    Distinctness, not null-preservation: the question is whether the output's
+    NDV equals the input's, so that a counted distinct_count stays a counted
+    distinct_count on the far side.
+    """
+    target_name = (getattr(cast_node, "value", "") or "").upper()
+    if target_name.startswith("TRY_"):
+        return False  # TRY_ exists precisely to collapse failures onto NULL
+    if getattr(cast_node, "format", None) is not None:
+        return False  # a FORMAT pattern can render two values identically
+    source = getattr(cast_node, "left", None)
+    if source is None:
+        return False
+    source_physical = _physical_type_name(source)
+    target_physical = _physical_type_name(cast_node)
+    if not source_physical or not target_physical:
+        return False
+    if source_physical in _INTEGER_PHYSICALS and target_physical == "VARCHAR":
+        return True
+    return target_physical in _DISTINCTNESS_PRESERVING_WIDENING.get(
+        source_physical, frozenset()
+    )
+
+
+def _project_stats(
+    node: LogicalPlanNode,
+    child_stats: List[Tuple[Optional[RelationStatistics], str]],
+) -> RelationStatistics:
+    """Pass the child's statistics through, and give derived columns whose
+    expression cannot change the distinct-value count their source's NDV.
+
+    Project used to be pure pass-through, which silently dropped the one
+    statistic a COMPUTED join key can still honestly claim. `CAST(src_addr AS
+    VARCHAR)` renders a UINT32 as a dotted quad -- distinct addresses give
+    distinct strings -- so the derived column's NDV *is* src_addr's NDV. But
+    the derived identity carried no statistics at all, so `_equi_key_classes`
+    fell through to its domain-size stand-in (the smaller side's PRE-filter
+    row count) and divided by 278,985 for a key with ~5,000 distinct values.
+    Measured on `home.network.netflow JOIN home.network.dns ON
+    CAST(src_addr AS VARCHAR) = client`: a join emitting 2,295,861,762 rows
+    was estimated at 462,275. src_addr's NDV of 10,087 was sitting in the
+    scan statistics one node below, unread.
+
+    ONLY expressions that provably preserve distinctness qualify -- see
+    `_cast_preserves_distinctness`. Everything else keeps no statistics, which
+    is the honest answer: any other expression gives an NDV that is merely an
+    UPPER BOUND (a function cannot increase distinct values, only reduce them),
+    and writing a bound into `distinct_count` is the stand-in problem again one
+    level down. `_equi_key_classes` reads a present `distinct_count` as
+    MEASURED, and `ColumnStatistics` has no provenance field to say otherwise.
+
+    Only `distinct_count` and `null_fraction` cross. Value ranges, histograms,
+    char-class stats and byte sizes do NOT: '10.0.0.9' and '10.0.0.10' sort the
+    opposite way round to the integers behind them, and the rendered width is a
+    different number from the source's.
+    """
+    from opteryx.expression import NodeType
+
+    base = _first_child_stats(child_stats) or _empty_stats()
+    columns = getattr(node, "columns", None)
+    if not columns or not base.columns:
+        return base
+
+    derived: Dict[bytes, ColumnStatistics] = {}
+    for column in columns:
+        if column.node_type != NodeType.CAST:
+            continue
+        identity = _column_identity(column)
+        # An identity already carrying statistics is the child's own column
+        # re-exposed (an alias does not mint a new identity); leave it alone.
+        if identity is None or identity in base.columns or identity in derived:
+            continue
+        source_identity = _column_identity(getattr(column, "left", None))
+        if source_identity is None:
+            continue
+        source_stats = base.columns.get(source_identity)
+        if source_stats is None or source_stats.distinct_count is None:
+            continue
+        if not _cast_preserves_distinctness(column):
+            continue
+        schema_column = getattr(column, "schema_column", None)
+        derived[identity] = ColumnStatistics(
+            column_name=getattr(schema_column, "name", "") or "",
+            data_type=_physical_type_name(column),
+            distinct_count=source_stats.distinct_count,
+            null_fraction=source_stats.null_fraction,
+        )
+
+    if not derived:
+        return base
+
+    merged = dict(base.columns)
+    merged.update(derived)
+    # A projection changes no row counts, so the count and its provenance --
+    # and the pre-filter domain size the join stand-in reads -- pass through
+    # untouched. Rebuilding without base_row_count would shrink the very
+    # fallback this function exists to stop being reached.
+    if base.row_count_is_metric:
+        return RelationStatistics(
+            columns=merged,
+            row_count_metric=base.row_count,
+            base_row_count=base.base_row_count,
+        )
+    return RelationStatistics(
+        columns=merged,
+        row_count_estimate=base.row_count,
+        base_row_count=base.base_row_count,
+    )
+
+
 def _distinct_stats(
     node: LogicalPlanNode,
     child_stats: List[Tuple[Optional[RelationStatistics], str]],
@@ -1826,6 +1983,8 @@ class StatisticsRefreshVisitor:
             return _limit_stats(node, child_stats)
         if nt == LogicalPlanStepType.Distinct:
             return _distinct_stats(node, child_stats, self.plan, nid)
+        if nt == LogicalPlanStepType.Project:
+            return _project_stats(node, child_stats)
         if nt == LogicalPlanStepType.Union:
             return _union_stats(child_stats)
         if nt in (LogicalPlanStepType.Intersect, LogicalPlanStepType.Except):

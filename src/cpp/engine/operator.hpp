@@ -24,6 +24,20 @@ namespace opteryx::engine {
 
 using MorselPtr = std::shared_ptr<CxxMorsel>;
 
+// ErrCtx::code values. 1 (and anything else non-zero) is the INTERNAL-FAULT
+// channel: the message gets framed with the operator name and whatever machine
+// handle the failure carries, and Python raises it as a RuntimeError, because
+// nobody outside the engine can act on it.
+//
+// kErrCodeDataError is the other channel: the DATA is what failed (a cardinality
+// violation, a string that is not a number), ErrCtx::msg is the COMPLETE
+// user-facing text, and build_terminal_exc (_operators.pyx) raises it verbatim as
+// opteryx DataError with no engine framing at all. Set it only when the message
+// reads as something a reader can act on — everything internal in front of it
+// pushes the part they can act on out of sight, which is the whole reason this
+// channel exists.
+inline constexpr int kErrCodeDataError = 2;
+
 // ---- Per-operator telemetry (basic, always-on) -----------------------------------
 // One Source/Operator/Sink instance serves EVERY worker thread, so these counters are
 // shared and therefore atomic. Accumulation is PER-MORSEL (never per-row): the atomic

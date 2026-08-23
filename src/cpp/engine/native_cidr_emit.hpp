@@ -91,6 +91,13 @@ using opteryx::roaring32::kBitmapWords;
 // "255.255.255.255/32" — the address plus "/nn".
 constexpr uint32_t kMaxCidrTextBytes = draken::ipv4::MAX_CIDR_TEXT_LENGTH;
 
+// format_cidr renders the address half through draken::ipv4::format, which
+// TOUCHES FORMAT_SCRATCH_BYTES from the start of the buffer regardless of the
+// address's real width. The CIDR budget is wider than that, so the same buffer
+// serves both — but it is an invariant, not a coincidence.
+static_assert(kMaxCidrTextBytes >= draken::ipv4::FORMAT_SCRATCH_BYTES,
+              "format_cidr's buffer must cover ipv4::format's scratch width");
+
 // Bytes `format_cidr` will write, without writing them. Lets a caller charge an
 // exact byte budget BEFORE producing the text, rather than emitting first and
 // discovering the overrun after the allocation.

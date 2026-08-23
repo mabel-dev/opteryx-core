@@ -5275,6 +5275,20 @@ def execute_native(plan, telemetry=None, trace_sink=None):
             # pipelines down, and merged with the trampoline diagnostics collected
             # above (before close_source) into one io_scan_diagnostics list.
             if telemetry is not None:
+                # Per-join build-side consolidation decisions. Same harvest point and
+                # the same reason as the scan diagnostics below: a native decision made
+                # once at finalize, which nothing in the plan can show. Consolidation
+                # picks whether the probe emits its build half as codes over one shared
+                # block or re-gathers a physical value per OUTPUT row (8-13x on a
+                # string-carrying payload), and it turns on the join's cardinality
+                # ESTIMATE — so a bad estimate silently switches the fast path off and
+                # a byte-identical plan runs 4x slower with nothing to point at.
+                # Unconditional (unlike the IO block): a join that DECLINED is exactly
+                # the case worth reporting, so an empty-looking row is the payload.
+                _join_builds = nplan.collect_join2_build_stats()
+                if _join_builds:
+                    telemetry._reading["join_build_diagnostics"] = _join_builds
+
                 _scan_plans = getattr(nplan, "scan_plans", None)
                 if _scan_plans:
                     for _sp in _scan_plans:

@@ -38,10 +38,6 @@
 
 namespace opteryx::engine {
 
-// ErrCtx code for user-facing data errors: the message is the complete,
-// user-presentable text (no internal framing), raised Python-side as DataError.
-inline constexpr int kErrCodeDataError = 2;
-
 struct ScalarGuardGlobal : GlobalSourceState {
     std::atomic<bool> claimed{false};
 };

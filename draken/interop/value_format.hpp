@@ -81,13 +81,13 @@ struct ColumnDesc {
 // render one. A UINT32 with no descriptor renders through fmt_uint64 as the
 // plain integer it is.
 inline void fmt_ipv4(std::string &out, uint32_t v) {
-  char buf[draken::ipv4::MAX_TEXT_LENGTH];
+  char buf[draken::ipv4::FORMAT_SCRATCH_BYTES];
   out.append(buf, draken::ipv4::format(v, buf));
 }
 
 // JSON form: quotes baked into the same stack buffer, one append per cell.
 inline void fmt_ipv4_quoted(std::string &out, uint32_t v) {
-  char buf[draken::ipv4::MAX_TEXT_LENGTH + 2];
+  char buf[draken::ipv4::FORMAT_SCRATCH_BYTES + 2];
   buf[0] = '"';
   uint32_t n = draken::ipv4::format(v, buf + 1);
   buf[n + 1] = '"';

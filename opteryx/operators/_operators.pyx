@@ -208,12 +208,24 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         uint64_t wall_ns
         uint64_t cpu_ns
         int dop
+    cdef cppclass Join2BuildReading "opteryx::engine::Engine::Join2BuildReading":
+        string identity
+        string display_name
+        string outcome
+        bint consolidated
+        int64_t est_rows
+        uint64_t build_rows
+        uint64_t morsels
+        uint64_t block_bytes
+        double dense_bpr
+        double code_bpr
     cdef cppclass Engine:
         Engine() except +
         void set_current_identity(string s)
         void set_current_display_name(string s)
         cppvector[OpReading] collect_op_stats()
         cppvector[PipelineReading] collect_pipeline_stats()
+        cppvector[Join2BuildReading] collect_join2_build_stats()
         cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
         size_t new_buffer()
@@ -2336,6 +2348,34 @@ cdef class NativePlan:
             })
         return out
 
+    def collect_join2_build_stats(self):
+        """One row per Join2 BUILD SINK: did it consolidate its retained payload into
+        one block, and if not, which branch refused.
+
+        That decision picks the probe's build-half emit — codes over a shared block,
+        or the dense per-row gather — and it is driven by a CARDINALITY ESTIMATE, so
+        it can silently flip between two runs of a byte-identical plan. ``est_rows``
+        against ``build_rows`` is what makes an estimate-driven decline readable as
+        one. Valid only after the run has drained; the sinks outlive it, so there is
+        no ordering constraint against scan-plan teardown."""
+        cdef cppvector[Join2BuildReading] rows = self._e.collect_join2_build_stats()
+        cdef Join2BuildReading r
+        out = []
+        for r in rows:
+            out.append({
+                "identity": r.identity.decode("utf-8"),
+                "node": r.display_name.decode("utf-8"),
+                "outcome": r.outcome.decode("utf-8"),
+                "consolidated": bool(r.consolidated),
+                "estimated_rows": int(r.est_rows),
+                "build_rows": int(r.build_rows),
+                "build_morsels": int(r.morsels),
+                "payload_bytes": int(r.block_bytes),
+                "dense_bytes_per_row": float(r.dense_bpr),
+                "code_bytes_per_row": float(r.code_bpr),
+            })
+        return out
+
     def collect_trace_symbols(self):
         """node_id -> human-readable display name (e.g. "FilterNode", set via
         set_current_display_name) for this plan's operators/sources/sinks, resolving
@@ -3332,11 +3372,12 @@ def build_terminal_exc(NativePlan nplan, NativeErrorSlot errslot):
         exc = (<BasePlanNode>scan_obj)._take_exc()
         if exc is not None:
             return exc
-    # Code 2 (kErrCodeDataError, native_scalar_guard.hpp) marks a USER-FACING data
-    # error: the native message is the complete, user-presentable text (e.g. the
-    # SQL-standard "more than one row returned by a subquery used as an
-    # expression"), so it is raised verbatim as DataError — no engine framing.
-    # Code 1 remains the internal-fault channel and keeps the bracketed code.
+    # Code 2 (kErrCodeDataError, operator.hpp) marks a USER-FACING data error: the
+    # native message is the complete, user-presentable text (e.g. the SQL-standard
+    # "more than one row returned by a subquery used as an expression", or a CAST
+    # naming the value that is not a number), so it is raised verbatim as DataError
+    # — no engine framing. Code 1 remains the internal-fault channel and keeps the
+    # bracketed code.
     if errslot.code == 2:
         from opteryx.exceptions import DataError
         return DataError(errslot.message() or "unknown data error")

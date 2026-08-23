@@ -78,4 +78,14 @@ struct VecResult {
     // child. nullptr for every non-ARRAY result, which is why every existing
     // producer stays correct without touching this field.
     VecResult*        child            = nullptr;
+    // Error CLASSIFICATION, meaningful only on an error sentinel (data == nullptr).
+    // 0 = an internal fault (a null operand, a type the kernel does not accept, a
+    // failed allocation) — the engine frames those with the operator name and the
+    // failing opcode, because the reader cannot act on them and we need the
+    // machine handle. 1 = a DATA error: the values themselves are the problem
+    // (a string that is not a number, a value outside the target's range), the
+    // message is complete, user-presentable text, and the engine raises it
+    // verbatim as opteryx DataError with no engine framing at all. Set ONLY by
+    // draken_data_error_sentinel[_fmt]; every other producer leaves it 0.
+    uint8_t           data_error       = 0u;
 };

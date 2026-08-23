@@ -6,11 +6,11 @@
 """WP-3: debug-mode logical-plan invariant checker.
 
 Optimizer strategies mutate a shared plan in place. When a rewrite corrupts the
-plan the symptom usually surfaces far downstream (or at execution), which is why
-``CastSimplificationStrategy`` was disabled wholesale rather than fixed. This
-module localises corruption to the strategy that caused it: when the
-``VALIDATE_OPTIMIZER_PLANS`` flag is set, ``validate_plan`` runs after every
-strategy and raises an :class:`InvalidInternalStateError` naming it.
+plan the symptom usually surfaces far downstream (or at execution), so the
+failure names a strategy other than the one that caused it. This module
+localises the corruption: when the ``VALIDATE_OPTIMIZER_PLANS`` flag is set,
+``validate_plan`` runs after every strategy and raises an
+:class:`InvalidInternalStateError` naming it.
 
 The checks are intentionally structural and conservative — they must never
 false-positive on a correct plan. Start narrow; tighten over time. The validator

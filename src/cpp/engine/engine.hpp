@@ -311,6 +311,44 @@ public:
         return out;
     }
 
+    // ---- Join2 build-side consolidation decisions (per build sink) ---------------
+    // The build sink decides ONCE, at finalize, whether to consolidate its retained
+    // payload into one block — which is what decides whether the probe emits the
+    // build half as codes over that block or falls back to the dense per-row gather
+    // (8-13x on a string-carrying payload). The decision is invisible in the plan:
+    // it turns on a cardinality ESTIMATE, so two runs of a byte-identical plan can
+    // differ by 4x in wall clock with nothing to show for it. This is that seam.
+    //
+    // Read after run() returns, alongside the scan diagnostics harvest — the sinks
+    // live for the Engine's lifetime, so there is no teardown ordering to respect.
+    struct Join2BuildReading {
+        std::string identity;      // plan-node identity (the correlation key)
+        std::string display_name;  // human-readable plan-node kind
+        std::string outcome;       // consolidate_outcome_name — a stable wire spelling
+        bool consolidated;         // did the probe actually get the dict path?
+        int64_t est_rows;          // the estimate the decision was made ON (-1 unknown)
+        uint64_t build_rows;       // the ACTUAL build rows
+        uint64_t morsels;          // retained build morsels
+        uint64_t block_bytes;      // measured payload bytes (0 = never measured)
+        double dense_bpr, code_bpr;  // bytes/output row either way (0 = never measured)
+    };
+    std::vector<Join2BuildReading> collect_join2_build_stats() const {
+        std::vector<Join2BuildReading> out;
+        for (const auto& pn : pipelines) {
+            if (!pn->sink) continue;
+            const auto* bs = dynamic_cast<const Join2BuildSink*>(pn->sink.get());
+            if (bs == nullptr) continue;
+            out.push_back(Join2BuildReading{
+                bs->stats.identity, bs->stats.display_name,
+                consolidate_outcome_name(bs->consolidate_outcome),
+                bs->consolidate_outcome == ConsolidateOutcome::Consolidated,
+                bs->consolidate_est_rows, bs->consolidate_build_rows,
+                bs->consolidate_morsels, bs->consolidate_block_bytes,
+                bs->consolidate_dense_bpr, bs->consolidate_code_bpr});
+        }
+        return out;
+    }
+
     // node_id -> display name, for resolving trace.hpp spans (which carry only
     // the compact node_id) back to a human-readable plan-node kind at drain
     // time. Falls back to identity (the opaque correlation key) only for

@@ -386,6 +386,39 @@ def _selectivity_between(node, stats: RelationStatistics) -> float:
         total = float(dgram.count())
         if total > 0:
             lo, hi = (a, b) if a <= b else (b, a)
+            # A histogram cannot resolve a window narrower than one bin. Probing
+            # the raw bounds there makes `count_up_to` interpolate INSIDE a
+            # single bin and hand back that bin's mass scaled by
+            # window_width/bin_gap -- a confident near-zero fabricated from a
+            # linearity the histogram never claimed. It is not a small error:
+            # `src_addr BETWEEN 3232235520 AND 3232301055` (a /16, 65,536 wide)
+            # against a 50-bin histogram spanning the uint32 domain (~74.8M per
+            # bin) covers 0.09% of one bin and estimated 6.34e-06 where the true
+            # selectivity was 0.78 -- 123,000x under, which took a 4.7M-row scan
+            # estimate to 9 rows and poisoned every join above it.
+            #
+            # So widen the probe to one bin width about the window's centre --
+            # the SAME probe `_selectivity_eq`/`_selectivity_in_list` already
+            # apply to a point, and for the same reason. The answer becomes the
+            # bin's average density, which is the most the histogram actually
+            # knows at this resolution.
+            #
+            # This matches the eq tier's HISTOGRAM PROBE, not its final answer:
+            # `_selectivity_eq` then ceilings the density at ~1/ndv, which makes
+            # skew undetectable and is a separately logged defect (2026-08-21
+            # estimator audit). No such ceiling is applied here -- a BETWEEN
+            # window spans many distinct values, so 1/ndv is not even the right
+            # shape of bound for it. The two tiers therefore do NOT agree
+            # end-to-end at a degenerate `BETWEEN x AND x`; closing that gap
+            # means revisiting the eq ceiling, which is not this change.
+            bins_len = dgram.bin_count
+            span = dgram.max - dgram.min
+            if bins_len > 1 and span > 0:
+                bin_width = span / bins_len
+                if (hi - lo) < bin_width:
+                    centre_point = (lo + hi) / 2.0
+                    lo = centre_point - bin_width / 2.0
+                    hi = centre_point + bin_width / 2.0
             fraction = (_count_up_to(dgram, hi) - _count_up_to(dgram, lo)) / total
             return _clamp01(fraction)
     return _RANGE_FALLBACK_SELECTIVITY

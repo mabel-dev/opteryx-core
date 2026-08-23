@@ -584,7 +584,6 @@ _DIFFERENTIAL_STRATEGIES = (
     "disable_operator_fusion",
     "disable_project_fusion",
     "disable_disjunction_simplification",
-    "disable_cast_simplification",
     "disable_topn_scan_pushdown",
     "disable_window_topk_fusion",
 )

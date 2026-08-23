@@ -34,6 +34,9 @@ cdef extern from "ops/vec_result.h":
         const char*       error_msg
         void*             child   # VecResult* — void* here, self-reference breaks
                                    # ctypedef-struct parsing; cast at use sites.
+        uint8_t           data_error  # 1 = the message is user-facing data-error
+                                      # text (see ops/vec_result.h); the spans turn
+                                      # that into rc 96 instead of rc 4.
 
 # GIL: resolve LOAD_COL identity → column index in the CxxMorsel and LOAD_LIT_CONST
 # → DV*. Stable for a fixed pipeline schema → resolve once, reuse. 0 ok, -1 column
@@ -44,8 +47,10 @@ cdef int _dv_cxx_resolve_caches(CompiledBytecode bc, const CxxMorsel* m,
 # Pure-nogil filter span over a PRE-RESOLVED (col_idx, lit_dv). Owns its frame arena.
 # rc 0 → *out_filtered is a NEW owned CxxMorsel; 4 → kernel error (*err_msg set —
 # a pointer into the failing kernel's thread; valid until the next kernel call on
-# THIS thread, copy/decode it before that); 99 → arena OOM; other → not applicable
-# (caller falls back).
+# THIS thread, copy/decode it before that); 96 → kernel DATA error, same *err_msg
+# contract but the message is complete user-facing text that must be surfaced
+# VERBATIM and never treated as a decline (see c_execute_dv_inner); 99 → arena
+# OOM; other → not applicable (caller falls back).
 cdef int _dv_filter_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
                              int* col_idx, DrakenVector** lit_dv,
                              CxxMorsel** out_filtered, int* err_op,
@@ -65,8 +70,9 @@ cdef int _dv_filter_span_with_consts_cxx(
 # Pure-nogil expression span for a COMPUTED column (projection twin of the filter
 # span): evaluate + deep-copy the arena result into fresh draken_malloc'd buffers
 # the caller owns. rc 0 → out_vec/out_data/out_validity/out_sel filled; 4 → kernel
-# error (*err_msg set, same contract as _dv_filter_span_cxx); 98 → non-fixed-width
-# result; 99 → arena OOM; other → not applicable.
+# error (*err_msg set, same contract as _dv_filter_span_cxx); 96 → kernel DATA
+# error (ditto); 98 → non-fixed-width result; 99 → arena OOM; other → not
+# applicable.
 from libc.stdint cimport uint8_t
 cdef int _dv_eval_span_cxx(BytecodeInstr* instrs, int count, const CxxMorsel* m,
                            int* col_idx, DrakenVector** lit_dv,

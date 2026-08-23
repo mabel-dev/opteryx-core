@@ -6,7 +6,7 @@
 """WP-7: JoinOrderingStrategy consumes node.statistics (post-filter row counts).
 
 Two layers:
-  * ``_decide_swap`` — the pure side-selection logic, including the case the old
+  * ``_decide_swap_reasoned`` — the pure side-selection logic, including the case the old
     pre-filter size heuristic got wrong (a heavily-filtered large table).
   * ``JoinOrderingStrategy.visit`` end-to-end — proves the strategy reads the
     children's post-filter ``statistics.row_count`` (by 'left'/'right' edge
@@ -28,7 +28,14 @@ from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.strategies.join_ordering import JoinOrderingStrategy
-from opteryx.planner.optimizer.strategies.join_ordering import _decide_swap
+from opteryx.planner.optimizer.strategies.join_ordering import _decide_swap_reasoned
+
+
+def _decide_swap(*args):
+    """The swap answer alone. _decide_swap_reasoned also returns WHICH rule
+    produced it (reported through record_decision); these tests are about the
+    answer, so they read element 0 rather than restating every rule name."""
+    return _decide_swap_reasoned(*args)[0]
 from opteryx.planner.optimizer.strategies.optimization_strategy import OptimizerContext
 
 
@@ -73,7 +80,7 @@ def test_decide_swap_ndv_may_not_overturn_row_counts():
     assert _decide_swap(286, 600, 53, 37, None, None) is False
     # The MIRROR is deliberately NOT guarded: Rule 3 declining a swap can still
     # leave the larger side on the build leg. Closing that measured net negative
-    # at SF100 (Q10 1.7s -> 3.1s, Q09 4.2s -> 5.3s) -- see _decide_swap. This
+    # at SF100 (Q10 1.7s -> 3.1s, Q09 4.2s -> 5.3s) -- see _decide_swap_reasoned. This
     # asserts today's behaviour so a future change to it is a visible decision.
     assert _decide_swap(600, 286, 37, 53, None, None) is False
     # Rule 1 (>3x) is decided before any NDV is read and is unaffected.

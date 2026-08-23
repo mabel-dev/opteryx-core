@@ -71,7 +71,14 @@ VecResult draken_cast_string_to_float64(void* ctx, const DrakenVector* v) {
             if (first == last || res.ec != std::errc() || res.ptr != last) {
                 if (!kernel_cast_is_safe(ctx)) {
                     draken_free(out);
-                    return draken_error_sentinel("Invalid number in string literal");
+                    // Neither the value nor the target is named by the caller, so
+                    // the message names the VALUE and not the target: this kernel
+                    // also serves FLOAT32 through DRAKEN_CAST_STRING_VIA, and a
+                    // message that said FLOAT64 would misname half its failures.
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to a number: '%.*s' is not numeric. Use TRY_CAST to return NULL instead.",
+                        (int)(end - start > 48u ? 48u : end - start),
+                        (const char*)(bytes + start));
                 }
                 out[j] = 0.0; bad[j] = 1u; any_bad = true;
             } else {
@@ -140,11 +147,18 @@ VecResult draken_cast_string_to_int64(void* ctx, const DrakenVector* v) {
             if (malformed || overflow || slen == 0u || (slen == 1u && sign < 0)) {
                 if (!is_safe) {
                     draken_free(out);
+                    // "a 64-bit integer" rather than INT64: the narrow signed and
+                    // unsigned targets parse through THIS kernel (see
+                    // DRAKEN_CAST_STRING_VIA below) and only narrow afterwards, so a
+                    // value that overflows here overflows every one of them.
                     if (overflow)
-                        return draken_error_sentinel_fmt(
-                            "Integer literal out of range for INT64: '%.*s'",
-                            (int)(slen > 64u ? 64u : slen), (const char*)sdata);
-                    return draken_error_sentinel("Invalid digit in integer literal");
+                        return draken_data_error_sentinel_fmt(
+                            "Cannot cast to an integer: '%.*s' is out of range for a "
+                            "64-bit integer. Use TRY_CAST to return NULL instead.",
+                            (int)(slen > 48u ? 48u : slen), (const char*)sdata);
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to an integer: '%.*s' is not a whole number. Use TRY_CAST to return NULL instead.",
+                        (int)(slen > 48u ? 48u : slen), (const char*)sdata);
                 }
                 out[j] = 0; bad[j] = 1u; any_bad = true; continue;
             }
@@ -247,8 +261,9 @@ VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* v) {
             if (slen > 0 && sdata[0] == '-') {
                 if (!is_safe) {
                     draken_free(out);
-                    return draken_error_sentinel(
-                        "cast string->uint64: negative value out of range for uint64_t");
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to an unsigned integer: '%.*s' is negative. Use TRY_CAST to return NULL instead.",
+                        (int)(slen > 48u ? 48u : slen), (const char*)sdata);
                 }
                 out[j] = 0; bad[j] = 1u; any_bad = true; continue;
             }
@@ -259,7 +274,10 @@ VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* v) {
                 if (c < '0' || c > '9') {
                     if (!is_safe) {
                         draken_free(out);
-                        return draken_error_sentinel("Invalid digit in integer literal");
+                        return draken_data_error_sentinel_fmt(
+                            "Cannot cast to an unsigned integer: '%.*s' is not a whole "
+                            "number. Use TRY_CAST to return NULL instead.",
+                            (int)(slen > 48u ? 48u : slen), (const char*)sdata);
                     }
                     rejected = true; break;
                 }
@@ -270,7 +288,10 @@ VecResult draken_cast_string_to_uint64(void* ctx, const DrakenVector* v) {
                 if (value > (0xFFFFFFFFFFFFFFFFull - digit) / 10ull) {
                     if (!is_safe) {
                         draken_free(out);
-                        return draken_error_sentinel("cast string->uint64: value out of range for uint64_t");
+                        return draken_data_error_sentinel_fmt(
+                            "Cannot cast to an unsigned integer: '%.*s' is out of range "
+                            "for a 64-bit unsigned integer. Use TRY_CAST to return NULL instead.",
+                            (int)(slen > 48u ? 48u : slen), (const char*)sdata);
                     }
                     rejected = true; break;
                 }
@@ -331,8 +352,10 @@ VecResult draken_cast_string_to_bool(void* ctx, const DrakenVector* v) {
             } else {
                 if (!is_safe) {
                     draken_free(out);
-                    return draken_error_sentinel(
-                        "Cannot cast string to BOOL: expected true/false/1/0/yes/no/on/off");
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to BOOL: got '%.*s', expected one of "
+                        "true/false/1/0/yes/no/on/off. Use TRY_CAST to return NULL instead.",
+                        (int)(slen > 48u ? 48u : slen), (const char*)s);
                 }
                 bad[j] = 1u; any_bad = true; continue;
             }
@@ -421,9 +444,10 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
                                      &year, &month, &day, &hour, &minute, &second, &usec)) {
                     if (!is_safe) {
                         draken_free(out);
-                        return draken_error_sentinel_fmt(
-                            "Cannot cast string to DATE: got %.*s",
-                            (int)(len < 20u ? len : 20u), s);
+                        return draken_data_error_sentinel_fmt(
+                            "Cannot cast to DATE: '%.*s' does not match the given "
+                            "FORMAT. Use TRY_CAST to return NULL instead.",
+                            (int)(len < 48u ? len : 48u), (const char*)s);
                     }
                     out[j] = 0; bad[j] = 1u; any_bad = true; continue;
                 }
@@ -433,9 +457,9 @@ VecResult draken_cast_string_to_date32(void* ctx, const DrakenVector* v) {
                 if (days == INT32_MIN) {
                     if (!is_safe) {
                         draken_free(out);
-                        return draken_error_sentinel_fmt(
-                            "Cannot cast string to DATE: expected YYYY-MM-DD, got %.*s",
-                            (int)(len < 20u ? len : 20u), s);
+                        return draken_data_error_sentinel_fmt(
+                            "Cannot cast to DATE: got '%.*s', expected YYYY-MM-DD. Use TRY_CAST to return NULL instead.",
+                            (int)(len < 48u ? len : 48u), (const char*)s);
                     }
                     out[j] = 0; bad[j] = 1u; any_bad = true; continue;
                 }
@@ -521,9 +545,9 @@ VecResult draken_cast_string_to_ipv4(void* ctx, const DrakenVector* v) {
                 // TRY_CAST is how a caller opts into NULLing those rows instead.
                 if (!is_safe) {
                     draken_free(out);
-                    return draken_error_sentinel_fmt(
-                        "Cannot cast string to IPV4: expected A.B.C.D, got %.*s",
-                        (int)(len < 32u ? len : 32u), s);
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to IPV4: got '%.*s', expected A.B.C.D. Use TRY_CAST to return NULL instead.",
+                        (int)(len < 48u ? len : 48u), (const char*)s);
                 }
                 out[j] = 0u; bad[j] = 1u; any_bad = true; continue;
             }
@@ -581,7 +605,7 @@ VecResult draken_cast_ipv4_to_string(void* ctx, const DrakenVector* v) {
             if (len > STR_INLINE_MAX) total_extern += static_cast<size_t>(len);
         }
 
-        char tmp[draken::ipv4::MAX_TEXT_LENGTH];
+        char tmp[draken::ipv4::FORMAT_SCRATCH_BYTES];
 
         DrakenStringSlot* slots;
         uint8_t* arena;
@@ -787,15 +811,22 @@ VecResult draken_cast_string_to_decimal(void* ctx, const DrakenVector* v) {
             if (status != draken::decimal_text::OK) {
                 if (!is_safe) {
                     draken_free(out);
+                    const int shown = (int)(slen > 40u ? 40u : slen);
                     if (status == draken::decimal_text::OVERFLOW_)
-                        return draken_error_sentinel_fmt(
-                            "cast string->decimal: value overflows DECIMAL(%d, %d)",
-                            (int)c->result_precision, (int)c->result_scale);
+                        return draken_data_error_sentinel_fmt(
+                            "Cannot cast to DECIMAL(%d, %d): '%.*s' overflows it. Use TRY_CAST to return NULL instead.",
+                            (int)c->result_precision, (int)c->result_scale,
+                            shown, (const char*)sdata);
                     if (status == draken::decimal_text::SCALE)
-                        return draken_error_sentinel_fmt(
-                            "cast string->decimal: value has more decimal places than "
-                            "the declared scale %d", (int)c->result_scale);
-                    return draken_error_sentinel("Invalid number in string literal");
+                        return draken_data_error_sentinel_fmt(
+                            "Cannot cast to DECIMAL(%d, %d): '%.*s' has more decimal "
+                            "places than the declared scale. Use TRY_CAST to return NULL instead.",
+                            (int)c->result_precision, (int)c->result_scale,
+                            shown, (const char*)sdata);
+                    return draken_data_error_sentinel_fmt(
+                        "Cannot cast to DECIMAL(%d, %d): '%.*s' is not a number. Use TRY_CAST to return NULL instead.",
+                        (int)c->result_precision, (int)c->result_scale,
+                        shown, (const char*)sdata);
                 }
                 std::memset(dst, 0, es); bad[j] = 1u; any_bad = true; continue;
             }

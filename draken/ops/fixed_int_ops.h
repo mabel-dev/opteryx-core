@@ -1057,6 +1057,76 @@ static inline VecResult fixed_int_dictionary_encode(const DrakenVector& v) {
 // BETWEEN — widen T to int64_t, compare against int64_t lo/hi
 // ===========================================================================
 
+// Inner loop, factored out of fi_between_impl so the selection lookup can be a
+// COMPILE-TIME choice rather than a per-row one. Identity == true reads data[pos]
+// contiguously (which is what lets the compiler vectorise the 8-way pack);
+// Identity == false gathers data[selection[pos]]. Same answer either way — the
+// accessor is the only difference, everything downstream is one shared body, so
+// a dense vector and a dictionary vector cannot drift apart.
+//
+// This is the same shape specialisation int64_predicates.h's between_kernel and
+// ops/ipv4_predicates.h already use, and it is here for the same reason: the
+// gather is what blocks vectorisation, so hoisting it out of the dense case is
+// the whole win. §11's identity/compressed fast paths (ratified 2026-08-06)
+// cover it; the narrow widths were simply never given one, so an INT64 column's
+// BETWEEN took the fast path and the same predicate on an INT32/UINT32 column —
+// an IPv4 address after the CIDR-to-range rewrite, for one — did not.
+template<typename T, bool lo_incl, bool hi_incl, bool Identity>
+static inline void fi_between_kernel(
+    const T*        data,
+    const uint32_t* selection,
+    int64_t         lo,
+    int64_t         hi,
+    const uint8_t*  src_null,
+    uint8_t*        dst,
+    uint32_t        n)
+{
+    using Op = BetweenOp<lo_incl, hi_incl>;
+    const uint32_t whole_bytes = n >> 3;
+    auto at = [&](uint32_t pos) -> int64_t {
+        if constexpr (Identity) return static_cast<int64_t>(data[pos]);
+        else                    return static_cast<int64_t>(data[selection[pos]]);
+    };
+
+    if (src_null == nullptr) {
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            dst[b] = static_cast<uint8_t>(
+                (static_cast<unsigned>(Op::apply(at(base+0), lo, hi)) << 0) |
+                (static_cast<unsigned>(Op::apply(at(base+1), lo, hi)) << 1) |
+                (static_cast<unsigned>(Op::apply(at(base+2), lo, hi)) << 2) |
+                (static_cast<unsigned>(Op::apply(at(base+3), lo, hi)) << 3) |
+                (static_cast<unsigned>(Op::apply(at(base+4), lo, hi)) << 4) |
+                (static_cast<unsigned>(Op::apply(at(base+5), lo, hi)) << 5) |
+                (static_cast<unsigned>(Op::apply(at(base+6), lo, hi)) << 6) |
+                (static_cast<unsigned>(Op::apply(at(base+7), lo, hi)) << 7));
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if (Op::apply(at(i), lo, hi))
+                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+        // Branchless: AND the packed result with the validity byte so a null row
+        // yields 0 without a per-row branch.
+        for (uint32_t b = 0; b < whole_bytes; ++b) {
+            const uint32_t base = b << 3;
+            const uint8_t m = static_cast<uint8_t>(
+                (static_cast<unsigned>(Op::apply(at(base+0), lo, hi)) << 0) |
+                (static_cast<unsigned>(Op::apply(at(base+1), lo, hi)) << 1) |
+                (static_cast<unsigned>(Op::apply(at(base+2), lo, hi)) << 2) |
+                (static_cast<unsigned>(Op::apply(at(base+3), lo, hi)) << 3) |
+                (static_cast<unsigned>(Op::apply(at(base+4), lo, hi)) << 4) |
+                (static_cast<unsigned>(Op::apply(at(base+5), lo, hi)) << 5) |
+                (static_cast<unsigned>(Op::apply(at(base+6), lo, hi)) << 6) |
+                (static_cast<unsigned>(Op::apply(at(base+7), lo, hi)) << 7));
+            dst[b] = static_cast<uint8_t>(m & src_null[b]);
+        }
+        for (uint32_t i = whole_bytes << 3; i < n; ++i)
+            if ((src_null[i >> 3] >> (i & 7)) & 1u)
+                if (Op::apply(at(i), lo, hi))
+                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    }
+}
+
 template<typename T, bool lo_incl, bool hi_incl>
 static inline VecResult fi_between_impl(
     const DrakenVector& v, int64_t lo, int64_t hi)
@@ -1091,44 +1161,18 @@ static inline VecResult fi_between_impl(
         catch (...) { draken_free(dst); throw; }
     }
 
-    using Op = BetweenOp<lo_incl, hi_incl>;
-    const uint32_t whole_bytes = n >> 3;
-
-    if (src_null == nullptr) {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            dst[b] = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+0]]), lo, hi)) << 0) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+1]]), lo, hi)) << 1) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+2]]), lo, hi)) << 2) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+3]]), lo, hi)) << 3) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+4]]), lo, hi)) << 4) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+5]]), lo, hi)) << 5) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+6]]), lo, hi)) << 6) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+7]]), lo, hi)) << 7));
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i)
-            if (Op::apply(static_cast<int64_t>(data[v.selection[i]]), lo, hi))
-                dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-    } else {
-        for (uint32_t b = 0; b < whole_bytes; ++b) {
-            const uint32_t base = b << 3;
-            const uint8_t m = static_cast<uint8_t>(
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+0]]), lo, hi)) << 0) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+1]]), lo, hi)) << 1) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+2]]), lo, hi)) << 2) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+3]]), lo, hi)) << 3) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+4]]), lo, hi)) << 4) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+5]]), lo, hi)) << 5) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+6]]), lo, hi)) << 6) |
-                (static_cast<unsigned>(Op::apply(static_cast<int64_t>(data[v.selection[base+7]]), lo, hi)) << 7));
-            dst[b] = static_cast<uint8_t>(m & src_null[b]);
-        }
-        for (uint32_t i = whole_bytes << 3; i < n; ++i)
-            if ((src_null[i >> 3] >> (i & 7)) & 1u)
-                if (Op::apply(static_cast<int64_t>(data[v.selection[i]]), lo, hi))
-                    dst[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
-    }
+    // The dense claim is CHECKED, not assumed: DRAKEN_SEL_IDENTITY is a layout
+    // hint ("0 = don't know", buffers.h), so a missing flag costs a gather and
+    // never a wrong answer. `data_length >= n` is verified too — the identity
+    // path reads data[0 .. n-1] directly, and a vector that claimed identity
+    // while carrying a shorter data buffer would read out of bounds rather than
+    // merely answer slowly.
+    const bool identity = ((v.flags & DRAKEN_SEL_IDENTITY) != 0u)
+                       && (v.data_length >= n);
+    if (identity)
+        fi_between_kernel<T, lo_incl, hi_incl, true >(data, v.selection, lo, hi, src_null, dst, n);
+    else
+        fi_between_kernel<T, lo_incl, hi_incl, false>(data, v.selection, lo, hi, src_null, dst, n);
 
     VecResult r;
     r.data = dst; r.validity = out_null;

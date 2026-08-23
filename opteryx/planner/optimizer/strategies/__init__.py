@@ -1,5 +1,4 @@
 from .boolean_simplication import BooleanSimplificationStrategy
-from .cast_simplification import CastSimplificationStrategy
 from .constant_folding import ConstantFoldingStrategy
 from .correlated_filters import CorrelatedFiltersStrategy
 from .semi_join_pushdown import SemiJoinPushdownStrategy
@@ -43,7 +42,6 @@ from .window_topk_fusion import WindowTopKFusionStrategy
 
 __all__ = [
     "BooleanSimplificationStrategy",
-    "CastSimplificationStrategy",
     "ConstantFoldingStrategy",
     "CorrelatedFiltersStrategy",
     "SemiJoinPushdownStrategy",

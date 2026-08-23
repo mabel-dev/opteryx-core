@@ -457,7 +457,7 @@ static void test_ipv4_survives_typed_and_renders() {
     const char* expect[] = {"192.168.1.1", "8.8.8.8", "0.0.0.0", "255.255.255.255"};
     const uint32_t* values = static_cast<const uint32_t*>(out.columns[0].view.data);
     for (uint32_t i = 0; i < addresses.size(); ++i) {
-        char text[draken::ipv4::MAX_TEXT_LENGTH + 1];
+        char text[draken::ipv4::FORMAT_SCRATCH_BYTES + 1];
         const uint32_t n = draken::ipv4::format(
             values[out.columns[0].view.selection[i]], text);
         text[n] = '\0';

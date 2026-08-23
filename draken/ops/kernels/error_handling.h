@@ -75,6 +75,27 @@ VecResult draken_error_sentinel(const char* error_message);
 VecResult draken_error_sentinel_fmt(const char* format, ...);
 
 /**
+ * Sentinel twin of draken_error_sentinel[_fmt] for a DATA error: the VALUES are
+ * the problem (a string that is not a number, a value outside the target's
+ * range), not the engine. The message must therefore be complete, user-facing
+ * text — the engine raises it VERBATIM as opteryx DataError, with no operator
+ * name and no opcode in front of it (see VecResult::data_error in
+ * ops/vec_result.h, and native_expression.hpp's rc 96 arm).
+ *
+ * Do NOT use for an internal fault (null operand, wrong operand type, failed
+ * allocation): those keep draken_error_sentinel, whose framing carries the
+ * machine handle a reader of a data error has no use for.
+ */
+VecResult draken_data_error_sentinel(const char* error_message);
+
+/**
+ * Formatting twin of draken_data_error_sentinel. Same DRAKEN_ERROR_MSG_LEN cap —
+ * bound any interpolated VALUE (`%.*s` with an explicit precision), or a long
+ * string operand truncates the sentence that explains it away.
+ */
+VecResult draken_data_error_sentinel_fmt(const char* format, ...);
+
+/**
  * Check if the last operation resulted in an error.
  * Called by the executor to detect sentinel VecResults.
  *
