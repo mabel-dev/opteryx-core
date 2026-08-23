@@ -279,3 +279,5 @@ draken/_abi_stamp.py
 opteryx/_draken_abi.py
 rugo/_draken_abi.py
 skene/_draken_abi.py
+draken/morsels/sort.cpp
+skene/src/skene_native.cpp
