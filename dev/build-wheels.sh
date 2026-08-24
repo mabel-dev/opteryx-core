@@ -10,8 +10,43 @@ set -ex
 yum install -y openssl-devel curl-devel || dnf install -y openssl-devel libcurl-devel
 
 # Install Rust 1.83.0 (pinned version to avoid GLIBC_2.18 symbols from newer compilers)
-curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.83.0 -y
+#
+# This used to be a bare `curl ... | sh`. In a pipeline `set -e` only observes the
+# exit status of the LAST command, so a failed fetch (empty stdout) fed `sh` an
+# empty script, `sh` exited 0, and the build carried on for eight more minutes of
+# C++/Cython compilation before dying at `build_rust` with "can't find Rust
+# compiler". The real failure — the network — was invisible. Fetch to a file, check
+# the fetch, and verify the toolchain is actually on PATH before continuing.
+RUSTUP_SH="$(mktemp)"
+rustup_fetched=false
+for attempt in 1 2 3; do
+  if curl --proto '=https' --tlsv1.2 -sSf --retry 2 --retry-connrefused \
+      --connect-timeout 15 --max-time 120 https://sh.rustup.rs -o "${RUSTUP_SH}"; then
+    rustup_fetched=true
+    break
+  fi
+  echo "rustup fetch attempt ${attempt}/3 failed" >&2
+  sleep $((attempt * 5))
+done
+
+if [ "${rustup_fetched}" != true ]; then
+  echo "ERROR: could not fetch https://sh.rustup.rs after 3 attempts." >&2
+  echo "       Rust is required for the opteryx_core compute extension; refusing" >&2
+  echo "       to start a build that can only fail at link time." >&2
+  exit 1
+fi
+
+sh "${RUSTUP_SH}" -s -- --default-toolchain 1.83.0 -y
+rm -f "${RUSTUP_SH}"
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# The installer can exit 0 having installed nothing usable. Verify before building.
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+  echo "ERROR: rustup ran but cargo/rustc are not on PATH (${PATH})." >&2
+  exit 1
+fi
+rustc --version
+cargo --version
 
 cd $GITHUB_WORKSPACE/io
 cd io
