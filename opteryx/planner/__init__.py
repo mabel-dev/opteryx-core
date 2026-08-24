@@ -538,6 +538,23 @@ def query_planner(
         scan_stats_cache=scan_stats_cache,
     )
 
+    # The `data_processed` billing meter, measured on the FINAL logical plan —
+    # after manifest pruning, projection pushdown and predicate pushdown, all of
+    # which change the answer. Plan-time by ruling (2026-08-24): jobs.opteryx
+    # enforces usage limits at submit time and has to quote the same number this
+    # bills, which a runtime counter cannot be. See planner/data_processed.py for
+    # the definition and for what that choice costs.
+    #
+    # `increase`, not assign: a semicolon-separated batch plans each statement
+    # through here and bills the sum, matching the one DATA_PROCESSED_BYTES event
+    # per execute() call that the session emits.
+    from opteryx.planner.data_processed import measure_data_processed
+
+    telemetry.increase(
+        "bytes_processed",
+        measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
+    )
+
     # Default: build traditional physical plan
     # before we write the new optimizer and execution engine, convert to a V1 plan
     start = time.monotonic_ns()

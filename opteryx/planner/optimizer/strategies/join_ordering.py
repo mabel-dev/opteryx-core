@@ -42,6 +42,7 @@ was removed rather than re-tuned.
 """
 
 from opteryx.expression import NodeType, binary_operands
+from opteryx.planner.binder.join_helpers import band_operand_leg
 from opteryx.planner.cost_estimation import composite_key_ndv
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
@@ -73,6 +74,161 @@ def _contains_non_equi_comparator(condition) -> bool:
         left, right = binary_operands(condition)
         return _contains_non_equi_comparator(left) or _contains_non_equi_comparator(right)
     return _col_value(condition) in _NON_EQUI_COMPARATORS
+
+
+# ---- BAND JOIN recognition ---------------------------------------------------------
+#
+# A BAND join is an equi-join whose ON clause also bounds ONE column of one leg
+# BOTH ABOVE AND BELOW by values from the other leg:
+#
+#   ON f.client = l.client
+#      AND l.event_time <= f.flow_start
+#      AND l.event_time  > f.flow_start - INTERVAL '20' SECOND
+#
+# Executed as a hash join the equality alone pairs every flow with every one of its
+# client's lookups and the band discards >99% of them one node up. Executed as a
+# band join the build side is kept sorted by the banded column within each equi
+# group, and a probe row emits the contiguous slice between two bisects — the
+# discarded pairs are never formed. See docs/BAND_JOIN_PROPOSAL.md.
+#
+# ⛔ BOTH bounds are required, and that is a restriction, not an oversight. A
+# one-sided bound selects a PREFIX of the sorted run, unbounded in size, which is
+# usually a worse plan than the hash join it would replace.
+#
+# ⛔ The two band conjuncts are CONSUMED by the range, not also applied as a
+# residual. That is only sound because recognition admits NOTHING ELSE in the ON
+# clause: equi conjuncts (which stay join keys) plus exactly the two band conjuncts.
+# Anything else declines the whole shape, so "consume" and "is exactly equivalent"
+# are one decision rather than two.
+
+_BAND_COMPARATORS = ("Lt", "LtEq", "Gt", "GtEq")
+
+# Which end of the BANDED column a comparator establishes, and whether that end is
+# closed — read once for the banded operand on the left of the comparator, and
+# mirrored when it is on the right. Getting this table backwards shifts the answer
+# by exactly the rows sitting ON a boundary, which no interior-range test notices.
+_BAND_BOUND_ON_LEFT = {
+    "Lt": ("upper", False),
+    "LtEq": ("upper", True),
+    "Gt": ("lower", False),
+    "GtEq": ("lower", True),
+}
+_BAND_BOUND_ON_RIGHT = {
+    "Lt": ("lower", False),
+    "LtEq": ("lower", True),
+    "Gt": ("upper", False),
+    "GtEq": ("upper", True),
+}
+
+
+def _and_conjuncts(condition):
+    """Flatten an ON tree's AND spine. An OR is one leaf and carries no band."""
+    if condition is None:
+        return []
+    if getattr(condition, "node_type", None) == NodeType.AND:
+        left, right = binary_operands(condition)
+        return _and_conjuncts(left) + _and_conjuncts(right)
+    return [condition]
+
+
+def _band_conjunct(conjunct, left_relation_names, right_relation_names):
+    """Read one comparison as (banded_identifier, banded_leg, bound_expr, end, closed).
+
+    The banded operand must be a BARE column — it is the thing the build side gets
+    sorted by, so it has to be a column that exists, not a value computed per pair.
+    The bound operand must read from the OTHER leg only; a bound reading the banded
+    leg is a single-relation filter and a bound reading both is a theta this cannot
+    bisect.
+    """
+    if conjunct.node_type != NodeType.COMPARISON_OPERATOR:
+        return None
+    if conjunct.value not in _BAND_COMPARATORS:
+        return None
+    if conjunct.left is None or conjunct.right is None:
+        return None
+
+    for banded, bound, table in (
+        (conjunct.left, conjunct.right, _BAND_BOUND_ON_LEFT),
+        (conjunct.right, conjunct.left, _BAND_BOUND_ON_RIGHT),
+    ):
+        if banded.node_type != NodeType.IDENTIFIER:
+            continue
+        if banded.schema_column is None:
+            continue
+        banded_leg = band_operand_leg(banded, left_relation_names, right_relation_names)
+        bound_leg = band_operand_leg(bound, left_relation_names, right_relation_names)
+        if banded_leg is None or bound_leg is None:
+            continue
+        if banded_leg == bound_leg:
+            continue
+        end, closed = table[conjunct.value]
+        return banded, banded_leg, bound, end, closed
+    return None
+
+
+def _recognize_band(node):
+    """The band descriptor for this join's ON clause, or None.
+
+    Returns (banded_identifier, banded_leg, lower_expr, lower_closed, upper_expr,
+    upper_closed). Called only for INNER joins whose ON already carries a non-equi
+    conjunct.
+    """
+    left_names = list(node.left_relation_names or ())
+    right_names = list(node.right_relation_names or ())
+    if not left_names or not right_names:
+        return None
+
+    bounds = {}
+    banded = None
+    equi_seen = False
+    for conjunct in _and_conjuncts(node.on):
+        if (
+            conjunct.node_type == NodeType.COMPARISON_OPERATOR
+            and conjunct.value == "Eq"
+        ):
+            equi_seen = True
+            continue
+        read = _band_conjunct(conjunct, left_names, right_names)
+        if read is None:
+            return None   # something in the ON this shape does not model
+        identifier, leg, bound, end, closed = read
+        if banded is None:
+            banded = (identifier, leg)
+        elif identifier.schema_column.identity != banded[0].schema_column.identity:
+            return None   # two different columns banded — not one sorted run
+        if end in bounds:
+            return None   # two lower or two upper bounds do not close a band
+        bounds[end] = (bound, closed)
+
+    # An UNKEYED band would build one sorted run over the whole relation. That may
+    # well be a good plan, but it is a different one -- it is the shape the CROSS
+    # JOIN spelling lands on -- and costing it is not this change.
+    if not equi_seen or banded is None:
+        return None
+    if set(bounds) != {"lower", "upper"}:
+        return None
+
+    lower_expr, lower_closed = bounds["lower"]
+    upper_expr, upper_closed = bounds["upper"]
+
+    # ⛔ ALL THREE must carry the SAME type. The band is answered by BISECTING the
+    # build side's sort order with the probe's bound values, so the two sides have to
+    # agree on what order the values are in. Two types that merely compare correctly
+    # through the expression engine can normalise differently under the sort key —
+    # this is the class of bug ASOF hit on a VARCHAR key (see AsofKeyKind) — and here
+    # it would not raise, it would return a bisect over garbage.
+    #
+    # ASOF answers the same problem by materialising a coercion CAST. That is
+    # available here too, and deliberately not taken yet: a coercion changes which
+    # values are equal, and the four inclusivity edges have to be re-argued against
+    # the coerced type before it can be trusted. Declining leaves today's plan.
+    band_type = banded[0].schema_column.column_type
+    for bound_expr in (lower_expr, upper_expr):
+        bound_column = bound_expr.schema_column
+        if bound_column is None or bound_column.column_type != band_type:
+            return None
+
+    return banded[0], banded[1], lower_expr, lower_closed, upper_expr, upper_closed
 
 
 def _join_key_identity(col):
@@ -394,10 +550,70 @@ class JoinOrderingStrategy(OptimizationStrategy):
             # module docstring for why there is no longer a nested-loop-vs-hash-join
             # cost trade-off to make for equi joins in the native engine.
             if _contains_non_equi_comparator(node.on):
-                node.type = "nested loop"
+                # ONE decision point. A band and a theta-nested-loop are two answers
+                # to the same question -- "what execution strategy does a non-equi ON
+                # clause need?" -- so they are an if/elif here rather than two
+                # strategies that have to be kept from both claiming the shape.
+                node.type = self._band_or_nested_loop(node)
                 context.optimized_plan[context.node_id] = node
 
         return context
+
+    def _band_or_nested_loop(self, node) -> str:
+        """"band" when the ON clause is an equi-join plus a closed band on a BUILD-side
+        column, otherwise "nested loop" — today's answer, unchanged.
+
+        Unconditional for the shape, by ruling: the band form removes row emissions
+        rather than making them cheaper, and its worst case (a band selecting the
+        whole equi group) costs one sort per group against a hash-then-filter worst
+        case that is unbounded. The join cardinality estimate this would otherwise be
+        costed against is still ~180x low on frequency skew, i.e. wrong in exactly the
+        direction that would decline the band. See docs/BAND_JOIN_PROPOSAL.md §Cost.
+        """
+        band = _recognize_band(node)
+        if band is None:
+            return "nested loop"
+        identifier, banded_leg, lower_expr, lower_closed, upper_expr, upper_closed = band
+
+        # `_compile_join` builds from the LEFT leg for INNER (mode 0) and probes the
+        # right. The banded column is the one the build side gets SORTED by, so it has
+        # to be the left leg here.
+        #
+        # The build side itself is NOT re-chosen for the band: the cardinality/NDV
+        # rule and its row-count guard above have already run and stand. A band whose
+        # column landed on the probe leg is invertible when its bounds are
+        # `column ± literal` (`l.t <= f.t AND l.t > f.t - 20s` IS
+        # `f.t >= l.t AND f.t < l.t + 20s`), which would let the band apply in either
+        # orientation. That inversion is NOT implemented yet — it needs the shifted
+        # bound expressions synthesised — so this declines and the join runs exactly
+        # as it does today.
+        if banded_leg != "left":
+            self.telemetry.optimization_band_join_declined_probe_side += 1
+            self.record_decision(
+                "band join",
+                "declined: the banded column is on the probe leg and bound inversion"
+                " is not implemented",
+            )
+            return "nested loop"
+
+        node.band_column = identifier.schema_column.identity
+        # Carried for EXPLAIN only. `band_column` is an IDENTITY, which is what the
+        # compiler resolves against the build layout and what must never be replaced
+        # by a name (names are not unique across a plan); the name rides alongside so
+        # the plan line reads as the user's column rather than as a hash.
+        node.band_column_name = identifier.schema_column.name
+        node.band_lower = lower_expr
+        node.band_lower_closed = lower_closed
+        node.band_upper = upper_expr
+        node.band_upper_closed = upper_closed
+        self.telemetry.optimization_band_join += 1
+        self.record_decision(
+            "band join",
+            f"applied: {identifier.schema_column.name} bounded"
+            f" {'[' if lower_closed else '('}lower,"
+            f" upper{']' if upper_closed else ')'} within the equi key",
+        )
+        return "band"
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         # No finalization needed for this strategy

@@ -539,16 +539,32 @@ cdef dict _CONTAINS_MODES = {"InStr": 0, "NotInStr": 1, "IInStr": 2, "NotIInStr"
 # arm never needs to handle a raw pattern.
 cdef dict _RLIKE_MODES = {"RLike": 0, "NotRLike": 1}
 
-# LIKE ANY / ILIKE ANY (+ NOT) -> (case_insensitive, negate). Both flags are
+# Quantified LIKE -> (case_insensitive, negate, require_all). All three flags are
 # baked into the matcher blob by compile_like_any, not into a binary_op_ctx —
 # the blob rides in ctx (like draken_in_list's set). The pattern set is a
 # plan-time constant list; a per-row (column-sourced) pattern set is not handled
 # by this arm (it has no constant blob to compile) and falls through.
+#
+# ⛔ `negate` spells NOT-LIKE-**ALL**, not NOT-LIKE-ANY. The kernel applies it to
+# the ANY verdict (`NOT(matches any pattern)`), and by De Morgan that is exactly
+# `(NOT LIKE a) AND (NOT LIKE b)` — the ALL quantifier. This table previously
+# mapped `AnyOpNotLike` onto that flag, which made `x NOT LIKE ANY (...)` return
+# the ALL answer: a silent wrong answer, and the reason the AnyOpNot* spellings
+# are absent here now. `NOT LIKE ANY` is rejected in the planner, so no entry.
+#
+#   AllOpLike     x LIKE a AND x LIKE b        require_all
+#   AllOpNotLike  NOT(x LIKE a OR x LIKE b)    negate
+#   AnyOpLike     x LIKE a OR x LIKE b         neither
+#
+# negate and require_all are mutually exclusive by construction (their pairing
+# would be NOT LIKE ANY); compile_like_any refuses the combination.
 cdef dict _LIKE_ANY_MODES = {
-    "AnyOpLike": (False, False),
-    "AnyOpNotLike": (False, True),
-    "AnyOpILike": (True, False),
-    "AnyOpNotILike": (True, True),
+    "AnyOpLike": (False, False, False),
+    "AnyOpILike": (True, False, False),
+    "AllOpNotLike": (False, True, False),
+    "AllOpNotILike": (True, True, False),
+    "AllOpLike": (False, False, True),
+    "AllOpILike": (True, False, True),
 }
 
 # draken_humanize mode ids (kernel contract — string_humanize.cpp HzMode). This
@@ -1549,7 +1565,7 @@ cdef Py_ssize_t _linearize(
             # built-in, not an external-kernel-home lookup) — fall through to
             # the generic compare path, which the c-native gate will refuse.
 
-        # LIKE ANY / ILIKE ANY (+ NOT) — bind-time compile the constant pattern
+        # Quantified LIKE (ANY / ALL, + NOT) — bind-time compile the constant pattern
         # set into a matcher blob (compile_like_any) and dispatch draken_like_any.
         # The pattern set NEVER becomes a Draken vector (which is exactly why the
         # old RE2 path errored: _eval_value could not construct one). Subject is
@@ -1569,7 +1585,7 @@ cdef Py_ssize_t _linearize(
                 if not (_la_is_array and node.left.node_type != _NT_IDENTIFIER):
                     from opteryx.compiled import vector_ops as _la_vops
                     _la_blob = _la_vops.compile_like_any(
-                        tuple(_la_patterns), _la_modes[0], _la_modes[1])
+                        tuple(_la_patterns), _la_modes[0], _la_modes[1], _la_modes[2])
                     from draken.ops.kernels._kernel_registry import alloc_like_any_ctx as _la_alloc
                     _la_fn, _la_ctx = _resolve_kernel_and_context(
                         "draken_like_any", _la_alloc, _la_blob)

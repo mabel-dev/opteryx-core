@@ -390,6 +390,9 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                  int asof_type, int64_t est_output_rows)
         void add_asof_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
                             cppvector[size_t] payload_idx, size_t asof_idx, int op)
+        void add_band_probe(size_t p, size_t ref, cppvector[size_t] key_idx,
+                            cppvector[size_t] payload_idx, size_t lo_idx,
+                            size_t hi_idx, bint lower_closed, bint upper_closed)
         void set_sort_sink(size_t p, cppvector[SortKeySpec] spec, size_t buf,
                            bint emit_prune, cppvector[uint32_t] emit_cols)
         void set_topn_sink(size_t p, cppvector[SortKeySpec] spec, size_t n, size_t buf,
@@ -2863,6 +2866,28 @@ cdef class NativePlan:
             pay.push_back(<size_t>i)
         self._e.add_asof_probe(p, ref, keys, pay, asof_idx, op)
 
+    def add_band_probe(self, size_t p, size_t ref, list key_idx, list payload_idx,
+                       size_t lo_idx, size_t hi_idx, bint lower_closed,
+                       bint upper_closed):
+        """BAND probe: emit the contiguous run of build rows whose band column falls
+        between this probe row's two bounds, within its equi group.
+
+        The build side is ``set_asof_build_sink`` unchanged — the band's order key is
+        captured and sorted by the same machinery — so only the probe is band-specific.
+
+        ``lo_idx``/``hi_idx`` index the PROBE morsel's synthetic bound columns.
+        ``lower_closed``/``upper_closed`` say whether each end is inclusive; they are
+        NOT interchangeable and getting one backwards moves the answer by the rows
+        sitting exactly on that boundary."""
+        cdef cppvector[size_t] keys
+        cdef cppvector[size_t] pay
+        for i in key_idx:
+            keys.push_back(<size_t>i)
+        for i in payload_idx:
+            pay.push_back(<size_t>i)
+        self._e.add_band_probe(p, ref, keys, pay, lo_idx, hi_idx,
+                               lower_closed, upper_closed)
+
     def add_expr_filter(self, size_t p, CompiledBytecode bc, list layout,
                        list const_col_idx=None, list const_scalar_vecs=None):
         """General WHERE: a plan-lowered, plan-resolved c-native predicate program
@@ -2936,15 +2961,19 @@ cdef class NativePlan:
         held for the plan's lifetime, because the operator borrows the pointers and
         a freed ctx would be read on every morsel.
 
-        Emitted by the compiler when 2+ extractions share an operand at one point in
+        Emitted by the compiler when 2+ EXTRACTIONS share an operand at one point in
         the plan; parsing dominates extraction, so N paths cost barely more than one.
+        Those 2+ extractions need not be 2+ distinct PATHS: one path referenced twice
+        in a predicate is lowered as two extract instructions, so materializing it
+        here — N == 1 — still replaces two parses per row with one. The floor is
+        therefore one path, not two; the compiler decides whether materializing pays
+        (see _fuse_json_extractions), this only refuses a call that names none.
         """
         if len(ctx_ptrs) != len(names):
             raise ValueError("add_json_extract_multi needs one name "
                              "per ctx")
-        if len(ctx_ptrs) < 2:
-            raise ValueError("add_json_extract_multi is for 2+ paths — "
-                             "a single extraction belongs in its own expression program")
+        if len(ctx_ptrs) < 1:
+            raise ValueError("add_json_extract_multi needs at least one path")
         cdef cppvector[void*] ctxs
         cdef cppvector[string] nms
         cdef unsigned long long raw
@@ -3652,6 +3681,7 @@ _DRAKEN_CMP_OP_FLIPPED[18] = -1
 include "read/read.pyx"
 
 include "asof_join/asof_join.pyx"
+include "band_join/band_join.pyx"
 include "cross_join/cross_join.pyx"
 include "cte_ref/cte_ref.pyx"
 include "csv_read/csv_read.pyx"

@@ -65,6 +65,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
     },
     "null": {
         "description": "The absence of a value. NULL is not a type you declare — it appears when a column has no value or an expression produces no result.",
+        "example": "NULL",
         "notes": "NULL is never equal to anything, including itself. Use `IS NULL` or `IS NOT NULL` to test for nulls. NULL propagates through arithmetic and most functions: `1 + NULL` is NULL.",
         "comparable_with": [],
         "limitations": [
@@ -324,6 +325,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             "from a VARCHAR/NVARCHAR/VARBINARY column. Use `->` to extract a field as VARIANT (a JSON value), "
             "or `->>` to extract the same field as NVARCHAR (JSON strings unquoted to plain text)."
         ),
+        "example": "'{\"a\": 1}' -> 'a'",
         "cast_to": [],
         "comparable_with": [],
         "notes": "VARIANT is NOT produced by reading JSON files/columns directly — file connectors map JSON object/struct columns to NVARCHAR. VARIANT only appears as the result of the `->` operator; there is no PARSE_JSON()/TO_VARIANT() function.",
@@ -339,6 +341,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             "Array columns appear when reading Parquet or JSONL files that contain repeated/array fields. "
             "The element type is declared as `ARRAY<type>` (e.g. `ARRAY<INTEGER>`, `ARRAY<VARCHAR>`)."
         ),
+        "example": "'[1, 2, 3]'::ARRAY<INTEGER>",
         "cast_to": [],
         "comparable_with": [],
         "operators": ["AtArrow", "ArrayContainsAll", "InList", "NotInList", "MapAccess"],
@@ -361,6 +364,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
             "Used for similarity search and ML embedding workloads. "
             "Declared as `VECTOR(n)` where n is the number of dimensions."
         ),
+        "example": "[1.0, 0.5, 0.25]::VECTOR(3)",
         "cast_to": [
             {"type": "from ARRAY<FLOAT> literal", "example": "[1.0, 0.5, 0.25]::VECTOR(3)", "note": "Quantizes each element to FP16. Only a literal array of non-null numeric values is currently supported by CAST — casting an arbitrary ARRAY<FLOAT> column is not covered by this path."},
         ],
@@ -369,6 +373,7 @@ _TYPE_METADATA: dict[str, dict[str, Any]] = {
         "limitations": [
             "Vector columns cannot be used with standard comparison operators (=, <, >, etc.).",
             "The dimension count must match between vectors in any operation.",
+            "A VECTOR value cannot be projected in the SELECT list — `SELECT [1.0, 0.5, 0.25]::VECTOR(3)` is refused, because a literal list cannot be projected. A vector literal has to be consumed where it is built, by a function such as `COSINE_SIMILARITY(a, b)`.",
         ],
     },
 }

@@ -70,6 +70,10 @@ DEF OP_ANYOP_ILIKE      = 32
 DEF OP_ANYOP_NOT_ILIKE  = 33
 DEF OP_IP_CONTAINED_BY  = 34
 DEF OP_IP_CONTAINS      = 35
+DEF OP_ALLOP_LIKE       = 36
+DEF OP_ALLOP_NOT_LIKE   = 37
+DEF OP_ALLOP_ILIKE      = 38
+DEF OP_ALLOP_NOT_ILIKE  = 39
 
 # Python-side mirror so dispatchers can resolve a string op once. Must stay
 # in sync with the DEFs above; if they ever diverge the verification check
@@ -85,6 +89,11 @@ _OP_CODE = {
     "AllOpEq": 25, "AllOpNotEq": 26,
     "AtArrow": 27, "ArrayContainsAll": 28, "AtQuestion": 29,
     "AnyOpLike": 30, "AnyOpNotLike": 31, "AnyOpILike": 32, "AnyOpNotILike": 33,
+    # Quantified-LIKE ALL forms. AnyOpNotLike/AnyOpNotILike above are no longer
+    # reachable from SQL (the planner rejects `NOT LIKE ANY`); their codes are
+    # kept rather than reused so a stale compiled artefact cannot silently take
+    # on a different operator's meaning.
+    "AllOpLike": 36, "AllOpNotLike": 37, "AllOpILike": 38, "AllOpNotILike": 39,
     "IPContainedBy": 34, "IPContains": 35,
 }
 
@@ -101,7 +110,7 @@ _OP_CODE = {
 # our op_code. Negative entries flag "no Draken equivalent" so the caller
 # can fall back. The body of the array is set once at module load.
 # ---------------------------------------------------------------------------
-cdef int _DRAKEN_CMP_OP[36]
+cdef int _DRAKEN_CMP_OP[40]
 _DRAKEN_CMP_OP[0]  = -1  # OP_UNKNOWN
 _DRAKEN_CMP_OP[1]  =  0  # OP_EQ        → Draken Eq
 _DRAKEN_CMP_OP[2]  =  1  # OP_NOT_EQ    → Draken Ne
@@ -138,11 +147,15 @@ _DRAKEN_CMP_OP[32] = -1  # OP_ANYOP_ILIKE   — own kernel
 _DRAKEN_CMP_OP[33] = -1  # OP_ANYOP_NOT_ILIKE — own kernel
 _DRAKEN_CMP_OP[34] = -1  # OP_IP_CONTAINED_BY — own kernel
 _DRAKEN_CMP_OP[35] = -1  # OP_IP_CONTAINS     — own kernel
+_DRAKEN_CMP_OP[36] = -1  # OP_ALLOP_LIKE      — own kernel (draken_like_any)
+_DRAKEN_CMP_OP[37] = -1  # OP_ALLOP_NOT_LIKE  — own kernel (draken_like_any)
+_DRAKEN_CMP_OP[38] = -1  # OP_ALLOP_ILIKE     — own kernel (draken_like_any)
+_DRAKEN_CMP_OP[39] = -1  # OP_ALLOP_NOT_ILIKE — own kernel (draken_like_any)
 
 # Same table but with directional ops flipped — used when we dispatch the
 # compare on the right-hand operand (e.g. Float64 < Int64 → Int64 > Float64).
 # Eq/Ne are symmetric and unchanged.
-cdef int _DRAKEN_CMP_OP_FLIPPED[34]
+cdef int _DRAKEN_CMP_OP_FLIPPED[40]
 _DRAKEN_CMP_OP_FLIPPED[0]  = -1
 _DRAKEN_CMP_OP_FLIPPED[1]  =  0   # Eq    (symmetric)
 _DRAKEN_CMP_OP_FLIPPED[2]  =  1   # Ne    (symmetric)
@@ -177,6 +190,12 @@ _DRAKEN_CMP_OP_FLIPPED[30] = -1
 _DRAKEN_CMP_OP_FLIPPED[31] = -1
 _DRAKEN_CMP_OP_FLIPPED[32] = -1
 _DRAKEN_CMP_OP_FLIPPED[33] = -1
+_DRAKEN_CMP_OP_FLIPPED[34] = -1
+_DRAKEN_CMP_OP_FLIPPED[35] = -1
+_DRAKEN_CMP_OP_FLIPPED[36] = -1
+_DRAKEN_CMP_OP_FLIPPED[37] = -1
+_DRAKEN_CMP_OP_FLIPPED[38] = -1
+_DRAKEN_CMP_OP_FLIPPED[39] = -1
 
 
 # Include order: leaves with no intra-package deps first, then leaves that

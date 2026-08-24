@@ -572,6 +572,22 @@ public:
             std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
             JoinMode::LeftOuter, static_cast<int>(asof_idx), op));
     }
+    // BAND: build side reuses set_asof_build_sink verbatim — the band's ORDER key is
+    // captured and sorted per equi group by exactly the machinery ASOF already needs,
+    // so there is no band build sink. Only the probe differs: two bounds instead of
+    // one, and a whole contiguous run emitted instead of a single nearest row.
+    void add_band_probe(size_t p, size_t ref, std::vector<size_t> key_idx,
+                        std::vector<size_t> payload_idx, size_t lo_idx, size_t hi_idx,
+                        bool lower_closed, bool upper_closed) {
+        auto op = std::make_unique<DeferredJoin2Probe>(
+            std::move(key_idx), std::move(payload_idx), join2_refs[ref].get(),
+            JoinMode::Inner);
+        op->band_lo_idx = static_cast<int>(lo_idx);
+        op->band_hi_idx = static_cast<int>(hi_idx);
+        op->band_lower_closed = lower_closed;
+        op->band_upper_closed = upper_closed;
+        add_op_(p, std::move(op));
+    }
     void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bool serialize_pull) {
         set_source_(p,
             std::make_unique<StreamingScanSource>(scan_ptr, fn, serialize_pull));

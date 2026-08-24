@@ -1742,6 +1742,111 @@ class Manifest:
                 return None
         return total
 
+    # Categories whose dense-equivalent bytes come from ANALYZE's char_total_bytes
+    # rather than from a fixed width. Mirrors _analyze._STRING_CATEGORIES, which is
+    # the set char_class_stats() is actually run over -- a category listed here but
+    # not there reads back None for every file, never a wrong number.
+    _DENSE_CHAR_CATEGORIES = frozenset(
+        {LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY}
+    )
+
+    def get_total_dense_size(self, column) -> Optional[int]:
+        """Total DENSE-EQUIVALENT byte size for a column across all files, or None.
+
+        This is the COMMERCIAL number: what the column's values would occupy if
+        stored densely, one value per row, with no dictionary or run-length
+        encoding. It is deliberately NOT get_total_uncompressed_size, which
+        reports the parquet footer's ``total_uncompressed_size`` -- the
+        decompressed size of the ENCODED pages (dictionary page + index values).
+        The two differ by more than an order of magnitude in both directions: a
+        4-distinct-value VARCHAR measured 12.8x LARGER dense than its footer
+        size, while a fully-distinct VARCHAR measured 0.76x -- SMALLER, because
+        the footer figure carries offset framing this one excludes. Neither
+        number is a safe substitute for the other, and neither bounds the other.
+
+        Derived, never stored, on purpose: everything it needs is already on the
+        manifest, and a stored copy would be a fourth per-column size list free
+        to drift from the three that produced it. The consequence is that the
+        fixed-width arm works on ANY manifest -- no ANALYZE required, since
+        record_count alone answers it -- and only the string arm needs a stats
+        pass to have run.
+
+        Per column, in one of three arms:
+
+          * FIXED WIDTH (integers, floats, DATE32/TIME/TIMESTAMP64, DECIMAL,
+            DECIMAL128, INTERVAL) -- ``record_count * fixed_itemsize()``, the
+            single canonical native width table (draken_type_fixed_itemsize in
+            core/buffers.h). NULL rows ARE charged their slot: a dense vector
+            allocates the slot whether or not it holds a value, which is what
+            "stored densely" means.
+
+          * STRING FAMILY (VARCHAR/NVARCHAR/VARBINARY) -- ANALYZE's
+            ``char_total_bytes``, the native char_class_stats() byte total.
+            VALUES ONLY: no per-row offset, no validity bitmap. A NULL string
+            contributes nothing.
+
+          * EVERYTHING ELSE -- None. ARRAY, VARIANT, VECTOR_FP16 and NULL have
+            no dense measure recorded anywhere yet. BOOL is here too and is the
+            surprising member: its fixed_itemsize() is 0 because draken stores
+            booleans bit-packed, and fabricating a width outside the canonical
+            table to cover it is exactly the drift that table exists to prevent.
+            A native pass for these is the follow-on work; until then a consumer
+            MUST read None as UNKNOWN, never as zero bytes -- billing a column
+            nothing because nobody measured it is a silent revenue error.
+
+        None if ANY live file is missing the input for its arm, matching
+        get_total_uncompressed_size's and get_total_null_count's no-partial-sums
+        contract: a partial sum understates the true size and is
+        indistinguishable from a genuinely small relation.
+
+        Indexing follows get_total_uncompressed_size's own split, for the same
+        reason. The TYPE is resolved by NAME against the live schema (via
+        _column_type), which returns None -- unknown, not guessed -- for a
+        column projection pushdown has pruned out of scope. ``char_total_bytes``
+        is a plain positional list that both producers (the local ANALYZE path's
+        _field_ids and the catalog path's raw pass-through) key by LOAD-TIME
+        POSITION with no field_id remapping, so it is indexed through
+        _sketch_index and NEVER through _resolve_field_id, whose catalog
+        field_id can differ from position after schema evolution.
+        """
+        col_name = column.decode("utf-8") if isinstance(column, bytes) else column
+
+        column_type = self._column_type(col_name)
+        if column_type is None:
+            return None
+        physical = column_type.physical
+        if physical is None:
+            return None
+
+        fixed_width = physical.fixed_itemsize()
+        if fixed_width:
+            total = 0
+            for file in self.files:
+                # Unknown is not zero -- same rule get_record_count applies to
+                # the relation total, applied here per file.
+                if file.record_count is None:
+                    return None
+                total += file.record_count * fixed_width
+            return total
+
+        if column_type.category not in self._DENSE_CHAR_CATEGORIES:
+            return None
+
+        position = self._sketch_index(col_name)
+        if position is None:
+            return None
+
+        total = 0
+        for file in self.files:
+            char_total_bytes = file.char_total_bytes
+            if not char_total_bytes or position >= len(char_total_bytes):
+                return None
+            size = char_total_bytes[position]
+            if size is None:
+                return None
+            total += size
+        return total
+
     def estimate_null_fraction(self, column) -> Optional[float]:
         """Estimate fraction of nulls in column using catalog null counts if present."""
         col_name = column.decode("utf-8") if isinstance(column, bytes) else column

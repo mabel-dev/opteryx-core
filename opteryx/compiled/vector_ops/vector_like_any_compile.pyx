@@ -3,7 +3,8 @@
 # cython: cdivision=True
 
 """
-Plan-time compiler for `LIKE ANY` / `ILIKE ANY`.
+Plan-time compiler for the quantified LIKE forms (`LIKE ANY`, `LIKE ALL`,
+`NOT LIKE ALL`, and their ILIKE spellings).
 
 Mirrors the RLIKE split (`vector_dfa_compile.pyx` compiles, `draken_rlike`
 walks): this module is Python, plan-time only. It partitions the N literal glob
@@ -39,7 +40,7 @@ list sets the has_null flag (SQL three-valued ANY: a non-match becomes NULL).
 
 Blob format (little-endian):
     u8  version (=1)
-    u8  flags   (bit0 = ci, bit1 = negate)
+    u8  flags   (bit0 = ci, bit1 = negate, bit2 = require_all)
     u8  always_true
     u8  has_null
     u32 n_exact ; then n_exact * (u32 len, len bytes)
@@ -164,12 +165,32 @@ cdef void _put_strs(bytearray out, list items):
         out += it
 
 
-cpdef bytes compile_like_any(object patterns, bint ci, bint negate=False):
-    """Compile a literal LIKE ANY pattern set into a matcher blob (never None —
-    the residual glob bucket catches everything, so this always yields a valid,
-    correct matcher). `patterns` is an iterable of str/bytes/None. `negate`
-    (NOT LIKE ANY) is carried in the blob flags and applied by the kernel; it
-    does not change bucketing."""
+cpdef bytes compile_like_any(object patterns, bint ci, bint negate=False,
+                             bint require_all=False):
+    """Compile a literal quantified-LIKE pattern set into a matcher blob (never
+    None — the residual glob bucket catches everything, so this always yields a
+    valid, correct matcher). `patterns` is an iterable of str/bytes/None.
+
+    The two flags spell the three reachable quantifier forms; they are NOT
+    independent knobs, and `negate` does NOT mean "NOT LIKE ANY":
+
+        x LIKE ANY (a,b)      negate=0 require_all=0   a OR b
+        x NOT LIKE ALL (a,b)  negate=1 require_all=0   NOT(a OR b)
+        x LIKE ALL (a,b)      negate=0 require_all=1   a AND b
+
+    `NOT LIKE ALL` is the De Morgan dual of `LIKE ANY`, which is why it rides the
+    ANY bucketing with a flipped verdict and costs nothing extra. The fourth
+    combination would be `NOT LIKE ANY` = NOT(a AND b); the planner rejects that
+    spelling outright (see `pattern_match` in logical_planner_builders.py), so it
+    never reaches here and is refused below rather than silently compiled.
+
+    `negate` does not change bucketing. `require_all` does: a conjunction cannot
+    use the ANY short-circuits (see the comments at each site below)."""
+    if negate and require_all:
+        raise ValueError(
+            "compile_like_any: negate and require_all together spell NOT LIKE ANY, "
+            "which the planner rejects and this compiler cannot express."
+        )
     cdef list exact = []
     cdef list prefix = []
     cdef list suffix = []
@@ -190,7 +211,12 @@ cpdef bytes compile_like_any(object patterns, bint ci, bint negate=False):
             p = _uni_lower(<bytes>p)
         kind, payload = _classify(<bytes>p)
         if kind == "always":
-            always_true = True
+            # In a disjunction a match-everything pattern makes the whole set
+            # true; in a CONJUNCTION it constrains nothing, so it is dropped.
+            # Setting always_true under require_all would answer TRUE for rows
+            # the other patterns reject — the kernel refuses that blob.
+            if not require_all:
+                always_true = True
         elif kind == "exact":
             exact.append(payload)
         elif kind == "prefix":
@@ -198,13 +224,25 @@ cpdef bytes compile_like_any(object patterns, bint ci, bint negate=False):
         elif kind == "suffix":
             suffix.append(payload)
         elif kind == "contains":
-            contains.append(payload)
+            # The contains bucket is an Aho-Corasick automaton, which answers
+            # "SOME needle occurs in the subject" — it cannot answer "EVERY
+            # needle occurs" (a single accepting walk does not say which needles
+            # were seen, and folding fail links loses that per-needle identity).
+            # Under require_all the needle goes back to its `%X%` glob form and
+            # is matched per-pattern. LIKE ALL is a rare predicate and the ALL
+            # walk short-circuits on the first non-match, so this is the honest
+            # trade rather than growing a second automaton to count needles.
+            if require_all:
+                glob.append(b"%" + payload + b"%")
+            else:
+                contains.append(payload)
         else:
             glob.append(payload)
 
     cdef bytearray out = bytearray()
     out.append(1)                                   # version
-    out.append((1 if ci else 0) | (2 if negate else 0))   # flags: bit0=ci bit1=negate
+    # flags: bit0=ci bit1=negate bit2=require_all
+    out.append((1 if ci else 0) | (2 if negate else 0) | (4 if require_all else 0))
     out.append(1 if always_true else 0)
     out.append(1 if has_null else 0)
     _put_strs(out, exact)

@@ -234,7 +234,7 @@ def test_no_predicate_free_case(tmp_path, monkeypatch):
 
 # ── regex predicates: were fail-closed (R4), now relocated natively ──────────
 
-@pytest.mark.parametrize("where", ["s RLIKE 'a'", "s SIMILAR TO 'a.*'"])
+@pytest.mark.parametrize("where", ["s RLIKE 'a'", "s NOT RLIKE 'a.*'"])
 def test_regex_predicate_relocates_natively(tmp_path, monkeypatch, where):
     """A pushed regex predicate used to fail CLOSED — it did not lower to a c-native
     span, so the whole scan fell back (the R4 `unlowerable_predicate` residual). The

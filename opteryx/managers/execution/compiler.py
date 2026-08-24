@@ -211,6 +211,41 @@ def _type_name(schema_column, physical=None) -> str:
     return "an unknown type"
 
 
+def _residual_without_keyed_equalities(on_condition, left_relation_names,
+                                       right_relation_names):
+    """`on_condition` minus the Eq conjuncts that became hash-join keys, or None when
+    nothing is left to check.
+
+    The keyed equalities are decided by the key — equality downstream is 64-bit hash
+    identity, which is the SAME rule a plain INNER join runs on and re-checking it
+    per pair only makes nested_loop disagree with `inner` about cost, never about the
+    answer.
+
+    ⛔ Keyed-ness is re-derived per conjunct through `extract_join_fields`, the same
+    function that built the key lists, rather than pattern-matched here. An Eq whose
+    operand is an EXPRESSION is returned as `unkeyed` by that function and keys
+    nothing, so dropping it would widen the join to the equi-only answer.
+    """
+    from opteryx.compiled.structures.node import Node
+    from opteryx.planner.binder.join_helpers import extract_join_fields
+
+    remaining = []
+    for conjunct in _and_conjuncts(on_condition):
+        if conjunct.node_type == NodeType.COMPARISON_OPERATOR and conjunct.value == "Eq":
+            left_fields, right_fields, unkeyed = extract_join_fields(
+                conjunct, left_relation_names, right_relation_names
+            )
+            if left_fields and right_fields and not unkeyed:
+                continue   # the key already decided this one
+        remaining.append(conjunct)
+    if not remaining:
+        return None
+    combined = remaining[0]
+    for conjunct in remaining[1:]:
+        combined = Node(NodeType.AND, left=combined, right=conjunct)
+    return combined
+
+
 def _live_positions(layout, live):
     """Positions of `layout` still wanted after the operator that owns `live`.
 
@@ -1287,8 +1322,18 @@ class _Compiler:
         for src_identity, by_out in groups.items():
             fusable = [(out_id, info) for out_id, info in by_out.items()
                        if out_id not in layout]
-            if len(fusable) < 2:
-                continue   # one path (or already materialized) — the normal path is fine
+            # Materialize whenever the fused operator replaces MORE THAN ONE parse.
+            # That is two distinct paths sharing one parse of the document — and
+            # ALSO a single path whose extraction appears more than once in this
+            # predicate. The repeats share ONE out-identity (they are the same
+            # bound expression), which is why they collapse to a single entry in
+            # `by_out`, but the lowerer emits one extract instruction per textual
+            # occurrence: `x->>'k' LIKE 'a%' OR x->>'k' LIKE 'b%' OR ...` costs N
+            # parses per row. Counting distinct paths instead of extractions
+            # skipped exactly that shape.
+            extraction_count = sum(len(info["nodes"]) for _out_id, info in fusable)
+            if extraction_count < 2:
+                continue   # nothing to share — the normal path is fine
 
             from draken.ops.kernels._kernel_registry import alloc_extraction_ctx
             from opteryx.compiled.expression.compiled_expression import (
@@ -3786,6 +3831,8 @@ class _Compiler:
         join_type = getattr(node, "join_type", None)
         if join_type == "asof":
             return self._compile_asof_join(node, in_edges)
+        if join_type == "band":
+            return self._compile_band_join(node, in_edges)
         # THREE key rules live here and none of them is interchangeable with another;
         # each disagrees with the others only on NULL, which is why substituting one
         # for another is a silent wrong answer rather than an error.
@@ -3860,7 +3907,22 @@ class _Compiler:
         # A nested_loop node carries an `on` COMPARISON referencing BOTH legs — it
         # cannot be a pre-scan filter. Applied as a post-join filter over the
         # combined layout below (fails loud if not c-native).
+        #
+        # ⛔ Only the conjuncts the KEY did not already decide. `on` is equi conjuncts
+        # PLUS whatever could not be keyed, and re-checking a keyed equality per pair
+        # is work the hash key has already done — join_ordering's own docstring calls
+        # it "an extra, wholly redundant residual re-check of the equi condition it
+        # already keyed on". It is not free: an absorbed band join re-compared a
+        # VARCHAR key on every one of 26M emitted pairs.
+        #
+        # A conjunct is dropped ONLY if it is exactly the shape `extract_join_fields`
+        # turns into a key pair. An Eq with an expression operand is NOT keyed (it
+        # comes back as `unkeyed`) and must stay, or the join silently widens.
         residual = getattr(node, "on", None) if join_type == "nested_loop" else None
+        if residual is not None and left_cols and right_cols:
+            residual = _residual_without_keyed_equalities(
+                residual, node.left_relation_names, node.right_relation_names
+            )
 
         # A SEMI/ANTI node may carry a CORRELATED NON-EQUALITY residual, split off the
         # EXISTS subquery by decorrelate_subquery, post-bind (TPC-H Q21). Unlike nested_loop's,
@@ -3973,12 +4035,41 @@ class _Compiler:
         # the keys the join itself needs — the two are separate sets and the key
         # indices below are untouched (they address `bkeyout`/`pkeyout`, not payload).
         #
-        # Two shapes keep the full width because their own consumers read the unpruned
-        # pair layout: a nested_loop residual (`add_expr_filter` over `out_layout`) and
-        # a SEMI/ANTI correlated residual (lowered against `blayout + playout` inside
-        # the probe).
+        # One shape keeps the full width: a SEMI/ANTI correlated residual, lowered
+        # against `blayout + playout` INSIDE the probe, which is a layout this pruning
+        # does not build and cannot narrow.
+        #
+        # A nested_loop residual used to keep it too, and that was over-broad. The
+        # residual is an `add_expr_filter` over `out_layout` — the RETAINED lists — so
+        # what it needs is its OWN operand columns, not every column of both legs.
+        #
+        # Measured on a 6.1bn-pair absorbed band join, single-variable:
+        #     301.7s  neither fix
+        #     213.3s  residual stripped of keyed equalities only
+        #     159.3s  both
+        # so this pruning is worth 1.34x on top of the residual fix, NOT redundant
+        # with it. ⛔ It contributes NOTHING when `live` is empty (a COUNT(*) with no
+        # surviving payload keeps `prune_payload` False either way) — do not re-test
+        # it on such a query and conclude it is dead, which is a mistake already made
+        # once here.
         live = getattr(node, "pre_update_columns", None) or set()
-        prune_payload = bool(live) and residual is None and filter_residual is None
+        # ⛔ UNION, not replacement: a residual operand that nothing above the join
+        # wants is still read PER PAIR, so dropping it would be a compile failure at
+        # best and the wrong column at worst.
+        residual_live = set()
+        if residual is not None:
+            from opteryx.expression import get_all_nodes_of_type
+
+            residual_live = {
+                reference.schema_column.identity
+                for reference in get_all_nodes_of_type(residual, (NodeType.IDENTIFIER,))
+                if reference.schema_column is not None
+            }
+        # `live` empty means UNKNOWN (see _live_positions), never "nothing is wanted",
+        # so an unknown live set still disables pruning — a residual's operands alone
+        # are NOT a safe stand-in for it.
+        prune_payload = bool(live) and filter_residual is None
+        payload_live = live | residual_live
         # SEMI/ANTI emit probe rows only — no build payload needed, UNLESS a
         # correlated residual has to read build-side columns to decide existence.
         semi_no_payload = mode in semi_anti_modes and filter_residual is None
@@ -3986,7 +4077,7 @@ class _Compiler:
             build_payload = []
             build_types, build_logical, build_element = [], [], []
         else:
-            build_payload = _live_positions(blayout, live) if prune_payload \
+            build_payload = _live_positions(blayout, payload_live) if prune_payload \
                 else list(range(len(blayout)))
             build_types, build_logical, build_element = self._payload_types(
                 build_id, [blayout[i] for i in build_payload])
@@ -4020,7 +4111,7 @@ class _Compiler:
             if identity not in pkeyout:
                 _unsupported("a probe-side join key the engine could not resolve here")
             probe_key_idx.append(pkeyout.index(identity))
-        probe_payload = _live_positions(playout, live) if prune_payload \
+        probe_payload = _live_positions(playout, payload_live) if prune_payload \
             else list(range(len(playout)))
         # SEMI/ANTI EMIT set. An existence filter emits surviving PROBE rows, so its
         # payload is not the question — what it re-gathers is. Its probe key is read
@@ -4748,6 +4839,100 @@ class _Compiler:
         # unchanged by the coercion.
         return pp, list(blayout) + list(playout)
 
+    def _compile_band_join(self, node, in_edges):
+        """BAND JOIN: an INNER equi-join that additionally emits only the build rows
+        whose band column falls between two per-probe-row bounds.
+
+        LEFT leg = build (matching `_compile_join`'s INNER rule, so the side
+        JoinOrderingStrategy chose to build is the side that gets sorted); RIGHT leg =
+        probe. Per probe row the output is a contiguous RUN of build rows, which is
+        what separates this from ASOF's exactly-one.
+
+        The build sink is `set_asof_build_sink` unchanged — capturing and sorting a
+        per-equi-group order key is the same job for both — so everything specific to
+        the band is on the probe.
+        """
+        band_column = getattr(node, "band_column", None)
+        band_lower = getattr(node, "band_lower", None)
+        band_upper = getattr(node, "band_upper", None)
+        if band_column is None or band_lower is None or band_upper is None:
+            _unsupported("a band join without a complete band descriptor")
+        left_cols = list(getattr(node, "left_columns", None) or [])
+        right_cols = list(getattr(node, "right_columns", None) or [])
+        if not left_cols or len(left_cols) != len(right_cols):
+            _unsupported("a band join without aligned equi-key lists")
+
+        legs = {}
+        for idx, (provider, _target, label) in enumerate(in_edges):
+            if not label:
+                label = "left" if idx == 0 else "right"
+            legs[label] = provider
+        if "left" not in legs or "right" not in legs:
+            _unsupported("a band join without labelled left/right legs")
+
+        bp, blayout = self.compile_node(legs["left"])
+        build_key_idx = []
+        for identity in left_cols:
+            if identity not in blayout:
+                _unsupported("a band build-side key the engine could not resolve here")
+            build_key_idx.append(blayout.index(identity))
+        if band_column not in blayout:
+            _unsupported("a band column the build stream does not carry")
+
+        pp, playout = self.compile_node(legs["right"])
+        probe_key_idx = []
+        for identity in right_cols:
+            if identity not in playout:
+                _unsupported("a band probe-side key the engine could not resolve here")
+            probe_key_idx.append(playout.index(identity))
+
+        # The two bounds become real probe columns. A bare identifier bound is
+        # already one; anything else is appended by `_add_computed` AFTER the leg's
+        # real columns, so `playout` — the payload and the declared output — is
+        # untouched and only the bound INDICES address the grown layout. Letting a
+        # synthetic column into the payload would emit a column the output layout
+        # does not have and shift every column after it. Same rule, and same reason,
+        # as the coercion casts in `_compile_asof_join`.
+        bound_layout = list(playout)
+        bound_idx = []
+        for bound in (band_lower, band_upper):
+            schema_column = getattr(bound, "schema_column", None)
+            if schema_column is None:
+                _unsupported("a band bound the compiler cannot identify")
+            identity = schema_column.identity
+            if identity not in bound_layout:
+                bound_layout = self._add_computed(pp, [bound], bound_layout)
+            if identity not in bound_layout:
+                _unsupported("a band bound the projection layer declined")
+            bound_idx.append(bound_layout.index(identity))
+
+        band_type = self._layout_type(self.plan[legs["left"]], band_column)
+        if band_type is None:
+            _unsupported("a band column whose type the compiler cannot resolve")
+
+        ref = self.nplan.new_join2_ref()
+        self.nplan.set_current_identity(node.identity)  # own the build sink + probe
+        self.nplan.set_current_display_name(type(node).__name__)
+        build_types, build_logical, build_element = self._payload_types(
+            legs["left"], blayout)
+        self.nplan.set_asof_build_sink(bp, build_key_idx, list(range(len(blayout))),
+                                       blayout.index(band_column), ref,
+                                       build_types, build_logical, build_element,
+                                       band_type.value,
+                                       _estimate_to_int64(
+                                           getattr(node, "join_output_rows_estimate",
+                                                   None),
+                                           "output-row estimate for the band join"))
+        self.nplan.set_current_identity(node.identity)  # probe op belongs to the join
+        self.nplan.set_current_display_name(type(node).__name__)
+        self.nplan.add_band_probe(pp, ref, probe_key_idx, list(range(len(playout))),
+                                  bound_idx[0], bound_idx[1],
+                                  bool(getattr(node, "band_lower_closed", False)),
+                                  bool(getattr(node, "band_upper_closed", False)))
+        # Build payload first, then probe payload — the same emit order every
+        # Join2ProbeOperator uses. The synthetic bound columns are in neither.
+        return pp, list(blayout) + list(playout)
+
     def _compile_materialized_source(self, node):
         """Virtual datasets ($planets, VALUES, GENERATE_SERIES, contradiction-empty
         relations): their content is a PLAN CONSTANT — materialize it once, here, at
@@ -5298,15 +5483,13 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                 if _io_diags:
                     telemetry._reading["io_scan_diagnostics"] = _io_diags
                     # The scan's true IO volume, measured at transfer by the rugo IO
-                    # pipeline. Accumulated (not assigned): virtual-dataset scans
-                    # (operators/read/read.pyx) add their own materialized bytes to
-                    # this same counter, and a query can mix the two. The native
-                    # engine's per-operator bytes_in/bytes_out cannot be used here —
-                    # they are a rows*cols*8 estimate of the post-filter, post-LIMIT
-                    # morsel, so on this query they read 7.6KB for a 309-blob scan.
-                    telemetry.increase(
-                        "bytes_processed",
-                        sum(d.get("bytes_fetched", 0) for d in _io_diags),
+                    # pipeline: COMPRESSED bytes off storage. Diagnostic only — it is
+                    # NOT the billing meter and must not be folded into
+                    # `bytes_processed`, which bills dense LOGICAL bytes measured at
+                    # plan time (planner/data_processed.py). The two differ by the
+                    # whole compression ratio, and this counter used to be the meter.
+                    telemetry._reading["io_bytes_fetched"] = sum(
+                        d.get("bytes_fetched", 0) for d in _io_diags
                     )
                     telemetry._reading["io_http_request_count"] = sum(
                         d.get("http_request_count", 0) for d in _io_diags

@@ -14,8 +14,9 @@ This is a pure translation layer. It:
   - Converts Python str/dict/list arguments to C++ std::string/std::map/std::vector
   - Releases the GIL for all network calls (with nogil:) so Python threads
     are not blocked while C++ does network I/O
-  - Lets Cython's `except +` automatically translate std::runtime_error
-    into Python RuntimeError — no manual PyErr_SetString anywhere
+  - Translates C++ exceptions into Python via `except +_raise_http_error`,
+    which preserves HttpError's status code as HttpStatusError.status — no
+    manual PyErr_SetString anywhere
 
 The C++ layer (http_client.hpp / http_client.cpp) has no knowledge of Python.
 """
@@ -26,24 +27,85 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 
 
+class HttpStatusError(RuntimeError):
+    """A failed HTTP call, carrying the status code that caused it.
+
+    Subclasses RuntimeError deliberately: every existing `except RuntimeError`
+    around this client keeps working unchanged, and callers that need to
+    classify a failure read `.status` instead of parsing the message. `.status`
+    is 0 when the call never got a response at all (a CURL-level error), which
+    is NOT the same as "no error" - reach it only from an except block.
+
+    The message text is for humans and is not a contract; matching on it is how
+    the S3 filesystem used to decide an object was missing.
+    """
+
+    def __init__(self, message, long status):
+        super().__init__(message)
+        self.status = status
+
+
+cdef extern from *:
+    """
+    #include <string>
+    #include <stdexcept>
+    #include "http_client.hpp"
+
+    // Runs inside the catch(...) block Cython generates for `except +translator`,
+    // so the C++ exception is still in flight and `throw;` recovers its dynamic
+    // type - the only way to read HttpError::http_status from here.
+    static void opteryx_http_error_info(std::string& message, long& status) {
+        try {
+            throw;
+        } catch (const HttpError& err) {
+            message = err.what();
+            status = err.http_status;
+        } catch (const std::exception& err) {
+            message = err.what();
+            status = 0;
+        } catch (...) {
+            message = "unknown C++ exception";
+            status = 0;
+        }
+    }
+    """
+    void opteryx_http_error_info(string& message, long& status)
+
+
+cdef void _raise_http_error() except *:
+    """Translate the in-flight C++ exception into HttpStatusError.
+
+    Named in every `except +_raise_http_error` below, replacing Cython's default
+    `except +` (which flattens everything to RuntimeError and drops the status).
+
+    `except *` is load-bearing: it is what lets the Python exception raised here
+    propagate. Declared `noexcept`, Cython discards it ("Exception ignored in")
+    and the caller sees a bare "Error converting c++ exception" instead.
+    """
+    cdef string message
+    cdef long status = 0
+    opteryx_http_error_info(message, status)
+    raise HttpStatusError(message.decode("utf-8", "replace"), status)
+
+
 cdef extern from "http_client.hpp":
     # Alias the C++ class as CHttpClient to avoid collision with the Python cdef class below
     cdef cppclass CHttpClient "HttpClient":
-        CHttpClient(int max_connections, long timeout_ms) except +
+        CHttpClient(int max_connections, long timeout_ms) except +_raise_http_error
         vector[unsigned char] get(
             string url,
             cpp_map[string, string] headers
-        ) except + nogil
+        ) except +_raise_http_error nogil
         cpp_map[string, string] head(
             string url,
             cpp_map[string, string] headers
-        ) except + nogil
+        ) except +_raise_http_error nogil
         vector[vector[unsigned char]] get_many(
             vector[pair[string, cpp_map[string, string]]] requests
-        ) except + nogil
+        ) except +_raise_http_error nogil
         vector[cpp_map[string, string]] head_many(
             vector[pair[string, cpp_map[string, string]]] requests
-        ) except + nogil
+        ) except +_raise_http_error nogil
 
 
 cdef class HttpClient:
@@ -83,7 +145,8 @@ cdef class HttpClient:
     cdef bint _closed
 
     def __init__(self, int max_connections=128, long timeout_ms=60000):
-        # except + on the constructor means std::runtime_error → RuntimeError
+        # except +_raise_http_error on the constructor means a C++ throw here
+        # surfaces as HttpStatusError (a RuntimeError), not a crash
         self._client = new CHttpClient(max_connections, timeout_ms)
         self._closed = False
 

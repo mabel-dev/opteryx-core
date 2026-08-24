@@ -51,8 +51,8 @@
         "settable": false,
         "requires_entitlement": null,
         "set_by": "not settable via SQL",
-        "default": 3251,
-        "default_source": "literal"
+        "default": null,
+        "default_source": "build"
     },
     "character_set_client": {
         "name": "character_set_client",

@@ -204,6 +204,40 @@ def _rewrite_rlike_to_dfa(predicate, telemetry):
     return predicate
 
 
+# Operand shapes eligible for LIKE-ANY / NOT-LIKE-ALL fusion. IDENTIFIER is the
+# plain-column case. EXTRACTION_OPERATOR (`->`, `->>`, and the other extraction
+# spellings) is admitted because the operand is what the patterns are matched
+# against, not what produces it: the fused node evaluates its left operand ONCE
+# and hands the resulting vector to draken_like_any exactly as a column load
+# would. Grouping is keyed on the bound schema_column identity, which two
+# occurrences of the same extraction already share (the binder mints one identity
+# per distinct expression), so the fused node cannot straddle two different
+# operands that merely render alike.
+#
+# Deliberately NOT widened to every computed operand. A general
+# "anything with an identity" gate would also admit CASTs, arithmetic and
+# function results, whose identities are minted in more places and whose
+# equality carries more risk than this rewrite needs to take on.
+_LIKE_FUSE_OPERAND_TYPES = frozenset({NodeType.IDENTIFIER, NodeType.EXTRACTION_OPERATOR})
+
+
+def _like_fuse_operand_identity(node):
+    """Identity of a LIKE/NOT-LIKE left operand eligible for fusion, else None."""
+    if node is None or node.node_type not in _LIKE_FUSE_OPERAND_TYPES:
+        return None
+    schema_column = node.schema_column
+    if schema_column is None or schema_column.identity is None:
+        return None
+    return schema_column.identity
+
+
+def _like_pattern_literal(node):
+    """True when `node` is a plan-time constant string pattern."""
+    return node is not None and node.node_type == NodeType.LITERAL and isinstance(
+        node.value, (str, bytes)
+    )
+
+
 def rewrite_ored_like_to_any(predicate, telemetry):
     """
     Rewrite OR'd LIKE/ILIKE conditions on the same column into a single
@@ -221,20 +255,18 @@ def rewrite_ored_like_to_any(predicate, telemetry):
     (measured ~16× slower at N=50). Grouped by (column, case-sensitivity) so a
     single ANY node is uniformly case-sensitive or -insensitive; a column mixing
     LIKE and ILIKE yields one AnyOpLike and one AnyOpILike. Only positive
-    LIKE/ILIKE over an identifier with a string-literal pattern are fused; NOT
-    LIKE and everything else is left untouched.
+    LIKE/ILIKE with a string-literal pattern are fused, over the operand shapes
+    `_LIKE_FUSE_OPERAND_TYPES` admits (a plain column or an extraction); NOT LIKE
+    is handled by `rewrite_anded_not_like_to_all`, everything else is left
+    untouched.
     """
     groups: dict = {}  # (col_id, is_ci) -> {"patterns": [...], "nodes": [...]}
 
     def collect(node):
         if node.node_type == NodeType.COMPARISON_OPERATOR and node.value in {"Like", "ILike"}:
-            if (
-                node.right.node_type == NodeType.LITERAL
-                and isinstance(node.right.value, (str, bytes))
-                and node.left.node_type == NodeType.IDENTIFIER
-                and node.left.schema_column is not None
-            ):
-                key = (node.left.schema_column.identity, node.value == "ILike")
+            operand_identity = _like_fuse_operand_identity(node.left)
+            if operand_identity is not None and _like_pattern_literal(node.right):
+                key = (operand_identity, node.value == "ILike")
                 group = groups.setdefault(key, {"patterns": [], "nodes": []})
                 group["patterns"].append(node.right.value)
                 group["nodes"].append(node)
@@ -256,6 +288,79 @@ def rewrite_ored_like_to_any(predicate, telemetry):
                 node.type = _lt.BOOLEAN
 
     return predicate
+
+
+def rewrite_anded_not_like_to_all(conjuncts, telemetry):
+    """AND-side counterpart of `rewrite_ored_like_to_any`: fuse NOT LIKE / NOT ILIKE
+    conjuncts on one operand into a single negated ``LIKE ANY``.
+
+    Example:
+        col NOT LIKE 'a%' AND col NOT LIKE '%b' AND col NOT LIKE '%c%'
+        -->  NOT (col LIKE ANY ('a%', '%b', '%c%'))
+
+    Same kernel and the same reason as the OR-side rewrite: `draken_like_any`
+    buckets the pattern set itself and stays O(1) in pattern count, where N ANDed
+    NOT LIKEs execute as N independent passes over the column. De Morgan makes the
+    conjunction the exact negation of the disjunction the positive rewrite fuses,
+    so one negated matcher answers all N terms.
+
+    `conjuncts` is the flat conjunct list (NOT a tree) and a possibly shorter list
+    is returned — absorbed terms are dropped rather than neutralised to TRUE,
+    because the caller is about to turn each surviving conjunct into its own
+    Filter node and a TRUE node would become a Filter that filters nothing.
+
+    Grouped by (operand, case-sensitivity), so a mix of NOT LIKE and NOT ILIKE on
+    one operand yields one node of each. Only NOT LIKE/NOT ILIKE with a
+    string-literal pattern over an operand `_LIKE_FUSE_OPERAND_TYPES` admits are
+    fused; positive LIKE and everything else is left for the OR-side rewrite and
+    the per-conjunct rewrites downstream.
+    """
+    groups: dict = {}  # (operand_id, is_ci) -> {"patterns": [...], "positions": [...]}
+
+    for position, conjunct in enumerate(conjuncts):
+        if conjunct.node_type != NodeType.COMPARISON_OPERATOR:
+            continue
+        if conjunct.value not in {"NotLike", "NotILike"}:
+            continue
+        operand_identity = _like_fuse_operand_identity(conjunct.left)
+        if operand_identity is None or not _like_pattern_literal(conjunct.right):
+            continue
+        key = (operand_identity, conjunct.value == "NotILike")
+        group = groups.setdefault(key, {"patterns": [], "positions": []})
+        group["patterns"].append(conjunct.right.value)
+        group["positions"].append(position)
+
+    absorbed: set = set()
+    for (_operand_identity, is_ci), group in groups.items():
+        if len(group["positions"]) < 2:
+            continue
+        telemetry.optimization_predicate_rewriter_not_like_to_all += 1
+        # The fused node takes the FIRST member's position, so a conjunct order the
+        # caller (or a later ordering pass) cares about is not reshuffled here.
+        _fuse_not_like_group(conjuncts[group["positions"][0]], group["patterns"], is_ci)
+        absorbed.update(group["positions"][1:])
+
+    if not absorbed:
+        return conjuncts
+    return [c for position, c in enumerate(conjuncts) if position not in absorbed]
+
+
+def _fuse_not_like_group(first_node, patterns, is_ci):
+    """Turn a group's first NOT LIKE/NOT ILIKE node into a NOT LIKE ALL node in
+    place, mirroring `_fuse_like_group`: the raw glob patterns become an
+    ARRAY<VARCHAR> literal on the right and the op becomes AllOpNotLike /
+    AllOpNotILike. The node's BOOLEAN schema_column is preserved.
+
+    `x NOT LIKE a AND x NOT LIKE b` IS `x NOT LIKE ALL (a, b)` — the operator name
+    now says what the fusion computes. It used to emit AnyOpNotLike, which mapped
+    to the same kernel behaviour under a name that read as the opposite quantifier;
+    that mismatch is what made the SQL spelling `NOT LIKE ANY` return the ALL
+    answer. The emitted op is chosen for its meaning, and its meaning and its name
+    now agree, so this no longer depends on a documented discrepancy.
+    """
+    first_node.value = "AllOpNotILike" if is_ci else "AllOpNotLike"
+    first_node.right.value = list(patterns)
+    first_node.right.type = _lt.ARRAY(_lt.VARCHAR)
 
 
 def _fuse_like_group(first_node, patterns, is_ci):
@@ -280,15 +385,14 @@ def rewrite_cnf_like_to_any(condition, telemetry):
     groups: dict = {}  # (col_id, is_ci) -> {"patterns": [...], "nodes": [...]}
     others = []
     for branch in condition.parameters:
-        if (
-            branch.node_type == NodeType.COMPARISON_OPERATOR
+        operand_identity = (
+            _like_fuse_operand_identity(branch.left)
+            if branch.node_type == NodeType.COMPARISON_OPERATOR
             and branch.value in {"Like", "ILike"}
-            and branch.right.node_type == NodeType.LITERAL
-            and isinstance(branch.right.value, (str, bytes))
-            and branch.left.node_type == NodeType.IDENTIFIER
-            and branch.left.schema_column is not None
-        ):
-            key = (branch.left.schema_column.identity, branch.value == "ILike")
+            else None
+        )
+        if operand_identity is not None and _like_pattern_literal(branch.right):
+            key = (operand_identity, branch.value == "ILike")
             group = groups.setdefault(key, {"patterns": [], "nodes": []})
             group["patterns"].append(branch.right.value)
             group["nodes"].append(branch)

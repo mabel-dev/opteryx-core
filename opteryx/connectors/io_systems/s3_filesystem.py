@@ -696,9 +696,22 @@ class OpteryxS3FileSystem:
 
         return f"{scheme}://{host}{canonical_uri}?{canonical_query}&X-Amz-Signature={signature}"
 
-    def _object_url(self, path: str, expiry_seconds: int = _DEFAULT_EXPIRY_SECONDS) -> str:
+    def _object_url(
+        self,
+        path: str,
+        expiry_seconds: int = _DEFAULT_EXPIRY_SECONDS,
+        method: str = "GET",
+    ) -> str:
+        """A presigned URL for one object, bound to the verb it will be used with.
+
+        SigV4 signs the METHOD as the first line of the canonical request, so a
+        URL signed for GET does not authenticate a HEAD of the same object - S3
+        rejects it with SignatureDoesNotMatch. `method` is therefore not
+        optional decoration: every caller must pass the verb it is about to
+        issue.
+        """
         bucket, key = split_path(path)
-        return self.presign(bucket, key, expiry_seconds=expiry_seconds)
+        return self.presign(bucket, key, method=method, expiry_seconds=expiry_seconds)
 
     # ── Native scan-path contract ───────────────────────────────────────────
 
@@ -794,15 +807,30 @@ class OpteryxS3FileSystem:
 
     def get_file_info(self, paths: Union[str, List[str]]):
         """Get info about S3 objects via HEAD requests."""
+        # Imported here rather than at module scope for the same reason the
+        # client itself is: the extension import has a diagnostic wrapper in
+        # __init__, and by the time any method runs it has already succeeded.
+        from opteryx.compiled.http_client import HttpStatusError
+
         single_path = isinstance(paths, str)
         if single_path:
             paths = [paths]
 
         # Fast path: avoid batch overhead for the common single-path case.
+        #
+        # Only a 404 means "not found". Every other failure - a bad signature, a
+        # wrong-region redirect, a refused credential - is reported, not folded
+        # into NotFound: an object that exists being reported absent is a lie
+        # the caller cannot see through, and it is what a GET-signed HEAD used
+        # to produce for every single object.
         if len(paths) == 1:
             try:
-                headers = self.http_client.head(self._object_url(paths[0]))
-            except RuntimeError:
+                headers = self.http_client.head(self._object_url(paths[0], method="HEAD"))
+            except HttpStatusError as err:
+                if err.status != 404:
+                    raise DatasetReadError(
+                        f"Unable to stat {md_code(paths[0])}. {md_cause(err)}"
+                    ) from err
                 info = FileInfo(path=paths[0], type=FileType.NotFound)
                 return info if single_path else [info]
             size = int(headers.get("content-length", 0))
@@ -812,7 +840,7 @@ class OpteryxS3FileSystem:
         # Fan out all HEAD requests in ONE native libcurl batch (a single C++
         # CURLM event loop, one GIL release for the whole call) rather than a
         # Python thread pool, matching the GCS filesystem.
-        requests = [(self._object_url(path), {}) for path in paths]
+        requests = [(self._object_url(path, method="HEAD"), {}) for path in paths]
         headers_list = self.http_client.head_many(requests)
         return [
             FileInfo(path=path, type=FileType.File, size=int(headers.get("content-length", 0)))

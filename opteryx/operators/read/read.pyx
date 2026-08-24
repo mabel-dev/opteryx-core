@@ -250,11 +250,11 @@ cdef class ReaderNode(BasePlanNode):
             self.telemetry.time_reading_blobs += time.monotonic_ns() - start_clock
             self.telemetry.blobs_read += 1
             self.telemetry.rows_read += result_morsel.num_rows
-            # Query-wide (billing) and per-node (sensors/mermaid) counters are
-            # distinct: the shared telemetry sums every scan in the query, this
-            # node's readings hold only its own bytes. Same split as
-            # function_dataset.pyx.
-            self.telemetry.bytes_processed += result_morsel.nbytes
+            # Per-node only (sensors/mermaid, remapped to bytes_in). This is the
+            # morsel's MATERIALIZED in-memory size, not a quantity the billing
+            # meter can use — `bytes_processed` on the shared telemetry is dense
+            # logical bytes measured at plan time (planner/data_processed.py),
+            # and adding this to it mixed two quantities in one number.
             self.readings["bytes_processed"] += result_morsel.nbytes
 
             yield result_morsel

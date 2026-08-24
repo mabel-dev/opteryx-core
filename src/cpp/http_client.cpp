@@ -133,6 +133,17 @@ bool curl_result_retryable(CURLcode c) {
     }
 }
 
+// Only 2xx is success. CURLOPT_FOLLOWLOCATION is set on every handle, so a 3xx
+// that still reaches us is one curl could NOT follow -- S3 answers a request sent
+// to the wrong regional endpoint with exactly that: a 301 carrying no Location
+// header and an XML error document as its body. Accepting `code < 400` handed
+// that document back as if it were object bytes, so a wrong-region scan decoded
+// an error page as Parquet instead of failing. No caller sends a conditional
+// request, so no 3xx is ever legitimate here.
+bool http_status_ok(long code) {
+    return code >= 200 && code < 300;
+}
+
 // HTTP status is retryable for 5xx (server-side transient) and 429 (rate limit);
 // 4xx (except 429) is a hard client error — never retried.
 bool http_status_retryable(long code) {
@@ -410,7 +421,7 @@ std::vector<uint8_t> HttpClient::get(
         curl_easy_getinfo(easy, CURLINFO_OS_ERRNO, &os_errno);
         curl_easy_cleanup(easy);
 
-        bool http_ok = curl_ok && http_code < 400;
+        bool http_ok = curl_ok && http_status_ok(http_code);
         if (http_ok) return std::move(buf.body);
 
         bool retryable = curl_ok ? http_status_retryable(http_code)
@@ -470,13 +481,19 @@ std::map<std::string, std::string> HttpClient::head(
     curl_slist_free_all(hlist);
     curl_easy_cleanup(easy);
 
+    // HttpError, not a bare runtime_error, so the status survives the trip to
+    // Python: callers such as the S3 filesystem's get_file_info must tell a 404
+    // (the object really is absent) from a signature or redirect failure (the
+    // object's existence is unknown), and the message text is not a contract.
     if (res != CURLE_OK) {
-        throw std::runtime_error(
-            std::string("CURL error: ") + curl_easy_strerror(res));
+        throw HttpError(
+            std::string("CURL error: ") + curl_easy_strerror(res),
+            curl_result_retryable(res), 0);
     }
-    if (http_code >= 400) {
-        throw std::runtime_error(
-            std::string("HTTP ") + std::to_string(http_code) + ": " + url);
+    if (!http_status_ok(http_code)) {
+        throw HttpError(
+            std::string("HTTP ") + std::to_string(http_code) + ": " + url,
+            http_status_retryable(http_code), http_code);
     }
 
     return parse_headers(buf.headers_raw);
@@ -632,7 +649,7 @@ std::vector<std::vector<uint8_t>> HttpClient::get_many(
         std::vector<size_t> retry_next;
         for (size_t i : pending) {
             bool curl_ok = (ctx[i].res == CURLE_OK);
-            bool http_ok = curl_ok && ctx[i].http_code < 400;
+            bool http_ok = curl_ok && http_status_ok(ctx[i].http_code);
             if (http_ok) continue;
 
             bool retryable = curl_ok ? http_status_retryable(ctx[i].http_code)
@@ -812,7 +829,7 @@ std::vector<std::map<std::string, std::string>> HttpClient::head_many(
         std::vector<size_t> retry_next;
         for (size_t i : pending) {
             bool curl_ok = (ctx[i].res == CURLE_OK);
-            bool http_ok = curl_ok && ctx[i].http_code < 400;
+            bool http_ok = curl_ok && http_status_ok(ctx[i].http_code);
             if (http_ok) continue;
 
             bool retryable = curl_ok ? http_status_retryable(ctx[i].http_code)

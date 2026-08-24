@@ -15,6 +15,7 @@ from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, Logica
 from opteryx.utils import random_string
 
 from .optimization_strategy import OptimizationStrategy, OptimizerContext, filter_referenced_columns
+from .predicate_rewriter import rewrite_anded_not_like_to_all
 
 
 def _inner_split(node):
@@ -63,6 +64,19 @@ class SplitConjunctivePredicatesStrategy(OptimizationStrategy):
         """
         if node.node_type == LogicalPlanStepType.Filter:
             split_predicates = _inner_split(node.condition)
+            # Fuse same-operand NOT LIKE conjuncts into one negated LIKE ANY before
+            # the split hands each conjunct its own Filter node. THIS CALL SITE IS
+            # LOAD-BEARING, not a convenience: it is the last point in the pipeline
+            # where both halves of what the fusion needs still hold — the conjuncts
+            # are still one list (after the split they are separate plan nodes that
+            # PredicateRewriteStrategy visits one at a time, so it can never see two
+            # terms together), and LIKE is still spelled LIKE (PredicateRewrite
+            # lowers anchored patterns to _STARTS_WITH/_ENDS_WITH and unanchored
+            # ones to InStr, after which the pattern set can only be re-derived, not
+            # read). Fusing before pushdown costs nothing: every fused term names
+            # the same single operand the separate terms did, so the fused node
+            # pushes exactly where they would have.
+            split_predicates = rewrite_anded_not_like_to_all(split_predicates, self.telemetry)
             if len(split_predicates) > 1:
                 self.telemetry.optimization_split_conjunctions += len(split_predicates) - 1
             new_nodes = []

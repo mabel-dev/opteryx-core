@@ -127,6 +127,38 @@ SELECT f.client, l.tag
 """.format(flows=FLOWS, lookups=LOOKUPS)
 
 
+# The SAME band, with the two legs behind a CTE boundary, over NAMED relations.
+# This spelling used to DECLINE absorption and leave the Filter above the join: a
+# relation crossing a CTE boundary is known by SEVERAL names -- the user's alias AND
+# the `$view-XXXX` the planner mints -- and the gate demanded the predicate name
+# EXACTLY the two names the join names. Both sides were the same FOUR-name set, so
+# only the `len(...) != 2` half rejected it.
+#
+# ⛔ The legs MUST be named relations. A CTE over inline `VALUES` mints no `$view-`
+# alias, so the relations stay two and the old gate admitted it -- a CTE-over-VALUES
+# fixture passes with or without the fix and pins NOTHING.
+CTE_BAND = """
+WITH cf AS (SELECT client, flow_start FROM testdata.band_join.flows),
+     cl AS (SELECT client, event_time, tag FROM testdata.band_join.lookups)
+SELECT f.client, l.tag
+  FROM cf AS f INNER JOIN cl AS l ON f.client = l.client
+ WHERE l.event_time <= f.flow_start
+   AND l.event_time > f.flow_start - INTERVAL '20' SECOND
+ ORDER BY f.client, l.tag
+"""
+
+# The same query with the legs named directly -- the spelling that always absorbed.
+# The two must agree, and they are the SAME question.
+DIRECT_BAND = """
+SELECT f.client, l.tag
+  FROM testdata.band_join.flows AS f
+  INNER JOIN testdata.band_join.lookups AS l ON f.client = l.client
+ WHERE l.event_time <= f.flow_start
+   AND l.event_time > f.flow_start - INTERVAL '20' SECOND
+ ORDER BY f.client, l.tag
+"""
+
+
 def rows(sql):
     """Every row, in order, as tuples — row-for-row comparison, not a count."""
     session = opteryx.session()
@@ -148,14 +180,26 @@ def explain(sql):
 
 @pytest.fixture
 def unoptimized():
-    """Run a query with PredicatePushdownStrategy switched off — the plan where the
-    band genuinely is a Filter above the join. This is the oracle."""
-    original = config.features.disable_predicate_pushdown
-    config.features.disable_predicate_pushdown = True
-    try:
-        yield rows
-    finally:
-        config.features.disable_predicate_pushdown = original
+    """Run ONE query with PredicatePushdownStrategy switched off — the plan where the
+    band genuinely is a Filter above the join. This is the oracle.
+
+    ⛔ The flag is scoped to the CALL, not to the test. Held for the whole test body
+    (which is what a `yield rows` fixture does) it disables pushdown for the
+    optimised side too, and every `rows(sql) == unoptimized(sql)` in this file
+    becomes `rows(sql) == rows(sql)` — a tautology that passes no matter what the
+    optimisation does. The comparison only means something while exactly one of the
+    two sides is unoptimised.
+    """
+
+    def run(sql):
+        original = config.features.disable_predicate_pushdown
+        config.features.disable_predicate_pushdown = True
+        try:
+            return rows(sql)
+        finally:
+            config.features.disable_predicate_pushdown = original
+
+    return run
 
 
 def test_band_window_edges(unoptimized):
@@ -246,3 +290,49 @@ if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
     run_tests()
+
+
+def test_cte_band_matches_the_unoptimised_plan(unoptimized):
+    # Same question, same answer, whichever side of a CTE boundary the legs sit on.
+    assert rows(CTE_BAND) == unoptimized(CTE_BAND)
+
+
+def test_cte_band_agrees_with_the_direct_spelling(unoptimized):
+    # The two spellings took DIFFERENT plans before the fix -- absorbed for the
+    # direct one, Filter-above-the-join for the CTE one -- and must not have taken
+    # different answers. Both are checked against the unoptimised oracle too, so a
+    # regression breaking both identically cannot pass by agreeing with itself.
+    assert rows(CTE_BAND) == rows(DIRECT_BAND)
+    assert rows(DIRECT_BAND) == unoptimized(DIRECT_BAND)
+
+
+def test_cte_band_window_edges():
+    # Microsecond-precision edges: the `<=` bound at flow_start is CLOSED, so
+    # `hi_exact` is in and `hi_plus1us` is out; the `>` bound 20s earlier is OPEN,
+    # so `lo_exact` is out and `lo_plus1us` is in.
+    tags = [tag for _client, tag in rows(CTE_BAND)]
+    assert "hi_exact" in tags, tags
+    assert "hi_plus1us" not in tags, tags
+    assert "lo_plus1us" in tags, tags
+    assert "lo_exact" not in tags, tags
+    assert "lo_minus1us" not in tags, tags
+    assert "z_no_flow" not in tags, tags
+
+
+def test_the_cte_band_really_is_absorbed_into_the_join():
+    # The assertion that pins the fix: before it, this plan carried a Filter above
+    # an `Inner Join Draken` and no absorption counter at all.
+    #
+    # ⛔ NOT "no Filter anywhere". Over named relations CorrelatedFiltersStrategy
+    # transports a one-sided range down onto the lookups SCAN, so a Filter survives
+    # and SHOULD -- it reads `event_time <= TIMESTAMP '...'`, a single-relation
+    # bound. What must be gone is a filter naming BOTH legs, which is the band
+    # itself sitting above the join.
+    plan = explain(CTE_BAND)
+    cross_relation_filters = [
+        (tree, detail)
+        for tree, detail in plan
+        if "Filter" in tree and "flow_start" in (detail or "")
+    ]
+    assert not cross_relation_filters, plan
+    assert any("theta to inner join" in tree for tree, _ in plan), plan

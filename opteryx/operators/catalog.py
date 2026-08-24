@@ -177,6 +177,7 @@ def _build_registry() -> OperatorRegistry:
     # Local imports to avoid circular dependencies at module load time.
     from opteryx.operators.aggregate import UngroupedAggregateNode
     from opteryx.operators.asof_join import AsofJoinNode
+    from opteryx.operators.band_join import BandJoinNode
     from opteryx.operators.cross_join import CrossJoinNode
     from opteryx.operators.cte_ref import CteRefNode
     from opteryx.operators.csv_read import CsvReadNode
@@ -381,6 +382,13 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         AsofJoinNode,
         name="ASOF Join",
+        category=OperatorCategory.JOIN,
+        is_join=True,
+        is_pipeline_breaking=True,
+    )
+    r.register(
+        BandJoinNode,
+        name="Band Join",
         category=OperatorCategory.JOIN,
         is_join=True,
         is_pipeline_breaking=True,

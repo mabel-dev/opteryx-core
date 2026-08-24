@@ -289,6 +289,44 @@ def hoistable_operand_leg(
     return legs.pop()
 
 
+def band_operand_leg(
+    expression: Node, left_relation_names: List[str], right_relation_names: List[str]
+) -> Optional[str]:
+    """The single join leg `expression` reads from, or None if it is not exactly one.
+
+    The BAND-bound counterpart to `hoistable_operand_leg`, and deliberately not the
+    same function: that one answers "what would I have to PROJECT", so it returns
+    None for a bare IDENTIFIER (nothing to project) and for a LITERAL (names no leg).
+    A band bound asks a different question — "whose rows does this value depend on"
+    — and `l.event_time <= f.flow_start` has a bare identifier as its bound. Reusing
+    `hoistable_operand_leg` here would refuse the motivating shape.
+
+    A constant bound returns None on purpose: `l.event_time <= TIMESTAMP '...'` is a
+    single-relation filter that belongs on the scan, not a band across a join.
+
+    Everything `hoistable_operand_leg` refuses for soundness is refused here too and
+    for the same reasons — an aggregate is not a per-row value, and a volatile
+    function evaluated once per probe row instead of once per pair is a different
+    query.
+    """
+    if expression is None:
+        return None
+    if get_all_nodes_of_type(expression, _UNHOISTABLE_NODE_TYPES):
+        return None
+    if has_volatile_function(expression):
+        return None
+    identifiers = get_all_nodes_of_type(expression, (NodeType.IDENTIFIER,))
+    if not identifiers:
+        return None
+    legs = {
+        _identifier_leg(identifier, left_relation_names, right_relation_names)
+        for identifier in identifiers
+    }
+    if len(legs) != 1:
+        return None
+    return legs.pop()
+
+
 def plan_join_key_hoists(
     conjunct: Node, left_relation_names: List[str], right_relation_names: List[str]
 ) -> Optional[List[Tuple[Node, str]]]:

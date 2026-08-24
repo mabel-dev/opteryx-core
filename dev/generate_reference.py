@@ -26,6 +26,7 @@ if str(_repo_root) not in sys.path:
 def main() -> None:
     from reference.aggregate_catalog import write_aggregate_catalog
     from reference.clauses_catalog import write_clauses_catalog
+    from reference.expression_catalog import write_expression_catalog
     from reference.joins_catalog import write_joins_catalog
     from reference.operator_catalog import write_operator_catalog
     from reference.signatures import write_function_signatures
@@ -39,6 +40,7 @@ def main() -> None:
     write_function_signatures(ref / "function_signatures.json")
     write_aggregate_catalog(ref / "aggregates.json")
     write_clauses_catalog(ref / "clauses.json")
+    write_expression_catalog(ref / "expressions.json")
     write_joins_catalog(ref / "joins.json")
     write_operator_catalog(ref / "operators.json")
     write_type_catalog(ref / "types.json")

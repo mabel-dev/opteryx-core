@@ -31,34 +31,34 @@ query shape 34 2
 SELECT name, missions FROM testdata.astronauts WHERE missions ILIKE ANY ('%Apoll%', 'mission')
 
 query shape 334 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY '%apoll%'
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ALL ('%apoll%')
 
 query shape 300 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ANY '%apoll%'
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ALL ('%apoll%')
 
 query shape 334 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ('%apoll%')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ALL ('%apoll%')
 
 query shape 300 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ANY ('%apoll%')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ALL ('%apoll%')
 
 query shape 300 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ('%Apoll%')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ALL ('%Apoll%')
 
 query shape 300 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ANY ('%Apoll%')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ALL ('%Apoll%')
 
 query shape 300 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ('%Apoll%', 'mission')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ALL ('%Apoll%', 'mission')
 
 query shape 300 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ANY ('%Apoll%', 'mission')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT ILIKE ALL ('%Apoll%', 'mission')
 
 query shape 37 2
 SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ('Apoll%', 'Gemini%', 'Mercury%')
 
 query shape 297 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ('Apoll%', 'Gemini%', 'Mercury%')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ALL ('Apoll%', 'Gemini%', 'Mercury%')
 
 statement error QueryParseError
 SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ()
@@ -70,7 +70,7 @@ query shape 34 2
 SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ('%Apoll%', null)
 
 query shape 0
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ('%Apoll%', null)
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ALL ('%Apoll%', null)
 
 query shape 0
 SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ('%aPoll%')
@@ -82,7 +82,7 @@ query shape 3 2
 SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ('Apollo 11')
 
 query shape 331 2
-SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ANY ('Apollo 11')
+SELECT name, missions FROM testdata.astronauts WHERE missions NOT LIKE ALL ('Apollo 11')
 
 query shape 34 2
 SELECT name, missions FROM testdata.astronauts WHERE missions LIKE ANY ('Apollo_%')
@@ -121,34 +121,34 @@ query shape 1 2
 SELECT name, missions FROM testdata.astronauts WHERE name ILIKE ANY ('%Armstrong%', 'mission')
 
 query shape 357 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY '%armstrong%'
+SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ALL ('%armstrong%')
 
 query shape 356 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ANY '%armstrong%'
+SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ALL ('%armstrong%')
 
 query shape 357 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ('%armstrong%')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ALL ('%armstrong%')
 
 query shape 356 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ANY ('%armstrong%')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ALL ('%armstrong%')
 
 query shape 356 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ('%Armstrong%')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ALL ('%Armstrong%')
 
 query shape 356 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ANY ('%Armstrong%')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ALL ('%Armstrong%')
 
 query shape 356 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ('%Armstrong%', 'mission')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ALL ('%Armstrong%', 'mission')
 
 query shape 356 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ANY ('%Armstrong%', 'mission')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT ILIKE ALL ('%Armstrong%', 'mission')
 
 query shape 4 2
 SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ('%Armstrong%', '%Aldrin%', '%Collins%')
 
 query shape 353 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ('%Armstrong%', '%Aldrin%', '%Collins%')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ALL ('%Armstrong%', '%Aldrin%', '%Collins%')
 
 statement error QueryParseError
 SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ()
@@ -160,7 +160,7 @@ query shape 1 2
 SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ('%Armstrong%', null)
 
 query shape 0
-SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ('%Armstrong%', null)
+SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ALL ('%Armstrong%', null)
 
 query shape 0
 SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ('%aRmstrong%')
@@ -172,7 +172,7 @@ query shape 1 2
 SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ('Neil A. Armstrong')
 
 query shape 356 2
-SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ANY ('Neil A. Armstrong')
+SELECT name, missions FROM testdata.astronauts WHERE name NOT LIKE ALL ('Neil A. Armstrong')
 
 query shape 1 2
 SELECT name, missions FROM testdata.astronauts WHERE name LIKE ANY ('%__Armstrong%')

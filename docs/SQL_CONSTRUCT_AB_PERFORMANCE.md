@@ -1,6 +1,10 @@
 # A/B Performance: Recently-Fixed SQL Constructs vs Their Workarounds
 
 **Status:** findings only — no fix attempted here.
+**UPDATE 2026-08-24:** items 1 and 2 of [Still open](#still-open) are now CLOSED —
+Pair 6 by the band join, Pair 5's cost half by two fixes to the nested-loop residual
+path. See [BAND_JOIN_PROPOSAL.md](BAND_JOIN_PROPOSAL.md) for both. The measurements
+below are left exactly as taken; the closures are marked inline.
 **Measured:** 2026-08-22, against **local `main`** (opteryx-core 0.9.78, in-process,
 catalog-backed `home.*` datasets over GCS).
 **Supersedes:** the 2026-08-22 revision measured against deployed `jobs.opteryx.app`.
@@ -17,7 +21,7 @@ and is now measured, not proposed.
 | 3 | Subscript in `WHERE` vs outer subquery | 1.92s | 1.83s | neutral (~5%, noise) | fix 18% slower |
 | 4 | `EXISTS` in `SELECT` vs bucketed semi-join | 8.26s | **7.17s** | fix 1.15x slower | fix 6.8x slower |
 | 5 | `CAST` in `ON` vs cast hoisted to CTE | 98.4s | **70.6s** | fix 1.39x slower | 1.3x slower |
-| 6 | As-of join unbucketed vs hand-bucketed | 70.6s -> **18.3s** | 8.2s -> **5.9s** | 8.6x -> **3.1x** (see note) | 58x |
+| 6 | As-of join unbucketed vs hand-bucketed | 70.6s -> **18.3s** | 8.2s -> **5.9s** | 8.6x -> **3.1x** -> ✅ **CLOSED** | 58x |
 
 Three of the six moved:
 
@@ -174,6 +178,13 @@ partitioning on the join key, or a sort-merge over the time dimension — so the
 20-second window bounds the probe instead of filtering its output. That is
 execution work, not optimizer-rule work.
 
+✅ **DELIVERED 2026-08-23**, and by neither of the two routes guessed at above: the
+build side is kept sorted by the band column WITHIN each existing equi partition, so
+a probe row bounds its window with two binary searches and emits the contiguous slice
+between them. No interval partitioning, no global sort, no new build sink — it reuses
+the ASOF machinery, which is the same bisect with one bound instead of two. 418x on a
+local fixture of this shape. See [BAND_JOIN_PROPOSAL.md](BAND_JOIN_PROPOSAL.md).
+
 Both arms were verified to return the same result (one row differs by 256 in a
 count, from data ingested during the 62 seconds between runs), so the bucketing
 rewrite is a valid oracle for any future fix.
@@ -203,6 +214,15 @@ on this data — and **the absorbed plan is the slower of the two.** Two things 
 2. Absorption is being applied without costing it. Turning a hash join into a
    nested loop is not unconditionally a win, and here it is a 1.39x loss.
 
+✅ **RESOLVED 2026-08-24, and (2) above was the wrong framing.** Absorption did not
+need costing — it needed the overhead removing. `nested_loop` and `inner` compile to
+the SAME build/probe (both `JoinMode::Inner`); absorption only moves the filter
+inside the join, so it can never be an algorithmic trade-off, only overhead. The
+overhead was the residual re-checking the KEYED equality per emitted pair, plus a
+residual disabling payload pruning outright. Both fixed; the arms are now at parity
+(159.3s vs 158.1s at 6.1bn pairs). (1) was a CTE alias-soup gate and is also fixed —
+🔴 except for the subquery spelling.
+
 Also note the join's `est_rows` is **3** against 2.56 billion actual. Whatever
 decides between hash and nested loop is deciding on an estimate that is off by nine
 orders of magnitude.
@@ -223,16 +243,39 @@ All still pass on local `main`:
 
 ## Still open
 
-1. **As-of / band join execution strategy** (Pair 6) — 8.6x, and the only large
-   gap left. Needs interval partitioning or sort-merge, not predicate transport.
-   Do not re-attempt the range-pushdown route; it is implemented and measured not
-   to help this shape.
-2. **Theta-absorption inconsistency and cost** (Pair 5) — fires on one spelling,
-   declines on another, and when it fires here it is 1.39x slower. Two separate
-   questions: why the CTE spelling declines, and whether absorption should be
-   costed rather than unconditional.
-3. **Join cardinality estimate of 3 vs 2.56 billion actual** — plausibly upstream
-   of (1) and (2), since it is what any cost-based choice would be reading.
+1. ✅ **CLOSED 2026-08-23 — as-of / band join execution strategy** (Pair 6). Shipped
+   as its own join type: the build side is kept sorted by the band column within each
+   equi group and a probe row emits the contiguous run between two bisects, so the
+   discarded pairs are never formed. On a local fixture of this exact shape (1.28M x
+   272k over 57 clients, ~6.1bn pairs), identical answer digests:
+   **hash + `Filter` 154.0s, absorbed nested loop 159.3s, band join 0.375s — 418x.**
+   The adversarial wide band this was expected to lose on does NOT exist: at a band
+   spanning twice the data's range, where both arms emit the same 26,194,532 rows,
+   the band is still 3.7x faster, because it replaces per-pair predicate evaluation
+   with per-probe-row bisection. See [BAND_JOIN_PROPOSAL.md](BAND_JOIN_PROPOSAL.md).
+2. ✅ **MOSTLY CLOSED 2026-08-24 — theta-absorption inconsistency and cost** (Pair 5).
+   Both halves answered, one of them completely.
+
+   *Why the CTE spelling declined:* a relation crossing a CTE boundary is known by
+   SEVERAL names — the user's alias AND the `$view-XXXX` the planner mints — and the
+   INNER arm's gate demanded the predicate name EXACTLY the two names the join names.
+   Both sides were the same four-name set, so only the `len(...) != 2` half rejected
+   it. Fixed by adopting the gate the CROSS arm already used. 🔴 The SUBQUERY spelling
+   still declines and needs column availability as ground truth, not a looser set test.
+
+   *Whether absorption should be costed:* **no, and the question dissolved.**
+   `nested_loop` and `inner` are the SAME build/probe (both `JoinMode::Inner`);
+   `nested_loop` only moves the filter inside, so a gap between them is overhead, never
+   an algorithmic trade-off. It was two costs, both VARCHAR-shaped — the residual
+   re-checked the KEYED equality on every emitted pair, and any residual disabled
+   payload pruning outright so the pair gather carried every column of both legs.
+   Single-variable at 6.1bn pairs: **301.7s neither fix -> 213.3s residual strip ->
+   159.3s both**, against 158.1s for hash + `Filter`. Absorption is now at parity.
+3. 🔴 **Join cardinality estimate of 3 vs 2.56 billion actual** — still open, but no
+   longer blocking (1) or (2): the band join is unconditional for its shape by ruling,
+   and absorption turned out to need no cost decision at all. It remains ~180x low on
+   frequency skew and still needs per-value frequency information (an MCV list or a
+   join histogram), not a different combination rule.
 4. **IPV4 `<<=` 1.7x slower than a VARCHAR cast on live data only** (Pair 2). The
    predicate does reach the scan — confirmed locally, along with 10x IO pruning
    when the layout allows and parity when it does not. Needs one deployed-side
@@ -254,9 +297,12 @@ All still pass on local `main`:
 
 ## Suggested priority
 
-1. **Pair 6** — as-of join execution. The only remaining large gap.
-2. **Pair 5 / estimate** — items 2 and 3, which are entangled. Cheap to
-   investigate, and item 3 may be the root of both.
+*(Rewritten 2026-08-24: the top two are done.)*
+
+1. ~~**Pair 6** — as-of join execution.~~ ✅ Delivered, 418x.
+2. ~~**Pair 5**~~ ✅ Cost half closed, spelling half closed for CTEs. 🔴 The subquery
+   spelling still declines absorption, and item 3's estimate is still 180x low —
+   entangled with nothing now, so either can be picked up alone.
 3. **Pair 2** — IPV4 predicate. Blocked on one deployed-side measurement; the
    local fixtures have taken it as far as they can.
 4. Items 5 and 6 — small, self-contained, clear repros.

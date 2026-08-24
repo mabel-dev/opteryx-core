@@ -687,10 +687,10 @@ def binary_op(branch, alias: Optional[List[str]] = None, key=None):
         symbol = operator["Custom"]
         operator = get_operator_for_sql_symbol(symbol) or symbol
 
-    if operator in ("PGRegexMatch", "SimilarTo"):
-        operator = "RLike"
-    if operator in ("PGRegexNotMatch", "NotSimilarTo"):
-        operator = "NotRLike"
+    if operator in ("SimilarTo", "NotSimilarTo"):
+        raise UnsupportedSyntaxError(_SIMILAR_TO_REFUSAL)
+    if operator in ("PGRegexMatch", "PGRegexNotMatch"):
+        raise UnsupportedSyntaxError(_PG_REGEX_REFUSAL)
 
     operator_type = get_operator_node_type(operator)
     if operator_type is None:
@@ -2652,20 +2652,115 @@ def nested(branch, alias: Optional[List[str]] = None, key=None):
     )
 
 
+# SQL-standard `SIMILAR TO` is its own pattern language: `%` and `_` are the
+# wildcards (as in LIKE), `.` is a LITERAL dot, and the metacharacters it does have
+# (`|`, `*`, `+`, `()`, `[]`) mean something narrower than in POSIX. Opteryx used to
+# accept the spelling and then apply POSIX regex to the pattern, which agrees with
+# the standard only for patterns that happen to read the same in both languages —
+# `name SIMILAR TO '^C.'` matched C-initial names here and would match nothing
+# under the standard. That is a silent wrong answer dressed as a supported feature,
+# so the spelling is refused outright rather than quietly re-interpreted.
+# `~` and `!~` were undocumented alternate spellings of RLIKE / NOT RLIKE — same
+# lowering, same kernel, no entry in the published operator catalog. One regular
+# expression operator is enough; two spellings for one behaviour is a second
+# vocabulary to keep in step, and `~` also reads as the unary bitwise-NOT operator
+# (a genuinely different, still-supported node).
+_PG_REGEX_REFUSAL = (
+    "The **~** and **!~** operators are not supported. Use `RLIKE` and `NOT RLIKE` "
+    "for regular expression matching."
+)
+
+_SIMILAR_TO_REFUSAL = (
+    "**SIMILAR TO** is not supported. It is a distinct SQL pattern language, not a "
+    "spelling of regular expressions, and Opteryx has no implementation of it. "
+    "For regular expressions use `RLIKE`; for SQL wildcard matching use `LIKE`."
+)
+
+
+def _all_quantifier_patterns(pattern_branch):
+    """Recover the pattern list from `LIKE ALL (...)`, or None if this is not one.
+
+    The vendored parser models the LIKE quantifier with a single `any: bool` and
+    has no `all` flag, so `x LIKE ALL ('a%','b%')` does not arrive as a quantified
+    node at all: it parses as an UNQUANTIFIED `Like` whose *pattern* is a function
+    call named ALL. The shape is fully recoverable, which is why this is handled
+    here rather than by patching the parser — but it means the ALL spelling is
+    recognised by pattern shape, so the match is kept deliberately narrow. Anything
+    that is not exactly a bare `ALL(<expr>, ...)` call falls through unchanged and
+    still fails as an unknown function, rather than being quietly reinterpreted.
+    """
+    if not isinstance(pattern_branch, dict):
+        return None
+    function = pattern_branch.get("Function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    if not isinstance(name, list) or len(name) != 1:
+        return None
+    identifier = name[0].get("Identifier") if isinstance(name[0], dict) else None
+    if not isinstance(identifier, dict) or identifier.get("value", "").upper() != "ALL":
+        return None
+    # A quantifier is a plain argument list: no DISTINCT, no window, no ORDER BY.
+    if function.get("over") is not None or function.get("filter") is not None:
+        return None
+    args = function.get("args")
+    if not isinstance(args, dict) or "List" not in args:
+        return None
+    arg_list = args["List"]
+    if arg_list.get("duplicate_treatment") is not None:
+        return None
+    entries = arg_list.get("args")
+    if not isinstance(entries, list) or not entries:
+        return None
+    patterns = []
+    for entry in entries:
+        unnamed = entry.get("Unnamed") if isinstance(entry, dict) else None
+        if not isinstance(unnamed, dict) or "Expr" not in unnamed:
+            return None
+        patterns.append(unnamed["Expr"])
+    return patterns
+
+
 def pattern_match(branch, alias: Optional[List[str]] = None, key=None):
     negated = branch["negated"]
     left = build(branch["expr"])
-    right = build(branch["pattern"])
     is_any = branch.get("any", False)
-    if key in ("PGRegexMatch", "SimilarTo"):
-        key = "RLike"
+    pattern_branch = branch["pattern"]
+    is_all = False
+    if not is_any and key in ("Like", "ILike"):
+        all_patterns = _all_quantifier_patterns(pattern_branch)
+        if all_patterns is not None:
+            is_all = True
+            # Re-present the recovered arguments as the Tuple the ANY spelling
+            # produces, so both quantifiers share one operand-shaping path below
+            # and cannot drift in how they build the pattern array.
+            pattern_branch = {"Tuple": all_patterns}
+    right = build(pattern_branch)
+    if key == "SimilarTo":
+        raise UnsupportedSyntaxError(_SIMILAR_TO_REFUSAL)
+    if is_any and negated and key in ("Like", "ILike"):
+        # `x NOT LIKE ANY (a, b)` decomposes to `(NOT x LIKE a) OR (NOT x LIKE b)`,
+        # which is `NOT(a AND b)` — true for every subject unless EVERY pattern
+        # matches. That is almost never what is meant, and the engine used to
+        # answer the ALL reading instead: a silent wrong answer. Rather than pick
+        # a reading for the user, refuse the ambiguous spelling and name both
+        # unambiguous ones.
+        _spelling = "ILIKE" if key == "ILike" else "LIKE"
+        raise UnsupportedSyntaxError(
+            f"**NOT {_spelling} ANY** is not supported because its meaning is ambiguous. "
+            f"For rows matching NONE of the patterns write `NOT {_spelling} ALL (patterns)`. "
+            f"For the literal reading — rows where the patterns do not ALL match — write "
+            f"`NOT ({_spelling} ALL (patterns))`."
+        )
     if negated:
         key = f"Not{key}"
-    if is_any:
-        key = f"AnyOp{key}"
+    if is_any or is_all:
+        key = f"{'AnyOp' if is_any else 'AllOp'}{key}"
         if right.node_type == NodeType.IDENTIFIER:
+            _quantifier = "ANY" if is_any else "ALL"
             raise UnsupportedSyntaxError(
-                "**LIKE** ANY syntax incorrect, `column LIKE ANY (patterns)` expected. The patterns go in brackets, for example `name LIKE ANY ('a%', 'b%')`."
+                f"**LIKE** {_quantifier} syntax incorrect, `column LIKE {_quantifier} (patterns)` expected. "
+                f"The patterns go in brackets, for example `name LIKE {_quantifier} ('a%', 'b%')`."
             )
         if right.node_type == NodeType.NESTED:
             right = right.centre
@@ -2962,7 +3057,7 @@ BUILDERS = {
     "QualifiedWildcard": qualified_wildcard,
     "RLike": pattern_match,
     "SingleQuotedString": literal_string,
-    "SimilarTo": pattern_match,
+    "SimilarTo": pattern_match,  # refused there — see _SIMILAR_TO_REFUSAL
     "Subquery": scalar_subquery,
     "Substring": substring,
     "Tuple": tuple_literal,

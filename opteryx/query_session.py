@@ -232,11 +232,17 @@ class Session(DataFrame):
     def _emit_processed_bytes_billing(self, operation: str) -> None:
         """Emit the DATA_PROCESSED_BYTES billing event.
 
-        Must be called *after* execution has completed and the results have
-        been fully consumed: ``bytes_processed`` is accumulated by the scan
-        operators as morsels flow, so it is only complete once the result
-        stream has been drained. Emitting earlier (e.g. right after the lazy
-        ``execute()`` call returns) always reports zero bytes.
+        Emitted once execution has been SUBMITTED, not once it has finished.
+        ``bytes_processed`` is a plan-time figure — the dense logical bytes the
+        final plan will read, measured in ``plan_query`` (see
+        planner/data_processed.py) — so it is complete the moment planning is,
+        and waiting for the result stream to drain would only delay it.
+
+        Two consequences, both intended. A query whose result stream is
+        abandoned mid-flight still bills; the work was committed when the plan
+        was accepted. And this is the same number jobs.opteryx quotes at submit
+        time, which is the point: enforcement and invoicing charge one figure
+        rather than two that differ by the compression ratio.
         """
         write_billing_event(
             billing_event=BillingEventType.DATA_PROCESSED_BYTES,
@@ -699,6 +705,13 @@ class Session(DataFrame):
             return
         result_data, self._result_type = results
 
+        # Billed here, BEFORE the result stream is consumed: the meter is a
+        # plan-time figure and `_execute_statements` has planned every statement
+        # in the batch by now (execute() is lazy, so nothing has been drained).
+        # This is the only DATA_PROCESSED_BYTES emit — one event per execute()
+        # call, whatever shape the result takes below.
+        self._emit_processed_bytes_billing(operation)
+
         # Handle non-tabular results (DDL statements)
         if self._result_type == ResultType.NON_TABULAR:
             from opteryx.models import NonTabularResult
@@ -708,7 +721,6 @@ class Session(DataFrame):
             self._executed = True
             elapsed = time.time_ns() - start
             self._telemetry.time_executing += elapsed - self._telemetry.time_planning
-            self._emit_processed_bytes_billing(operation)
             return
 
         # Runtime backstop for `sql_select_limit`. The plan-time guard only fires when
@@ -805,7 +817,6 @@ class Session(DataFrame):
         self._executed = True
         elapsed = time.time_ns() - start
         self._telemetry.time_executing += elapsed - self._telemetry.time_planning
-        self._emit_processed_bytes_billing(operation)
 
     @property
     def messages(self) -> List[str]:

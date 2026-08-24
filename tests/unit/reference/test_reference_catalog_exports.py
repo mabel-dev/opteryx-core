@@ -14,7 +14,7 @@ from reference import export_unary_ops_catalog
 
 
 def test_aggregate_catalog_json_matches_export():
-    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/aggregates.json"
+    catalog_path = Path(__file__).resolve().parents[3] / "reference/aggregates.json"
 
     expected = export_aggregate_catalog()
     actual = json.loads(catalog_path.read_text(encoding="utf8"))
@@ -23,7 +23,7 @@ def test_aggregate_catalog_json_matches_export():
 
 
 def test_type_catalog_json_matches_export():
-    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/types.json"
+    catalog_path = Path(__file__).resolve().parents[3] / "reference/types.json"
 
     expected = export_type_catalog()
     actual = json.loads(catalog_path.read_text(encoding="utf8"))
@@ -32,7 +32,7 @@ def test_type_catalog_json_matches_export():
 
 
 def test_operator_catalog_json_matches_export():
-    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/operators.json"
+    catalog_path = Path(__file__).resolve().parents[3] / "reference/operators.json"
 
     expected = export_operator_catalog()
     actual = json.loads(catalog_path.read_text(encoding="utf8"))
@@ -41,7 +41,7 @@ def test_operator_catalog_json_matches_export():
 
 
 def test_unary_ops_catalog_json_matches_export():
-    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/unary_ops.json"
+    catalog_path = Path(__file__).resolve().parents[3] / "reference/unary_ops.json"
 
     expected = export_unary_ops_catalog()
     actual = json.loads(catalog_path.read_text(encoding="utf8"))
@@ -50,7 +50,7 @@ def test_unary_ops_catalog_json_matches_export():
 
 
 def test_joins_catalog_json_matches_export():
-    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/joins.json"
+    catalog_path = Path(__file__).resolve().parents[3] / "reference/joins.json"
 
     expected = export_joins_catalog()
     actual = json.loads(catalog_path.read_text(encoding="utf8"))
@@ -59,7 +59,7 @@ def test_joins_catalog_json_matches_export():
 
 
 def test_clauses_catalog_json_matches_export():
-    catalog_path = Path(__file__).resolve().parents[3] / "opteryx/reference/clauses.json"
+    catalog_path = Path(__file__).resolve().parents[3] / "reference/clauses.json"
 
     expected = export_clauses_catalog()
     actual = json.loads(catalog_path.read_text(encoding="utf8"))
@@ -76,32 +76,54 @@ def test_type_catalog_includes_runtime_metadata():
     assert integer_type["family"] == "numeric"
     assert integer_type["flags"]["numeric"] is True
     assert integer_type["flags"]["temporal"] is False
-    assert integer_type["metadata"]["description"] == "Signed 64-bit integer."
+    assert integer_type["metadata"]["description"].startswith("Signed 64-bit integer.")
     assert integer_type["metadata"]["example"] == "42"
     assert integer_type["metadata"]["min"] == -9223372036854775808
     assert integer_type["metadata"]["max"] == 9223372036854775807
-    assert "int64" in integer_type["aliases"]
+    assert "bigint" in integer_type["aliases"]
     assert "int32" in integer_type["ingestion_mappings"]["parquet_physical"]
     assert "int64" in integer_type["ingestion_mappings"]["jsonl"]
 
     decimal_type = catalog["decimal"]
-    assert decimal_type["metadata"]["description"].startswith("Fixed-point decimal number")
-    assert decimal_type["metadata"]["example"] == "123.45"
-    assert decimal_type["parameterized_forms"] == ["DECIMAL(10,2)"]
+    assert decimal_type["metadata"]["description"].startswith(
+        "Exact fixed-point number with declared precision and scale"
+    )
+    assert decimal_type["metadata"]["example"] == "1.23::DECIMAL(10,2)"
+    assert decimal_type["parameterized_forms"] == ["DECIMAL(precision,scale)"]
     assert "decimal(...)" in decimal_type["ingestion_mappings"]["parquet_logical_patterns"]
 
     array_type = catalog["array"]
     assert array_type["family"] == "nested"
     assert array_type["flags"]["collection"] is True
-    assert array_type["metadata"]["description"] == "Array of values of a single type."
-    assert array_type["parameterized_forms"] == ["ARRAY<INTEGER>"]
+    assert array_type["metadata"]["description"].startswith(
+        "An ordered sequence of elements, all of the same type."
+    )
+    assert array_type["parameterized_forms"] == ["ARRAY<type>"]
     assert "array<...>" in array_type["ingestion_mappings"]["jsonl_patterns"]
     assert "integer" in array_type["element_type_aliases"]
 
     vector_type = catalog["vector"]
     assert vector_type["family"] == "vector"
-    assert vector_type["metadata"]["description"] == "Fixed-length numeric vector."
-    assert vector_type["metadata"]["example"] == "[0.1, 0.2, 0.3]"
+    assert vector_type["metadata"]["description"].startswith(
+        "A fixed-length vector of FP16 (half-precision) floating-point values."
+    )
+    assert vector_type["metadata"]["example"] == "[1.0, 0.5, 0.25]::VECTOR(3)"
+
+
+
+def test_every_type_carries_an_example():
+    """A type with no example publishes a page that shows nobody how to write one.
+
+    Four of them (array, null, variant, vector) had drifted into that state
+    unnoticed, because nothing asked. This only checks an example is PRESENT -
+    it does not run them, as `vector`'s cannot be projected in a SELECT list
+    (see its limitations).
+    """
+    catalog = export_type_catalog()
+
+    missing = sorted(name for name, entry in catalog.items() if not entry["metadata"].get("example"))
+
+    assert not missing, f"types with no metadata example: {missing}"
 
 
 def test_operator_catalog_includes_binder_matrix_metadata():
@@ -244,11 +266,19 @@ def test_aggregate_catalog_includes_execution_support():
         "APPROX_PERCENTILE",
         "ARRAY_AGG",
         "AVG",
+        "CIDR_AGG",
+        "CORR",
         "COUNT",
         "COUNT_DISTINCT",
         "MAX",
+        "MEDIAN",
         "MIN",
+        "STDDEV",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
         "SUM",
+        "VAR_POP",
+        "VAR_SAMP",
     }
 
 

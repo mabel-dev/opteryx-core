@@ -1416,7 +1416,14 @@ def inner_binder(
                         raise IncompatibleTypesError(
                             message=f"Cannot construct ARRAY from incompatible types."
                         ) from e
-                # LIKE/ILIKE patterns must all be strings
+                # LIKE/ILIKE patterns must all be strings.
+                # ⛔ AnyOpNotLike / AnyOpNotILike are RETIRED, not live operators:
+                # nothing constructs them any more. `NOT LIKE ANY` is refused in the
+                # planner (its two readings differ, and the engine used to silently
+                # answer the ALL one), and the AND'd-NOT-LIKE fusion now emits the
+                # correctly named AllOpNotLike. They are listed here only so this
+                # guard stays exhaustive over the family; do not read their presence
+                # as evidence the spelling works.
                 if node.value in (
                     "AnyOpLike",
                     "AnyOpNotLike",

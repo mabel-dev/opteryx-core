@@ -1,5 +1,6 @@
-// draken/ops/kernels/function_like_any.cpp — `LIKE ANY` / `ILIKE ANY` (and the
-// NOT variants) as a genuine draken-native kernel. Zero RE2, zero Python.
+// draken/ops/kernels/function_like_any.cpp — quantified LIKE (`LIKE ANY`,
+// `LIKE ALL`, `NOT LIKE ALL`, and their ILIKE forms) as a genuine draken-native
+// kernel. Zero RE2, zero Python.
 //
 // The pattern set is ALWAYS a pre-compiled matcher blob, produced at plan time
 // by opteryx.compiled.vector_ops.compile_like_any (see that module's docstring
@@ -7,7 +8,8 @@
 // walks that blob: literal buckets (exact/prefix/suffix) are memcmp checks, the
 // contains bucket is a single Aho-Corasick pass (states LINEAR in total needle
 // length — no determinisation blow-up, unlike an alternation DFA), and the
-// residual bucket is the shared byte-glob matcher. First bucket that hits wins.
+// residual bucket is the shared byte-glob matcher. Under ANY the first bucket
+// that hits wins; under ALL every bucket must pass and the first miss wins.
 //
 // The blob rides in `ctx` (like draken_in_list's set), copied once at bind time
 // (kernel_alloc_like_any_ctx). ci (ILIKE) and negate (NOT) are carried in the
@@ -19,6 +21,21 @@
 // SQL three-valued ANY: a NULL pattern in the set (has_null) turns a non-match
 // into NULL, not false; NOT flips TRUE<->FALSE and leaves NULL as NULL; a NULL
 // subject row (or NULL array) is NULL.
+//
+// Two quantifiers, and they are NOT each other's negation — read this before
+// touching the flags, because conflating them is exactly the defect this arm
+// was rewritten to kill:
+//
+//   x LIKE ANY (a,b)      = x LIKE a OR  x LIKE b      -> require_all=0 negate=0
+//   x NOT LIKE ALL (a,b)  = NOT(x LIKE a OR x LIKE b)  -> require_all=0 negate=1
+//   x LIKE ALL (a,b)      = x LIKE a AND x LIKE b      -> require_all=1 negate=0
+//
+// `negate` therefore spells NOT-LIKE-*ALL*, never NOT-LIKE-ANY: it flips the
+// ANY verdict, which is the De Morgan dual of the ALL conjunction. The fourth
+// combination (require_all=1 negate=1) is `NOT LIKE ANY`, whose compositional
+// reading is `NOT(a AND b)` — the planner REJECTS that spelling rather than
+// lower it, so the compiler never emits both bits and parse() refuses a blob
+// that sets them together.
 
 #include <cstdint>
 #include <cstring>
@@ -56,6 +73,7 @@ struct Str { const uint8_t* p; uint32_t n; };
 // Parsed view over the compile_like_any blob (no copies — points into the ctx).
 struct Matcher {
     bool ci = false, negate = false, always = false, has_null = false;
+    bool require_all = false;   // flags bit2 — LIKE ALL (conjunction over patterns)
     std::vector<Str> exact, prefix, suffix, glob;
     uint32_t ac_n = 0;
     const uint8_t* accept = nullptr;      // accept bitmap (ac_n bits)
@@ -69,14 +87,26 @@ struct Matcher {
         uint8_t flags = *q++;
         ci = (flags & 1) != 0;
         negate = (flags & 2) != 0;
+        require_all = (flags & 4) != 0;
+        // require_all is a conjunction, so it cannot ride the ANY fast structures:
+        // `always` short-circuits the disjunction to true (meaningless in a
+        // conjunction — compile_like_any drops those patterns instead), and the
+        // Aho-Corasick automaton answers "SOME needle occurs", never "EVERY needle
+        // occurs" (compile_like_any routes contains-needles to the glob bucket
+        // under require_all). Either bit set here means the blob and this kernel
+        // disagree about the format — refuse it rather than answer from a
+        // structure that cannot express the question.
+        if (require_all && negate) return false;
         always = (*q++ != 0);
         has_null = (*q++ != 0);
+        if (require_all && always) return false;
         if (!parse_strs(q, end, exact)) return false;
         if (!parse_strs(q, end, prefix)) return false;
         if (!parse_strs(q, end, suffix)) return false;
         if (!parse_strs(q, end, glob)) return false;
         if (end - q < 4) return false;
         ac_n = la_rd_u32(q);
+        if (require_all && ac_n > 0) return false;   // see the require_all note above
         if (ac_n > 0) {
             size_t abl = (static_cast<size_t>(ac_n) + 7) / 8;
             size_t tbl = static_cast<size_t>(ac_n) * 256 * 4;
@@ -145,14 +175,57 @@ struct Matcher {
             if (draken_glob::like_match(sl, sll, g.p, g.n, false)) return true;
         return false;
     }
+
+    // Raw ALL match: EVERY pattern must match (LIKE ALL). The buckets survive the
+    // conjunction unchanged — "all patterns match" is "all exact match AND all
+    // prefix match AND ..." — so the memcmp fast paths still earn their keep; only
+    // the contains bucket is unusable (see the require_all note in parse), and
+    // compile_like_any has already routed those needles into `glob`.
+    //
+    // Short-circuits on the FIRST non-match, which is the common case: a subject
+    // satisfying every one of N patterns is rare, so this costs ~1 pattern per row
+    // in practice rather than N.
+    bool matches_all(const uint8_t* sl, uint32_t sll) const {
+        for (const Str& e : exact)
+            if (e.n != sll || std::memcmp(sl, e.p, e.n) != 0) return false;
+        for (const Str& p : prefix)
+            if (p.n > sll || std::memcmp(sl, p.p, p.n) != 0) return false;
+        for (const Str& s2 : suffix)
+            if (s2.n > sll || std::memcmp(sl + (sll - s2.n), s2.p, s2.n) != 0) return false;
+        for (const Str& g : glob)
+            if (!draken_glob::like_match(sl, sll, g.p, g.n, false)) return false;
+        // No pattern rejected the subject. With every bucket empty (`LIKE ALL ('%')`,
+        // whose only pattern compile_like_any dropped as unconstraining) this is a
+        // vacuous conjunction, which is TRUE — the same answer `x LIKE '%'` gives.
+        return true;
+    }
+
+    // The quantifier's raw verdict for one subject.
+    inline bool probe(const uint8_t* sl, uint32_t sll) const {
+        return require_all ? matches_all(sl, sll) : matches(sl, sll);
+    }
 };
 
-// Resolve raw hit -> (set output bit?, is row NULL?) under negate + has_null.
+// Resolve raw hit -> (set output bit?, is row NULL?) under the quantifier,
+// negate and has_null. A NULL pattern contributes an UNKNOWN term, so the two
+// quantifiers absorb it on OPPOSITE sides — this is the standard three-valued
+// OR/AND table, not a shared rule with a flag:
+//
+//   ANY (OR):  a hit is TRUE outright (TRUE dominates OR), so only a MISS can be
+//              softened to NULL by an unknown term.
+//   ALL (AND): a miss is FALSE outright (FALSE dominates AND), so only a full
+//              MATCH can be softened to NULL by an unknown term.
 inline void la_resolve(const Matcher& m, bool hit, bool& set_bit, bool& is_null) {
     bool like_true, like_null;
-    if (hit) { like_true = true; like_null = false; }
-    else if (m.has_null) { like_true = false; like_null = true; }
-    else { like_true = false; like_null = false; }
+    if (m.require_all) {
+        if (!hit) { like_true = false; like_null = false; }   // FALSE dominates AND
+        else if (m.has_null) { like_true = false; like_null = true; }
+        else { like_true = true; like_null = false; }
+    } else {
+        if (hit) { like_true = true; like_null = false; }     // TRUE dominates OR
+        else if (m.has_null) { like_true = false; like_null = true; }
+        else { like_true = false; like_null = false; }
+    }
     if (m.negate && !like_null) like_true = !like_true;
     set_bit = like_true && !like_null;
     is_null = like_null;
@@ -249,7 +322,7 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
                 const uint8_t* ed = reinterpret_cast<const uint8_t*>(str_data(es, csa->arena));
                 const uint32_t el = str_length(es);
                 const uint8_t* ef = la_fold(m, child_utf8, ed, el, scratch);
-                if (m.matches(ef, el)) hit = true;
+                if (m.probe(ef, el)) hit = true;
             }
             bool set_bit, is_null;
             la_resolve(m, hit, set_bit, is_null);
@@ -274,7 +347,7 @@ VecResult draken_like_any(void* ctx, const DrakenVector* const* args, uint32_t n
             const uint8_t* vd = reinterpret_cast<const uint8_t*>(str_data(vs, vsa->arena));
             const uint32_t vl = str_length(vs);
             const uint8_t* vf = la_fold(m, subj_utf8, vd, vl, scratch);
-            uhit[j] = m.matches(vf, vl) ? 1 : 0;
+            uhit[j] = m.probe(vf, vl) ? 1 : 0;
         }
         for (uint32_t i = 0; i < n; ++i) {
             if (!la_row_valid(subject, i)) {

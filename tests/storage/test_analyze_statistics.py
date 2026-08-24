@@ -23,6 +23,7 @@ from opteryx.models.manifest_io import read_manifest_char_classes
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.models.manifest_io import read_manifest_histograms
 from opteryx.models.manifest_io import read_manifest_sketches
+from opteryx.types.logical_type import LogicalCategory
 
 DATASET = "testdata.satellites"
 _MANIFEST_GLOB = f"testdata/satellites/{DATASET_MANIFEST_NAME}"
@@ -788,6 +789,141 @@ def test_drop_statistics_for_columns_keeps_sizes():
         assert after[0].uncompressed_size_in_bytes == before[0].uncompressed_size_in_bytes
     finally:
         _clean()
+
+
+def _scalar(sql):
+    """First column of the first row of `sql`."""
+    session = opteryx.session()
+    rows = None
+    for morsel in session.execute_to_morsels(sql):
+        rows = morsel.to_arrow().to_pylist()
+    return rows[0][session.column_names[0]]
+
+
+def test_dense_size_is_the_values_not_the_encoded_pages():
+    """get_total_uncompressed_size reports the parquet footer's
+    total_uncompressed_size — the DECOMPRESSED size of the ENCODED pages, i.e.
+    the dictionary page plus its index values. Billing charges dense-equivalent
+    bytes, which for a low-cardinality column is very much larger. The two
+    numbers are asserted apart in BOTH directions on purpose: a
+    low-cardinality column is dense-LARGER (dictionary encoding pays off), and
+    a fully-distinct one is dense-SMALLER (the footer figure carries offset
+    framing the dense figure excludes). Neither bounds the other, so neither
+    may be quietly substituted for the other."""
+    _clean_nullable()
+    try:
+        _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
+        _, manifest = _astronauts_metadata()
+
+        # gender: 2 distinct values over 357 rows — the case dictionary
+        # encoding is built for, and the case billing under-charged worst.
+        assert manifest.get_total_dense_size("gender") > (
+            10 * manifest.get_total_uncompressed_size("gender")
+        )
+        # name: distinct per row, nothing to dictionary-encode.
+        assert (
+            manifest.get_total_dense_size("name")
+            < manifest.get_total_uncompressed_size("name")
+        )
+    finally:
+        _clean_nullable()
+
+
+def test_dense_size_matches_the_columns_actual_value_bytes():
+    """The string arm is ANALYZE's char_total_bytes, and it must equal what
+    summing the values themselves says — values only, with no per-row offset or
+    validity framing added, and NULL rows contributing nothing."""
+    _clean_nullable()
+    try:
+        _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
+        schema, manifest = _astronauts_metadata()
+
+        string_columns = [
+            c.name
+            for c in schema.columns
+            if c.column_type.category
+            in (LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR, LogicalCategory.VARBINARY)
+        ]
+        assert string_columns, "fixture no longer has string columns to check"
+        for name in string_columns:
+            measured = _scalar(f'SELECT SUM(LENGTH("{name}")) FROM {NULLABLE_DATASET}')
+            assert manifest.get_total_dense_size(name) == measured, name
+    finally:
+        _clean_nullable()
+
+
+def test_dense_size_fixed_width_arm_needs_no_analyze():
+    """Deriving rather than storing buys this: record_count alone answers a
+    fixed-width column, so the fixed-width arm works on a manifest no stats
+    pass has ever touched. Only the string arm needs ANALYZE to have run."""
+    _clean_nullable()
+    try:
+        _, manifest = _astronauts_metadata()
+        rows = manifest.get_record_count()
+        assert rows > 0
+
+        assert manifest.get_total_dense_size("year") == rows * 8  # INT64
+        assert manifest.get_total_dense_size("group") == rows * 8  # FLOAT64
+        assert manifest.get_total_dense_size("birth_date") == rows * 4  # DATE32
+        # No ANALYZE — the string arm has no input, and says so.
+        assert manifest.get_total_dense_size("gender") is None
+    finally:
+        _clean_nullable()
+
+
+def test_dense_size_charges_null_rows_their_fixed_width_slot():
+    """A dense vector allocates a slot whether or not it holds a value, so a
+    mostly-null fixed-width column costs the same as a full one. death_date is
+    ~95% null in this fixture and must still bill every row."""
+    _clean_nullable()
+    try:
+        _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
+        _, manifest = _astronauts_metadata()
+        rows = manifest.get_record_count()
+        assert manifest.estimate_null_fraction("death_date") > 0.5
+        assert manifest.get_total_dense_size("death_date") == rows * 4
+    finally:
+        _clean_nullable()
+
+
+def test_dense_size_is_none_never_zero_for_unmeasured_types():
+    """ARRAY (and BOOL, VARIANT, VECTOR_FP16, NULL) have no dense measure
+    recorded anywhere yet. None means UNKNOWN. A consumer that reads it as zero
+    bills a column nothing because nobody measured it — a silent revenue error,
+    which is why this must never be softened to 0."""
+    _clean_nullable()
+    try:
+        _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
+        schema, manifest = _astronauts_metadata()
+        arrays = [
+            c.name for c in schema.columns if c.column_type.category == LogicalCategory.ARRAY
+        ]
+        assert arrays, "fixture no longer has an ARRAY column to check"
+        for name in arrays:
+            assert manifest.get_total_dense_size(name) is None, name
+            # ... and the footer still answers for it, so the two accessors are
+            # genuinely independent rather than one wrapping the other.
+            assert manifest.get_total_uncompressed_size(name) > 0, name
+    finally:
+        _clean_nullable()
+
+
+def test_dense_size_and_footer_size_both_survive():
+    """The encoded-size accessor is what the PLANNER wants (an I/O and decode
+    cost proxy) and the dense one is what BILLING wants. Two different numbers,
+    both live — this test fails the moment one replaces the other."""
+    _clean_nullable()
+    try:
+        _run(f"ANALYZE TABLE {NULLABLE_DATASET}")
+        _, manifest = _astronauts_metadata()
+        for name in ("gender", "year", "name"):
+            assert manifest.get_total_uncompressed_size(name) is not None, name
+            assert manifest.get_total_dense_size(name) is not None, name
+            assert manifest.get_total_dense_size(name) != manifest.get_total_uncompressed_size(
+                name
+            ), name
+    finally:
+        _clean_nullable()
 
 
 if __name__ == "__main__":  # pragma: no cover

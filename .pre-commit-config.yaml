@@ -5,4 +5,26 @@ repos:
         name: build_counter
         entry: python ./dev/build_counter.py
         language: python
+        # Runs once per commit, not once per file-chunk. Without these,
+        # pre-commit splits the staged files across parallel workers and forks
+        # one build_counter per chunk -- they then race each other on
+        # __version__.py, pyproject.toml and the index.
+        pass_filenames: false
+        require_serial: true
+        stages: [pre-commit]
+      # reference/*.json is generated from the compiled engine (registrars, the
+      # binder's OPERATOR_MAP, the catalog .pyx files) and is COMMITTED, because
+      # docs.opteryx, web.opteryx and agent.opteryx read it off disk. Nothing
+      # else gates its freshness, so regenerate on every commit and let
+      # pre-commit fail the commit if the output moved -- restage and commit
+      # again. `language: system` is required: the generators import the
+      # in-place compiled opteryx, which pre-commit's isolated venv does not
+      # have. Stale .so in, stale catalogs out -- `make c` before committing
+      # engine changes.
+      - id: regenerate-reference
+        name: reference catalogs
+        entry: python3.14 ./dev/generate_reference.py
+        language: system
+        pass_filenames: false
+        always_run: true
         stages: [pre-commit]

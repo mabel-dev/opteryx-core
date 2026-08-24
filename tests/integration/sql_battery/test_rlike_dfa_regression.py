@@ -32,6 +32,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
 from opteryx.exceptions import NotSupportedError
+from opteryx.exceptions import UnsupportedSyntaxError
 
 
 # Subjects deliberately span: empty, ASCII words, digits, punctuation,
@@ -92,14 +93,17 @@ def test_not_rlike_is_complement(pattern):
     assert matched | not_matched == set(SUBJECTS), pattern
 
 
-def test_rlike_tilde_operator_is_rlike():
-    """`~` is a synonym for RLIKE and must take the same DFA path."""
+def test_rlike_tilde_operator_is_refused():
+    """`~` and `!~` USED to be synonyms for RLIKE / NOT RLIKE — same lowering, same
+    DFA path, no entry in the published operator catalog. One spelling per behaviour:
+    the synonyms were withdrawn, so the dialect has exactly one regular expression
+    operator. Unary `~` (bitwise NOT) is a different node and is unaffected."""
     values = ", ".join("('" + s + "')" for s in ["Mercury", "Mars", "Venus"])
-    sql = f"SELECT s FROM (VALUES {values}) AS t(s) WHERE s ~ '^M'"
-    out = []
-    for morsel in opteryx.session().execute_to_morsels(sql):
-        out.extend(morsel.column(b"s").to_pylist())
-    assert set(out) == {"Mercury", "Mars"}
+    for operator in ("~", "!~"):
+        sql = f"SELECT s FROM (VALUES {values}) AS t(s) WHERE s {operator} '^M'"
+        with pytest.raises(UnsupportedSyntaxError) as raised:
+            list(opteryx.session().execute_to_morsels(sql))
+        assert "RLIKE" in str(raised.value), operator
 
 
 def test_rlike_over_real_column():

@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from opteryx.compiled.http_client import HttpStatusError
 from opteryx.connectors.io_systems import create_filesystem
 from opteryx.connectors.io_systems import s3_filesystem as s3_module
 from opteryx.connectors.io_systems.s3_filesystem import FileType
@@ -252,9 +253,43 @@ def test_get_file_info_single(fs):
 
 
 def test_get_file_info_missing_object(fs):
-    fs.http_client.head = Mock(side_effect=RuntimeError("404 Not Found"))
+    fs.http_client.head = Mock(side_effect=HttpStatusError("HTTP 404: ...", 404))
     info = fs.get_file_info("s3://bucket/missing.parquet")
     assert info.type == FileType.NotFound
+
+
+def test_get_file_info_reports_non_404_failures(fs):
+    """A failure that is not a 404 leaves the object's existence UNKNOWN.
+
+    Folding it into NotFound is a lie the caller cannot see through - and it is
+    what a wrong-region 301, or the GET-signed HEAD this filesystem used to
+    issue, produced for objects that were sitting right there.
+    """
+    fs.http_client.head = Mock(side_effect=HttpStatusError("HTTP 301: ...", 301))
+    with pytest.raises(DatasetReadError):
+        fs.get_file_info("s3://bucket/elsewhere.parquet")
+
+
+def test_get_file_info_signs_for_head_not_get(fs):
+    """SigV4 covers the METHOD, so a GET-signed URL cannot authenticate a HEAD.
+
+    Signing every stat as a GET meant S3 answered SignatureDoesNotMatch for
+    every object in the bucket.
+    """
+    fs.http_client.head = Mock(return_value={"content-length": "1"})
+    fs.get_file_info("s3://bucket/file.parquet")
+    single_url = fs.http_client.head.call_args[0][0]
+
+    fs.http_client.head_many = Mock(return_value=[{"content-length": "1"}] * 2)
+    fs.get_file_info(["s3://bucket/a.parquet", "s3://bucket/b.parquet"])
+    batch_urls = [url for url, _ in fs.http_client.head_many.call_args[0][0]]
+
+    for url in [single_url, *batch_urls]:
+        head_signed = fs.presign("bucket", url.split("/")[3].split("?")[0], method="HEAD")
+        get_signed = fs.presign("bucket", url.split("/")[3].split("?")[0], method="GET")
+        signature = url.split("X-Amz-Signature=")[1]
+        assert signature == head_signed.split("X-Amz-Signature=")[1]
+        assert signature != get_signed.split("X-Amz-Signature=")[1]
 
 
 def test_get_file_info_batches_multiple_paths(fs):

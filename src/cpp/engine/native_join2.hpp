@@ -1235,14 +1235,14 @@ struct Join2ProbeOperator : Operator {
 
 enum class AsofOp : uint8_t { GtEq = 0, Gt = 1, LtEq = 2, Lt = 3 };
 
-struct AsofProbeOperator : Join2ProbeOperator {
-    size_t asof_probe_idx;
-    AsofOp op;
-
-    AsofProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
-                      const Join2Ref* r, size_t asof_idx, int op_code)
-        : Join2ProbeOperator(std::move(keys), std::move(payload), r, /*outer=*/true),
-          asof_probe_idx(asof_idx), op(static_cast<AsofOp>(op_code)) {}
+// Shared by the two probes that BISECT a sorted run inside an equi group: ASOF
+// (one bound, exactly one row out per probe row) and BAND (two bounds, a whole
+// contiguous run out per probe row). The sorted index and the key reassembly are
+// identical for both and are held here rather than copied — the ordering the
+// bisect assumes and the ordering the sort produces have to be ONE definition or
+// they drift into a silent wrong answer.
+struct SortedGroupProbeOperator : Join2ProbeOperator {
+    using Join2ProbeOperator::Join2ProbeOperator;
 
     // Sort every equi group's row list by asof key, once, before the first probe.
     // Runs under the ref's once_flag: exactly one thread mutates; the rest wait.
@@ -1281,6 +1281,18 @@ struct AsofProbeOperator : Join2ProbeOperator {
         }
         return key;
     }
+
+};
+
+struct AsofProbeOperator : SortedGroupProbeOperator {
+    size_t asof_probe_idx;
+    AsofOp op;
+
+    AsofProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
+                      const Join2Ref* r, size_t asof_idx, int op_code)
+        : SortedGroupProbeOperator(std::move(keys), std::move(payload), r,
+                                   /*outer=*/true),
+          asof_probe_idx(asof_idx), op(static_cast<AsofOp>(op_code)) {}
 
     int64_t match_row(const std::vector<int64_t>& rows, const AsofKey& k,
                       const Join2BuildGlobal& g) const {
@@ -1354,6 +1366,148 @@ struct AsofProbeOperator : Join2ProbeOperator {
             build_rows.push_back(build_row);
             probe_rows.push_back(row);
             ++st.row;
+            if (build_rows.size() >= kBatch) {
+                out = build_output(in, build_rows, probe_rows, err);
+                return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::HAVE_MORE;
+            }
+        }
+        if (!build_rows.empty()) {
+            out = build_output(in, build_rows, probe_rows, err);
+            return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::EMIT;
+        }
+        return OpResult::NEED_INPUT;
+    }
+};
+
+// ---- BAND probe: contiguous run between two bounds within an equi partition --------
+// INNER semantics. Each probe row carries its OWN two bounds as PRE-COMPUTED probe
+// columns (the compiler materialises `f.flow_start` and
+// `f.flow_start - INTERVAL '20' SECOND` as synthetic columns, exactly as
+// _compile_asof_join materialises a coercion cast), so nothing is evaluated here per
+// row: the bounds are read and bisected.
+//
+// Within the probe row's equi group, sorted by the band key:
+//   lo edge   CLOSED (`build >= lower`) -> lower_bound     OPEN (`>`) -> upper_bound
+//   hi edge   CLOSED (`build <= upper`) -> upper_bound     OPEN (`<`) -> lower_bound
+// Getting either backwards shifts the answer by exactly the rows sitting ON a
+// boundary — which no interior-range row count would ever notice.
+//
+// ⛔ NULL matches nothing, on either side and in either bound. That is the WHERE
+// clause's own behaviour (a comparison with NULL is UNKNOWN and UNKNOWN is not
+// TRUE), which is what this join is replacing, and it is the same guard the ASOF
+// probe applies via sort_row_valid.
+//
+// ⚠️ THE ONE GENUINELY NEW CONTROL-FLOW CASE: a single probe row can emit MORE THAN
+// kBatch rows. Every other probe in this file finishes a probe row before testing
+// the batch limit; this one has to suspend MID-RUN and resume inside the same run on
+// the next call, which is what BandProbeState::run_pos exists for.
+
+struct BandProbeState : Join2ProbeState {
+    const std::vector<int64_t>* run = nullptr;   // the current probe row's sorted group
+    size_t run_pos = 0;                          // next index to emit within the run
+    size_t run_end = 0;                          // one past the run's last index
+    bool in_run = false;
+};
+
+struct BandProbeOperator : SortedGroupProbeOperator {
+    size_t lo_idx, hi_idx;        // probe columns holding this row's two bounds
+    bool lower_closed, upper_closed;
+
+    BandProbeOperator(std::vector<size_t> keys, std::vector<size_t> payload,
+                      const Join2Ref* r, size_t lo, size_t hi,
+                      bool lower_closed_, bool upper_closed_)
+        : SortedGroupProbeOperator(std::move(keys), std::move(payload), r,
+                                   /*outer=*/false),
+          lo_idx(lo), hi_idx(hi),
+          lower_closed(lower_closed_), upper_closed(upper_closed_) {}
+
+    std::unique_ptr<OperatorState> make_state() override {
+        return std::make_unique<BandProbeState>();
+    }
+
+    // The half-open [begin, end) of `rows` the band selects. Empty when the bounds
+    // cross (an inverted band selects nothing, which is the right answer, not an
+    // error) — normalised here so the caller never sees end < begin.
+    void match_range(const std::vector<int64_t>& rows, const AsofKey& lo_key,
+                     const AsofKey& hi_key, const Join2BuildGlobal& g,
+                     size_t& begin, size_t& end) const {
+        const AsofKeyKind kind = g.asof_kind;
+        auto cmp = [&](int64_t r, const AsofKey& v) {
+            return asof_key_cmp(kind, build_key(g, r), v) < 0;
+        };
+        auto cmp2 = [&](const AsofKey& v, int64_t r) {
+            return asof_key_cmp(kind, v, build_key(g, r)) < 0;
+        };
+        auto b = lower_closed
+            ? std::lower_bound(rows.begin(), rows.end(), lo_key, cmp)
+            : std::upper_bound(rows.begin(), rows.end(), lo_key, cmp2);
+        auto e = upper_closed
+            ? std::upper_bound(rows.begin(), rows.end(), hi_key, cmp2)
+            : std::lower_bound(rows.begin(), rows.end(), hi_key, cmp);
+        begin = static_cast<size_t>(b - rows.begin());
+        end = static_cast<size_t>(e - rows.begin());
+        if (end < begin) end = begin;
+    }
+
+    OpResult execute(const MorselPtr& in, OperatorState& st_, MorselPtr& out,
+                     ErrCtx& err) override {
+        // See the identical guard in Join2ProbeOperator::execute — a 0-row morsel
+        // can carry an EMPTY columns vector, and both compute_row_hashes and the
+        // bound-column reads below assume real columns exist.
+        if (in->num_rows() == 0) return OpResult::NEED_INPUT;
+        ensure_sorted();
+        auto& st = static_cast<BandProbeState&>(st_);
+        const Join2BuildGlobal& g = *ref->g;
+        if (st.pending_in != in) {
+            st.pending_in = in;
+            st.row = 0;
+            st.in_run = false;
+            if (!compute_row_hashes(in, probe_key_idx, st.rowh, err))
+                return OpResult::NEED_INPUT;
+        }
+        const uint32_t n = in->num_rows();
+        std::vector<uint32_t> build_rows, probe_rows;
+        build_rows.reserve(kBatch);
+        probe_rows.reserve(kBatch);
+        const DrakenVector& lov = in->columns[lo_idx].view;
+        const DrakenVector& hiv = in->columns[hi_idx].view;
+
+        while (st.in_run || st.row < n) {
+            if (!st.in_run) {
+                const uint32_t row = st.row;
+                bool usable = sort_row_valid(lov, row) && sort_row_valid(hiv, row);
+                for (size_t k : probe_key_idx) {
+                    if (!usable) break;
+                    if (!sort_row_valid(in->columns[k].view, row)) usable = false;
+                }
+                int64_t idx = -1;
+                if (!usable || !g.asof_index.lookup_fast(st.rowh[row], idx)) {
+                    ++st.row;   // INNER: no key match, or a NULL anywhere, emits nothing
+                    continue;
+                }
+                const std::vector<int64_t>& rows =
+                    g.asof_sorted[static_cast<size_t>(idx)];
+                size_t begin = 0, end = 0;
+                match_range(rows, asof_key_of(lov, row, g.asof_kind),
+                            asof_key_of(hiv, row, g.asof_kind), g, begin, end);
+                if (begin >= end) { ++st.row; continue; }
+                st.run = &rows;
+                st.run_pos = begin;
+                st.run_end = end;
+                st.in_run = true;
+            }
+            // `asof_sorted` is materialised once under a once_flag and never
+            // resized after, so holding a pointer into it across calls is safe.
+            while (st.run_pos < st.run_end && build_rows.size() < kBatch) {
+                build_rows.push_back(
+                    static_cast<uint32_t>((*st.run)[st.run_pos]));
+                probe_rows.push_back(st.row);
+                ++st.run_pos;
+            }
+            if (st.run_pos >= st.run_end) {
+                st.in_run = false;
+                ++st.row;
+            }
             if (build_rows.size() >= kBatch) {
                 out = build_output(in, build_rows, probe_rows, err);
                 return (err.code != 0) ? OpResult::NEED_INPUT : OpResult::HAVE_MORE;
@@ -2040,6 +2194,14 @@ struct DeferredJoin2Probe : Operator {
     JoinMode mode;
     int asof_probe_idx = -1;   // >= 0: ASOF probe (asof column index + op below)
     int asof_op = 0;
+    // >= 0: BAND probe. The two probe columns holding each row's bounds, plus
+    // whether each end is closed. Distinct from `asof_probe_idx`: the band's ORDER
+    // key lives on the build side (captured by the same Join2BuildSink the ASOF
+    // build uses), while these two index the PROBE morsel.
+    int band_lo_idx = -1;
+    int band_hi_idx = -1;
+    bool band_lower_closed = false;
+    bool band_upper_closed = false;
     // SEMI/ANTI only: correlated non-equality residual (see SemiAntiProbeOperator).
     ExprProgram residual;
     ExprEvalFn residual_fn = nullptr;
@@ -2073,7 +2235,13 @@ struct DeferredJoin2Probe : Operator {
 
     std::unique_ptr<OperatorState> make_state() override {
         std::call_once(once, [this] {
-            if (asof_probe_idx >= 0) {
+            if (band_lo_idx >= 0) {
+                inner = std::make_unique<BandProbeOperator>(
+                    key_idx, payload_idx, ref,
+                    static_cast<size_t>(band_lo_idx),
+                    static_cast<size_t>(band_hi_idx),
+                    band_lower_closed, band_upper_closed);
+            } else if (asof_probe_idx >= 0) {
                 inner = std::make_unique<AsofProbeOperator>(
                     key_idx, payload_idx, ref,
                     static_cast<size_t>(asof_probe_idx), asof_op);

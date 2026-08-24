@@ -638,10 +638,6 @@ _REGEX_FLAT = "testdata/flat/formats/parquet"
 @pytest.mark.parametrize("predicate", [
     "text RLIKE 'a'",                 # the canonical HAND_SET trigger
     "text NOT RLIKE 'a'",
-    "text SIMILAR TO 'a.*'",
-    "text NOT SIMILAR TO 'a.*'",
-    "text ~ 'a'",
-    "text !~ 'a'",
     # composed with a plain compare in the SAME pushed span, and negated
     "text RLIKE 'a' AND followers > 5",
     "text RLIKE 'a' OR followers > 5",

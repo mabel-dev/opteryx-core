@@ -44,6 +44,7 @@ _CONFIG_ASSIGNMENT = re.compile(r"^([A-Z0-9_]+)\s*:[^=\n]*=", re.MULTILINE)
 # Defaults computed from the host or the build at import time.
 _ENVIRONMENT_DERIVED = {
     "architecture": "host",
+    "build": "build",
     "cpu_count": "host",
     "memory_limit_bytes": "host",
     "operating_system": "host",

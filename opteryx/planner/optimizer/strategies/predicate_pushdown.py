@@ -1422,12 +1422,42 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     # see the table in compiler.py's `_compile_join`. Do not widen this
                     # to outer/semi/anti.
                     remaining_predicates = []
-                    join_relations = set(node.right_relation_names + node.left_relation_names)
+                    left_names = set(node.left_relation_names)
+                    right_names = set(node.right_relation_names)
+                    join_relations = left_names | right_names
+                    # A relation is known by SEVERAL names across a CTE or subquery
+                    # boundary -- the user's alias AND the `$view-XXXX` the planner
+                    # mints -- so demanding the predicate name EXACTLY the two the
+                    # join names is wrong. It declined every CTE spelling of the
+                    # very band shape this block exists for: measured on a $planets
+                    # self-join, `predicate.relations` and `join_relations` were the
+                    # SAME four-name set and only the `len(...) != 2` half rejected
+                    # it, leaving a Filter above the join while the identical query
+                    # written with plain aliases absorbed.
+                    #
+                    # Ground truth is what the CROSS arm above already asks: the
+                    # predicate names one leg, names the other, and names nothing
+                    # outside the join.
+                    #
+                    # ...EXCEPT when the two legs SHARE a name, where an intersection
+                    # cannot attribute that name to a side and a single-leg predicate
+                    # could satisfy both tests. There the strict two-name form is
+                    # kept: it is the only form that is provably about both legs.
+                    ambiguous_legs = bool(left_names & right_names)
                     for predicate in context.collected_predicates:
                         condition = predicate.condition
-                        if len(predicate.relations) != 2 or join_relations != set(
-                            predicate.relations
-                        ):
+                        relations = set(predicate.relations)
+                        if ambiguous_legs:
+                            spans_join = (
+                                len(relations) == 2 and join_relations == relations
+                            )
+                        else:
+                            spans_join = (
+                                bool(relations & left_names)
+                                and bool(relations & right_names)
+                                and relations.issubset(join_relations)
+                            )
+                        if not spans_join:
                             remaining_predicates.append(predicate)
                             continue
                         if condition.value == "Eq":

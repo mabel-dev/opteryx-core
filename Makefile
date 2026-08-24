@@ -62,7 +62,7 @@ define print_red
 	@echo -e "\033[0;31m$(1)\033[0m"
 endef
 
-.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs
+.PHONY: help lint format check test test-battery coverage mypy compile compile-quick draken clean distclean update dev-install all check-python dt rt st et q rugo-floor reference function-costs publish-reference
 
 # Default target
 .DEFAULT_GOAL := help
@@ -86,6 +86,47 @@ function-costs: check-python ## Re-measure function execution costs and bake the
 	$(call print_blue,Writing measured costs into the registrars...)
 	@$(PYTHON) dev/import_function_costs.py dev/function_costs.json --apply
 	$(call print_blue,Recompiling so the catalog carries the refreshed costs...)
+
+# === REFERENCE FAN-OUT ===
+
+# The sibling checkouts that vendor the catalogs. Override to point at a
+# different tree, e.g. make publish-reference DOCS_REPO=~/src/docs.opteryx
+DOCS_REPO  ?= ../docs.opteryx
+WEB_REPO   ?= ../web.opteryx
+AGENT_REPO ?= ../agent.opteryx
+
+# reference/*.json is the source of truth for the engine's SQL surface, and
+# three services vendor generated copies of it: the docs site's reference pages,
+# the query editor's autocomplete config, and the chat agent's SQL brief. Each
+# has its own generator that reads THIS repo off disk, so a dialect change only
+# reaches them when someone runs all three.
+#
+# This target is that someone. It cannot be a pre-commit hook in the consuming
+# repos: the staleness event happens HERE, and a hook over there only fires when
+# that repo happens to be committed to for unrelated reasons - a repo nobody
+# touches for a month serves month-old syntax with nothing failing to say so.
+#
+# Nothing is committed downstream. Each repo is left with a working-tree diff to
+# read and commit, because what the docs and the editor publish is a review
+# surface, not a build artifact.
+#
+# A missing sibling is a hard failure, not a skip. A silently skipped repo is
+# precisely the drift this target exists to stop, and it would report success.
+publish-reference: reference ## Regenerate the catalogs, then push them into docs/web/agent
+	@for repo in "$(DOCS_REPO)" "$(WEB_REPO)" "$(AGENT_REPO)"; do \
+		if [ ! -d "$$repo" ]; then \
+			echo "ERROR: $$repo is not checked out - cannot publish to it." >&2; \
+			echo "Check it out alongside this repo, or point at it: make publish-reference DOCS_REPO=... WEB_REPO=... AGENT_REPO=..." >&2; \
+			exit 1; \
+		fi; \
+	done
+	$(call print_blue,"docs.opteryx: definitions + reference pages...")
+	@$(MAKE) -C $(DOCS_REPO) sql-docs
+	$(call print_blue,"web.opteryx: editor signatures + grammar + operators...")
+	@$(MAKE) -C $(WEB_REPO) sql-signatures
+	$(call print_blue,"agent.opteryx: SQL brief + lookup catalog...")
+	@$(MAKE) -C $(AGENT_REPO) sql-reference
+	$(call print_yellow,"Published. Three working trees now carry diffs - review and commit each.")
 
 # === LINTING AND FORMATTING ===
 

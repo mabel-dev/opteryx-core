@@ -408,6 +408,7 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
             ordinal_bounds = None
             length_bounds = None
             total_bytes = None
+            encoded_bytes = None
             if manifest is not None:
                 try:
                     distinct_count = manifest.estimate_cardinality(col_name)
@@ -470,25 +471,50 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
                 except Exception:
                     length_bounds = None
                 try:
-                    total_bytes = manifest.get_total_uncompressed_size(col_name)
+                    encoded_bytes = manifest.get_total_uncompressed_size(col_name)
                 except Exception:
-                    total_bytes = None
-            # Byte-size estimate, in priority order: real measured manifest
-            # bytes (above) > avg_length (ANALYZE'd string columns) > fixed
-            # physical width (row_count * DrakenType.fixed_itemsize(), the
-            # single canonical native width table -- see core/buffers.h).
-            # None -- never a fabricated guess -- when none of these signals
-            # are available (e.g. a variable-width column with no ANALYZE
-            # pass and no manifest-level size).
+                    encoded_bytes = None
+            # Byte-size estimate, in priority order -- DENSE sources first,
+            # because this number is what DATA_PROCESSED_BYTES bills on and the
+            # commercial definition is LOGICAL UNCOMPRESSED bytes: a zstd column
+            # pays its uncompressed bytes, a dictionary-encoded column pays the
+            # equivalent DENSE bytes (see planner/data_processed.py).
+            #
+            #   1. row_count * DrakenType.fixed_itemsize() -- the single
+            #      canonical native width table (core/buffers.h). EXACT dense
+            #      bytes for every fixed-width column, no estimation involved.
+            #   2. avg_length * row_count -- ANALYZE'd string columns.
+            #      `avg_length` is char_total_bytes over the NON-NULL rows, so
+            #      multiplying by the full row_count charges a null row at the
+            #      column's average width. Deliberate: a null still occupies a
+            #      logical row, and the alternative needs a null_fraction that
+            #      is itself absent more often than not.
+            #   3. manifest.get_total_uncompressed_size -- LAST RESORT, and the
+            #      one source that is NOT dense. It is the parquet footer's
+            #      `total_uncompressed_size`: the decompressed size of the
+            #      ENCODED pages, which is not a bound on the dense size in
+            #      EITHER direction. A dictionary-encoded column reports its
+            #      dictionary page plus bit-packed indices and lands far BELOW
+            #      dense; a PLAIN-encoded string column carries a 4-byte length
+            #      per value plus page headers and lands ABOVE it (measured on
+            #      testdata.astronauts.name: 8,012 encoded vs 6,088 dense).
+            #      Reached only by a variable-width column with no ANALYZE pass,
+            #      where the alternative is no number at all -- so ANALYZE is
+            #      what makes this column's billing figure correct.
+            #
+            # None -- never a fabricated guess -- when none of these signals are
+            # available (a variable-width column with no ANALYZE pass and no
+            # manifest-level size).
+            column_type = col.column_type
+            physical = None if column_type is None else column_type.physical
+            if physical is not None:
+                fixed_width = physical.fixed_itemsize()
+                if fixed_width:
+                    total_bytes = int(fixed_width) * int(row_count)
             if total_bytes is None and avg_length is not None:
                 total_bytes = int(avg_length * row_count)
             if total_bytes is None:
-                column_type = col.column_type
-                physical = None if column_type is None else column_type.physical
-                if physical is not None:
-                    fixed_width = physical.fixed_itemsize()
-                    if fixed_width:
-                        total_bytes = int(fixed_width) * int(row_count)
+                total_bytes = encoded_bytes
             # Keyed by identity; the manifest accessors above are name-based
             # because manifest statistics are per-relation and unambiguous.
             col_type = col.column_type
@@ -518,6 +544,44 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
     )
 
 
+def scan_base_statistics(
+    node: LogicalPlanNode, base_stats_cache: Optional[dict] = None
+) -> RelationStatistics:
+    """A scan's statistics BEFORE any predicate/limit narrowing, memoized.
+
+    This is the pre-filter relation — the rows and bytes the scan actually
+    reads off storage, after manifest/file pruning but before any predicate is
+    evaluated. `_scan_stats` narrows this on the way out, so a caller that
+    needs the READ size (billing: see planner/data_processed.py) must come
+    here rather than read `node.statistics`, which is the narrowed result.
+
+    Memoization: the base depends only on the scan's schema and manifest. Both
+    are shared by reference across plan copies and the node's uuid is preserved
+    by LogicalPlanNode.copy, so within one query the base is memoizable — keyed
+    by object identity. Manifests are immutable by contract: every prune
+    (ManifestPruning/TopNManifestPruning/LimitFilesPruning/
+    statistics_only_response) is copy-on-write and assigns a NEW Manifest to
+    node.manifest (see Manifest.subset), so id(manifest) misses here and the
+    base recomputes over the pruned file set — an in-place prune would have
+    kept serving pre-pruning statistics. A strategy that replaces the schema
+    misses the same way.
+    """
+    wanted = _referenced_scan_identities(node)
+    cache_key = None
+    if base_stats_cache is not None:
+        # `wanted` is part of the key: projection pushdown prunes the scan's
+        # columns mid-optimization, and a base computed for the wide set must
+        # not answer for the narrow one (or vice versa).
+        cache_key = (node.uuid, id(node.schema), id(node.manifest), wanted)
+        cached = base_stats_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    base = _scan_base_stats(node, wanted)
+    if cache_key is not None:
+        base_stats_cache[cache_key] = base
+    return base
+
+
 def _scan_stats(
     node: LogicalPlanNode,
     plan: Optional["LogicalPlan"] = None,
@@ -526,30 +590,9 @@ def _scan_stats(
     base_stats_cache: Optional[dict] = None,
     fold_registry: Optional[Dict[int, object]] = None,
 ) -> RelationStatistics:
-    # The base (pre-narrowing) statistics depend only on the scan's schema and
-    # manifest. Both are shared by reference across plan copies and the node's
-    # uuid is preserved by LogicalPlanNode.copy, so within one optimization run
-    # the base is memoizable — keyed by object identity. Manifests are
-    # immutable by contract: every prune (ManifestPruning/TopNManifestPruning/
-    # LimitFilesPruning/statistics_only_response) is copy-on-write and assigns
-    # a NEW Manifest to node.manifest (see Manifest.subset), so id(manifest)
-    # misses here and the base recomputes over the pruned file set — an
-    # in-place prune would have kept serving pre-pruning statistics. A
-    # strategy that replaces the schema misses the same way. The narrowing
+    # Base statistics are memoized (see scan_base_statistics); the narrowing
     # below is predicate- and plan-shape-dependent and always re-runs.
-    wanted = _referenced_scan_identities(node)
-    base = None
-    cache_key = None
-    if base_stats_cache is not None:
-        # `wanted` is part of the key: projection pushdown prunes the scan's
-        # columns mid-optimization, and a base computed for the wide set must
-        # not answer for the narrow one (or vice versa).
-        cache_key = (node.uuid, id(node.schema), id(node.manifest), wanted)
-        base = base_stats_cache.get(cache_key)
-    if base is None:
-        base = _scan_base_stats(node, wanted)
-        if cache_key is not None:
-            base_stats_cache[cache_key] = base
+    base = scan_base_statistics(node, base_stats_cache)
 
     # Apply leaf-local filter selectivity from upward Filter ancestors.
     if plan is not None and nid is not None:

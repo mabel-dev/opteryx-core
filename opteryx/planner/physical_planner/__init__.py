@@ -375,6 +375,11 @@ def _create_join_node(logical_node, query_properties, registry):
     elif join_type == "asof":
         # ASOF JOIN — nearest-neighbour time-series join
         return registry.create("ASOF Join", query_properties, **node_config)
+    elif join_type == "band":
+        # BAND JOIN — an equi-join whose ON also closes a range on one build-side
+        # column, executed as a bisect into sorted per-equi-group runs instead of a
+        # full equi fan-out with the range filtered off the top.
+        return registry.create("Band Join", query_properties, **node_config)
     else:
         # We don't support other JOIN types, e.g. RIGHT SEMI, RIGHT ANTI
         raise InvalidInternalStateError(f"Unsupported JOIN type '{join_type}'")
