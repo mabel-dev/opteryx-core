@@ -155,28 +155,6 @@ def _relation_name(table_factor: dict) -> str:
     return ".".join(p["Identifier"]["value"] for p in table_factor["Table"]["name"])
 
 
-def _reject_composite_on(on_expr: dict) -> None:
-    """Refuse a multi-column ON key.
-
-    Composite join keys still match NULL = NULL: they run the legacy
-    hash-sentinel path, where a partially-null row mixes to an arbitrary
-    composite hash. In a SELECT that is a spurious result row. In a MERGE the
-    row that should have taken NOT MATCHED takes MATCHED instead, so a row that
-    should have been inserted marks an unrelated row deleted and replaces it —
-    a silent wrong answer that mutates storage.
-
-    Lift this only once multi-column keys filter on key-column validity, as
-    single-column keys already do.
-    """
-    op = on_expr.get("BinaryOp", {}).get("op") if isinstance(on_expr, dict) else None
-    if op == "And":
-        raise UnsupportedSyntaxError(
-            "**MERGE INTO** does not support a multi-column **ON** condition. "
-            "Composite join keys can still match NULL to NULL, which in a MERGE "
-            "would replace an unrelated row. Use a single-column **ON** key."
-        )
-
-
 def _insert_assignments(action: dict) -> Dict[str, dict]:
     """`{target column: value expression}` for a NOT MATCHED arm's INSERT."""
     insert = action["Insert"]
@@ -353,7 +331,6 @@ def plan_merge(statement, **kwargs):
     target_name = _relation_name(target_factor)
 
     on_expr = merge["on"]
-    _reject_composite_on(on_expr)
     arms = _read_arms(merge["clauses"])
 
     # The target's columns, in schema order — the shape the merged rows must

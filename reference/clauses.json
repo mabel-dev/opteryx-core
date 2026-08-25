@@ -333,7 +333,7 @@
         ],
         "summary": "Apply a set of changes to a table in one atomic statement.",
         "documentation": "Desugars to a single LEFT JOIN with the SOURCE on the left, so a row is matched exactly when the ON condition is true. One CASE chain over the arm conditions produces both the action code and every output column, so classification and blending run natively in the projection. Merge-on-read: a replaced row's old version is marked deleted by its (file, ordinal) address and its replacement appended, both landing in ONE snapshot. Rows no arm claims cost nothing - they are not read past the join, not rewritten, and contribute no delete position.",
-        "notes": "Arm order is significant: within each population the first arm whose condition holds wins. Both relations must be aliased. The ON condition must be a single-column equality - composite keys can still match NULL to NULL, which in a MERGE would replace an unrelated row. WHEN NOT MATCHED BY SOURCE is rejected. The USING side must be a table. A target row matched by more than one source row raises a cardinality violation before anything is committed."
+        "notes": "Arm order is significant: within each population the first arm whose condition holds wins. Both relations must be aliased. Multi-column ON conditions are supported. WHEN NOT MATCHED BY SOURCE is rejected. The USING side must be a table. A target row matched by more than one source row raises a cardinality violation before anything is committed."
     },
     "offset": {
         "canonical_name": "OFFSET",

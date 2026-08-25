@@ -502,3 +502,87 @@ def test_a_lost_race_fails_the_statement_and_writes_nothing(merge_env, monkeypat
     # Nothing published: no snapshot, target byte-identical.
     assert target.metadata.current_snapshot_id == before
     assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_composite_on_key(tmp_path):
+    """A two-column ON key, including a row whose key is partly NULL.
+
+    This was refused until multi-column joins stopped matching NULL to NULL:
+    a source row that should take NOT MATCHED taking MATCHED instead would mark
+    an unrelated target row deleted and replace it. The partly-null row is the
+    one that used to go wrong.
+    """
+    from opteryx_catalog.catalog.manifest import clear_parsed_manifest_cache
+
+    import opteryx.connectors as connectors
+
+    clear_parsed_manifest_cache()
+    disk_io = _LocalDiskIO()
+    # (region, cve) is the key. Row 3 has a NULL region — it can never match.
+    target = _build_dataset(
+        str(tmp_path / "ct"),
+        "col.tgt",
+        ["region", "cve", "details"],
+        [(1, 100, 10), (2, 100, 20), (None, 100, 30)],
+        disk_io,
+    )
+    source = _build_dataset(
+        str(tmp_path / "cs"),
+        "col.src",
+        ["region", "cve", "details"],
+        [(2, 100, 99), (None, 100, 77), (3, 100, 55)],
+        disk_io,
+    )
+    datasets = {"col.tgt": target, "col.src": source}
+
+    class _FakeCatalog:
+        def __init__(self, workspace=None, **kwargs):
+            self.workspace = workspace
+            self.io = disk_io
+
+        def dataset_exists(self, identifier):
+            return identifier in datasets
+
+        def load_dataset(self, identifier):
+            return datasets[identifier]
+
+        def get_relation(self, identifier):
+            if identifier in datasets:
+                return "dataset", datasets[identifier]
+            return None, None
+
+    saved_default = connectors._default_connector
+    saved_prefixes = dict(connectors._storage_prefixes)
+    saved_cache = dict(connectors._connector_cache)
+    connectors._storage_prefixes.pop(WORKSPACE, None)
+    connectors._connector_cache.clear()
+    opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
+    try:
+        list(opteryx.session(user="tester").execute_to_morsels(f"""
+            MERGE INTO {TARGET} AS n
+            USING {SOURCE} AS t
+               ON n.region = t.region AND n.cve = t.cve
+             WHEN MATCHED THEN UPDATE SET details = t.details
+             WHEN NOT MATCHED THEN INSERT (region, cve, details)
+                  VALUES (t.region, t.cve, t.details)
+        """))
+        clear_parsed_manifest_cache()
+        # NULLs last, then by details — two rows share a NULL region, so the
+        # region alone is not a total order.
+        rows = sorted(
+            _rows(f"SELECT region, cve, details FROM {TARGET}"),
+            key=lambda r: (r[0] is None, r[0] if r[0] is not None else 0, r[2]),
+        )
+        assert rows == [
+            (1, 100, 10),    # never mentioned
+            (2, 100, 99),    # matched on both key columns, updated
+            (3, 100, 55),    # no match, inserted
+            (None, 100, 30), # target's NULL-region row: matched NOTHING, untouched
+            (None, 100, 77), # source's NULL-region row: matched nothing, INSERTED
+        ]
+    finally:
+        connectors._default_connector = saved_default
+        connectors._storage_prefixes.clear()
+        connectors._storage_prefixes.update(saved_prefixes)
+        connectors._connector_cache.clear()
+        connectors._connector_cache.update(saved_cache)

@@ -454,9 +454,8 @@ CLAUSE_DEFINITIONS = {
         ),
         "notes": (
             "Arm order is significant: within each population the first arm whose "
-            "condition holds wins. Both relations must be aliased. The ON condition "
-            "must be a single-column equality - composite keys can still match NULL to "
-            "NULL, which in a MERGE would replace an unrelated row. WHEN NOT MATCHED BY "
+            "condition holds wins. Both relations must be aliased. Multi-column ON "
+            "conditions are supported. WHEN NOT MATCHED BY "
             "SOURCE is rejected. The USING side must be a table. A target row matched "
             "by more than one source row raises a cardinality violation before anything "
             "is committed."

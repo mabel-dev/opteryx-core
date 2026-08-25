@@ -36,7 +36,7 @@ if [ "${rustup_fetched}" != true ]; then
   exit 1
 fi
 
-sh "${RUSTUP_SH}" -s -- --default-toolchain 1.83.0 -y
+sh "${RUSTUP_SH}" --default-toolchain 1.83.0 -y
 rm -f "${RUSTUP_SH}"
 export PATH="$HOME/.cargo/bin:$PATH"
 
