@@ -211,8 +211,21 @@ def test_ordinary_table_writes_leave_the_message_to_the_store(tmp_path):
         "TRUNCATE TABLE ws.mv",
         "ALTER TABLE ws.mv RENAME TO ws.renamed",
         "ALTER TABLE ws.mv CLUSTER BY (a)",
+        "MERGE INTO ws.mv AS m USING ws.src AS s ON m.a = s.a WHEN MATCHED THEN DELETE",
+        "UPDATE ws.mv SET a = 9",
+        "DELETE FROM ws.mv",
     ],
-    ids=["cortas", "insert-select", "insert-values", "truncate", "rename", "cluster-by"],
+    ids=[
+        "cortas",
+        "insert-select",
+        "insert-values",
+        "truncate",
+        "rename",
+        "cluster-by",
+        "merge",
+        "update",
+        "delete",
+    ],
 )
 def test_table_modifiers_are_refused_on_a_materialized_view(tmp_path, statement):
     session = _setup(tmp_path)
@@ -267,3 +280,31 @@ def test_creating_a_view_over_an_existing_view_still_works(tmp_path):
     )
 
     assert len(_rows(session.execute_to_morsels("SELECT * FROM ws.mv"))) == 1
+
+
+def test_optimize_is_not_refused_for_being_a_view(tmp_path):
+    """OPTIMIZE is the one modifier a view accepts. It compacts the files the
+    view's rows already live in - lossless, and declaring no new structure - so
+    there is nothing for the next REFRESH to disagree with. Refusing it would
+    leave views as the only relations that cannot be maintained.
+
+    What this pins is that the VIEW guard no longer fires. It stops at the
+    connector instead: LocalStoreConnector has no catalog, so it supports
+    OPTIMIZE for no relation at all, view or table. That refusal is the honest
+    one - it names a missing capability rather than the target's type - and
+    proving compaction actually runs needs a catalog-backed view, which is the
+    compactor's own test, not this file's.
+    """
+    session = _setup(tmp_path)
+    _seed_view(session)
+
+    with pytest.raises(NotImplementedError, match="does not support OPTIMIZE"):
+        list(session.execute_to_morsels("OPTIMIZE TABLE ws.mv"))
+
+    # The same statement against a plain table stops at exactly the same place,
+    # which is what makes the refusal about the connector and not the view.
+    list(session.execute_to_morsels("CREATE TABLE ws.plain2 (a BIGINT)"))
+    with pytest.raises(NotImplementedError, match="does not support OPTIMIZE"):
+        list(session.execute_to_morsels("OPTIMIZE TABLE ws.plain2"))
+
+    assert len(_rows(session.execute_to_morsels("SELECT * FROM ws.mv"))) == 2

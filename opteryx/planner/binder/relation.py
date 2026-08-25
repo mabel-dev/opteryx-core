@@ -652,7 +652,13 @@ def visit_optimize_relation(self, node: Node, context: BindingContext) -> Tuple[
             f"User does not have permission to optimize table {node.relation_name}"
         )
 
-    _reject_materialized_view_target(node, "**OPTIMIZE**")
+    # NOT refused for a materialized view, unlike every other table modifier.
+    # OPTIMIZE compacts the files a relation's rows already live in; it is
+    # lossless and declares no new structure, so the view still holds exactly
+    # what its SELECT produced. It is physical maintenance, not a write - the
+    # thing `_reject_materialized_view_target` exists to stop is a statement
+    # whose effect the next REFRESH would discard, and compaction has no such
+    # effect to discard.
 
     node.columns = []
     return node, context
@@ -696,11 +702,22 @@ def _reject_materialized_view_target(node, statement: str) -> None:
     `DROP TABLE` is refused in the same spirit, one layer down in
     relation_management, where the drop path already had the type guard.
 
-    The two writes NOT routed through here are the ones that are legitimately
-    allowed to land on a view: creating it (`CREATE MATERIALIZED VIEW`, which
-    carries `is_materialized_view`) and refreshing it (`REFRESH MATERIALIZED
-    VIEW`, which carries `is_refresh`). Both are checked by their callers
-    before reaching this point.
+    Exactly four statements may land on a view, and each is allowed for its own
+    reason rather than by omission:
+
+      CREATE MATERIALIZED VIEW   it defines the view (carries
+                                 `is_materialized_view`, checked by its caller)
+      REFRESH MATERIALIZED VIEW  it rebuilds the view from that definition
+                                 (carries `is_refresh`, likewise)
+      DROP MATERIALIZED VIEW     it removes the view (typed one layer down, in
+                                 relation_management)
+      OPTIMIZE                   it compacts files losslessly and changes no
+                                 contents, so there is nothing a REFRESH could
+                                 discard (see visit_optimize_relation)
+
+    Everything else - DDL and mutation alike, including MERGE, UPDATE and
+    DELETE - is refused. A statement added here that mutates a relation and is
+    not on that list must call this.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
 
@@ -1208,6 +1225,19 @@ def visit_merge(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
         raise PermissionError(
             f"User does not have permission to merge into {node.relation_name}"
         )
+
+    # `statement_name` is set by every builder that produces this node
+    # (plan_merge, plan_update, plan_delete). None means a fourth builder
+    # appeared without setting it, which would put the word "None" in a user's
+    # error - fail on the invariant instead of papering over it.
+    if not node.statement_name:
+        raise InvalidInternalStateError(
+            "visit_merge: the merge sink node does not name its statement"
+        )
+    # Refused before any manifest is read. Writing to a view would either be
+    # discarded by the next REFRESH or survive and leave the view disagreeing
+    # with its own definition - see _reject_materialized_view_target.
+    _reject_materialized_view_target(node, f"**{node.statement_name}**")
 
     # Read the target's schema through the connector-agnostic table engine, as
     # visit_insert does — the gateway connector has no schema of its own.
