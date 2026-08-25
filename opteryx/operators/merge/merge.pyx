@@ -83,6 +83,10 @@ class MergeNode(BasePlanNode):
         self.statement_name: str = parameters.get("statement_name") or "MERGE INTO"
         BasePlanNode.__init__(self, properties=properties, **parameters)
         self.relation_name: str = parameters.get("relation_name")
+        # What the catalog records this commit AS. The three statements are one
+        # physical operation, so without it the snapshot log and the audit trail
+        # could not say which one a reader is looking at.
+        self.operation: str = parameters.get("operation") or "merge"
         self.connector = parameters.get("connector")
         self.target_schema = parameters.get("target_schema")
         self.target_column_names = parameters.get("target_column_names")
@@ -151,6 +155,7 @@ class MergeNode(BasePlanNode):
                 self._file_entries,
                 delete_positions,
                 author=self._author,
+                operation=self.operation,
             )
             self.result = NonTabularResult(
                 record_count=self._acted_row_count(),

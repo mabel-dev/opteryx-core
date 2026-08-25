@@ -156,6 +156,7 @@ class Writable:
         delete_positions: "Dict[str, List[int]]",
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        operation: str = "merge",
     ) -> None:
         """Commit pre-written data files AND row-level deletes as ONE snapshot.
 
@@ -180,6 +181,12 @@ class Writable:
             author: session user this merge is attributed to (see create_relation)
             commit_message: what the snapshot history should say this merge WAS,
                 or None to let the store describe the mechanism (see `insert`).
+            operation: which STATEMENT this commit is - "merge", "update" or
+                "delete". UPDATE and DELETE are MERGE with a degenerate source
+                and land here through this same method, so without this the
+                history could not tell a reader which one ran. It changes
+                nothing about what is committed. A store is free to reject a
+                word it does not know.
 
         Raises:
             ValueError: If the relation doesn't exist, both arguments are empty,

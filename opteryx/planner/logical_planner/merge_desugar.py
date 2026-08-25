@@ -218,6 +218,41 @@ def _update_assignments(action: dict, owner: str = "**MERGE INTO**'s **UPDATE** 
     return out
 
 
+
+def _resolve_assignments(
+    assignments: Dict[str, dict],
+    target_columns: List[str],
+    relation_name: str,
+    owner: str,
+) -> Dict[str, dict]:
+    """Re-key a SET or INSERT column list by the target's own spelling.
+
+    Two things go wrong without this, and both are silent. The blend chain looks
+    each target column up in the assignment dict by its SCHEMA name, so an
+    assignment whose key does not match a schema name exactly is never read:
+    a column the target does not have, and a column spelled in a different case
+    from the schema, are both quietly dropped. The statement then reports success
+    for a change it did not make.
+
+    Column names are not case sensitive anywhere else in the engine, so the
+    match is folded and the SCHEMA's spelling is what comes back.
+    """
+    from opteryx.exceptions import ColumnNotFoundError
+
+    by_folded = {name.lower(): name for name in target_columns}
+    resolved: Dict[str, dict] = {}
+    for assigned, value in assignments.items():
+        canonical = by_folded.get(assigned.lower())
+        if canonical is None:
+            raise ColumnNotFoundError(column=assigned, dataset=relation_name)
+        if canonical in resolved:
+            raise UnsupportedSyntaxError(
+                f"{owner} names `{canonical}` more than once."
+            )
+        resolved[canonical] = value
+    return resolved
+
+
 class _Arm:
     """One WHEN clause, reduced to what the chains need."""
 
@@ -344,6 +379,21 @@ def plan_merge(statement, **kwargs):
     if not target_columns:
         raise UnsupportedSyntaxError(f"**MERGE INTO** target {target_name} has no columns.")
 
+    # Re-key every arm's assignments by the target's own spelling BEFORE the
+    # blend chain is built - it looks columns up by schema name, so an
+    # unresolvable or differently-cased key would simply never be read.
+    for arm in arms:
+        if not arm.assignments:
+            continue
+        owner = (
+            "**MERGE INTO**'s **INSERT** arm"
+            if arm.action_code == MERGE_INSERT
+            else "**MERGE INTO**'s **UPDATE SET**"
+        )
+        arm.assignments = _resolve_assignments(
+            arm.assignments, target_columns, target_name, owner
+        )
+
     unmatched = _not(_is_true(on_expr))
 
     # ── the action code ──────────────────────────────────────────────────────
@@ -468,6 +518,8 @@ def plan_merge(statement, **kwargs):
     merge_step.target_column_names = tuple(target_columns)
     merge_step.source_tail_id = exit_node_id
     merge_step.target_alias = target_alias
+    merge_step.statement_name = "MERGE INTO"
+    merge_step.operation = "merge"
 
     merge_id = random_string()
     plan.add_node(merge_id, merge_step)
@@ -646,7 +698,12 @@ def _stamp_target_scan(plan, relation_name: str, alias: str, keyword: str) -> No
     candidates[0].emit_row_identity = True
 
 
-def _sink_node(relation_name: str, target_columns, alias: str, keyword: str):
+def _sink_node(relation_name: str, target_columns, alias: str, keyword: str, operation: str):
+    """The Merge sink node. `keyword` is what the statement is CALLED in a
+    message; `operation` is what the catalog records it AS in the snapshot log
+    and the audit trail. Two fields rather than one derived from the other: the
+    catalog's vocabulary is its own, and deriving it by taking the first word of
+    a message would make a wording change a silent history change."""
     from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
     from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 
@@ -655,6 +712,7 @@ def _sink_node(relation_name: str, target_columns, alias: str, keyword: str):
     step.target_column_names = tuple(target_columns)
     step.target_alias = alias
     step.statement_name = keyword
+    step.operation = operation
     return step
 
 
@@ -728,7 +786,7 @@ def plan_delete(statement, **kwargs):
         )
     )
     _stamp_target_scan(plan, relation_name, alias, keyword)
-    return _attach_sink(plan, _sink_node(relation_name, (), alias, keyword))
+    return _attach_sink(plan, _sink_node(relation_name, (), alias, keyword, "delete"))
 
 
 def plan_update(statement, **kwargs):
@@ -741,7 +799,6 @@ def plan_update(statement, **kwargs):
     """
     from opteryx.constants.row_identity import ROW_IDENTITY_FILE
     from opteryx.constants.row_identity import ROW_IDENTITY_ORDINAL
-    from opteryx.exceptions import ColumnNotFoundError
     from opteryx.planner.logical_planner.logical_planner import plan_query
 
     update = statement["Update"]
@@ -778,22 +835,9 @@ def plan_update(statement, **kwargs):
     # spell SET identically - one reader, so the two cannot drift.
     assignments = _update_assignments({"Update": update}, owner="**UPDATE**")
 
-    # Resolve each assigned name against the target's schema. Column names are
-    # not case sensitive, so the SET list's spelling is matched case-insensitively
-    # and the SCHEMA's spelling is what the projection is keyed by. An
-    # unresolvable name is refused here: silently dropping it would report a
-    # successful update that did not make the change it was asked for.
-    by_folded = {name.lower(): name for name in target_columns}
-    resolved: Dict[str, dict] = {}
-    for assigned, value in assignments.items():
-        canonical = by_folded.get(assigned.lower())
-        if canonical is None:
-            raise ColumnNotFoundError(column=assigned, dataset=relation_name)
-        if canonical in resolved:
-            raise UnsupportedSyntaxError(
-                f"**UPDATE**'s **SET** assigns `{canonical}` more than once."
-            )
-        resolved[canonical] = value
+    resolved = _resolve_assignments(
+        assignments, target_columns, relation_name, "**UPDATE**'s **SET**"
+    )
 
     projection = [
         _aliased(resolved.get(column) or _identifier(column), column)
@@ -809,4 +853,6 @@ def plan_update(statement, **kwargs):
         )
     )
     _stamp_target_scan(plan, relation_name, alias, keyword)
-    return _attach_sink(plan, _sink_node(relation_name, target_columns, alias, keyword))
+    return _attach_sink(
+        plan, _sink_node(relation_name, target_columns, alias, keyword, "update")
+    )

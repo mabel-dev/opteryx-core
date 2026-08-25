@@ -1245,6 +1245,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         delete_positions,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        operation: str = "merge",
     ) -> None:
         """Commit pre-written parquet files and row-level deletes as ONE snapshot.
 
@@ -1255,7 +1256,10 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         back, so no translation happens here.
 
         `commit_message` is passed through as given, including None: the catalog
-        composes its own default naming the file and row counts."""
+        composes its own default naming the file and row counts.
+
+        `operation` names the statement - the catalog stamps it on the snapshot
+        and the audit record, and validates it against its own vocabulary."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
@@ -1266,6 +1270,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 delete_positions,
                 author=author,
                 commit_message=commit_message,
+                operation=operation,
             ),
         )
 

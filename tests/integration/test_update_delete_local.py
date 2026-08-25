@@ -83,6 +83,18 @@ def test_delete_is_one_snapshot(merge_env):
     assert len(target.metadata.snapshots) == before + 1
 
 
+def test_the_snapshot_names_the_statement_that_ran(merge_env):
+    """All three statements are the same physical operation, so the history can
+    only tell them apart if each one says which it was."""
+    target = merge_env["col.tgt"]
+
+    _run(f"DELETE FROM {TARGET} WHERE cve = 3")
+    assert target.snapshot(None).operation_type == "delete"
+
+    _run(f"UPDATE {TARGET} SET details = 1 WHERE cve = 2")
+    assert target.snapshot(None).operation_type == "update"
+
+
 def test_repeated_delete_is_idempotent(merge_env):
     _run(f"DELETE FROM {TARGET} WHERE cve = 2")
     first = _target_rows()
@@ -259,3 +271,58 @@ def test_explain_analyze_refuses_to_run_a_write(merge_env):
 
     with pytest.raises(UnsupportedSyntaxError, match="EXPLAIN ANALYZE"):
         _run(f"EXPLAIN ANALYZE DELETE FROM {TARGET} WHERE cve = 1")
+
+
+# ── The assignment resolver is shared with MERGE ────────────────────────────
+#
+# These exercise MERGE rather than UPDATE/DELETE, but they belong to the same
+# change: the blend chain looks each target column up in an arm's assignment
+# dict by its SCHEMA name, so a key that does not match one exactly was never
+# read - the arm reported success for a change it did not make. One resolver
+# now re-keys every SET and INSERT list, for the statement and for MERGE's arms
+# alike, so the two cannot drift back apart.
+
+from tests.integration.test_merge_into_local import SOURCE  # noqa: E402
+
+
+def test_merge_update_arm_rejects_an_unknown_column(merge_env):
+    from opteryx.exceptions import ColumnNotFoundError
+
+    target = merge_env["col.tgt"]
+    before = target.metadata.current_snapshot_id
+
+    with pytest.raises(ColumnNotFoundError, match="no_such_column"):
+        _run(
+            f"""
+            MERGE INTO {TARGET} AS n USING {SOURCE} AS t ON n.cve = t.cve
+             WHEN MATCHED THEN UPDATE SET no_such_column = 1
+            """
+        )
+
+    assert target.metadata.current_snapshot_id == before
+
+
+def test_merge_insert_arm_rejects_an_unknown_column(merge_env):
+    from opteryx.exceptions import ColumnNotFoundError
+
+    with pytest.raises(ColumnNotFoundError, match="no_such_column"):
+        _run(
+            f"""
+            MERGE INTO {TARGET} AS n USING {SOURCE} AS t ON n.cve = t.cve
+             WHEN NOT MATCHED THEN INSERT (cve, no_such_column, revision)
+                  VALUES (t.cve, t.details, 1)
+            """
+        )
+
+
+def test_merge_arm_assignment_is_not_case_sensitive(merge_env):
+    """Spelled in a different case from the schema, this assignment used to be
+    dropped on the floor: the row was retired and re-appended unchanged."""
+    _run(
+        f"""
+        MERGE INTO {TARGET} AS n USING {SOURCE} AS t ON n.cve = t.cve
+         WHEN MATCHED THEN UPDATE SET DETAILS = t.details
+        """
+    )
+    # cve 2 and 3 matched; cve 3's details came from the source.
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 99, 1)]
