@@ -597,6 +597,10 @@ def _create_insert_node(logical_node, query_properties, registry):
     return registry.create("Insert", query_properties, **logical_node.properties)
 
 
+def _create_merge_node(logical_node, query_properties, registry):
+    return registry.create("Merge", query_properties, **logical_node.properties)
+
+
 def _create_drop_trigger_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_trigger", **logical_node.properties)
 
@@ -654,6 +658,7 @@ _DISPATCH = {
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.DropWorkspace:    _create_drop_workspace_node,
     LogicalPlanStepType.Insert:           _create_insert_node,
+    LogicalPlanStepType.Merge:            _create_merge_node,
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
     LogicalPlanStepType.AlterMaterializedViewOwner: _create_alter_materialized_view_owner_node,
     LogicalPlanStepType.AlterMaterializedViewSuspended: _create_alter_materialized_view_suspended_node,

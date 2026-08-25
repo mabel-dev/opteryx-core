@@ -1176,3 +1176,90 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         context.schemas[target_relation_name] = schema
 
     return node, context
+
+
+def visit_merge(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind the MERGE node.
+
+    The join, the action chain and the blended columns were already desugared
+    into an ordinary SELECT by `plan_merge` and bound like any other, so this
+    binds only the SINK: who may write, what shape the rows must have, and
+    whether the statement is inside the row cap.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import InvalidInternalStateError
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.managers.permissions import can_perform_action
+    from opteryx.planner.logical_planner.merge_desugar import MERGE_ACTION_COLUMN
+    from opteryx.planner.logical_planner.merge_desugar import MERGE_FILE_COLUMN
+    from opteryx.planner.logical_planner.merge_desugar import MERGE_ORDINAL_COLUMN
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support MERGE"
+        )
+
+    # MERGE both deletes and appends, so it needs the same authority as any
+    # other write to the relation - no more, and no less.
+    if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to merge into {node.relation_name}"
+        )
+
+    # Read the target's schema through the connector-agnostic table engine, as
+    # visit_insert does — the gateway connector has no schema of its own.
+    table = node.connector.table_engine(node.relation_name, telemetry=context.telemetry)
+    if getattr(table, "get_dataset_metadata", None) is not None:
+        target_schema, _target_manifest = table.get_dataset_metadata()
+    else:
+        target_schema = table.get_dataset_schema()
+    node.target_schema = target_schema
+    # The ordered data-file list the sink maps `$merge_file` through. It must be
+    # the SAME list, in the SAME order, that the scan indexed against - both come
+    # from this relation's manifest, read once here.
+    node.file_paths = list(_target_manifest.get_file_paths()) if _target_manifest else []
+    node.columns = []  # binder convention; MERGE produces no output columns
+
+    # ---- output shape -----------------------------------------------------
+    # `plan_merge` built the projection as the target's columns in schema order
+    # followed by the three control columns, so the sink can split by position
+    # rather than by name. Verify that here: a drift between the desugar and the
+    # sink would write the right values into the wrong columns.
+    feeder = self.graph[node.source_tail_id]
+    if not getattr(feeder, "columns", None):
+        raise InvalidInternalStateError("visit_merge: source feeder has no bound columns")
+
+    # `column.alias` is the output name — the same field ExitNode derives its
+    # `final_names` from. NOT `schema_column.name`, which on a computed column
+    # is the rendered expression text rather than anything the desugar chose.
+    produced = [c.alias for c in feeder.columns]
+    expected = list(node.target_column_names) + [
+        MERGE_ACTION_COLUMN,
+        MERGE_FILE_COLUMN,
+        MERGE_ORDINAL_COLUMN,
+    ]
+    if produced != expected:
+        raise InvalidInternalStateError(
+            "visit_merge: merge projection does not match the target's columns "
+            f"(produced {produced}, expected {expected})"
+        )
+
+    target_by_name = {c.name: c for c in target_schema.columns}
+    for index, column_name in enumerate(node.target_column_names):
+        target_column = target_by_name.get(column_name)
+        if target_column is None:  # pragma: no cover - names come from the schema
+            raise InvalidInternalStateError(
+                f"visit_merge: target has no column {column_name}"
+            )
+        produced_category = feeder.columns[index].schema_column.category
+        if not _types_compatible(produced_category, target_column.category):
+            raise UnsupportedSyntaxError(
+                f"**MERGE INTO** type mismatch on column '{column_name}': "
+                f"{produced_category} is not compatible with target "
+                f"{target_column.category}"
+            )
+
+    return node, context

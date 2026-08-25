@@ -51,6 +51,7 @@ from opteryx.planner.binder.relation import (
     visit_rename_relation,
     visit_truncate_relation,
     visit_insert,
+    visit_merge,
 )
 from opteryx.planner.logical_planner import LogicalPlan
 
@@ -313,6 +314,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_insert(self, node, context)
+
+    def visit_merge(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_merge(self, node, context)
 
     def visit_comment(
         self, node: Node, context: BindingContext

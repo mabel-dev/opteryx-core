@@ -105,6 +105,7 @@ class LogicalPlanStepType(int, Enum):
     AlterColumnType = auto()
     OptimizeRelation = auto()
     Insert = auto()
+    Merge = auto()
 
     CreateCollection = auto()
     DropCollection = auto()
@@ -3338,7 +3339,28 @@ def plan_explain(statement, **kwargs) -> LogicalPlan:
     explain_id = random_string()
     plan.add_node(explain_id, explain_node)
 
-    sub_plan = plan_query(statement=statement["Explain"]["statement"])
+    # The explained statement is not necessarily a SELECT. Dispatch it through
+    # the same builder table the top level uses rather than assuming plan_query:
+    # `EXPLAIN INSERT ...` and `EXPLAIN MERGE ...` have no query `body` to read
+    # and used to die on a raw KeyError deep inside plan_query, naming nothing.
+    inner = statement["Explain"]["statement"]
+    inner_root = next(iter(inner))
+    if explain_node.analyze and inner_root != "Query":
+        # ANALYZE gets its numbers by RUNNING the statement. For anything that
+        # writes, that would make an EXPLAIN mutate the table - a surprise no
+        # plan-inspection command should be able to spring. Refused rather than
+        # silently executed, and rather than silently reporting nothing.
+        raise UnsupportedSyntaxError(
+            f"**EXPLAIN ANALYZE** cannot be used on a **{inner_root.upper()}** "
+            "statement: ANALYZE measures a statement by running it, and this one "
+            "writes. Use **EXPLAIN** without **ANALYZE** to see the plan."
+        )
+    builder = QUERY_BUILDERS.get(inner_root)
+    if builder is None:
+        raise UnsupportedSyntaxError(
+            f"**EXPLAIN** does not support **{inner_root.upper()}** statements."
+        )
+    sub_plan = builder(inner)
     sub_plan_id = sub_plan.get_exit_points()[0]
     plan += sub_plan
     plan.add_edge(sub_plan_id, explain_id)
@@ -5104,6 +5126,10 @@ def plan_comment(statement, **kwargs):
     return plan
 
 
+from opteryx.planner.logical_planner.merge_desugar import plan_delete  # noqa: E402
+from opteryx.planner.logical_planner.merge_desugar import plan_merge  # noqa: E402
+from opteryx.planner.logical_planner.merge_desugar import plan_update  # noqa: E402
+
 QUERY_BUILDERS = {
     "Analyze": plan_analyze_query,
     # synthesized pre-parse, like DropTrigger and RefreshMaterializedView
@@ -5131,6 +5157,11 @@ QUERY_BUILDERS = {
     "Truncate": plan_truncate,
     "OptimizeTable": plan_optimize_table,
     "Insert": plan_insert,
+    "Merge": plan_merge,
+    # UPDATE and DELETE are MERGE with a degenerate source - same action
+    # codes, same row addresses, same sink (see merge_desugar).
+    "Update": plan_update,
+    "Delete": plan_delete,
     "RefreshMaterializedView": plan_refresh_materialized_view,  # synthesized pre-parse
 }
 

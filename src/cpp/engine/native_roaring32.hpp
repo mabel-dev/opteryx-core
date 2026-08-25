@@ -63,31 +63,63 @@ constexpr uint32_t kArrayMax        = 4096;
 constexpr uint32_t kBitmapWords     = 1024;    // 1024 * 64 == 65536 bits
 constexpr uint32_t kContainerValues = 65536;   // one /16
 
+// WHICH budget a set charges is a policy, chosen by the owner. A policy supplies
+// a ceiling and the counter it accounts against:
+//
+//     struct Policy {
+//         static constexpr int64_t ceiling() noexcept;
+//         static std::atomic<int64_t>& used() noexcept;
+//     };
+//
+// Parametrised rather than global because unrelated features hold these sets —
+// CIDR_AGG's per-group address sets and MERGE's acted-on row addresses — and a
+// shared counter would make each one's ceiling depend on what the other happened
+// to be doing. A merge failing for reasons in someone else's query is a failure
+// whose message cannot honestly say why. The policy is a template parameter, so
+// separation costs nothing at runtime and nothing per container.
+
+// CIDR_AGG's set budget: this file's original owner, and the default.
 // Shared with variables.py's SHOW VARIABLES report — see engine/agg_budgets.hpp
 // for why the value lives there and the counter below stays here.
-constexpr int64_t kSetBudgetBytes = opteryx::agg_budgets::kCidrAggStateBytes;
+struct CidrSetBudget {
+    static constexpr int64_t ceiling() noexcept {
+        return opteryx::agg_budgets::kCidrAggStateBytes;
+    }
+    // Per-shared-object counter, matching the MedianState convention: the one
+    // extension that actually executes the aggregate accounts against a single
+    // instance.
+    static std::atomic<int64_t>& used() noexcept {
+        static std::atomic<int64_t> counter{0};
+        return counter;
+    }
+};
 
-// Per-shared-object counter, matching the MedianState convention: the one
-// extension that actually executes the aggregate accounts against a single
-// instance.
-inline std::atomic<int64_t>& set_budget_used() noexcept {
-    static std::atomic<int64_t> used{0};
-    return used;
-}
+// MERGE INTO's address set budget. Same shape, its own counter and ceiling.
+struct MergeAddressBudget {
+    static constexpr int64_t ceiling() noexcept {
+        return opteryx::agg_budgets::kMergeAddressStateBytes;
+    }
+    static std::atomic<int64_t>& used() noexcept {
+        static std::atomic<int64_t> counter{0};
+        return counter;
+    }
+};
 
-// Reserve `delta` bytes against the global budget. Returns false (and reserves
-// nothing) if that would breach the ceiling.
+// Reserve `delta` bytes against `B`. Returns false (and reserves nothing) if
+// that would breach its ceiling.
+template <class B>
 inline bool budget_take(int64_t delta) noexcept {
     if (delta <= 0) return true;
-    if (set_budget_used().fetch_add(delta) + delta > kSetBudgetBytes) {
-        set_budget_used().fetch_sub(delta);
+    if (B::used().fetch_add(delta) + delta > B::ceiling()) {
+        B::used().fetch_sub(delta);
         return false;
     }
     return true;
 }
 
+template <class B>
 inline void budget_give(int64_t delta) noexcept {
-    if (delta > 0) set_budget_used().fetch_sub(delta);
+    if (delta > 0) B::used().fetch_sub(delta);
 }
 
 // ---------------------------------------------------------------------------
@@ -122,14 +154,15 @@ struct Container {
 
     // Convert the sparse lane to a bitmap. Returns false if the budget refuses
     // the 8KB, leaving the container untouched and still usable as an array.
+    template <class B>
     inline bool promote() noexcept {
         if (bitmap) return true;
-        if (!budget_take(static_cast<int64_t>(kBitmapWords) * static_cast<int64_t>(sizeof(uint64_t)))) {
+        if (!budget_take<B>(static_cast<int64_t>(kBitmapWords) * static_cast<int64_t>(sizeof(uint64_t)))) {
             return false;
         }
         words.assign(kBitmapWords, 0ULL);
         for (uint16_t v : arr) words[v >> 6] |= (1ULL << (v & 63));
-        budget_give(static_cast<int64_t>(arr.capacity()) * static_cast<int64_t>(sizeof(uint16_t)));
+        budget_give<B>(static_cast<int64_t>(arr.capacity()) * static_cast<int64_t>(sizeof(uint16_t)));
         arr.clear();
         arr.shrink_to_fit();
         bitmap = true;
@@ -140,6 +173,7 @@ struct Container {
     // the budget refused the growth. A -1 is NOT "already present" — the
     // caller must latch overflow rather than treat it as a no-op, or the set
     // silently loses values.
+    template <class B>
     inline int add(uint16_t v) noexcept {
         if (bitmap) {
             uint64_t& w = words[v >> 6];
@@ -156,8 +190,8 @@ struct Container {
         if (cardinality >= kArrayMax) {
             // Past the crossover — switch encoding, then set the bit. `it` is
             // dead after promote(); the bitmap path does its own lookup.
-            if (!promote()) return -1;
-            return add(v);
+            if (!promote<B>()) return -1;
+            return add<B>(v);
         }
 
         // Charge the reallocation before it happens; vector::insert would
@@ -166,7 +200,7 @@ struct Container {
             const size_t next = arr.capacity() == 0 ? 16 : arr.capacity() * 2;
             const int64_t delta = static_cast<int64_t>(next - arr.capacity())
                                 * static_cast<int64_t>(sizeof(uint16_t));
-            if (!budget_take(delta)) return -1;
+            if (!budget_take<B>(delta)) return -1;
             const size_t offset = static_cast<size_t>(it - arr.begin());
             arr.reserve(next);
             it = arr.begin() + static_cast<std::ptrdiff_t>(offset);
@@ -177,6 +211,7 @@ struct Container {
     }
 
     // Union `o` into this container. Returns false if the budget refused.
+    template <class B>
     inline bool merge_from(const Container& o) noexcept {
         if (o.cardinality == 0) return true;
 
@@ -203,12 +238,12 @@ struct Container {
         // crossover, promote once up front rather than reallocating the array
         // repeatedly on the way there.
         if (o.bitmap || cardinality + o.cardinality > kArrayMax) {
-            if (!promote()) return false;
-            return merge_from(o);
+            if (!promote<B>()) return false;
+            return merge_from<B>(o);
         }
 
         for (uint16_t v : o.arr) {
-            const int r = add(v);
+            const int r = add<B>(v);
             if (r < 0) return false;
         }
         return true;
@@ -230,18 +265,19 @@ struct Container {
 // ~3.7MB of index per set, ten thousand groups is 37GB of headers before a
 // single value is stored. The index has to be proportional to content.
 // ---------------------------------------------------------------------------
-struct Roaring32 {
+template <class B = CidrSetBudget>
+struct Roaring32T {
     std::vector<uint16_t>  keys;    // sorted high-16 partition keys
     std::vector<uint32_t>  slots;   // parallel to keys → index into conts
     std::vector<Container> conts;   // stable under slot indices (not pointers)
     uint64_t total = 0;             // distinct values held
     bool overflowed = false;        // budget refused an insert; sink must raise
 
-    Roaring32() noexcept = default;
-    Roaring32(const Roaring32&) = delete;
-    Roaring32& operator=(const Roaring32&) = delete;
-    Roaring32(Roaring32&&) noexcept = default;
-    Roaring32& operator=(Roaring32&&) noexcept = default;
+    Roaring32T() noexcept = default;
+    Roaring32T(const Roaring32T&) = delete;
+    Roaring32T& operator=(const Roaring32T&) = delete;
+    Roaring32T(Roaring32T&&) noexcept = default;
+    Roaring32T& operator=(Roaring32T&&) noexcept = default;
 
     // Index overhead charged per partition: the Container header itself plus
     // its key and slot entries. Bounded at ~4MB per set (65536 partitions),
@@ -250,9 +286,9 @@ struct Roaring32 {
     static constexpr int64_t kIndexBytesPerContainer =
         static_cast<int64_t>(sizeof(Container)) + 6;
 
-    ~Roaring32() noexcept {
-        for (const Container& c : conts) budget_give(c.charged_bytes());
-        budget_give(static_cast<int64_t>(conts.size()) * kIndexBytesPerContainer);
+    ~Roaring32T() noexcept {
+        for (const Container& c : conts) budget_give<B>(c.charged_bytes());
+        budget_give<B>(static_cast<int64_t>(conts.size()) * kIndexBytesPerContainer);
     }
 
     // Most recent partition, cached. Real IP columns cluster — consecutive
@@ -284,7 +320,7 @@ struct Roaring32 {
         if (it != keys.end() && *it == hi) {
             slot = slots[pos];
         } else {
-            if (!budget_take(kIndexBytesPerContainer)) return kNoSlot;
+            if (!budget_take<B>(kIndexBytesPerContainer)) return kNoSlot;
             slot = static_cast<uint32_t>(conts.size());
             conts.emplace_back();
             keys.insert(keys.begin() + static_cast<std::ptrdiff_t>(pos), hi);
@@ -299,14 +335,14 @@ struct Roaring32 {
     inline bool add(uint32_t v) noexcept {
         const uint32_t slot = _slot_for(static_cast<uint16_t>(v >> 16));
         if (slot == kNoSlot) { overflowed = true; return false; }
-        const int r = conts[slot].add(static_cast<uint16_t>(v & 0xFFFF));
+        const int r = conts[slot].template add<B>(static_cast<uint16_t>(v & 0xFFFF));
         if (r < 0) { overflowed = true; return false; }
         total += static_cast<uint64_t>(r);
         return true;
     }
 
     // Union `o` into this set — the partial-aggregation combine.
-    inline bool merge_from(const Roaring32& o) noexcept {
+    inline bool merge_from(const Roaring32T& o) noexcept {
         if (o.overflowed) overflowed = true;
         for (size_t i = 0; i < o.keys.size(); ++i) {
             const Container& src = o.conts[o.slots[i]];
@@ -315,12 +351,16 @@ struct Roaring32 {
             if (slot == kNoSlot) { overflowed = true; return false; }
             Container& dst = conts[slot];
             const uint32_t had = dst.cardinality;
-            const bool ok = dst.merge_from(src);
+            const bool ok = dst.template merge_from<B>(src);
             total += static_cast<uint64_t>(dst.cardinality - had);
             if (!ok) { overflowed = true; return false; }
         }
         return true;
     }
 };
+
+// The original name, bound to the original budget: every existing use
+// (CIDR_AGG) keeps compiling and keeps charging the counter it always did.
+using Roaring32 = Roaring32T<CidrSetBudget>;
 
 }} // namespace opteryx::roaring32

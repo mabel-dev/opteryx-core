@@ -1210,8 +1210,63 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
-        catalog.load_dataset(relative_id).add_files(
-            file_paths, author=author, commit_message=commit_message
+        self._commit(
+            relation_name,
+            lambda: catalog.load_dataset(relative_id).add_files(
+                file_paths, author=author, commit_message=commit_message
+            ),
+        )
+
+    def _commit(self, relation_name: str, commit):
+        """Run one catalog commit, translating a lost race into the engine's own error.
+
+        The store's exception type never travels into the engine - the same
+        boundary rule `EgressRefusal` follows. What reaches the caller says what
+        happened to THEIR statement, not what the metastore called it.
+
+        No retry here, by decision: whether the work survives a race depends on
+        what won it (an append leaves row addresses valid, a compaction does
+        not), and the caller re-running is always correct where the engine
+        guessing is only sometimes. See ConcurrentModificationError.
+        """
+        from opteryx_catalog.exceptions import SnapshotRaceError
+
+        from opteryx.exceptions import ConcurrentModificationError
+
+        try:
+            return commit()
+        except SnapshotRaceError as err:
+            raise ConcurrentModificationError(relation_name) from err
+
+    def merge_commit(
+        self,
+        relation_name: str,
+        file_entries,
+        delete_positions,
+        author: Optional[str] = None,
+        commit_message: Optional[str] = None,
+    ) -> None:
+        """Commit pre-written parquet files and row-level deletes as ONE snapshot.
+
+        The write half of MERGE - see `Writable.merge_commit` for why the two
+        halves cannot be two commits. `delete_positions` maps data-file paths as
+        they appear in the current manifest to file-local row ordinals; those
+        paths are the same strings `write_morsel` produced and the scan read
+        back, so no translation happens here.
+
+        `commit_message` is passed through as given, including None: the catalog
+        composes its own default naming the file and row counts."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        file_paths = [fe.file_path for fe in file_entries]
+        self._commit(
+            relation_name,
+            lambda: catalog.load_dataset(relative_id).merge_commit(
+                file_paths,
+                delete_positions,
+                author=author,
+                commit_message=commit_message,
+            ),
         )
 
     def replace_relation(
@@ -1232,8 +1287,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
-        catalog.load_dataset(relative_id).truncate_and_add_files(
-            file_paths, author=author, commit_message=commit_message
+        self._commit(
+            relation_name,
+            lambda: catalog.load_dataset(relative_id).truncate_and_add_files(
+                file_paths, author=author, commit_message=commit_message
+            ),
         )
 
     def relation_column_names(self, relation_name: str):

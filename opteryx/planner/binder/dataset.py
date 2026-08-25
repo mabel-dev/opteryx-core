@@ -1274,6 +1274,39 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             # Fallback for connectors that don't have manifest support yet
             node.schema = node.connector.get_dataset_schema()
             node.manifest = None
+        # Physical row address, for a Scan the planner asked to emit one (MERGE).
+        # These columns are not in the relation's schema and are not read from
+        # the data file - the scan synthesizes them (see constants/row_identity).
+        # Appended before origin stamping below so they carry the alias like any
+        # other column and resolve through the ordinary identifier path.
+        if getattr(node, "emit_row_identity", False):
+            from opteryx.constants.row_identity import ROW_IDENTITY_FILE
+            from opteryx.constants.row_identity import ROW_IDENTITY_ORDINAL
+
+            if node.manifest is None:
+                # No manifest means no file list, and without one an ordinal
+                # addresses nothing. Refusing here beats emitting a column of
+                # coordinates that point at no file.
+                raise UnsupportedSyntaxError(
+                    f"{node.relation} cannot provide row identity - its connector "
+                    "reports no manifest, so a row has no addressable file and "
+                    "ordinal. MERGE requires a catalog-backed target."
+                )
+            node.schema.columns = list(node.schema.columns) + [
+                SchemaColumn(
+                    name=ROW_IDENTITY_FILE,
+                    column_type=ColumnType(physical=DrakenType.INT64),
+                    identity=mint_column_identity(node.alias, ROW_IDENTITY_FILE),
+                    nullable=False,
+                ),
+                SchemaColumn(
+                    name=ROW_IDENTITY_ORDINAL,
+                    column_type=ColumnType(physical=DrakenType.INT64),
+                    identity=mint_column_identity(node.alias, ROW_IDENTITY_ORDINAL),
+                    nullable=False,
+                ),
+            ]
+
         context.schemas[node.alias] = node.schema
         for column in node.schema.columns:
             column.origin = [node.alias]

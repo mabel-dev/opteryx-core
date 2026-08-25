@@ -228,6 +228,30 @@ CLAUSE_DEFINITIONS = {
         "documentation": "The query body is stored for later planning when the view is referenced.",
         "notes": "Supports OR REPLACE and optional column lists.",
     },
+    "delete": {
+        "canonical_name": "DELETE",
+        "planner_entry": "plan_delete",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["DELETE FROM table_name [AS alias] [WHERE predicate]"],
+        "summary": "Mark the rows a predicate names as deleted.",
+        "documentation": (
+            "MERGE INTO with a degenerate source: no join, so every scanned row the "
+            "WHERE keeps is acted on. Merge-on-read - each acted-on row's (file, "
+            "ordinal) address is marked deleted in one snapshot and no data file is "
+            "written at all. The statement projects no payload columns, so the scan "
+            "reads only the columns the predicate needs plus the row address. "
+            "Omitting WHERE deletes every row. A DELETE that matches nothing "
+            "commits nothing rather than writing a snapshot describing no change."
+        ),
+        "notes": (
+            "One relation only: USING, joins and the multi-table `DELETE a, b FROM` "
+            "form are rejected. RETURNING, OUTPUT, ORDER BY and LIMIT are rejected - "
+            "the statement reports a row count, and there is no ordered or bounded "
+            "delete. The target must be a catalog-backed relation, because a row "
+            "without a file and ordinal has no address to mark."
+        ),
+    },
     "distinct": {
         "canonical_name": "DISTINCT",
         "planner_entry": "plan_query",
@@ -404,6 +428,38 @@ CLAUSE_DEFINITIONS = {
         "notes": (
             "INSERT OVERWRITE is rejected; TRUNCATE the table first. An explicit column "
             "list must name every column in the target relation."
+        ),
+    },
+    "merge": {
+        "canonical_name": "MERGE",
+        "planner_entry": "plan_merge",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "MERGE INTO target AS t USING source AS s ON predicate "
+            "WHEN MATCHED [AND predicate] THEN UPDATE SET column = expression, ... "
+            "WHEN MATCHED [AND predicate] THEN DELETE "
+            "WHEN NOT MATCHED [AND predicate] THEN INSERT (column, ...) VALUES (expression, ...)",
+        ],
+        "summary": "Apply a set of changes to a table in one atomic statement.",
+        "documentation": (
+            "Desugars to a single LEFT JOIN with the SOURCE on the left, so a row is "
+            "matched exactly when the ON condition is true. One CASE chain over the "
+            "arm conditions produces both the action code and every output column, so "
+            "classification and blending run natively in the projection. Merge-on-read: "
+            "a replaced row's old version is marked deleted by its (file, ordinal) "
+            "address and its replacement appended, both landing in ONE snapshot. Rows "
+            "no arm claims cost nothing - they are not read past the join, not "
+            "rewritten, and contribute no delete position."
+        ),
+        "notes": (
+            "Arm order is significant: within each population the first arm whose "
+            "condition holds wins. Both relations must be aliased. The ON condition "
+            "must be a single-column equality - composite keys can still match NULL to "
+            "NULL, which in a MERGE would replace an unrelated row. WHEN NOT MATCHED BY "
+            "SOURCE is rejected. The USING side must be a table. A target row matched "
+            "by more than one source row raises a cardinality violation before anything "
+            "is committed."
         ),
     },
     "limit": {
@@ -726,6 +782,34 @@ CLAUSE_DEFINITIONS = {
         "summary": "Combine result sets.",
         "documentation": "The logical planner supports UNION and applies DISTINCT unless ALL is specified.",
         "notes": "Set operations are routed through the Union logical node.",
+    },
+    "update": {
+        "canonical_name": "UPDATE",
+        "planner_entry": "plan_update",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "UPDATE table_name [AS alias] SET column = expression, ... [WHERE predicate]"
+        ],
+        "summary": "Replace the rows a predicate names with a modified version.",
+        "documentation": (
+            "MERGE INTO with a degenerate source, taking the same action as MERGE's "
+            "UPDATE arm: each acted-on row is retired by its (file, ordinal) address "
+            "and a replacement appended, both in ONE snapshot. There is no in-place "
+            "mutation. The replacement is the old row with the SET columns "
+            "substituted, so an assignment may read the value it replaces "
+            "(`SET revision = revision + 1`) and a column the SET list omits keeps "
+            "its old value. Rebuilding a whole row from a partial SET list is why "
+            "the scan projects every column of the target."
+        ),
+        "notes": (
+            "One relation only: UPDATE ... FROM and joins are rejected - an update "
+            "that reads a second relation is a MERGE INTO. RETURNING, OUTPUT, LIMIT "
+            "and the OR conflict clause are rejected. An assignment to a column the "
+            "target does not have is rejected rather than ignored. Column names are "
+            "matched case-insensitively. Omitting WHERE updates every row. An UPDATE "
+            "that matches nothing commits nothing."
+        ),
     },
     "version_as_of": {
         "canonical_name": "VERSION AS OF",

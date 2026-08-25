@@ -632,6 +632,12 @@ cdef class ParquetReadNode(ReaderNode):
     cdef bint _scan_finished              # decode-telemetry flushed once
     cdef bint _emitted_any                # any morsel returned (empty-result guard)
     cdef bint _empty_guard_done           # the single empty morsel already returned
+    cdef list _sp_row_identity_names      # identities for the synthesized $file/$ordinal
+                                           # columns, appended AFTER the read columns.
+                                           # Empty list when the scan was not asked for
+                                           # row identity — see constants/row_identity.
+    cdef dict _sp_file_index              # data-file path -> its index in _sp_blob_paths,
+                                           # the value $file carries.
     cdef dict _sp_delete_positions        # path -> sorted tuple of file-global deleted
                                            # row ordinals (merge-on-read delete vectors,
                                            # resolved onto FileEntry at binding). Empty
@@ -1302,6 +1308,17 @@ cdef class ParquetReadNode(ReaderNode):
         # Select physical columns to read by NAME, not by identity.
         read_schema = deepcopy(base_schema)
         read_schema.columns = [c for c in base_schema.columns if c.name in required_names]
+        # Row identity ($file/$ordinal) is SYNTHESIZED, not read: the columns are
+        # not in the data file. Resolved here, before the two-pass gate below
+        # consults it — a scan emitting an ordinal cannot use the two-pass path.
+        from opteryx.constants.row_identity import ROW_IDENTITY_COLUMNS
+
+        _identity_cols = [c for c in read_schema.columns if c.name in ROW_IDENTITY_COLUMNS]
+        # Ordering is the contract: $file then $ordinal, matching the order
+        # `_row_identity_vectors` builds them and visit_scan appended them.
+        _identity_cols.sort(key=lambda c: ROW_IDENTITY_COLUMNS.index(c.name))
+        self._sp_row_identity_names = [c.identity for c in _identity_cols]
+
         if not read_schema.columns and base_schema.columns:
             # Zero-projection/no-filter scans still need one physical column for row counts.
             read_schema.columns = [base_schema.columns[0]]
@@ -1451,6 +1468,11 @@ cdef class ParquetReadNode(ReaderNode):
         two_pass_eligible = (
             config.features.parquet_late_materialization
             and not self._sp_delete_positions
+            # $ordinal is a row's POSITION in its file, and it is only that while
+            # row position still equals file ordinal. Pass 2 renumbers rows, so an
+            # ordinal produced across the two passes would address a different
+            # row — a silent wrong answer that MERGE would then mark deleted.
+            and not self._sp_row_identity_names
             and has_predicates
             and bool(_filter_names)
             and bool(_pass2_names)
@@ -1518,17 +1540,24 @@ cdef class ParquetReadNode(ReaderNode):
         self._sp_filesystem = filesystem
         self._sp_connector_type = connector_type
 
-        column_names = [col.name for col in read_schema.columns]
+        # The identity columns leave the READ list — the reader must never be
+        # asked for a column the file does not hold. Their vectors are appended
+        # per row group instead, keeping `_sp_identity_names`'s positional
+        # pairing intact across both halves.
+        _read_cols = [c for c in read_schema.columns if c.name not in ROW_IDENTITY_COLUMNS]
+        self._sp_file_index = {p: i for i, p in enumerate(blob_paths)}
+
+        column_names = [col.name for col in _read_cols]
         self._sp_column_names = column_names
         self._sp_name_to_identity = {
             col.name: _read_name_to_identity.get(col.name, col.identity)
-            for col in read_schema.columns
+            for col in _read_cols
         }
         # Identity order is invariant across row groups (positional pairing with
         # row_group.values()); compute once instead of per morsel.
         self._sp_identity_names = [
             self._sp_name_to_identity[col] for col in column_names
-        ]
+        ] + self._sp_row_identity_names
         # Positional logical-type coercion plan (kind, arg) per column, computed
         # once. kind 0=none, 1=decimal(prec,scale), 2=date32, 3=timestamp,
         # 4=array<timestamp>, 5=ipv4. Empty of real work for pure numeric scans →
@@ -1669,7 +1698,11 @@ cdef class ParquetReadNode(ReaderNode):
 
         The two must stay in step: see the note on the _sp_coerce_ops build for
         what a coercion present in one and missing from the other actually does."""
-        cdef Py_ssize_t i, n = len(vectors)
+        # Bounded by the PLAN, not by the vector list: a scan emitting row
+        # identity appends synthesized columns past the read columns, and those
+        # have no coercion plan entry (nor need one — they are built at the
+        # width the schema declares).
+        cdef Py_ssize_t i, n = len(self._sp_coerce_ops)
         cdef tuple op
         cdef int kind
         cdef object v, v_nb, dec
@@ -1712,6 +1745,69 @@ cdef class ParquetReadNode(ReaderNode):
             else:  # kind == 3
                 vectors[i] = _int64_to_timestamp(v_nb, op[1])
 
+    cdef tuple _rg_row_window(self, str path, int rg_idx, str why):
+        """`(file-global first row index, row count)` for one row group.
+
+        The footer's per-row-group counts, prefix-summed and cached per file.
+        Keyed by the file's REAL row-group index — upstream predicate pruning
+        skips groups but never renumbers them.
+
+        `why` names what wanted the window, so a file with no footer counts
+        fails saying which capability it cannot serve.
+        """
+        cached = self._sp_rg_offset_cache.get(path)
+        if cached is None:
+            counts = self._ipc_source.rg_row_counts(path)
+            if not counts:
+                raise RuntimeError(
+                    f"ParquetReadNode: no footer row-group counts for {why} "
+                    f"file {path}; cannot map row ordinals to row groups."
+                )
+            offsets = []
+            running = 0
+            for c in counts:
+                offsets.append(running)
+                running += c
+            cached = (offsets, counts)
+            self._sp_rg_offset_cache[path] = cached
+        offsets, counts = cached
+        return (offsets[rg_idx], counts[rg_idx])
+
+    cdef list _row_identity_vectors(self, str path, int rg_idx):
+        """The `$file` and `$ordinal` vectors for one row group, in that order.
+
+        `$ordinal` is the row's FILE-GLOBAL position, so it is built from the
+        footer's row-group offset and the row's position within the group —
+        valid only while position still equals ordinal, which is why this runs
+        before the delete filter and the pushed predicate, and why the two-pass
+        path is refused outright for a scan that emits it.
+
+        `$file` is one value for the whole group (a row group belongs to exactly
+        one file), so it is built from a repeated sequence rather than measured
+        per row.
+
+        Cost note: building the ordinal range measures ~3.3ms per 262K-row row
+        group, which is noise under the row cap MERGE ships with. A native iota
+        is the obvious replacement if that cap is ever lifted.
+        """
+        cdef tuple window = self._rg_row_window(path, rg_idx, "row-identity")
+        cdef int64_t start = window[0]
+        # The group's FULL row count, from the footer — not len(vectors[0]),
+        # which is absent when row identity is the only thing projected.
+        cdef Py_ssize_t nrows = window[1]
+        cdef object file_idx = self._sp_file_index.get(path)
+        if file_idx is None:
+            raise RuntimeError(
+                f"ParquetReadNode: {path} is not in this scan's file list; "
+                "cannot address its rows."
+            )
+        return [
+            _vector_from_sequence_typed([file_idx] * nrows, dtype="INTEGER"),
+            _vector_from_sequence_typed(
+                range(start, start + nrows), dtype="INTEGER"
+            ),
+        ]
+
     cdef object _apply_delete_filter(self, list vectors, str path, int rg_idx):
         """Subtract a file's merge-on-read delete vector from one row group.
 
@@ -1731,24 +1827,9 @@ cdef class ParquetReadNode(ReaderNode):
         cdef tuple positions = self._sp_delete_positions.get(path)
         if positions is None:
             return vectors, 0
-        cached = self._sp_rg_offset_cache.get(path)
-        if cached is None:
-            counts = self._ipc_source.rg_row_counts(path)
-            if not counts:
-                raise RuntimeError(
-                    f"ParquetReadNode: no footer row-group counts for delete-bearing "
-                    f"file {path}; cannot map delete ordinals to row groups."
-                )
-            offsets = []
-            running = 0
-            for c in counts:
-                offsets.append(running)
-                running += c
-            cached = (offsets, counts)
-            self._sp_rg_offset_cache[path] = cached
-        offsets, counts = cached
-        cdef int64_t start = offsets[rg_idx]
-        cdef int64_t nrows = counts[rg_idx]
+        cdef tuple window = self._rg_row_window(path, rg_idx, "delete-bearing")
+        cdef int64_t start = window[0]
+        cdef int64_t nrows = window[1]
         # positions is sorted: slice the file-global window for this group.
         cdef Py_ssize_t lo = bisect_left(positions, start)
         cdef Py_ssize_t hi = bisect_left(positions, start + nrows)
@@ -1842,6 +1923,17 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_claims_pending -= 1
                 self._scan_mtx.unlock()
                 continue
+
+            # ── Row identity (thread-local, before EVERYTHING that drops rows) ──
+            # $ordinal is a row's position in its file, so it must be stamped
+            # while position still equals ordinal. Appended here, the delete
+            # filter below takes it along (it filters every vector positionally)
+            # and the pushed predicate does the same through the cxm — so the
+            # address stays attached to its row wherever the row survives to.
+            if self._sp_row_identity_names:
+                vectors = vectors + self._row_identity_vectors(
+                    <str>path, <int>pulled[5]
+                )
 
             # ── Merge-on-read delete filter (thread-local, before predicate) ──
             # Deleted ordinals are physical row positions, so they must be

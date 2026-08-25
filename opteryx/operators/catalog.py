@@ -218,6 +218,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
+    from opteryx.operators.merge import MergeNode
 
     r = OperatorRegistry()
 
@@ -512,6 +513,12 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         InsertNode,
         name="Insert",
+        category=OperatorCategory.IO,
+        is_not_explained=True,
+    )
+    r.register(
+        MergeNode,
+        name="Merge",
         category=OperatorCategory.IO,
         is_not_explained=True,
     )

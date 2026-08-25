@@ -85,6 +85,24 @@ cdef extern from "engine/streaming_scan_source.hpp" namespace "opteryx::engine" 
 # task running the whole graph, streaming the terminal pipeline into the production
 # MorselQueue the cursor drains. This is the general form that subsumed (and replaced)
 # the four narrow native_engine_real_* entry points, now removed.
+# MERGE INTO's per-row work (native_merge_sink.hpp). The sink receives Cxx-backed
+# morsels, whose values are readable only through the C++ substrate; the row loop
+# lives there so the whole per-row path is GIL-free and Python is crossed once, at
+# EOS, to hand the accumulated addresses to the catalog commit.
+cdef extern from "engine/native_merge_sink.hpp" namespace "opteryx::engine" nogil:
+    cdef cppclass MergeAddressState:
+        MergeAddressState()
+        int64_t rows_inserted
+        int64_t rows_updated
+        int64_t rows_deleted
+        int64_t violation_file
+        int64_t violation_ordinal
+    int merge_split_morsel(const CxxMorsel& m, int32_t action_idx, int32_t file_idx,
+                           int32_t ordinal_idx, MergeAddressState& st,
+                           cppvector[int32_t]& write_rows)
+    cppvector[int64_t] merge_retired_files(const MergeAddressState& st)
+    cppvector[int64_t] merge_retired_ordinals(const MergeAddressState& st, int64_t file)
+
 cdef extern from "engine/native_sort.hpp" namespace "opteryx::engine" nogil:
     cdef struct SortKeySpec:
         size_t col_idx
@@ -3714,6 +3732,7 @@ include "sort/sort.pyx"
 include "table_management/table_management.pyx"
 include "relation_management/relation_management.pyx"
 include "insert/insert.pyx"
+include "merge/merge.pyx"
 include "union/union.pyx"
 include "unnest_join/unnest_join.pyx"
 include "view_management/view_management.pyx"

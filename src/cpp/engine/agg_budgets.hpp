@@ -71,4 +71,17 @@ constexpr int64_t kArrayAggBytes = 512LL * 1024 * 1024;   // 512MB, all groups
 constexpr int64_t kCidrAggStateBytes = 512LL * 1024 * 1024;   // 512MB, all groups
 constexpr int64_t kCidrAggEmitBytes  = 512LL * 1024 * 1024;   // 512MB of CIDR text
 
+// MERGE INTO's address set: which target rows the statement has acted on. Held
+// until the commit, because the commit is atomic — the appends and the
+// row-deletes land in one snapshot, so neither half can be flushed early.
+//
+// SEPARATE from the CIDR budget rather than sharing it. They are unrelated
+// workloads that can run in the same process, and a shared counter makes each
+// one's ceiling depend on what the other happens to be doing — a merge would
+// fail for reasons in someone else's query, and the message could not honestly
+// say why. Sized the same because the underlying structure is the same (roaring
+// over dense values) and 512MB of it addresses far more rows than a merge that
+// size would take to write.
+constexpr int64_t kMergeAddressStateBytes = 512LL * 1024 * 1024;
+
 }} // namespace opteryx::agg_budgets

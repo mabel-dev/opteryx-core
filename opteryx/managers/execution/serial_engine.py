@@ -47,6 +47,7 @@ def _special_op_types():
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
+    from opteryx.operators.merge import MergeNode
 
     return (
         ExplainNode,
@@ -60,6 +61,7 @@ def _special_op_types():
         ViewManagementNode,
         RelationManagementNode,
         InsertNode,
+        MergeNode,
     )
 
 
@@ -85,6 +87,7 @@ def execute(
     from opteryx.operators.view_management import ViewManagementNode
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
+    from opteryx.operators.merge import MergeNode
 
     head_nodes = list(set(plan.get_exit_points()))
     if len(head_nodes) != 1:
@@ -105,6 +108,28 @@ def execute(
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, (ViewManagementNode, TableManagementNode, RelationManagementNode)):
         return head_node(None), ResultType.NON_TABULAR
+    if isinstance(head_node, MergeNode):
+        # MERGE's whole body — the join, the action chain and the blended
+        # columns — is an ordinary Exit-headed SELECT built by plan_merge, so it
+        # runs natively like any other. Python drives only the sink, exactly as
+        # the INSERT path below does: interim debt per CLAUDE.md §2, shared with
+        # that path rather than duplicated so there stays ONE loop to move.
+        subplan = plan.copy()
+        subplan.remove_node(head_nodes[0], heal=True)
+        new_head = subplan[subplan.get_exit_points()[0]]
+        if type(new_head).__name__ != "ExitNode":
+            raise InvalidInternalStateError(
+                "MERGE sub-plan is not Exit-headed; it cannot run on the native engine"
+            )
+        from opteryx.managers.execution.compiler import execute_native
+
+        generator, _ = execute_native(subplan, telemetry=telemetry)
+        for morsel in generator:
+            head_node._push_impl(morsel)
+        head_node._push_impl(EOS)
+        if head_node.result is None:
+            raise InvalidInternalStateError("MergeNode did not produce a result")
+        return head_node.result, ResultType.NON_TABULAR
     if isinstance(head_node, InsertNode):
         # INSERT ... SELECT: plan_insert keeps the sub-query's ExitNode instead
         # of stripping it (see logical_planner.py), so the SELECT subplan is

@@ -149,6 +149,47 @@ class Writable:
         """
         raise NotImplementedError
 
+    def merge_commit(
+        self,
+        relation_name: str,
+        file_entries: "List[FileEntry]",
+        delete_positions: "Dict[str, List[int]]",
+        author: Optional[str] = None,
+        commit_message: Optional[str] = None,
+    ) -> None:
+        """Commit pre-written data files AND row-level deletes as ONE snapshot.
+
+        The write half of MERGE. A merge replaces a row by marking its old
+        ordinal deleted and appending the replacement, so the two halves must
+        share a snapshot: a reader that observed the append without the delete
+        would see the row twice, and the delete without the append would see it
+        not at all. `insert` cannot express this - its snapshot marks nothing
+        deleted - which is why this is a separate method rather than a flag.
+
+        Caller must have already written parquet files into the relation
+        folder, exactly as for `insert`.
+
+        Args:
+            relation_name: Fully-qualified relation name
+            file_entries: FileEntry objects for the files to register. May be
+                empty for a merge whose every arm deleted.
+            delete_positions: data-file path -> file-local, zero-based row
+                ordinals in physical row order. Paths are as they appear in the
+                relation's CURRENT manifest. May be empty for a merge whose
+                every arm inserted.
+            author: session user this merge is attributed to (see create_relation)
+            commit_message: what the snapshot history should say this merge WAS,
+                or None to let the store describe the mechanism (see `insert`).
+
+        Raises:
+            ValueError: If the relation doesn't exist, both arguments are empty,
+                a named path is not in the current manifest, or an ordinal is
+                out of range for its file. Any of these aborts the whole commit -
+                a merge never lands partially.
+            ConcurrentModificationError: If relation was modified concurrently
+        """
+        raise NotImplementedError
+
     def replace_relation(
         self,
         relation_name: str,

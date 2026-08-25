@@ -661,6 +661,30 @@ class ResultTooLargeError(SqlError):
         )
 
 
+class MergeTooLargeError(SqlError):
+    """Raised when a MERGE's set of acted-on row addresses exceeds the set budget.
+
+    A merge holds the address of every target row it has acted on until it
+    commits, because the commit is atomic: the appends and the row-deletes must
+    land in one snapshot, so neither half can be flushed early. That set is a
+    roaring bitmap over file-local ordinals, which is bounded by construction
+    and dense for the shape merges actually produce - so reaching this means a
+    genuinely enormous delta, or a target whose live rows are scattered thinly
+    across many files.
+
+    Deliberately an ERROR and not a partial commit. Committing what fits would
+    leave the target holding some of the merge and not the rest, with nothing to
+    say which - a wrong answer wearing the shape of a right one, and one written
+    to storage.
+
+    This is the ceiling that replaced MERGE's original plan-time row cap. The cap
+    was a proxy: it bounded rows because the address set was a hash set costing
+    ~48 bytes each, and rows were the thing that could be counted before running.
+    With the set on roaring bitmaps the memory is bounded directly, so the limit
+    is now stated in the terms that actually bind.
+    """
+
+
 class IncorrectTypeError(SqlError):
     """Exception raised for incorrect types."""
 
@@ -917,7 +941,40 @@ class UnnamedColumnError(SqlError):
 
 
 class ConcurrentModificationError(DatabaseError):
-    """Raised when a relation is modified concurrently during a commit operation."""
+    """Raised when another writer committed to a relation while this statement was
+    building its own commit.
+
+    Every commit is built against a snapshot it read, and is published by moving
+    one pointer. If another writer moved that pointer first, publishing anyway
+    would drop their work: this statement's manifest was built from a parent
+    that no longer describes the relation. The store refuses the write, so
+    NOTHING was published - the data files this statement wrote are orphans the
+    reclamation sweeps collect.
+
+    Deliberately NOT retried automatically. Whether the work survives the race
+    depends on what won it: a winner that appended leaves this statement's
+    assumptions intact, but a winner that compacted has moved rows between
+    files, which invalidates any row addresses computed against the old manifest
+    - the case MERGE depends on. Rather than encode that judgement in the
+    engine, the statement fails and the caller re-runs it, which rebuilds
+    against whatever is current. A caller re-running is always correct; the
+    engine guessing is correct only sometimes.
+    """
+
+    def __init__(self, relation: str, message: Optional[str] = None):
+        self.relation = relation
+        super().__init__(
+            compose(
+                message
+                or (
+                    f"Another writer committed to {md_code(relation)} while this "
+                    "statement was preparing its own commit, so it was refused. "
+                    "Nothing was written."
+                ),
+                "Re-run the statement - it will be rebuilt against the current "
+                "state of the relation.",
+            )
+        )
 
 
 # ======================== End Miscellaneous Database Errors ==========================
