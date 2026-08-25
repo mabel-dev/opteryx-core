@@ -537,12 +537,16 @@ def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[No
     Bind the ALTER WORKSPACE ... SET node to determine which connector should
     handle persisting the workspace property.
     """
-    from opteryx.connectors import connector_factory
+    from opteryx.connectors import workspace_settings_connector
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
     from opteryx.managers.permissions import can_perform_workspace_action
 
-    node.connector = connector_factory(node.workspace_name, telemetry=context.telemetry)
+    # The SETTINGS connector, not the data one: these properties live in the
+    # opteryx catalog entry whatever the workspace's data is bound to.
+    node.connector = workspace_settings_connector(
+        node.workspace_name, telemetry=context.telemetry
+    )
     if not isinstance(node.connector, Writable):
         raise ReadOnlyConnectorError(
             f"connector for {node.workspace_name} does not support ALTER WORKSPACE"
@@ -567,12 +571,17 @@ def visit_drop_workspace(self, node: Node, context: BindingContext) -> Tuple[Nod
     Bind the DROP WORKSPACE node to determine which connector should handle
     the drop, same shape as visit_alter_workspace.
     """
-    from opteryx.connectors import connector_factory
+    from opteryx.connectors import workspace_settings_connector
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
     from opteryx.managers.permissions import can_perform_workspace_action
 
-    node.connector = connector_factory(node.workspace_name, telemetry=context.telemetry)
+    # Settings connector, same reasoning as ALTER WORKSPACE. Dropping an
+    # externally-bound workspace unlinks it - the catalog decides that, from
+    # the binding it can see on the workspace's own `$properties`.
+    node.connector = workspace_settings_connector(
+        node.workspace_name, telemetry=context.telemetry
+    )
     if not isinstance(node.connector, Writable):
         raise ReadOnlyConnectorError(
             f"connector for {node.workspace_name} does not support DROP WORKSPACE"

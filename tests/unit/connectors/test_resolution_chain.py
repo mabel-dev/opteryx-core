@@ -48,12 +48,14 @@ def clean_registry():
     saved_prefixes = dict(connectors._storage_prefixes)
     saved_default = connectors._default_connector
     saved_resolver = connectors._workspace_resolver
+    saved_settings_resolver = connectors._workspace_settings_resolver
     saved_cache = dict(connectors._connector_cache)
     saved_versions = dict(connectors._connector_versions)
 
     connectors._storage_prefixes.clear()
     connectors._default_connector = None
     connectors._workspace_resolver = None
+    connectors._workspace_settings_resolver = None
     connectors._connector_cache.clear()
     connectors._connector_versions.clear()
     try:
@@ -63,6 +65,7 @@ def clean_registry():
         connectors._storage_prefixes.update(saved_prefixes)
         connectors._default_connector = saved_default
         connectors._workspace_resolver = saved_resolver
+        connectors._workspace_settings_resolver = saved_settings_resolver
         connectors._connector_cache.clear()
         connectors._connector_cache.update(saved_cache)
         connectors._connector_versions.clear()

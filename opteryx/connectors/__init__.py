@@ -34,6 +34,16 @@ walked in `connector_factory` — first answer wins:
 3. Static default — `set_default_connector(connector, **kwargs)`.
 4. Local disk — the terminal fallback, always available.
 
+That chain answers ONE question: which connector serves a workspace's DATA.
+Which catalog holds a workspace's SETTINGS and lifecycle is a SEPARATE
+question with a separate resolver - `set_workspace_settings_resolver` - read
+through `workspace_settings_connector`. The settings answer is always the
+opteryx catalog entry, whatever the data is bound to, and never needs a
+binding's stored credential. Workspace-scoped DDL (`ALTER WORKSPACE`, `DROP
+WORKSPACE`) asks the second question; everything else asks the first. Do not
+collapse them back into one call - see `set_workspace_settings_resolver` for
+what that cost last time.
+
 Connector instances are cached per resolved key (the workspace/prefix, or
 "_default"/"_disk" for the shared fallbacks) and validated by a VERSION compare
 on every lookup: the resolution's version (or, absent one, a fingerprint of the
@@ -150,6 +160,10 @@ _default_connector = None
 
 # Slot 2: the installed resolver, or None
 _workspace_resolver = None
+
+# The SETTINGS resolver, or None. Deliberately separate from
+# `_workspace_resolver`: see `set_workspace_settings_resolver`.
+_workspace_settings_resolver = None
 # fmt:on
 
 # A workspace segment the resolver is worth consulting for. Protocol-style
@@ -172,6 +186,8 @@ __all__ = (
     # Utilities
     "set_default_connector",
     "set_workspace_resolver",
+    "set_workspace_settings_resolver",
+    "workspace_settings_connector",
     "Resolution",
     "TableType",
     # Legacy names (backward compatibility) - map to factories
@@ -260,6 +276,97 @@ def set_workspace_resolver(resolver) -> None:
         raise ValueError("workspace resolver must be callable (or None to remove it).")
 
     _workspace_resolver = resolver
+
+
+def set_workspace_settings_resolver(resolver) -> None:
+    """Install (or, with None, remove) the workspace SETTINGS resolver.
+
+    There are two different questions about a workspace, and they must not
+    share a resolver:
+
+    - Which connector serves this workspace's DATA? Depends on the workspace's
+      external binding, and answering it may require that binding's stored
+      credential. That is `set_workspace_resolver`.
+    - Which catalog holds this workspace's SETTINGS and lifecycle? Always the
+      opteryx catalog entry, whatever the data is bound to, and answering it
+      needs no credential ever. That is this resolver.
+
+    They were once one call, which meant `ALTER WORKSPACE` decrypted an
+    external catalog's credential to reach a property the opteryx catalog
+    entry owns - so a workspace whose stored credential had gone bad could
+    not be repaired or dropped through SQL at all, the repairing statement
+    itself dying at bind time. Two resolvers make that conflation
+    unspellable rather than merely fixed.
+
+    `resolver(workspace)` returns a `Resolution` or None; None falls through
+    the same way the data resolver's does. Exceptions propagate.
+    """
+    global _workspace_settings_resolver
+
+    if resolver is not None and not callable(resolver):
+        raise ValueError(
+            "workspace settings resolver must be callable (or None to remove it)."
+        )
+
+    _workspace_settings_resolver = resolver
+
+
+def workspace_settings_connector(workspace_name: str, telemetry):
+    """The connector that owns `workspace_name`'s settings and lifecycle.
+
+    For workspace-SCOPED statements only - `ALTER WORKSPACE`, `DROP
+    WORKSPACE`. Relation-scoped DDL keeps going through `connector_factory`,
+    and must: routing `CREATE TABLE` at a bound workspace's own metastore is
+    what makes that metastore refuse the write, which is what enforces the
+    rule that an externally-bound workspace never domiciles opteryx datasets.
+
+    With no settings resolver installed this defers to `connector_factory`.
+    That is not a fallback but the same answer arrived at cheaply: a
+    deployment with no settings resolver has no external bindings either, so
+    the data connector and the settings connector are the same object and no
+    credential is in play. A deployment that installs a DATA resolver without
+    a settings resolver is a different matter - it has bindings but no
+    settings routing, which is exactly the bug this seam exists to prevent -
+    and is refused here rather than silently reintroducing it.
+    """
+    if _workspace_settings_resolver is not None:
+        resolution = _workspace_settings_resolver(workspace_name)
+        if resolution is not None:
+            if not isinstance(resolution, Resolution):
+                raise ValueError(
+                    "workspace settings resolver must return a Resolution or None, "
+                    f"got {type(resolution)}"
+                )
+            # Namespaced away from connector_factory's cache: the same
+            # workspace name legitimately resolves to a DIFFERENT connector
+            # for settings than for data, and one key for both would hand
+            # whichever asked second the other's answer.
+            cache_key = f"$settings:{workspace_name}"
+            version = resolution.version
+            entry = dict(resolution.config)
+            if version is None:
+                version = _fingerprint(entry)
+            cached = _connector_cache.get(cache_key)
+            if cached is not None and _connector_versions.get(cache_key) == version:
+                return cached
+            build_entry = {key: value for key, value in entry.items() if key != "connector"}
+            instance = _build_connector(resolution.connector, build_entry, telemetry)
+            instance._matched_prefix = workspace_name
+            _connector_cache[cache_key] = instance
+            _connector_versions[cache_key] = version
+            return instance
+
+    if _workspace_resolver is not None:
+        raise ValueError(
+            "a workspace DATA resolver is installed but no settings resolver is - "
+            "workspace properties and lifecycle live in the opteryx catalog entry, "
+            "not in whatever external catalog a workspace's data is bound to, so "
+            "resolving them through the data binding would decrypt a credential "
+            "that has no bearing on the answer. Install one with "
+            "set_workspace_settings_resolver()."
+        )
+
+    return connector_factory(workspace_name, telemetry=telemetry)
 
 
 def create_local_connector(**kwargs):
