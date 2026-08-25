@@ -36,6 +36,7 @@ between I/O and decode across all files and row groups simultaneously.
 
 import heapq as _heapq
 import time
+from bisect import bisect_left
 from copy import deepcopy
 from typing import Generator
 
@@ -255,6 +256,12 @@ cdef class ScanReadings:
     cdef public int64_t time_decoding_blobs
     cdef public int64_t parquet_rows_before_filter
     cdef public int64_t empty_datasets
+    # ── Merge-on-read deletes ────────────────────────────────────────────────
+    # mor_delete_files: files in this scan carrying a delete vector (set once
+    # at scan start). mor_rows_deleted: rows the vectors removed from emitted
+    # row groups. Reported only when the scan has delete debt — see flush_into.
+    cdef public int64_t mor_delete_files
+    cdef public int64_t mor_rows_deleted
 
     # ── Mutation API ─────────────────────────────────────────────────────────
     # All accumulation goes through the methods below rather than direct field
@@ -289,6 +296,12 @@ cdef class ScanReadings:
     cpdef void record_decode_time(self, int64_t ns):
         self.time_decoding_blobs += ns
 
+    cpdef void record_mor_delete_files(self, int64_t file_count):
+        self.mor_delete_files = file_count
+
+    cpdef void record_mor_rows_deleted(self, int64_t rows):
+        self.mor_rows_deleted += rows
+
     cpdef void record_filter_totals(self, int64_t rows_before):
         # rows_after (post-relocated-filter survivor count) is intentionally not
         # kept here — it duplicated the downstream ExprFilter operator's own
@@ -313,6 +326,12 @@ cdef class ScanReadings:
         readings["time_decoding_blobs"]                = self.time_decoding_blobs
         readings["parquet_rows_before_filter"]         = self.parquet_rows_before_filter
         readings["empty_datasets"]                     = self.empty_datasets
+        # Present only when merge-on-read deletes were in play, so the
+        # ordinary no-debt scan's telemetry is unchanged — absence means "no
+        # delete vectors", exactly like the manifest columns themselves.
+        if self.mor_delete_files:
+            readings["mor_delete_files"]               = self.mor_delete_files
+            readings["mor_rows_deleted"]               = self.mor_rows_deleted
 
 
 cdef inline void _coerce_logical_types(
@@ -613,6 +632,11 @@ cdef class ParquetReadNode(ReaderNode):
     cdef bint _scan_finished              # decode-telemetry flushed once
     cdef bint _emitted_any                # any morsel returned (empty-result guard)
     cdef bint _empty_guard_done           # the single empty morsel already returned
+    cdef dict _sp_delete_positions        # path -> sorted tuple of file-global deleted
+                                           # row ordinals (merge-on-read delete vectors,
+                                           # resolved onto FileEntry at binding). Empty
+                                           # dict when the scan has no delete debt.
+    cdef dict _sp_rg_offset_cache         # path -> (prefix_offsets, rg_row_counts)
     cdef int64_t _sp_claims_pending       # row groups claimed via next_vectors() but not
                                            # yet fully processed by this worker (see
                                            # _single_pass_next's race-fix comment)
@@ -1397,8 +1421,36 @@ cdef class ParquetReadNode(ReaderNode):
             except Exception:
                 _selectivity_estimate = None
 
+        # ── Merge-on-read delete vectors ──────────────────────────────────────
+        # Collected once per scan from the manifest's FileEntry rows. A file
+        # that reports delete debt without resolved positions is refused —
+        # scanning it would serve the deleted rows back. When ANY file carries
+        # deletes the whole scan takes the single-pass path (the latmat gate
+        # below): pass-1/pass-2 masks compose with the delete filter at the
+        # worker layer, which is machinery the debt does not yet justify —
+        # correctness first, the two-pass optimisation can learn deletes later.
+        self._sp_delete_positions = {}
+        self._sp_rg_offset_cache = {}
+        _mf_files = getattr(self.manifest, "files", None) if self.manifest else None
+        if _mf_files:
+            for _fe in _mf_files:
+                _drc = getattr(_fe, "deleted_record_count", 0)
+                if not _drc:
+                    continue
+                _pos = getattr(_fe, "delete_positions", None)
+                if _pos is None:
+                    raise RuntimeError(
+                        f"ParquetReadNode: {_fe.file_path} reports {_drc} deleted rows but "
+                        "no delete vector was resolved at binding; refusing to scan and "
+                        "serve deleted rows."
+                    )
+                self._sp_delete_positions[_fe.file_path] = tuple(_pos)
+        if self._sp_delete_positions:
+            self.scan_readings.record_mor_delete_files(len(self._sp_delete_positions))
+
         two_pass_eligible = (
             config.features.parquet_late_materialization
+            and not self._sp_delete_positions
             and has_predicates
             and bool(_filter_names)
             and bool(_pass2_names)
@@ -1601,7 +1653,7 @@ cdef class ParquetReadNode(ReaderNode):
             footer_bytes_cache=_FOOTER_CACHE,
             null_fillers=[self._sp_null_filler_by_name[c] for c in column_names],
             string_types=[self._sp_string_type_by_name[c] for c in column_names],
-            limit=self.limit if not has_predicates else None,
+            limit=self.limit if (not has_predicates and not self._sp_delete_positions) else None,
             http_tuning=_resolve_http_tuning(getattr(self.properties, "variables", None)),
             in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
             coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
@@ -1659,6 +1711,57 @@ cdef class ParquetReadNode(ReaderNode):
                 vectors[i] = _int64_to_decimal(v_nb, dec[0], dec[1])
             else:  # kind == 3
                 vectors[i] = _int64_to_timestamp(v_nb, op[1])
+
+    cdef object _apply_delete_filter(self, list vectors, str path, int rg_idx):
+        """Subtract a file's merge-on-read delete vector from one row group.
+
+        `vectors` holds the row group's FULL rows (the single-pass path applies
+        any predicate after assembly, and the NULL-fill path fills to the row
+        group's logical row count, so row position == row-group-local ordinal).
+        The file-global ordinals on the delete vector are mapped to row-group-
+        local ones via the footer's per-row-group row counts, keyed by the
+        file's REAL row-group index — upstream predicate pruning skips groups
+        but never renumbers them.
+
+        Returns ``(vectors, removed)``: the vectors unchanged and 0 when the
+        group has no deleted rows, a row-filtered copy and the removed count
+        when some are, and ``(None, nrows)`` when EVERY row is deleted (the
+        caller skips the group without emitting).
+        """
+        cdef tuple positions = self._sp_delete_positions.get(path)
+        if positions is None:
+            return vectors, 0
+        cached = self._sp_rg_offset_cache.get(path)
+        if cached is None:
+            counts = self._ipc_source.rg_row_counts(path)
+            if not counts:
+                raise RuntimeError(
+                    f"ParquetReadNode: no footer row-group counts for delete-bearing "
+                    f"file {path}; cannot map delete ordinals to row groups."
+                )
+            offsets = []
+            running = 0
+            for c in counts:
+                offsets.append(running)
+                running += c
+            cached = (offsets, counts)
+            self._sp_rg_offset_cache[path] = cached
+        offsets, counts = cached
+        cdef int64_t start = offsets[rg_idx]
+        cdef int64_t nrows = counts[rg_idx]
+        # positions is sorted: slice the file-global window for this group.
+        cdef Py_ssize_t lo = bisect_left(positions, start)
+        cdef Py_ssize_t hi = bisect_left(positions, start + nrows)
+        if lo == hi:
+            return vectors, 0
+        if hi - lo >= nrows:
+            return None, nrows  # whole row group deleted — nothing to emit
+        deleted_local = set()
+        cdef Py_ssize_t i
+        for i in range(lo, hi):
+            deleted_local.add(positions[i] - start)
+        keep = [i for i in range(nrows) if i not in deleted_local]
+        return [v.take(keep) for v in vectors], hi - lo
 
     cdef shared_ptr[CxxMorsel] _single_pass_next(self):
         """Pull and assemble the next single-pass morsel directly from the native
@@ -1721,6 +1824,7 @@ cdef class ParquetReadNode(ReaderNode):
                 self._scan_mtx.unlock()
                 return self._finish_locked_cxx()
             vectors = pulled[0]
+            mor_removed = 0
             bytes_fetched = pulled[1]
             read_ns = pulled[2]
             decode_ns = pulled[3]
@@ -1738,6 +1842,26 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_claims_pending -= 1
                 self._scan_mtx.unlock()
                 continue
+
+            # ── Merge-on-read delete filter (thread-local, before predicate) ──
+            # Deleted ordinals are physical row positions, so they must be
+            # subtracted while row position still equals file ordinal — i.e.
+            # before the pushed predicate reorders survivorship.
+            if self._sp_delete_positions:
+                vectors, mor_removed = self._apply_delete_filter(
+                    vectors, <str>path, <int>pulled[5]
+                )
+                if vectors is None:
+                    # Every row of this group is deleted — skip it entirely.
+                    with nogil:
+                        self._scan_mtx.lock()
+                    self.bytes_in += bytes_fetched
+                    self.scan_readings.time_parquet_read_ranges_ns += read_ns
+                    self.scan_readings.time_parquet_decode_columns_ns += decode_ns
+                    self.scan_readings.mor_rows_deleted += mor_removed
+                    self._sp_claims_pending -= 1
+                    self._scan_mtx.unlock()
+                    continue
 
             # ── Thread-local cxm assembly (no lock) ──────────────────────────
             if self._sp_needs_coerce:
@@ -1776,6 +1900,7 @@ cdef class ParquetReadNode(ReaderNode):
             self.bytes_in += bytes_fetched
             self.scan_readings.time_parquet_read_ranges_ns += read_ns
             self.scan_readings.time_parquet_decode_columns_ns += decode_ns
+            self.scan_readings.mor_rows_deleted += mor_removed
             if has_identity:
                 self._total_rows_before_filter += rows_before_filter
             self._sp_claims_pending -= 1

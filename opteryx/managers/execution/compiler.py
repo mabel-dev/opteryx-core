@@ -3727,7 +3727,16 @@ class _Compiler:
         # than the single-pass path below, and when it declines the scan falls through
         # to that path, which is exactly the work the trampoline would have done for
         # the shapes it declines on. See `_latmat_scan_plan`.
-        lat = self._latmat_scan_plan(scan)
+        # Merge-on-read deletes: the two zero-Python Sources below decode row
+        # groups entirely in C++ and know nothing about delete vectors, so a
+        # delete-bearing scan through either would serve deleted rows back.
+        # Decline both and fall through to StreamingScanSource, whose
+        # ParquetReadNode subtracts each file's delete vector per row group
+        # (see _apply_delete_filter). The fast paths can learn deletes later;
+        # a dataset with no delete debt — the overwhelming case — is untouched.
+        _scan_manifest = getattr(scan, "manifest", None)
+        _scan_has_deletes = _scan_manifest is not None and _scan_manifest.has_deletes()
+        lat = None if _scan_has_deletes else self._latmat_scan_plan(scan)
         if lat is not None:
             (p1_plan, p2_plan, resolver, pred_col_to_p1, sort_p1_index, sort_ascending,
              topn_limit, out_from_p1, out_from_p2, emit_ids) = lat
@@ -3752,7 +3761,7 @@ class _Compiler:
             # The predicate is fully applied in pass 1, and the Source emits the
             # projection directly — no relocated ExprFilter, no trailing Select.
             return p, emit_ids
-        splan = self._native_scan_plan(scan)
+        splan = None if _scan_has_deletes else self._native_scan_plan(scan)
         if splan is not None:
             # Zero-Python Source: workers pull decoded row groups straight from
             # the rugo IO pipeline (no GIL trampoline, no per-morsel attach).
@@ -5485,7 +5494,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                     # The scan's true IO volume, measured at transfer by the rugo IO
                     # pipeline: COMPRESSED bytes off storage. Diagnostic only — it is
                     # NOT the billing meter and must not be folded into
-                    # `bytes_processed`, which bills dense LOGICAL bytes measured at
+                    # `billing_bytes`, which bills dense LOGICAL bytes measured at
                     # plan time (planner/data_processed.py). The two differ by the
                     # whole compression ratio, and this counter used to be the meter.
                     telemetry._reading["io_bytes_fetched"] = sum(

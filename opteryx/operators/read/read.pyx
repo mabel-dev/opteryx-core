@@ -252,7 +252,7 @@ cdef class ReaderNode(BasePlanNode):
             self.telemetry.rows_read += result_morsel.num_rows
             # Per-node only (sensors/mermaid, remapped to bytes_in). This is the
             # morsel's MATERIALIZED in-memory size, not a quantity the billing
-            # meter can use — `bytes_processed` on the shared telemetry is dense
+            # meter can use — `billing_bytes` on the shared telemetry is dense
             # logical bytes measured at plan time (planner/data_processed.py),
             # and adding this to it mixed two quantities in one number.
             self.readings["bytes_processed"] += result_morsel.nbytes

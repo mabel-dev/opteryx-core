@@ -43,7 +43,7 @@ def test_meter_is_not_the_compressed_fetch_volume():
     """
     telemetry = _run("SELECT * FROM testdata.astronauts")
 
-    logical = telemetry.bytes_processed
+    logical = telemetry.billing_bytes
     fetched = telemetry._reading.get("io_bytes_fetched", 0)
 
     assert fetched > 0, "no IO measured — the scan did not read the file"
@@ -64,13 +64,13 @@ def test_meter_is_dense_for_a_fixed_width_column():
     session = opteryx.session()
     for _ in session.execute_to_morsels("SELECT id FROM $planets"):
         pass
-    assert session._telemetry.bytes_processed == 9 * 1
+    assert session._telemetry.billing_bytes == 9 * 1
 
 
 def test_projection_narrows_the_meter():
     """Only the columns the query REFERENCES are billed."""
-    wide = _run("SELECT * FROM testdata.astronauts").bytes_processed
-    narrow = _run("SELECT name FROM testdata.astronauts").bytes_processed
+    wide = _run("SELECT * FROM testdata.astronauts").billing_bytes
+    narrow = _run("SELECT name FROM testdata.astronauts").billing_bytes
 
     assert 0 < narrow < wide
 
@@ -81,32 +81,32 @@ def test_a_predicate_does_not_reduce_the_meter():
     predicate selectivity on the way up the plan, which is exactly why the
     meter reads `scan_base_statistics` rather than `node.statistics`.
     """
-    unfiltered = _run("SELECT id FROM $planets").bytes_processed
-    filtered = _run("SELECT id FROM $planets WHERE id > 6").bytes_processed
+    unfiltered = _run("SELECT id FROM $planets").billing_bytes
+    filtered = _run("SELECT id FROM $planets WHERE id > 6").billing_bytes
 
     assert filtered == unfiltered
 
 
 def test_a_filter_only_column_is_billed():
     """A column read solely to evaluate a predicate still enters the system."""
-    projection_only = _run("SELECT id FROM $planets").bytes_processed
+    projection_only = _run("SELECT id FROM $planets").billing_bytes
     plus_predicate = _run(
         "SELECT id FROM $planets WHERE mean_temperature > 0"
-    ).bytes_processed
+    ).billing_bytes
 
     assert plus_predicate > projection_only
 
 
 def test_explain_bills_nothing():
     """EXPLAIN plans the query and describes it. Nothing is read."""
-    assert _run("EXPLAIN SELECT * FROM testdata.astronauts").bytes_processed == 0
+    assert _run("EXPLAIN SELECT * FROM testdata.astronauts").billing_bytes == 0
 
 
 def test_no_table_bills_nothing():
     """`$no_table` is the planner's stand-in for a statement with no FROM, and
     for a statistics-only answer. It is not a relation the user named."""
-    assert _run("SELECT 1").bytes_processed == 0
-    assert _run("SELECT COUNT(*) FROM testdata.astronauts").bytes_processed == 0
+    assert _run("SELECT 1").billing_bytes == 0
+    assert _run("SELECT COUNT(*) FROM testdata.astronauts").billing_bytes == 0
 
 
 def test_a_shared_cte_is_billed_once():
@@ -118,11 +118,11 @@ def test_a_shared_cte_is_billed_once():
     # The body's projection is narrowed to the column the outer query and the
     # join key actually need, so the comparison scan is that same one column —
     # NOT `SELECT name, year`, which the body no longer reads.
-    direct = _run("SELECT name FROM testdata.astronauts").bytes_processed
+    direct = _run("SELECT name FROM testdata.astronauts").billing_bytes
     shared = _run(
         "WITH c AS (SELECT name, year FROM testdata.astronauts) "
         "SELECT a.name FROM c a INNER JOIN c b ON a.name = b.name"
-    ).bytes_processed
+    ).billing_bytes
 
     assert shared == direct, (
         f"shared CTE billed {shared:,}, one scan of the same columns is "
@@ -141,11 +141,11 @@ def test_each_leg_of_a_union_is_billed():
     figure here would be asserting a pushdown that does not happen, and would
     make this test fail the day someone fixes it for the wrong reason.
     """
-    whole = _run("SELECT * FROM testdata.astronauts").bytes_processed
+    whole = _run("SELECT * FROM testdata.astronauts").billing_bytes
     two_legs = _run(
         "SELECT name FROM testdata.astronauts "
         "UNION ALL SELECT name FROM testdata.astronauts"
-    ).bytes_processed
+    ).billing_bytes
 
     assert two_legs == 2 * whole
 
@@ -176,7 +176,7 @@ def test_billing_event_is_emitted_without_draining_the_result(monkeypatch):
         if e["billing_event"] == BillingEventType.DATA_PROCESSED_BYTES
     ]
     assert len(processed) == 1, "expected exactly one DATA_PROCESSED_BYTES event"
-    assert processed[0]["event_details"]["bytes_processed"] > 0
+    assert processed[0]["event_details"]["billing_bytes"] > 0
 
 
 if __name__ == "__main__":  # pragma: no cover

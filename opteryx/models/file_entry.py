@@ -98,6 +98,19 @@ class FileEntry:
     # elsewhere) — the numerator half of avg_length = char_total_bytes /
     # true_non_null_count, computed at read time from the now-real null_counts.
     char_total_bytes: Optional[List[Optional[int]]] = None
+    # Merge-on-read deletes (opteryx-catalog: catalog/deletes.py). How many of
+    # this file's PHYSICAL rows are deleted, which sidecar records them, and —
+    # resolved at binding time by the catalog connector — the deleted row
+    # ordinals themselves (file-local, zero-based, physical row order, sorted).
+    # record_count above stays PHYSICAL; live rows are
+    # record_count - deleted_record_count. 0 / None / None is the universal
+    # "no deletes" state, including for every manifest written before these
+    # columns existed. delete_positions being None while deleted_record_count
+    # is non-zero means the vector was not resolved — readers must refuse to
+    # scan that file rather than serve its deleted rows.
+    deleted_record_count: int = 0
+    delete_file_path: Optional[str] = None
+    delete_positions: Optional[Tuple[int, ...]] = None
     # Per-column distinct-value count, field_id-keyed, as (ndv, is_exact).
     #
     # The two halves are ONE value on purpose. An exact NDV (skene's
@@ -350,6 +363,12 @@ class FileEntry:
             max_lengths=max_lengths,
             char_total_bytes=char_total_bytes,
             histogram_bins=histogram_bins,
+            # entry is None on the attribute-shaped fallback branch — a
+            # producer with no manifest row has no delete columns either.
+            deleted_record_count=int(entry.get("deleted_record_count") or 0)
+            if entry is not None
+            else 0,
+            delete_file_path=entry.get("delete_file_path") if entry is not None else None,
         )
 
     def to_dict(self) -> dict:

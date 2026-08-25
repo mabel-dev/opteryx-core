@@ -296,10 +296,11 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 # trampoline scan's ScanReadings, flushed by close_source in the
                 # driver teardown). Only fall back to the connector-level telemetry
                 # object when sensors() gave nothing, so a real flushed reading is
-                # never clobbered back to 0. `bytes_processed` is deliberately absent:
-                # on the shared telemetry it is a query-wide total across every scan,
-                # so it cannot stand in for one node's bytes. Every scan node records
-                # its own into readings.
+                # never clobbered back to 0. Bytes are deliberately absent from this
+                # fallback: the shared telemetry's only byte totals are query-wide
+                # (`billing_bytes`, plan-time logical; `io_bytes_fetched`, compressed
+                # IO), so neither can stand in for one node's bytes. Every scan node
+                # records its own into readings.
                 for _k in ("rows_read", "blobs_read", "columns_read"):
                     if not node_stat.get(_k):
                         node_stat[_k] = getattr(node.telemetry, _k, 0)
@@ -546,9 +547,9 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
         bytes_ = stats_.get("bytes_out")
         if source_node is not None:
             # Use telemetry only for scan nodes or when summary stats are absent/zero.
-            # Only rows: `bytes_processed` is a query-wide connector counter (total
-            # bytes fetched from storage, summed across every scan), so using it as
-            # this edge's payload size would label one edge with the whole query's IO.
+            # Only rows: the telemetry's byte totals (`billing_bytes`, plan-time
+            # logical; `io_bytes_fetched`, compressed IO) are query-wide, so using one
+            # as this edge's payload size would label one edge with the whole query.
             telemetry_rows = getattr(source_node.telemetry, "rows_read", None)
             if (
                 (records is None or records == 0)
@@ -569,10 +570,10 @@ def plan_to_mermaid(plan: PhysicalPlan, stats: list = None) -> str:
     if exit_points:
         exit_node = plan[exit_points[0]]
         total_duration = sum(node.execution_time for nid, node in plan.nodes(True)) / 1e6
-        # Prefer telemetry for final counts when present. `bytes_processed` is NOT
-        # usable here: it is a query-wide connector counter (the scan's fetched IO
-        # volume), not this node's output size, so the terminus edge takes the exit
-        # operator's own bytes_out.
+        # Prefer telemetry for final counts when present. The telemetry byte totals
+        # are NOT usable here: they are query-wide (billing meter / fetched IO), not
+        # this node's output size, so the terminus edge takes the exit operator's
+        # own bytes_out.
         final_rows = getattr(exit_node.telemetry, "rows_read", None) or exit_node.records_out
         final_bytes = exit_node.bytes_out
         final_columns = len(exit_node.columns) if getattr(exit_node, "columns", None) is not None else 0

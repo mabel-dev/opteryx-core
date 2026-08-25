@@ -57,9 +57,13 @@ def write_billing_event(
             raise ValueError("Missing 'user' in event_details for QUERY_EXECUTION billing event")
 
     if billing_event == BillingEventType.DATA_PROCESSED_BYTES:
-        if "bytes_processed" not in event_details:
+        # `billing_bytes` is the ONE number invoicing and enforcement quote:
+        # dense LOGICAL bytes at plan time (planner/data_processed.py). It was
+        # named `bytes_processed` until 2026-08-25, a name shared with the
+        # per-node materialised-morsel readings — a different quantity.
+        if "billing_bytes" not in event_details:
             raise ValueError(
-                "Missing 'bytes_processed' in event_details for DATA_PROCESSED_BYTES billing event"
+                "Missing 'billing_bytes' in event_details for DATA_PROCESSED_BYTES billing event"
             )
         if "user" not in event_details:
             raise ValueError(

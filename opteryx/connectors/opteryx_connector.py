@@ -519,6 +519,34 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             sketch_vectors = {}
             _warn_no_native_sketches(self.table)
 
+        # Merge-on-read deletes: resolve each delete-bearing file's row
+        # ordinals NOW, at binding, from the dataset's sidecar(s) — one small
+        # cached read via the same manifest LRU the scan itself warmed. The
+        # positions ride on the FileEntry so the read node can subtract them
+        # per row group without any further catalog round-trip. Resolution is
+        # fail-closed on both sides: the dataset raises if a referenced
+        # sidecar is unreadable, and a FileEntry left with
+        # deleted_record_count > 0 but no positions is refused by the reader
+        # — either way deleted rows are never silently served.
+        if any(fe.deleted_record_count for fe in file_entries):
+            delete_vectors_fn = getattr(self.table, "delete_vectors", None)
+            if delete_vectors_fn is None:
+                raise DatasetReadError(
+                    f"{type(self.table).__name__} reports merge-on-read deletes but does not "
+                    "implement delete_vectors(); refusing to scan and resurrect deleted rows."
+                )
+            resolved = delete_vectors_fn(self.snapshot_id)
+            for fe in file_entries:
+                if not fe.deleted_record_count:
+                    continue
+                positions = resolved.get(fe.file_path)
+                if positions is None:
+                    raise DatasetReadError(
+                        f"Manifest attributes {fe.deleted_record_count} deleted rows to "
+                        f"{fe.file_path} but the delete sidecar holds no vector for it."
+                    )
+                fe.delete_positions = tuple(positions)
+
         # Create Manifest with files and schema.
         #
         # bounds_are_ordinal is asked of the DATASET, never assumed here. This

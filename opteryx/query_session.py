@@ -233,7 +233,7 @@ class Session(DataFrame):
         """Emit the DATA_PROCESSED_BYTES billing event.
 
         Emitted once execution has been SUBMITTED, not once it has finished.
-        ``bytes_processed`` is a plan-time figure — the dense logical bytes the
+        ``billing_bytes`` is a plan-time figure — the dense logical bytes the
         final plan will read, measured in ``plan_query`` (see
         planner/data_processed.py) — so it is complete the moment planning is,
         and waiting for the result stream to drain would only delay it.
@@ -253,7 +253,7 @@ class Session(DataFrame):
                 "user": self.context.user,
                 "query_id": self.query_id,
                 "query": operation,
-                "bytes_processed": self._telemetry.bytes_processed,
+                "billing_bytes": self._telemetry.billing_bytes,
             },
         )
 

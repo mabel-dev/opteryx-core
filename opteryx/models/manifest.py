@@ -261,8 +261,24 @@ class Manifest:
         for f in self.files:
             if f.record_count is None:
                 return None
-            total += f.record_count
+            # record_count is PHYSICAL rows; merge-on-read deletes subtract
+            # exactly (delete vectors are exact, not estimates), so the live
+            # total keeps the same "answer COUNT(*) / delete LIMIT nodes"
+            # guarantees as before. deleted_record_count is 0 when a producer
+            # predates deletes.
+            total += f.record_count - getattr(f, "deleted_record_count", 0)
         return total
+
+    def has_deletes(self) -> bool:
+        """True when any file carries merge-on-read delete debt.
+
+        The gate for every strategy that reads PER-COLUMN statistics as exact
+        answers (manifest MIN/MAX, COUNT(col) via null counts): with deletes,
+        bounds and null counts describe a SUPERSET of the live rows — still
+        valid for pruning, wrong as query answers. Whole-manifest record
+        counts stay exact via get_record_count above.
+        """
+        return any(getattr(f, "deleted_record_count", 0) for f in self.files)
 
     def get_file_count(self) -> int:
         """Number of files in manifest."""

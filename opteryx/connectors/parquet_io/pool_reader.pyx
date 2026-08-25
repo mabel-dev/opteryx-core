@@ -1320,6 +1320,28 @@ cdef class IpcRowGroupSource:
             return self.prefetched_footers[path_str]["row_groups"][rg_idx]["num_rows"]
         return 0
 
+    cpdef list rg_row_counts(self, str path_str):
+        """Per-row-group logical row counts for one file, in row-group order.
+
+        Read from the already-parsed footer (native footer_map, or the
+        prefetched footer dict), so this costs no I/O. The read node uses it
+        to map a row group's file-LOCAL row ordinals to the file-global
+        ordinal space that merge-on-read delete vectors are recorded in
+        (offset of rg N = sum of counts[0..N)). Indexed by the file's REAL
+        row-group index, so predicate pruning upstream does not shift it.
+        Empty list when the footer is unknown — the caller must treat that as
+        an error for a delete-bearing file, never as "no rows"."""
+        cdef string key = path_str.encode('utf-8')
+        cdef list out = []
+        cdef size_t i
+        if self.footer_map != NULL and self.footer_map[0].count(key) > 0:
+            for i in range(self.footer_map[0][key].row_groups.size()):
+                out.append(self.footer_map[0][key].row_groups[i].num_rows)
+            return out
+        if self.prefetched_footers and path_str in self.prefetched_footers:
+            return [rg["num_rows"] for rg in self.prefetched_footers[path_str]["row_groups"]]
+        return out
+
     cpdef void close(self):
         """Cancel outstanding work, drain the pool, free the footer map. Safe to
         call more than once and on a source that produced no work."""

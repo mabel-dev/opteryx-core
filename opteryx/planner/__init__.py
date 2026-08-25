@@ -551,7 +551,7 @@ def query_planner(
     from opteryx.planner.data_processed import measure_data_processed
 
     telemetry.increase(
-        "bytes_processed",
+        "billing_bytes",
         measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
     )
 
@@ -635,6 +635,15 @@ def execute_logical_plan(
     start = time.monotonic_ns()
     optimized_plan = do_optimizer(bound_plan, telemetry)
     telemetry.time_planning_optimizer += time.monotonic_ns() - start
+
+    # The `billing_bytes` meter, same figure `plan_query` records: a query is a
+    # query whether it arrived as SQL or as a logical plan, and this path
+    # answering without setting the meter is exactly how "what is reported
+    # differs based on what is answering". Externally-supplied plans carry no
+    # shared CTEs (a CTE only exists in SQL text).
+    from opteryx.planner.data_processed import measure_data_processed
+
+    telemetry.increase("billing_bytes", measure_data_processed(optimized_plan))
 
     # Default: build physical plan
     start = time.monotonic_ns()

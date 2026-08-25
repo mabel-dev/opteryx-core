@@ -93,12 +93,13 @@ class _QueryTelemetry:
         readings_dict = dict(self._reading)
 
         # Remove connector-level stats that should only appear in operation/sensor stats.
-        # ``bytes_processed`` is deliberately NOT in this list: it is a query-wide total
+        # ``billing_bytes`` is deliberately NOT in this list: it is a query-wide total
         # (the dense LOGICAL bytes the plan reads, measured at plan time — see
-        # planner/data_processed.py) rather than a per-node reading, it is what the
-        # DATA_PROCESSED_BYTES billing event charges on, and popping it here is why the
-        # query report could only ever show 0 bytes. Not to be confused with
-        # ``io_bytes_fetched``, the COMPRESSED volume the IO pipeline measured.
+        # planner/data_processed.py) rather than a per-node reading, and it is what the
+        # DATA_PROCESSED_BYTES billing event charges on. Named to be unambiguous
+        # against the two quantities it is not: the per-node ``bytes_processed``
+        # sensor readings (materialised morsel bytes), and ``io_bytes_fetched``,
+        # the COMPRESSED volume the IO pipeline measured.
         connector_only_keys = [
             "rows_read",
             "rows_seen",

@@ -634,6 +634,22 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
             agg_id = getattr(getattr(agg_node, "schema_column", None), "identity", None)
             column_aliases.append(alias_by_identity.get(agg_id, f"agg_{idx}"))
 
+        # Merge-on-read deletes make PER-COLUMN statistics one-sided: min/max
+        # and null counts describe the physical superset, so a MIN whose row
+        # was deleted, or a COUNT(col) subtracting a null count that includes
+        # deleted rows, is a confident wrong answer. COUNT(*) alone stays
+        # exact — get_count_from_manifest already returns live rows (physical
+        # minus the exact delete-vector cardinality).
+        _has_deletes_fn = getattr(manifest, "has_deletes", None)
+        if (
+            _has_deletes_fn is not None
+            and _has_deletes_fn()
+            and any(column_name for (_agg_func, column_name, _n) in agg_metadata)
+        ):
+            # Every per-column aggregate (MIN/MAX/COUNT(col)) carries a column
+            # name; bare COUNT(*) does not, and is the only one still safe.
+            return plan
+
         # Build literal nodes for each aggregate, collecting values
         literals = []
         for idx, (agg_func, column_name, agg_node) in enumerate(agg_metadata):
