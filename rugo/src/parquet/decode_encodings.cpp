@@ -507,6 +507,21 @@ int32_t DecodeRLEBitPackedIndicesNoPrefix(const uint8_t *data, size_t data_size,
 // consecutive equal codes into runs.  The caller resolves dict codes to actual
 // values (one lookup per run, not per row), then accumulates into the column's
 // type-specific RLE output vectors.
+//
+// The bit-packed merge loop is BRANCHLESS.  Real columns routinely produce
+// close to one run per value (measured on tpch_100 lineitem: l_shipdate 0.994,
+// l_linenumber 0.964, l_shipmode 0.857 runs/value), which makes the "did this
+// value continue the previous run" test a coin flip.  A data-dependent branch
+// there costs a mispredict per value and dominates the whole stage — it is flat
+// across bit width, so it is not the unpacking.  Writing the run cell
+// unconditionally and advancing the cursor by (v != prev) removes the branch:
+// measured 1.76 -> 0.83 ns/value on l_shipdate, 2.00 -> 1.52 on l_shipmode, and
+// neutral (0.78 -> 0.80) on the genuinely run-heavy l_linestatus (0.137).
+//
+// The cost of that is pre-sizing both arrays to num_values (8 bytes per value,
+// transient for the page, released by the resize-down below) so the cursor can
+// store without a capacity check.  Measured at 0.01-0.04 ns/value against warm
+// buffers, i.e. the zero-fill is not a factor.
 // ---------------------------------------------------------------------------
 
 int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
@@ -521,8 +536,17 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
     return num_values;
   }
 
-  run_codes.clear();
-  run_counts.clear();
+  // Worst case is one run per value; size for it once so the merge loop can
+  // store unconditionally.  Trimmed to the real run count before returning.
+  run_codes.assign((size_t)num_values, 0);
+  run_counts.assign((size_t)num_values, 0);
+  int32_t *__restrict__ out_codes  = run_codes.data();
+  int32_t *__restrict__ out_counts = run_counts.data();
+
+  // Cursor into the run arrays.  -1 means "no run open yet"; `prev` is only
+  // read when cursor >= 0, so its initial value never decides anything.
+  int64_t cursor  = -1;
+  int32_t prev    = 0;
 
   const uint8_t *ptr = data;
   const uint8_t *end = data + data_size;
@@ -570,13 +594,19 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
         }
       }
 
-      // Merge scratch values into run_codes/run_counts.
-      for (int32_t v : scratch) {
-        if (!run_codes.empty() && run_codes.back() == v) {
-          ++run_counts.back();
-        } else {
-          run_codes.push_back(v);
-          run_counts.push_back(1);
+      // Merge scratch values into run_codes/run_counts.  Branchless: advance
+      // the cursor only when the value differs from the open run, then store
+      // both cells unconditionally.  Identical output to the equivalent
+      // if/else, without the per-value mispredict.
+      {
+        const int32_t *__restrict__ src = scratch.data();
+        for (int32_t i = 0; i < to_decode; i++) {
+          const int32_t v     = src[i];
+          const int64_t opens = (int64_t)((v != prev) | (cursor < 0));
+          cursor += opens;
+          out_codes[cursor]  = v;
+          out_counts[cursor] = opens ? 1 : out_counts[cursor] + 1;
+          prev = v;
         }
       }
 
@@ -592,19 +622,33 @@ int32_t DecodeRLEBitPackedIndicesToRuns(const uint8_t *data, size_t data_size,
         value |= ((uint32_t)(*ptr++)) << (i * 8);
       value &= (1U << bit_width) - 1;
 
+      // A zero-length RLE run consumes no values but would still open a run,
+      // so a stream of them could advance the cursor past the pre-sized arrays.
+      // It is malformed either way — reject it rather than absorb it.
+      if (count <= 0) return -1;
+
       const int32_t to_fill = std::min(count, num_values - decoded);
       const int32_t code    = (int32_t)value;
 
       // Merge with previous run if same code (handles page-internal adjacency).
-      if (!run_codes.empty() && run_codes.back() == code) {
-        run_counts.back() += to_fill;
+      // One test per RLE segment, not per value — left as a branch.
+      if (cursor >= 0 && code == prev) {
+        out_counts[cursor] += to_fill;
       } else {
-        run_codes.push_back(code);
-        run_counts.push_back(to_fill);
+        ++cursor;
+        out_codes[cursor]  = code;
+        out_counts[cursor] = to_fill;
+        prev = code;
       }
       decoded += to_fill;
     }
   }
+
+  // Trim to the runs actually emitted.  Done on the failure path too, so a
+  // short/corrupt stream never leaves the caller looking at zero-filled tail
+  // cells that would read as valid (code 0, count 0) runs.
+  run_codes.resize((size_t)(cursor + 1));
+  run_counts.resize((size_t)(cursor + 1));
 
   return (decoded == num_values) ? decoded : -1;
 }

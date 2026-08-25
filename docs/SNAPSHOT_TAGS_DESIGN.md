@@ -7,8 +7,9 @@ charged** (which requires a change to the storage collector, §5); a tag names a
 letter and **normalized to lowercase**; **100** per dataset; **materialized views can
 be tagged**; the listing surface is a **`tags` column on `SHOW SNAPSHOTS`**; and the DDL
 is parsed by **our own dialect**, not a fork. Every decision raised is ruled except **D7 (truncate)**,
-raised during implementation ([§12](#12-decisions)). The catalog side is built; the
-engine side is not.
+raised during implementation ([§12](#12-decisions)). The catalog side is built. The
+engine side is built except for integration tests: reads, tag DDL and the
+`SHOW SNAPSHOTS` column all plan and execute, `make q` is green.
 
 **Proposed surface:**
 
@@ -295,11 +296,14 @@ result travels to the planner inside an existing variant —
 second user-facing spelling, and it is stated here so it is not later mistaken for
 property support.
 
-That transport is spoofable in principle: a reader could hand-write the same
-`SET TBLPROPERTIES` and reach the tag branch. It grants nothing — tag DDL is owner-only
-either way — but it would be an undocumented second spelling, so **the hook rejects
-`SET TBLPROPERTIES` carrying a reserved `__opteryx.` key**. The hook sees every
-statement's tokens before upstream does, which is the only place that check can live.
+That transport would be spoofable if the prefix were the only thing marking it: a reader
+could hand-write the same `SET TBLPROPERTIES` and reach the tag branch. **As built, the
+two are told apart by the SHAPE of the key, in the planner** — the dialect emits an
+unquoted identifier containing dots, which reader text cannot produce, because a bare
+key cannot contain a dot and a quoted key arrives carrying its quote style. A reserved
+key that came from reader text is refused by name. This is a change from the first
+draft, which put the check in the hook: the planner sees the parsed keys and their quote
+styles, where the hook would have to re-tokenise to find them.
 
 A slot table for the carriers considered before this route was found is kept in
 [appendix A](#appendix-a-alter-table-carrier-slots-superseded), because it is the

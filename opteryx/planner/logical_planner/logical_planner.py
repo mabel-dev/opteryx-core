@@ -99,6 +99,8 @@ class LogicalPlanStepType(int, Enum):
     TruncateRelation = auto()
     AlterRelation = auto()
     RenameRelation = auto()
+    CreateTag = auto()
+    DropTag = auto()
     AddColumn = auto()
     DropColumn = auto()
     RenameColumn = auto()
@@ -3267,7 +3269,18 @@ def create_node_relation(relation: dict):
         # Extract and validate AT / VERSION clause if present
         version_clause = table.get("version")
         if version_clause is not None:
-            if logical_planner_builders.is_version_as_of_clause(version_clause):
+            # Three forms, three destinations, decided once: a TAG names a
+            # snapshot the catalog resolves by name, VERSION AS OF names one
+            # directly, and everything else is a point in time. The tag test
+            # comes first because its clause arrives as `AT(TAG => ...)` - the
+            # rewriter's carrier for a name the VERSION AS OF grammar cannot
+            # hold - and would otherwise fall through to the timestamp arm and
+            # be reported as a bad date.
+            if logical_planner_builders.is_tag_clause(version_clause):
+                from_step.version_tag = logical_planner_builders.extract_timetravel_tag(
+                    version_clause
+                )
+            elif logical_planner_builders.is_version_as_of_clause(version_clause):
                 from_step.version = logical_planner_builders.extract_timetravel_version(
                     version_clause
                 )
@@ -3980,6 +3993,8 @@ def plan_alter_table(statement, **kwargs):
     ALTER TABLE [IF EXISTS] table_name DROP COLUMN [IF EXISTS] name
     ALTER TABLE [IF EXISTS] table_name RENAME COLUMN old_name TO new_name
     ALTER TABLE [IF EXISTS] table_name ALTER COLUMN name TYPE type
+    ALTER TABLE [IF EXISTS] table_name CREATE TAG name [AS OF VERSION id|CURRENT|PREVIOUS]
+    ALTER TABLE [IF EXISTS] table_name DROP TAG name
     """
     root_node = "AlterTable"
     plan = LogicalPlan()
@@ -4204,12 +4219,83 @@ def plan_alter_table(statement, **kwargs):
         plan.add_node(random_string(), alter_column_type_node)
         return plan
 
+    if "SetTblProperties" in operation:
+        return _plan_tag_ddl(
+            operation["SetTblProperties"].get("table_properties") or [],
+            relation_name,
+            if_exists,
+        )
+
     raise UnsupportedSyntaxError(
         "Opteryx only supports '**ALTER TABLE** ... CLUSTER BY (...)', "
         "'**ALTER TABLE** ... RENAME TO ...', '**ALTER TABLE** ... ADD COLUMN ...', "
-        "'**ALTER TABLE** ... DROP COLUMN ...', '**ALTER TABLE** ... RENAME COLUMN ... TO ...' "
-        "and '**ALTER TABLE** ... ALTER COLUMN ... TYPE ...'."
+        "'**ALTER TABLE** ... DROP COLUMN ...', '**ALTER TABLE** ... RENAME COLUMN ... TO ...', "
+        "'**ALTER TABLE** ... ALTER COLUMN ... TYPE ...', "
+        "'**ALTER TABLE** ... CREATE TAG ...' and '**ALTER TABLE** ... DROP TAG ...'."
     )
+
+
+# Reserved property-key prefix. Keys under it are an INTERNAL transport between
+# `OpteryxDialect::parse_statement` and this module, never a spelling a reader may
+# use - see `_plan_tag_ddl`.
+_RESERVED_PROPERTY_PREFIX = "__opteryx."
+_TAG_ACTION_KEY = "__opteryx.tag.action"
+_TAG_NAME_KEY = "__opteryx.tag.name"
+_TAG_VERSION_KEY = "__opteryx.tag.version"
+
+
+def _plan_tag_ddl(properties, relation_name: str, if_exists: bool):
+    """`ALTER TABLE ... CREATE TAG` / `DROP TAG`, arriving as table properties.
+
+    The dialect parses tag DDL itself - sqlparser has no grammar for it - but it
+    cannot invent an AST node, so it hands the parsed result over inside
+    `SetTblProperties` under reserved keys. This is the only reader of that
+    transport.
+
+    A statement the dialect built and one a reader typed by hand are told apart by
+    the SHAPE of the key, not by trusting the prefix: the dialect emits an
+    unquoted identifier containing dots, which reader text cannot produce (a bare
+    key cannot contain a dot, and a quoted key arrives carrying its quote style).
+    A reserved key that came from reader text is refused outright, so tag DDL has
+    exactly one spelling rather than a documented one and a discoverable one.
+    """
+    values = {}
+    for entry in properties:
+        key_value = entry.get("KeyValue") if isinstance(entry, dict) else None
+        if key_value is None:
+            continue
+        key = key_value["key"]
+        name = key["value"]
+        if not name.startswith(_RESERVED_PROPERTY_PREFIX):
+            continue
+        if key.get("quote_style") is not None:
+            raise UnsupportedSyntaxError(
+                f"'{name}' is a reserved internal property name and cannot be set. "
+                "To tag a snapshot write '**ALTER TABLE** ... CREATE TAG ...'."
+            )
+        values[name] = key_value["value"]["Value"]["value"]["SingleQuotedString"]
+
+    if _TAG_ACTION_KEY not in values:
+        raise UnsupportedSyntaxError(
+            "**ALTER TABLE ... SET TBLPROPERTIES** is not supported."
+        )
+
+    plan = LogicalPlan()
+    if values[_TAG_ACTION_KEY] == "create":
+        node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTag)
+        # Carried as text, not resolved here: CURRENT and PREVIOUS name a snapshot
+        # the catalog has to be asked for, and a planner that resolved them would
+        # be reading the catalog to build a plan that then reads it again.
+        node.version_spec = values[_TAG_VERSION_KEY]
+    else:
+        node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTag)
+
+    node.relation_name = relation_name
+    node.if_exists = if_exists
+    node.tag_name = values[_TAG_NAME_KEY]
+
+    plan.add_node(random_string(), node)
+    return plan
 
 
 def _parse_boolean_workspace_property(name: str, value):

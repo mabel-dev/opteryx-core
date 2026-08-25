@@ -289,6 +289,21 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                     # which is near-zero for an operator that's mostly blocked waiting.
                     node_stat["self_time"] = native["execution_time"]
                     node_stat["cpu_time_ms"] = native["cpu_time"] / 1_000_000
+                    # Degree of parallelism the node's pipeline ran at. A width, not
+                    # a duration — never summed, and meaningful next to cpu_time_ms
+                    # (cpu/wall against dop is what shows a parked pool).
+                    node_stat["dop"] = native.get("dop", 0)
+                    # Breaker cost — combine() + finalize(), the two Sink calls that
+                    # run after the morsels stop. Until 2026-08-25 these were timed by
+                    # nothing and their cost was attributable to no plan node at all.
+                    # Reported as one `merge_time` because they are one question
+                    # ("what did the breaker cost after the stream ended"); the split
+                    # stays available in native_op_stats for anyone who needs it.
+                    node_stat["combine_time"] = native.get("combine_time", 0)
+                    node_stat["finalize_time"] = native.get("finalize_time", 0)
+                    node_stat["merge_time"] = (
+                        native.get("combine_time", 0) + native.get("finalize_time", 0)
+                    )
 
             # Add telemetry-specific readings for reader nodes
             if node.is_scan:
@@ -325,6 +340,16 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                         node_stat["blobs_read"] = facts["files_read"]
                         node_stat["row_groups_read"] = facts["row_groups_read"]
                         node_stat["row_groups_pruned"] = facts["row_groups_pruned"]
+                        # RUNTIME MIN/MAX JOIN FILTER: present only when a bound
+                        # was wired to THIS scan, and then only its marginal
+                        # share of `row_groups_pruned` (the plan-time correlated
+                        # filter pushes range predicates onto the same scan, so
+                        # one combined number would misattribute its work).
+                        # Absent stays absent — "did not fire" is not "pruned 0".
+                        if "row_groups_pruned_runtime" in facts:
+                            node_stat["row_groups_pruned_runtime"] = facts[
+                                "row_groups_pruned_runtime"
+                            ]
                         node_stat["parquet_rows_before_filter"] = facts["parquet_rows_before_filter"]
                         node_stat["columns_read"] = facts["columns_read"]
                         # No pushed predicates on the native path → every column

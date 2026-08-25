@@ -398,6 +398,18 @@ PyObject* draken_vector_own_time64(
 PyObject* draken_vector_own_decimal(
     void* data, uint8_t* validity, uint32_t length, uint8_t precision, uint8_t scale);
 
+// draken_vector_own_decimal128 — the p>18 sibling of draken_vector_own_decimal.
+// Wraps a hand-allocated __int128 unscaled buffer as a DRAKEN_DECIMAL128 Vector
+// carrying a DECIMAL LogicalType (precision/scale). data must be draken_malloc'd
+// __int128[length] (16-byte stride, native endianness); validity may be NULL
+// (all-valid). Ownership of both buffers transfers unconditionally. NEW
+// reference on success; NULL + exception on failure.
+//
+// Declared for C consumers as void* data because __int128 is not a C89 type;
+// the buffer is read at 16-byte stride regardless.
+PyObject* draken_vector_own_decimal128(
+    void* data, uint8_t* validity, uint32_t length, uint8_t precision, uint8_t scale);
+
 // draken_arrow_varlen_to_string_block — Arrow varlen (data + offsets + nulls) →
 // German-string storage. PURE buffer work, no Python: builds and returns a
 // draken_malloc'd consolidated arena block [DrakenStringArena | slots | arena]

@@ -18,3 +18,8 @@ class Diachronic:
         # A snapshot id, or 0 meaning "the parent of the current snapshot" - see
         # extract_timetravel_version. None unless the query used VERSION AS OF.
         self.version = kwargs.get("version")
+        # A tag NAMES a snapshot; it does not carry one. Kept separate from
+        # `version` rather than resolved into it here, because resolution is a
+        # catalog read and this is a constructor - and because a connector that
+        # cannot resolve tags must be able to tell the two apart to say so.
+        self.version_tag = kwargs.get("version_tag")

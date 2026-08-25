@@ -221,11 +221,16 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         uint64_t bytes_out
         uint64_t exec_ns
         uint64_t cpu_ns
+        uint64_t combine_ns
+        uint64_t finalize_ns
+        int dop
     cdef cppclass PipelineReading "opteryx::engine::Engine::PipelineReading":
         string label
         uint64_t wall_ns
         uint64_t cpu_ns
         int dop
+        uint64_t skew_ns
+        uint64_t barrier_idle_ns
     cdef cppclass Join2BuildReading "opteryx::engine::Engine::Join2BuildReading":
         string identity
         string display_name
@@ -263,7 +268,10 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[int]* zone_ops,
                                           const cppvector[int64_t]* zone_ordinals,
                                           int64_t* row_groups_total,
-                                          int64_t* row_groups_pruned)
+                                          int64_t* row_groups_pruned,
+                                          int64_t* row_groups_pruned_runtime)
+        size_t new_runtime_bound()
+        void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* p1_column_names,
@@ -374,6 +382,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                   cppvector[cppvector[int]] elem_chain,
                                   bint track_matches, int64_t est_output_rows,
                                   bint null_equal)
+        void set_join2_bound_slots(size_t p, cppvector[int] slots)
         void set_unmatched_build_source(size_t p, size_t ref,
                                         cppvector[DrakenType] probe_types,
                                         cppvector[int] lt_kind, cppvector[int] lt_unit,
@@ -2104,6 +2113,13 @@ cdef class SkeneScanPlan:
     # nothing", which a 0 would silently conflate.
     cdef int64_t row_groups_total
     cdef int64_t row_groups_pruned
+    # Row groups a RUNTIME min/max join filter excluded that no plan-time term
+    # had already excluded — the MARGINAL win, reported separately so a runtime
+    # filter that pruned nothing new cannot be mistaken for one that did all the
+    # work. See docs/RUNTIME_MINMAX_FILTER_DESIGN.md §6.2: the plan-time
+    # CorrelatedFiltersStrategy already pushes min/max range predicates onto this
+    # same scan, so an unsplit counter would misattribute its pruning.
+    cdef int64_t row_groups_pruned_runtime
     # The plan node this scan belongs to, so the post-run fold can find its
     # scan_facts entry. Set by the compiler; None means "do not report".
     cdef public object scan_identity
@@ -2136,6 +2152,7 @@ cdef class SkeneScanPlan:
             self.retag_units.push_back(<int>retag_unit)
         self.row_groups_total = -1
         self.row_groups_pruned = -1
+        self.row_groups_pruned_runtime = -1
         self.scan_identity = None
         for zone_term in zone_terms or []:
             zone_name, zone_op, zone_ordinal = zone_term
@@ -2154,6 +2171,18 @@ cdef class SkeneScanPlan:
         if self.row_groups_total < 0:
             return None
         return (int(self.row_groups_total), int(self.row_groups_pruned))
+
+    @property
+    def row_groups_pruned_at_runtime(self):
+        """Row groups a RUNTIME min/max join filter excluded that plan-time
+        pruning had NOT already excluded, or None before the scan has run.
+
+        Attribution is first-proving-term-wins with the plan terms ordered first
+        (SkeneClaimSet::build), so this is the marginal win and never a share of
+        what the pushed predicates were already doing."""
+        if self.row_groups_total < 0 or self.row_groups_pruned_runtime < 0:
+            return None
+        return int(self.row_groups_pruned_runtime)
 
 
 cdef class SkeneLatmatScanPlan:
@@ -2347,6 +2376,11 @@ cdef class NativePlan:
                 "bytes_out": int(r.bytes_out),
                 "execution_time": int(r.exec_ns),
                 "cpu_time": int(r.cpu_ns),
+                # Breaker cost: the two Sink calls that run after the morsels stop.
+                # Zero except on sinks; see OpStats::combine_ns/finalize_ns.
+                "combine_time": int(r.combine_ns),
+                "finalize_time": int(r.finalize_ns),
+                "dop": int(r.dop),
             })
         return out
 
@@ -2356,7 +2390,22 @@ cdef class NativePlan:
         ``cpu_time / wall_time`` is the mean number of cores that pipeline kept busy;
         against ``dop`` it shows how much of the pool was parked while it ran. The
         per-operator readings cannot answer that — they measure operators that ran,
-        not workers that did not. Valid only after the run has drained."""
+        not workers that did not. Valid only after the run has drained.
+
+        ``skew_time`` is the spread between the first worker to finish and the last;
+        ``barrier_idle_time`` is the worker-time that spread burned waiting at the
+        barrier. Together they say whether the work DISTRIBUTED, which cpu/wall
+        cannot: a large skew means it did not — either one straggler among busy
+        workers, or (just as common) most workers finding nothing to claim and
+        exiting immediately while one did everything. Both present as a large skew
+        and both are fixed the same way, by handing out more, smaller units of work.
+        A near-zero skew with a low cpu/wall is the other case: every worker was
+        equally idle, so the pipeline is bounded by something upstream rather than
+        by how its work was split.
+
+        Per-operator ``exec_ns`` structurally cannot answer this: it is SUMMED across
+        workers, and "all sixteen busy for 10ms" and "one busy for 160ms" are the
+        same sum."""
         cdef cppvector[PipelineReading] rows = self._e.collect_pipeline_stats()
         cdef PipelineReading r
         out = []
@@ -2366,6 +2415,10 @@ cdef class NativePlan:
                 "wall_time": int(r.wall_ns),
                 "cpu_time": int(r.cpu_ns),
                 "dop": int(r.dop),
+                # P3: how far apart this pipeline's workers finished, and the
+                # worker-time that spread burned idling at the barrier.
+                "skew_time": int(r.skew_ns),
+                "barrier_idle_time": int(r.barrier_idle_ns),
             })
         return out
 
@@ -2456,7 +2509,8 @@ cdef class NativePlan:
                 &splan.column_types, &splan.retag_units, &splan.emit_indices,
                 NULL, 0, col_idx, lit_dv, _expr_filter_tramp,
                 &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
-                &splan.row_groups_total, &splan.row_groups_pruned)
+                &splan.row_groups_total, &splan.row_groups_pruned,
+                &splan.row_groups_pruned_runtime)
             return
         if not bytecode_is_c_native_predicate(filter_bc):
             raise ValueError("set_native_skene_scan_source requires a c-native "
@@ -2473,7 +2527,28 @@ cdef class NativePlan:
             <void*>filter_bc.instrs, <int>filter_bc.count, col_idx, lit_dv,
             _expr_filter_tramp,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
-            &splan.row_groups_total, &splan.row_groups_pruned)
+            &splan.row_groups_total, &splan.row_groups_pruned,
+            &splan.row_groups_pruned_runtime)
+
+    def new_runtime_bound(self):
+        """Allocate an UNFILLED runtime min/max bound slot and return its index.
+
+        One per (join, eligible key column). The build sink fills it when its
+        pipeline completes; the probe scan reads it when it builds its claim
+        list. Unfilled means "prunes nothing" — never "prunes everything"."""
+        return self._e.new_runtime_bound()
+
+    def add_skene_runtime_bound(self, size_t p, size_t bound_idx, object column):
+        """Wire pipeline ``p``'s skene scan to bound slot ``bound_idx``, testing
+        the file column named ``column`` (a PHYSICAL, in-file name — the Source
+        matches it against each file's own footer schema, exactly as the
+        plan-time zone terms are matched).
+
+        Must be called after ``set_native_skene_scan_source`` for the same
+        pipeline; raises if that pipeline's source is not a skene scan, which
+        would mean the compiler's eligibility test and the plan disagree."""
+        cdef bytes name = column if isinstance(column, bytes) else str(column).encode("utf-8")
+        self._e.add_skene_runtime_bound(p, bound_idx, <string>name)
 
     def set_skene_latmat_scan_source(self, size_t p, SkeneLatmatScanPlan splan,
                                      size_t pred_fn, size_t pred_ctx,
@@ -2715,6 +2790,29 @@ cdef class NativePlan:
                             ts, lk, lu, lp, lsc, ld, ec)
         self._e.set_join2_build_sink(p, keys, pay, ref, ts, lk, lu, lp, lsc, ld, ec,
                                      track_matches, est_output_rows, null_equal)
+
+    def set_join2_bound_slots(self, size_t p, list slots):
+        """RUNTIME MIN/MAX JOIN FILTER: arm ordinal min/max capture on the build
+        sink already wired to pipeline ``p``.
+
+        ``slots`` is PARALLEL to the ``key_idx`` that sink was built with, and
+        holds the ``new_runtime_bound()`` slot each key column's observed range
+        is published into, with -1 for "no bound wanted".
+
+        Separate from ``set_join2_build_sink`` because eligibility depends on the
+        PROBE leg, which is compiled after the build sink is wired — compile
+        order is run order and the build has to run first.
+
+        Whether a bound is sound at all is decided by the CALLER: the join mode
+        must drop unmatched probe rows, the probe key must be a direct column of
+        a not-yet-started scan, and the two sides' ordinals must be comparable.
+        Nothing native re-decides any of it — see
+        docs/RUNTIME_MINMAX_FILTER_DESIGN.md."""
+        cdef cppvector[int] v
+        cdef int i
+        for i in slots:
+            v.push_back(<int>i)
+        self._e.set_join2_bound_slots(p, v)
 
     def set_unmatched_build_source(self, size_t p, size_t ref, list probe_types,
                                    list probe_logical=None, list probe_element=None):

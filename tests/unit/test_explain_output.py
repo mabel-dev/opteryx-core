@@ -12,11 +12,16 @@ table with no operator names or structure. It now emits:
   * an ``est_rows`` column — the planner's row-count estimate (statistics_refresh),
     available even without ANALYZE since it needs no execution,
   * an ``est_bytes`` column — the planner's total-byte-size estimate, same
-    availability as est_rows; 0 when no column at that node carried a known
+    availability as est_rows; NULL when no column at that node carried a known
     size (see ColumnStatistics.total_bytes),
   * an OPTIMIZATIONS section listing which optimizer rules fired,
-  * and, for EXPLAIN ANALYZE, ``rows`` and ``time_ms`` columns -- the actual
-    numbers to compare est_rows against.
+  * and, for EXPLAIN ANALYZE, ``rows``/``time_ms``/``cpu_ms``/``self_ms``/``dop``
+    -- the actual numbers to compare est_rows against, plus the wall-vs-CPU split
+    that says whether a slow node was expensive or starved.
+
+Architect rulings D1/D3 (2026-08-25), see docs/EXECUTION_PROFILING_IMPALA_GAP.md:
+an estimate that was never computed renders NULL, never 0 — 0 is a legitimate
+estimate and cannot also mean "unknown".
 """
 
 import os
@@ -78,9 +83,62 @@ def test_explain_lists_optimizations():
 
 def test_explain_analyze_adds_stats_columns():
     names, data = _explain("EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
-    assert names == ["tree", "details", "est_rows", "est_bytes", "rows", "time_ms", "self_ms"]
-    # the single scan's row count surfaces (5 nations in region 1)
-    assert max(data["rows"]) == 5, data["rows"]
+    assert names == [
+        "tree", "details", "est_rows", "est_bytes",
+        "rows", "time_ms", "cpu_ms", "merge_ms", "self_ms", "dop",
+    ]
+    # the single scan's row count surfaces (5 nations in region 1). Filtered for
+    # None because the OPTIMIZATIONS/REWRITE TRACE rows are not plan nodes and
+    # every numeric column on them is NULL, not 0 -- see _append_no_reading.
+    assert max(v for v in data["rows"] if v is not None) == 5, data["rows"]
+
+
+def test_explain_analyze_has_cpu_and_dop():
+    """cpu_ms/dop are the D1 active-vs-wait surface: time_ms is WALL, cpu_ms is
+    CPU actually burned, and both are summed across `dop` workers. The engine has
+    always recorded cpu_ns (OpStats, always-on) -- this asserts it is rendered."""
+    _, data = _explain("EXPLAIN ANALYZE SELECT n_name FROM testdata.tpch_001.nation WHERE n_regionkey = 1")
+    scan_idx = next(i for i, line in enumerate(data["tree"]) if "Parquet Read" in line)
+    assert data["dop"][scan_idx] >= 1, data["dop"]
+    # a scan that read real rows burned real CPU
+    assert data["cpu_ms"][scan_idx] > 0.0, data["cpu_ms"]
+
+
+def test_explain_unknown_estimate_is_null_not_zero():
+    """D3: `refresh_statistics` runs opportunistically, so a node it never reached
+    has NO estimate -- distinct from an estimate OF zero. The non-plan-node filler
+    rows (OPTIMIZATIONS / REWRITE TRACE headings) are the always-available case of
+    a row that genuinely has no estimate, so they must render NULL."""
+    _, data = _explain("EXPLAIN " + _JOIN_QUERY)
+    opt_idx = data["tree"].index("OPTIMIZATIONS")
+    assert data["est_rows"][opt_idx] is None, data["est_rows"]
+    assert data["est_bytes"][opt_idx] is None, data["est_bytes"]
+
+
+def test_explain_analyze_non_plan_rows_are_null_in_every_column():
+    """A section heading / optimizer-rule row is not a plan node: it has no
+    estimate, ran nothing and produced nothing. Every numeric column on it is
+    NULL, not 0 -- 0 is a legitimate reading (a node can emit zero rows in zero
+    measurable time) so it cannot also mean "no reading here"."""
+    names, data = _explain("EXPLAIN ANALYZE " + _JOIN_QUERY)
+    numeric = [n for n in names if n not in ("tree", "details")]
+    for heading in ("OPTIMIZATIONS", "REWRITE TRACE"):
+        if heading not in data["tree"]:
+            continue
+        idx = data["tree"].index(heading)
+        for column in numeric:
+            assert data[column][idx] is None, (heading, column, data[column][idx])
+
+
+def test_explain_analyze_forces_estimate_refresh():
+    """D3, second half: ANALYZE forces refresh_statistics so every explained plan
+    node carries an estimate -- a column that is blank half the time cannot serve
+    as the est-vs-actual cardinality audit that is the whole point of ANALYZE."""
+    _, data = _explain("EXPLAIN ANALYZE " + _JOIN_QUERY)
+    # every row that is a real plan node (i.e. above the OPTIMIZATIONS heading)
+    # must have an estimate
+    end = data["tree"].index("OPTIMIZATIONS")
+    assert all(v is not None for v in data["est_rows"][:end]), data["est_rows"][:end]
 
 
 def test_explain_has_est_rows_without_analyze():
@@ -136,3 +194,42 @@ def test_explain_mermaid_unchanged():
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+def test_explain_analyze_reports_breaker_cost():
+    """P2: combine() and finalize() -- the two Sink calls that run after the morsels
+    stop -- used to be timed by nothing, so a breaker's merge and result construction
+    were real work charged to no plan node. merge_ms is that cost. It is zero on a
+    scan (a Source has neither call) and non-zero on a sink that actually merges."""
+    _, data = _explain(
+        "EXPLAIN ANALYZE SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId"
+    )
+    scan_idx = next(i for i, line in enumerate(data["tree"]) if "Reader" in line or "Read" in line)
+    assert data["merge_ms"][scan_idx] == 0.0, data["merge_ms"]
+    # some node in the plan is a breaker and paid a measurable breaker cost
+    plan_end = data["tree"].index("OPTIMIZATIONS") if "OPTIMIZATIONS" in data["tree"] else len(data["tree"])
+    assert any(v is not None and v > 0.0 for v in data["merge_ms"][:plan_end]), data["merge_ms"]
+
+
+def test_pipeline_stats_report_barrier_skew():
+    """P3: worker skew at the pipeline barrier. exec_ns is SUMMED across workers and
+    so cannot distinguish "all sixteen busy briefly" from "one busy for a long time";
+    the spread of worker finish times can, and nothing recorded it before."""
+    import opteryx
+
+    session = opteryx.session()
+    for _ in session.execute_to_morsels(
+        "SELECT planetId, COUNT(*) FROM testdata.satellites GROUP BY planetId"
+    ):
+        pass
+    pipelines = session._telemetry._reading["native_pipeline_stats"]
+    assert pipelines, "no pipeline stats harvested"
+    for row in pipelines:
+        # present, well-formed, and bounded by the pipeline's own wall clock --
+        # a skew wider than the run itself would be a clock or lifetime bug
+        assert "skew_time" in row and "barrier_idle_time" in row, row
+        assert row["skew_time"] >= 0, row
+        assert row["skew_time"] <= row["wall_time"], row
+        # every worker idles for (last_finish - own_finish), so the total is
+        # bounded by workers * skew
+        assert row["barrier_idle_time"] <= row["dop"] * row["skew_time"] + 1, row

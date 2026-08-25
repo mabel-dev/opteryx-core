@@ -14,7 +14,8 @@ use std::boxed::Box;
 
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
-    AlterTable, AlterTableOperation, BinaryOperator, Expr, ObjectName, Statement,
+    AlterTable, AlterTableOperation, BinaryOperator, Expr, Ident, ObjectName, SqlOption,
+    Statement, Value,
 };
 use sqlparser::dialect::{Dialect, Precedence};
 use sqlparser::keywords::Keyword;
@@ -184,9 +185,172 @@ fn parse_guarded_add_column(
     }))
 }
 
+// Reserved property keys: an INTERNAL transport, not anything a reader may
+// write. See `parse_tag_ddl`. The `__opteryx.` prefix is refused from reader
+// text by the planner, which is the side that can tell the two apart.
+const TAG_ACTION_KEY: &str = "__opteryx.tag.action";
+const TAG_NAME_KEY: &str = "__opteryx.tag.name";
+const TAG_VERSION_KEY: &str = "__opteryx.tag.version";
+
+/// `ALTER TABLE [IF EXISTS] [ONLY] name (CREATE|DROP) TAG ...`, or nothing.
+struct TagDdl {
+    name: ObjectName,
+    if_exists: bool,
+    only: bool,
+    create: bool,
+}
+
+/// Errors mean "this is not that statement" and are discarded by the caller's
+/// `maybe_parse`, which rewinds the parser. Nothing here is a diagnostic.
+fn parse_tag_ddl_prefix(parser: &mut Parser) -> Result<TagDdl, ParserError> {
+    parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
+    let if_exists = parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+    let only = parser.parse_keyword(Keyword::ONLY);
+    let name = parser.parse_object_name(false)?;
+
+    let create = if parser.parse_keyword(Keyword::CREATE) {
+        true
+    } else if parser.parse_keyword(Keyword::DROP) {
+        false
+    } else {
+        return Err(ParserError::ParserError("not tag DDL".to_string()));
+    };
+
+    // TAG is what commits us. Without it this is an ordinary DROP COLUMN (or
+    // anything else beginning CREATE/DROP) and must rewind to upstream untouched.
+    if !parser.parse_keyword(Keyword::TAG) {
+        return Err(ParserError::ParserError("not tag DDL".to_string()));
+    }
+
+    Ok(TagDdl {
+        name,
+        if_exists,
+        only,
+        create,
+    })
+}
+
+/// A tag name: a quoted string or a bare identifier, which mean the same thing.
+///
+/// Not normalized here. Tag names fold to lowercase, but that rule belongs to the
+/// one place that resolves them; a second copy in the parser is a second place for
+/// it to drift.
+fn parse_tag_name(parser: &mut Parser) -> Result<String, ParserError> {
+    let token = parser.peek_token();
+    match &token.token {
+        Token::SingleQuotedString(value) => {
+            parser.next_token();
+            Ok(value.clone())
+        }
+        Token::Word(_) => Ok(parser.parse_identifier()?.value),
+        _ => parser.expected("a tag name", token),
+    }
+}
+
+/// `AS OF VERSION <snapshot id | CURRENT | PREVIOUS>`, defaulting to CURRENT.
+///
+/// Returned as text for the planner to interpret, because these are three
+/// different KINDS of answer - a literal id, and two instructions to go and look
+/// one up - and flattening them to a number here would need the catalog, which a
+/// parser does not have and must not acquire.
+///
+/// CURRENT and PREVIOUS are matched as identifiers rather than keywords: PREVIOUS
+/// is not one, and reading both the same way keeps the two spellings symmetrical.
+fn parse_tag_version(parser: &mut Parser) -> Result<String, ParserError> {
+    if !parser.parse_keywords(&[Keyword::AS, Keyword::OF, Keyword::VERSION]) {
+        return Ok("current".to_string());
+    }
+
+    let token = parser.peek_token();
+    match &token.token {
+        Token::Number(digits, _) => {
+            parser.next_token();
+            Ok(digits.clone())
+        }
+        Token::Word(_) => {
+            let word = parser.parse_identifier()?.value.to_uppercase();
+            match word.as_str() {
+                "CURRENT" => Ok("current".to_string()),
+                "PREVIOUS" => Ok("previous".to_string()),
+                _ => parser.expected("a snapshot id, CURRENT or PREVIOUS", token),
+            }
+        }
+        _ => parser.expected("a snapshot id, CURRENT or PREVIOUS", token),
+    }
+}
+
+/// The rest of a tag statement, once `TAG` has been seen and it can be nothing
+/// else. Errors from here ARE diagnostics.
+///
+/// Opteryx owns this statement outright: sqlparser has no tag operation on ALTER
+/// TABLE, and its `Tag` AST node is Snowflake's key-value governance tag, a
+/// different concept wearing our word. Rather than re-spell tag DDL onto some
+/// other slot in the rewriter - every slot large enough to carry a name AND a
+/// version is one we may want later, and a re-spelling makes the parser report
+/// errors about a feature the reader never mentioned - the dialect parses it, the
+/// way the Snowflake dialect parses its own statements.
+///
+/// What it CANNOT do is invent an AST node: `AlterTableOperation` has no
+/// `CreateTag`, and adding one is the only part of this that would need a fork of
+/// sqlparser. So the parsed result travels to the planner inside
+/// `SetTblProperties` under reserved `__opteryx.tag.*` keys - an internal
+/// transport, produced only here and read by exactly one branch of
+/// `plan_alter_table`, never a second spelling anybody may write. The planner
+/// refuses those keys from any statement it did not build itself.
+fn parse_tag_ddl(parser: &mut Parser, prefix: TagDdl) -> Result<Statement, ParserError> {
+    let tag = parse_tag_name(parser)?;
+    let version = if prefix.create {
+        parse_tag_version(parser)?
+    } else {
+        String::new()
+    };
+
+    let end_token = if parser.peek_token_ref().token == Token::SemiColon {
+        parser.peek_token_ref().clone()
+    } else {
+        parser.get_current_token().clone()
+    };
+
+    let mut properties = vec![
+        property(
+            TAG_ACTION_KEY,
+            if prefix.create { "create" } else { "drop" },
+        ),
+        property(TAG_NAME_KEY, &tag),
+    ];
+    if prefix.create {
+        properties.push(property(TAG_VERSION_KEY, &version));
+    }
+
+    Ok(Statement::AlterTable(AlterTable {
+        name: prefix.name,
+        if_exists: prefix.if_exists,
+        only: prefix.only,
+        operations: vec![AlterTableOperation::SetTblProperties {
+            table_properties: properties,
+        }],
+        location: None,
+        on_cluster: None,
+        table_type: None,
+        end_token: AttachedToken(end_token),
+    }))
+}
+
+/// One transport property. The key is an UNQUOTED identifier containing dots,
+/// which is a shape reader text cannot produce - a bare key cannot contain a dot,
+/// and a quoted one arrives carrying its quote style - so the planner can tell a
+/// statement this dialect built from one somebody typed.
+fn property(key: &str, value: &str) -> SqlOption {
+    SqlOption::KeyValue {
+        key: Ident::new(key),
+        value: Expr::Value(Value::SingleQuotedString(value.to_string()).with_empty_span()),
+    }
+}
+
 impl Dialect for OpteryxDialect {
-    /// Opteryx owns `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` - see
-    /// `parse_guarded_add_column_prefix`.
+    /// Opteryx owns two `ALTER TABLE` productions: snapshot tag DDL, which
+    /// upstream has no grammar for at all (see `parse_tag_ddl`), and
+    /// `ADD COLUMN IF NOT EXISTS` - see `parse_guarded_add_column_prefix`.
     ///
     /// Upstream gates the column-level guard on `dialect_of!(self is PostgreSql |
     /// BigQuery | DuckDb | Generic)` with no trait flag to opt into, so a custom
@@ -214,6 +378,15 @@ impl Dialect for OpteryxDialect {
         match &parser.peek_token_ref().token {
             Token::Word(word) if word.keyword == Keyword::ALTER => {}
             _ => return None,
+        }
+
+        // Tag DDL first: `ALTER TABLE t DROP TAG x` and `ALTER TABLE t DROP COLUMN x`
+        // share a prefix, and only the word after DROP tells them apart. Both
+        // probes rewind on a miss, so the order costs nothing but a peek.
+        match parser.maybe_parse(parse_tag_ddl_prefix) {
+            Ok(Some(prefix)) => return Some(parse_tag_ddl(parser, prefix)),
+            Ok(None) => {}
+            Err(err) => return Some(Err(err)),
         }
 
         match parser.maybe_parse(parse_guarded_add_column_prefix) {

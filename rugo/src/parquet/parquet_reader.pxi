@@ -36,12 +36,9 @@
 # feeds the engine — it does not.
 # =============================================================================
 import datetime
-import decimal as _decimal
 import os
 import struct
 import time as _time
-
-_Decimal = _decimal.Decimal
 
 from cpython.bytes cimport PyBytes_FromStringAndSize
 
@@ -878,20 +875,40 @@ cdef inline Vector _make_int_vector(parquet_reader.DecodedColumn& col,
     return Vector(_dn.vector_from_sequence(vals))
 
 
-# int128 → Python int. `DecodedColumn::int128_values` is a std::vector<__int128>
-# (compact: non-null values only), which Cython cannot represent — this tiny C++
-# shim reads each 16-byte little-endian signed value into a Python int, emitting
-# None for null rows. Defined inline (not in decode.hpp) so rugo's pure-C++ core
-# stays free of Python.h.
+# DECIMAL materialization — native, zero Python objects per row.
+#
+# Parquet stores decimals as INT32/INT64/FIXED_LEN_BYTE_ARRAY; rugo's decoder
+# tiers by byte width into `int64_values` (width <= 8, `col.type` int64/int32)
+# or `int128_values` (width 9..16, `col.type` int128). Either way the value on
+# the wire ALREADY IS the signed unscaled integer at the column's scale — which
+# is exactly draken's DECIMAL/DECIMAL128 storage. So there is nothing to
+# convert: scatter the decoded values into a draken_malloc'd buffer, build the
+# validity bitmap, and hand both to the bridge.
+#
+# This replaces a per-row Python round trip (unscaled -> Python int ->
+# Decimal.scaleb(-S) -> decimal_to_unscaled() -> unscaled) that cost ~360ns/row
+# — 30x a plain int64 column of the same width and the same decode telemetry —
+# and violated the no-Python-objects-in-compiled-paths rule for every value.
+# The round trip was an identity on the stored representation, so dropping it
+# changes no answer; the precision bound it enforced is kept below as a native
+# integer compare.
+#
+# `col.is_unsigned` is not consulted: it is set only from a "uintN"/"intN"
+# logical-type annotation, which a "decimal(P,S)" column never carries, and a
+# DECIMAL is signed two's complement by definition.
+#
+# Defined inline (not in decode.hpp) so rugo's pure-C++ core stays free of
+# Python.h. The draken_vector_own_decimal* symbols live in draken_native.so and
+# resolve at runtime under RTLD_GLOBAL — rugo/__init__.py imports draken first
+# for exactly this reason.
 cdef extern from *:
     """
     #include <Python.h>
     #include <cstdint>
-    static inline PyObject* _rugo_int128_to_pylong(__int128 v) {
-        return _PyLong_FromByteArray(
-            reinterpret_cast<const unsigned char*>(&v), 16,
-            /*little_endian=*/1, /*is_signed=*/1);
-    }
+    #include <cstring>
+    #include "core/alloc.h"
+    #include "core/draken_bridge.h"
+
     static inline uint32_t _rugo_read_code(const std::vector<uint8_t>& arr,
                                            size_t i, uint8_t width) {
         size_t off = (size_t)i * width;
@@ -900,89 +917,179 @@ cdef extern from *:
         return arr[off] | ((uint32_t)arr[off + 1] << 8)
              | ((uint32_t)arr[off + 2] << 16) | ((uint32_t)arr[off + 3] << 24);
     }
-    static PyObject* rugo_int128_unscaled_pylist(const DecodedColumn& col, int32_t num_rows) {
-        // Two shapes:
-        //   dict  — dict_int128_values holds the value table; per-row codes live in
-        //           dict_codes_array (nullable, packed by row) or dict_indices
-        //           (non-nullable, compact valid-only). Mirrors _int64_list exactly.
-        //   plain — int128_values is the compact (non-null) dense payload.
-        PyObject* out = PyList_New(num_rows);
-        if (!out) return NULL;
+
+    // Draken validity bitmap: 1 = valid, LSB-first, byte i>>3 bit i&7, sized to
+    // a multiple of 8 bytes (min 8). Returned all-valid; callers clear nulls.
+    static uint8_t* _rugo_alloc_validity(uint32_t length) {
+        const uint32_t bm     = (length + 7u) / 8u;
+        const uint32_t padded = ((bm + 7u) & ~7u);
+        const size_t   vbytes = padded > 0u ? padded : 8u;
+        uint8_t* v = (uint8_t*)draken_malloc(vbytes);
+        if (v) std::memset(v, 0xFF, vbytes);
+        return v;
+    }
+
+    // Scatter the decoded unscaled values of `col` into out[0, num_rows).
+    // Mirrors _int64_list's four source shapes exactly (dict via packed codes,
+    // dict via compact indices, RLE runs, plain compact values). Null rows get
+    // 0 and their validity bit cleared; the RLE shape carries no per-row
+    // validity, matching _int64_list.
+    // T is int64_t (width <= 8) or __int128 (width 9..16); DictT/PlainT let the
+    // int64 tier read a physical int32 column without a second copy of the loop.
+    template <typename T, typename DictT, typename PlainT>
+    static bool _rugo_scatter_unscaled(const DecodedColumn& col, int32_t num_rows,
+                                       const std::vector<DictT>& dict_vals,
+                                       const std::vector<PlainT>& plain_vals,
+                                       bool has_dict, bool is_rle,
+                                       T* out, uint8_t* validity, bool* has_nulls) {
         const bool has_v = !col.valid_bits.empty();
-        if (!col.dict_int128_values.empty()) {
-            const size_t dict_sz = col.dict_int128_values.size();
+        if (has_dict) {
+            const size_t dict_sz = dict_vals.size();
             const bool use_codes = !col.dict_codes_array.empty();
             const uint8_t cw = (col.code_width == 1 || col.code_width == 2 ||
                                 col.code_width == 4) ? col.code_width : 1;
             size_t vi = 0;
             for (int32_t i = 0; i < num_rows; ++i) {
-                bool valid = true;
-                if (has_v) valid = ((col.valid_bits[i >> 3] >> (i & 7)) & 1) != 0;
-                if (!valid) { Py_INCREF(Py_None); PyList_SET_ITEM(out, i, Py_None); continue; }
+                if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                    out[i] = 0;
+                    validity[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                    *has_nulls = true;
+                    continue;
+                }
                 uint32_t code = use_codes
                     ? _rugo_read_code(col.dict_codes_array, (size_t)i, cw)
                     : col.dict_indices[vi++];
                 if ((size_t)code >= dict_sz) {  // fail safe on a corrupt code
-                    Py_DECREF(out);
-                    PyErr_SetString(PyExc_ValueError,
-                        "int128 dict code out of range");
-                    return NULL;
+                    PyErr_SetString(PyExc_ValueError, "decimal dict code out of range");
+                    return false;
                 }
-                PyObject* num = _rugo_int128_to_pylong(col.dict_int128_values[code]);
-                if (!num) { Py_DECREF(out); return NULL; }
-                PyList_SET_ITEM(out, i, num);
+                out[i] = (T)dict_vals[code];
             }
-            return out;
+            return true;
+        }
+        if (is_rle) {
+            // rle_int64_values holds resolved values for both int64 and int32.
+            // Runs summing past num_rows would run off the end of `out` — the
+            // old list-building path raised IndexError there, so fail here too
+            // rather than truncate (a short column is a silent wrong answer).
+            size_t off = 0;
+            for (size_t r = 0; r < col.rle_run_lengths.size(); ++r) {
+                const size_t cnt = col.rle_run_lengths[r];
+                if (off + cnt > (size_t)num_rows) {
+                    PyErr_SetString(PyExc_ValueError,
+                        "decimal: RLE run lengths exceed the column's row count");
+                    return false;
+                }
+                const T val = (T)col.rle_int64_values[r];
+                for (size_t j = 0; j < cnt; ++j) out[off + j] = val;
+                off += cnt;
+            }
+            return true;
         }
         size_t vi = 0;
         for (int32_t i = 0; i < num_rows; ++i) {
-            bool valid = true;
-            if (has_v) valid = ((col.valid_bits[i >> 3] >> (i & 7)) & 1) != 0;
-            if (!valid) { Py_INCREF(Py_None); PyList_SET_ITEM(out, i, Py_None); continue; }
-            PyObject* num = _rugo_int128_to_pylong(col.int128_values[vi++]);
-            if (!num) { Py_DECREF(out); return NULL; }
-            PyList_SET_ITEM(out, i, num);
+            if (has_v && !((col.valid_bits[i >> 3] >> (i & 7)) & 1)) {
+                out[i] = 0;
+                validity[i >> 3] &= (uint8_t)~(1u << (i & 7));
+                *has_nulls = true;
+                continue;
+            }
+            out[i] = (T)plain_vals[vi++];
         }
-        return out;
+        return true;
+    }
+
+    // |unscaled| < 10^precision — the bound decimal_to_unscaled() enforced per
+    // value on the old Python path, kept here as an integer compare. A file
+    // whose values overflow their own declared precision is a file that
+    // contradicts itself; it fails rather than yielding a silently wrong type.
+    template <typename T>
+    static bool _rugo_check_precision(const T* data, uint32_t length, uint8_t precision) {
+        T limit = 1;
+        for (int i = 0; i < (int)precision; ++i) limit *= 10;
+        for (uint32_t i = 0; i < length; ++i)
+            if (data[i] >= limit || data[i] <= -limit) {
+                PyErr_SetString(PyExc_OverflowError,
+                    "decimal: value exceeds declared precision");
+                return false;
+            }
+        return true;
+    }
+
+    // Build a DECIMAL (p<=18, int64) or DECIMAL128 (p>18, int128) Vector from a
+    // decoded parquet DECIMAL column. Returns a NEW reference, or NULL with a
+    // Python exception set. GIL is held (Cython calls this from the reader).
+    static PyObject* rugo_decimal_vector(const DecodedColumn& col, int32_t num_rows) {
+        const uint8_t precision = col.decimal_precision;
+        const uint8_t scale     = col.decimal_scale;
+        const bool    is_i128   = (col.type == "int128");
+        const uint32_t length   = (uint32_t)(num_rows > 0 ? num_rows : 0);
+        const size_t   slots    = length > 0u ? length : 1u;
+
+        if (precision < 1 || precision > (is_i128 ? 38 : 18)) {
+            PyErr_SetString(PyExc_ValueError,
+                is_i128 ? "DECIMAL128 precision must be in [1, 38]"
+                        : "DECIMAL precision must be in [1, 18]");
+            return NULL;
+        }
+        if (scale > precision) {
+            PyErr_SetString(PyExc_ValueError,
+                is_i128 ? "DECIMAL128 scale must be <= precision"
+                        : "DECIMAL scale must be <= precision");
+            return NULL;
+        }
+
+        uint8_t* validity = _rugo_alloc_validity(length);
+        if (!validity) return PyErr_NoMemory();
+        bool has_nulls = false;
+
+        if (is_i128) {
+            __int128* data = (__int128*)draken_malloc(slots * sizeof(__int128));
+            if (!data) { draken_free(validity); return PyErr_NoMemory(); }
+            const bool has_codes = !col.dict_codes_array.empty() || !col.dict_indices.empty();
+            const bool has_dict = !col.dict_int128_values.empty() && has_codes;
+            if (!_rugo_scatter_unscaled<__int128, __int128, __int128>(
+                    col, num_rows, col.dict_int128_values, col.int128_values,
+                    has_dict, /*is_rle=*/false, data, validity, &has_nulls)
+                || !_rugo_check_precision<__int128>(data, length, precision)) {
+                draken_free(data); draken_free(validity); return NULL;
+            }
+            if (!has_nulls) { draken_free(validity); validity = NULL; }
+            return draken_vector_own_decimal128(data, validity, length, precision, scale);
+        }
+
+        int64_t* data = (int64_t*)draken_malloc(slots * sizeof(int64_t));
+        if (!data) { draken_free(validity); return PyErr_NoMemory(); }
+        const bool from_int32 = (col.type == "int32");
+        const bool has_codes = !col.dict_codes_array.empty() || !col.dict_indices.empty();
+        const bool has_dict = has_codes && (from_int32 ? !col.dict_int32_values.empty()
+                                                       : !col.dict_int64_values.empty());
+        const bool is_rle = !has_dict && !col.rle_run_lengths.empty();
+        const bool ok = from_int32
+            ? _rugo_scatter_unscaled<int64_t, int32_t, int32_t>(
+                  col, num_rows, col.dict_int32_values, col.int32_values,
+                  has_dict, is_rle, data, validity, &has_nulls)
+            : _rugo_scatter_unscaled<int64_t, int64_t, int64_t>(
+                  col, num_rows, col.dict_int64_values, col.int64_values,
+                  has_dict, is_rle, data, validity, &has_nulls);
+        if (!ok || !_rugo_check_precision<int64_t>(data, length, precision)) {
+            draken_free(data); draken_free(validity); return NULL;
+        }
+        if (!has_nulls) { draken_free(validity); validity = NULL; }
+        return draken_vector_own_decimal(data, validity, length, precision, scale);
     }
     """
-    object rugo_int128_unscaled_pylist(parquet_reader.DecodedColumn& col, int32_t num_rows)
+    object rugo_decimal_vector(parquet_reader.DecodedColumn& col, int32_t num_rows)
 
 
 cdef Vector _make_decimal_vector(parquet_reader.DecodedColumn& col, int32_t num_rows):
     """Build a DECIMAL Vector from a decoded parquet DECIMAL column.
 
-    Parquet stores decimals as INT32/INT64/FIXED_LEN_BYTE_ARRAY; rugo's decoder
-    tiers by byte width into `int64_values` (width <= 8, `col.type` int64/int32)
-    or `int128_values` (width 9..16, `col.type` int128). Either way the value is
-    the SIGNED UNSCALED integer; we scale it by 10**-S into a decimal.Decimal and
-    build a native DRAKEN_DECIMAL (P<=18) / DRAKEN_DECIMAL128 vector carrying
-    precision+scale — instead of silently dropping the >64-bit tier (old
-    behaviour: no int128 branch → returned None) or handing back a bare unscaled
-    int with no decimal identity (old <=8 behaviour). Precision/scale come from
-    `col.decimal_precision`/`col.decimal_scale` (set in decode_column.cpp), so
-    this works on the morsel path where no per-column logical-type string exists.
+    One native call per morsel; no Python object is created per row. See the
+    C++ block above for the tiering, the shapes handled, and why the old
+    Decimal round trip was an identity.
     """
-    cdef int precision = col.decimal_precision
-    cdef int scale = col.decimal_scale
-
-    cdef list unscaled
-    if col.type == b"int128":
-        unscaled = rugo_int128_unscaled_pylist(col, num_rows)
-    else:
-        unscaled = _int64_list(col, num_rows, col.type == b"int32")
-
-    cdef list decs = [None] * num_rows
-    cdef Py_ssize_t i
-    cdef object u
-    for i in range(num_rows):
-        u = unscaled[i]
-        if u is not None:
-            decs[i] = _Decimal(u).scaleb(-scale)
-
-    if precision <= 18:
-        return Vector(_dn.vector_decimal_from_sequence(decs, precision, scale))
-    return Vector(_dn.vector_decimal128_from_sequence(decs, precision, scale))
+    return Vector(rugo_decimal_vector(col, num_rows))
 
 
 cdef list _float64_list(parquet_reader.DecodedColumn& col, int32_t num_rows,

@@ -24,6 +24,8 @@ Responsibilities:
   has no grammar for
 - Rewrites VERSION AS OF PREVIOUS to VERSION AS OF 0 (the planner's sentinel for
   "the parent of the current snapshot"), and refuses a literal VERSION AS OF 0
+- Rewrites VERSION AS OF <tag> to AT(TAG => '<tag>'), the version-space slot the
+  grammar will accept a name in - VERSION AS OF itself parses only a number
 
 The rewriter does NOT parse SQL into an AST; it only manipulates the text.
 
@@ -55,6 +57,10 @@ from typing import Sequence
 from typing import Tuple
 
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.exceptions import compose
+from opteryx.exceptions import did_you_mean
+from opteryx.exceptions import md_code
+from opteryx.exceptions import md_syntax
 from opteryx.utils.sql import offset_of
 from opteryx.utils.sql import position_of
 
@@ -247,6 +253,29 @@ _VERSION_AS_OF = re.compile(
     re.IGNORECASE,
 )
 
+# VERSION AS OF <tag> -> AT(TAG => '<tag>'). sqlparser's grammar for VERSION AS OF
+# reads a NUMBER (`parse_number_value`, not `parse_expr` - see
+# `maybe_parse_table_version`), so a tag name cannot reach the planner under the
+# reader's own spelling and has to be re-spelled onto a slot the grammar accepts.
+#
+# `AT(<name> => <expr>)` is that slot, and it is the RIGHT one: it parses as
+# `TableVersion::Function`, which lives in the version space beside VERSION AS OF
+# rather than in the timestamp space, and `AT(TAG => ...)` is what Snowflake and
+# Databricks already spell for exactly this. A tag names a SNAPSHOT, never a
+# timestamp, so carrying it through `FOR SYSTEM_TIME AS OF` (which parses a full
+# expression, and which opteryx otherwise rejects) was considered and refused: it
+# would have put a snapshot reference in the timestamp grammar, where the next
+# person to read it would reasonably conclude tags resolve by time.
+#
+# This pass MUST run after `_rewrite_version_as_of_previous`: PREVIOUS is a bare
+# word and would otherwise be captured here as a tag name. By the time this runs
+# it is already the digit 0, which `tag` cannot match.
+_VERSION_AS_OF_TAG = re.compile(
+    rf"(?P<quoted>{_QUOTED_SPAN})"
+    r"|\bVERSION\s+AS\s+OF\s+(?P<tag>'(?:[^']|'')*'|[A-Za-z][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+
 
 def _rewrite_escaped_breaks(text: str) -> Tuple[str, List[Edit]]:
     def replace(match):
@@ -396,6 +425,87 @@ def _rewrite_version_as_of_previous(text: str) -> Tuple[str, List[Edit]]:
     return _substitute(text, _VERSION_AS_OF, replace)
 
 
+# `AS OF VERSION x` written where `VERSION AS OF x` was meant. The two orders are
+# BOTH real in this dialect - reads take `VERSION AS OF` (sqlparser's table-version
+# grammar, and the spelling snapshot ids and PREVIOUS have always used), while tag
+# DDL takes Iceberg's `CREATE TAG x AS OF VERSION y`. Someone who has just written
+# the DDL reaches for the same order on the read, gets "Expected: end of statement,
+# found: VERSION", and has no way to tell from that which half of the phrase the
+# parser objected to.
+#
+# Only queries are checked, never `ALTER`: `CREATE TAG ... AS OF VERSION CURRENT` is
+# the CORRECT spelling of the DDL and must not be refused by the rule that helps its
+# author with the read.
+_AS_OF_VERSION = re.compile(
+    rf"(?P<quoted>{_QUOTED_SPAN})"
+    r"|\bAS\s+OF\s+VERSION\b(?:\s+(?P<operand>'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_]*|\d+))?",
+    re.IGNORECASE,
+)
+_STATEMENT_HEAD = re.compile(r"^\s*(?:\(|\s)*(?P<word>[A-Za-z_]+)")
+
+
+def _reject_reversed_version_as_of(text: str) -> Tuple[str, List[Edit]]:
+    """`AS OF VERSION` in a QUERY -> a message naming `VERSION AS OF`.
+
+    Deliberately an error rather than a second accepted spelling: one phrase, one
+    order. What was wrong before was not that the order was refused, it was that
+    the refusal blamed the wrong token and named neither order.
+    """
+    head = _STATEMENT_HEAD.match(text)
+    if head is None or head.group("word").upper() not in ("SELECT", "WITH", "EXPLAIN"):
+        return text, []
+
+    def replace(match):
+        if match.group("quoted") is not None:
+            return None
+        # The operand is echoed back so the suggestion is the reader's OWN
+        # statement, corrected and copyable, rather than a shape to translate.
+        operand = match.group("operand") or "<snapshot id | tag>"
+        raise UnsupportedSyntaxError(
+            compose(
+                f"Time travel on a relation is written {md_syntax('VERSION AS OF')}, "
+                f"not {md_syntax('AS OF VERSION')}.",
+                did_you_mean(f"VERSION AS OF {operand}"),
+                f"The {md_syntax('AS OF VERSION')} order belongs to "
+                f"{md_code('ALTER TABLE ... CREATE TAG <name> AS OF VERSION ...')}.",
+            )
+        )
+
+    return _substitute(text, _AS_OF_VERSION, replace)
+
+
+def _rewrite_version_as_of_tag(text: str) -> Tuple[str, List[Edit]]:
+    """VERSION AS OF <tag> -> AT(TAG => '<tag>'); see `_VERSION_AS_OF_TAG`.
+
+    Both spellings of the name are accepted and mean the same thing - a tag name
+    IS a SQL identifier (a letter, then letters, digits and underscores), so
+    `VERSION AS OF report_202602` and `VERSION AS OF 'report_202602'` are the same
+    tag. Someone who created it unquoted will read it back unquoted.
+
+    The name is passed through as written. Normalizing it (tags fold to lowercase)
+    is resolution's job, not the rewriter's: this module re-spells text so the
+    parser will accept it and knows nothing about what a tag means or whether one
+    exists.
+    """
+
+    def replace(match):
+        if match.group("quoted") is not None:
+            return None
+        tag = match.group("tag")
+
+        if tag.upper() == "CURRENT" and not tag.startswith("'"):
+            raise UnsupportedSyntaxError(
+                "VERSION AS OF CURRENT is not a time-travel read - reading the relation "
+                "without a version clause already reads the current version. `CURRENT` is "
+                "accepted only when CREATING a tag."
+            )
+
+        literal = tag if tag.startswith("'") else f"'{tag}'"
+        return f"AT(TAG => {literal})"
+
+    return _substitute(text, _VERSION_AS_OF_TAG, replace)
+
+
 def do_sql_rewrite(
     statement, source: Optional[str] = None, source_offset: int = 0
 ) -> RewrittenStatement:
@@ -418,6 +528,8 @@ def do_sql_rewrite(
         _rewrite_prefixed_strings,
         _rewrite_explain_format,
         _rewrite_version_as_of_previous,
+        _reject_reversed_version_as_of,
+        _rewrite_version_as_of_tag,
     ):
         statement, edits = rewrite(statement)
         passes.append(edits)

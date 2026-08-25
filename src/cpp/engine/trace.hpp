@@ -30,6 +30,8 @@ constexpr uint16_t TC_IO_WAIT         = DRAKEN_TC_IO_WAIT;
 constexpr uint16_t TC_BUFFER_RESIDENT = DRAKEN_TC_BUFFER_RESIDENT;
 constexpr uint16_t TC_DECODE          = DRAKEN_TC_DECODE;
 constexpr uint16_t TC_DECODE_PHASE    = DRAKEN_TC_DECODE_PHASE;
+constexpr uint16_t TC_QUEUE_STALL     = DRAKEN_TC_QUEUE_STALL;
+constexpr uint16_t TC_FINALIZE        = DRAKEN_TC_FINALIZE;
 
 inline uint64_t trace_now_ns() { return draken_trace_now_ns(); }
 inline void trace_set_enabled(bool on) { draken_trace_set_enabled(on ? 1 : 0); }

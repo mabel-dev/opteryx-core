@@ -51,6 +51,13 @@ typedef enum {
     // pending_items_ before a worker claims it) or an inline-decode help
     // (which never blocks). [t_start_ns, t_end_ns) is the blocked interval.
     DRAKEN_TC_QUEUE_STALL     = 11,
+    // The two Sink calls that run after the morsels stop flowing: the per-worker
+    // merge into global state (TC_COMBINE, declared since the first landing and
+    // finally emitted 2026-08-25) and the once-per-pipeline result construction.
+    // APPEND ONLY below this line: `category` is a wire field in a persisted blob
+    // (worker.opteryx stores trace.spans.bin), so renumbering silently reinterprets
+    // every archived trace.
+    DRAKEN_TC_FINALIZE        = 12,
 } DrakenTraceCategory;
 
 // One cache line. Layout MUST match draken_trace::TraceSpan (draken/core/

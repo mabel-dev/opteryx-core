@@ -46,6 +46,28 @@ inline uint64_t telem_now_ns() {
 // running, not while blocked in a mutex/condvar wait (e.g. the scan's get_morsel() pull
 // from the async decode pipeline). Read alongside telem_now_ns() at the same call sites
 // to split "real work" (cpu_ns) from "elapsed, possibly-blocked" (exec_ns) per operator.
+//
+// READ-ORDER CONTRACT for the three brackets below (measured, docs/
+// EXECUTION_PROFILING_IMPALA_GAP.md §6.3a). This clock costs ~107ns per read against
+// telem_now_ns()'s ~26ns on Apple Silicon, so whichever bracket encloses it absorbs
+// that cost as if it were work. The order is therefore fixed as:
+//
+//     c0 = telem_cpu_now_ns();   <- CPU clock OUTERMOST
+//     t0 = telem_now_ns();       <- wall clock innermost
+//     ...the call being measured...
+//     t1 = telem_now_ns();
+//     c1 = telem_cpu_now_ns();
+//
+// so the WALL bracket contains only the measured call. Reading them the other way
+// round (the original order) put the 107ns CPU read inside the wall bracket and
+// inflated exec_ns by ~120ns per call — measured a third of the reported time on a
+// cheap operator. exec_ns is the published figure (EXPLAIN ANALYZE's time_ms/self_ms),
+// so it is the one the ordering protects; cpu_ns absorbs the two ~26ns wall reads
+// instead, which is the cheaper end of the trade. Total cost is unchanged (measured
+// 226.3 -> 224.3 ns/stage, inside noise) — this buys accuracy, not speed.
+//
+// Do not reorder these reads, and do not put anything but the measured call between
+// t0 and t1.
 inline uint64_t telem_cpu_now_ns() {
     timespec ts;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
@@ -78,6 +100,29 @@ struct WorkerCtx {
     GlobalSinkState*    gsink;
     std::vector<ErrCtx>* errs;
     int                 w;
+    // P3 (docs/EXECUTION_PROFILING_IMPALA_GAP.md): when this worker started and
+    // when it actually finished. TWO CLOCK READS PER WORKER PER PIPELINE — not
+    // per morsel — so the cost is ~52ns per worker per pipeline, immeasurable.
+    //
+    // Why this cannot be derived from OpStats: exec_ns is SUMMED across workers,
+    // which loses the distribution entirely. "Every worker was busy for 10ms" and
+    // "one worker was busy for 160ms while fifteen idled" are the same sum and
+    // opposite problems, and only the second is fixable. The spread of t_last_ns
+    // is the barrier skew.
+    uint64_t            t_first_ns = 0;
+    uint64_t            t_last_ns  = 0;
+};
+
+// Straggler picture for one pipeline run. Filled by run_pipeline_impl from the
+// worker contexts once every worker has finished.
+struct PipelineSkew {
+    // Spread between the first worker to finish and the last: the barrier's width.
+    uint64_t skew_ns = 0;
+    // Worker-time burned waiting at the barrier — sum over workers of (last worker's
+    // finish - this worker's finish). This is the number that says what the skew COST,
+    // as opposed to how wide it was.
+    uint64_t barrier_idle_ns = 0;
+    int      workers = 0;
 };
 
 // One worker's full body: claim disjoint morsels from the source (dynamic assignment =
@@ -86,6 +131,16 @@ struct WorkerCtx {
 inline void run_worker(WorkerCtx* ctx) {
     Pipeline& p = *ctx->p;
     ErrCtx& e = (*ctx->errs)[static_cast<size_t>(ctx->w)];
+    // RAII, not a plain assignment before the final combine: run_worker returns
+    // early on any worker error (three sites below), and a finish timestamp that
+    // is only written on the success path would report a failed run as though its
+    // workers never finished — a skew reading that is wrong exactly when something
+    // has gone wrong. Declared before `lsink` so it destructs LAST, after combine.
+    struct FinishStamp {
+        WorkerCtx* c;
+        ~FinishStamp() { c->t_last_ns = telem_now_ns(); }
+    } _finish{ctx};
+    ctx->t_first_ns = telem_now_ns();
     std::unique_ptr<LocalSourceState> lsrc = p.source->make_local(*ctx->gsrc);
     std::unique_ptr<LocalSinkState>   lsink = p.sink->make_local(*ctx->gsink);
     std::vector<std::unique_ptr<OperatorState>> op_states;
@@ -105,16 +160,20 @@ inline void run_worker(WorkerCtx* ctx) {
             ss.calls.fetch_add(1, relaxed);
             ss.rows_in.fetch_add(m ? m->num_rows() : 0, relaxed);
             ss.bytes_in.fetch_add(telem_nbytes(m), relaxed);
-            uint64_t t0 = telem_now_ns();
-            uint64_t c0 = telem_cpu_now_ns();
+            uint64_t c0 = telem_cpu_now_ns();  // read order is fixed — see telem_cpu_now_ns
             // TC_SINK: closes the "operator waterfall goes blank for a plan
             // with no Operator-role nodes" gap — a Source->Sink-only pipeline
             // (e.g. scan with a baked-in residual filter -> TopN/Sort) had
             // NOTHING to show before this, even on real, expensive queries.
+            // Opened before t0 so an armed trace's own clock read does not land
+            // inside the wall bracket either.
             TraceHandle sh = trace_begin(TC_SINK, ss.node_id, 0, 0xFFFFFFFFu, ctx->w);
+            uint64_t t0 = telem_now_ns();
             p.sink->sink(m, *ctx->gsink, *lsink, e);
-            ss.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
-            ss.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
+            uint64_t t1 = telem_now_ns();
+            uint64_t c1 = telem_cpu_now_ns();
+            ss.exec_ns.fetch_add(t1 - t0, relaxed);
+            ss.cpu_ns.fetch_add(c1 - c0, relaxed);
             trace_end(sh, m ? static_cast<uint32_t>(m->num_rows()) : 0,
                       static_cast<uint32_t>(telem_nbytes(m)));
             return;
@@ -125,16 +184,18 @@ inline void run_worker(WorkerCtx* ctx) {
         os.bytes_in.fetch_add(telem_nbytes(m), relaxed);
         MorselPtr out;
         while (true) {
-            uint64_t t0 = telem_now_ns();
-            uint64_t c0 = telem_cpu_now_ns();
+            uint64_t c0 = telem_cpu_now_ns();  // read order is fixed — see telem_cpu_now_ns
             // Phase 1 of docs/EXECUTION_TRACING_DESIGN.md: TC_OP_EXEC span, same
             // bracket as the always-on exec_ns/cpu_ns sums above — a no-op branch
             // when OPTERYX_TRACE is off (trace_begin short-circuits on the disabled
             // gate before touching the clock).
             TraceHandle th = trace_begin(TC_OP_EXEC, os.node_id, 0, 0xFFFFFFFFu, ctx->w);
+            uint64_t t0 = telem_now_ns();
             OpResult orr = p.operators[stage]->execute(m, *op_states[stage], out, e);
-            os.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);  // SELF time — excludes forward
-            os.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
+            uint64_t t1 = telem_now_ns();
+            uint64_t c1 = telem_cpu_now_ns();
+            os.exec_ns.fetch_add(t1 - t0, relaxed);  // SELF time — excludes forward
+            os.cpu_ns.fetch_add(c1 - c0, relaxed);
             trace_end(th, out ? static_cast<uint32_t>(out->num_rows()) : 0,
                       static_cast<uint32_t>(telem_nbytes(out)));
             if (e.code != 0) return;
@@ -152,15 +213,17 @@ inline void run_worker(WorkerCtx* ctx) {
     MorselPtr in;
     while (true) {
         if (p.halt != nullptr && p.halt->load(std::memory_order_relaxed)) break;
-        uint64_t t0 = telem_now_ns();
-        uint64_t c0 = telem_cpu_now_ns();
+        uint64_t c0 = telem_cpu_now_ns();  // read order is fixed — see telem_cpu_now_ns
         // TC_SOURCE_PULL: same gap-closing rationale as TC_SINK above — this
         // is the ONLY per-morsel timing signal for a scan whose predicate is
         // baked in rather than a separate Operator (GCS/trampoline scans).
         TraceHandle sph = trace_begin(TC_SOURCE_PULL, src.node_id, 0, 0xFFFFFFFFu, ctx->w);
+        uint64_t t0 = telem_now_ns();
         SourceResult sr = p.source->get_morsel(*ctx->gsrc, *lsrc, in, e);
-        src.exec_ns.fetch_add(telem_now_ns() - t0, relaxed);
-        src.cpu_ns.fetch_add(telem_cpu_now_ns() - c0, relaxed);
+        uint64_t t1 = telem_now_ns();
+        uint64_t c1 = telem_cpu_now_ns();
+        src.exec_ns.fetch_add(t1 - t0, relaxed);
+        src.cpu_ns.fetch_add(c1 - c0, relaxed);
         trace_end(sph, in ? static_cast<uint32_t>(in->num_rows()) : 0,
                   static_cast<uint32_t>(telem_nbytes(in)));
         if (e.code != 0) return;
@@ -171,7 +234,26 @@ inline void run_worker(WorkerCtx* ctx) {
         push(in, 0);
         if (e.code != 0) return;
     }
-    p.sink->combine(*ctx->gsink, *lsink, e);
+    // P2: combine() was timed by NOTHING — not OpStats, not a span — so a hash
+    // aggregate's cross-worker merge was charged to no plan node at all. Once per
+    // worker per pipeline, so the bracket is free at any morsel count. Same fixed
+    // read order as the per-morsel brackets (see telem_cpu_now_ns).
+    //
+    // WALL ONLY, deliberately: combine's CPU is NOT added to cpu_ns. exec_ns does not
+    // include combine's wall time, so charging cpu_ns with its CPU would make cpu_ns
+    // systematically exceed exec_ns on any sink with a real merge — and time_ms vs
+    // cpu_ms is precisely the comparison P1 just put on EXPLAIN ANALYZE. The two stay
+    // measuring the same window. If combine ever needs its own blocked/running split
+    // (it can contend on the global sink), that is a combine_cpu_ns field, not a
+    // reading smuggled into this one.
+    {
+        OpStats& cs = p.sink->stats;
+        TraceHandle ch = trace_begin(TC_COMBINE, cs.node_id, 0, 0xFFFFFFFFu, ctx->w);
+        uint64_t ct0 = telem_now_ns();
+        p.sink->combine(*ctx->gsink, *lsink, e);
+        cs.combine_ns.fetch_add(telem_now_ns() - ct0, relaxed);
+        trace_end(ch, 0, 0);
+    }
 }
 
 // Native-task entry matching BSThreadPoolBridge::submit_native's `void(*)(void*)` shape.
@@ -184,7 +266,8 @@ inline void run_worker_task(void* raw) {
 // checks errors and finalizes exactly as before.
 template <typename DispatchFn>
 inline std::unique_ptr<GlobalSinkState>
-run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch) {
+run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch,
+                  PipelineSkew* skew = nullptr) {
     if (dop < 1) dop = 1;
     std::unique_ptr<GlobalSourceState> gsrc = p.source->make_global();
     std::unique_ptr<GlobalSinkState>   gsink = p.sink->make_global();
@@ -196,10 +279,41 @@ run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch) {
 
     dispatch(ctxs);
 
+    // P3: every worker has finished, so the finish timestamps are final. Computed
+    // here and not by the workers because it is a property of the SET of them.
+    if (skew != nullptr) {
+        uint64_t earliest_end = 0, latest_end = 0;
+        int counted = 0;
+        for (const WorkerCtx& c : ctxs) {
+            if (c.t_last_ns == 0) continue;   // never dispatched
+            if (counted == 0 || c.t_last_ns < earliest_end) earliest_end = c.t_last_ns;
+            if (c.t_last_ns > latest_end) latest_end = c.t_last_ns;
+            ++counted;
+        }
+        skew->workers = counted;
+        skew->skew_ns = counted > 0 ? latest_end - earliest_end : 0;
+        uint64_t idle = 0;
+        for (const WorkerCtx& c : ctxs) {
+            if (c.t_last_ns == 0) continue;
+            idle += latest_end - c.t_last_ns;
+        }
+        skew->barrier_idle_ns = idle;
+    }
+
     for (ErrCtx& e : errs) {
         if (e.code != 0) { err = e; return gsink; }  // skip finalize on any worker error
     }
-    p.sink->finalize(*gsink, err);
+    // P2: finalize() — the breaker's result construction — was, like combine(),
+    // timed by nothing. Runs exactly once per pipeline. Wall only, for the same
+    // reason combine is (see there).
+    {
+        OpStats& fs = p.sink->stats;
+        TraceHandle fh = trace_begin(TC_FINALIZE, fs.node_id, 0, 0xFFFFFFFFu, 0);
+        uint64_t ft0 = telem_now_ns();
+        p.sink->finalize(*gsink, err);
+        fs.finalize_ns.fetch_add(telem_now_ns() - ft0, std::memory_order_relaxed);
+        trace_end(fh, 0, 0);
+    }
     return gsink;
 }
 
@@ -207,13 +321,13 @@ run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch) {
 // at low dop (no Python pool available in these call sites); NOT the real cutover path —
 // see the free-threaded deadlock note above before raising dop here.
 inline std::unique_ptr<GlobalSinkState>
-run_pipeline(Pipeline& p, int dop, ErrCtx& err) {
+run_pipeline(Pipeline& p, int dop, ErrCtx& err, PipelineSkew* skew = nullptr) {
     return run_pipeline_impl(p, dop, err, [](std::vector<WorkerCtx>& ctxs) {
         std::vector<std::thread> threads;
         threads.reserve(ctxs.size());
         for (WorkerCtx& ctx : ctxs) threads.emplace_back(run_worker, &ctx);
         for (std::thread& t : threads) t.join();
-    });
+    }, skew);
 }
 
 // Real cutover backend: submit `dop` native tasks to the caller's persistent
@@ -235,11 +349,11 @@ run_pipeline(Pipeline& p, int dop, ErrCtx& err) {
 // code, the same pattern draken_native.so uses for draken_vector_unwrap et al.) ensures
 // the pool is only ever touched by the code that was compiled against its true layout.
 inline std::unique_ptr<GlobalSinkState>
-run_pipeline(Pipeline& p, int dop, ErrCtx& err, void* pool) {
+run_pipeline(Pipeline& p, int dop, ErrCtx& err, void* pool, PipelineSkew* skew = nullptr) {
     return run_pipeline_impl(p, dop, err, [pool](std::vector<WorkerCtx>& ctxs) {
         for (WorkerCtx& ctx : ctxs) bs_pool_submit_native(pool, &run_worker_task, &ctx);
         bs_pool_wait_native(pool);
-    });
+    }, skew);
 }
 
 }  // namespace opteryx::engine

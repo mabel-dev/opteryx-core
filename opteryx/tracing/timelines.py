@@ -34,6 +34,8 @@ from opteryx.tracing.spans import TC_OP_EXEC
 from opteryx.tracing.spans import TC_QUEUE_STALL
 from opteryx.tracing.spans import TC_QUEUE_WAIT
 from opteryx.tracing.spans import TC_SINK
+from opteryx.tracing.spans import TC_COMBINE
+from opteryx.tracing.spans import TC_FINALIZE
 from opteryx.tracing.spans import TC_SOURCE_PULL
 from opteryx.tracing.spans import interpret_trace
 from opteryx.tracing.spans import parse_spans
@@ -148,6 +150,11 @@ class TraceTimelines:
         TC_OP_EXEC: "operator",
         TC_SINK: "sink",
         TC_IO_WAIT: "io_wait",
+        # The breaker's two post-stream calls, emitted since 2026-08-25. They are
+        # genuine pipeline stages on the sink's node (not nested inside another
+        # span, unlike io_wait), so they fold into the node's duration normally.
+        TC_COMBINE: "combine",
+        TC_FINALIZE: "finalize",
     }
 
     def exec_timelines(self) -> tuple:

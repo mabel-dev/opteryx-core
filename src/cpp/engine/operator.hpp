@@ -68,6 +68,21 @@ struct OpStats {
     std::atomic<uint64_t> exec_ns{0};    // wall time inside this operator's own call(s)
     std::atomic<uint64_t> cpu_ns{0};     // CPU time actually consumed (CLOCK_THREAD_CPUTIME_ID);
                                           // excludes time blocked/asleep, unlike exec_ns
+    // ---- Breaker cost: the two Sink calls that run AFTER the morsels stop -------
+    // Zero on Sources and Operators, which have neither call.
+    //
+    // These existed as real work charged to NO plan node until 2026-08-25. combine()
+    // and finalize() sit outside every exec_ns bracket (they are called from the end
+    // of the worker body and from run_pipeline_impl, not from the per-morsel loop),
+    // so a hash aggregate's cross-worker merge and its result construction landed in
+    // the pipeline's wall_ns and were attributable to nothing. Separate fields rather
+    // than folded into exec_ns (architect ruling D4, 2026-08-25): no previously
+    // published reading changes meaning, and the new cost is visibly new.
+    //
+    // combine_ns is summed across workers (once per worker); finalize_ns is charged
+    // once, by whichever thread ran finalize.
+    std::atomic<uint64_t> combine_ns{0};
+    std::atomic<uint64_t> finalize_ns{0};
 };
 
 // ---- Opaque per-operator state. The engine owns the lifetimes. -------------------

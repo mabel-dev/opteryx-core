@@ -35,10 +35,12 @@
             "ALTER TABLE [IF EXISTS] table_name RENAME COLUMN column_name TO new_column_name",
             "ALTER TABLE [IF EXISTS] table_name ALTER COLUMN column_name TYPE data_type",
             "ALTER TABLE [IF EXISTS] table_name CLUSTER BY (column, ...)",
-            "ALTER TABLE [IF EXISTS] table_name RENAME TO new_table_name"
+            "ALTER TABLE [IF EXISTS] table_name RENAME TO new_table_name",
+            "ALTER TABLE [IF EXISTS] table_name CREATE TAG tag_name [AS OF VERSION snapshot_id | CURRENT | PREVIOUS]",
+            "ALTER TABLE [IF EXISTS] table_name DROP TAG tag_name"
         ],
-        "summary": "Change a table's columns, its clustering columns, or its name.",
-        "documentation": "ADD/DROP/RENAME COLUMN and ALTER COLUMN ... TYPE change the table's shape, rewriting each data file's footer and copying the columns they do not touch byte-for-byte. ADD COLUMN ... DEFAULT fills the rows that already exist with a literal; it is a backfill value, not stored state a later INSERT consults. ALTER COLUMN ... TYPE only widens within a type family. CLUSTER BY records the columns a catalog-backed table is sorted by, in priority order. RENAME TO renames the relation and may move it between collections.",
+        "summary": "Change a table's columns, its clustering columns, its name, or the tags naming its snapshots.",
+        "documentation": "ADD/DROP/RENAME COLUMN and ALTER COLUMN ... TYPE change the table's shape, rewriting each data file's footer and copying the columns they do not touch byte-for-byte. ADD COLUMN ... DEFAULT fills the rows that already exist with a literal; it is a backfill value, not stored state a later INSERT consults. ALTER COLUMN ... TYPE only widens within a type family. CLUSTER BY records the columns a catalog-backed table is sorted by, in priority order. RENAME TO renames the relation and may move it between collections. CREATE TAG binds a name to one snapshot and holds that snapshot - and every file it references - from expiry until the tag is dropped; the version defaults to CURRENT, the name may be quoted or bare and folds to lowercase, and the storage a tag pins is charged. DROP TAG releases it, which returns the snapshot to the ordinary retention rules at once.",
         "notes": "One operation per statement. CLUSTER BY takes column names, not expressions. RENAME TO cannot cross workspaces. DROP COLUMN takes one column and rejects CASCADE/RESTRICT. ADD COLUMN accepts only a literal DEFAULT, and rejects FIRST/AFTER - a new column is always appended. The two guards are independent: IF EXISTS on the ALTER makes a missing TABLE a no-op, IF NOT EXISTS on ADD COLUMN (and IF EXISTS on DROP COLUMN) makes an already-settled COLUMN a no-op, which is what makes a migration script re-runnable. ALTER COLUMN ... TYPE rejects narrowing, integer-to-float, cross-family changes, no-ops and USING. SET DEFAULT, DROP DEFAULT, SET NOT NULL and ADD CONSTRAINT are rejected at plan time - the engine enforces no constraints, so accepting them would imply behaviour it does not have."
     },
     "alter_view": {
@@ -591,11 +593,12 @@
         "syntax_forms": [
             "relation VERSION AS OF snapshot_id",
             "relation VERSION AS OF PREVIOUS",
+            "relation VERSION AS OF tag",
             "relation TIMESTAMP AS OF timestamp_expression"
         ],
-        "summary": "Query a catalog-backed table as of a snapshot or a point in time.",
-        "documentation": "VERSION AS OF takes a literal snapshot id. VERSION AS OF PREVIOUS is rewritten, before the statement reaches the parser, to the snapshot immediately before the current one. TIMESTAMP AS OF takes an expression that resolves to a timestamp before the query runs - a literal like '2024-01-01', or NOW() combined with an INTERVAL - and the binder resolves it to the snapshot that was current at that instant.",
-        "notes": "Only a connector with snapshot-based time travel accepts either form; against any other connector both are rejected at bind time. VERSION AS OF 0 is rejected outright - 0 is the sentinel PREVIOUS rewrites to, so a literal 0 would be indistinguishable from it. FOR SYSTEM_TIME AS OF is not accepted; use TIMESTAMP AS OF."
+        "summary": "Query a catalog-backed table as of a snapshot, a tag or a point in time.",
+        "documentation": "VERSION AS OF takes a literal snapshot id. VERSION AS OF PREVIOUS is rewritten, before the statement reaches the parser, to the snapshot immediately before the current one. TIMESTAMP AS OF takes an expression that resolves to a timestamp before the query runs - a literal like '2024-01-01', or NOW() combined with an INTERVAL - and the binder resolves it to the snapshot that was current at that instant. VERSION AS OF <tag> reads the snapshot a tag names; the name may be written quoted or bare, folds to lowercase, and is resolved through the catalog. A tag holds its snapshot from expiry for as long as it exists, so a tagged version stays readable where a bare snapshot id eventually will not.",
+        "notes": "Only a connector with snapshot-based time travel accepts either form; against any other connector both are rejected at bind time. VERSION AS OF 0 is rejected outright - 0 is the sentinel PREVIOUS rewrites to, so a literal 0 would be indistinguishable from it. FOR SYSTEM_TIME AS OF is not accepted; use TIMESTAMP AS OF. VERSION AS OF CURRENT is refused on a read - a relation with no version clause already reads the current version, and CURRENT is accepted only when creating a tag."
     },
     "where": {
         "canonical_name": "WHERE",

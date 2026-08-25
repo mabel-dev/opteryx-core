@@ -164,6 +164,21 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # caller who needs a trace to hold `platform_admin`.
     "trace": (BOOLEAN, config.OPTERYX_TRACE, VariableOwner.USER, Visibility.UNRESTRICTED),
     "match_threshold": (FLOAT64, config.MATCH_THRESHOLD, VariableOwner.USER, Visibility.UNRESTRICTED),
+    # Runtime min/max join filters (docs/RUNTIME_MINMAX_FILTER_DESIGN.md), read
+    # at COMPILE time by the native plan compiler. Named for the state the caller
+    # probably does not want, per this module's feature-flag convention.
+    #
+    # UNRESTRICTED and USER-owned: the filter is pure PRUNING — turning it off can
+    # only make a query read more, never change what it returns — so letting a
+    # caller disable it on their own query is a performance choice, not a
+    # data-access grant, exactly like `match_threshold` above. It is settable
+    # because whether it pays is a property of the DATA LAYOUT (is the probe
+    # table clustered on the join key?) that the planner cannot see, and because
+    # attributing a measurement needs the off arm: the plan-time correlated
+    # filter pushes range predicates onto the same scans.
+    "disable_runtime_minmax_join_filter": (
+        BOOLEAN, config.DISABLE_RUNTIME_MINMAX_JOIN_FILTER,
+        VariableOwner.USER, Visibility.UNRESTRICTED),
     # Bind-time only (see binder.py's COMPARISON_OPERATOR handling), same
     # capture-at-bind reasoning as match_threshold above. UNRESTRICTED: tuning
     # a cost-estimation coefficient for one's own query is not a data-access

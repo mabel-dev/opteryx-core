@@ -345,19 +345,77 @@ def explain(
         stat = node_stats_by_nid.get(node_id)
         return round((stat.get("self_time", 0) or 0) / 1e6, 3) if stat else 0.0
 
+    def _cpu_ms(node_id):
+        # CPU this node actually burned (CLOCK_THREAD_CPUTIME_ID, summed across
+        # every dop worker), against time_ms's WALL time. The gap between them is
+        # time the node was not running: blocked on IO, on downstream
+        # backpressure, or descheduled. That distinction — "expensive" vs
+        # "starved" — is the first question anyone asks of a slow operator, and
+        # the engine has recorded it all along (OpStats::cpu_ns, always-on); it
+        # was simply never rendered. Architect ruling D1, 2026-08-25: publish the
+        # two honest columns side by side and let the reader subtract, rather than
+        # a derived `wait_ms` that hides which of the two causes it was.
+        #
+        # An Operator cannot block (pure in-memory compute over a morsel), so a
+        # wide time_ms/cpu_ms gap is expected only at sources and sinks.
+        #
+        # KNOWN BOUND. The CPU clock is read on the OUTSIDE of the wall bracket
+        # (see telem_cpu_now_ns in executor.hpp), which keeps time_ms honest at
+        # the cost of charging cpu_ms two wall-clock reads (~52ns) per call.
+        # Measured consequence: for nodes averaging >=45us per call the ratio is
+        # 0.95-1.07 (trustworthy); for nodes averaging ~1us per call it reads
+        # 1.5-1.9 and cpu_ms can exceed time_ms, which is instrument overhead,
+        # not a measurement. Those nodes total single-digit microseconds, so the
+        # distortion is confined to rows nobody is optimising. Not clamped:
+        # min()-ing cpu_ms to time_ms would hide the artifact rather than bound it.
+        stat = node_stats_by_nid.get(node_id)
+        return round((stat.get("cpu_time_ms", 0) or 0), 3) if stat else 0.0
+
+    def _merge_ms(node_id):
+        # Breaker cost: combine() + finalize(), the two Sink calls that run AFTER
+        # the morsels stop flowing. Zero on sources and operators, which have
+        # neither. Until 2026-08-25 both were timed by nothing at all, so a hash
+        # aggregate's cross-worker merge and its result construction were real work
+        # charged to no plan node — they showed up in the pipeline's wall clock and
+        # nowhere else. Deliberately NOT folded into time_ms (architect ruling D4):
+        # that would move a published number.
+        #
+        # One column, not two, because they answer one question — what the breaker
+        # cost once the stream ended. The split stays in
+        # telemetry._reading["native_op_stats"] as combine_time/finalize_time for
+        # anyone who needs to know which half.
+        stat = node_stats_by_nid.get(node_id)
+        return round((stat.get("merge_time", 0) or 0) / 1e6, 3) if stat else 0.0
+
+    def _dop(node_id):
+        # Degree of parallelism the node's pipeline ran at. A width, not a
+        # duration: time_ms and cpu_ms are both summed across dop workers, so
+        # neither is readable without knowing how many there were.
+        stat = node_stats_by_nid.get(node_id)
+        return int(stat.get("dop", 0) or 0) if stat else 0
+
     # est_rows is planning-time (no execution needed), so it's available for
     # plain EXPLAIN too, not just ANALYZE -- the physical plan graph is keyed
     # by the same nid as the logical plan (see create_physical_plan), so this
     # correlates directly against statistics_refresh's estimate, no separate
-    # identity mapping needed. Empty/0 when refresh_statistics never ran for
-    # this node (e.g. an input lacked real row counts -- see result_size_guard).
+    # identity mapping needed. NULL (not 0) when refresh_statistics never reached
+    # this node -- see _est_row_count; EXPLAIN ANALYZE forces the refresh so this
+    # is rare on the surface where est-vs-actual is the whole point.
     est_rows_by_nid = {
         entry["nid"]: entry["row_count"]
         for entry in (getattr(telemetry, "estimated_row_counts", None) or [])
     }
 
     def _est_row_count(node_id):
-        return int(est_rows_by_nid.get(node_id, 0) or 0)
+        # None, not 0. `refresh_statistics` runs opportunistically (only when a
+        # strategy asks for it, plus result_size_guard), so a node it never reached
+        # has NO estimate — which is a different fact from "estimated zero rows",
+        # and 0 cannot say which one happened. Architect ruling D3, 2026-08-25:
+        # render the unknown distinctly. EXPLAIN ANALYZE additionally forces the
+        # refresh (planner/__init__.py) so this is rare on the surface where the
+        # est-vs-actual comparison is the point.
+        value = est_rows_by_nid.get(node_id)
+        return int(value) if value is not None else None
 
     # est_bytes mirrors est_rows above -- same planning-time availability, same
     # nid correlation. `total_bytes` is None (not 0) for a node where not one
@@ -371,8 +429,11 @@ def explain(
     }
 
     def _est_bytes(node_id):
+        # None, not 0 — same D3 reasoning as _est_row_count. `total_bytes` is
+        # already None (not 0) for a node where no column carried a byte-size
+        # estimate, so this now preserves that distinction instead of flattening it.
         value = est_bytes_by_nid.get(node_id)
-        return int(value) if value is not None else 0
+        return int(value) if value is not None else None
 
     tree_col = [row[0] for row in op_rows]
     details_col = [row[1] for row in op_rows]
@@ -381,6 +442,25 @@ def explain(
     rows_col = [_row_count(row[3]) for row in op_rows]
     time_col = [_time_ms(row[3]) for row in op_rows]
     self_col = [_self_ms(row[3]) for row in op_rows]
+    cpu_col = [_cpu_ms(row[3]) for row in op_rows]
+    merge_col = [_merge_ms(row[3]) for row in op_rows]
+    dop_col = [_dop(row[3]) for row in op_rows]
+
+    def _append_no_reading():
+        """Append one row that is NOT a plan node — an OPTIMIZATIONS/REWRITE TRACE
+        section heading or rule entry. Such a row has no estimate, ran nothing and
+        produced nothing, so every numeric column is NULL rather than 0. Same D3
+        reasoning as _est_row_count, applied across the row: 0 is a legitimate
+        reading (a node CAN emit zero rows in zero measurable time) and therefore
+        cannot also mean "there is no reading here"."""
+        est_rows_col.append(None)
+        est_bytes_col.append(None)
+        rows_col.append(None)
+        time_col.append(None)
+        self_col.append(None)
+        cpu_col.append(None)
+        merge_col.append(None)
+        dop_col.append(None)
 
     # ── OPTIMIZATIONS: which optimizer rules fired, from telemetry counters ───
     readings = getattr(telemetry, "_reading", None) or {}
@@ -403,20 +483,12 @@ def explain(
     if opt_rows:
         tree_col.append("OPTIMIZATIONS")
         details_col.append("")
-        est_rows_col.append(0)
-        est_bytes_col.append(0)
-        rows_col.append(0)
-        time_col.append(0.0)
-        self_col.append(0.0)
+        _append_no_reading()
         for index, (label, detail) in enumerate(opt_rows):
             connector = "└─ " if index == len(opt_rows) - 1 else "├─ "
             tree_col.append(connector + label)
             details_col.append(detail)
-            est_rows_col.append(0)
-            est_bytes_col.append(0)
-            rows_col.append(0)
-            time_col.append(0.0)
-            self_col.append(0.0)
+            _append_no_reading()
 
     # ── REWRITE TRACE: ordered strategies that changed plan structure ────────
     # Grade-A structural trace (see QueryTelemetry.add_plan_rewrite): the
@@ -428,11 +500,7 @@ def explain(
     if shape_changes:
         tree_col.append("REWRITE TRACE")
         details_col.append("")
-        est_rows_col.append(0)
-        est_bytes_col.append(0)
-        rows_col.append(0)
-        time_col.append(0.0)
-        self_col.append(0.0)
+        _append_no_reading()
         for index, entry in enumerate(shape_changes):
             connector = "└─ " if index == len(shape_changes) - 1 else "├─ "
             node_before, node_after = entry["nodes"]
@@ -441,11 +509,7 @@ def explain(
             details_col.append(
                 f"nodes {node_before}→{node_after}, edges {edge_before}→{edge_after}"
             )
-            est_rows_col.append(0)
-            est_bytes_col.append(0)
-            rows_col.append(0)
-            time_col.append(0.0)
-            self_col.append(0.0)
+            _append_no_reading()
 
     columns = ["tree", "details", "est_rows", "est_bytes"]
     vectors = [
@@ -455,13 +519,20 @@ def explain(
         vector_from_sequence(est_bytes_col, dtype=DrakenType.INT64),
     ]
     if analyze:
-        # time_ms is INCLUSIVE (own + downstream); self_ms is this operator's own
-        # work only — the column to read when deciding what to parallelise.
-        columns += ["rows", "time_ms", "self_ms"]
+        # time_ms is WALL time; cpu_ms is the CPU actually burned. time_ms - cpu_ms
+        # is time the node was NOT running (blocked on IO/backpressure, or
+        # descheduled) — read together, that gap separates an expensive operator
+        # from a starved one. Both are summed across `dop` workers, which is why
+        # dop is here too. self_ms is this operator's own work only, and equals
+        # time_ms on the native path.
+        columns += ["rows", "time_ms", "cpu_ms", "merge_ms", "self_ms", "dop"]
         vectors += [
             vector_from_sequence(rows_col, dtype=DrakenType.INT64),
             vector_from_sequence(time_col, dtype=DrakenType.FLOAT64),
+            vector_from_sequence(cpu_col, dtype=DrakenType.FLOAT64),
+            vector_from_sequence(merge_col, dtype=DrakenType.FLOAT64),
             vector_from_sequence(self_col, dtype=DrakenType.FLOAT64),
+            vector_from_sequence(dop_col, dtype=DrakenType.INT64),
         ]
 
     yield Morsel.from_vectors(columns, vectors)

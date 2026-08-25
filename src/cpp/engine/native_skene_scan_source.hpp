@@ -113,6 +113,7 @@
 
 #include "native_expression.hpp"   // ExprProgram / ExprFilterFn — the pushed predicate
 #include "operator.hpp"
+#include "runtime_bound.hpp"       // RuntimeKeyBound — runtime min/max join filter
 
 #include "logical_type.h"  // LogicalType / logical_type_intern (TIMESTAMP64 descriptor)
 #include "morsels/cxx_morsel.h"
@@ -340,6 +341,32 @@ struct SkeneZoneMap {
     size_t size() const { return columns == nullptr ? 0 : columns->size(); }
 };
 
+// ─── Runtime min/max join filter (docs/RUNTIME_MINMAX_FILTER_DESIGN.md) ──────
+//
+// A bound this scan may ADD to its zone map, discovered at run time on a join's
+// build side rather than at plan time from a literal. Each entry names a
+// PHYSICAL (in-file) column and points at an engine-owned RuntimeKeyBound that
+// Engine::run() filled when the build pipeline completed.
+//
+// The timing is not a race and needs no wait: pipelines run strictly one at a
+// time (engine.hpp), and the build pipeline that fills the bound is created —
+// and therefore runs — before any pipeline of the probe leg. By the time this
+// Source's first get_morsel() builds the claim list, the bound is complete.
+// `valid == 0` (never filled, or no usable bound) simply contributes no term,
+// which costs a read and never an answer.
+//
+// Whether a bound is SOUND to apply at all — the join mode, the probe key being
+// a direct scan column, ordinal comparability of the two sides' types — is
+// settled at plan time by the compiler. Nothing here re-decides it; this only
+// turns a filled bound into two ordinary zone terms.
+struct SkeneRuntimeBounds {
+    std::vector<std::string>            columns;   // physical (in-file) names
+    std::vector<const RuntimeKeyBound*> bounds;    // parallel; engine-owned
+
+    bool empty() const { return columns.empty(); }
+    size_t size() const { return columns.size(); }
+};
+
 // ─── The claim unit ─────────────────────────────────────────────────────────
 //
 // ONE ROW GROUP OF ONE FILE — never a whole file. A .skene file holds up to 16
@@ -373,10 +400,22 @@ class SkeneClaimSet {
     // `zone` may be empty, in which case every non-empty row group is claimed.
     // `out_total` / `out_pruned` are the run-time counts this scan reports as
     // telemetry; they are written once, here, under the caller's call_once.
+    //
+    // `runtime_from` is the index in `zone` at which RUNTIME terms begin (==
+    // zone.size() when there are none), and `out_pruned_runtime` counts the row
+    // groups a runtime term excluded that no PLAN-TIME term had already
+    // excluded. Attribution is first-proving-term-wins, and plan terms are
+    // always ordered first, so this is the MARGINAL win of the runtime filter —
+    // which is the only number worth reporting. Without the split, a runtime
+    // filter that pruned nothing new would be indistinguishable from one that
+    // did all the work (docs/RUNTIME_MINMAX_FILTER_DESIGN.md §6.2).
     bool build(const std::vector<std::string>& files, const SkeneZoneMap& zone,
-               int64_t* out_total, int64_t* out_pruned, std::string& err_buf) {
+               int64_t* out_total, int64_t* out_pruned, std::string& err_buf,
+               size_t runtime_from = 0, int64_t* out_pruned_runtime = nullptr) {
         int64_t total = 0;
         int64_t pruned = 0;
+        int64_t pruned_runtime = 0;
+        if (out_pruned_runtime == nullptr) runtime_from = zone.size();
         mappings_.reserve(files.size());
         for (size_t i = 0; i < files.size(); ++i) {
             auto mapping = std::make_unique<SkeneFileMapping>(files[i]);
@@ -427,8 +466,11 @@ class SkeneClaimSet {
                 // pruned — nothing was skipped that would have been read.
                 if (metadata.row_groups[g].row_count == 0) continue;
                 total += 1;
-                if (zone_excludes_row_group(zone, stat_index, metadata.row_groups[g])) {
+                const int proof = zone_excluding_term(zone, stat_index,
+                                                     metadata.row_groups[g]);
+                if (proof >= 0) {
                     pruned += 1;
+                    if (static_cast<size_t>(proof) >= runtime_from) pruned_runtime += 1;
                     continue;
                 }
                 claims_.push_back(SkeneClaim{static_cast<uint32_t>(i), g});
@@ -437,6 +479,7 @@ class SkeneClaimSet {
         }
         if (out_total != nullptr) *out_total = total;
         if (out_pruned != nullptr) *out_pruned = pruned;
+        if (out_pruned_runtime != nullptr) *out_pruned_runtime = pruned_runtime;
         return true;
     }
 
@@ -447,10 +490,13 @@ class SkeneClaimSet {
         return build(files, SkeneZoneMap{}, nullptr, nullptr, err_buf);
     }
 
-    // True when the zone terms PROVE this row group holds no matching row.
-    static bool zone_excludes_row_group(const SkeneZoneMap& zone,
-                                        const std::vector<int32_t>& stat_index,
-                                        const skene::RowGroupSummary& summary) {
+    // The index of the FIRST zone term that PROVES this row group holds no
+    // matching row, or -1 when none does. The terms are ANDed, so one proof is
+    // enough — returning WHICH term proved it costs nothing and is what lets the
+    // caller attribute a skip to plan-time or run-time pruning.
+    static int zone_excluding_term(const SkeneZoneMap& zone,
+                                   const std::vector<int32_t>& stat_index,
+                                   const skene::RowGroupSummary& summary) {
         for (size_t t = 0; t < zone.size(); ++t) {
             const int32_t index = stat_index[t];
             if (index < 0) continue;
@@ -461,10 +507,11 @@ class SkeneClaimSet {
             if (!column_stats.present) continue;
             if (skene_zone_excludes(column_stats.statistics, (*zone.ops)[t],
                                     (*zone.ordinals)[t]))
-                return true;   // the terms are ANDed: one emptiness proof is enough
+                return static_cast<int>(t);
         }
-        return false;
+        return -1;
     }
+
 
     const std::vector<SkeneClaim>& claims() const { return claims_; }
     const SkeneFileMapping& mapping(uint32_t file_idx) const {
@@ -485,6 +532,13 @@ struct NativeSkeneScanGlobal : GlobalSourceState {
     std::string         init_err;   // stable once `init` has run; err.msg borrows it
     SkeneClaimSet       work;
     std::atomic<size_t> next_claim{0};
+    // Runtime min/max filter only: the plan terms and the resolved runtime terms
+    // concatenated into ONE conjunction, owned here so the SkeneZoneMap the
+    // claim builder walks has a stable address for this pipeline's lifetime.
+    // Untouched (and unallocated) when no runtime bound is wired.
+    std::vector<std::string> zone_columns;
+    std::vector<int>         zone_ops;
+    std::vector<int64_t>     zone_ordinals;
 };
 
 class NativeSkeneScanSource : public Source {
@@ -510,7 +564,8 @@ class NativeSkeneScanSource : public Source {
                           ExprProgram* filter,
                           SkeneZoneMap zone,
                           int64_t* row_groups_total,
-                          int64_t* row_groups_pruned)
+                          int64_t* row_groups_pruned,
+                          int64_t* row_groups_pruned_runtime = nullptr)
         : files_(files),
           column_names_(column_names),
           out_identities_(out_identities),
@@ -522,6 +577,7 @@ class NativeSkeneScanSource : public Source {
           zone_(zone),
           row_groups_total_(row_groups_total),
           row_groups_pruned_(row_groups_pruned),
+          row_groups_pruned_runtime_(row_groups_pruned_runtime),
           narrows_(emit_indices_ != nullptr && !is_identity_emit(*emit_indices,
                                                                  column_names->size())) {}
 
@@ -542,8 +598,49 @@ class NativeSkeneScanSource : public Source {
         // and a failure to map a file must reach the driver as an error rather
         // than as an empty scan.
         std::call_once(g.init, [&g, this] {
-            g.init_ok = g.work.build(*files_, zone_, row_groups_total_,
-                                     row_groups_pruned_, g.init_err);
+            // No runtime bound wired: the plan's borrowed terms are the whole
+            // zone map and nothing is copied — byte-for-byte the pre-feature
+            // path.
+            if (runtime_.empty()) {
+                g.init_ok = g.work.build(*files_, zone_, row_groups_total_,
+                                         row_groups_pruned_, g.init_err);
+                // Left UNWRITTEN (at its -1 sentinel) on purpose: the telemetry
+                // fold reports the runtime count only when a bound was actually
+                // wired, so "the filter did not fire here" stays distinguishable
+                // from "it fired and pruned nothing".
+                return;
+            }
+            // Plan terms FIRST, then the runtime terms — the order is what makes
+            // "first proving term wins" attribute a skip the plan already made
+            // to plan time, so the runtime counter reports only its marginal win.
+            for (size_t t = 0; t < zone_.size(); ++t) {
+                g.zone_columns.push_back((*zone_.columns)[t]);
+                g.zone_ops.push_back((*zone_.ops)[t]);
+                g.zone_ordinals.push_back((*zone_.ordinals)[t]);
+            }
+            const size_t runtime_from = g.zone_columns.size();
+            for (size_t b = 0; b < runtime_.size(); ++b) {
+                const RuntimeKeyBound* bound = runtime_.bounds[b];
+                // Unfilled or unusable: contributes NO term. A missing bound
+                // costs a read, never an answer.
+                if (bound == nullptr || bound->valid == 0) continue;
+                g.zone_columns.push_back(runtime_.columns[b]);
+                g.zone_ops.push_back(kSkeneZoneGtEq);
+                g.zone_ordinals.push_back(bound->lo);
+                g.zone_columns.push_back(runtime_.columns[b]);
+                g.zone_ops.push_back(kSkeneZoneLtEq);
+                g.zone_ordinals.push_back(bound->hi);
+            }
+            SkeneZoneMap effective;
+            effective.columns  = &g.zone_columns;
+            effective.ops      = &g.zone_ops;
+            effective.ordinals = &g.zone_ordinals;
+            int64_t pruned_runtime = 0;
+            g.init_ok = g.work.build(*files_, effective, row_groups_total_,
+                                     row_groups_pruned_, g.init_err,
+                                     runtime_from, &pruned_runtime);
+            if (row_groups_pruned_runtime_ != nullptr)
+                *row_groups_pruned_runtime_ = pruned_runtime;
         });
         if (!g.init_ok) {
             err.code = 1;
@@ -729,15 +826,33 @@ class NativeSkeneScanSource : public Source {
     ExprFilterFn filter_fn_;
     ExprProgram* filter_;
     // Row-group zone terms (empty = no skipping) and the run-time counts the
-    // claim builder writes back for telemetry. The two int64_t* point at fields
+    // claim builder writes back for telemetry. The int64_t* point at fields
     // of the plan object, which the NativePlan holds for the driver's lifetime;
     // they are written exactly once, inside the call_once above, and read by
     // Python only after the driver has finished.
     SkeneZoneMap zone_;
     int64_t* row_groups_total_;
     int64_t* row_groups_pruned_;
+    int64_t* row_groups_pruned_runtime_;
+    // Runtime min/max join filter — OWNED (not borrowed): a handful of strings
+    // and pointers, appended at plan time (see add_runtime_bound below) AFTER
+    // this Source was constructed, because the probe scan is compiled before the
+    // join that supplies the bound is finished wiring. Empty for every scan the
+    // compiler did not find eligible, which is the overwhelming majority.
+    SkeneRuntimeBounds runtime_;
     // Precomputed in the ctor: does emit_indices_ actually change the morsel?
     bool narrows_;
+  public:
+    // Plan-time only, on the compiler's thread, before run() is entered. `bound`
+    // is an engine-owned RuntimeKeyBound slot whose address is stable for the
+    // query; it may still be unfilled at this point (it is filled when the build
+    // pipeline completes) and an unfilled bound contributes no term.
+    void add_runtime_bound(std::string physical_column, const RuntimeKeyBound* bound) {
+        runtime_.columns.push_back(std::move(physical_column));
+        runtime_.bounds.push_back(bound);
+    }
+
+  private:
     // Error text must outlive the call (ErrCtx.msg is a borrowed const char*).
     // One Source instance reports at most one error before the scan stops, so a
     // single member is enough; a second failing worker overwrites a message for

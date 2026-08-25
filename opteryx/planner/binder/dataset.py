@@ -1154,7 +1154,9 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     # Extract the dataset name (remove prefix if configured)
     dataset_name = node.relation
 
-    if node.version is not None and not gateway.supports_version_travel:
+    if (
+        node.version is not None or node.version_tag is not None
+    ) and not gateway.supports_version_travel:
         raise UnsupportedSyntaxError(
             f"VERSION AS OF is not supported for {node.relation} - it requires a "
             "connector with snapshot-based time travel."
@@ -1167,6 +1169,7 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     if gateway.supports_diachronic:
         engine_kwargs["at_date"] = node.at_date
         engine_kwargs["version"] = node.version
+        engine_kwargs["version_tag"] = node.version_tag
     if getattr(gateway, "requires_execution_context", False):
         engine_kwargs["execution_context"] = context.execution_context
     if getattr(gateway, "requires_original_case", False):

@@ -42,6 +42,8 @@
 #include "native_key_hash.hpp"     // compute_row_hashes — draken owns the key hash
 #include "native_sort.hpp"          // gather_rows, sort_row_valid, string helpers
 #include "morsels/cxx_hash.h"       // cxx_hash_c — draken owns the join-key hash
+#include "morsels/cxx_ordinal.h"     // cxx_ordinal_bounds_c — draken owns the ordinal
+#include "runtime_bound.hpp"         // RuntimeKeyBound — runtime min/max join filter
 #include "carchar_join_index.hpp"   // opteryx::carchar::CarcharJoinIndex
 
 namespace opteryx::engine {
@@ -107,6 +109,11 @@ struct Join2BuildLocal : LocalSinkState {
     std::vector<uint32_t> null_row_m, null_row_r;
     uint32_t next_row = 0;
     bool saw_null_key = false;
+    // Runtime min/max join filter: per BOUNDED key column (parallel to the
+    // sink's `bound_slots`), this worker's ordinal range over its non-null
+    // values. Empty unless the compiler asked for bounds.
+    std::vector<int64_t> bound_lo, bound_hi;
+    std::vector<uint8_t> bound_any;
 };
 // ---- ASOF ordering key -------------------------------------------------------------
 // One ASOF MATCH_CONDITION key. A numeric/temporal key rides `num`, which is
@@ -313,6 +320,14 @@ struct Join2BuildGlobal : GlobalSinkState {
     // indices); moved onto the end of row_m/row_r by finalize() once the keyed
     // row space is sealed.
     std::vector<uint32_t> null_row_m, null_row_r;
+
+    // Runtime min/max join filter — parallel to the sink's `bound_slots`, the
+    // merged ordinal range over every worker's non-null key values. Read ONCE,
+    // by Engine::run(), on the driver thread after this pipeline completed and
+    // before the probe pipeline's source state exists; never read concurrently
+    // with a probe. `bound_any[i] == 0` means "no bound", i.e. prune nothing.
+    std::vector<int64_t> bound_lo, bound_hi;
+    std::vector<uint8_t> bound_any;
 
     // The two build-table operations the probe modes use.
     //
@@ -564,6 +579,24 @@ struct Join2BuildSink : Sink {
     // already hashes alike on both sides. The rule is therefore the ABSENCE of the
     // exclusion below, never a second comparison path.
     bool null_equal = false;
+    // RUNTIME MIN/MAX JOIN FILTER (docs/RUNTIME_MINMAX_FILTER_DESIGN.md).
+    // Parallel to `key_idx`: the engine-owned RuntimeKeyBound slot this key
+    // column's observed ordinal range should be published into, or -1 for "no
+    // bound wanted". Empty means no bounds at all — the pre-feature behaviour,
+    // byte for byte.
+    //
+    // Which key columns get a slot is decided ENTIRELY at plan time, in Python,
+    // by the compiler: the join mode must be one that DROPS unmatched probe rows
+    // (INNER / SEMI / the swapped semi-anti streamed leg — see the design note
+    // §1.3; an ANTI join emits exactly the probe rows a bound would prune, so
+    // filtering it is a wrong answer, not a slower one), the probe key must be a
+    // direct column of the probe scan, and the type must be one whose ordinals
+    // are comparable across the two sides. Nothing here re-decides any of that.
+    //
+    // Set by Engine::set_join2_bound_slots AFTER construction, not through the
+    // constructor: eligibility depends on the probe leg, which is compiled after
+    // this sink is wired. Empty until then, and empty is the pre-feature path.
+    std::vector<int> bound_slots;
     // Rows this join is ESTIMATED to emit (JoinBuildShapeStrategy), or -1 for
     // unknown. The only input finalize() cannot measure for itself; it weighs this
     // against the REAL byte size of the retained build payload to decide whether to
@@ -657,6 +690,42 @@ struct Join2BuildSink : Sink {
         // the key columns (not the hash) so NULL keys are excluded as before.
         std::vector<uint64_t> rowh;
         if (!compute_row_hashes(in, key_idx, rowh, err)) return SinkResult::CONTINUE;
+
+        // RUNTIME MIN/MAX capture. One batched draken call per bounded key
+        // column per morsel — NOT free, and not pretended to be: the hash above
+        // destroys order, so nothing already computed can be reused. The column
+        // is hot from compute_row_hashes and this is the small side of the join
+        // by construction (JoinOrderingStrategy builds the smaller leg).
+        //
+        // The bound covers every NON-NULL value of this column in this morsel,
+        // including rows that the loop below excludes from the table because a
+        // DIFFERENT key column was null (or, under ASOF, because the match
+        // column was). That can only WIDEN the range, so it stays a sound
+        // necessary condition — and it keeps this a per-column batch call
+        // instead of a per-row test against the whole key tuple.
+        if (!bound_slots.empty()) {
+            if (l.bound_any.empty()) {
+                l.bound_lo.assign(bound_slots.size(), 0);
+                l.bound_hi.assign(bound_slots.size(), 0);
+                l.bound_any.assign(bound_slots.size(), 0);
+            }
+            for (size_t b = 0; b < bound_slots.size(); ++b) {
+                if (bound_slots[b] < 0) continue;
+                int64_t lo = 0, hi = 0;
+                if (cxx_ordinal_bounds_c(in.get(), static_cast<int32_t>(key_idx[b]),
+                                         &lo, &hi) != 1)
+                    continue;   // no ordinal / all null: contributes nothing
+                if (l.bound_any[b] == 0) {
+                    l.bound_lo[b] = lo;
+                    l.bound_hi[b] = hi;
+                    l.bound_any[b] = 1;
+                } else {
+                    if (lo < l.bound_lo[b]) l.bound_lo[b] = lo;
+                    if (hi > l.bound_hi[b]) l.bound_hi[b] = hi;
+                }
+            }
+        }
+
         for (uint32_t i = 0; i < rows; ++i) {
             // NULL in ANY key column: the row can never equi-match; record for the
             // null-aware ANTI contract and skip the table insert. Under `null_equal`
@@ -712,6 +781,27 @@ struct Join2BuildSink : Sink {
         auto& l = static_cast<Join2BuildLocal&>(ls);
         std::lock_guard<std::mutex> lk(g.mtx);
         g.saw_null_key = g.saw_null_key || l.saw_null_key;
+        // Runtime min/max: two scalars per bounded key column, O(1) under the
+        // lock. A worker that saw no non-null value for a column contributes
+        // nothing rather than a sentinel.
+        if (!l.bound_any.empty()) {
+            if (g.bound_any.empty()) {
+                g.bound_lo.assign(l.bound_any.size(), 0);
+                g.bound_hi.assign(l.bound_any.size(), 0);
+                g.bound_any.assign(l.bound_any.size(), 0);
+            }
+            for (size_t b = 0; b < l.bound_any.size(); ++b) {
+                if (l.bound_any[b] == 0) continue;
+                if (g.bound_any[b] == 0) {
+                    g.bound_lo[b] = l.bound_lo[b];
+                    g.bound_hi[b] = l.bound_hi[b];
+                    g.bound_any[b] = 1;
+                } else {
+                    if (l.bound_lo[b] < g.bound_lo[b]) g.bound_lo[b] = l.bound_lo[b];
+                    if (l.bound_hi[b] > g.bound_hi[b]) g.bound_hi[b] = l.bound_hi[b];
+                }
+            }
+        }
         // Concatenate this worker's retained views, then re-base its row addresses:
         // a local morsel index becomes a global one by adding the number of morsels
         // already present. No value copying and — the point of the whole exercise —

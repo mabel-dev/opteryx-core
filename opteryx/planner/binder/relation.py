@@ -532,6 +532,54 @@ def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node,
     return node, context
 
 
+def _bind_tag_ddl(self, node: Node, context: BindingContext, statement: str):
+    """Shared binding for CREATE TAG and DROP TAG.
+
+    Both are ALTER TABLE statements about one relation, and both are gated at the
+    same tier as every other ALTER: a tag pins its snapshot's storage indefinitely
+    and the pinned bytes are charged, so creating one commits the relation's owner
+    to an open-ended cost, and dropping one is how data stops being kept. Neither
+    is a writer's call.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support {statement}"
+        )
+    if not node.connector.supports_version_travel:
+        # Tags name snapshots. A store with no snapshots has nothing to tag, and
+        # saying so here beats a connector failing later on a method it has no
+        # business having.
+        raise UnsupportedSyntaxError(
+            f"{statement} is not supported for {node.relation_name} - it requires a "
+            "connector with snapshot-based time travel."
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
+def visit_create_tag(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind ALTER TABLE ... CREATE TAG."""
+    return _bind_tag_ddl(self, node, context, "**ALTER TABLE ... CREATE TAG**")
+
+
+def visit_drop_tag(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind ALTER TABLE ... DROP TAG."""
+    return _bind_tag_ddl(self, node, context, "**ALTER TABLE ... DROP TAG**")
+
+
 def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the ALTER WORKSPACE ... SET node to determine which connector should

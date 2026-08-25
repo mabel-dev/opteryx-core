@@ -26,12 +26,17 @@ import datetime
 from typing import Dict, List, Optional
 
 # Column order IS the output column order. Values are the dtype tag handed to
-# `vector_from_sequence`; every one of these is a flat scalar column, so unlike
-# the manifest morsel there is no nested-array case to special-case.
+# `vector_from_sequence`. All but `tags` are flat scalars; `tags` is an ARRAY of
+# the tag names on that snapshot, which `vector_from_sequence` builds from a list
+# of lists without any special-casing here.
 _SNAPSHOT_COLUMNS = {
     "snapshot_id": "INTEGER",
     "committed_at": "TIMESTAMP",
     "is_current": "BOOLEAN",
+    # The tags naming this snapshot, or an empty list. This is what makes a tag
+    # visible: a tag pins its snapshot's storage indefinitely and that storage is
+    # charged, so tags accumulating unseen is a bill nobody can account for.
+    "tags": "ARRAY",
     "operation_type": "VARCHAR",
     "author": "VARCHAR",
     "user_created": "BOOLEAN",
@@ -82,6 +87,10 @@ def _snapshot_column_types():
     types["author"] = _lt.VARCHAR
     types["schema_id"] = _lt.VARCHAR
     types["commit_message"] = _lt.VARCHAR
+    # The element type is stated rather than inferred: an ARRAY whose element
+    # type is unknown is a column downstream cannot compare, and the names in it
+    # are always strings.
+    types["tags"] = _lt.ARRAY(_lt.VARCHAR)
     return types
 
 
@@ -110,7 +119,9 @@ def snapshots_output_schema(relation_name: str = "$snapshots"):
 
 
 def normalize_snapshot(
-    snapshot, current_snapshot_id: Optional[int] = None
+    snapshot,
+    current_snapshot_id: Optional[int] = None,
+    tags: Optional[List[str]] = None,
 ) -> Dict[str, object]:
     """Flatten one catalog `Snapshot` record into the _SNAPSHOT_COLUMNS shape.
 
@@ -118,6 +129,11 @@ def normalize_snapshot(
     in. `summary` is a plain dict on that dataclass and a snapshot written by
     an older catalog may be missing keys entirely — a missing counter is None
     (unknown), NOT zero, which would claim the commit added nothing.
+
+    `tags` is the names bound to THIS snapshot, which the caller has already
+    grouped (a tag points at a snapshot; a snapshot does not carry its names).
+    An untagged snapshot gets an empty list, not None: nothing is pinning it,
+    which is a fact rather than an unknown.
     """
     summary = snapshot.summary or {}
     row = {
@@ -128,6 +144,7 @@ def normalize_snapshot(
         "is_current": (
             current_snapshot_id is not None and snapshot.snapshot_id == current_snapshot_id
         ),
+        "tags": list(tags or []),
         "operation_type": snapshot.operation_type,
         "author": snapshot.author,
         "user_created": snapshot.user_created,

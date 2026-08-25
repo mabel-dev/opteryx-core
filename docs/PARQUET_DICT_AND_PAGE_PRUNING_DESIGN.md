@@ -135,9 +135,31 @@ flags as the primary risk:
    This is the guard whose failure mode is silent wrong answers, and it is
    currently unpinned.
 
-**DECISION A-1.** Close gaps 1–4 as a standalone test-only change. My
-recommendation: yes, and specifically gap 4, which pins the guard with the
-worst failure mode.
+**DECISION A-1 — ✅ DONE 2026-08-25.** Closed as a test-only change, no engine
+edits:
+
+* `tests/unit/connectors/parquet_io/test_dict_skip_fallback_guard.py` (9 tests) —
+  gap 4. Each fixture forces a real dictionary spill and places the needle
+  *after* it, so the needle is in a PLAIN page and absent from the dictionary.
+  Covers string `=`/`IN`, all three LIKE lowerings, int `=`/`IN`, plus two
+  controls that the guard is not satisfied by matching everything. Every fixture
+  asserts the file really carries both `RLE_DICTIONARY` and `PLAIN`, so it cannot
+  silently stop reproducing the condition.
+* `tests/unit/connectors/parquet_io/test_dict_skip_boundary_values.py` (50 tests) —
+  gaps 1–3. Lands on `0x80000000`, `0xFFFFFFFF`, `INT64_MAX±1`, `UINT64_MAX` at
+  uint8/16/32/64, with int32/int64 negatives as the control that an unsigned fix
+  does not zero-extend a signed column.
+
+**Verified by defeating the guard, not by inspection**: forcing
+`dict_covers_all_rows = true` and rebuilding turns all 7 guard assertions red,
+each returning exactly `0` — the silent wrong answer — while the two controls
+stay green. Source restored byte-identical; `make q` 462/462.
+
+One boundary case is NOT reachable from SQL: a `u64` IN-list mixing members
+above and below `INT64_MAX` is refused by the logical planner
+(`ArrayWithMixedTypesError`) before it reaches the scan. That is a pre-existing
+limitation pinned elsewhere; the test groups members by bind type rather than
+re-testing the refusal.
 
 ### A.4 Range predicates — do they duplicate the column-chunk statistics?
 
@@ -457,7 +479,7 @@ predicate columns are well clustered. ClickBench's are not.
 
 | # | Decision | My recommendation |
 |---|---|---|
-| A-1 | Add boundary-value tests (0, midpoints, `INT64_MAX`, `UINT64_MAX`), a UINT8/16 case, a signed-negative case, and a test pinning the dictionary-fallback guard | **Yes** — cheap, and the fallback guard is currently unpinned |
+| A-1 | Add boundary-value tests (0, midpoints, `INT64_MAX`, `UINT64_MAX`), a UINT8/16 case, a signed-negative case, and a test pinning the dictionary-fallback guard | ✅ **DONE** — 59 tests, verified red on a real guard-defeat rebuild |
 | A-2 | Implement interior-gap range probing | **No** — no measured case beats min/max |
 | A-3 | Any further functional widening of the probe (negated forms, CI LIKE, floats, multi-predicate-per-column) | **No** — measured as worthless, redundant, or a correctness liability |
 | B-1 | Implement page-index pruning | **No** — zero benefit on files we own |

@@ -44,6 +44,8 @@ from opteryx.planner.binder.relation import (
     visit_drop_collection,
     visit_drop_column,
     visit_drop_relation,
+    visit_create_tag,
+    visit_drop_tag,
     visit_drop_trigger,
     visit_drop_workspace,
     visit_optimize_relation,
@@ -249,6 +251,16 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_trigger(self, node, context)
+
+    def visit_create_tag(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_create_tag(self, node, context)
+
+    def visit_drop_tag(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_drop_tag(self, node, context)
 
     def visit_alter_materialized_view_owner(
         self, node: Node, context: BindingContext

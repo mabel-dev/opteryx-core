@@ -470,6 +470,72 @@ def _normalize_timetravel_value(value, value_type: Optional[ColumnType]):
     return value
 
 
+def _at_function_arguments(version_clause):
+    """The named arguments of an `AT(...)` version clause, or None.
+
+    `AT(<name> => <expr>)` parses as `TableVersion::Function`. Opteryx reaches it
+    by ONE route: the sql_rewriter re-spells `VERSION AS OF <tag>` into
+    `AT(TAG => '<tag>')`, because the grammar for VERSION AS OF reads a number and
+    a tag name cannot travel in it. Nobody writes `AT(...)` by hand - it is not a
+    spelling this dialect offers - so anything else arriving here is a mistake to
+    name, not a form to support.
+
+    Returns a {NAME: argument} map so the caller can say which names it accepts.
+    """
+    if "Function" not in version_clause:
+        return None
+
+    function_wrapper = version_clause["Function"]
+    function_branch = function_wrapper.get("Function", function_wrapper)
+    if "Function" in function_branch:
+        function_branch = function_branch["Function"]
+    if "name" not in function_branch:
+        return None
+    if function_branch["name"][0]["Identifier"]["value"].upper() != "AT":
+        return None
+
+    arguments = {}
+    for argument in function_branch.get("args", {}).get("List", {}).get("args", []):
+        named = argument.get("Named")
+        if named is None:
+            continue
+        arguments[named["name"]["value"].upper()] = named.get("arg")
+    return arguments
+
+
+def is_tag_clause(version_clause) -> bool:
+    """True for a tag read - `VERSION AS OF <tag>`, carried as `AT(TAG => '...')`.
+
+    Checked before the timestamp and snapshot-id forms: a tag names a SNAPSHOT and
+    resolves through the catalog, so it shares no machinery with either.
+    """
+    if version_clause is None:
+        return False
+    arguments = _at_function_arguments(version_clause)
+    return arguments is not None and "TAG" in arguments
+
+
+def extract_timetravel_tag(version_clause) -> str:
+    """The tag name from `VERSION AS OF <tag>`.
+
+    Returned as written. Tag names fold to lowercase, but that is the catalog's
+    normalization to apply when it resolves the name - doing it here would put a
+    second, silent copy of the rule in the planner.
+    """
+    argument = _at_function_arguments(version_clause)["TAG"]
+    literal = (argument or {}).get("Expr", {}).get("Value", {}).get("value", {})
+    tag = literal.get("SingleQuotedString")
+    if not tag:
+        # Not reachable from any spelling a reader can write - the rewriter only
+        # ever emits a single-quoted string here - so this is an internal
+        # inconsistency, and says so rather than blaming the reader's SQL.
+        raise UnsupportedSyntaxError(
+            "Invalid tag in VERSION AS OF: expected a tag name, which must be a valid "
+            "identifier starting with a letter."
+        )
+    return tag
+
+
 def _extract_version_expression(version_clause):
     if "ForSystemTimeAsOf" in version_clause:
         raise UnsupportedSyntaxError(
@@ -481,35 +547,18 @@ def _extract_version_expression(version_clause):
         # {"TimestampAsOf": <expr>}
         return version_clause["TimestampAsOf"]
 
-    if "Function" in version_clause:
-        function_wrapper = version_clause["Function"]
-        function_branch = function_wrapper.get("Function", function_wrapper)
-    else:
-        raise UnsupportedSyntaxError(
-            "Unsupported table version syntax. Use `TIMESTAMP AS OF <expression>`."
-        )
-
-    if "Function" in function_branch:
-        function_branch = function_branch["Function"]
-
-    if "name" not in function_branch:
-        raise UnsupportedSyntaxError(
-            "Invalid time-travel clause, use `TIMESTAMP AS OF <expression>`."
-        )
-
-    function_name = function_branch["name"][0]["Identifier"]["value"].upper()
-    if function_name != "AT":
-        raise UnsupportedSyntaxError(
-            f"Unsupported time-travel function '{function_name}'. Use `TIMESTAMP AS OF <expression>`."
-        )
-
-    args = function_branch.get("args", {}).get("List", {}).get("args", [])
-    if len(args) != 1:
-        raise UnsupportedSyntaxError(
-            f"Time-travel syntax expects exactly 1 argument, got {len(args)}. Write `TIMESTAMP AS OF <expression>`."
-        )
-
-    raise UnsupportedSyntaxError("Time-travel syntax must be `TIMESTAMP AS OF <expression>`.")
+    # An `AT(...)` clause that is not `AT(TAG => ...)`. `is_tag_clause` has already
+    # been consulted by the caller, so reaching here means the argument was not a
+    # tag. This used to walk the argument list and then raise unconditionally on
+    # every path - the walking was unreachable work, and the docstring above
+    # `extract_timetravel_timestamp` advertised `AT(TIMESTAMP => ...)` as supported
+    # when no input could ever produce it. The claim is withdrawn rather than
+    # implemented: there is one spelling for a point-in-time read.
+    raise UnsupportedSyntaxError(
+        "Unsupported table version syntax. Use `TIMESTAMP AS OF <expression>` for a "
+        "point in time, `VERSION AS OF <snapshot id>` for a snapshot, or "
+        "`VERSION AS OF <tag>` for a tag."
+    )
 
 
 def extract_timetravel_timestamp(version_clause) -> Optional[object]:
@@ -521,7 +570,6 @@ def extract_timetravel_timestamp(version_clause) -> Optional[object]:
         TIMESTAMP AS OF '2024-12-15 00:00:00'
         TIMESTAMP AS OF CURRENT_DATE - INTERVAL '7' DAY
         TIMESTAMP AS OF TRUNC(CURRENT_DATE, 'month')
-        AT(TIMESTAMP => '2024-12-15 00:00:00') -- legacy/alternate syntax
 
     Args:
         version_clause: The version field from the table AST

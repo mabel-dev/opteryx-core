@@ -166,6 +166,15 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
         # denominator `row_groups_pruned` is a fraction OF — reporting a pruned
         # count against a differently-derived total invites a nonsense ratio.
         entry["row_groups_read"] = total - pruned
+        # The RUNTIME min/max join filter's share of that pruning, and ONLY its
+        # marginal share: the plan-time CorrelatedFiltersStrategy already pushes
+        # min/max range predicates onto this same scan, so a single number would
+        # let the runtime filter take credit for what the pushed predicates were
+        # already doing. Absent (not 0) when no bound was wired to this scan, so
+        # "did not fire" stays distinguishable from "fired and pruned nothing".
+        runtime_pruned = getattr(plan, "row_groups_pruned_at_runtime", None)
+        if runtime_pruned is not None:
+            entry["row_groups_pruned_runtime"] = runtime_pruned
 
 
 def _and_conjuncts(node):
@@ -624,6 +633,46 @@ class _Compiler:
         # read by the CteRefNode arm of compile_node. The dict OBJECT is shared
         # between the body compilers and the main compiler.
         self.cte_buffers: dict = {}
+        # RUNTIME MIN/MAX JOIN FILTER (docs/RUNTIME_MINMAX_FILTER_DESIGN.md):
+        # pipeline index -> {column identity: physical in-file name} for every
+        # pipeline whose SOURCE is a native skene scan. A join uses this to ask
+        # whether its probe leg bottoms out in a scan that has not started yet
+        # and whose row-group statistics a bound could be tested against.
+        #
+        # Keyed on the PIPELINE, not the scan node, deliberately: what makes the
+        # bound reachable is that the probe operator sits in the same pipeline as
+        # the scan, so no breaker (aggregate, sort, CTE buffer) separates them.
+        # A probe pipeline absent from this map is refused, which is also what
+        # excludes a probe leg reading a shared CTE — those bodies are compiled
+        # and RUN before every join build, so their scan is already finished.
+        # NOT shared with the CTE body compilers (unlike cte_buffers): a body's
+        # pipelines belong to a different compile and must not be wired here.
+        self.skene_scan_pipelines: dict = {}
+        # Runtime min/max join filters: resolved ONCE per compile through the
+        # variable chain (default -> env -> SET), not read from `config` at each
+        # decision, so a `SET disable_runtime_minmax_join_filter` on this session
+        # actually takes effect and `SHOW VARIABLES` cannot advertise a value the
+        # compiler is not using. Every plan node shares one QueryProperties, so
+        # any node's `.properties.variables` is this query's — the same lookup
+        # execute_native makes for `max_execution_workers`.
+        from opteryx import config as _config
+        from opteryx.variables import resolve as _resolve_variable
+
+        _first_nid = next(iter(plan.nodes()), None)
+        _variables = (
+            getattr(plan[_first_nid].properties, "variables", None)
+            if _first_nid is not None
+            else None
+        )
+        self.runtime_minmax_enabled: bool = not _resolve_variable(
+            "disable_runtime_minmax_join_filter",
+            _variables,
+            _config.DISABLE_RUNTIME_MINMAX_JOIN_FILTER,
+        )
+        # How many (join, key column) runtime bounds this compile armed. A
+        # plan-time fact, folded into telemetry so "the filter did not fire" is
+        # distinguishable from "the filter fired and pruned nothing".
+        self.runtime_bounds_wired: int = 0
 
     # ---- expression lowering ------------------------------------------------------
     # Expressions are lowered ONCE, at plan time, to the phase-9 flat bytecode whose
@@ -3709,6 +3758,16 @@ class _Compiler:
                 }
                 p = self.nplan.new_pipeline()
                 self.nplan.set_native_skene_scan_source(p, splan, filter_bc, read_layout)
+                # RUNTIME MIN/MAX JOIN FILTER: record what this pipeline's SOURCE
+                # is, so a join compiled later can ask whether its probe leg
+                # bottoms out in a skene scan and, if so, which FILE column a
+                # probe-key identity names. Keyed by pipeline index; a pipeline
+                # absent from this map has a source that is not a skene scan
+                # (a buffer, a parquet scan, the materialized path), which is the
+                # conservative refusal the eligibility test needs.
+                self.skene_scan_pipelines[p] = {
+                    sc.identity: sc.name for sc in scan.skene_read_schema_columns
+                }
                 self._remember_types(scan.columns)
                 # The Source emits the PROJECTION: it applies the pushed predicate
                 # over the read set and drops predicate-only columns itself, so
@@ -4120,6 +4179,14 @@ class _Compiler:
             if identity not in pkeyout:
                 _unsupported("a probe-side join key the engine could not resolve here")
             probe_key_idx.append(pkeyout.index(identity))
+        # RUNTIME MIN/MAX JOIN FILTER. Here, not earlier, because eligibility
+        # depends on what the probe leg compiled to — and the probe leg cannot be
+        # compiled first (compile order is run order, and the build must run
+        # first, which is the very property that makes the bound safe).
+        # `probe_keys` is post-coercion, so a synthetic CAST key is not a scanned
+        # column and is refused inside.
+        self._wire_runtime_bounds(bp, pp, mode, build_keys, probe_keys,
+                                  existence_name)
         probe_payload = _live_positions(playout, payload_live) if prune_payload \
             else list(range(len(playout)))
         # SEMI/ANTI EMIT set. An existence filter emits surviving PROBE rows, so its
@@ -4256,6 +4323,17 @@ class _Compiler:
                 _unsupported("a streamed-side join key the engine could not resolve here")
             probe_key_idx.append(pkeyout.index(identity))
         probe_payload = list(range(len(playout)))
+        # RUNTIME MIN/MAX JOIN FILTER on the STREAMED leg — the large one, which
+        # is why the swap was taken. Sound for BOTH semi and anti here, unlike the
+        # un-swapped forms: the streamed leg emits nothing at all (Join2MarkSink),
+        # and a streamed row outside the build key range can mark nothing either
+        # way. What is emitted is the BUILD leg, which no bound touches.
+        #
+        # Mode is passed as INNER's code because that is what this allow-list
+        # means — "a streamed row that cannot match cannot affect the answer" —
+        # and it is true here for mode 4 (anti) as well, which the un-swapped
+        # allow-list correctly refuses.
+        self._wire_runtime_bounds(bp, sp, 0, build_keys, probe_keys, None)
 
         if filter_residual is None:
             self.nplan.set_join2_mark_sink(sp, ref, probe_key_idx, probe_payload)
@@ -4988,6 +5066,153 @@ class _Compiler:
 
     # ---- identity -> physical type tracking ------------------------------------
 
+    # ---- runtime min/max join filter ------------------------------------------------
+    #
+    # docs/RUNTIME_MINMAX_FILTER_DESIGN.md. A join's build side runs to completion
+    # before its probe side starts (Engine::run executes pipelines strictly in
+    # creation order, and the compiler creates the build leg's pipelines first),
+    # so the OBSERVED ordinal range of the build keys is known before the probe
+    # scan enumerates a single row group. Handing that range to the scan's
+    # row-group zone map skips row groups that provably hold no matching row —
+    # data never read, not rows discarded after reading.
+    #
+    # EVERYTHING that makes this sound is decided HERE, in Python, in the one
+    # place that knows the join mode and the column types. The native side turns
+    # a filled bound into two ordinary zone terms and does integer comparisons;
+    # it re-decides nothing. That is the same division `ordinal_zone_map_terms`
+    # imposes on plan-time terms, and for the same reason: a second site deciding
+    # comparability would be a second ordinal dialect.
+
+    # Join modes whose probe rows are EMITTED ONLY WHEN THEY MATCH — the only
+    # modes a probe-side bound may prune. This is an ALLOW-LIST on purpose.
+    #
+    #   0 INNER  — unmatched probe rows are dropped anyway.
+    #   2 SEMI   — emits probe rows with >= 1 match.
+    #
+    # Every other mode is a WRONG ANSWER, not a slower one, and several of them
+    # look identical in shape:
+    #   1 LEFT OUTER / 5 FULL OUTER  — the probe is the PRESERVED side.
+    #   4 ANTI / 3 ANTI_NULL_AWARE   — these emit exactly the probe rows that do
+    #                                  NOT match, i.e. precisely what a bound
+    #                                  would prune.
+    #   6/7 not-distinct (INTERSECT/EXCEPT) — NULL is a matchable VALUE, and
+    #                                  skene's statistics are over NON-NULL values
+    #                                  only, so a row group whose non-null values
+    #                                  fall outside the bound can still hold NULL
+    #                                  rows that legitimately match.
+    #   existence flag modes         — every probe row is emitted with a verdict
+    #                                  appended; they reuse mode 2/4 codes, so
+    #                                  they are excluded by `existence_name`
+    #                                  at the call site, NOT by this set.
+    _RUNTIME_BOUND_MODES = (0, 2)
+
+    def _runtime_bound_type_ok(self, build_identity, probe_identity):
+        """True when the two sides' values are comparable IN DRAKEN'S ORDINAL
+        SPACE, which is what the file statistics are written in.
+
+        Deliberately narrow (design note D6). An ordinal is monotone, so
+        excluding a row group whose whole non-null range sits outside the build
+        range is sound for any type where the two sides ordinalize through the
+        SAME mapping. The refusals below are the cases where they might not:
+
+        * DECIMAL — the ordinal is the RAW UNSCALED mantissa (draken's
+          ops/ordinalize.h), so two DECIMALs only compare at equal scale. The
+          binder normally aligns them; this does not assume it did.
+        * TIMESTAMP64 / TIME32 / TIME64 — the unit lives in a logical
+          descriptor and two different units ordinalize into different spaces.
+          Same physical type is not enough.
+        * FLOAT32 / FLOAT64 — a float equi-join key is pathological, and NaN's
+          relationship to bounds is a rule that lives elsewhere
+          (`_nan_invisible_to_bounds`). Not worth reasoning about for a shape
+          nobody writes.
+        * DECIMAL128 / ARRAY / VARIANT / VECTOR_FP16 / NULL — no ordinal exists
+          (draken deliberately has no DECIMAL128 ordinalize kernel).
+
+        Refusing costs a read; it never costs an answer."""
+        from opteryx.types.logical_type import DrakenType
+
+        cts = getattr(self, "_cts", None) or {}
+        build_ct = cts.get(build_identity)
+        probe_ct = cts.get(probe_identity)
+        if build_ct is None or probe_ct is None:
+            return False
+        build_pt = build_ct.physical
+        probe_pt = probe_ct.physical
+        if build_pt != probe_pt:
+            # A cross-type pair reaches the join through a synthetic CAST key,
+            # which is not a scanned column and is refused at the call site
+            # anyway. Refuse here too rather than rely on that.
+            return False
+        allowed = (
+            DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+            DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+            DrakenType.DATE32, DrakenType.BOOL,
+            DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY,
+        )
+        if build_pt not in allowed:
+            return False
+        # Same physical type is enough for every entry above: none of them
+        # carries a logical parameter that changes the ordinal. (DATE32 is bare
+        # days-since-epoch; the string family packs the first 8 content bytes.)
+        return True
+
+    def _wire_runtime_bounds(self, build_pipeline, probe_pipeline, mode,
+                             build_keys, probe_keys, existence_name):
+        """Arm runtime min/max capture for whichever key columns of this join can
+        actually prune the probe scan. Returns the number of bounds wired (0 when
+        nothing was eligible, which leaves both sides byte-for-byte unchanged).
+
+        Five conditions, all necessary:
+
+        1. The mode emits probe rows only when they match (`_RUNTIME_BOUND_MODES`),
+           and is not an existence-flag join (those keep every probe row).
+        2. The probe pipeline's SOURCE is a native skene scan. This single test
+           also excludes every case where the barrier does not hold: a probe leg
+           with its own breaker sources from a buffer, and a probe leg reading a
+           SHARED CTE sources from a buffer whose body already ran (CTE bodies are
+           compiled — and therefore run — before every join build).
+        3. The probe key is a DIRECT column of that scan's read set. A coerced or
+           computed key has no scanned column whose statistics could be tested.
+        4. The two sides' types are comparable in draken's ordinal space.
+        5. The probe pipeline was created AFTER the build pipeline. Pipelines run
+           in creation order, so this IS the barrier the whole feature rests on:
+           it is what makes the bound complete before the probe scan enumerates a
+           row group. The compiler's own structure already guarantees it (the
+           build leg is compiled first, and compile order is creation order), so
+           this is a cheap restatement of a load-bearing invariant rather than a
+           case that is expected to fire.
+        """
+        if not self.runtime_minmax_enabled:
+            return 0
+        if mode not in self._RUNTIME_BOUND_MODES or existence_name is not None:
+            return 0
+        if probe_pipeline <= build_pipeline:
+            return 0
+        scan_columns = self.skene_scan_pipelines.get(probe_pipeline)
+        if not scan_columns:
+            return 0
+        if len(build_keys) != len(probe_keys):
+            return 0
+        slots = []
+        wired = 0
+        for build_identity, probe_identity in zip(build_keys, probe_keys):
+            physical = scan_columns.get(probe_identity)
+            if physical is None or not self._runtime_bound_type_ok(
+                    build_identity, probe_identity):
+                slots.append(-1)
+                continue
+            bound_idx = self.nplan.new_runtime_bound()
+            self.nplan.add_skene_runtime_bound(probe_pipeline, bound_idx, physical)
+            slots.append(bound_idx)
+            wired += 1
+        if wired == 0:
+            return 0
+        # Only now is the capture armed on the build sink — so a join whose probe
+        # cannot use a bound pays nothing for one.
+        self.nplan.set_join2_bound_slots(build_pipeline, slots)
+        self.runtime_bounds_wired += wired
+        return wired
+
     def _remember_types(self, columns):
         types = getattr(self, "_types", None)
         if types is None:
@@ -5110,6 +5335,7 @@ def compile_to_native(plan, pool=None):
         compiler.scan_facts.update(body_compiler.scan_facts)
         compiler.scan_residual_reasons.update(body_compiler.scan_residual_reasons)
         compiler.footer_fetch_ns += body_compiler.footer_fetch_ns
+        compiler.runtime_bounds_wired += body_compiler.runtime_bounds_wired
 
     in_edges = list(plan.ingoing_edges(exit_id))
     if len(in_edges) != 1:
@@ -5138,7 +5364,8 @@ def compile_to_native(plan, pool=None):
         final_logical.append(_logical_tuple(ct))
     nplan.set_final_schema(list(exit_node.final_names), final_types, final_logical)
     return (nplan, out_q, compiler.scan_sources, compiler.scan_facts,
-            compiler.scan_residual_reasons, compiler.footer_fetch_ns)
+            compiler.scan_residual_reasons, compiler.footer_fetch_ns,
+            compiler.runtime_bounds_wired)
 
 
 def execute_native(plan, telemetry=None, trace_sink=None):
@@ -5206,7 +5433,7 @@ def execute_native(plan, telemetry=None, trace_sink=None):
     # separately instead of one hiding inside the other's name.
     _compile0 = _t.perf_counter_ns()
     (nplan, out_q, scan_sources, scan_facts, scan_residual_reasons,
-     _footer_fetch_ns) = compile_to_native(plan, pool=pool)
+     _footer_fetch_ns, _runtime_bounds_wired) = compile_to_native(plan, pool=pool)
     _compile_ns = _t.perf_counter_ns() - _compile0 - _footer_fetch_ns
     # WP-INSTR instrument 2: which Source each parquet scan selected (a plan-time
     # fact — recorded whether or not the GIL instrumentation is armed; the dict is
@@ -5215,6 +5442,13 @@ def execute_native(plan, telemetry=None, trace_sink=None):
         telemetry._reading["native_engine_engaged"] = 1
         telemetry._reading["native_engine_dop"] = dop
         telemetry._reading["scan_sources"] = dict(scan_sources)
+        # RUNTIME MIN/MAX JOIN FILTER: how many (join, key column) bounds this
+        # plan armed. A plan-time fact, recorded only when non-zero so it never
+        # adds noise to the overwhelming majority of plans that arm none. Read
+        # alongside each scan's `row_groups_pruned_runtime` fact: this says the
+        # filter was WIRED, that says what it was WORTH.
+        if _runtime_bounds_wired:
+            telemetry._reading["runtime_minmax_bounds_wired"] = _runtime_bounds_wired
         # A0 acceptance gate: WHY each trampoline (StreamingScanSource) scan fell
         # back — the stable R1..R7 reason code from _native_scan_plan, keyed by
         # scan identity, parallel to scan_sources. Plan-time fact, always recorded
@@ -5390,6 +5624,17 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                             "calls": row["calls"],
                             "execution_time": row["execution_time"],
                             "cpu_time": row["cpu_time"],
+                            # Breaker cost. Additive like calls/execution_time: a
+                            # combine runs once per WORKER, and an identity spanning
+                            # two pipelines genuinely paid both. Zero except on sinks.
+                            "combine_time": row["combine_time"],
+                            "finalize_time": row["finalize_time"],
+                            # dop is a property of the PIPELINE, so every row for one
+                            # identity within a pipeline carries the same value; an
+                            # identity spanning two pipelines (UNION legs, a buffer
+                            # continuation) takes the max — the widest parallelism the
+                            # node actually ran at. Never summed: it is a width, not work.
+                            "dop": row["dop"],
                         }
                     else:
                         # records_out/bytes_out: last-row-wins is correct — the
@@ -5409,6 +5654,9 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                         agg["calls"] += row["calls"]
                         agg["execution_time"] += row["execution_time"]
                         agg["cpu_time"] += row["cpu_time"]
+                        agg["combine_time"] += row["combine_time"]
+                        agg["finalize_time"] += row["finalize_time"]
+                        agg["dop"] = max(agg["dop"], row["dop"])
                 telemetry._reading["native_op_stats"] = op_stats
                 # Per-pipeline wall/CPU. Pipelines run one at a time (engine.hpp's
                 # run()), so cpu_time/wall_time is the mean cores that pipeline kept

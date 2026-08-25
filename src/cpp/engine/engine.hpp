@@ -42,6 +42,7 @@
 #include "native_cidr_unnest.hpp"   // CidrUnnestOperator — CROSS JOIN CIDR_UNNEST
 #include "native_grouping_expand.hpp"  // GroupingExpandOperator — GROUP BY ROLLUP
 #include "pipeline_buffers.hpp"     // MorselBuffer, BufferSource
+#include "runtime_bound.hpp"        // RuntimeKeyBound — runtime min/max join filter
 #include "native_scalar_guard.hpp"  // ScalarGuardSource — scalar-subquery cardinality
 #include "native_queue_sink.hpp"    // QueueSink/Global — the terminal output edge
 #include "streaming_scan_source.hpp"
@@ -197,6 +198,11 @@ struct PipelineNode {
     std::vector<std::unique_ptr<Operator>> operators;
     std::unique_ptr<Sink> sink;
     int fill_join2_ref = -1;  // join2_refs index to point at this sink's global post-run
+    // Runtime min/max join filter: parallel to this build sink's key columns,
+    // the runtime_bounds slot each key's observed ordinal range is published
+    // into post-run, or -1. Empty for every pipeline that is not an eligible
+    // join build. See docs/RUNTIME_MINMAX_FILTER_DESIGN.md.
+    std::vector<int> fill_bound_slots;
     int reads_buffer = -1;    // buffers index this pipeline's BufferSource reads, so
                               // run() can free a buffer after its LAST consumer
     int dop_override = 0;     // >0 forces this pipeline's degree (order-sensitive
@@ -212,6 +218,9 @@ struct PipelineNode {
     uint64_t wall_ns = 0;
     uint64_t cpu_ns = 0;
     int dop_used = 0;
+    // P3: barrier skew for this pipeline's run — how far apart its workers finished,
+    // and what that spread cost in idle worker-time. Filled by run_pipeline().
+    PipelineSkew skew{};
 };
 
 class Engine {
@@ -219,6 +228,12 @@ public:
     std::vector<std::unique_ptr<PipelineNode>> pipelines;  // run in creation order
     std::vector<std::unique_ptr<MorselBuffer>> buffers;
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
+    // Runtime min/max join filter slots. unique_ptr because a probe Source holds
+    // the ADDRESS of a slot from plan time until it builds its claim list, and
+    // the vector grows as more joins are compiled. Written once each, by run(),
+    // on the driver thread between two pipelines — never concurrently with any
+    // reader.
+    std::vector<std::unique_ptr<RuntimeKeyBound>> runtime_bounds;
     // R3 latmat: the plan-time vectors a LatmatScanSource borrows that have no
     // NativeScanPlan of their own (predicate column map, output-assembly maps, output
     // names). Owned here so they outlive the run; unique_ptr keeps the addresses
@@ -266,20 +281,30 @@ public:
         std::string identity;
         std::string role;   // "source" | "operator" | "sink"
         uint64_t calls, rows_in, rows_out, bytes_in, bytes_out, exec_ns, cpu_ns;
+        // Breaker cost — see OpStats::combine_ns/finalize_ns. Zero except on sinks.
+        uint64_t combine_ns, finalize_ns;
+        // Degree of parallelism the pipeline this operator belonged to actually ran
+        // at (`dop_used`, set in run()). Carried per-row rather than looked up from
+        // collect_pipeline_stats because PipelineReading is keyed by DISPLAY NAME,
+        // which is not unique — two scans of the same relation share a label, so a
+        // by-name join back to a plan node is ambiguous. Read at teardown from a
+        // field the run already set: no execution-path cost.
+        int dop;
     };
     std::vector<OpReading> collect_op_stats() const {
         std::vector<OpReading> out;
-        auto emit = [&out](const OpStats& s, const char* role) {
+        auto emit = [&out](const OpStats& s, const char* role, int dop) {
             out.push_back(OpReading{
                 s.identity, role,
                 s.calls.load(), s.rows_in.load(), s.rows_out.load(),
                 s.bytes_in.load(), s.bytes_out.load(), s.exec_ns.load(),
-                s.cpu_ns.load()});
+                s.cpu_ns.load(), s.combine_ns.load(), s.finalize_ns.load(), dop});
         };
         for (const auto& pn : pipelines) {
-            if (pn->source) emit(pn->source->stats, "source");
-            for (const auto& op : pn->operators) emit(op->stats, "operator");
-            if (pn->sink) emit(pn->sink->stats, "sink");
+            const int dop = pn->dop_used;
+            if (pn->source) emit(pn->source->stats, "source", dop);
+            for (const auto& op : pn->operators) emit(op->stats, "operator", dop);
+            if (pn->sink) emit(pn->sink->stats, "sink", dop);
         }
         return out;
     }
@@ -292,6 +317,10 @@ public:
         std::string label;      // the pipeline's source display name (what it reads)
         uint64_t wall_ns, cpu_ns;
         int dop;
+        // P3: how far apart the workers finished, and the worker-time that spread
+        // burned waiting at the barrier. `cpu_ns/wall_ns` says how much of the pool
+        // was busy; this says whether the idle half was ONE straggler.
+        uint64_t skew_ns, barrier_idle_ns;
     };
     std::vector<PipelineReading> collect_pipeline_stats() const {
         std::vector<PipelineReading> out;
@@ -306,7 +335,8 @@ public:
                 const OpStats& s = pn->sink->stats;
                 label = s.display_name.empty() ? s.identity : s.display_name;
             }
-            out.push_back(PipelineReading{label, pn->wall_ns, pn->cpu_ns, pn->dop_used});
+            out.push_back(PipelineReading{label, pn->wall_ns, pn->cpu_ns, pn->dop_used,
+                                          pn->skew.skew_ns, pn->skew.barrier_idle_ns});
         }
         return out;
     }
@@ -414,6 +444,27 @@ public:
         join2_refs.push_back(std::make_unique<Join2Ref>());
         return join2_refs.size() - 1;
     }
+    // A fresh, UNFILLED runtime bound slot (valid == 0 -> prunes nothing). The
+    // compiler allocates one per (join, eligible key column) pair and hands the
+    // index to both the build sink (which fills it) and the probe scan (which
+    // reads it).
+    size_t new_runtime_bound() {
+        runtime_bounds.push_back(std::make_unique<RuntimeKeyBound>());
+        return runtime_bounds.size() - 1;
+    }
+    // Wire an already-created skene Source to a bound slot. Called AFTER
+    // set_native_skene_scan_source for the same pipeline: the compiler compiles
+    // the probe leg (creating the scan) before it knows the join is eligible.
+    // Fails loud rather than silently declining — reaching here with a
+    // non-skene source means the compiler's own eligibility test and the plan
+    // disagree, which is a bug, not a shape to tolerate.
+    void add_skene_runtime_bound(size_t p, size_t bound_idx, std::string column) {
+        auto* src = dynamic_cast<NativeSkeneScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "add_skene_runtime_bound: pipeline source is not a skene scan");
+        src->add_runtime_bound(std::move(column), runtime_bounds[bound_idx].get());
+    }
     // payload_types/lt_* are the build-side payload columns' PLAN-KNOWN physical +
     // logical types (same shape as set_final_schema) — sized/typed into the build
     // sink's row-store up front, so a build side that streams zero rows (a filtered-
@@ -442,6 +493,27 @@ public:
             /*asof=*/-1, /*asof_type=*/0, track_matches, null_equal,
             est_output_rows));
         pipelines[p]->fill_join2_ref = static_cast<int>(ref);
+    }
+    // RUNTIME MIN/MAX JOIN FILTER: arm bound capture on an ALREADY-CREATED build
+    // sink. Separate from set_join2_build_sink because the compiler cannot know
+    // yet whether the bound is usable: eligibility depends on the PROBE leg, and
+    // the probe leg is compiled after the build sink is wired (it has to be —
+    // compile order is run order, and the build must run first).
+    //
+    // `slots` is parallel to the sink's key_idx; the sink indexes both with the
+    // same subscript, so a mismatch would capture one key column's values into
+    // another's bound and prune the probe on them. That fails loud here rather
+    // than producing a plausible wrong answer.
+    void set_join2_bound_slots(size_t p, std::vector<int> slots) {
+        auto* sink = dynamic_cast<Join2BuildSink*>(pipelines[p]->sink.get());
+        if (sink == nullptr)
+            throw std::runtime_error(
+                "set_join2_bound_slots: pipeline sink is not a join build sink");
+        if (slots.size() != sink->key_idx.size())
+            throw std::runtime_error(
+                "set_join2_bound_slots: slots must be parallel to the sink's key_idx");
+        pipelines[p]->fill_bound_slots = slots;
+        sink->bound_slots = std::move(slots);
     }
     // `emit_prune`/`emit_cols` apply to SEMI/ANTI modes only — the probe columns an
     // existence filter still emits, which is normally not its own probe key. Every
@@ -638,7 +710,8 @@ public:
                                       const std::vector<int>* zone_ops,
                                       const std::vector<int64_t>* zone_ordinals,
                                       int64_t* row_groups_total,
-                                      int64_t* row_groups_pruned) {
+                                      int64_t* row_groups_pruned,
+                                      int64_t* row_groups_pruned_runtime = nullptr) {
         ExprProgram* program = nullptr;
         if (instrs != nullptr) {
             skene_scan_filters.push_back(std::make_unique<ExprProgram>());
@@ -656,7 +729,8 @@ public:
                            files, column_names, out_identities, column_types,
                            retag_units, emit_indices,
                            program != nullptr ? fn : nullptr, program, zone,
-                           row_groups_total, row_groups_pruned));
+                           row_groups_total, row_groups_pruned,
+                           row_groups_pruned_runtime));
     }
 
     // The two-pass late-materialization skene scan: pass 1 decodes only the
@@ -1139,13 +1213,33 @@ public:
             pn->dop_used = pdop;
             const uint64_t w0 = telem_now_ns();
             const uint64_t c0 = telem_process_cpu_now_ns();
-            pn->result = run_pipeline(p, pdop, err, pool);
+            pn->result = run_pipeline(p, pdop, err, pool, &pn->skew);
             pn->wall_ns = telem_now_ns() - w0;
             pn->cpu_ns = telem_process_cpu_now_ns() - c0;
             if (err.code != 0) return;
             if (pn->fill_join2_ref >= 0) {
-                join2_refs[static_cast<size_t>(pn->fill_join2_ref)]->g =
-                    static_cast<const Join2BuildGlobal*>(pn->result.get());
+                const auto* bg = static_cast<const Join2BuildGlobal*>(pn->result.get());
+                join2_refs[static_cast<size_t>(pn->fill_join2_ref)]->g = bg;
+                // RUNTIME MIN/MAX JOIN FILTER — the one publish point.
+                //
+                // This is where the whole feature's correctness contract lives:
+                // the build pipeline has completed (run_pipeline above blocks
+                // until every worker combined and finalize() ran) and the probe
+                // pipeline's GlobalSourceState does not exist yet (it is
+                // constructed by the NEXT run_pipeline call). So a bound is
+                // always complete and always visible before the probe scan
+                // enumerates its first row group — no timeout, no late arrival,
+                // no partially-populated filter, and no atomics: this is the
+                // driver thread, between two pipelines.
+                for (size_t k = 0; k < pn->fill_bound_slots.size(); ++k) {
+                    const int slot = pn->fill_bound_slots[k];
+                    if (slot < 0) continue;
+                    if (k >= bg->bound_any.size() || bg->bound_any[k] == 0) continue;
+                    RuntimeKeyBound& out = *runtime_bounds[static_cast<size_t>(slot)];
+                    out.lo = bg->bound_lo[k];
+                    out.hi = bg->bound_hi[k];
+                    out.valid = 1;
+                }
             }
             for (size_t b = 0; b < last_consumer.size(); ++b) {
                 if (last_consumer[b] == static_cast<int>(pipeline_index)) {

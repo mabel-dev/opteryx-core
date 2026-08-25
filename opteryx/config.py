@@ -113,6 +113,25 @@ scratch/like_selectivity's report) — lower values discount later needle
 characters faster, blunting how far a long needle can drive the estimate
 toward zero. Tune per deployment with `SET like_selectivity_decay`."""
 
+DISABLE_RUNTIME_MINMAX_JOIN_FILTER: bool = get_bool(
+    "DISABLE_RUNTIME_MINMAX_JOIN_FILTER", False
+)
+"""Turn OFF runtime min/max join filters — the observed ordinal range of a
+join's build keys, handed to the probe-side scan's row-group zone map so row
+groups that provably hold no matching row are never read
+(docs/RUNTIME_MINMAX_FILTER_DESIGN.md).
+
+Named for the state the caller probably does not want, per variables.py's
+convention for feature flags, and mirrored as the session variable
+`disable_runtime_minmax_join_filter` so it can be flipped per query.
+
+The filter is pure pruning: disabling it can only make a query read MORE, never
+return a different answer. That is exactly what the switch is for — the oracle
+gate runs every eligible shape both ways and asserts the results are identical
+(tests/integration/test_runtime_minmax_join_filter.py) — and it is also how to
+attribute a measurement, since the plan-time correlated filter pushes range
+predicates onto the same scans."""
+
 VALIDATE_OPTIMIZER_PLANS: bool = get_bool("VALIDATE_OPTIMIZER_PLANS", False)
 """Debug guardrail: when set, the optimizer checks plan structural invariants
 after every strategy and raises (naming the offending strategy) on corruption.

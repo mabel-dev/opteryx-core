@@ -64,6 +64,7 @@ TC_BUFFER_RESIDENT = 8
 TC_DECODE = 9
 TC_DECODE_PHASE = 10
 TC_QUEUE_STALL = 11
+TC_FINALIZE = 12
 
 CATEGORY_NAMES = {
     TC_SOURCE_PULL: "source_pull",
@@ -77,6 +78,7 @@ CATEGORY_NAMES = {
     TC_DECODE: "decode",
     TC_DECODE_PHASE: "decode_phase",
     TC_QUEUE_STALL: "queue_stall",
+    TC_FINALIZE: "finalize",
 }
 
 # Field order for struct.iter_unpack — kept alongside

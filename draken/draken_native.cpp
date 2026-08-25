@@ -3373,6 +3373,26 @@ extern "C" PyObject* draken_vector_own_decimal(
       catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
 }
 
+extern "C" PyObject* draken_vector_own_decimal128(
+    void* data, uint8_t* validity, uint32_t length, uint8_t precision, uint8_t scale)
+{
+    OwnedBuffer<void>    data_guard(data);
+    OwnedBuffer<uint8_t> val_guard(validity);
+    try {
+        void* final_data = data_guard.release();
+        DrakenVector v = draken_vector_from_dense(final_data, length, DRAKEN_DECIMAL128, validity);
+        OwnedBuffer<void>    data_buf(final_data);
+        OwnedBuffer<uint8_t> vbuf(val_guard.release());
+        VectorOwner owner(v, std::move(data_buf), std::move(vbuf));
+        LogicalType lt; lt.kind = LogicalKind::DECIMAL; lt.precision = precision; lt.scale = scale;
+        owner.logical_type = logical_type_intern(lt);
+        nb::object obj = nb::cast(std::move(owner));
+        PyObject* result = obj.ptr(); Py_INCREF(result); return result;
+    } catch (nb::python_error& e) { e.restore(); return nullptr; }
+      catch (std::bad_alloc&) { PyErr_NoMemory(); return nullptr; }
+      catch (std::exception& e) { PyErr_SetString(PyExc_RuntimeError, e.what()); return nullptr; }
+}
+
 // draken_vector_own — wrap a VecResult op result in a new Python Vector handle.
 //
 // C++ only (declared in bridge header under #ifdef __cplusplus).
@@ -6799,6 +6819,66 @@ extern "C" CxxMorsel* cxx_hash_c(const CxxMorsel* m, const int32_t* col_idxs, ui
     g_hash_calls.fetch_add(1, std::memory_order_relaxed);
     g_hash_rows.fetch_add(m->num_rows(), std::memory_order_relaxed);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// cxx_ordinal_bounds_c — the ORDINAL min/max of one column, over its NON-NULL
+// rows. The build-side capture for runtime min/max join filters
+// (docs/RUNTIME_MINMAX_FILTER_DESIGN.md).
+//
+// This lives HERE, not in src/cpp/engine, for the same reason cxx_hash_c does:
+// ops/hash.h's dispatch table is `static inline`, so including it in a second
+// shared object would give that object its own copy. Routing through one
+// extern "C" symbol (resolved via RTLD_GLOBAL, the pattern executor.hpp
+// documents for the thread pool) keeps ONE ops table and ONE definition of what
+// a value's ordinal is — the same one skene::compute_statistics writes file
+// statistics with and Manifest._ordinalize_literal produces plan terms with.
+//
+// Returns 1 and writes *out_lo/*out_hi only when a bound genuinely exists.
+// Returns 0 — meaning "no bound", i.e. PRUNE NOTHING, never "empty" — for:
+//   * a type with no ordinalize kernel (DECIMAL128 deliberately has none),
+//   * DRAKEN_ARRAY / DRAKEN_VECTOR_FP16 / DRAKEN_NULL,
+//   * zero rows, or every row null.
+// It never throws: the type check is made against the ops table before
+// dispatch, so nothing can propagate across the C ABI.
+//
+// NULLS ARE EXCLUDED BY VALIDITY, NOT BY SENTINEL. draken_ordinalize writes
+// ORDINAL_NULL (== INT64_MIN) for a null row, but INT64_MIN is also the honest
+// ordinal of a real INT64 value, so filtering on the sentinel would drop that
+// value out of the bound and OVER-PRUNE. The validity bitmap is re-read per row
+// instead — the same choice skene/src/statistics.cpp makes, and for the same
+// reason.
+extern "C" int cxx_ordinal_bounds_c(const CxxMorsel* m, int32_t col_idx,
+                                    int64_t* out_lo, int64_t* out_hi) {
+    if (m == nullptr || out_lo == nullptr || out_hi == nullptr) return 0;
+    if (col_idx < 0 || static_cast<size_t>(col_idx) >= m->columns.size()) return 0;
+    const DrakenVector& v = m->columns[static_cast<size_t>(col_idx)].view;
+    if (v.type == DRAKEN_ARRAY || v.type == DRAKEN_VECTOR_FP16 || v.type == DRAKEN_NULL)
+        return 0;
+    const unsigned type_idx = static_cast<unsigned>(v.type);
+    if (type_idx >= OpsTable::kSize || g_ops_table().entries[type_idx].ordinalize == nullptr)
+        return 0;
+    const uint32_t n = v.length;
+    if (n == 0u) return 0;
+
+    std::vector<int64_t> ordinals(n);
+    draken_ordinalize(v, ordinals.data(), n);
+
+    const uint8_t* validity = v.validity;
+    int64_t lo = 0;
+    int64_t hi = 0;
+    bool any = false;
+    for (uint32_t i = 0u; i < n; ++i) {
+        if (validity != nullptr && ((validity[i >> 3] >> (i & 7u)) & 1u) == 0u) continue;
+        const int64_t o = ordinals[i];
+        if (!any) { lo = o; hi = o; any = true; continue; }
+        if (o < lo) lo = o;
+        if (o > hi) hi = o;
+    }
+    if (!any) return 0;
+    *out_lo = lo;
+    *out_hi = hi;
+    return 1;
 }
 
 // Row-routing scatter — partition a morsel into W disjoint sub-morsels by

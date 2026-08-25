@@ -157,6 +157,17 @@
         "default_source": "environment",
         "environment_key": "DISABLE_OPTIMIZER"
     },
+    "disable_runtime_minmax_join_filter": {
+        "name": "disable_runtime_minmax_join_filter",
+        "type": "BOOL",
+        "owner": "USER",
+        "visibility": "UNRESTRICTED",
+        "settable": true,
+        "requires_entitlement": null,
+        "set_by": "any session",
+        "default": false,
+        "default_source": "literal"
+    },
     "external_user": {
         "name": "external_user",
         "type": "VARCHAR",

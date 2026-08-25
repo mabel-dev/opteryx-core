@@ -353,7 +353,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         two commits sharing a millisecond do not order arbitrarily between runs.
 
         Expired snapshots are absent - the catalog's loader tombstones them out
-        of the history it returns.
+        of the history it returns. A TAGGED snapshot can never be one of them: a
+        tag holds its snapshot from expiry, which is why the `tags` column is
+        also the answer to "why is this old snapshot still here".
         """
         from opteryx.models.snapshot_history import normalize_snapshot
 
@@ -366,7 +368,22 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         ordered = sorted(
             snapshots, key=lambda s: (s.timestamp_ms, s.snapshot_id), reverse=True
         )
-        return [normalize_snapshot(s, current_snapshot_id) for s in ordered]
+
+        # Tags point AT snapshots, so they are grouped by target here rather than
+        # read off each snapshot. One subcollection read for the whole statement,
+        # on a path that is already doing a full history load.
+        tags_by_snapshot: dict = {}
+        for tag in self.catalog.list_tags(self.dataset):
+            tags_by_snapshot.setdefault(tag["snapshot-id"], []).append(tag["name"])
+
+        return [
+            normalize_snapshot(
+                snapshot,
+                current_snapshot_id,
+                tags=sorted(tags_by_snapshot.get(snapshot.snapshot_id, [])),
+            )
+            for snapshot in ordered
+        ]
 
     def _resolve_snapshot(self) -> None:
         """Settle which snapshot this read sees, honouring time travel.
@@ -375,7 +392,44 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         the full-metadata reads so a statement cannot resolve to one snapshot when
         checked and a different one when run.
         """
-        if self.version is not None:
+        if self.version_tag is not None:
+            # A tag is resolved by NAME, through the catalog, as one document get
+            # by id - `tags/{name}` under the dataset. NOT by scanning any
+            # in-memory tag map: that map is populated only by a history load, and
+            # this path deliberately does not do one, so a scan would find nothing
+            # and report every tag as unknown.
+            #
+            # A tag pins its snapshot from expiry for as long as it exists, so a
+            # tag that resolves to a snapshot which then cannot be read is a BROKEN
+            # PIN, not a stale reference to shrug at. Both failures below say what
+            # they are and stop; neither falls back to current data, which would
+            # answer a question about February with March's numbers.
+            from opteryx_catalog.exceptions import TagNotFound
+
+            try:
+                snapshot_id = self.catalog.resolve_tag(self.dataset, self.version_tag)
+            except TagNotFound as exc:
+                # Translated at the boundary, as DatasetNotFound already is above:
+                # a catalog exception type is not something a reader of SQL should
+                # ever see. Deliberately does NOT list the tags that do exist -
+                # someone who cannot see a dataset's tags must not learn them from
+                # a failed guess.
+                raise DatasetReadError(
+                    f"No tag {self.version_tag} on {self.dataset}."
+                ) from exc
+
+            target = self.table.snapshot(snapshot_id)
+            if target is None:
+                raise DatasetReadError(
+                    f"Tag {self.version_tag} of {self.dataset} names snapshot {snapshot_id}, "
+                    "which could not be read. A tag holds its snapshot from expiry, so this "
+                    "is a broken pin rather than an expired version."
+                )
+
+            self.snapshot_id = target.snapshot_id
+            self.snapshot = target
+
+        elif self.version is not None:
             # No history reload: the current snapshot is already in memory (set at
             # construction), and a snapshot fetched by id is a single targeted
             # lookup (Dataset.snapshot's own doc, not the whole history) - see
@@ -1624,6 +1678,93 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 f"trigger {trigger_name} does not exist on {relation_name} "
                 "(use DROP TRIGGER IF EXISTS to make this quiet)"
             ) from exc
+
+    def create_tag(
+        self,
+        relation_name: str,
+        tag_name: str,
+        version_spec: str,
+        author: Optional[str] = None,
+    ) -> dict:
+        """Bind a name to one snapshot and pin that snapshot from expiry.
+
+        `version_spec` is what the reader wrote - a snapshot id, `current` or
+        `previous` - and is resolved to an id HERE, where the catalog is, rather
+        than in the planner. The resolution is deliberately identical to the read
+        path's: `CURRENT` is the dataset's current snapshot and `PREVIOUS` is that
+        snapshot's parent, so `CREATE TAG t AS OF VERSION PREVIOUS` names exactly
+        the snapshot `VERSION AS OF PREVIOUS` would have read.
+
+        The tag stores an ID, never the word: a tag is immutable, and one holding
+        the phrase "current" would silently mean something different tomorrow.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        dataset = catalog.load_dataset(relative_id)
+
+        spec = (version_spec or "current").lower()
+        if spec in ("current", "previous"):
+            current = dataset.snapshot()
+            if current is None:
+                raise ValueError(
+                    f"The dataset {relation_name} exists, but no data has been committed "
+                    "to it yet, so there is no version to tag."
+                )
+            if spec == "current":
+                snapshot_id = current.snapshot_id
+            else:
+                snapshot_id = current.parent_snapshot_id
+                if snapshot_id is None:
+                    raise ValueError(
+                        f"No previous version for {relation_name} - snapshot "
+                        f"{current.snapshot_id} is the first."
+                    )
+        else:
+            snapshot_id = int(spec)
+
+        from opteryx_catalog.exceptions import SnapshotMissingError
+        from opteryx_catalog.exceptions import TagError
+
+        try:
+            return catalog.create_tag(relative_id, tag_name, snapshot_id, author=author)
+        except (TagError, SnapshotMissingError) as exc:
+            # Translated at the boundary, like TagNotFound below and DatasetNotFound
+            # above: an `opteryx_catalog.exceptions` class name is not something a
+            # reader of SQL should ever be shown. The catalog's message is kept
+            # verbatim - it already names the tag, the snapshot it holds, and what
+            # to do about it, and rewording it here would be a second place for
+            # that wording to drift. SnapshotMissingError is in the same list
+            # because a version that does not resolve is the other way this
+            # statement fails, and it must not be the one that leaks.
+            raise ValueError(str(exc)) from exc
+
+    def drop_tag(
+        self,
+        relation_name: str,
+        tag_name: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Remove a tag, releasing the snapshot it held.
+
+        The snapshot returns to the ordinary retention rules at once, and expires
+        on the next run if it is already past the window. That is the point of the
+        statement, not a side effect of it.
+        """
+        from opteryx_catalog.exceptions import TagNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.drop_tag(relative_id, tag_name, author=author)
+        except TagNotFound as exc:
+            raise ValueError(f"There is no tag {tag_name} on {relation_name}.") from exc
+
+    def list_tags(self, relation_name: str) -> list:
+        """The tags on a dataset, as the catalog's plain dicts."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        return catalog.list_tags(relative_id)
 
     def list_triggers(self, relation_name: str) -> list:
         """The triggers attached to a dataset, as the catalog's plain dicts."""

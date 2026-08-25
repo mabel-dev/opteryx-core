@@ -69,6 +69,13 @@ class RelationManagementNode(BasePlanNode):
         self.new_column_name: Optional[str] = parameters.get("new_column_name")
         self.new_column_type = parameters.get("new_column_type")
 
+        # CREATE / DROP TAG
+        self.tag_name: Optional[str] = parameters.get("tag_name")
+        # "current" | "previous" | a snapshot id as text. Left as the reader wrote
+        # it: resolving CURRENT or PREVIOUS is a catalog read, and the connector
+        # is what holds the catalog.
+        self.version_spec: Optional[str] = parameters.get("version_spec")
+
         # DROP TRIGGER
         self.trigger_name: Optional[str] = parameters.get("trigger_name")
         self.table_name: Optional[str] = parameters.get("table_name")
@@ -116,6 +123,10 @@ class RelationManagementNode(BasePlanNode):
             return f"alter workspace {self.workspace_name} set {self.property_name} = {self.property_value}"
         if self.action == "drop_workspace":
             return f"drop workspace {self.workspace_name}"
+        if self.action == "create_tag":
+            return f"create tag {self.tag_name} on {self.relation_name} as of {self.version_spec}"
+        if self.action == "drop_tag":
+            return f"drop tag {self.tag_name} on {self.relation_name}"
         if self.action == "drop_trigger":
             return f"drop trigger {self.trigger_name} on {self.table_name}"
         if self.action == "alter_materialized_view_suspended":
@@ -303,6 +314,23 @@ class RelationManagementNode(BasePlanNode):
                 self.trigger_name,
                 author=self._author,
                 missing_ok=self.if_exists,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "create_tag":
+            self.connector.create_tag(
+                self.relation_name,
+                self.tag_name,
+                self.version_spec,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_tag":
+            self.connector.drop_tag(
+                self.relation_name,
+                self.tag_name,
+                author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 

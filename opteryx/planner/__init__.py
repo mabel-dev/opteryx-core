@@ -538,6 +538,28 @@ def query_planner(
         scan_stats_cache=scan_stats_cache,
     )
 
+    # EXPLAIN ANALYZE: force the estimate refresh. `refresh_statistics` otherwise
+    # runs opportunistically (only when an optimizer strategy asks for it, plus
+    # result_size_guard above), so nodes it never reached carry no estimate and
+    # EXPLAIN's `est_rows`/`est_bytes` render NULL. On ANALYZE specifically that
+    # is worth paying plan time to avoid: the entire value of the statement is
+    # putting the planner's estimate beside the row count the query actually
+    # produced, which doubles as a cardinality-estimator audit on every real
+    # query — and a column that is blank half the time cannot do that job.
+    # Architect ruling D3, 2026-08-25. Plain EXPLAIN is deliberately NOT forced:
+    # it has no actuals to compare against, so it does not earn the plan time.
+    from opteryx.planner.logical_planner import LogicalPlanStepType as _LPST
+
+    if getattr(optimized_plan, "statistics_are_stale", True) and any(
+        node.node_type == _LPST.Explain and getattr(node, "analyze", False)
+        for _, node in optimized_plan.nodes(True)
+    ):
+        from opteryx.planner.optimizer.statistics_refresh import refresh_statistics
+
+        optimized_plan = refresh_statistics(
+            optimized_plan, telemetry=telemetry, scan_stats_cache=scan_stats_cache
+        )
+
     # The `data_processed` billing meter, measured on the FINAL logical plan —
     # after manifest pruning, projection pushdown and predicate pushdown, all of
     # which change the answer. Plan-time by ruling (2026-08-24): jobs.opteryx
