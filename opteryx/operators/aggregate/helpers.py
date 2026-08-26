@@ -29,6 +29,17 @@ AGGREGATORS: dict = {
     "VAR_SAMP": "var_samp",
 }
 
+# Aggregate SPELLINGS that are not aggregates in their own right: the builder
+# rewrites each to a base aggregate carrying duplicate_treatment="Distinct"
+# (see logical_planner_builders), so `COUNT_DISTINCT(x)` and `COUNT(DISTINCT x)`
+# are the same node by the time anything downstream sees them. The map lives here,
+# with the registry it rewrites INTO, because two readers need it: the builder that
+# performs the rewrite, and reference/window_catalog.py, which has to answer the
+# window-support question for the name the USER writes, not the rewritten one.
+DISTINCT_SPELLINGS: dict = {
+    "COUNT_DISTINCT": "COUNT",
+}
+
 
 def is_aggregator(name: str) -> bool:
     return name in AGGREGATORS

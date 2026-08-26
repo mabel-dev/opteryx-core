@@ -571,11 +571,20 @@ def query_planner(
     # through here and bills the sum, matching the one DATA_PROCESSED_BYTES event
     # per execute() call that the session emits.
     from opteryx.planner.data_processed import measure_data_processed
+    from opteryx.planner.data_processed import plan_relations
 
     telemetry.increase(
         "billing_bytes",
         measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
     )
+    # The relations that figure was measured over, recorded from the SAME plan
+    # and the same scan walk. Downstream this is what attributes a query to the
+    # things it read; nothing else records it, and re-deriving it from the SQL
+    # text later would need the binder and could disagree with the number
+    # billed here. Unioned, not assigned, for the same reason `billing_bytes`
+    # is increased: a semicolon-separated batch plans each statement through
+    # here and the session emits one event for the batch.
+    telemetry.add_relations(plan_relations(optimized_plan, shared_ctes))
 
     # Default: build traditional physical plan
     # before we write the new optimizer and execution engine, convert to a V1 plan
@@ -664,8 +673,10 @@ def execute_logical_plan(
     # differs based on what is answering". Externally-supplied plans carry no
     # shared CTEs (a CTE only exists in SQL text).
     from opteryx.planner.data_processed import measure_data_processed
+    from opteryx.planner.data_processed import plan_relations
 
     telemetry.increase("billing_bytes", measure_data_processed(optimized_plan))
+    telemetry.add_relations(plan_relations(optimized_plan))
 
     # Default: build physical plan
     start = time.monotonic_ns()

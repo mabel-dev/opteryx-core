@@ -31,6 +31,19 @@ class _QueryTelemetry:
         self._reading["operations"] = {}
         self._reading["optimizer_trace"] = []
         self._reading["optimizer_decisions"] = []
+        # Relations the planned statement(s) read, as `plan_relations` resolved
+        # them. Predefined because `_reading` defaults to 0 and a bare
+        # `defaultdict(int)` would hand the first caller an integer to add to.
+        #
+        # TWO readings, because the two billing events have different scopes.
+        # `relations` accumulates over a semicolon-separated batch, matching the
+        # one DATA_PROCESSED_BYTES event the session emits per execute().
+        # `statement_relations` holds only the statement just planned, matching
+        # QUERY_EXECUTION, which is emitted once PER STATEMENT and whose `query`
+        # is that statement's own text. Reporting the running union there would
+        # make the second statement of `A; B;` claim it read A.
+        self._reading["relations"] = set()
+        self._reading["statement_relations"] = []
 
     def _ns_to_s(self, nano_seconds: int) -> float:
         """convert elapsed ns to s"""
@@ -51,6 +64,22 @@ class _QueryTelemetry:
 
     def increase(self, attr: str, amount: float = 1.0):
         self._reading[attr] += amount
+
+    def add_relations(self, relations):
+        """Record the relations a planned statement reads.
+
+        A union, not an assignment: a semicolon-separated batch plans each
+        statement through the planner separately but the session emits ONE
+        billing event for the batch, so the second statement's relations must
+        add to the first's rather than replace them - exactly the reasoning
+        that makes `billing_bytes` an `increase`. Assigning here would make the
+        event report only the last statement's relations while reporting every
+        statement's bytes, and a consumer joining the two would attribute the
+        whole batch's volume to a fraction of its tables.
+        """
+        relations = list(relations)
+        self._reading["relations"].update(relations)
+        self._reading["statement_relations"] = relations
 
     def add_message(self, message: str):
         """collect warnings"""
@@ -101,6 +130,12 @@ class _QueryTelemetry:
         # sensor readings (materialised morsel bytes), and ``io_bytes_fetched``,
         # the COMPRESSED volume the IO pipeline measured.
         connector_only_keys = [
+            # Not readings: the relations the plan reads, kept for the billing
+            # events, which take them off the telemetry object directly. Left
+            # out of `as_dict()` because that shape is materialised into API
+            # responses, and a set would not serialise there anyway.
+            "relations",
+            "statement_relations",
             "rows_read",
             "rows_seen",
             "blobs_read",

@@ -224,6 +224,12 @@ class Session(DataFrame):
                 "user": self.context.user,
                 "query_id": self.query_id,
                 "query": operation,
+                # THIS statement's relations, not the batch's. `operation` here
+                # is one statement's text (`_execute_statements` splits before
+                # calling), and this event is emitted once per statement, so the
+                # cumulative reading would attribute earlier statements' tables
+                # to this one.
+                "relations": list(self._telemetry.statement_relations),
             },
         )
 
@@ -254,6 +260,16 @@ class Session(DataFrame):
                 "query_id": self.query_id,
                 "query": operation,
                 "billing_bytes": self._telemetry.billing_bytes,
+                # The relations that figure was measured over. Emitted here as
+                # well as on QUERY_EXECUTION deliberately: this is the event
+                # carrying the volume, so a consumer attributing bytes to
+                # tables reads one row rather than joining two on `query_id`.
+                #
+                # The CUMULATIVE reading, unlike QUERY_EXECUTION's: one of these
+                # is emitted per execute(), and `billing_bytes` beside it is
+                # likewise the whole batch's. The two halves of this event
+                # describe the same scope.
+                "relations": sorted(self._telemetry.relations),
             },
         )
 

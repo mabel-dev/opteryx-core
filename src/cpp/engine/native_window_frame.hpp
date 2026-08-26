@@ -97,12 +97,41 @@ struct FramedWindowGlobal : GlobalSinkState {
 
 // Per-function accumulation domain, chosen from the ARGUMENT column's physical type —
 // the same three-way split native_group_sinks.hpp's GBKind::SumI/SumF/SumD128 uses.
-enum class AggDomain : uint8_t { I64 = 0, F64 = 1, I128 = 2 };
+// `Str` is a MIN/MAX-ONLY domain: the string family has a byte-lexicographic
+// order (sort_type_is_string / SortKeyCmp's string arm) but no arithmetic, so
+// SUM/AVG over it are rejected at plan time (compiler.py's FramedWindowNode
+// branch) and refused again below. Unlike the other three domains its result
+// is not a scalar — a string MIN/MAX carries the WINNING SOURCE ROW forward and
+// the emit re-gathers the bytes, rather than copying them twice.
+enum class AggDomain : uint8_t { I64 = 0, F64 = 1, I128 = 2, Str = 3 };
 
 inline AggDomain framed_agg_domain(DrakenType t) {
     if (t == DRAKEN_DECIMAL128) return AggDomain::I128;
     if (t == DRAKEN_FLOAT32 || t == DRAKEN_FLOAT64) return AggDomain::F64;
+    if (sort_type_is_string(t)) return AggDomain::Str;
     return AggDomain::I64;
+}
+
+// (pointer, length) of one non-null string row, read through the CANONICAL
+// layout (`data` is the DrakenStringArena struct — see sort.hpp's note on the
+// two conventions). Never called for a null row: validity is the caller's
+// dimension, exactly as in build_sort_keys.
+struct FramedStrRef { const uint8_t* p; uint32_t len; };
+
+inline FramedStrRef framed_read_str(const DrakenVector& v, uint32_t row) {
+    const DrakenStringArena* sa = string_arena_of(v);
+    const DrakenStringSlot* slot = &sa->slots[v.selection[row]];
+    return {reinterpret_cast<const uint8_t*>(str_data(slot, sa->arena)), str_length(slot)};
+}
+
+// Byte-wise compare, shorter prefix first — the SAME ordering SortKeyCmp's
+// string arm defines, so a framed MIN/MAX and an ORDER BY agree on which value
+// is smaller. Keep the two in step.
+inline int framed_cmp_str(const FramedStrRef& a, const FramedStrRef& b) {
+    uint32_t common = a.len < b.len ? a.len : b.len;
+    int r = common ? std::memcmp(a.p, b.p, common) : 0;
+    if (r != 0) return r;
+    return a.len < b.len ? -1 : (a.len > b.len ? 1 : 0);
 }
 
 struct FramedWindowSink : Sink, EmitSubset {
@@ -239,6 +268,10 @@ struct FramedWindowSink : Sink, EmitSubset {
         std::vector<std::vector<int64_t>>  res_i64(nf);
         std::vector<std::vector<double>>   res_f64(nf);
         std::vector<std::vector<__int128>> res_i128(nf);
+        // Str lane only: the GLOBAL row id (flatten_rows space) of the winning
+        // value, re-read by the emit. kNoRow where the frame is empty.
+        std::vector<std::vector<uint32_t>> res_row(nf);
+        constexpr uint32_t kNoRow = UINT32_MAX;
 
         for (size_t f = 0; f < nf; ++f) {
             const FramedAggFnSpec& fs = funcs[f];
@@ -253,6 +286,21 @@ struct FramedWindowSink : Sink, EmitSubset {
                       src[row_m[perm[0]]]->columns[static_cast<size_t>(fs.arg_col)].view.type);
             bool is_float = (dom == AggDomain::F64);
             bool is_i128 = (dom == AggDomain::I128);
+            bool is_str = (dom == AggDomain::Str);
+            if (is_str) {
+                // COUNT never reaches here (its domain is forced to I64 above — it
+                // reads validity, never the value). SUM/AVG over a string have no
+                // meaning; compiler.py rejects them by name and type at plan time,
+                // and this is the backstop for any plan-construction path that
+                // bypasses it — loud, never a garbage answer.
+                if (fs.kind != WinAggFn::Min && fs.kind != WinAggFn::Max) {
+                    err.code = 1;
+                    err.msg = "FramedWindowSink: only MIN and MAX accept a string "
+                              "window aggregate argument";
+                    return;
+                }
+                res_row[f].assign(n, kNoRow);
+            }
 
             std::vector<int64_t> lo(n), hi(n);
             for (size_t i = 0; i < n; ++i) {
@@ -274,7 +322,18 @@ struct FramedWindowSink : Sink, EmitSubset {
                     const DrakenVector& v =
                         src[mi]->columns[static_cast<size_t>(fs.arg_col)].view;
                     if (!sort_row_valid(v, ri)) return;
-                    if (is_i128) {
+                    if (is_str) {
+                        FramedStrRef kv = framed_read_str(v, ri);
+                        while (!dq.empty()) {
+                            auto [bmi, bri] = row_at(dq.back());
+                            FramedStrRef bk = framed_read_str(
+                                src[bmi]->columns[static_cast<size_t>(fs.arg_col)].view, bri);
+                            int c = framed_cmp_str(bk, kv);
+                            bool pop = (fs.kind == WinAggFn::Min) ? (c >= 0) : (c <= 0);
+                            if (!pop) break;
+                            dq.pop_back();
+                        }
+                    } else if (is_i128) {
                         __int128 kv = agg2_read_i128(v, ri);
                         while (!dq.empty()) {
                             auto [bmi, bri] = row_at(dq.back());
@@ -314,11 +373,32 @@ struct FramedWindowSink : Sink, EmitSubset {
                         continue;
                     }
                     res_valid[f][i] = 1;
+                    if (is_str) {
+                        // Carry the winning SOURCE ROW, not the bytes: the emit
+                        // already has to build a consolidated arena block, so
+                        // copying the value here would copy it twice.
+                        res_row[f][i] = perm[static_cast<size_t>(dq.front())];
+                        continue;
+                    }
                     auto [wmi, wri] = row_at(dq.front());
                     const DrakenVector& wv =
                         src[wmi]->columns[static_cast<size_t>(fs.arg_col)].view;
-                    if (is_i128) res_i128[f][i] = agg2_read_i128(wv, wri);
-                    else res_i64[f][i] = agg2_read_raw(wv, wri, is_float);
+                    // The result lane MUST match the lane `emit_framed_column` reads
+                    // for `fs.out_type` — i128 -> res_i128, FLOAT32/FLOAT64 -> res_f64,
+                    // everything else -> res_i64. agg2_read_raw returns a float as the
+                    // DOUBLE's BIT PATTERN in an int64 container, so the float arm has
+                    // to decode it into res_f64; parking those bits in res_i64 left
+                    // res_f64 untouched and every float MIN/MAX emitted 0.0.
+                    if (is_i128) {
+                        res_i128[f][i] = agg2_read_i128(wv, wri);
+                    } else if (is_float) {
+                        int64_t bits = agg2_read_raw(wv, wri, true);
+                        double d;
+                        std::memcpy(&d, &bits, sizeof(d));
+                        res_f64[f][i] = d;
+                    } else {
+                        res_i64[f][i] = agg2_read_raw(wv, wri, false);
+                    }
                 }
                 continue;
             }
@@ -416,6 +496,7 @@ struct FramedWindowSink : Sink, EmitSubset {
                     const FramedAggFnSpec& fs = funcs[f];
                     CxxColumn col = emit_framed_column(fs, res_valid[f], res_i64[f],
                                                        res_f64[f], res_i128[f],
+                                                       res_row[f], src, row_m, row_r,
                                                        static_cast<uint32_t>(start), cn);
                     m->columns.push_back(std::move(col));
                     m->names.push_back(fs.name);
@@ -435,6 +516,98 @@ struct FramedWindowSink : Sink, EmitSubset {
     }
 
 private:
+    // String MIN/MAX emit. `rowv[i]` is the GLOBAL row id (flatten_rows space) of
+    // the winning value for output row i; the bytes are re-read from the source
+    // morsels here. Two-pass build of ONE canonical consolidated block —
+    // [DrakenStringArena header | slots[cn] | arena bytes] with `data` at the
+    // header — the same layout and the same reasoning as sort.hpp's gather_rows
+    // string arm (buffers.h contract). Inline slots carry their own bytes and are
+    // copied whole; only out-of-line ones consume arena.
+    static CxxColumn emit_framed_string_column(const FramedAggFnSpec& fs,
+                                               const std::vector<uint8_t>& valid,
+                                               const std::vector<uint32_t>& rowv,
+                                               const std::vector<MorselPtr>& src,
+                                               const std::vector<uint32_t>& row_m,
+                                               const std::vector<uint32_t>& row_r,
+                                               uint32_t start, uint32_t cn) {
+        size_t col = static_cast<size_t>(fs.arg_col);
+        auto win = [&](uint32_t i) -> const DrakenStringSlot* {
+            uint32_t g = rowv[start + i];
+            const DrakenVector& v = src[row_m[g]]->columns[col].view;
+            return &string_arena_of(v)->slots[v.selection[row_r[g]]];
+        };
+
+        size_t total_arena = 0;
+        bool any_null = false;
+        for (uint32_t i = 0; i < cn; ++i) {
+            if (!valid[start + i]) { any_null = true; continue; }
+            const DrakenStringSlot* slot = win(i);
+            if (!str_is_inline(slot)) total_arena += str_length(slot);
+        }
+
+        size_t vbytes = (static_cast<size_t>(cn) + 7) / 8;
+        uint8_t* vbits = nullptr;
+        if (any_null) {
+            vbits = static_cast<uint8_t*>(draken_malloc(vbytes == 0 ? 1 : vbytes));
+            std::memset(vbits, 0xFF, vbytes == 0 ? 1 : vbytes);
+            for (uint32_t i = 0; i < cn; ++i) {
+                if (!valid[start + i]) vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+            }
+        }
+
+        size_t slots_off = sizeof(DrakenStringArena);
+        size_t arena_off = slots_off
+            + static_cast<size_t>(cn == 0 ? 1 : cn) * sizeof(DrakenStringSlot);
+        uint8_t* blk = static_cast<uint8_t*>(draken_malloc(arena_off + total_arena));
+        auto* sa_out = reinterpret_cast<DrakenStringArena*>(blk);
+        auto* dst = reinterpret_cast<DrakenStringSlot*>(blk + slots_off);
+        uint8_t* out_arena = total_arena > 0 ? blk + arena_off : nullptr;
+        sa_out->slots = dst;
+        sa_out->arena = out_arena;
+        sa_out->length = cn;
+        sa_out->arena_used = total_arena;
+        sa_out->arena_cap = total_arena;
+        sa_out->null_bitmap = nullptr;
+        sa_out->owns_buffers = 0;   // the VectorOwner frees the one block
+        sa_out->payloads_elided = 0;
+        sa_out->type = fs.out_type;
+
+        size_t arena_pos = 0;
+        for (uint32_t i = 0; i < cn; ++i) {
+            if (!valid[start + i]) {
+                std::memset(&dst[i], 0, sizeof(DrakenStringSlot));
+                continue;
+            }
+            uint32_t g = rowv[start + i];
+            const DrakenVector& v = src[row_m[g]]->columns[col].view;
+            const DrakenStringArena* sa = string_arena_of(v);
+            const DrakenStringSlot* slot = &sa->slots[v.selection[row_r[g]]];
+            if (str_is_inline(slot)) {
+                dst[i] = *slot;
+            } else {
+                uint32_t slen = str_length(slot);
+                std::memcpy(out_arena + arena_pos, str_data(slot, sa->arena), slen);
+                str_clone_with_offset(&dst[i], slot, static_cast<uint32_t>(arena_pos));
+                arena_pos += slen;
+            }
+        }
+
+        uint32_t* sel = static_cast<uint32_t*>(
+            draken_malloc((cn == 0 ? 1u : cn) * sizeof(uint32_t)));
+        for (uint32_t i = 0; i < cn; ++i) sel[i] = i;
+        DrakenVector v;
+        v.data = sa_out; v.selection = sel; v.data_length = cn; v.length = cn;
+        v.validity = vbits; v.type = fs.out_type;
+        v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
+        CxxColumn c;
+        c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
+                                              OwnedBuffer<uint8_t>(vbits),
+                                              OwnedBuffer<void>(sel));
+        c.own->logical_type = fs.out_logical;
+        c.view = c.own->vec;
+        return c;
+    }
+
     // Build one output column, [start, start+cn) of the full per-row result arrays,
     // typed per `fs.out_type`. NULL where `valid[i] == 0`.
     static CxxColumn emit_framed_column(const FramedAggFnSpec& fs,
@@ -442,7 +615,14 @@ private:
                                         const std::vector<int64_t>& i64v,
                                         const std::vector<double>& f64v,
                                         const std::vector<__int128>& i128v,
+                                        const std::vector<uint32_t>& rowv,
+                                        const std::vector<MorselPtr>& src,
+                                        const std::vector<uint32_t>& row_m,
+                                        const std::vector<uint32_t>& row_r,
                                         uint32_t start, uint32_t cn) {
+        if (sort_type_is_string(fs.out_type)) {
+            return emit_framed_string_column(fs, valid, rowv, src, row_m, row_r, start, cn);
+        }
         size_t alloc_n = (cn == 0 ? 1 : cn);
         size_t vbytes = (static_cast<size_t>(cn) + 7) / 8;
         uint8_t* vbits = nullptr;

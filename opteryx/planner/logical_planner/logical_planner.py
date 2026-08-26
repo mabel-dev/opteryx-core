@@ -17,9 +17,11 @@ from typing import List, Optional, Tuple
 
 from opteryx.exceptions import (
     InvalidInternalStateError,
+    SqlError,
     UnnamedColumnError,
     UnsupportedSyntaxError,
     compose,
+    did_you_mean,
     md_code,
     md_column,
     md_syntax,
@@ -40,7 +42,7 @@ from opteryx.types.vectors.vector_types import (
     get_vector_source_identifier,
     node_is_vector_query_expression,
 )
-from opteryx.utils import dnf, random_string
+from opteryx.utils import dnf, random_string, suggest_alternative
 
 
 class LogicalPlanStepType(int, Enum):
@@ -937,6 +939,191 @@ def _refuse_window_in_window_spec(spec_nodes: list, clause: str) -> None:
             )
 
 
+def _window_name(identifier: dict) -> str:
+    """The written form of a window name, from the parser's identifier."""
+    return identifier["value"]
+
+
+def _lookup_named_window(identifier: dict, definitions: dict):
+    """The WINDOW clause definition `identifier` refers to.
+
+    Window names are matched case-insensitively, as identifiers are everywhere else
+    in the engine (see `ColumnNotFoundError` on why casing is never the cause).
+    """
+    written = _window_name(identifier)
+    definition = definitions.get(written.lower())
+    if definition is None:
+        raise SqlError(
+            compose(
+                f"Window {md_column(written)} is not defined",
+                did_you_mean(
+                    suggest_alternative(written, [_written for _written, _ in definitions.values()])
+                ),
+                f"Define it in a {md_syntax('window')} clause, for example "
+                f"{md_code(f'WINDOW {written} AS (PARTITION BY column)')}, or write the "
+                f"specification inline in the {md_syntax('over')} clause",
+            )
+        )
+    return definition[1]
+
+
+def _extend_named_window(identifier: dict, spec: dict, definitions: dict) -> dict:
+    """Resolve `OVER (w ...)` — a named window extended by an inline specification.
+
+    Standard SQL calls this inherit-and-extend and it is deliberately one-way: the
+    referencing specification may ADD an ORDER BY and a frame to what the named window
+    supplies, and may not replace anything it already has. The three refusals below are
+    exactly the cases where a replacement was asked for.
+
+    Until this existed the `window_name` on an inline spec was read by nothing, so
+    `SUM(mass) OVER (w)` computed an unpartitioned window: nine rows carrying one global
+    total, with the PARTITION BY the caller wrote in the WINDOW clause discarded. That
+    was the worse half of the named-window defect — a bare `OVER w` at least collapsed
+    the row count, this one kept the shape and changed only the values.
+    """
+    base = _lookup_named_window(identifier, definitions)
+    written = _window_name(identifier)
+
+    if spec["partition_by"]:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"Cannot override the {md_syntax('partition by')} of window "
+                f"{md_column(written)}",
+                "A named window is inherited and extended, not replaced — the "
+                "referencing specification may only add an ORDER BY and a frame",
+                f"Write the specification inline as {md_code('OVER (PARTITION BY ...)')}, "
+                f"or define a second window in the {md_syntax('window')} clause",
+            )
+        )
+    if base["order_by"] and spec["order_by"]:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"Cannot override the {md_syntax('order by')} of window "
+                f"{md_column(written)}",
+                "A named window is inherited and extended, not replaced — an ORDER BY "
+                "can only be added to a named window that does not already have one",
+                f"Write the specification inline as {md_code('OVER (PARTITION BY ... ORDER BY ...)')}, "
+                f"or define a second window in the {md_syntax('window')} clause",
+            )
+        )
+    if base["window_frame"] is not None:
+        raise UnsupportedSyntaxError(
+            compose(
+                f"Window {md_column(written)} cannot be extended because it has a frame",
+                "A frame is the last thing a window specification can gain, so a window "
+                "that already has one has nothing left to inherit and extend",
+                f"Reference it whole as {md_code(f'OVER {written}')}, or define a second "
+                f"window in the {md_syntax('window')} clause",
+            )
+        )
+
+    return {
+        "window_name": None,
+        "partition_by": base["partition_by"],
+        "order_by": base["order_by"] or spec["order_by"],
+        "window_frame": spec["window_frame"],
+    }
+
+
+def _named_window_definitions(select_branch: dict) -> dict:
+    """The statement's WINDOW clause, resolved to a name -> specification map.
+
+    A definition may itself extend an earlier one (`WINDOW w AS (PARTITION BY x), v AS
+    (w ORDER BY y)`), so definitions are resolved in the order they were written and each
+    sees only the ones before it. That ordering is the whole cycle guard: a definition
+    cannot name itself or anything later, so a chain cannot close.
+    """
+    definitions: dict = {}
+    for _identifier, _spec in select_branch.get("named_window") or []:
+        written = _window_name(_identifier)
+        key = written.lower()
+        if key in definitions:
+            raise SqlError(
+                compose(
+                    f"Window {md_column(written)} is defined more than once",
+                    f"Each name in a {md_syntax('window')} clause defines one window",
+                    "Give the second window a different name",
+                )
+            )
+        spec = _spec["WindowSpec"]
+        if spec["window_name"] is not None:
+            spec = _extend_named_window(spec["window_name"], spec, definitions)
+        definitions[key] = (written, spec)
+    return definitions
+
+
+def _resolved_over(over, definitions: dict):
+    """One `over` value, with any reference to a named window substituted out.
+
+    Everything downstream — the ranking/navigation refusals, the framed-aggregate
+    restriction, `_window_spec_nodes`, `_build_window_frame` — reads the parser's inline
+    spec dict. Rather than teach each of them a second spelling, the named spelling stops
+    existing here: by the time the projection is built there are only inline specs, so
+    every rule already enforced for one applies unchanged to the other.
+
+    The two references are not the same thing. `OVER w` uses the named window WHOLE, so
+    it takes the definition verbatim — a frame on it included. `OVER (w ...)` extends it,
+    which is what `_extend_named_window` constrains.
+    """
+    if not isinstance(over, dict):
+        return over
+    if "NamedWindow" in over:
+        return {"WindowSpec": _lookup_named_window(over["NamedWindow"], definitions)}
+    if "WindowSpec" in over:
+        spec = over["WindowSpec"]
+        if spec["window_name"] is not None:
+            return {
+                "WindowSpec": _extend_named_window(spec["window_name"], spec, definitions)
+            }
+    return over
+
+
+def _substitute_named_windows(branch, definitions: dict) -> None:
+    """Rewrite every `over` in one query block, in place.
+
+    Walks the raw AST rather than the built nodes because that is the only place the
+    named spelling exists: `logical_planner_builders` carries an `over` onto the node
+    only when it is an inline `WindowSpec`, and a `NamedWindow` was dropped there
+    silently. Doing it on the AST also reaches every clause at once — projection,
+    QUALIFY, HAVING and the statement's ORDER BY are all built from this branch.
+
+    A nested `Select` or `Query` is a query block of its own and carries its own WINDOW
+    clause scope, so the walk stops at one rather than resolving an inner reference
+    against the outer statement's definitions. Its own call to `inner_query_planner`
+    resolves it.
+    """
+    if isinstance(branch, list):
+        for item in branch:
+            _substitute_named_windows(item, definitions)
+        return
+    if not isinstance(branch, dict):
+        return
+    for key, value in list(branch.items()):
+        if key in ("Select", "Query"):
+            continue
+        if key == "over" and isinstance(value, dict):
+            branch[key] = _resolved_over(value, definitions)
+            continue
+        _substitute_named_windows(value, definitions)
+
+
+def _resolve_named_windows(ast_branch: dict) -> None:
+    """Resolve the query block's WINDOW clause into the windows that reference it.
+
+    Runs before anything is built. A named window that reached the hoist unresolved did
+    not look like a window at all — `over` was never set — so `SUM(mass) OVER w` was
+    planned as an ordinary aggregate and nine rows collapsed to one global total, with no
+    error and no trace of the PARTITION BY the caller wrote.
+    """
+    definitions = _named_window_definitions(ast_branch["Select"])
+    for key, value in ast_branch.items():
+        if key == "Select":
+            for _clause, _value in value.items():
+                _substitute_named_windows(_value, definitions)
+        else:
+            _substitute_named_windows(value, definitions)
+
+
 def _refuse_window_in_having(having) -> None:
     """Refuse a window function written in HAVING.
 
@@ -1686,6 +1873,11 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
 
     inner_plan = LogicalPlan()
     step_id = None
+
+    # The WINDOW clause is resolved into the windows that reference it BEFORE anything is
+    # built, so from here on the named spelling does not exist and every rule written for
+    # an inline OVER (...) applies to it unchanged.
+    _resolve_named_windows(ast_branch)
 
     # TOP used?
     if ast_branch["Select"].get("top") is not None:

@@ -27,10 +27,12 @@ to a point: widen to one bin width about the window's centre and take the bin's
 average density.
 
 Note this matches the eq tier's histogram PROBE, not its final answer -- the eq
-tier then ceilings the density at ~1/ndv (skew undetectable; a separately logged
-defect from the 2026-08-21 estimator audit). So ``BETWEEN x AND x`` and ``= x``
-still disagree, and the test below pins the probe rather than asserting a
-continuity that does not hold.
+tier then scales the probe down to one value's share of its bin
+(``_bin_mass_point_share``; the old ~1/ndv ceiling was removed 2026-08-26). So
+``BETWEEN x AND x`` and ``= x`` still disagree, deliberately -- a point probe
+answers for one value, a range probe for every value inside the window -- and
+the test below pins the probe rather than asserting a continuity that does not
+hold.
 """
 
 import os
@@ -130,12 +132,13 @@ def test_the_widened_probe_is_one_bin_width_about_the_centre():
     assert estimate_selectivity(_between(_LO, _HI), stats) == pytest.approx(expected)
 
 
-def test_the_eq_tier_ndv_ceiling_is_not_applied_to_a_range():
-    """A BETWEEN spans many distinct values, so 1/ndv is not a bound on it.
+def test_no_per_value_scaling_is_applied_to_a_range():
+    """A BETWEEN spans many distinct values, so a per-VALUE share is no bound on it.
 
     Guards against someone "restoring continuity" with ``=`` by copying the eq
-    tier's ``min(density, 1/ndv)`` ceiling over here -- that would reintroduce a
-    near-zero on any wide-domain column with a large NDV.
+    tier's ``_bin_mass_point_share`` scaling (or its pre-2026-08-26 ``1/ndv``
+    ceiling) over here -- either would reintroduce a near-zero on any
+    wide-domain column with a large NDV.
     """
     stats = _stats(_histogram())
     selectivity = estimate_selectivity(_between(_LO, _HI), stats)

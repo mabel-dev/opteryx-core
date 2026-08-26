@@ -38,7 +38,13 @@ from opteryx.exceptions import md_code
 from opteryx.exceptions import md_column
 from opteryx.exceptions import md_syntax
 from opteryx.expression import NodeType
+from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
+
+# Kind code -> function name, INVERTED from the single registry the plan node and the
+# native sink already agree on — so an operand-type refusal here names the function the
+# caller actually wrote, and a new framed aggregate cannot drift out of this mapping.
+_FRAMED_KIND_NAMES = {code: name for name, code in FRAMED_AGGREGATE_FUNCTIONS.items()}
 from opteryx.types.logical_type import rescale_decimal_literal as _rescale_decimal_literal
 
 _MAX_WORKER_CAP = 16
@@ -130,7 +136,9 @@ def _skene_row_group_count(manifest, file_count: int) -> int:
 
 
 def _fold_skene_scan_facts(nplan, telemetry) -> None:
-    """Copy each skene scan's RUN-TIME row-group counts into `native_scan_facts`.
+    """Copy each skene scan's RUN-TIME claim-builder numbers out of its plan:
+    row-group counts into `native_scan_facts`, and the query-wide on-disk byte
+    total into the `io_bytes_claimed` telemetry key.
 
     `scan_facts` is built during compilation, so it can only carry plan-time
     numbers. Skene's row-group skipping is decided in the Source's claim builder,
@@ -148,6 +156,30 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
     plans = getattr(nplan, "skene_scan_plans", None)
     if not plans:
         return
+
+    # Query-wide physical read volume for skene, accumulated BEFORE the
+    # native_scan_facts guard below: the facts dict is a per-node diagnostic and
+    # may be absent, but the byte total is the figure the benchmark series
+    # records and must not be suppressed by a missing diagnostic.
+    #
+    # `io_bytes_claimed`, NOT `io_bytes_fetched`: parquet's counter is measured
+    # by the rugo IO pipeline at the point of TRANSFER, whereas skene mmaps the
+    # file whole and the kernel faults pages in with no user-visible byte count.
+    # This is instead the on-disk extent of the row groups the claim builder
+    # claimed — what a ranged reader WOULD fetch. The two are close in spirit and
+    # are not the same number, so they do not share a name and must not be summed
+    # into one total. Each is comparable against its own history, not the other's.
+    #
+    # A plan that never ran reports None and contributes nothing, so a scan that
+    # was optimized away is not stamped as having claimed 0 bytes.
+    claimed = [
+        value
+        for value in (getattr(plan, "bytes_claimed_on_disk", None) for plan in plans)
+        if value is not None
+    ]
+    if claimed:
+        telemetry._reading["io_bytes_claimed"] = sum(claimed)
+
     facts = telemetry._reading.get("native_scan_facts")
     if not facts:
         return
@@ -2433,7 +2465,31 @@ class _Compiler:
                 arg_idx = layout.index(arg_identity)
                 arg_type = self._layout_type(None, arg_identity)
                 if arg_type not in self._AGG_OPERAND_TYPES:
-                    self._check_key_type("window aggregate", self._layout_name(arg_identity), arg_type)
+                    # Same split the plain (unframed) aggregate gate above makes, in
+                    # the same words: MIN/MAX have a byte-lexicographic string order
+                    # (framed_cmp_str, native_window_frame.hpp) and COUNT only reads
+                    # validity, so both take the string family; SUM/AVG over a string
+                    # have no meaning and are rejected here BY NAME AND TYPE.
+                    #
+                    # This branch used to fall through to `_check_key_type`, whose
+                    # `_KEY_COLUMN_TYPES` admits the whole string family — so
+                    # `SUM(varchar) OVER (ORDER BY ...)` returned garbage and
+                    # `AVG(varchar) OVER (...)` segfaulted, while MIN/MAX returned
+                    # the current row on every row. `_check_key_type` stays as the
+                    # tail for genuinely unorderable types (ARRAY/INTERVAL/VARIANT),
+                    # which is the job it was written for.
+                    _fn_name = _FRAMED_KIND_NAMES[int(_kind_code)]
+                    _string_arg = _fn_name in ("MIN", "MAX", "COUNT") and arg_type in (
+                        DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY)
+                    if not _string_arg:
+                        if arg_type in self._KEY_COLUMN_TYPES:
+                            _unsupported(
+                                f"{md_syntax(_fn_name)} over a column of type "
+                                f"{md_code(_type_name(arg_node.schema_column, arg_type))} "
+                                f"in a window {md_syntax('FRAME')}"
+                            )
+                        self._check_key_type(
+                            "window aggregate", self._layout_name(arg_identity), arg_type)
                 fn_args.append(arg_idx)
 
             py_funcs = []

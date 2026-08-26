@@ -25,6 +25,17 @@ A rejection must be a clean plan-time refusal — UnsupportedSyntaxError — not
 accepted query that quietly ignores the clause. A silently-dropped window spec
 is a wrong answer, not a restriction, so a query that RUNS is a failure of the
 "rejected" claim even though it did not raise.
+
+BOTH SPELLINGS
+
+A specification can be written inline in the OVER clause or NAMED in the
+statement's WINDOW clause, and the catalog claims the two are the same window.
+So every spec literal below is run in both spellings: a rule that held for
+`OVER (ORDER BY id)` and not for `OVER w` would make the catalog's claim false.
+The named spelling used to be the case that got this wrong — the WINDOW clause
+was parsed, dropped, and the window planned as a plain aggregate. What it
+ANSWERS is pinned in tests/sql/test_named_windows.py; what the catalog CLAIMS
+about it is pinned here.
 """
 
 import os
@@ -63,6 +74,18 @@ _CALL = {
 _FRAME = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
 
 
+def _spellings(call: str, spec: str) -> list:
+    """(label, SQL) for the inline and the named spelling of one specification.
+
+    The empty specification has no named spelling — `WINDOW w AS ()` does not parse —
+    so it yields the inline form alone rather than a form that tests the parser.
+    """
+    forms = [("inline", f"SELECT {call} OVER {spec} AS r FROM $planets")]
+    if spec != "()":
+        forms.append(("named", f"SELECT {call} OVER w AS r FROM $planets WINDOW w AS {spec}"))
+    return forms
+
+
 def _runs(sql: str):
     """(ran?, error) — a clean plan-time refusal is a result, not a failure."""
     try:
@@ -83,13 +106,17 @@ def test_ordered_window_spec_order_by(function):
     assert _ORDERED_WINDOW_SPEC["order_by"] == "required"
     call = _CALL[function]
 
-    ran, _ = _runs(f"SELECT {call} OVER (ORDER BY id) AS r FROM $planets")
-    assert ran, f"{function}: an ORDER BY window is required to run"
+    for spelling, sql in _spellings(call, "(ORDER BY id)"):
+        ran, error = _runs(sql)
+        assert ran, f"{function}: an ORDER BY window is required to run ({spelling}: {error})"
 
     for spec in ("()", "(PARTITION BY id)"):
-        ran, error = _runs(f"SELECT {call} OVER {spec} AS r FROM $planets")
-        assert not ran, f"{function} OVER {spec} ran; catalog says ORDER BY is required"
-        assert "ORDER BY" in str(error)
+        for spelling, sql in _spellings(call, spec):
+            ran, error = _runs(sql)
+            assert not ran, (
+                f"{function} OVER {spec} ran ({spelling}); catalog says ORDER BY is required"
+            )
+            assert "ORDER BY" in str(error)
 
 
 @pytest.mark.parametrize("function", sorted(_CALL))
@@ -99,10 +126,12 @@ def test_ordered_window_spec_frame_is_rejected(function):
     call = _CALL[function]
 
     for frame in (_FRAME, "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"):
-        sql = f"SELECT {call} OVER (ORDER BY id {frame}) AS r FROM $planets"
-        ran, error = _runs(sql)
-        assert not ran, f"{function} accepted `{frame}`; catalog says frame is rejected"
-        assert "not supported" in str(error)
+        for spelling, sql in _spellings(call, f"(ORDER BY id {frame})"):
+            ran, error = _runs(sql)
+            assert not ran, (
+                f"{function} accepted `{frame}` ({spelling}); catalog says frame is rejected"
+            )
+            assert "not supported" in str(error)
 
 
 @pytest.mark.parametrize("function", sorted(_CALL))
@@ -112,8 +141,9 @@ def test_ordered_window_spec_partition_by_is_optional(function):
     call = _CALL[function]
 
     for spec in ("(ORDER BY id)", "(PARTITION BY gravity ORDER BY id)"):
-        ran, error = _runs(f"SELECT {call} OVER {spec} AS r FROM $planets")
-        assert ran, f"{function} OVER {spec} refused: {error}"
+        for spelling, sql in _spellings(call, spec):
+            ran, error = _runs(sql)
+            assert ran, f"{function} OVER {spec} refused ({spelling}): {error}"
 
 
 @pytest.mark.parametrize("aggregate", sorted(AGGREGATORS))
@@ -131,17 +161,19 @@ def test_aggregate_window_order_by_and_frame_match_the_support_map(aggregate):
     argument = "*" if aggregate == "COUNT" else "mass"
     call = f"{aggregate}({argument})"
 
-    ran_order, error_order = _runs(f"SELECT {call} OVER (ORDER BY id) AS r FROM $planets")
-    assert ran_order == support["over_order_by"], (
-        f"{aggregate} OVER (ORDER BY id): engine ran={ran_order}, "
-        f"catalog over_order_by={support['over_order_by']} ({error_order})"
-    )
+    for spelling, sql in _spellings(call, "(ORDER BY id)"):
+        ran_order, error_order = _runs(sql)
+        assert ran_order == support["over_order_by"], (
+            f"{aggregate} OVER (ORDER BY id) [{spelling}]: engine ran={ran_order}, "
+            f"catalog over_order_by={support['over_order_by']} ({error_order})"
+        )
 
-    ran_frame, error_frame = _runs(f"SELECT {call} OVER (ORDER BY id {_FRAME}) AS r FROM $planets")
-    assert ran_frame == support["over_frame"], (
-        f"{aggregate} OVER (ORDER BY id {_FRAME}): engine ran={ran_frame}, "
-        f"catalog over_frame={support['over_frame']} ({error_frame})"
-    )
+    for spelling, sql in _spellings(call, f"(ORDER BY id {_FRAME})"):
+        ran_frame, error_frame = _runs(sql)
+        assert ran_frame == support["over_frame"], (
+            f"{aggregate} OVER (ORDER BY id {_FRAME}) [{spelling}]: engine ran={ran_frame}, "
+            f"catalog over_frame={support['over_frame']} ({error_frame})"
+        )
 
 
 def test_framed_aggregate_set_is_the_planners_gate():
@@ -153,8 +185,9 @@ def test_aggregate_window_partition_by_is_optional():
     """`OVER ()` and `OVER (PARTITION BY ...)` both run for a framed aggregate."""
     assert _AGGREGATE_WINDOW_SPEC["partition_by"] == "optional"
     for spec in ("()", "(PARTITION BY gravity)"):
-        ran, error = _runs(f"SELECT SUM(mass) OVER {spec} AS r FROM $planets")
-        assert ran, f"SUM(mass) OVER {spec} refused: {error}"
+        for spelling, sql in _spellings("SUM(mass)", spec):
+            ran, error = _runs(sql)
+            assert ran, f"SUM(mass) OVER {spec} refused ({spelling}): {error}"
 
 
 def test_window_frames_restriction_is_claimed_supported():
@@ -232,6 +265,22 @@ def test_moving_frame_differs_from_the_running_one():
     assert moving != runningv, (
         "a 1 PRECEDING frame answering the unbounded one means the bound was ignored"
     )
+
+
+def test_named_windows_restriction_is_claimed_supported():
+    """The catalog claims the named spelling exists; every test above runs it."""
+    named = export_window_catalog()["restrictions"]["named_windows"]
+    assert named["supported"] is True
+
+
+def test_named_and_inline_spellings_of_one_spec_are_one_column():
+    """The catalog claims the two spellings dedup onto one computed column."""
+    table = execute_and_get_arrow(
+        "SELECT SUM(mass) OVER w AS a, SUM(mass) OVER (PARTITION BY gravity) AS b "
+        "FROM $planets WINDOW w AS (PARTITION BY gravity)"
+    )
+    assert table.num_rows == 9
+    assert table.column("a").to_pylist() == table.column("b").to_pylist()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -3765,21 +3765,41 @@ struct GroupBySink : Sink {
 
 // ---- DistinctSink -------------------------------------------------------------------
 
+// One worker's locally-new rows for ONE hash partition. Bucketed at sink time by
+// the top kGBPartShift bits of the dedup hash — the same partitioning GroupBySink
+// uses — so the cross-worker dedup can run per-partition in parallel at finalize.
+struct DistinctPart {
+    std::vector<uint64_t> hashes;         // dedup hash per kept row
+    std::vector<uint32_t> ref_m, ref_r;   // (morsel, row) of each locally-new row
+};
+// One worker's queued contribution to a partition. `base` is where that worker's
+// retained morsels landed in the global morsel list, applied to ref_m at merge time
+// (not under the combine lock).
+struct DistinctChunk {
+    uint32_t base;
+    DistinctPart part;
+};
+
 struct DistinctLocal : LocalSinkState {
     opteryx::carchar::CarcharSet seen;    // per-worker dedup on the 64-bit key hash
     opteryx::parvi::ParviSet small;       // low-card front set (kDistinctParviGateNDV)
     bool use_parvi = false;               // armed by DistinctSink when the estimate is low
     std::vector<MorselPtr> morsels;       // source morsels a kept row references
-    std::vector<uint64_t> kept_hashes;    // parallel to (ref_m,ref_r); carried to combine
-    std::vector<uint32_t> ref_m, ref_r;   // (morsel, row) of each locally-new row
+    std::array<DistinctPart, kGBParts> parts;   // locally-new rows, hash-partitioned
     std::vector<uint64_t> rowh;           // per-morsel scratch: dense per-row hash
     std::vector<int32_t> newidx;          // per-morsel scratch: indices of locally-new rows
 };
 struct DistinctGlobal : GlobalSinkState {
     std::mutex mtx;
-    opteryx::carchar::CarcharSet seen;    // global dedup on the 64-bit key hash
     std::vector<MorselPtr> morsels;
-    std::vector<uint32_t> ref_m, ref_r;
+    // Per-partition queues of worker contributions. combine() only MOVES into these
+    // (O(kGBParts) under the mutex); the cross-worker dedup itself happens in
+    // finalize(), in parallel across disjoint partitions. The old design deduped in
+    // combine() through one global CarcharSet under this mutex — measured on TPC-H
+    // SF100 q22 (GROUP BY o_custkey, 10M distinct in 150M rows) that serialized
+    // ~6M surviving rows PER WORKER through one lock: 3.4 cores busy at dop=16 and
+    // wall time RISING past dop=4.
+    std::array<std::vector<DistinctChunk>, kGBParts> pending;
 };
 
 struct DistinctSink : Sink {
@@ -3868,9 +3888,11 @@ struct DistinctSink : Sink {
         l.morsels.push_back(in);   // retain: a kept row references it
         for (size_t j = 0; j < nnew; ++j) {
             uint32_t row = static_cast<uint32_t>(l.newidx[j]);
-            l.ref_m.push_back(mi);
-            l.ref_r.push_back(row);
-            l.kept_hashes.push_back(l.rowh[row]);
+            uint64_t h = l.rowh[row];
+            DistinctPart& P = l.parts[h >> kGBPartShift];
+            P.hashes.push_back(h);
+            P.ref_m.push_back(mi);
+            P.ref_r.push_back(row);
         }
         return SinkResult::CONTINUE;
     }
@@ -3881,29 +3903,90 @@ struct DistinctSink : Sink {
         std::lock_guard<std::mutex> lk(g.mtx);
         uint32_t base = static_cast<uint32_t>(g.morsels.size());
         for (MorselPtr& m : l.morsels) g.morsels.push_back(std::move(m));
-        for (size_t i = 0; i < l.kept_hashes.size(); ++i) {
-            if (g.seen.insert_or_ignore(l.kept_hashes[i])) {
-                g.ref_m.push_back(base + l.ref_m[i]);
-                g.ref_r.push_back(l.ref_r[i]);
-            }
+        // Queue, never merge, under the lock: O(kGBParts) moves per worker. The
+        // per-row cross-worker dedup runs partition-parallel in finalize().
+        for (size_t p = 0; p < kGBParts; ++p) {
+            if (!l.parts[p].hashes.empty())
+                g.pending[p].push_back(DistinctChunk{base, std::move(l.parts[p])});
         }
     }
 
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<DistinctGlobal&>(gs);
-        size_t total = g.ref_m.size();
+        size_t total = 0;
+        size_t nonempty_parts = 0;
+        for (size_t p = 0; p < kGBParts; ++p) {
+            size_t pe = 0;
+            for (const DistinctChunk& c : g.pending[p]) pe += c.part.hashes.size();
+            total += pe;
+            if (pe > 0) ++nonempty_parts;
+        }
         if (total == 0 || g.morsels.empty()) return;
         const std::vector<std::string>& names = g.morsels.front()->names;
-        // gather_rows indexes rows by GLOBAL row id via (row_m, row_r) maps — here
-        // the refs already ARE (morsel, row) pairs, so feed them through directly.
-        std::vector<uint32_t> order(total);
-        for (size_t i = 0; i < total; ++i) order[i] = static_cast<uint32_t>(i);
-        for (size_t start = 0; start < total; start += chunk_rows) {
-            size_t count = std::min(chunk_rows, total - start);
-            MorselPtr m = gather_rows(g.morsels, order, start, count, g.ref_m, g.ref_r,
-                                      names, err);
-            if (err.code != 0) return;
-            out->morsels.push_back(std::move(m));
+        // Same adaptive one-shot pool-let as GroupBySink::finalize: partitions are
+        // disjoint by hash, so they dedup AND emit in parallel; output order across
+        // partitions is unspecified — exactly SQL's contract for DISTINCT / GROUP BY
+        // without ORDER BY (and the compiler never dop-1-pins this sink's consumer).
+        unsigned hw = std::thread::hardware_concurrency();
+        unsigned nt = hw > 2 ? hw - 2 : 1;
+        if (nt > 16) nt = 16;
+        if (nt > nonempty_parts) nt = static_cast<unsigned>(nonempty_parts);
+        if (total < 65536) nt = 1;   // small distinct: inline, no threads
+        if (nt < 1) nt = 1;
+        std::atomic<size_t> next_part{0};
+        std::mutex out_mtx;
+        std::vector<ErrCtx> errs(nt);
+        auto worker = [&](unsigned tid) {
+            std::vector<MorselPtr> local_out;
+            std::vector<uint32_t> rm, rr;      // partition survivors: (morsel, row)
+            std::vector<int32_t> newi;         // per-chunk scratch
+            for (;;) {
+                size_t p = next_part.fetch_add(1);
+                if (p >= kGBParts) break;
+                auto& list = g.pending[p];
+                if (list.empty()) continue;
+                size_t ptotal = 0;
+                for (const DistinctChunk& c : list) ptotal += c.part.hashes.size();
+                opteryx::carchar::CarcharSet seen;
+                seen.reserve(ptotal);
+                rm.clear(); rr.clear();
+                for (const DistinctChunk& c : list) {
+                    size_t n = c.part.hashes.size();
+                    newi.resize(n);
+                    size_t nn = seen.mark_new_indices_32(c.part.hashes.data(),
+                                                         newi.data(), n);
+                    for (size_t j = 0; j < nn; ++j) {
+                        uint32_t i = static_cast<uint32_t>(newi[j]);
+                        rm.push_back(c.base + c.part.ref_m[i]);
+                        rr.push_back(c.part.ref_r[i]);
+                    }
+                }
+                size_t kept = rm.size();
+                if (kept == 0) continue;
+                // gather_rows indexes rows by GLOBAL row id via (row_m, row_r) maps —
+                // here the refs already ARE (morsel, row) pairs, so feed them through.
+                std::vector<uint32_t> order(kept);
+                for (size_t i = 0; i < kept; ++i) order[i] = static_cast<uint32_t>(i);
+                for (size_t start = 0; start < kept; start += chunk_rows) {
+                    size_t count = std::min(chunk_rows, kept - start);
+                    MorselPtr m = gather_rows(g.morsels, order, start, count, rm, rr,
+                                              names, errs[tid]);
+                    if (errs[tid].code != 0) return;
+                    local_out.push_back(std::move(m));
+                }
+            }
+            if (!local_out.empty()) {
+                std::lock_guard<std::mutex> lk(out_mtx);
+                for (MorselPtr& m : local_out) out->morsels.push_back(std::move(m));
+            }
+        };
+        std::vector<std::thread> threads;
+        threads.reserve(nt > 0 ? nt - 1 : 0);
+        for (unsigned t = 1; t < nt; ++t) threads.emplace_back(worker, t);
+        worker(0);
+        for (std::thread& t : threads) t.join();
+        for (unsigned t = 0; t < nt; ++t) {
+            if (errs[t].code != 0) { err = errs[t]; return; }
         }
     }
 };
@@ -3914,11 +3997,12 @@ struct DistinctSink : Sink {
 // morsel's partition columns (compute_row_hashes — the same 64-bit hash-only
 // identity contract GROUP BY/DISTINCT use) and maintains, per worker, a bounded
 // max-heap of the K best rows per partition hash — O(log K) per row instead of an
-// O(n log n) sort of every row. combine() merges each worker's per-partition heaps
-// into one global map (bounded: at most K survivors per partition per worker, so
-// the merge is cheap regardless of n). finalize() sorts each partition's <= K
-// survivors by the order key (cheap — K is small) to assign sequential
-// ROW_NUMBERs, and emits.
+// O(n log n) sort of every row, bucketed by the top hash bits (kGBParts). combine()
+// only QUEUES each worker's bucket maps under the global mutex (O(kGBParts) moves —
+// bounded per bucket: at most K survivors per partition per worker). finalize()
+// merges the queued worker heaps bucket-parallel (buckets are disjoint by hash),
+// sorts each partition's <= K survivors by the order key (cheap — K is small) to
+// assign sequential ROW_NUMBERs, and emits.
 //
 // Scope: the compiler only routes here when there is exactly one ROW_NUMBER
 // function (no RANK/DENSE_RANK — tie handling needs the full rank first, see
@@ -3970,12 +4054,21 @@ using WindowTopKHeapMap = std::unordered_map<uint64_t, std::vector<WindowTopKCan
 
 struct WindowTopKLocal : LocalSinkState {
     std::vector<MorselPtr> morsels;
-    WindowTopKHeapMap heaps;
+    // Heaps bucketed by the top kGBPartShift bits of the partition hash (the same
+    // partitioning GroupBySink/DistinctSink use) so the cross-worker merge can run
+    // per-bucket in parallel at finalize.
+    std::array<WindowTopKHeapMap, kGBParts> heaps;
 };
 struct WindowTopKGlobal : GlobalSinkState {
     std::mutex mtx;
     std::vector<MorselPtr> morsels;
-    WindowTopKHeapMap heaps;
+    // Per-bucket queues of (morsel base, worker heap map). combine() only MOVES into
+    // these (O(kGBParts) under the mutex); the heap merge itself happens in
+    // finalize(), in parallel across disjoint buckets. The old design offered every
+    // worker candidate into one global map under this mutex — measured on h2o g8
+    // (1M partitions × 16 workers) that serialized ~16M map probes through one lock:
+    // 17.2s of combine wall against a 3.5s pipeline.
+    std::array<std::vector<std::pair<uint32_t, WindowTopKHeapMap>>, kGBParts> pending;
 };
 
 struct WindowTopKSink : Sink {
@@ -4021,7 +4114,8 @@ struct WindowTopKSink : Sink {
             c.valid = ok ? 1 : 0;
             c.morsel_idx = mi;
             c.row = r;
-            window_topk_offer(l.heaps[phashes[r]], c, k, better);
+            uint64_t ph = phashes[r];
+            window_topk_offer(l.heaps[ph >> kGBPartShift][ph], c, k, better);
         }
         return SinkResult::CONTINUE;
     }
@@ -4029,35 +4123,104 @@ struct WindowTopKSink : Sink {
     void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx&) override {
         auto& g = static_cast<WindowTopKGlobal&>(gs);
         auto& l = static_cast<WindowTopKLocal&>(ls);
-        WindowTopKBetter better{ascending};
         std::lock_guard<std::mutex> lk(g.mtx);
         uint32_t base = static_cast<uint32_t>(g.morsels.size());
         for (MorselPtr& m : l.morsels) g.morsels.push_back(std::move(m));
-        for (auto& [phash, local_heap] : l.heaps) {
-            std::vector<WindowTopKCandidate>& global_heap = g.heaps[phash];
-            for (WindowTopKCandidate c : local_heap) {
-                c.morsel_idx += base;
-                window_topk_offer(global_heap, c, k, better);
-            }
+        // Queue, never merge, under the lock: O(kGBParts) moves per worker. The
+        // per-candidate merge runs bucket-parallel in finalize().
+        for (size_t p = 0; p < kGBParts; ++p) {
+            if (!l.heaps[p].empty())
+                g.pending[p].emplace_back(base, std::move(l.heaps[p]));
         }
     }
 
     void finalize(GlobalSinkState& gs, ErrCtx& err) override {
         auto& g = static_cast<WindowTopKGlobal&>(gs);
-        if (g.heaps.empty() || g.morsels.empty()) return;
+        if (g.morsels.empty()) return;
+        // Gate on queued PARTITION entries (map.size() is O(1)), not candidates —
+        // candidates are at most k per entry, so this is the same scale and avoids
+        // walking millions of map nodes serially just to pick a thread count.
+        size_t entry_total = 0;
+        size_t nonempty_buckets = 0;
+        for (size_t p = 0; p < kGBParts; ++p) {
+            size_t pe = 0;
+            for (const auto& [base, hm] : g.pending[p]) pe += hm.size();
+            entry_total += pe;
+            if (pe > 0) ++nonempty_buckets;
+        }
+        if (entry_total == 0) return;
 
         WindowTopKBetter better{ascending};
+        // Merge phase: buckets are disjoint by partition-hash bits, so each bucket's
+        // worker-heap merge, per-partition sort and ROW_NUMBER assignment run in
+        // parallel (adaptive one-shot pool-let — same idiom as GroupBySink::finalize).
+        // Each bucket fills its own slot of per-bucket row lists; the slots
+        // concatenate afterwards so the emission phase below is untouched.
+        std::array<std::vector<uint32_t>, kGBParts> b_row_m, b_row_r;
+        std::array<std::vector<int64_t>, kGBParts> b_rn;
+        {
+            unsigned hw = std::thread::hardware_concurrency();
+            unsigned mnt = hw > 2 ? hw - 2 : 1;
+            if (mnt > 16) mnt = 16;
+            if (mnt > nonempty_buckets) mnt = static_cast<unsigned>(nonempty_buckets);
+            if (entry_total < 65536) mnt = 1;   // small window: inline, no threads
+            if (mnt < 1) mnt = 1;
+            std::atomic<size_t> next_bucket{0};
+            auto merge_worker = [&](unsigned) {
+                for (;;) {
+                    size_t p = next_bucket.fetch_add(1);
+                    if (p >= kGBParts) break;
+                    auto& list = g.pending[p];
+                    if (list.empty()) continue;
+                    // Merge worker maps in queue order; rebase morsel refs here (not
+                    // under the combine lock).
+                    WindowTopKHeapMap merged = std::move(list[0].second);
+                    uint32_t base0 = list[0].first;
+                    if (base0 != 0) {
+                        for (auto& [phash, heap] : merged)
+                            for (WindowTopKCandidate& c : heap) c.morsel_idx += base0;
+                    }
+                    for (size_t i = 1; i < list.size(); ++i) {
+                        uint32_t base = list[i].first;
+                        for (auto& [phash, local_heap] : list[i].second) {
+                            std::vector<WindowTopKCandidate>& heap = merged[phash];
+                            for (WindowTopKCandidate c : local_heap) {
+                                c.morsel_idx += base;
+                                window_topk_offer(heap, c, k, better);
+                            }
+                        }
+                    }
+                    for (auto& [phash, heap] : merged) {
+                        // Best-first: `a` sorts before `b` iff `a` ranks better.
+                        std::sort(heap.begin(), heap.end(), better);
+                        int64_t pos = 1;
+                        for (const WindowTopKCandidate& c : heap) {
+                            b_row_m[p].push_back(c.morsel_idx);
+                            b_row_r[p].push_back(c.row);
+                            b_rn[p].push_back(pos++);
+                        }
+                    }
+                    // Free this bucket's queued worker maps HERE, on the pool-let,
+                    // not at global-state destruction: at 1M partitions × dop
+                    // workers that is millions of map nodes, and freeing them
+                    // serially after the pipeline measured ~1.8s of invisible
+                    // teardown wall.
+                    list.clear();
+                    list.shrink_to_fit();
+                }
+            };
+            std::vector<std::thread> mthreads;
+            mthreads.reserve(mnt > 0 ? mnt - 1 : 0);
+            for (unsigned t = 1; t < mnt; ++t) mthreads.emplace_back(merge_worker, t);
+            merge_worker(0);
+            for (std::thread& t : mthreads) t.join();
+        }
         std::vector<uint32_t> row_m, row_r;
         std::vector<int64_t> rn;
-        for (auto& [phash, heap] : g.heaps) {
-            // Best-first: `a` sorts before `b` iff `a` ranks better than `b`.
-            std::sort(heap.begin(), heap.end(), better);
-            int64_t pos = 1;
-            for (const WindowTopKCandidate& c : heap) {
-                row_m.push_back(c.morsel_idx);
-                row_r.push_back(c.row);
-                rn.push_back(pos++);
-            }
+        for (size_t p = 0; p < kGBParts; ++p) {
+            row_m.insert(row_m.end(), b_row_m[p].begin(), b_row_m[p].end());
+            row_r.insert(row_r.end(), b_row_r[p].begin(), b_row_r[p].end());
+            rn.insert(rn.end(), b_rn[p].begin(), b_rn[p].end());
         }
         size_t total = row_m.size();
         if (total == 0) return;

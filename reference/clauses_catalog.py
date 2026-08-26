@@ -534,6 +534,8 @@ CLAUSE_DEFINITIONS = {
             "aggregate(expr) OVER (PARTITION BY expr [, ...])",
             "aggregate(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
             "aggregate(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...] [ROWS|RANGE BETWEEN ...])",
+            "window_function(...) OVER window_name",
+            "window_function(...) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]] [ROWS|RANGE BETWEEN ...])",
         ],
         "summary": "Compute a value across a window of rows without collapsing them.",
         "documentation": (
@@ -550,7 +552,13 @@ CLAUSE_DEFINITIONS = {
             "AVG, COUNT, MAX, MIN and SUM, the five aggregates with a running/framed "
             "implementation. Every other aggregate refuses both. The window functions "
             "themselves, and which aggregates are legal in which aggregate-window "
-            "form, are in windows.json."
+            "form, are in windows.json. The specification may be written INLINE, as "
+            "above, or NAMED once in the statement's WINDOW clause and referenced by "
+            "name - `OVER w`, and `OVER (w ORDER BY ...)` to inherit it and extend it. "
+            "The two spellings are the same window: the name is resolved into the "
+            "specification before the statement is planned, so every rule here applies "
+            "to both, and a named and an inline spelling of one specification are "
+            "computed once. See the WINDOW clause."
         ),
         "notes": (
             "A frame specification (ROWS/RANGE BETWEEN) is supported on aggregate "
@@ -881,6 +889,46 @@ CLAUSE_DEFINITIONS = {
         "summary": "Filter rows.",
         "documentation": "WHERE conditions are rewritten into filters and may be optimized or pushed down.",
         "notes": "Predicate pushdown and boolean simplification operate on WHERE clauses.",
+    },
+    "window": {
+        "canonical_name": "WINDOW",
+        "planner_entry": "plan_query",
+        "scope": "query_clause",
+        "status": "supported",
+        "syntax_forms": [
+            "WINDOW name AS (window_specification)",
+            "WINDOW name AS (window_specification) [, name AS (window_specification) ...]",
+            "WINDOW name AS (other_name [ORDER BY expr [ASC|DESC] [, ...]] [ROWS|RANGE BETWEEN ...])",
+        ],
+        "summary": "Name a window specification once and reference it from OVER.",
+        "documentation": (
+            "WINDOW defines named window specifications for the query block it is "
+            "written in, so a specification used by several window functions is written "
+            "once. A name is referenced from OVER in two ways: `OVER w` uses the named "
+            "window WHOLE, and `OVER (w ...)` INHERITS it and extends it. Names are "
+            "resolved into the specifications they stand for before the statement is "
+            "planned, so a named window is not a second kind of window - it is the same "
+            "window, and every rule the OVER clause states applies to it unchanged. Two "
+            "spellings of one specification are also the same COLUMN: "
+            "`SUM(x) OVER w, SUM(x) OVER (PARTITION BY k)` over `WINDOW w AS (PARTITION "
+            "BY k)` is computed once. Names are matched case-insensitively, as "
+            "identifiers are everywhere else. The clause is written after HAVING and "
+            "before QUALIFY."
+        ),
+        "notes": (
+            "Inheriting and extending is one-way: the referencing specification may ADD "
+            "an ORDER BY and a frame to what the named window supplies, and may not "
+            "replace anything it already has. Three cases are rejected at plan time - a "
+            "PARTITION BY on the referencing specification, an ORDER BY on it when the "
+            "named window already has one, and a reference that extends a named window "
+            "carrying a FRAME, which has nothing left to gain. `OVER w` is not subject "
+            "to any of these: it uses the window whole, frame included. A definition may "
+            "itself extend an EARLIER definition in the same clause, and only an earlier "
+            "one - a name cannot refer to itself or to one defined after it, so a chain "
+            "cannot close. A name defined twice is rejected, as is a reference to a name "
+            "that is not defined. Each query block has its own WINDOW clause: a "
+            "subquery neither sees nor is seen by the definitions around it."
+        ),
     },
     "with": {
         "canonical_name": "WITH",

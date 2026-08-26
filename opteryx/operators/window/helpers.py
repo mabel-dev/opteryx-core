@@ -97,6 +97,15 @@ FRAMED_AGGREGATE_FUNCTIONS: dict[str, int] = {
     "MAX": 4,
 }
 
+# Of those, the ones whose DISTINCT variant is a DIFFERENT computation — the sink
+# runs its sliding distinct-multiset path for these (FramedAggFnSpec::distinct).
+# MIN/MAX are deliberately absent, and that is not a gap: an extremum cannot be
+# changed by removing duplicates, so MIN(DISTINCT x)/MAX(DISTINCT x) OVER (...) is
+# the plain sliding-extremum answer and is lowered to it rather than paying for a
+# multiset that could not alter the result. Anything NOT in FRAMED_AGGREGATE_FUNCTIONS
+# is refused with or without DISTINCT, so this set only ever narrows that one.
+FRAMED_DISTINCT_AGGREGATE_FUNCTIONS: frozenset = frozenset({"SUM", "COUNT", "AVG"})
+
 # name -> engine kind code (must match FrameUnits in native_window_frame.hpp).
 FRAME_UNITS: dict[str, int] = {
     "ROWS": 0,

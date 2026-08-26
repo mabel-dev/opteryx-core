@@ -411,10 +411,22 @@ class SkeneClaimSet {
     // did all the work (docs/RUNTIME_MINMAX_FILTER_DESIGN.md §6.2).
     bool build(const std::vector<std::string>& files, const SkeneZoneMap& zone,
                int64_t* out_total, int64_t* out_pruned, std::string& err_buf,
-               size_t runtime_from = 0, int64_t* out_pruned_runtime = nullptr) {
+               size_t runtime_from = 0, int64_t* out_pruned_runtime = nullptr,
+               int64_t* out_bytes_claimed = nullptr) {
         int64_t total = 0;
         int64_t pruned = 0;
         int64_t pruned_runtime = 0;
+        // On-disk DATA+INDEX extent of the row groups this scan CLAIMS, summed
+        // from the file footer's row group directory — already parsed here, so it
+        // costs one add per surviving row group and no extra IO.
+        //
+        // It is the WHOLE row group, every column. The per-column extents live in
+        // the row group's own footer, and parsing that is precisely the cost this
+        // claim builder exists to avoid. So this number moves with FILE and ROW
+        // GROUP pruning and is BLIND to projection: narrowing the read set does
+        // not lower it. Anything comparing read volume across projections needs a
+        // different measure, not this one.
+        int64_t bytes_claimed = 0;
         if (out_pruned_runtime == nullptr) runtime_from = zone.size();
         mappings_.reserve(files.size());
         for (size_t i = 0; i < files.size(); ++i) {
@@ -473,6 +485,7 @@ class SkeneClaimSet {
                     if (static_cast<size_t>(proof) >= runtime_from) pruned_runtime += 1;
                     continue;
                 }
+                bytes_claimed += static_cast<int64_t>(metadata.row_groups[g].byte_bytes);
                 claims_.push_back(SkeneClaim{static_cast<uint32_t>(i), g});
             }
             mappings_.push_back(std::move(mapping));
@@ -480,6 +493,7 @@ class SkeneClaimSet {
         if (out_total != nullptr) *out_total = total;
         if (out_pruned != nullptr) *out_pruned = pruned;
         if (out_pruned_runtime != nullptr) *out_pruned_runtime = pruned_runtime;
+        if (out_bytes_claimed != nullptr) *out_bytes_claimed = bytes_claimed;
         return true;
     }
 
@@ -565,7 +579,8 @@ class NativeSkeneScanSource : public Source {
                           SkeneZoneMap zone,
                           int64_t* row_groups_total,
                           int64_t* row_groups_pruned,
-                          int64_t* row_groups_pruned_runtime = nullptr)
+                          int64_t* row_groups_pruned_runtime = nullptr,
+                          int64_t* bytes_claimed = nullptr)
         : files_(files),
           column_names_(column_names),
           out_identities_(out_identities),
@@ -578,6 +593,7 @@ class NativeSkeneScanSource : public Source {
           row_groups_total_(row_groups_total),
           row_groups_pruned_(row_groups_pruned),
           row_groups_pruned_runtime_(row_groups_pruned_runtime),
+          bytes_claimed_(bytes_claimed),
           narrows_(emit_indices_ != nullptr && !is_identity_emit(*emit_indices,
                                                                  column_names->size())) {}
 
@@ -603,7 +619,8 @@ class NativeSkeneScanSource : public Source {
             // path.
             if (runtime_.empty()) {
                 g.init_ok = g.work.build(*files_, zone_, row_groups_total_,
-                                         row_groups_pruned_, g.init_err);
+                                         row_groups_pruned_, g.init_err,
+                                         0, nullptr, bytes_claimed_);
                 // Left UNWRITTEN (at its -1 sentinel) on purpose: the telemetry
                 // fold reports the runtime count only when a bound was actually
                 // wired, so "the filter did not fire here" stays distinguishable
@@ -638,7 +655,7 @@ class NativeSkeneScanSource : public Source {
             int64_t pruned_runtime = 0;
             g.init_ok = g.work.build(*files_, effective, row_groups_total_,
                                      row_groups_pruned_, g.init_err,
-                                     runtime_from, &pruned_runtime);
+                                     runtime_from, &pruned_runtime, bytes_claimed_);
             if (row_groups_pruned_runtime_ != nullptr)
                 *row_groups_pruned_runtime_ = pruned_runtime;
         });
@@ -834,6 +851,9 @@ class NativeSkeneScanSource : public Source {
     int64_t* row_groups_total_;
     int64_t* row_groups_pruned_;
     int64_t* row_groups_pruned_runtime_;
+    // On-disk extent of the CLAIMED row groups; same lifetime and single-write
+    // contract as the three counters above.
+    int64_t* bytes_claimed_;
     // Runtime min/max join filter — OWNED (not borrowed): a handful of strings
     // and pointers, appended at plan time (see add_runtime_bound below) AFTER
     // this Source was constructed, because the probe scan is compiled before the

@@ -232,10 +232,9 @@ def _selectivity_eq(identity: bytes, literal_value, stats: RelationStatistics) -
                     below = _count_up_to(dgram, lit_f - bin_width / 2.0)
                     above = _count_up_to(dgram, lit_f + bin_width / 2.0)
                     density = (above - below) / total
-                    ndv = col.distinct_count if col is not None else None
-                    if ndv and ndv > 0:
-                        density = min(density, max(1.0 / ndv, density / max(ndv, 1)))
-                    return _clamp01(density)
+                    return _clamp01(
+                        _bin_mass_point_share(density, bins_len, col.distinct_count)
+                    )
                 if span == 0:
                     return 1.0 if lit_f == dgram.min else 0.0
 
@@ -346,7 +345,8 @@ def _selectivity_in(identity: bytes, literal_value, stats: RelationStatistics) -
         if total > 0 and dgram.bin_count > 0:
             span = dgram.max - dgram.min
             if span > 0:
-                bin_width = span / dgram.bin_count
+                bins_len = dgram.bin_count
+                bin_width = span / bins_len
                 accumulated = 0.0
                 coerced_any = False
                 for v in values:
@@ -356,7 +356,14 @@ def _selectivity_in(identity: bytes, literal_value, stats: RelationStatistics) -
                     coerced_any = True
                     below = _count_up_to(dgram, f - bin_width / 2.0)
                     above = _count_up_to(dgram, f + bin_width / 2.0)
-                    accumulated += (above - below) / total
+                    # Same per-value share as _selectivity_eq -- each member is
+                    # a point probe, so `x IN (v)` and `x = v` must agree.
+                    # Before 2026-08-26 this tier accumulated RAW bin mass (no
+                    # scaling at all) while eq ceilinged at 1/ndv, so the two
+                    # spellings disagreed in both directions.
+                    accumulated += _bin_mass_point_share(
+                        (above - below) / total, bins_len, col.distinct_count
+                    )
                 if coerced_any:
                     return _clamp01(accumulated)
 
@@ -404,13 +411,13 @@ def _selectivity_between(node, stats: RelationStatistics) -> float:
             # knows at this resolution.
             #
             # This matches the eq tier's HISTOGRAM PROBE, not its final answer:
-            # `_selectivity_eq` then ceilings the density at ~1/ndv, which makes
-            # skew undetectable and is a separately logged defect (2026-08-21
-            # estimator audit). No such ceiling is applied here -- a BETWEEN
-            # window spans many distinct values, so 1/ndv is not even the right
-            # shape of bound for it. The two tiers therefore do NOT agree
-            # end-to-end at a degenerate `BETWEEN x AND x`; closing that gap
-            # means revisiting the eq ceiling, which is not this change.
+            # `_selectivity_eq` then scales the probe's mass down to one
+            # value's share of its bin (_bin_mass_point_share). No such
+            # scaling applies here -- a BETWEEN window spans many distinct
+            # values, so the whole window's mass IS the answer. The two tiers
+            # therefore still do not agree end-to-end at a degenerate
+            # `BETWEEN x AND x`, deliberately: a point probe answers for one
+            # value, a range probe answers for every value inside it.
             bins_len = dgram.bin_count
             span = dgram.max - dgram.min
             if bins_len > 1 and span > 0:
@@ -499,6 +506,43 @@ def _to_float(value) -> Optional[float]:
 
 def _count_up_to(dgram, value: float) -> float:
     return count_up_to(dgram, value)
+
+
+def _bin_mass_point_share(density: float, bin_count: int, ndv: Optional[int]) -> float:
+    """One value's share of a bin-width histogram probe's mass.
+
+    The eq/in-list histogram probes widen a point literal to one bin width
+    (the histogram's real resolution -- see the sub-bin fabrication note in
+    _selectivity_between), so the mass that comes back belongs to EVERY
+    distinct value that landed in that bin; handed back raw it overestimates
+    by however many values share the bin. A Distogram bin carries a value and
+    a row count, not a distinct count, so the share has to be derived:
+    assuming distinct values spread evenly ACROSS bins, one bin holds
+    ~ndv/bin_count of them, and one value's share of its bin's mass is
+    density * bin_count / ndv.
+
+    When ndv <= bin_count a bin holds ~one distinct value and the probe's
+    mass already IS the point density -- returned unscaled. Same when NDV is
+    unknown: raw density, matching _selectivity_starts_with's >=8-byte
+    point-density tier, which faces the identical question and returns the
+    unscaled probe.
+
+    Replaces (2026-08-26) ``min(density, max(1/ndv, density/ndv))``: dividing
+    by the whole-column ndv over-divides by a factor of bin_count, and the
+    max() rescue floor -- always the larger term, since density <= 1 --
+    reduced the entire expression to ``min(density, 1/ndv)``, a ceiling at
+    the uniform estimate. Under that ceiling the histogram could lower an
+    equality estimate but never raise one, which made frequency skew
+    structurally invisible (the 2026-08-21 estimator audit's "eq tier
+    ceilinged by 1/ndv" defect): a value holding 36% of a 215-NDV column
+    estimated at 0.47%, 78x under, and every join above the scan inherited
+    the miss. This share is still not an MCV list -- a value that dominates
+    its own BIN is still averaged against its bin-mates -- but the histogram's
+    signal now moves the answer in both directions instead of one.
+    """
+    if ndv and ndv > bin_count > 0:
+        return density * bin_count / ndv
+    return density
 
 
 # Textbook default for an inequality between two columns (`a.x < b.y`) with no

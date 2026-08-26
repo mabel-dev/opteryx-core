@@ -184,7 +184,8 @@ class NativeSkeneLatmatScanSource : public Source {
                                 int64_t topn_limit,
                                 SkeneZoneMap zone,
                                 int64_t* row_groups_total,
-                                int64_t* row_groups_pruned)
+                                int64_t* row_groups_pruned,
+                                int64_t* bytes_claimed = nullptr)
         : files_(files),
           p1_column_names_(p1_column_names),
           p1_column_types_(p1_column_types),
@@ -201,7 +202,8 @@ class NativeSkeneLatmatScanSource : public Source {
           topn_limit_(topn_limit),
           zone_(zone),
           row_groups_total_(row_groups_total),
-          row_groups_pruned_(row_groups_pruned) {}
+          row_groups_pruned_(row_groups_pruned),
+          bytes_claimed_(bytes_claimed) {}
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         return std::make_unique<SkeneLatmatGlobal>();
@@ -219,7 +221,8 @@ class NativeSkeneLatmatScanSource : public Source {
         // pass-1 failure so the barrier is released rather than parked on.
         std::call_once(g.init, [&g, this] {
             g.init_ok = g.work_set.build(*files_, zone_, row_groups_total_,
-                                         row_groups_pruned_, g.init_err);
+                                         row_groups_pruned_, g.init_err,
+                                         0, nullptr, bytes_claimed_);
         });
         if (!g.init_ok) {
             {
@@ -586,6 +589,9 @@ class NativeSkeneLatmatScanSource : public Source {
     SkeneZoneMap zone_;
     int64_t* row_groups_total_;
     int64_t* row_groups_pruned_;
+    // On-disk extent of the CLAIMED row groups — see SkeneClaimSet::build. Claim
+    // time covers BOTH passes, since pass 2 draws from pass 1's survivors.
+    int64_t* bytes_claimed_;
 };
 
 }  // namespace opteryx::engine

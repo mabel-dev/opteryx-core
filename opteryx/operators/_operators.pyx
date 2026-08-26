@@ -269,7 +269,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[int64_t]* zone_ordinals,
                                           int64_t* row_groups_total,
                                           int64_t* row_groups_pruned,
-                                          int64_t* row_groups_pruned_runtime)
+                                          int64_t* row_groups_pruned_runtime,
+                                          int64_t* bytes_claimed)
         size_t new_runtime_bound()
         void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
         void set_skene_latmat_scan_source(size_t p,
@@ -289,7 +290,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[int]* zone_ops,
                                           const cppvector[int64_t]* zone_ordinals,
                                           int64_t* row_groups_total,
-                                          int64_t* row_groups_pruned)
+                                          int64_t* row_groups_pruned,
+                                          int64_t* bytes_claimed)
         void set_native_scan_source(size_t p, ParquetIOPipeline* pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
                                     const cppvector[pair[string, int]]* work_items,
@@ -2132,6 +2134,14 @@ cdef class SkeneScanPlan:
     # CorrelatedFiltersStrategy already pushes min/max range predicates onto this
     # same scan, so an unsplit counter would misattribute its pruning.
     cdef int64_t row_groups_pruned_runtime
+    # On-disk DATA+INDEX extent of the row groups the claim builder CLAIMED,
+    # from the file footer's row group directory. Written under the same
+    # call_once as the counts above; -1 means "the scan never ran".
+    #
+    # Whole row groups, every column — see SkeneClaimSet::build. It moves with
+    # file and row-group pruning and NOT with projection, which is why it is not
+    # named for bytes "read" or "processed".
+    cdef int64_t bytes_claimed
     # The plan node this scan belongs to, so the post-run fold can find its
     # scan_facts entry. Set by the compiler; None means "do not report".
     cdef public object scan_identity
@@ -2165,6 +2175,7 @@ cdef class SkeneScanPlan:
         self.row_groups_total = -1
         self.row_groups_pruned = -1
         self.row_groups_pruned_runtime = -1
+        self.bytes_claimed = -1
         self.scan_identity = None
         for zone_term in zone_terms or []:
             zone_name, zone_op, zone_ordinal = zone_term
@@ -2195,6 +2206,20 @@ cdef class SkeneScanPlan:
         if self.row_groups_total < 0 or self.row_groups_pruned_runtime < 0:
             return None
         return int(self.row_groups_pruned_runtime)
+
+    @property
+    def bytes_claimed_on_disk(self):
+        """On-disk DATA+INDEX extent of the row groups this scan claimed, or
+        None before it has run.
+
+        WHOLE row groups, every column — the per-column extents live in each row
+        group's own footer, which the claim builder deliberately does not parse.
+        So this tracks file and row-group pruning and is BLIND to projection: a
+        query reading one column of a row group reports the same bytes as one
+        reading all of them."""
+        if self.bytes_claimed < 0:
+            return None
+        return int(self.bytes_claimed)
 
 
 cdef class SkeneLatmatScanPlan:
@@ -2235,6 +2260,10 @@ cdef class SkeneLatmatScanPlan:
     # argument and why -1 rather than 0 is the "never ran" marker.
     cdef int64_t row_groups_total
     cdef int64_t row_groups_pruned
+    # On-disk DATA+INDEX extent of the claimed row groups. Claim time covers both
+    # passes, so this is the whole scan's figure — see SkeneScanPlan.bytes_claimed
+    # for why it is blind to projection.
+    cdef int64_t bytes_claimed
     cdef public object scan_identity
 
     def __init__(self, list files, list p1_column_names, list p1_column_types,
@@ -2273,6 +2302,7 @@ cdef class SkeneLatmatScanPlan:
             self.pred_col_to_p1.push_back(<int>position)
         self.row_groups_total = -1
         self.row_groups_pruned = -1
+        self.bytes_claimed = -1
         self.scan_identity = None
         for zone_term in zone_terms or []:
             zone_name, zone_op, zone_ordinal = zone_term
@@ -2289,6 +2319,16 @@ cdef class SkeneLatmatScanPlan:
         if self.row_groups_total < 0:
             return None
         return (int(self.row_groups_total), int(self.row_groups_pruned))
+
+    @property
+    def bytes_claimed_on_disk(self):
+        """On-disk DATA+INDEX extent of the row groups this scan claimed, or None
+        before it has run. Same contract and same blind spot as
+        SkeneScanPlan.bytes_claimed_on_disk; pruning at claim time covers both
+        passes, so this is the whole scan's figure and not just pass 1's."""
+        if self.bytes_claimed < 0:
+            return None
+        return int(self.bytes_claimed)
 
 
 cdef void _fill_payload_types(list types, object logical, object element,
@@ -2522,7 +2562,7 @@ cdef class NativePlan:
                 NULL, 0, col_idx, lit_dv, _expr_filter_tramp,
                 &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
                 &splan.row_groups_total, &splan.row_groups_pruned,
-                &splan.row_groups_pruned_runtime)
+                &splan.row_groups_pruned_runtime, &splan.bytes_claimed)
             return
         if not bytecode_is_c_native_predicate(filter_bc):
             raise ValueError("set_native_skene_scan_source requires a c-native "
@@ -2540,7 +2580,7 @@ cdef class NativePlan:
             _expr_filter_tramp,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
             &splan.row_groups_total, &splan.row_groups_pruned,
-            &splan.row_groups_pruned_runtime)
+            &splan.row_groups_pruned_runtime, &splan.bytes_claimed)
 
     def new_runtime_bound(self):
         """Allocate an UNFILLED runtime min/max bound slot and return its index.
@@ -2585,7 +2625,8 @@ cdef class NativePlan:
             <void*>pred_fn, <void*>pred_ctx, &splan.pred_col_to_p1,
             sort_p1_index, sort_ascending, topn_limit,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
-            &splan.row_groups_total, &splan.row_groups_pruned)
+            &splan.row_groups_total, &splan.row_groups_pruned,
+            &splan.bytes_claimed)
 
     def set_native_scan_source(self, size_t p, NativeScanPlan splan, object row_limit=None):
         """Source = the fully-native parquet scan (NativeParquetScanSource): workers

@@ -76,7 +76,7 @@ from typing import Optional
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
-__all__ = ["measure_data_processed"]
+__all__ = ["iter_scan_nodes", "measure_data_processed", "plan_relations"]
 
 
 # The planner's one-row stand-in for a statement with no FROM clause, and for a
@@ -104,6 +104,109 @@ def _scan_bytes(node, base_stats_cache: Optional[dict]) -> int:
     )
 
 
+def iter_scan_nodes(plan: LogicalPlan, shared_ctes: Optional[dict] = None):
+    """Every Scan node this plan reads, once each.
+
+    The one traversal both the meter and `plan_relations` run on. They MUST see
+    the same scans: a bill that counts a CTE body and a relation list that does
+    not (or the reverse) describes two different queries, and whichever
+    consumer joins them later has no way to tell which is wrong. Sharing the
+    walk makes that class of disagreement unrepresentable rather than merely
+    unlikely.
+
+    `shared_ctes` is the plan's materialized-CTE bodies. Their scans are NOT in
+    the main graph — the body executes once off to the side — so they must be
+    walked explicitly or a CTE over a large table bills nothing. Yielded once
+    each, which is also how often they run, however many refs point at them.
+
+    Yields nothing for an EXPLAIN. It plans the query and then describes it:
+    nothing is read, nothing is billed, and nothing is recorded as having been
+    touched. Checked on the whole forest rather than the exit point alone —
+    Explain sits ABOVE Exit, so an exit-point test would miss it.
+    """
+    from opteryx.planner.relation_resolver import iter_plan_forest
+
+    for _, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Explain:
+            return
+
+    seen_plans: set = set()
+
+    def _walk(one_plan):
+        # iter_plan_forest covers plans embedded in node properties (expression
+        # subqueries hold whole plans off to the side) and dedupes by object
+        # identity — one expression object is routinely reachable from several
+        # nodes, and counting its plan twice would double-bill it.
+        for sub_plan in iter_plan_forest(one_plan):
+            if id(sub_plan) in seen_plans:
+                continue
+            seen_plans.add(id(sub_plan))
+            for _, node in sub_plan.nodes(True):
+                if node.node_type == LogicalPlanStepType.Scan:
+                    yield node
+
+    yield from _walk(plan)
+    for body in (shared_ctes or {}).values():
+        if isinstance(body, LogicalPlan):
+            yield from _walk(body)
+
+
+def _scan_relation(node) -> Optional[str]:
+    """The name a Scan node read, as a consumer outside the engine can use it.
+
+    For a catalog-backed scan that is `workspace.collection.dataset` — assembled
+    from the connector rather than from `node.relation`, because what the user
+    typed may be unqualified (the workspace comes from the session, not the
+    statement) and an unqualified name cannot be joined back to a catalog
+    entry. The connector holds the resolved workspace and the catalog-relative
+    identifier, which are exactly the two halves of the identifier
+    `catalog.load_dataset()` takes.
+
+    Every other connector yields `node.relation` as bound: lower-cased, and
+    whatever the user named. Their `dataset` attribute is a filesystem path by
+    then, not an identifier, so it is deliberately not used.
+
+    `$no_table` yields None. It is the planner's one-row stand-in for a
+    statement with no FROM clause, not a relation anyone named — the same
+    reason the meter bills it zero.
+    """
+    relation = getattr(node, "relation", None)
+    if not relation or relation == _NO_TABLE:
+        return None
+
+    connector = getattr(node, "connector", None)
+    workspace = getattr(connector, "workspace", None)
+    dataset = getattr(connector, "dataset", None)
+    if workspace and dataset:
+        return f"{workspace}.{dataset}"
+    return str(relation)
+
+
+def plan_relations(plan: LogicalPlan, shared_ctes: Optional[dict] = None) -> list:
+    """The relations this plan reads, sorted, deduplicated.
+
+    Recorded so that consumers of the billing event can attribute a query to
+    the things it touched without re-binding the SQL. That question has exactly
+    one correct answer and the engine already knows it here; recovering it
+    downstream would mean a second implementation of name resolution that can
+    disagree with this one.
+
+    Sorted because the list is compared and grouped downstream, and a set's
+    iteration order would make two identical queries produce two different
+    payloads. Deduplicated because a self-join reads one relation, twice — the
+    count of scans is a plan property, not a usage fact.
+    """
+    return sorted(
+        {
+            name
+            for name in (
+                _scan_relation(node) for node in iter_scan_nodes(plan, shared_ctes)
+            )
+            if name
+        }
+    )
+
+
 def measure_data_processed(
     plan: LogicalPlan,
     base_stats_cache: Optional[dict] = None,
@@ -118,41 +221,10 @@ def measure_data_processed(
     `base_stats_cache` is the query's scan-statistics memo (threaded from
     `plan_query`); passing it makes this walk effectively free when the
     optimizer has already costed the same scans.
-
-    `shared_ctes` is the plan's materialized-CTE bodies. Their scans are NOT in
-    the main graph — the body executes once off to the side — so they must be
-    walked explicitly or a CTE over a large table bills nothing. Counted once
-    each, which is also how often they run, however many refs point at them.
     """
-    from opteryx.planner.relation_resolver import iter_plan_forest
-
-    # EXPLAIN plans the query and then describes it. Nothing is read, so
-    # nothing is billed. Checked on the whole forest rather than the exit
-    # point alone: Explain sits ABOVE Exit, so an exit-point test would miss it.
-    for nid, node in plan.nodes(True):
-        if node.node_type == LogicalPlanStepType.Explain:
-            return 0
-
-    total = 0
-    seen_plans: set = set()
-
-    def _walk(one_plan) -> None:
-        nonlocal total
-        # iter_plan_forest covers plans embedded in node properties (expression
-        # subqueries hold whole plans off to the side) and dedupes by object
-        # identity — one expression object is routinely reachable from several
-        # nodes, and counting its plan twice would double-bill it.
-        for sub_plan in iter_plan_forest(one_plan):
-            if id(sub_plan) in seen_plans:
-                continue
-            seen_plans.add(id(sub_plan))
-            for nid, node in sub_plan.nodes(True):
-                if node.node_type == LogicalPlanStepType.Scan:
-                    total += _scan_bytes(node, base_stats_cache)
-
-    _walk(plan)
-    for body in (shared_ctes or {}).values():
-        if isinstance(body, LogicalPlan):
-            _walk(body)
-
-    return int(total)
+    return int(
+        sum(
+            _scan_bytes(node, base_stats_cache)
+            for node in iter_scan_nodes(plan, shared_ctes)
+        )
+    )

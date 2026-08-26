@@ -91,7 +91,8 @@ _KEYWORDS: List[str] = [
     # keywords above. Sorted, because none of them is the more common reading of
     # any near-miss - the ordering rule only decides ties.
     "ANTI", "MATERIALIZED", "NATURAL", "OPTIMIZE", "OWNER", "QUALIFY", "REFRESH",
-    "RESUME", "SEMI", "SNAPSHOTS", "SUSPEND", "TOP", "TRIGGERS", "VERSION",
+    "MERGE", "RESUME", "SEMI", "SNAPSHOTS", "SUSPEND", "TOP", "TRIGGERS",
+    "VERSION", "WINDOW",
 ]
 
 

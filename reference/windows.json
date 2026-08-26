@@ -9,7 +9,9 @@
             "documentation": "The number of rows up to and including the current row's LAST TIED PEER, divided by the number of rows in the partition. The value spans the HALF-OPEN interval (0, 1]: the last row is always 1, and no row is ever 0 because every row counts itself - which is the difference from PERCENT_RANK. Rows equal on the ORDER BY key all take the value of their group's last member, so the answer does not depend on the order tied rows arrive in.",
             "sql_forms": [
                 "CUME_DIST() OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "CUME_DIST() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "CUME_DIST() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "CUME_DIST() OVER window_name",
+                "CUME_DIST() OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [],
             "returns": "FLOAT",
@@ -30,7 +32,9 @@
             "documentation": "1-based. Rows equal on the ORDER BY key share a rank and the following rank does not skip, so a two-way tie for first yields 1, 1, 2 - the ranks are contiguous. Ties are resolved by the ORDER BY key alone, so the answer does not depend on the order tied rows arrive in.",
             "sql_forms": [
                 "DENSE_RANK() OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "DENSE_RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "DENSE_RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "DENSE_RANK() OVER window_name",
+                "DENSE_RANK() OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [],
             "returns": "INTEGER",
@@ -51,7 +55,9 @@
             "documentation": "FIRST_VALUE(expr) evaluates `expr` on the partition's first row and repeats it on every row of that partition. The result's type is the ARGUMENT's type. IGNORE NULLS / RESPECT NULLS is not supported - it changes WHICH row is read, so it is refused rather than accepted and ignored; a NULL first row yields NULL. Computed over the WHOLE ordered partition: this engine rejects a frame clause on the window functions, so the standard's default frame (RANGE UNBOUNDED PRECEDING AND CURRENT ROW) has no spelling here. For FIRST_VALUE the two readings agree. Rows that tie on the ORDER BY key sit in an unspecified order, so over a non-total ORDER BY which row is first - and therefore the answer - is not deterministic.",
             "sql_forms": [
                 "FIRST_VALUE(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "FIRST_VALUE(expr) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "FIRST_VALUE(expr) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "FIRST_VALUE(expr) OVER window_name",
+                "FIRST_VALUE(expr) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [
                 {
@@ -77,7 +83,9 @@
             "documentation": "LAG(expr) reads the previous row's value of `expr`; LAG(expr, offset) reads the row `offset` rows earlier. Rows closer to the start of their partition than the offset return NULL. The offset must be a non-negative integer literal and defaults to 1; offset 0 is the current row. The result's type is the ARGUMENT's type. The 3-argument default form is not supported - wrap the result: COALESCE(LAG(expr), default) - and neither is IGNORE NULLS / RESPECT NULLS. Rows that tie on the ORDER BY key sit in an unspecified order, so over a non-total ORDER BY the neighbouring row - and therefore the answer - is not deterministic.",
             "sql_forms": [
                 "LAG(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
-                "LAG(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])"
+                "LAG(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+                "LAG(expr) OVER window_name",
+                "LAG(expr) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [
                 {
@@ -110,7 +118,9 @@
             "documentation": "LAST_VALUE(expr) evaluates `expr` on the partition's last row and repeats it on every row of that partition. The result's type is the ARGUMENT's type. IGNORE NULLS / RESPECT NULLS is not supported - it changes WHICH row is read, so it is refused rather than accepted and ignored; a NULL last row yields NULL. IMPORTANT - this is the WHOLE-PARTITION reading, which DIFFERS from the SQL standard's default frame: under RANGE UNBOUNDED PRECEDING AND CURRENT ROW, LAST_VALUE returns the CURRENT row's last tied peer rather than the partition's last row, which is why LAST_VALUE is a well-known footgun elsewhere. This engine rejects a frame clause on the window functions, so that frame-relative reading has no spelling here and the whole-partition reading - what ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING means, and what callers almost always intend - is the only one. Rows that tie on the ORDER BY key sit in an unspecified order, so over a non-total ORDER BY which row is last - and therefore the answer - is not deterministic.",
             "sql_forms": [
                 "LAST_VALUE(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "LAST_VALUE(expr) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "LAST_VALUE(expr) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "LAST_VALUE(expr) OVER window_name",
+                "LAST_VALUE(expr) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [
                 {
@@ -136,7 +146,9 @@
             "documentation": "LEAD(expr) reads the next row's value of `expr`; LEAD(expr, offset) reads the row `offset` rows later. Rows closer to the end of their partition than the offset return NULL. The offset must be a non-negative integer literal and defaults to 1; offset 0 is the current row. The result's type is the ARGUMENT's type. The 3-argument default form is not supported - wrap the result: COALESCE(LEAD(expr), default) - and neither is IGNORE NULLS / RESPECT NULLS. Rows that tie on the ORDER BY key sit in an unspecified order, so over a non-total ORDER BY the neighbouring row - and therefore the answer - is not deterministic.",
             "sql_forms": [
                 "LEAD(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
-                "LEAD(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])"
+                "LEAD(expr, offset) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
+                "LEAD(expr) OVER window_name",
+                "LEAD(expr) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [
                 {
@@ -169,7 +181,9 @@
             "documentation": "NTH_VALUE(expr, n) evaluates `expr` on the partition's nth row - counting from 1 - and repeats it on every row of that partition. A partition with FEWER THAN n rows yields NULL for all of them. The position must be an integer literal of 1 or more; it cannot be a column, because the row it selects must be known before any row is read. The result's type is the ARGUMENT's type. IGNORE NULLS / RESPECT NULLS is not supported, and neither is FROM FIRST / FROM LAST - counting is always from the first row. Computed over the WHOLE ordered partition, which DIFFERS from the SQL standard's default frame - see LAST_VALUE for why. Rows that tie on the ORDER BY key sit in an unspecified order, so over a non-total ORDER BY which row is nth - and therefore the answer - is not deterministic.",
             "sql_forms": [
                 "NTH_VALUE(expr, n) OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "NTH_VALUE(expr, n) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "NTH_VALUE(expr, n) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "NTH_VALUE(expr, n) OVER window_name",
+                "NTH_VALUE(expr, n) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [
                 {
@@ -201,7 +215,9 @@
             "documentation": "NTILE(buckets) splits a partition of n rows into `buckets` groups as evenly as n divides: the first (n mod buckets) groups take one row more than the rest, and every group is contiguous in the ORDER BY order. When buckets is GREATER than n the first n buckets take one row each and the remainder are empty - no row is ever given a bucket number above n, so a 10-bucket decile over 3 rows yields 1, 2, 3 and not 1, 4, 8. The bucket count must be an integer literal of 1 or more; it cannot be a column, because the bucket sizes depend on it before any row is read. Rows that tie on the ORDER BY key are NOT kept together - tied rows sit in an unspecified order and can fall either side of a bucket boundary - so the result is only reproducible when the ORDER BY is a total order over the partition.",
             "sql_forms": [
                 "NTILE(buckets) OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "NTILE(buckets) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "NTILE(buckets) OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "NTILE(buckets) OVER window_name",
+                "NTILE(buckets) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [
                 {
@@ -229,7 +245,9 @@
             "documentation": "(RANK - 1) / (partition rows - 1). The first row of every partition is 0 and the last is 1, so the value spans the CLOSED interval [0, 1] - unlike CUME_DIST, which is never 0. A partition of ONE row has no spread to be a fraction of and the result is 0, not a division by zero. Rows equal on the ORDER BY key share a RANK and therefore share a percent rank, so the answer does not depend on the order tied rows arrive in.",
             "sql_forms": [
                 "PERCENT_RANK() OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "PERCENT_RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "PERCENT_RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "PERCENT_RANK() OVER window_name",
+                "PERCENT_RANK() OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [],
             "returns": "FLOAT",
@@ -250,7 +268,9 @@
             "documentation": "1-based. Rows equal on the ORDER BY key share a rank, and the following rank skips the ties it jumped over, so a two-way tie for first yields 1, 1, 3. Ties are resolved by the ORDER BY key alone, so the answer does not depend on the order tied rows arrive in.",
             "sql_forms": [
                 "RANK() OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "RANK() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "RANK() OVER window_name",
+                "RANK() OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [],
             "returns": "INTEGER",
@@ -271,7 +291,9 @@
             "documentation": "Every row in a partition gets a distinct number, so the numbering is a permutation of 1..n. Rows that tie on the ORDER BY key are numbered in an unspecified order: the result is only reproducible when the ORDER BY is a total order over the partition. The operator emits rows in the window's sort order (partition keys, then order keys) - SQL guarantees no ordering without a top-level ORDER BY, so add one if the output order matters.",
             "sql_forms": [
                 "ROW_NUMBER() OVER (ORDER BY expr [ASC|DESC] [, ...])",
-                "ROW_NUMBER() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])"
+                "ROW_NUMBER() OVER (PARTITION BY expr [, ...] ORDER BY expr [ASC|DESC] [, ...])",
+                "ROW_NUMBER() OVER window_name",
+                "ROW_NUMBER() OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])"
             ],
             "parameters": [],
             "returns": "INTEGER",
@@ -292,7 +314,9 @@
             "aggregate(expr) OVER ()",
             "aggregate(expr) OVER (PARTITION BY expr [, ...])",
             "aggregate(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
-            "aggregate(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...] [frame])"
+            "aggregate(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...] [frame])",
+            "aggregate(expr) OVER window_name",
+            "aggregate(expr) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]] [frame])"
         ],
         "window_spec": {
             "over": "required",
@@ -416,6 +440,10 @@
             "supported": true,
             "clean_error": true,
             "detail": "A frame specification (ROWS/RANGE BETWEEN) is supported on AGGREGATE windows, for the five aggregates that have a running/framed implementation - AVG, COUNT, MAX, MIN, SUM - and rejected everywhere else, at plan time, in four distinct cases. (1) On a ranking, navigation or value function a frame is rejected outright: those are always computed over the whole ordered partition. (2) On any other aggregate the whole running/framed form is rejected, ORDER BY and frame alike - `STDDEV(x) OVER (ORDER BY d)` refuses with `only AVG, COUNT, MAX, MIN, SUM support a running/framed window`. (3) A frame with no ORDER BY in the same OVER (...) is rejected: a frame is relative to a current row, and with no ordering there is none. (4) The frame's own shape is restricted - the units must be ROWS or RANGE (GROUPS is rejected), a RANGE frame takes only UNBOUNDED PRECEDING, CURRENT ROW and UNBOUNDED FOLLOWING (a numeric PRECEDING/FOLLOWING offset is rejected; use ROWS), a ROWS offset must be a non-negative integer literal, and the start bound may not come after the end bound. An ORDER BY with no explicit frame is not one of these cases: it gets the standard's default frame, RANGE UNBOUNDED PRECEDING AND CURRENT ROW."
+        },
+        "named_windows": {
+            "supported": true,
+            "detail": "A window specification may be NAMED once in the query block's WINDOW clause and referenced from OVER, instead of being written inline: `SELECT SUM(mass) OVER w FROM $planets WINDOW w AS (PARTITION BY gravity)`. Two references exist and they differ. `OVER w` uses the named window WHOLE, frame included. `OVER (w ...)` INHERITS it and EXTENDS it, which is one-way: the referencing specification may add an ORDER BY and a frame to what the named window supplies and may not replace anything it already has, so a PARTITION BY on it, an ORDER BY on it when the named window already has one, and extending a named window that carries a frame are each rejected at plan time. A definition may extend an EARLIER definition in the same clause and only an earlier one, so a chain cannot close; a duplicate name and an undefined name are both rejected. Resolution happens BEFORE the statement is planned, which is what makes the named spelling equivalent rather than parallel: every rule on this page applies to it unchanged - a ranking function over a named window with no ORDER BY is refused exactly as the inline form is - and a named and an inline spelling of one specification are the same column, computed once. Each query block has its own WINDOW clause; a subquery neither sees nor is seen by the definitions around it."
         },
         "with_group_by": {
             "supported": false,

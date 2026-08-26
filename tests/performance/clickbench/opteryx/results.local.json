@@ -63,8 +63,8 @@ make clickbench-skene (11.24s) (17-AUG) [1.05x]
 (10.65 seconds) <- DuckDB Baseline
 
 make tpch-sf1    (758.5ms) (20-AUG) [SF1] [2.18x]
-make tpch-sf10   (3551.4ms) (20-AUG) [SF10] [0.85x]
-make tpch-sf100  (42490.9ms) (22-AUG) [SF100] [1.39x]
+make tpch-sf10   (3550.9ms) (26-AUG) [SF10] [0.85x]
+make tpch-sf100  (41179.9ms) (26-AUG) [SF100] [1.35x]
 make tpcds-sf1   (25.6s) (25-AUG) [1 fails] [SF1]
 make tpcds-sf001 (18.3s) (25-AUG) [1 fails] [SF001]
 make medicare1   (426.3ms) (25-AUG) [2.63x]

@@ -365,6 +365,22 @@ def _default_sql_forms(function: str) -> list[str]:
     ]
 
 
+def _with_named_forms(forms: list[str]) -> list[str]:
+    """Every OVER (...) also has a NAMED spelling, so every form comes in pairs.
+
+    Derived from the inline forms rather than restated beside them: the two spellings
+    are resolved to the same specification before planning, so a named form that could
+    drift from its inline twin would be documenting a distinction the engine does not
+    have. The call shape is the part before OVER, which is what the two share.
+    """
+    call = forms[0].split(" OVER ", 1)[0]
+    return [
+        *forms,
+        f"{call} OVER window_name",
+        f"{call} OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]])",
+    ]
+
+
 def _aggregate_window_support() -> OrderedDict[str, dict[str, bool]]:
     """Which aggregates are legal in which window form - derived, not restated.
 
@@ -413,7 +429,9 @@ def export_window_catalog() -> OrderedDict[str, Any]:
             "status": "supported",
             "summary": entry["summary"],
             "documentation": entry["documentation"],
-            "sql_forms": entry.get("sql_forms") or _default_sql_forms(function),
+            "sql_forms": _with_named_forms(
+                entry.get("sql_forms") or _default_sql_forms(function)
+            ),
             "parameters": [dict(p) for p in entry.get("parameters", [])],
             "returns": entry.get("returns", "INTEGER"),
             "deterministic": entry["deterministic"],
@@ -446,6 +464,8 @@ def export_window_catalog() -> OrderedDict[str, Any]:
             "aggregate(expr) OVER (PARTITION BY expr [, ...])",
             "aggregate(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
             "aggregate(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...] [frame])",
+            "aggregate(expr) OVER window_name",
+            "aggregate(expr) OVER (window_name [ORDER BY expr [ASC|DESC] [, ...]] [frame])",
         ],
         "window_spec": dict(_AGGREGATE_WINDOW_SPEC),
         "support": _aggregate_window_support(),
@@ -474,6 +494,31 @@ def export_window_catalog() -> OrderedDict[str, Any]:
                 "An ORDER BY with no explicit frame is not one of these cases: it gets "
                 "the standard's default frame, RANGE UNBOUNDED PRECEDING AND CURRENT "
                 "ROW."
+            ),
+        },
+        "named_windows": {
+            "supported": True,
+            "detail": (
+                "A window specification may be NAMED once in the query block's WINDOW "
+                "clause and referenced from OVER, instead of being written inline: "
+                "`SELECT SUM(mass) OVER w FROM $planets WINDOW w AS (PARTITION BY "
+                "gravity)`. Two references exist and they differ. `OVER w` uses the "
+                "named window WHOLE, frame included. `OVER (w ...)` INHERITS it and "
+                "EXTENDS it, which is one-way: the referencing specification may add an "
+                "ORDER BY and a frame to what the named window supplies and may not "
+                "replace anything it already has, so a PARTITION BY on it, an ORDER BY "
+                "on it when the named window already has one, and extending a named "
+                "window that carries a frame are each rejected at plan time. A "
+                "definition may extend an EARLIER definition in the same clause and only "
+                "an earlier one, so a chain cannot close; a duplicate name and an "
+                "undefined name are both rejected. Resolution happens BEFORE the "
+                "statement is planned, which is what makes the named spelling equivalent "
+                "rather than parallel: every rule on this page applies to it unchanged - "
+                "a ranking function over a named window with no ORDER BY is refused "
+                "exactly as the inline form is - and a named and an inline spelling of "
+                "one specification are the same column, computed once. Each query block "
+                "has its own WINDOW clause; a subquery neither sees nor is seen by the "
+                "definitions around it."
             ),
         },
         "with_group_by": {

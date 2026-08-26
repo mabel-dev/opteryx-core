@@ -41,7 +41,7 @@ from opteryx.expression.intervals import (
 from opteryx.expression.operator_catalog import get_operator_for_sql_symbol
 from opteryx.expression.operator_catalog import get_operator_node_type
 from opteryx.models import LogicalColumn, Node
-from opteryx.operators.aggregate.helpers import aggregator_names, is_aggregator
+from opteryx.operators.aggregate.helpers import DISTINCT_SPELLINGS, aggregator_names, is_aggregator
 from opteryx.operators.window.helpers import GATHERED_FUNCTIONS
 from opteryx.operators.window.helpers import NAVIGATION_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
@@ -2067,9 +2067,11 @@ def function(branch, alias: Optional[List[str]] = None, key=None):
             )
         raise _unknown_function(func, name_span)
 
-    # rewrite COUNT_DISTINCT() to COUNT(DISTINCT)
-    if func == "COUNT_DISTINCT":
-        func = "COUNT"
+    # rewrite the DISTINCT spellings (COUNT_DISTINCT() -> COUNT(DISTINCT)) — the
+    # map is DISTINCT_SPELLINGS, next to the aggregate registry it rewrites into,
+    # because the catalog reads it too.
+    if func in DISTINCT_SPELLINGS:
+        func = DISTINCT_SPELLINGS[func]
         duplicate_treatment = "Distinct"
 
     # AGG(x) FILTER (WHERE p) -> AGG(IIF(p, x, NULL))
