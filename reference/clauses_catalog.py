@@ -532,22 +532,36 @@ CLAUSE_DEFINITIONS = {
             "navigation_function(expr [, offset]) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...])",
             "aggregate(expr) OVER ()",
             "aggregate(expr) OVER (PARTITION BY expr [, ...])",
+            "aggregate(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
+            "aggregate(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...] [ROWS|RANGE BETWEEN ...])",
         ],
         "summary": "Compute a value across a window of rows without collapsing them.",
         "documentation": (
             "OVER turns a call into a window function: it is evaluated over a window "
             "of rows and returns one value per input row, unlike GROUP BY which "
-            "collapses them. The window forms take OPPOSITE window specs. Ranking "
-            "functions - ROW_NUMBER, RANK, DENSE_RANK - and navigation functions - "
-            "LAG, LEAD - REQUIRE an ORDER BY inside OVER (...) and take an optional "
-            "PARTITION BY. Aggregate windows REJECT an ORDER BY inside OVER (...), so "
-            "`OVER ()` and `OVER (PARTITION BY ...)` are their only forms. The window "
-            "functions themselves, and which aggregates are legal in which "
-            "aggregate-window form, are in windows.json."
+            "collapses them. The two window forms take DIFFERENT window specs. Ranking "
+            "functions - ROW_NUMBER, RANK, DENSE_RANK, NTILE, PERCENT_RANK, CUME_DIST "
+            "- navigation functions - LAG, LEAD - and value functions - FIRST_VALUE, "
+            "LAST_VALUE, NTH_VALUE - REQUIRE an ORDER BY inside OVER (...), take an "
+            "optional PARTITION BY, and refuse a frame: they are always computed over "
+            "the whole ordered partition. Aggregate windows take an optional PARTITION "
+            "BY and accept `OVER ()`; they ALSO accept an ORDER BY, which makes a "
+            "running aggregate, and a frame, which makes a moving one - but only for "
+            "AVG, COUNT, MAX, MIN and SUM, the five aggregates with a running/framed "
+            "implementation. Every other aggregate refuses both. The window functions "
+            "themselves, and which aggregates are legal in which aggregate-window "
+            "form, are in windows.json."
         ),
         "notes": (
-            "A frame specification (ROWS/RANGE BETWEEN) is rejected for both forms, so "
-            "there are no running or moving windows. A window function cannot be "
+            "A frame specification (ROWS/RANGE BETWEEN) is supported on aggregate "
+            "windows over AVG, COUNT, MAX, MIN and SUM, and rejected everywhere else - "
+            "on every ranking, navigation and value function, and on every other "
+            "aggregate. A frame requires an ORDER BY in the same OVER (...); an ORDER "
+            "BY with no explicit frame gets the standard's default, RANGE UNBOUNDED "
+            "PRECEDING AND CURRENT ROW. GROUPS units are not supported, and a RANGE "
+            "frame takes only UNBOUNDED PRECEDING, CURRENT ROW and UNBOUNDED FOLLOWING "
+            "- a numeric PRECEDING/FOLLOWING offset needs ROWS. A window function "
+            "cannot be "
             "combined with GROUP BY in the same statement, nor with a plain aggregate "
             "beside it (`SELECT COUNT(*), COUNT(*) OVER () FROM t`) - a bare aggregate "
             "is still a group, and the window would be computed over the rows it "

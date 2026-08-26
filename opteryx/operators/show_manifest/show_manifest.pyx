@@ -33,12 +33,17 @@ def _collector(manifest):
     from opteryx.models.manifest_io import file_entries_to_manifest_morsel
 
     sketches, histograms, char_classes = manifest.sketch_vectors_by_file()
+    # bounds_as_text: min_values/max_values are one positional list per row
+    # spanning every column's type at once, which no typed ARRAY vector can
+    # hold. The rendering is this statement's alone — the persisted manifest
+    # keeps its typed bounds. See manifest_io._bound_as_text.
     return file_entries_to_manifest_morsel(
         manifest.files,
         manifest.schema,
         sketches=sketches,
         histograms=histograms,
         char_classes=char_classes,
+        bounds_as_text=True,
     )
 
 

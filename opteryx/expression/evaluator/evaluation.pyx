@@ -2217,6 +2217,26 @@ cdef int _dv_cxx_resolve_caches(
     return 0
 
 
+cdef inline DrakenVector** _dv_cache_for(
+    Py_ssize_t count, DrakenVector** inline_cache, DrakenFrameArena* arena
+) noexcept nogil:
+    """Pick the dv_cache buffer for a program of ``count`` instructions.
+
+    The spans keep a 256-slot inline array on the stack because it covers every
+    ordinary expression and costs nothing. A LONGER program — a programmatically
+    generated OR chain, a wide MERGE guard — takes an arena-backed cache instead.
+    Before this, _dv_fill_cache_cxx wrote one entry per instruction straight off the
+    end of the inline array and smashed the span's stack canary, aborting the worker
+    with SIGABRT instead of failing the query.
+
+    Returns NULL only on arena OOM; callers map that to rc 99, exactly as they do a
+    failed draken_frame_arena_create."""
+    if count <= 256:
+        return inline_cache
+    return <DrakenVector**>draken_frame_arena_alloc(
+        arena, <size_t>count * sizeof(DrakenVector*))
+
+
 cdef int _dv_filter_span_cxx(
     BytecodeInstr* instrs, int count, const CxxMorsel* m,
     int* col_idx, DrakenVector** lit_dv,
@@ -2231,7 +2251,8 @@ cdef int _dv_filter_span_cxx(
     _dv_cxx_resolve_caches and reused across morsels — that resolve is the only
     GIL-needing step; this span has no PyObject access, so a converted operator
     can call it inside `with nogil`."""
-    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_cache_inline[256]
+    cdef DrakenVector** dv_cache
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
     cdef Py_ssize_t num_rows = m.num_rows()
@@ -2240,6 +2261,12 @@ cdef int _dv_filter_span_cxx(
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     cdef VecResult* child_vr = NULL
     if arena == NULL:
+        err_op[0] = -99
+        err_msg[0] = NULL
+        return 99
+    dv_cache = _dv_cache_for(count, dv_cache_inline, arena)
+    if dv_cache == NULL:
+        draken_frame_arena_destroy(arena)
         err_op[0] = -99
         err_msg[0] = NULL
         return 99
@@ -2273,7 +2300,8 @@ cdef int _dv_filter_span_with_consts_cxx(
     and then discarded. (const_col_idx, const_scalar_dv) are resolved ONCE by the
     caller (FilterNode._flt_resolve_consts) and reused across morsels — same
     resolve-once contract as (col_idx, lit_dv)."""
-    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_cache_inline[256]
+    cdef DrakenVector** dv_cache
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
     cdef Py_ssize_t num_rows = m.num_rows()
@@ -2282,6 +2310,12 @@ cdef int _dv_filter_span_with_consts_cxx(
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     cdef VecResult* child_vr = NULL
     if arena == NULL:
+        err_op[0] = -99
+        err_msg[0] = NULL
+        return 99
+    dv_cache = _dv_cache_for(count, dv_cache_inline, arena)
+    if dv_cache == NULL:
+        draken_frame_arena_destroy(arena)
         err_op[0] = -99
         err_msg[0] = NULL
         return 99
@@ -2313,7 +2347,8 @@ cdef int _dv_filter_and_mask_span_cxx(
     mask is data-bitmap AND validity, matching cxx_mask_c's own drop semantics. Lets
     the parquet scan produce mask_bytes without the GIL Morsel VM. rc/err_msg as
     _dv_filter_span_cxx."""
-    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_cache_inline[256]
+    cdef DrakenVector** dv_cache
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
     cdef int rc
@@ -2323,6 +2358,12 @@ cdef int _dv_filter_and_mask_span_cxx(
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     cdef VecResult* child_vr = NULL
     if arena == NULL:
+        err_op[0] = -99
+        err_msg[0] = NULL
+        return 99
+    dv_cache = _dv_cache_for(count, dv_cache_inline, arena)
+    if dv_cache == NULL:
+        draken_frame_arena_destroy(arena)
         err_op[0] = -99
         err_msg[0] = NULL
         return 99
@@ -2989,7 +3030,8 @@ cdef int _dv_eval_span_cxx(
     (its _dv_copy_result_preserve_shape branch still returns -1/rc98 for ARRAY —
     an ARRAY feeding a GROUP BY/DISTINCT key is unreached today); *out_child stays
     NULL whenever rc != 0."""
-    cdef DrakenVector* dv_cache[256]
+    cdef DrakenVector* dv_cache_inline[256]
+    cdef DrakenVector** dv_cache
     cdef DrakenVector* dv_stack[64]
     cdef DrakenVector  dv_store[64]
     cdef Py_ssize_t num_rows = m.num_rows()
@@ -2999,6 +3041,12 @@ cdef int _dv_eval_span_cxx(
     cdef DrakenFrameArena* arena = draken_frame_arena_create()
     out_child[0] = NULL
     if arena == NULL:
+        err_op[0] = -99
+        err_msg[0] = NULL
+        return 99
+    dv_cache = _dv_cache_for(count, dv_cache_inline, arena)
+    if dv_cache == NULL:
+        draken_frame_arena_destroy(arena)
         err_op[0] = -99
         err_msg[0] = NULL
         return 99

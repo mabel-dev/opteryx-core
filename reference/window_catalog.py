@@ -13,13 +13,26 @@ does:
 Hand-spiking either one would have meant hand-written rows in a wholly derived
 file, so this is a catalog of its own.
 
-The single most important fact recorded here is that the window forms have
-OPPOSITE rules for ORDER BY:
+The single most important fact recorded here is that the two window forms take
+DIFFERENT window specs, and that the aggregate form's spec varies BY AGGREGATE:
 
-* Ranking windows - ROW_NUMBER/RANK/DENSE_RANK - and navigation windows -
-  LAG/LEAD - REQUIRE an ORDER BY inside OVER (...); PARTITION BY is optional.
-* Aggregate windows - `aggregate(expr) OVER (...)` - REJECT an ORDER BY inside
-  OVER (...); PARTITION BY is optional and `OVER ()` is legal.
+* Ranking windows - ROW_NUMBER/RANK/DENSE_RANK/NTILE/PERCENT_RANK/CUME_DIST -
+  navigation windows - LAG/LEAD - and value windows - FIRST_VALUE/LAST_VALUE/
+  NTH_VALUE - REQUIRE an ORDER BY inside OVER (...) and REJECT a frame;
+  PARTITION BY is optional. They are always computed over the whole ordered
+  partition.
+* Aggregate windows - `aggregate(expr) OVER (...)` - take an optional PARTITION
+  BY, and `OVER ()` is legal. An ORDER BY and a FRAME are ACCEPTED, but only for
+  the five aggregates that have a running/framed implementation; every other
+  aggregate rejects both.
+
+This used to read "the window forms have OPPOSITE rules for ORDER BY", because
+aggregate windows once rejected an ORDER BY outright and there were no running
+or moving windows. That stopped being true when the framed-aggregate path
+landed, and the opposition is no longer the organising fact: ORDER BY is
+required on one form and optional-but-conditional on the other, and it is the
+FRAME - rejected on every ranking/navigation/value function, supported on five
+aggregates - that now separates them.
 
 Which aggregates are legal in which aggregate-window form is DERIVED, never
 restated. `OVER ()` lowers to a global (ungrouped) aggregate and
@@ -29,6 +42,20 @@ and ARRAY_AGG are grouped-only, and correspondingly
 `ARRAY_AGG(x) OVER (PARTITION BY y)` runs while `ARRAY_AGG(x) OVER ()` is
 refused with "requires a GROUP BY clause". Importing those sets means a second
 list cannot drift away from the first.
+
+The running/framed answer is derived the same way, from
+`FRAMED_AGGREGATE_FUNCTIONS` in `opteryx/operators/window/helpers.py` - the very
+set the logical planner tests a window aggregate against before accepting an
+ORDER BY or a FRAME, and the set WindowNode builds its aggregate kind codes
+from. It is the engine's own answer, not a transcription of it.
+
+The per-form ORDER BY/FRAME rules for the ranking, navigation and value
+functions are NOT derivable: the planner enforces them as inline `raise`
+statements in `_hoist_windows` rather than as data a catalog could import (see
+`opteryx/planner/logical_planner/logical_planner.py`). They are stated as
+literals here, and `tests/sql/test_window_catalog_matches_engine.py` asserts
+every one of them against the running engine so this file cannot silently rot
+back into describing a surface the engine no longer has.
 """
 
 from __future__ import annotations
@@ -39,6 +66,7 @@ from pathlib import Path
 from typing import Any
 
 from opteryx.operators.aggregate.helpers import AGGREGATORS
+from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 
 from .aggregate_catalog import _GLOBAL_SUPPORTED
@@ -298,8 +326,17 @@ _WINDOW_FUNCTION_PROSE: dict[str, dict[str, Any]] = {
 }
 
 # The window spec each form accepts. Values are the vocabulary a generator can
-# switch on: "required", "optional", "rejected". Ranking and navigation share
-# the ordered spec — both require an ORDER BY inside OVER (...).
+# switch on: "required", "optional", "rejected", "conditional". Ranking,
+# navigation and value functions share the ordered spec — every one of them
+# requires an ORDER BY inside OVER (...) and refuses a frame.
+#
+# These four values are LITERALS because the planner has no importable table to
+# derive them from: `_hoist_windows` in
+# opteryx/planner/logical_planner/logical_planner.py enforces them as inline
+# `raise UnsupportedSyntaxError(...)` statements keyed off `_RANKING_FUNCTIONS`
+# (which is just `tuple(WINDOW_FUNCTIONS)` — membership, carrying no spec).
+# tests/sql/test_window_catalog_matches_engine.py runs each combination against
+# the engine and asserts it matches what is written here.
 _ORDERED_WINDOW_SPEC = {
     "over": "required",
     "partition_by": "optional",
@@ -307,11 +344,16 @@ _ORDERED_WINDOW_SPEC = {
     "frame": "rejected",
 }
 
+# "conditional" — accepted for SOME aggregates and refused for the rest. Which
+# is per-aggregate and derived, not stated: see `_aggregate_window_support()`'s
+# `over_order_by` / `over_frame`, both read off the engine's own
+# FRAMED_AGGREGATE_FUNCTIONS. A generator that needs the yes/no answer must read
+# the support map for the aggregate in hand rather than this summary.
 _AGGREGATE_WINDOW_SPEC = {
     "over": "required",
     "partition_by": "optional",
-    "order_by": "rejected",
-    "frame": "rejected",
+    "order_by": "conditional",
+    "frame": "conditional",
 }
 
 
@@ -329,12 +371,22 @@ def _aggregate_window_support() -> OrderedDict[str, dict[str, bool]]:
     `OVER ()` is the global (ungrouped) aggregate path and
     `OVER (PARTITION BY ...)` the grouped one, so the aggregate catalog's own
     support sets are the answer.
+
+    `over_order_by` and `over_frame` are the running/framed question, and they
+    are one answer, not two: the planner tests `FRAMED_AGGREGATE_FUNCTIONS`
+    once and refuses an ORDER BY and a FRAME together, so an aggregate that
+    accepts one accepts the other. They are reported as two keys because a
+    generator asks two questions, and kept in lockstep here rather than by a
+    reader's memory of the planner.
     """
     support: OrderedDict[str, dict[str, bool]] = OrderedDict()
     for aggregate in sorted(AGGREGATORS):
+        framed = aggregate in FRAMED_AGGREGATE_FUNCTIONS
         support[aggregate] = {
             "over_empty": aggregate in _GLOBAL_SUPPORTED,
             "over_partition_by": aggregate in _GROUPED_SUPPORTED,
+            "over_order_by": framed,
+            "over_frame": framed,
         }
     return support
 
@@ -377,25 +429,51 @@ def export_window_catalog() -> OrderedDict[str, Any]:
             "`aggregate(expr) OVER ()` computes the aggregate across the whole result "
             "and repeats it on every row; `aggregate(expr) OVER (PARTITION BY ...)` "
             "computes it per partition. The result type is the aggregate's own - "
-            "COUNT(*) OVER () is INTEGER, SUM(x) OVER (...) is SUM's type. An ORDER BY "
-            "inside OVER (...) is REJECTED here, which is the opposite of the rule for "
-            "the ranking functions, and there are no running or moving windows as a "
-            "consequence."
+            "COUNT(*) OVER () is INTEGER, SUM(x) OVER (...) is SUM's type. Adding an "
+            "ORDER BY inside OVER (...) makes it a RUNNING aggregate - "
+            "`SUM(x) OVER (ORDER BY d)` is a running total - and an explicit frame "
+            "(ROWS/RANGE BETWEEN) makes it a MOVING one. An ORDER BY with no explicit "
+            "frame gets the SQL standard's default frame, RANGE UNBOUNDED PRECEDING AND "
+            "CURRENT ROW. Running and framed windows are supported for AVG, COUNT, MAX, "
+            "MIN and SUM only; every other aggregate accepts PARTITION BY alone and "
+            "refuses an ORDER BY or a frame - compute those in a subquery. Which "
+            "aggregate is which is in `support` below, under `over_order_by` and "
+            "`over_frame`. A frame REQUIRES an ORDER BY; see `window_frames` under "
+            "`restrictions` for the frame shapes that are and are not accepted."
         ),
         "sql_forms": [
             "aggregate(expr) OVER ()",
             "aggregate(expr) OVER (PARTITION BY expr [, ...])",
+            "aggregate(expr) OVER (ORDER BY expr [ASC|DESC] [, ...])",
+            "aggregate(expr) OVER ([PARTITION BY expr [, ...]] ORDER BY expr [ASC|DESC] [, ...] [frame])",
         ],
         "window_spec": dict(_AGGREGATE_WINDOW_SPEC),
         "support": _aggregate_window_support(),
     }
     catalog["restrictions"] = {
         "window_frames": {
-            "supported": False,
+            "supported": True,
             "clean_error": True,
             "detail": (
-                "A frame specification (ROWS/RANGE BETWEEN) is rejected at plan time for "
-                "both window forms."
+                "A frame specification (ROWS/RANGE BETWEEN) is supported on AGGREGATE "
+                "windows, for the five aggregates that have a running/framed "
+                "implementation - AVG, COUNT, MAX, MIN, SUM - and rejected everywhere "
+                "else, at plan time, in four distinct cases. (1) On a ranking, "
+                "navigation or value function a frame is rejected outright: those are "
+                "always computed over the whole ordered partition. (2) On any other "
+                "aggregate the whole running/framed form is rejected, ORDER BY and "
+                "frame alike - `STDDEV(x) OVER (ORDER BY d)` refuses with `only AVG, "
+                "COUNT, MAX, MIN, SUM support a running/framed window`. (3) A frame "
+                "with no ORDER BY in the same OVER (...) is rejected: a frame is "
+                "relative to a current row, and with no ordering there is none. (4) The "
+                "frame's own shape is restricted - the units must be ROWS or RANGE "
+                "(GROUPS is rejected), a RANGE frame takes only UNBOUNDED PRECEDING, "
+                "CURRENT ROW and UNBOUNDED FOLLOWING (a numeric PRECEDING/FOLLOWING "
+                "offset is rejected; use ROWS), a ROWS offset must be a non-negative "
+                "integer literal, and the start bound may not come after the end bound. "
+                "An ORDER BY with no explicit frame is not one of these cases: it gets "
+                "the standard's default frame, RANGE UNBOUNDED PRECEDING AND CURRENT "
+                "ROW."
             ),
         },
         "with_group_by": {

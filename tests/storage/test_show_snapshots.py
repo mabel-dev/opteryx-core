@@ -131,6 +131,9 @@ class _FakeCatalog:
 
     loads = []
     history = _HISTORY
+    # One tag, on the MIDDLE snapshot: a tag on the current snapshot would pass
+    # a grouping that ignored `snapshot-id` and put every tag on row one.
+    tags = [{"name": "month_end", "snapshot-id": 7283774102}]
 
     def __init__(self, workspace=None, **kwargs):
         pass
@@ -139,6 +142,15 @@ class _FakeCatalog:
         _FakeCatalog.loads.append((identifier, load_history))
         history = _FakeCatalog.history if identifier == "coll1.src" else []
         return _FakeDataset(history, with_history=load_history)
+
+    def list_tags(self, identifier):
+        """The dataset's tags, as the plain dicts the connector groups on.
+
+        SHOW SNAPSHOTS reads these for every relation it lists - a catalog
+        object without this method takes the whole statement down, which is
+        exactly what a fake missing it did here.
+        """
+        return _FakeCatalog.tags if identifier == "coll1.src" else []
 
     def dataset_exists(self, identifier):
         return True
@@ -155,6 +167,7 @@ class _FakeCatalog:
 def catalog_workspace():
     _FakeCatalog.loads = []
     _FakeCatalog.history = _HISTORY
+    _FakeCatalog.tags = [{"name": "month_end", "snapshot-id": 7283774102}]
     register_workspace("cat", OpteryxConnector, catalog=_FakeCatalog)
     return _FakeCatalog
 
@@ -188,6 +201,7 @@ def test_show_snapshots_returns_the_whole_column_set(catalog_workspace):
         "snapshot_id",
         "committed_at",
         "is_current",
+        "tags",
         "operation_type",
         "author",
         "user_created",
@@ -253,6 +267,34 @@ def test_show_snapshots_carries_provenance(catalog_workspace):
     assert oldest["sequence_number"] == 4468
     assert oldest["schema_id"] == "sch-0004"
     assert oldest["commit_message"] == "backfill 2024 partitions"
+
+
+def test_a_tag_is_reported_against_the_snapshot_it_names(catalog_workspace):
+    """A tag pins its snapshot's storage indefinitely, and that storage is
+    charged - so which snapshot a tag holds is the point of the column, not
+    just that the names appear somewhere."""
+    rows = _rows("SHOW SNAPSHOTS FOR cat.coll1.src")
+
+    assert [row["tags"] for row in rows] == [[], ["month_end"], []]
+
+
+def test_an_untagged_history_reports_empty_lists_not_nulls(catalog_workspace):
+    """Empty says 'no tags on this snapshot'; null would say 'unknown', and
+    nothing about an untagged snapshot is unknown."""
+    catalog_workspace.tags = []
+    rows = _rows("SHOW SNAPSHOTS FOR cat.coll1.src")
+
+    assert [row["tags"] for row in rows] == [[], [], []]
+
+
+def test_several_tags_on_one_snapshot_are_listed_by_name(catalog_workspace):
+    catalog_workspace.tags = [
+        {"name": "quarter_end", "snapshot-id": 7283774102},
+        {"name": "month_end", "snapshot-id": 7283774102},
+    ]
+    rows = _rows("SHOW SNAPSHOTS FOR cat.coll1.src")
+
+    assert rows[1]["tags"] == ["month_end", "quarter_end"]
 
 
 def test_the_root_snapshot_has_a_null_parent(catalog_workspace):

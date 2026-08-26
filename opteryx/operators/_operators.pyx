@@ -1896,7 +1896,19 @@ cdef int _resolve_bc_for_layout(CompiledBytecode bc, list layout,
     old engine needed): LOAD_COL identity -> column index in ``layout`` (bytes
     identities, stream order); LOAD_LIT_CONST -> the bind-time-materialized literal
     Vector's DrakenVector*. Returns 0, or raises — a missing column at plan time is
-    a compiler bug, fail loud."""
+    a compiler bug, fail loud.
+
+    Also the single plan-time funnel for the evaluator's operand-stack bound: every
+    nogil span in evaluation.pyx runs on a fixed 64-slot dv_stack/dv_store pair and
+    does not re-check depth per push, so a deeper program would write past them and
+    abort the worker on a smashed stack canary. Refuse it here, where it is still a
+    catchable planning error, exactly as the GIL VM (execute_bytecode) already
+    does. The companion instruction-count bound is handled inside the spans, which
+    take an arena-backed dv_cache for a long program rather than refusing it."""
+    if bc.max_stack_depth > 64:
+        raise ValueError(
+            f"expression stack depth {bc.max_stack_depth} exceeds maximum 64"
+        )
     cdef Py_ssize_t k
     cdef BytecodeInstr* slot
     cdef bytes ident

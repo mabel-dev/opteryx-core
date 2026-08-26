@@ -405,5 +405,48 @@ class TestCombinedExpressions:
         assert get_first_value(morsels[0], 0) == 'ab'
 
 
+# ===========================================================================
+# LONG PROGRAMS: dv_cache bound
+# ===========================================================================
+class TestLongPrograms:
+    """A program longer than the spans' 256-slot inline dv_cache.
+
+    The nogil evaluator spans keep dv_cache on the stack and _dv_fill_cache_cxx
+    writes one entry per INSTRUCTION. A programmatically generated OR chain (a
+    wide MERGE guard is how this was found) crosses 256 instructions and used to
+    run off the end of that array, smashing the span's stack canary and aborting
+    the worker with SIGABRT — no exception, no result. The threshold sat between
+    11 and 12 `IS DISTINCT FROM` terms.
+
+    These run a chain on each side of the boundary and value-check the answer, so
+    the arena-backed cache is exercised for correctness and not just survival.
+    """
+
+    # >= 12 terms is the crashing side; the plain 5 stays on the inline array.
+    SHORT_TERMS = 5
+    LONG_TERMS = 40
+
+    @staticmethod
+    def _chain(n):
+        return " OR ".join("(gravity IS DISTINCT FROM gravity)" for _ in range(n))
+
+    @pytest.mark.parametrize("terms", [SHORT_TERMS, LONG_TERMS])
+    def test_or_chain_all_false(self, session, terms):
+        """A chain of always-false terms is False on every row, at any length."""
+        sql = f"SELECT {self._chain(terms)} AS changed FROM $planets"
+        values = [v for m in session.execute_to_morsels(sql) for v in m.column("changed")]
+        assert len(values) == 9
+        assert set(values) == {False}
+
+    @pytest.mark.parametrize("terms", [SHORT_TERMS, LONG_TERMS])
+    def test_or_chain_with_true_term(self, session, terms):
+        """One genuinely-true term still carries the whole chain."""
+        sql = (f"SELECT {self._chain(terms)} "
+               "OR (gravity IS DISTINCT FROM density) AS changed FROM $planets")
+        values = [v for m in session.execute_to_morsels(sql) for v in m.column("changed")]
+        assert len(values) == 9
+        assert set(values) == {True}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

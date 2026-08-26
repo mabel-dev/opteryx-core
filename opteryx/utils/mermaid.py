@@ -79,7 +79,16 @@ def _node_predicates(node):
     if predicates:
         return list(predicates)
 
-    expression = getattr(node, "filter", None)
+    return _split_conjuncts(getattr(node, "filter", None))
+
+
+def _split_conjuncts(expression):
+    """One entry per ANDed term of an expression tree, or [] for None.
+
+    Shared by the FILTER's `filter` and a join's `on`: both arrive as a single
+    tree that may itself be a conjunction, and both should reach a consumer as
+    the terms they are made of.
+    """
     if expression is None:
         return []
     try:
@@ -100,6 +109,59 @@ def _node_predicates(node):
     except Exception:  # pragma: no cover - never let telemetry break the query
         # Unsplit is still correct, just one long term instead of several.
         return [expression]
+
+
+def _join_condition(node):
+    """A join's equality terms, one entry per ANDed term.
+
+    `on` is the condition as written and is the truth when present. Joins the
+    planner builds from column lists instead (an inner join lowered from USING,
+    or rewritten by the optimizer) carry no `on`, so the keys are paired back
+    up positionally — `left_columns[i]` is joined to `right_columns[i]` by
+    construction, which is the same pairing the compiler hashes on.
+    """
+    from opteryx.expression import format_expression
+
+    terms = _format_expressions(_split_conjuncts(getattr(node, "on", None)))
+    if terms:
+        return terms
+
+    left = list(getattr(node, "left_columns", None) or [])
+    right = list(getattr(node, "right_columns", None) or [])
+    if not left or len(left) != len(right):
+        return []
+    return [
+        f"{format_expression(l)} = {format_expression(r)}" for l, r in zip(left, right)
+    ]
+
+
+# Which input leg each join materialises, mirroring _compile_join's own rules
+# (managers/execution/compiler.py). A consumer cannot derive this: the leg
+# labels are on the edges, but the INNER-vs-everything-else rule and the
+# JoinOrderingStrategy swap that flips SEMI/ANTI live here, in plan-land.
+# Absent for any join shape not listed — an unknown build side is better said
+# by silence than by a guess, since naming the wrong leg inverts the reading.
+def _join_legs(node):
+    """(build_leg, probe_leg) as "left"/"right", or None when not determined."""
+    class_name = node.__class__.__name__
+    join_type = str(getattr(node, "join_type", "") or "")
+
+    # ASOF and band joins sort and materialise the LEFT leg; a cross join
+    # builds the RIGHT one (the scalar side).
+    if class_name in ("AsofJoinNode", "BandJoinNode"):
+        return "left", "right"
+    if join_type == "cross":
+        return "right", "left"
+    if join_type == "inner":
+        return "left", "right"
+    # SEMI / ANTI normally build the right leg like every other filtering join,
+    # but JoinOrderingStrategy can swap them to build the left instead — and
+    # then the compiler runs a different pipeline shape entirely.
+    if join_type in ("left semi", "left anti") and getattr(node, "swap_build_side", False):
+        return "left", "right"
+    if join_type.startswith("left ") or join_type.endswith(" outer"):
+        return "right", "left"
+    return None
 
 
 def _format_expressions(expressions):
@@ -185,17 +247,35 @@ _OPERATOR_LABELS = {
     "ParquetReadNode": "TABLE SCAN",
     "ReaderNode": "SCAN",
     "NullReaderNode": "SCAN",
+    "CsvReadNode": "CSV SCAN",
+    "JsonlReadNode": "JSONL SCAN",
+    "SkeneReadNode": "SKENE SCAN",
     "FunctionDatasetNode": "FUNCTION SCAN",
+    # A multiply-referenced CTE is materialized once and read back by one of
+    # these per reference (see cte_ref.pyx). It is registered in the SCAN
+    # category, so without a label of its own it reported as a bare "SCAN" —
+    # indistinguishable from reading a table, which is the one thing it is
+    # not. A CTE referenced once never reaches here: the planner inlines it,
+    # and the read that remains is the real relation's.
+    "CteRefNode": "CTE SCAN",
     "FilterNode": "FILTER",
     "ProjectionNode": "PROJECT",
     "WindowNode": "WINDOW",
-    "GroupedAggregateHashedNode": "HASHED AGGREGATE",
+    # "AGGREGATE", not "HASHED AGGREGATE": hashed is how this operator groups,
+    # not what it does, and it is the only grouped aggregate there is — so the
+    # qualifier distinguished it from nothing while reading as jargon.
+    "GroupedAggregateHashedNode": "AGGREGATE",
     "UngroupedAggregateNode": "UNGROUPED AGGREGATE",
     "DistinctNode": "DISTINCT",
     "SortNode": "SORT",
-    "HeapSortNode": "HEAP SORT",
+    # A heap sort IS a top-N — it exists only because a LIMIT sits above an
+    # ORDER BY. Naming both halves says what the operator did; "heap" named
+    # the data structure it used to do it.
+    "HeapSortNode": "SORT & LIMIT",
     "LimitNode": "LIMIT",
-    "DrakenInnerJoinNode": "HASH JOIN",
+    # The join KIND is what a reader needs ("is this the inner join I wrote?");
+    # hashing is the strategy, and the only one this operator has.
+    "DrakenInnerJoinNode": "INNER JOIN",
     "NestedLoopJoinNode": "NESTED JOIN",
     "AsofJoinNode": "ASOF JOIN",
     "CrossJoinNode": "CROSS JOIN",
@@ -418,6 +498,37 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
             groups = _format_expressions(getattr(node, "groups", None) or [])
             if groups:
                 node_stat["groups"] = groups
+            # A sort's keys, one entry per key with its direction — the same
+            # split-them-out reasoning as the aggregate's two lists above. The
+            # `config` string ("ORDER = a DESC, b ASC") runs them together, and
+            # a key can itself contain a comma (a two-argument function call),
+            # so it cannot be split back apart reliably.
+            order_by = getattr(node, "order_by", None) or []
+            if order_by:
+                from opteryx.expression import format_expression
+
+                keys = []
+                for entry in order_by:
+                    try:
+                        column, ascending = entry
+                    except (TypeError, ValueError):  # pragma: no cover
+                        continue
+                    rendered = str(format_expression(column)).strip()
+                    if rendered:
+                        keys.append(f"{rendered} {'ASC' if ascending else 'DESC'}")
+                if keys:
+                    node_stat["sort_keys"] = keys
+            # A join's condition and which leg it materialises. `config` is no
+            # substitute for either: on an inner join it is the strategy name
+            # ("draken+carchar"), and no operator's config states its build
+            # side at all.
+            if node.is_join:
+                condition = _join_condition(node)
+                if condition:
+                    node_stat["join_on"] = condition
+                legs = _join_legs(node)
+                if legs:
+                    node_stat["build_leg"], node_stat["probe_leg"] = legs
             if node.is_scan:
                 # The denominator for `columns_read`: how many columns the
                 # relation has, so a reader can see the projection pushdown as

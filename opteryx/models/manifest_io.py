@@ -56,11 +56,15 @@ _SKETCH_VECTOR_COLUMNS = ("min_k_hashes", "histogram_counts", "char_class_counts
 # SQL-visible type for every _MANIFEST_COLUMNS entry, used only for
 # manifest_output_schema() below — _MANIFEST_COLUMNS' own dtype tags feed the
 # writer's `vector_from_sequence(values, dtype=...)` calls and stay as-is.
-# min_values/max_values are ARRAY(VARIANT): positionally-by-field-id bounds
-# span whatever physical types the dataset's own columns have (int, float, ...)
-# and are resolved dynamically at Vector construction (see
-# file_entries_to_manifest_morsel) rather than declared statically — the same
-# open element-type gap noted for ARRAY_AGG.
+# min_values/max_values are ARRAY(VARCHAR) HERE and nowhere else: this schema
+# describes the SHOW MANIFEST output only, which renders bounds as text
+# (file_entries_to_manifest_morsel's `bounds_as_text`). One positional list
+# holds one bound per field id, so it spans whatever physical types the
+# dataset's own columns have — int for one field, str for the next when the
+# source is an external catalog carrying real decoded bounds. A draken ARRAY
+# vector has ONE child type for the whole column, so that mixture has no typed
+# representation; text is the only encoding that can carry all of them. The
+# persisted manifest (write_manifest_parquet) keeps the typed encoding.
 def _manifest_column_types():
     from opteryx.types import logical_type as _lt
 
@@ -75,8 +79,8 @@ def _manifest_column_types():
         "min_k_hashes": _lt.ARRAY(_lt.ARRAY(_lt.UINT64)),
         "histogram_counts": _lt.ARRAY(_lt.ARRAY(_lt.INT64)),
         "histogram_bins": _lt.INT64,
-        "min_values": _lt.ARRAY(_lt.VARIANT),
-        "max_values": _lt.ARRAY(_lt.VARIANT),
+        "min_values": _lt.ARRAY(_lt.VARCHAR),
+        "max_values": _lt.ARRAY(_lt.VARCHAR),
         "field_ids": _lt.ARRAY(_lt.INT64),
         "min_lengths": _lt.ARRAY(_lt.INT64),
         "max_lengths": _lt.ARRAY(_lt.INT64),
@@ -258,6 +262,38 @@ def _file_entry_to_manifest_dict(
     }
 
 
+def _bound_as_text(value):
+    """One manifest bound rendered for SHOW MANIFEST, or None.
+
+    A row's `min_values`/`max_values` is one list holding one bound per field
+    id, so its elements are as heterogeneous as the dataset's columns are: an
+    int64 ordinal from opteryx_catalog's own stats builder, a real `str` for a
+    VARCHAR column and a real `float` for a DOUBLE from an external catalog
+    that decodes its manifest bounds (opteryx-iceberg). A draken ARRAY vector
+    carries ONE child type for the whole column, so that mixture cannot be
+    expressed typed — the first non-null element fixes the leaf and the next
+    element of another type is a hard error. Text is what all of them share.
+
+    This is a DISPLAY encoding and is never persisted: write_manifest_parquet
+    goes through the same builder with `bounds_as_text=False` and keeps the
+    typed encoding the shared manifest format (and file pruning) depends on.
+
+    Bytes are decoded as UTF-8 when they are UTF-8 and rendered as hex when
+    they are not, rather than as a Python `b'...'` repr, which would be this
+    module's repr leaking into a result set.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            return bytes(value).hex()
+    return str(value)
+
+
 def _nested_int64_array_column(dn, values: List, element_type: int):
     """A positional-per-field, fixed-width-per-field nested INT64 array column
     (histogram_counts' per-file [[bin_count,...] per field], char_class_counts'
@@ -274,6 +310,7 @@ def file_entries_to_manifest_morsel(
     sketches: Optional[Dict[str, List]] = None,
     histograms: Optional[Dict[str, List]] = None,
     char_classes: Optional[Dict[str, List]] = None,
+    bounds_as_text: bool = False,
 ):
     """Build one manifest Morsel (the `_MANIFEST_COLUMNS` shape) from FileEntry rows.
 
@@ -291,6 +328,12 @@ def file_entries_to_manifest_morsel(
     boxed copies that could drift from the vector. Producers that compute
     them (ANALYZE) supply the relevant dict; everyone else omits it and the
     column is written empty.
+
+    `bounds_as_text` renders min_values/max_values as ARRAY(VARCHAR) instead of
+    the typed encoding — SHOW MANIFEST passes it, write_manifest_parquet does
+    not. It exists because one row's bounds list is heterogeneous whenever the
+    producer stores real decoded values rather than int64 ordinals; see
+    _bound_as_text for why text is the only encoding that holds all of them.
 
     NOTE on min_values/max_values semantics: for FileEntry produced by
     ANALYZE's native per-file pass, these are `Vector.ordinalize()` ordinal
@@ -360,6 +403,19 @@ def file_entries_to_manifest_morsel(
             # histogram_counts — counts, never near uint64 wraparound.
             morsel.append_vector(
                 name, _nested_int64_array_column(_dn, values, _dn.DrakenType.INT64.value)
+            )
+        elif bounds_as_text and name in ("min_values", "max_values"):
+            # See _bound_as_text: SHOW MANIFEST only, never the persisted file.
+            morsel.append_vector(
+                name,
+                _dn.vector_array_from_sequence(
+                    [
+                        None if entry is None else [_bound_as_text(v) for v in entry]
+                        for entry in values
+                    ],
+                    element_type=_dn.DrakenType.VARCHAR.value,
+                    nesting_depth=1,
+                ),
             )
         else:
             morsel.append_vector(name, vector_from_sequence(values, dtype=dtype))
