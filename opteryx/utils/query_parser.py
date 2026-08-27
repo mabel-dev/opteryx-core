@@ -46,6 +46,11 @@ _SYNTHESIZED_TARGETS = {
     "DropTrigger": "table_name",
     "RefreshMaterializedView": "name",
     "AlterMaterializedViewOwner": "name",
+    # The permission target is the object the grant is being administered on;
+    # the principal receiving/losing it names a person, not a relation.
+    "GrantAccess": "object_name",
+    "RevokeAccess": "object_name",
+    "ShowGrantsOn": "object_name",
 }
 
 # What each synthesized statement is, and the role it needs. Kept beside the
@@ -66,6 +71,15 @@ _SYNTHESIZED_STATEMENTS = {
     "DropTrigger": (False, True, "writer"),
     # Ownership is a workspace-level change; the binder gates it at ALTER.
     "AlterMaterializedViewOwner": (False, True, "owner"),
+    # Grant administration is owner-tier on the object, per ACTION_ROLES'
+    # GRANT/REVOKE rows. Policy documents change, data does not: DDL, not
+    # mutation.
+    "GrantAccess": (False, True, "owner"),
+    "RevokeAccess": (False, True, "owner"),
+    # Reads policy documents and changes nothing — neither mutation nor DDL —
+    # but gated at owner all the same: who may see the grants on an object is
+    # who may change them.
+    "ShowGrantsOn": (False, False, "owner"),
 }
 
 

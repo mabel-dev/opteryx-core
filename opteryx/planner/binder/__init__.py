@@ -37,6 +37,58 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import apply_visibility_filters
 
 
+def _check_recursive_leg_types(name: str, anchor_schema, term_schema) -> None:
+    """The anchor's schema is the recursive CTE's schema, and the engine's
+    fixpoint appends the term's rows into the same buffers positionally — so the
+    term must produce the same column count and the same physical type in every
+    position. There is no silent widening: a mismatch names the column and the
+    cast to write (docs/RECURSIVE_CTE_DESIGN.md §5.2)."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    anchor_columns = anchor_schema.columns
+    term_columns = term_schema.columns
+
+    # The anchor's positions DEFINE the fixpoint's buffers, and downstream
+    # resolution (cte_column_map -> layout position) is by column IDENTITY. An
+    # aliased duplicate (`SELECT ename, ename AS path`) shares its source's
+    # identity — harmless in an ordinary query where both columns stay equal,
+    # but a recursive CTE's positions DIVERGE over iterations and a shared
+    # identity silently collapses them onto one buffer (`path` reads `ename`
+    # forever). Refuse it and name the rewrite that makes the copy independent.
+    seen_identities: dict = {}
+    for position, column in enumerate(anchor_columns):
+        identity = column.identity
+        first = seen_identities.get(identity)
+        if first is not None:
+            source_name = anchor_columns[first].name
+            type_name = column.column_type.physical.name
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{name}': columns '{source_name}' and "
+                f"'{column.name}' in the anchor are the same underlying column, but "
+                "a recursive CTE's columns evolve independently. Make the copy its "
+                f"own column — e.g. `CAST({source_name} AS {type_name}) "
+                f"AS {column.name}`."
+            )
+        seen_identities[identity] = position
+
+    if len(anchor_columns) != len(term_columns):
+        raise UnsupportedSyntaxError(
+            f"Recursive CTE '{name}': the anchor produces {len(anchor_columns)} "
+            f"column(s) but the recursive term produces {len(term_columns)}; the "
+            "two sides of UNION ALL must produce the same columns."
+        )
+    for position, (anchor_col, term_col) in enumerate(zip(anchor_columns, term_columns)):
+        anchor_type = anchor_col.column_type.physical
+        term_type = term_col.column_type.physical
+        if anchor_type != term_type:
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{name}': column '{anchor_col.name}' (position "
+                f"{position + 1}) is {anchor_type.name} in the anchor but "
+                f"{term_type.name} in the recursive term; add an explicit CAST in "
+                "one of the terms so both sides agree."
+            )
+
+
 def do_bind_phase(
     plan: LogicalPlan,
     execution_context=None,
@@ -79,6 +131,14 @@ def do_bind_phase(
     # identities. Row-level security applies inside the bodies exactly as it
     # does in the main plan — a body holds real Scans.
     shared_ctes = getattr(plan, "shared_ctes", None) or {}
+    # Recursive CTE metadata (relation_resolver): rcte_key -> anchor/term leg
+    # keys. The legs are ordinary entries in shared_ctes (anchor immediately
+    # before term); the CTE itself has no body of its own — its schema IS the
+    # anchor's, registered under the rcte_key the references carry, and the
+    # term binds against it (docs/RECURSIVE_CTE_DESIGN.md §5.2).
+    recursive_ctes = getattr(plan, "recursive_ctes", None) or {}
+    anchor_key_to_rcte = {meta["anchor_key"]: rkey for rkey, meta in recursive_ctes.items()}
+    term_key_to_rcte = {meta["term_key"]: rkey for rkey, meta in recursive_ctes.items()}
     # One registry dict, shared BY REFERENCE into every context (including the
     # child scopes expression subqueries bind under — see BindingContext).
     shared_cte_schemas: dict = {}
@@ -97,6 +157,19 @@ def do_bind_phase(
         body, _ = binder_visitor.traverse(body, body_heads[0], context=body_context)
         shared_ctes[cte_key] = body
         shared_cte_schemas[cte_key] = body[body_heads[0]].schema
+        rkey = anchor_key_to_rcte.get(cte_key)
+        if rkey is not None:
+            # the anchor's boundary schema IS the recursive CTE's schema — the
+            # term's self-reference (bound next) and every outer reference
+            # resolve against it
+            shared_cte_schemas[rkey] = shared_cte_schemas[cte_key]
+        rkey = term_key_to_rcte.get(cte_key)
+        if rkey is not None:
+            _check_recursive_leg_types(
+                recursive_ctes[rkey]["name"],
+                shared_cte_schemas[rkey],
+                shared_cte_schemas[cte_key],
+            )
 
     root_node = plan.get_exit_points()
     context = BindingContext.initialize(
@@ -111,5 +184,6 @@ def do_bind_phase(
 
     plan, _ = binder_visitor.traverse(plan, root_node[0], context=context)
     plan.shared_ctes = shared_ctes
+    plan.recursive_ctes = recursive_ctes
 
     return plan

@@ -636,10 +636,11 @@
         "scope": "query_clause",
         "status": "supported",
         "syntax_forms": [
-            "WITH cte AS (...)"
+            "WITH cte AS (...)",
+            "WITH RECURSIVE cte (columns) AS (anchor UNION ALL recursive_term)"
         ],
-        "summary": "Define common table expressions.",
-        "documentation": "CTEs are extracted before query planning and tracked as subplans.",
+        "summary": "Define common table expressions, including recursive ones.",
+        "documentation": "CTEs are extracted before query planning and tracked as subplans. A CTE referenced more than once is materialized once and shared by every reference. WITH RECURSIVE defines a fixpoint: the body must be an anchor term and a recursive term joined by UNION or UNION ALL, where only the recursive term references the CTE (exactly once). The engine evaluates semi-naively - each pass sees only the previous pass's rows - and accumulates the result. UNION deduplicates every emitted row against the whole history, which is what makes traversal of a cyclic graph terminate; UNION ALL appends unconditionally and is bounded by the MAX_RECURSION_ITERATIONS ceiling (default 1000), which fails loudly rather than truncating. The recursive term may not apply aggregation, window functions, ORDER BY or LIMIT over the self-reference, may only reach it through INNER joins, and both terms must produce the same column count and types (add explicit CASTs where they differ). Mutual recursion is not supported. Result order is unspecified without an ORDER BY in the reading query.",
         "notes": "Used for recursive and non-recursive CTE support."
     }
 }

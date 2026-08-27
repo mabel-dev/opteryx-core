@@ -95,6 +95,18 @@ class ScriptedCapability:
     def grants(self, identity, policies):
         return self.rows
 
+    # The grant-administration surface (GRANT / REVOKE / SHOW GRANTS ON).
+    # Required members since 2026-08-27; none of this file's scenarios run
+    # those statements, so a call reaching one is itself a bug worth failing.
+    def apply_grant(self, execution_context, pattern, role, principal):
+        raise AssertionError("apply_grant should not be reached by these tests")
+
+    def apply_revoke(self, execution_context, pattern, role, principal):
+        raise AssertionError("apply_revoke should not be reached by these tests")
+
+    def grants_on(self, execution_context, pattern):
+        raise AssertionError("grants_on should not be reached by these tests")
+
 
 @pytest.fixture(autouse=True)
 def permissions_state():
@@ -434,8 +446,8 @@ def test_workspace_action_is_allowed_when_the_capability_permits_it(tmp_path, in
 
 def test_show_grants_reports_what_the_capability_returns(tmp_path, install):
     rows = [
-        {"pattern": "ws.*", "role": "reader", "actions": "READ"},
-        {"pattern": "other.*", "role": "owner", "actions": "DROP, READ"},
+        {"pattern": "ws.*", "level": "workspace", "role": "reader", "actions": "READ"},
+        {"pattern": "other.*", "level": "workspace", "role": "owner", "actions": "DROP, READ"},
     ]
     install(ScriptedCapability(rows=rows))
     session = opteryx.session(user="olive")
@@ -444,7 +456,10 @@ def test_show_grants_reports_what_the_capability_returns(tmp_path, install):
     for morsel in session.execute_to_morsels("SHOW GRANTS"):
         reported.extend(tuple(row) for row in morsel)
 
-    assert reported == [("ws.*", "reader", "READ"), ("other.*", "owner", "DROP, READ")]
+    assert reported == [
+        ("ws.*", "workspace", "reader", "READ"),
+        ("other.*", "workspace", "owner", "DROP, READ"),
+    ]
 
 
 def test_show_grants_under_the_intrinsic_capability_says_everything_is_allowed():
@@ -454,7 +469,9 @@ def test_show_grants_under_the_intrinsic_capability_says_everything_is_allowed()
     for morsel in session.execute_to_morsels("SHOW GRANTS"):
         reported.extend(tuple(row) for row in morsel)
 
-    assert reported == [("*", "*", "*")]
+    # `level` is empty: a bare `*` addresses no single object, and the level
+    # column never guesses.
+    assert reported == [("*", "", "*", "*")]
 
 
 if __name__ == "__main__":  # pragma: no cover

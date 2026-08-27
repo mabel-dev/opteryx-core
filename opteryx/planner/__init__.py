@@ -519,6 +519,9 @@ def query_planner(
     # attributes, so `shared_ctes` on the plan object would not survive an
     # optimizer strategy handing back a copy.
     shared_ctes = getattr(bound_plan, "shared_ctes", None) or {}
+    # Recursive-CTE metadata rides the same way: the legs are shared_ctes
+    # entries, this maps each rcte_key to them (docs/RECURSIVE_CTE_DESIGN.md).
+    recursive_ctes = getattr(bound_plan, "recursive_ctes", None) or {}
     optimized_plan = do_optimizer(
         bound_plan, telemetry, scan_stats_cache=scan_stats_cache, shared_ctes=shared_ctes
     )
@@ -591,6 +594,7 @@ def query_planner(
     start = time.monotonic_ns()
     query_properties = QueryProperties(query_id=query_id, variables=execution_context.variables)
     physical_plan = create_physical_plan(optimized_plan, query_properties, shared_ctes=shared_ctes)
+    physical_plan.recursive_ctes = recursive_ctes
     telemetry.time_planning_physical_planner += time.monotonic_ns() - start
 
     return physical_plan

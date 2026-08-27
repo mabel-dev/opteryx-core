@@ -25,6 +25,7 @@ from opteryx.planner.logical_planner.logical_planner import (
     LogicalPlan,
     LogicalPlanNode,
     LogicalPlanStepType,
+    RecursiveCteDefinition,
     apply_visibility_filters,
     do_logical_planning_phase,
 )
@@ -35,6 +36,7 @@ __all__ = (
     "LogicalPlan",
     "LogicalPlanNode",
     "LogicalPlanStepType",
+    "RecursiveCteDefinition",
     "do_logical_planning_phase",
     "build",
 )

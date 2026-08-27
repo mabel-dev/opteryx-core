@@ -12,11 +12,12 @@ the same permissions capability that decides queries (see
 cannot drift into disagreeing. With no capability registered the engine allows
 everything, and this dataset says exactly that.
 
-This dataset REPORTS grants; it never confers them. Opteryx has no GRANT or
-REVOKE: policies are issued by the platform's policy service and handed to the
-session at construction, so the engine can only ever narrow access, never widen
-it. `SHOW GRANTS` exists so a caller can answer "why can't I see this table?"
-without leaving SQL.
+This dataset REPORTS grants; it never confers them. Grant administration is
+the separate `GRANT`/`REVOKE`/`SHOW GRANTS ON` surface, applied through the
+same capability. Policies are issued by the platform's policy service and
+handed to the session at construction, so within a session the engine can
+only ever narrow access, never widen it. `SHOW GRANTS` exists so a caller can
+answer "why can't I see this table?" without leaving SQL.
 """
 
 from draken.draken_native import DrakenType
@@ -50,6 +51,7 @@ def read(at_date=None, variables=None):
     rows = active_permissions_capability().grants(username, list(policies or []))
 
     patterns = []
+    levels = []
     roles = []
     actions = []
 
@@ -57,16 +59,21 @@ def read(at_date=None, variables=None):
         if not isinstance(row, dict):
             continue
         patterns.append(str(row.get("pattern", "")))
+        # The object level the pattern addresses (workspace/collection/dataset),
+        # spoken the way the GRANT surface speaks. Empty for a pattern that
+        # addresses no single object — never guessed.
+        levels.append(str(row.get("level", "")))
         roles.append(str(row.get("role", "")))
         actions.append(str(row.get("actions", "")))
 
     vectors = [
         vector_from_sequence(patterns, dtype=DrakenType.VARCHAR),
+        vector_from_sequence(levels, dtype=DrakenType.VARCHAR),
         vector_from_sequence(roles, dtype=DrakenType.VARCHAR),
         vector_from_sequence(actions, dtype=DrakenType.VARCHAR),
     ]
 
-    return Morsel.from_vectors(["pattern", "role", "actions"], vectors)
+    return Morsel.from_vectors(["pattern", "level", "role", "actions"], vectors)
 
 
 def schema():
@@ -78,6 +85,7 @@ def schema():
         name="$grants",
         columns=[
             sc("pattern"),
+            sc("level"),
             sc("role"),
             sc("actions"),
         ],

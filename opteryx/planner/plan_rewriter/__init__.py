@@ -59,8 +59,10 @@ def do_plan_rewrite(
     # the registry across — the rewriter can hand back a different plan object,
     # and Graph copies do not carry instance attributes.
     shared_ctes = getattr(plan, "shared_ctes", None) or {}
+    recursive_ctes = getattr(plan, "recursive_ctes", None) or {}
     for key, body in shared_ctes.items():
         shared_ctes[key] = rewriter.rewrite(body, {})
     plan = rewriter.rewrite(plan, {})
     plan.shared_ctes = shared_ctes
+    plan.recursive_ctes = recursive_ctes
     return plan

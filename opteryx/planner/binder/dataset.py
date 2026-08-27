@@ -11,6 +11,7 @@ from draken.draken_native import DrakenType
 from opteryx.exceptions import (
     AmbiguousDatasetError,
     InvalidFunctionParameterError,
+    InvalidInternalStateError,
     UnsupportedSyntaxError,
     compose,
     md_cause,
@@ -349,11 +350,20 @@ def visit_function_dataset(
             element_type = _lt.TIMESTAMP()
 
         node.relation_name = node.alias
-        _gs_schema_col = SchemaColumn(name=node.alias, column_type=element_type if isinstance(element_type, ColumnType) else None, identity=mint_column_identity(node.relation_name, node.alias))
+        # The column is named by the alias THE USER DECLARED, captured at plan
+        # time (logical_planner stamps `series_column`) — never the live alias,
+        # which rename_relations rewrites when a CTE or view body is spliced.
+        series_column = node.series_column
+        if series_column is None:
+            raise InvalidInternalStateError(
+                "GENERATE_SERIES reached the binder without its declared column "
+                "name — the logical planner stamps `series_column` at creation."
+            )
+        _gs_schema_col = SchemaColumn(name=series_column, column_type=element_type if isinstance(element_type, ColumnType) else None, identity=mint_column_identity(node.relation_name, series_column))
         columns = [
             LogicalColumn(
                 node_type=NodeType.IDENTIFIER,
-                source_column=node.alias,
+                source_column=series_column,
                 source=node.relation_name,
                 schema_column=_gs_schema_col,
             )

@@ -221,6 +221,110 @@ def _intercept_trigger_statements(clean_sql: str):
     ]
 
 
+# GRANT <role> ON <kind> <object> TO USER <user>
+# REVOKE <role> ON <kind> <object> FROM USER <user>
+# SHOW GRANTS ON <kind> <object>
+#
+# sqlparser has GRANT/REVOKE grammar, but it speaks in privileges (SELECT,
+# INSERT) over tables - it has no reader/writer/owner role vocabulary and no
+# WORKSPACE|COLLECTION|DATASET object kinds - so these take the same pre-parse
+# route as REFRESH. The principal is `TO USER <user>` with USER mandatory: it
+# reserves the grammar for TO ROLE/groups later without ambiguity. Bare
+# `SHOW GRANTS` (the session's own grants) is untouched here and still parses
+# through the ShowVariable catch-all.
+_GRANT_LEAD = re.compile(r"^\s*(GRANT|REVOKE)\b", re.IGNORECASE)
+_GRANT_RE = re.compile(
+    r"^\s*(?P<verb>GRANT|REVOKE)\s+(?P<role>READER|WRITER|OWNER)\s+"
+    r"ON\s+(?P<kind>WORKSPACE|COLLECTION|DATASET)\s+(?P<object>[A-Za-z_][\w.$]*)\s+"
+    r"(?P<direction>TO|FROM)\s+USER\s+(?P<user>'[^']+'|\"[^\"]+\"|[\w.@:+-]+)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SHOW_GRANTS_ON_LEAD = re.compile(r"^\s*SHOW\s+GRANTS\s+ON\b", re.IGNORECASE)
+_SHOW_GRANTS_ON_RE = re.compile(
+    r"^\s*SHOW\s+GRANTS\s+ON\s+(?P<kind>WORKSPACE|COLLECTION|DATASET)\s+"
+    r"(?P<object>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _intercept_grant_statements(clean_sql: str):
+    """Recognize GRANT and REVOKE before the SQL parser.
+
+        GRANT  READER|WRITER|OWNER ON WORKSPACE|COLLECTION|DATASET <object> TO USER <user>
+        REVOKE READER|WRITER|OWNER ON WORKSPACE|COLLECTION|DATASET <object> FROM USER <user>
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    does not begin with GRANT or REVOKE. Anything else beginning with those
+    keywords is rejected here by name rather than handed to sqlparser's own
+    GRANT grammar, which speaks in privileges over tables and would accept or
+    misreport a statement this engine does not run.
+
+    GRANT pairs with TO and REVOKE with FROM - the crossed forms are refused,
+    since a statement whose preposition disagrees with its verb was not the
+    statement someone meant to run.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _GRANT_LEAD.match(clean_sql):
+        return None
+    match = _GRANT_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **GRANT** READER|WRITER|OWNER **ON** "
+            "WORKSPACE|COLLECTION|DATASET <object> **TO USER** <user>, or "
+            "**REVOKE** READER|WRITER|OWNER **ON** WORKSPACE|COLLECTION|DATASET "
+            "<object> **FROM USER** <user>."
+        )
+    verb = match.group("verb").upper()
+    direction = match.group("direction").upper()
+    if (verb == "GRANT") != (direction == "TO"):
+        raise UnsupportedSyntaxError(
+            "**GRANT** grants **TO USER** and **REVOKE** revokes **FROM USER** - "
+            f"'{verb} ... {direction} USER' mixes the two."
+        )
+    principal = match.group("user")
+    if principal[0] in "'\"":
+        principal = principal[1:-1]
+    root = "GrantAccess" if verb == "GRANT" else "RevokeAccess"
+    return [
+        {
+            root: {
+                "role": match.group("role").lower(),
+                "object_kind": match.group("kind").lower(),
+                "object_name": match.group("object"),
+                "principal": principal,
+            }
+        }
+    ]
+
+
+def _intercept_show_grants_on(clean_sql: str):
+    """Recognize `SHOW GRANTS ON <kind> <object>` before the SQL parser.
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    is not a SHOW GRANTS ON - bare `SHOW GRANTS` (the session's own grants)
+    falls through to the parser's ShowVariable catch-all untouched.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _SHOW_GRANTS_ON_LEAD.match(clean_sql):
+        return None
+    match = _SHOW_GRANTS_ON_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **SHOW GRANTS ON** WORKSPACE|COLLECTION|DATASET <object>. "
+            "For the session's own grants, use bare **SHOW GRANTS**."
+        )
+    return [
+        {
+            "ShowGrantsOn": {
+                "object_kind": match.group("kind").lower(),
+                "object_name": match.group("object"),
+            }
+        }
+    ]
+
+
 # The order matters only in that each interceptor is asked about a statement it can
 # rule out on its first keyword; a statement matching two of them does not exist.
 _INTERCEPTORS = (
@@ -228,6 +332,8 @@ _INTERCEPTORS = (
     _intercept_trigger_statements,
     _intercept_refresh_statements,
     _intercept_alter_materialized_view,
+    _intercept_grant_statements,
+    _intercept_show_grants_on,
 )
 
 

@@ -39,8 +39,14 @@ ALIAS is randomised by rename_relations but its RELATION is not, and `relation` 
 lookup key — so a self-referencing view, a view cycle, or a recursive CTE regenerated an
 identical lookup on every pass and hung the planner forever.
 
-WITH RECURSIVE is rejected at logical planning (see extract_ctes). Supporting it needs a
-native fixpoint operator in the engine, which is a separate piece of work.
+WITH RECURSIVE (docs/RECURSIVE_CTE_DESIGN.md) is the ONE sanctioned exemption: a
+recursive CTE arrives from extract_ctes as a RecursiveCteDefinition (anchor plan +
+recursive-term plan, already split at its topmost UNION ALL) and is NEVER spliced —
+every reference, the term's self-reference included, becomes a MaterializedCteRef on
+the one definition, so no cycle ever exists in the plan graph. The legs ride
+`plan.shared_ctes` as ordinary bodies (bound, optimized and compiled on the existing
+shared-CTE rail) and `plan.recursive_ctes` carries the fixpoint metadata the plan
+compiler turns into the engine's LoopSpan.
 """
 
 from typing import Dict
@@ -52,6 +58,7 @@ from opteryx.models import LogicalColumn
 from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.planner.logical_planner import RecursiveCteDefinition
 
 __all__ = [
     "do_resolve_relations",
@@ -532,6 +539,7 @@ def _resolve(
     cte_registry: Optional[Dict[str, LogicalPlan]] = None,
     cte_body_keys: Optional[Dict[Tuple[int, str], str]] = None,
     cte_names: Optional[Dict[str, str]] = None,
+    recursive_defs: Optional[Dict[str, "RecursiveCteDefinition"]] = None,
 ) -> LogicalPlan:
     """
     Expand every view reference in one plan, resolve every CTE reference to a
@@ -579,6 +587,48 @@ def _resolve(
             scope, path, via_view = scopes.get(nid, (root_scope, root_path, root_via_view))
 
             if relation in scope:
+                if isinstance(scope[relation], RecursiveCteDefinition):
+                    # A recursive CTE is never spliced: every reference (the term's
+                    # self-reference included) becomes a pending marker on the ONE
+                    # definition. The key is registered BEFORE the legs resolve, so
+                    # the self-reference inside the term lands here on the memoized
+                    # key instead of recursing — the one sanctioned exemption from
+                    # the cycle check below.
+                    definition = scope[relation]
+                    body_key = cte_body_keys.get((id(scope), relation))
+                    if body_key is None:
+                        if relation in path:
+                            raise _cycle_error(relation, path)
+                        from opteryx.utils import random_string
+
+                        body_key = f"$rcte-{random_string(8)}"
+                        cte_body_keys[(id(scope), relation)] = body_key
+                        cte_names[body_key] = relation
+                        legs = []
+                        for leg in (definition.anchor, definition.term):
+                            legs.append(
+                                _resolve(
+                                    copy_sub_plan(leg),
+                                    scope,
+                                    path + (relation,),
+                                    telemetry,
+                                    catalog_cache,
+                                    via_view,
+                                    cte_registry=cte_registry,
+                                    cte_body_keys=cte_body_keys,
+                                    cte_names=cte_names,
+                                    recursive_defs=recursive_defs,
+                                )
+                            )
+                        recursive_defs[body_key] = RecursiveCteDefinition(
+                            anchor=legs[0],
+                            term=legs[1],
+                            distinct=definition.distinct,
+                            name=relation,
+                        )
+                    node.pending_cte_key = body_key
+                    settled.add(nid)
+                    continue
                 if relation in path:
                     raise _cycle_error(relation, path)
                 if len(path) >= MAX_EXPANSION_DEPTH:
@@ -608,6 +658,7 @@ def _resolve(
                         cte_registry=cte_registry,
                         cte_body_keys=cte_body_keys,
                         cte_names=cte_names,
+                        recursive_defs=recursive_defs,
                     )
                 node.pending_cte_key = body_key
                 settled.add(nid)
@@ -669,6 +720,7 @@ def _resolve(
                 cte_registry=cte_registry,
                 cte_body_keys=cte_body_keys,
                 cte_names=cte_names,
+                recursive_defs=recursive_defs,
             )
 
     return plan
@@ -729,8 +781,63 @@ def _pending_refs(plan: LogicalPlan):
                 yield member, nid, node
 
 
+def _reject_unsupported_term_shapes(term: LogicalPlan, key: str, name: str) -> None:
+    """v1 shape gates on the recursive term (docs/RECURSIVE_CTE_DESIGN.md §5.1):
+    the self-reference must feed the term's head through row-producing steps
+    whose semantics survive per-iteration re-execution. Aggregates/windows over
+    the working table are semantically contested across engines; ORDER BY /
+    LIMIT inside the term would need per-iteration reset the engine's operators
+    do not have (quota state is cumulative across passes); outer joins can
+    null-pad the frontier. Each is rejected by name, never computed wrongly."""
+    ref_nid = None
+    for nid, node in term.nodes(True):
+        if node.node_type == LogicalPlanStepType.MaterializedCteRef and node.cte_key == key:
+            ref_nid = nid
+            break
+    if ref_nid is None:
+        raise UnsupportedSyntaxError(
+            f"Recursive CTE '{name}' references itself inside a subquery expression "
+            "of the recursive term; reference it directly in the FROM clause."
+        )
+    blocking = {
+        LogicalPlanStepType.Aggregate: "an aggregation",
+        LogicalPlanStepType.AggregateAndGroup: "a GROUP BY",
+        LogicalPlanStepType.Window: "a window function",
+        LogicalPlanStepType.FramedWindow: "a window function",
+        LogicalPlanStepType.Limit: "a LIMIT",
+        LogicalPlanStepType.Order: "an ORDER BY",
+        LogicalPlanStepType.HeapSort: "an ORDER BY with LIMIT",
+    }
+    nid = ref_nid
+    while True:
+        outgoing = term.outgoing_edges(nid)
+        if not outgoing:
+            return
+        nid = outgoing[0][1]
+        node = term[nid]
+        label = blocking.get(node.node_type)
+        if label is not None:
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{name}' applies {label} over its own reference in "
+                "the recursive term, which is not supported; apply it in the query "
+                "that reads the CTE."
+            )
+        if (
+            node.node_type == LogicalPlanStepType.Join
+            and node.type not in ("inner", "cross join")
+        ):
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{name}' feeds its own reference through a "
+                f"{str(node.type).upper()} join in the recursive term; only INNER "
+                "joins over the self-reference are supported."
+            )
+
+
 def _finalize_cte_sharing(
-    plan: LogicalPlan, registry: Dict[str, LogicalPlan], names: Dict[str, str]
+    plan: LogicalPlan,
+    registry: Dict[str, LogicalPlan],
+    names: Dict[str, str],
+    recursive_defs: Optional[Dict[str, RecursiveCteDefinition]] = None,
 ) -> LogicalPlan:
     """Decide, per CTE definition, between inline expansion and result sharing.
 
@@ -746,11 +853,22 @@ def _finalize_cte_sharing(
       does for any derived relation.
 
     Unreachable bodies (a CTE declared but never referenced) are dropped.
+
+    Recursive CTEs (`recursive_defs`, keyed like the registry) never take the
+    inline path — their references share the fixpoint's one accumulated result by
+    definition. Each one's anchor/term legs enter `plan.shared_ctes` as ordinary
+    bodies and `plan.recursive_ctes` carries the metadata binding them together.
     """
+    recursive_defs = recursive_defs or {}
 
     # ---- reachability + reference counts ------------------------------------
     def _refs_in(p: LogicalPlan):
         return [node.pending_cte_key for _m, _nid, node in _pending_refs(p)]
+
+    def _body_refs(key: str):
+        if key in recursive_defs:
+            return _refs_in(recursive_defs[key].anchor) + _refs_in(recursive_defs[key].term)
+        return _refs_in(registry[key])
 
     counts: Dict[str, int] = {}
     reachable: list = []  # discovery order
@@ -760,7 +878,7 @@ def _finalize_cte_sharing(
         counts[key] = counts.get(key, 0) + 1
         if key not in reachable:
             reachable.append(key)
-            frontier.extend(_refs_in(registry[key]))
+            frontier.extend(_body_refs(key))
         # already-reachable bodies were counted when first discovered
 
     # A body's OWN references were counted exactly once, on discovery, which is the
@@ -782,8 +900,15 @@ def _finalize_cte_sharing(
             for site in _pending_refs(body):
                 if site[2].pending_cte_key == key:
                     yield site
+        # a recursive CTE's legs are bodies too — a single-referenced ordinary
+        # CTE read only from inside one is spliced into that leg
+        for d in recursive_defs.values():
+            for leg in (d.anchor, d.term):
+                for site in _pending_refs(leg):
+                    if site[2].pending_cte_key == key:
+                        yield site
 
-    for key in [k for k in reachable if counts[k] == 1]:
+    for key in [k for k in reachable if counts[k] == 1 and k not in recursive_defs]:
         sites = list(_all_sites(key, exclude_body=key))
         if len(sites) != 1:  # pragma: no cover — counts and sites derive identically
             raise UnsupportedSyntaxError(
@@ -793,9 +918,13 @@ def _finalize_cte_sharing(
         node.pending_cte_key = None
         _splice(member, nid, node, registry.pop(key))
 
-    # ---- refcount 2+: shared, materialized once ------------------------------
+    # ---- refcount 2+ (and every recursive CTE): shared, materialized once ----
     shared: Dict[str, LogicalPlan] = {}
+    recursive_used: list = []  # discovery order
     remaining = [_pending_refs(plan)] + [_pending_refs(body) for body in registry.values()]
+    for d in recursive_defs.values():
+        remaining.append(_pending_refs(d.anchor))
+        remaining.append(_pending_refs(d.term))
     for site_iter in remaining:
         for member, nid, node in site_iter:
             key = node.pending_cte_key
@@ -803,26 +932,70 @@ def _finalize_cte_sharing(
             node.node_type = LogicalPlanStepType.MaterializedCteRef
             node.cte_key = key
             node.cte_name = names.get(key)
-            shared.setdefault(key, registry[key])
+            if key in recursive_defs:
+                if key not in recursive_used:
+                    recursive_used.append(key)
+            else:
+                shared.setdefault(key, registry[key])
 
-    # Head each shared body with a Subquery boundary (alias = the CTE's declared
-    # name) so binding it standalone produces the body's output schema exactly as
-    # visit_subquery does for a derived table.
+    # Reference-shape obligations the fixpoint depends on: exactly one
+    # self-reference, in the term. An indirect self-reference (through a CTE
+    # spliced into a leg) surfaces here too — the splice landed the reference
+    # in the leg's own forest.
+    for key in recursive_used:
+        d = recursive_defs[key]
+        name = names.get(key, key)
+
+        def _self_refs(p: LogicalPlan):
+            return [
+                node
+                for member in iter_plan_forest(p)
+                for _nid, node in member.nodes(True)
+                if node.node_type == LogicalPlanStepType.MaterializedCteRef
+                and node.cte_key == key
+            ]
+
+        if _self_refs(d.anchor):
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{name}' references itself in the anchor term. "
+                "Only the term after UNION ALL may reference the CTE."
+            )
+        term_self_refs = len(_self_refs(d.term))
+        if term_self_refs != 1:
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{name}' references itself {term_self_refs} times in "
+                "the recursive term; exactly one self-reference is supported."
+            )
+        _reject_unsupported_term_shapes(d.term, key, name)
+
+    # Head each shared body (and each recursive leg) with a Subquery boundary
+    # (alias = the CTE's declared name) so binding it standalone produces the
+    # body's output schema exactly as visit_subquery does for a derived table.
     from opteryx.planner.logical_planner import LogicalPlanNode
     from opteryx.utils import random_string
 
-    for key, body in shared.items():
+    def _add_boundary(body: LogicalPlan, alias: str):
         head = body.get_exit_points()[0]
         boundary = LogicalPlanNode(LogicalPlanStepType.Subquery)
-        boundary.alias = names.get(key, key)
+        boundary.alias = alias
         boundary.columns = _boundary_columns(body, head, boundary.alias)
         boundary_nid = random_string()
         body.add_node(boundary_nid, boundary)
         body.add_edge(head, boundary_nid)
 
+    for key, body in shared.items():
+        _add_boundary(body, names.get(key, key))
+    for key in recursive_used:
+        _add_boundary(recursive_defs[key].anchor, names.get(key, key))
+        _add_boundary(recursive_defs[key].term, names.get(key, key))
+
     # Topological order, dependencies first — a shared body referencing another
-    # shared CTE must be bound/compiled after the body it reads.
+    # shared CTE must be bound/compiled after the body it reads. A recursive
+    # CTE contributes its two legs (anchor immediately before term) plus a
+    # metadata record binding them; its self-reference is not a dependency.
     ordered: Dict[str, LogicalPlan] = {}
+    recursive_meta: Dict[str, dict] = {}
+    emitted: set = set()
 
     def _converted_refs_in(p: LogicalPlan):
         return [
@@ -833,18 +1006,44 @@ def _finalize_cte_sharing(
         ]
 
     def _emit(key: str, trail: Tuple[str, ...]):
-        if key in ordered:
+        if key in emitted:
             return
         if key in trail:  # pragma: no cover — the resolver's cycle check fires first
             raise _cycle_error(names.get(key, key), trail)
-        for dep in set(_converted_refs_in(shared[key])):
-            _emit(dep, trail + (key,))
-        ordered[key] = shared[key]
+        if key in recursive_defs:
+            d = recursive_defs[key]
+            deps = set(_converted_refs_in(d.anchor)) | set(_converted_refs_in(d.term))
+            deps.discard(key)  # the self-reference
+            for dep in deps:
+                if dep in recursive_defs:
+                    raise UnsupportedSyntaxError(
+                        f"Recursive CTEs '{names.get(key, key)}' and "
+                        f"'{names.get(dep, dep)}' reference each other; mutual "
+                        "recursion is not supported."
+                    )
+                _emit(dep, trail + (key,))
+            emitted.add(key)
+            anchor_key, term_key = f"{key}#anchor", f"{key}#term"
+            ordered[anchor_key] = d.anchor
+            ordered[term_key] = d.term
+            names[anchor_key] = names[term_key] = names.get(key, key)
+            recursive_meta[key] = {
+                "anchor_key": anchor_key,
+                "term_key": term_key,
+                "distinct": d.distinct,
+                "name": names.get(key, key),
+            }
+        else:
+            for dep in set(_converted_refs_in(shared[key])):
+                _emit(dep, trail + (key,))
+            emitted.add(key)
+            ordered[key] = shared[key]
 
-    for key in shared:
+    for key in list(shared) + recursive_used:
         _emit(key, ())
 
     plan.shared_ctes = ordered
+    plan.recursive_ctes = recursive_meta
     return plan
 
 
@@ -868,6 +1067,7 @@ def do_resolve_relations(
     registry: Dict[str, LogicalPlan] = {}
     body_keys: Dict[Tuple[int, str], str] = {}
     names: Dict[str, str] = {}
+    recursive_defs: Dict[str, RecursiveCteDefinition] = {}
     plan = _resolve(
         plan,
         common_table_expressions or {},
@@ -877,5 +1077,6 @@ def do_resolve_relations(
         cte_registry=registry,
         cte_body_keys=body_keys,
         cte_names=names,
+        recursive_defs=recursive_defs,
     )
-    return _finalize_cte_sharing(plan, registry, names)
+    return _finalize_cte_sharing(plan, registry, names, recursive_defs)

@@ -1341,3 +1341,67 @@ def visit_merge(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
             )
 
     return node, context
+
+
+def _bind_grant_administration(node: Node, context: BindingContext, action: str) -> Node:
+    """Shared binding for GRANT, REVOKE and SHOW GRANTS ON.
+
+    The bind-time gate is the same question the capability's apply/list path
+    asks again authoritatively at execution — asked here too so a pre-flight
+    bind (the jobs API checks permissions before queueing) refuses a statement
+    the caller could never run, instead of queueing it to fail later. Both
+    reads go to the one registered capability, so they cannot disagree.
+
+    No connector is bound: nothing here reads or writes data, and whether the
+    named object exists is the policy service's caller-side concern (see
+    opteryx-access grants.py — deliberately not a permissions question).
+
+    The execution context is stashed on the node because the apply happens at
+    EXECUTION time, where the operator has no BindingContext — the capability
+    needs the acting identity to hold the authority check, the no-self-service
+    rule, and the audit record to.
+    """
+    from opteryx.managers.permissions import can_perform_action
+    from opteryx.managers.permissions import can_perform_workspace_action
+
+    if node.object_kind == "workspace":
+        # A bare workspace name is not a relation — `can_perform_action` reads
+        # a dotless name as a local table and short-circuits, so the
+        # workspace-level check is its own gate, exactly as ALTER WORKSPACE's.
+        permitted = can_perform_workspace_action(
+            context.execution_context, node.object_name, action=action
+        )
+    else:
+        permitted = can_perform_action(
+            context.execution_context, node.object_name, action=action
+        )
+    if not permitted:
+        raise PermissionError(
+            f"User does not have permission to administer grants on "
+            f"{node.object_kind} {node.object_name} (owner required)"
+        )
+
+    node.execution_context = context.execution_context
+    node.columns = []
+    return node
+
+
+def visit_grant_access(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind GRANT <role> ON <kind> <object> TO USER <user>. Owner-gated."""
+    return _bind_grant_administration(node, context, "GRANT"), context
+
+
+def visit_revoke_access(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind REVOKE <role> ON <kind> <object> FROM USER <user>. Owner-gated."""
+    return _bind_grant_administration(node, context, "REVOKE"), context
+
+
+def visit_show_grants_on(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind SHOW GRANTS ON <kind> <object>.
+
+    Gated at GRANT — the same authority a mutation needs, deliberately: who
+    may see the grants on an object is who may change them (architect ruling
+    2026-08-27). A weaker read-tier gate would let a reader enumerate who else
+    holds what.
+    """
+    return _bind_grant_administration(node, context, "GRANT"), context

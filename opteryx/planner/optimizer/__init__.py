@@ -461,6 +461,19 @@ def do_optimizer(
                 body[head].statistics,
             )
 
+        # A recursive CTE's references carry its ANCHOR's estimate: the fixpoint's
+        # true cardinality has no model yet (docs/RECURSIVE_CTE_DESIGN.md §5.4)
+        # and the anchor is an honest lower bound — better than UNKNOWN for join
+        # ordering, and still labelled an estimate.
+        for rkey, meta in (getattr(plan, "recursive_ctes", None) or {}).items():
+            anchor_body = shared.get(meta["anchor_key"])
+            if anchor_body is None:
+                continue
+            head = anchor_body.get_exit_points()[0]
+            stamp_reference_estimates(
+                [plan] + list(shared.values()), rkey, anchor_body[head].statistics
+            )
+
     plan = optimizer.optimize(plan, scan_stats_cache=scan_stats_cache)
 
     if shared:

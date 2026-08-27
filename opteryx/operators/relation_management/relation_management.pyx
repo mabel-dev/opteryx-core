@@ -90,6 +90,17 @@ class RelationManagementNode(BasePlanNode):
         self.property_name: Optional[str] = parameters.get("property_name")
         self.property_value = parameters.get("property_value")
 
+        # GRANT / REVOKE
+        self.pattern: Optional[str] = parameters.get("pattern")
+        self.role: Optional[str] = parameters.get("role")
+        self.principal: Optional[str] = parameters.get("principal")
+        self.object_kind: Optional[str] = parameters.get("object_kind")
+        self.object_name: Optional[str] = parameters.get("object_name")
+        # Stashed by the binder (visit_grant_access/visit_revoke_access): the
+        # capability needs the acting identity at execution time, where there
+        # is no BindingContext to read it from.
+        self.execution_context = parameters.get("execution_context")
+
         # CREATE / TRUNCATE / ALTER
         self.connector = parameters.get("connector")
 
@@ -133,6 +144,10 @@ class RelationManagementNode(BasePlanNode):
             return f"alter materialized view {self.relation_name} {'suspend' if self.suspended else 'resume'}"
         if self.action == "alter_materialized_view_owner":
             return f"alter materialized view {self.relation_name} owner to {'CURRENT_USER' if self.owner_is_current_user else self.new_owner}"
+        if self.action == "grant_access":
+            return f"grant {self.role} on {self.object_kind} {self.object_name} to user {self.principal}"
+        if self.action == "revoke_access":
+            return f"revoke {self.role} on {self.object_kind} {self.object_name} from user {self.principal}"
         return f"{self.action} {self.relation_name}"
 
     @property
@@ -367,6 +382,26 @@ class RelationManagementNode(BasePlanNode):
 
         elif self.action == "drop_workspace":
             self.connector.drop_workspace(self.workspace_name, author=self._author)
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "grant_access":
+            # Adds exactly ONE policy. Every rule — owner authority covering the
+            # pattern, the no-self-service rule, conflict refusal, the audit
+            # record — lives in the registered permissions capability; the engine
+            # hands over and reports. There is no upgrade path: changing an
+            # existing grant is REVOKE then GRANT, by the caller.
+            from opteryx.managers.permissions import apply_grant
+
+            apply_grant(self.execution_context, self.pattern, self.role, self.principal)
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "revoke_access":
+            # Deletes exactly ONE policy, resolved 1:1 by (principal, pattern,
+            # role). Access held through a policy at a different level errors,
+            # naming that policy — never narrowed, never a silent no-op.
+            from opteryx.managers.permissions import apply_revoke
+
+            apply_revoke(self.execution_context, self.pattern, self.role, self.principal)
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         else:

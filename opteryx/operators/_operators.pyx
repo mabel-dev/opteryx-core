@@ -250,16 +250,28 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         uint64_t block_bytes
         double dense_bpr
         double code_bpr
+    cdef cppclass LoopReading "opteryx::engine::Engine::LoopReading":
+        string name
+        uint32_t iterations
+        bint distinct
+        uint64_t visited_rows
+        uint32_t max_iterations
     cdef cppclass Engine:
         Engine() except +
         void set_current_identity(string s)
         void set_current_display_name(string s)
         cppvector[OpReading] collect_op_stats()
         cppvector[PipelineReading] collect_pipeline_stats()
+        cppvector[LoopReading] collect_loop_stats()
         cppvector[Join2BuildReading] collect_join2_build_stats()
         cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
+        size_t pipeline_count()
         size_t new_buffer()
+        size_t new_scratch_buffer()
+        void add_loop_span(size_t first, size_t last, size_t working, size_t delta,
+                           size_t result, bint distinct, uint32_t max_iterations,
+                           string name) except +
         void set_spill_root(string root)
         void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bint serialize_pull)
         void set_native_skene_scan_source(size_t p,
@@ -2560,8 +2572,45 @@ cdef class NativePlan:
     def new_pipeline(self):
         return self._e.new_pipeline()
 
+    def pipeline_count(self):
+        return self._e.pipeline_count()
+
     def new_buffer(self):
         return self._e.new_buffer()
+
+    def new_scratch_buffer(self):
+        """A never-spill buffer for a LoopSpan's WORKING/DELTA frontier — the
+        driver's swap primitives (reset_with/take_resident) require residency."""
+        return self._e.new_scratch_buffer()
+
+    def add_loop_span(self, size_t first, size_t last, size_t working, size_t delta,
+                      size_t result, bint distinct, uint32_t max_iterations, name):
+        """Fixpoint over pipelines [first, last]: the recursive-CTE loop
+        (docs/RECURSIVE_CTE_DESIGN.md). Anchor pipelines before `first` append
+        into `delta`; the span reads `working` and appends into `delta`; the
+        control step accumulates into `result`, which consumers read. `name` is
+        the CTE's declared name — it appears in the ceiling error and in
+        collect_loop_stats."""
+        cdef string nm = <string>((<str>name).encode("utf-8") if isinstance(name, str) else name)
+        self._e.add_loop_span(first, last, working, delta, result, distinct,
+                              max_iterations, nm)
+
+    def collect_loop_stats(self):
+        """Per-LoopSpan fixpoint readings: recursive passes run, the UNION
+        visited-set size, and the ceiling that applied. Same call-after-run
+        precondition as collect_op_stats."""
+        cdef cppvector[LoopReading] rows = self._e.collect_loop_stats()
+        cdef LoopReading r
+        out = []
+        for r in rows:
+            out.append({
+                "name": r.name.decode("utf-8"),
+                "iterations": int(r.iterations),
+                "distinct": bool(r.distinct),
+                "visited_rows": int(r.visited_rows),
+                "max_iterations": int(r.max_iterations),
+            })
+        return out
 
     def set_scan_source(self, size_t p, scan, bint serialize_pull=False):
         """Source = the existing native scan, pulled via the GIL trampoline — the ONE
@@ -3917,6 +3966,7 @@ include "parquet_read/parquet_read.pyx"
 include "projection/projection.pyx"
 include "set_variable/set_variable.pyx"
 include "show_columns/show_columns.pyx"
+include "show_grants/show_grants.pyx"
 include "show_manifest/show_manifest.pyx"
 include "show_snapshots/show_snapshots.pyx"
 include "show_create/show_create.pyx"

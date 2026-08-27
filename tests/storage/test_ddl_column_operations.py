@@ -773,6 +773,17 @@ class _RecordingCapability:
     def grants(self, identity, policies):
         return []
 
+    # Grant administration (required members since 2026-08-27). No column-DDL
+    # statement administers grants, so reaching one of these is itself a bug.
+    def apply_grant(self, execution_context, pattern, role, principal):
+        raise AssertionError("apply_grant should not be reached by these tests")
+
+    def apply_revoke(self, execution_context, pattern, role, principal):
+        raise AssertionError("apply_revoke should not be reached by these tests")
+
+    def grants_on(self, execution_context, pattern):
+        raise AssertionError("grants_on should not be reached by these tests")
+
 
 @pytest.fixture
 def install_capability():

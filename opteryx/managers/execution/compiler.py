@@ -5376,16 +5376,82 @@ def compile_to_native(plan, pool=None):
     # pipeline that reads it exists. Each body is a plan of its own (no Exit);
     # its head streams into a buffer-append sink, and the CteRefNode arm of
     # compile_node wires each reference to that buffer.
+    # Recursive-CTE metadata: the anchor/term legs sit in shared_ctes (anchor
+    # immediately before term); the compile below turns each pair into the
+    # engine's fixpoint — anchor appends into DELTA, the term's pipelines form
+    # the LoopSpan (its self-reference reads WORKING), and every outer reference
+    # reads the accumulated RESULT. See docs/RECURSIVE_CTE_DESIGN.md §3.
+    recursive_meta = getattr(plan, "recursive_ctes", None) or {}
+    leg_roles = {}
+    for rkey, meta in recursive_meta.items():
+        leg_roles[meta["anchor_key"]] = (rkey, "anchor", meta)
+        leg_roles[meta["term_key"]] = (rkey, "term", meta)
+    recursive_state: dict = {}  # rcte_key -> plan-time buffer/layout facts
+
     for cte_key, body_plan in (getattr(plan, "shared_ctes", None) or {}).items():
         body_compiler = _Compiler(body_plan, nplan, pool=pool)
-        body_compiler.cte_buffers = compiler.cte_buffers
+        role = leg_roles.get(cte_key)
+        if role is not None and role[1] == "term":
+            # The term's self-reference must read the WORKING frontier, never
+            # the RESULT it is accumulating into — an OVERRIDDEN copy of the
+            # buffer registry, never the shared dict itself.
+            state = recursive_state[role[0]]
+            body_compiler.cte_buffers = dict(compiler.cte_buffers)
+            body_compiler.cte_buffers[role[0]] = (state["working"], state["layout"])
+            state["first"] = nplan.pipeline_count()
+        else:
+            body_compiler.cte_buffers = compiler.cte_buffers
         body_heads = list(set(body_plan.get_exit_points()))
         if len(body_heads) != 1:
             _unsupported(f"a shared CTE body with {len(body_heads)} heads")
         body_pipeline, body_layout = body_compiler.compile_node(body_heads[0])
-        buf = nplan.new_buffer()
-        nplan.set_buffer_append_sink(body_pipeline, buf)
-        compiler.cte_buffers[cte_key] = (buf, list(body_layout))
+
+        if role is None:
+            buf = nplan.new_buffer()
+            nplan.set_buffer_append_sink(body_pipeline, buf)
+            compiler.cte_buffers[cte_key] = (buf, list(body_layout))
+        elif role[1] == "anchor":
+            rkey, _, meta = role
+            delta = nplan.new_scratch_buffer()
+            working = nplan.new_scratch_buffer()
+            result = nplan.new_buffer()
+            nplan.set_buffer_append_sink(body_pipeline, delta)
+            recursive_state[rkey] = {
+                "delta": delta,
+                "working": working,
+                "result": result,
+                "layout": list(body_layout),
+            }
+        else:
+            rkey, _, meta = role
+            state = recursive_state[rkey]
+            # The fixpoint appends positionally into one set of buffers; the
+            # binder proved the types line up, this proves the widths did not
+            # drift between bind and compile.
+            if len(body_layout) != len(state["layout"]):
+                _unsupported(
+                    f"a recursive CTE whose term produces {len(body_layout)} columns "
+                    f"against an anchor of {len(state['layout'])}"
+                )
+            if body_pipeline != nplan.pipeline_count() - 1:
+                # The span is [first, term-head]; run() jumps back over exactly
+                # that range, so the term's sink pipeline must be the last one
+                # its compile created.
+                _unsupported("a recursive term whose head pipeline is not its last")
+            nplan.set_buffer_append_sink(body_pipeline, state["delta"])
+            from opteryx import config as _config
+
+            nplan.add_loop_span(
+                state["first"],
+                body_pipeline,
+                state["working"],
+                state["delta"],
+                state["result"],
+                bool(meta.get("distinct")),
+                int(_config.MAX_RECURSION_ITERATIONS),
+                meta.get("name") or rkey,
+            )
+            compiler.cte_buffers[rkey] = (state["result"], state["layout"])
         # fold the body's plan-time facts into the facts this compile returns
         compiler.scan_sources.update(body_compiler.scan_sources)
         compiler.scan_facts.update(body_compiler.scan_facts)
@@ -5719,6 +5785,12 @@ def execute_native(plan, telemetry=None, trace_sink=None):
                 # busy — the only reading that can show the pool standing idle, which
                 # a per-operator stat structurally cannot.
                 telemetry._reading["native_pipeline_stats"] = nplan.collect_pipeline_stats()
+                # Recursive fixpoint readings (WITH RECURSIVE): passes run and the
+                # UNION visited-set size, keyed by the CTE's declared name. Empty
+                # for every query with no LoopSpan; EXPLAIN ANALYZE renders it.
+                loop_stats = nplan.collect_loop_stats()
+                if loop_stats:
+                    telemetry._reading["recursive_loop_stats"] = loop_stats
             _harvest_ns = _t.perf_counter_ns() - _th0
             # WP-INSTR instruments 1 & 4: harvest the execution-time GIL readings
             # after the driver (and therefore every worker) is done, so the

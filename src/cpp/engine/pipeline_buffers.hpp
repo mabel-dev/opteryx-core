@@ -234,6 +234,25 @@ struct MorselBuffer {
         return std::move(resident_);
     }
 
+    // ---- fixpoint-loop support (docs/RECURSIVE_CTE_DESIGN.md) -------------
+    // Driver-thread-only, between pipelines, on UNCONFIGURED scratch buffers
+    // (the loop's WORKING/DELTA — Engine::new_scratch_buffer — which can never
+    // spill). Replaces the contents with `pile` and reopens the buffer for
+    // append and a fresh seal(); the next seal recomputes the claim set, which
+    // is what lets one BufferSource pipeline re-read the buffer every
+    // iteration. An empty pile is the DELTA reset.
+    bool reset_with(std::vector<MorselPtr> pile) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (!units_.empty()) return fail_locked_("reset_with() on a spilled buffer");
+        if (failed_.load(std::memory_order_acquire)) return false;
+        resident_ = std::move(pile);
+        resident_bytes_ = 0;
+        for (const auto& m : resident_) resident_bytes_ += cxx_morsel_nbytes(m.get());
+        sealed_ = false;
+        claims_ = 0;
+        return true;
+    }
+
     bool spilled() const { return spilled_.load(std::memory_order_relaxed); }
     bool failed() const { return failed_.load(std::memory_order_acquire); }
     // The error is latched exactly once; the lock acquisition synchronizes the

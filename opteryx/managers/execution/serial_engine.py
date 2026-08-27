@@ -39,6 +39,7 @@ def _special_op_types():
     from opteryx.operators.explain import ExplainNode
     from opteryx.operators.set_variable import SetVariableNode
     from opteryx.operators.show_columns import ShowColumnsNode
+    from opteryx.operators.show_grants import ShowGrantsNode
     from opteryx.operators.show_manifest import ShowManifestNode
     from opteryx.operators.show_snapshots import ShowSnapshotsNode
     from opteryx.operators.show_create import ShowCreateNode
@@ -53,6 +54,7 @@ def _special_op_types():
         ExplainNode,
         SetVariableNode,
         ShowColumnsNode,
+        ShowGrantsNode,
         ShowManifestNode,
         ShowSnapshotsNode,
         ShowCreateNode,
@@ -79,6 +81,7 @@ def execute(
     from opteryx.operators.explain import ExplainNode
     from opteryx.operators.set_variable import SetVariableNode
     from opteryx.operators.show_columns import ShowColumnsNode
+    from opteryx.operators.show_grants import ShowGrantsNode
     from opteryx.operators.show_manifest import ShowManifestNode
     from opteryx.operators.show_snapshots import ShowSnapshotsNode
     from opteryx.operators.show_create import ShowCreateNode
@@ -163,9 +166,18 @@ def execute(
     # already attached (binder/view.py's visit_show_columns/visit_show_manifest/
     # visit_show_snapshots) — the Scan below any of them in the plan is never
     # read. No pipeline, no native engine.
+    # SHOW GRANTS ON is answered from the permissions capability (stashed
+    # execution context), not from a Scan — same no-pipeline shape.
     if isinstance(
         head_node,
-        (ShowValueNode, ShowCreateNode, ShowColumnsNode, ShowManifestNode, ShowSnapshotsNode),
+        (
+            ShowValueNode,
+            ShowCreateNode,
+            ShowColumnsNode,
+            ShowGrantsNode,
+            ShowManifestNode,
+            ShowSnapshotsNode,
+        ),
     ):
         return head_node(None), ResultType.TABULAR
 
@@ -299,6 +311,10 @@ def explain(
 
             subplan = plan.copy()
             subplan.remove_node(head[0], heal=True)
+            # Graph.copy() drops instance attributes; without these the compiler
+            # refuses every CTE reference ("shared body was not compiled").
+            subplan.shared_ctes = getattr(plan, "shared_ctes", None) or {}
+            subplan.recursive_ctes = getattr(plan, "recursive_ctes", None) or {}
             generator, _ = execute_native(subplan, telemetry=telemetry)
             for _ in generator:
                 pass
@@ -329,6 +345,12 @@ def explain(
         from opteryx.utils import mermaid as _mermaid
 
         node_stats_by_nid, _, _ = _mermaid._collect_node_stats(plan)
+        # Shared/recursive CTE bodies ran in the same engine and their operators
+        # carry readings under their own identities; fold them in so the
+        # RECURSIVE CTE section below renders real numbers, not zeros.
+        for _body in (getattr(plan, "shared_ctes", None) or {}).values():
+            _body_stats, _, _ = _mermaid._collect_node_stats(_body)
+            node_stats_by_nid.update(_body_stats)
 
     def _row_count(node_id):
         stat = node_stats_by_nid.get(node_id)
@@ -461,6 +483,82 @@ def explain(
         cpu_col.append(None)
         merge_col.append(None)
         dop_col.append(None)
+
+    # ── RECURSIVE CTEs: anchor + term bodies and the fixpoint readings ───────
+    # Each WITH RECURSIVE renders as its own section: the header carries the
+    # UNION flavour and — under ANALYZE — the passes the fixpoint actually ran
+    # and (UNION) the visited-set size, from the engine's LoopSpan readings.
+    # The legs are physical plans of their own (plan.shared_ctes); their
+    # operator rows read the same per-identity stats overlay as the main tree.
+    recursive_meta = getattr(plan, "recursive_ctes", None) or {}
+    if recursive_meta:
+        shared_bodies = getattr(plan, "shared_ctes", None) or {}
+        loop_by_name = {
+            entry["name"]: entry
+            for entry in (
+                (getattr(telemetry, "_reading", None) or {}).get("recursive_loop_stats")
+                or []
+            )
+        }
+
+        def _graph_tree_rows(graph, node_id, prefix, is_last, out):
+            operator = graph[node_id]
+            name = operator.name or type(operator).__name__
+            label = prefix + ("└─ " if is_last else "├─ ") + name
+            child_prefix = prefix + ("   " if is_last else "│  ")
+            out.append((label, str(operator.config) if operator.config else "", node_id))
+            _leg_rank = {"left": 0, "right": 1}
+            children = sorted(
+                graph.ingoing_edges(node_id), key=lambda edge: _leg_rank.get(edge[2], 2)
+            )
+            for index, edge in enumerate(children):
+                _graph_tree_rows(
+                    graph, edge[0], child_prefix, index == len(children) - 1, out
+                )
+
+        for _rkey, meta in recursive_meta.items():
+            reading = loop_by_name.get(meta["name"])
+            header_detail = "UNION" if meta.get("distinct") else "UNION ALL"
+            if reading is not None:
+                header_detail += f", {reading['iterations']} iterations"
+                if reading["distinct"]:
+                    header_detail += f", {reading['visited_rows']} distinct rows"
+                header_detail += f", ceiling {reading['max_iterations']}"
+            tree_col.append(f"RECURSIVE CTE {meta['name']}")
+            details_col.append(header_detail)
+            _append_no_reading()
+            legs = (
+                ("ANCHOR", meta["anchor_key"], False),
+                ("RECURSIVE TERM", meta["term_key"], True),
+            )
+            for role, leg_key, leg_is_last in legs:
+                tree_col.append(("└─ " if leg_is_last else "├─ ") + role)
+                details_col.append("")
+                _append_no_reading()
+                body = shared_bodies.get(leg_key)
+                if body is None:
+                    continue
+                body_rows: list = []
+                body_heads = list(dict.fromkeys(body.get_exit_points()))
+                for index, body_head in enumerate(body_heads):
+                    _graph_tree_rows(
+                        body,
+                        body_head,
+                        "   " if leg_is_last else "│  ",
+                        index == len(body_heads) - 1,
+                        body_rows,
+                    )
+                for label, config, body_nid in body_rows:
+                    tree_col.append(label)
+                    details_col.append(config)
+                    est_rows_col.append(_est_row_count(body_nid))
+                    est_bytes_col.append(_est_bytes(body_nid))
+                    rows_col.append(_row_count(body_nid))
+                    time_col.append(_time_ms(body_nid))
+                    self_col.append(_self_ms(body_nid))
+                    cpu_col.append(_cpu_ms(body_nid))
+                    merge_col.append(_merge_ms(body_nid))
+                    dop_col.append(_dop(body_nid))
 
     # ── OPTIMIZATIONS: which optimizer rules fired, from telemetry counters ───
     readings = getattr(telemetry, "_reading", None) or {}

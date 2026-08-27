@@ -120,6 +120,10 @@ class LogicalPlanStepType(int, Enum):
     AlterMaterializedViewOwner = auto()
     AlterMaterializedViewSuspended = auto()
 
+    GrantAccess = auto()
+    RevokeAccess = auto()
+    ShowGrantsOn = auto()
+
 
 class LogicalPlan(Graph):
     pass
@@ -351,20 +355,111 @@ def _apply_column_aliases(column_aliases: list, columns: list, relation: str) ->
         column.alias = alias
 
 
+class RecursiveCteDefinition:
+    """A `WITH RECURSIVE` CTE split at its topmost `UNION [ALL]` into an anchor
+    plan and a recursive-term plan (docs/RECURSIVE_CTE_DESIGN.md). Carried through
+    the CTE scope dict to the relation resolver, which resolves each leg and hands
+    the pair to the fixpoint machinery — the definition itself is never spliced."""
+
+    __slots__ = ("anchor", "term", "distinct", "name")
+
+    def __init__(self, anchor, term, distinct: bool, name: str):
+        self.anchor = anchor
+        self.term = term
+        self.distinct = distinct
+        self.name = name
+
+
+def _plan_cte_leg(query_ast, leg_body, column_aliases, alias):
+    """Plan one leg of a recursive CTE as its own query (the leg inherits the
+    CTE query's non-body siblings, which extract-time validation has already
+    required to be empty), strip its exit, and apply the declared column
+    aliases to its output projection."""
+    leg_plan = plan_query({**query_ast, "body": leg_body})
+    head = leg_plan.get_exit_points()[0]
+    output_columns = leg_plan[head].columns
+    leg_plan.remove_node(head, True)
+    _apply_column_aliases(column_aliases, output_columns, alias)
+    return leg_plan
+
+
+def _scans_of(plan, relation_name):
+    return [
+        node
+        for _nid, node in plan.nodes(True)
+        if node.node_type == LogicalPlanStepType.Scan and node.relation == relation_name
+    ]
+
+
+def _extract_recursive_cte(_ast, alias, column_aliases):
+    """Split one CTE under `WITH RECURSIVE` at its topmost UNION [ALL], or return
+    None when the body never references itself (RECURSIVE is permission, not
+    obligation — such a CTE plans as an ordinary one). Everything this fixpoint
+    cannot run yet is rejected HERE, loudly, by name."""
+    query_ast = _ast["query"]
+    body = query_ast.get("body") or {}
+    setop = body.get("SetOperation")
+
+    def _references_self(leg_body):
+        return bool(_scans_of(plan_query({**query_ast, "body": leg_body}), alias))
+
+    if setop is None or setop.get("op") != "Union":
+        if _references_self(body):
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{alias}' must be `<anchor> UNION ALL <recursive term>`; "
+                "the self-reference belongs in the recursive term."
+            )
+        return None  # not self-referencing — an ordinary CTE under the RECURSIVE keyword
+
+    if not _references_self(setop["right"]):
+        if _references_self(setop["left"]):
+            raise UnsupportedSyntaxError(
+                f"Recursive CTE '{alias}' references itself in the anchor term. "
+                "Only the term after UNION ALL may reference the CTE."
+            )
+        return None  # a plain UNION CTE that happens to sit under WITH RECURSIVE
+
+    if query_ast.get("with") is not None:
+        raise UnsupportedSyntaxError(
+            f"Recursive CTE '{alias}' declares a nested WITH inside its body; "
+            "declare the extra CTEs in the outer WITH instead."
+        )
+    if query_ast.get("order_by") is not None or query_ast.get("limit_clause") is not None:
+        raise UnsupportedSyntaxError(
+            f"Recursive CTE '{alias}' carries ORDER BY / LIMIT on its body; "
+            "apply them in the query that reads the CTE instead."
+        )
+    # UNION (distinct) dedups every emitted row against the fixpoint's whole
+    # history — the engine's persistent visited set — which is also what makes
+    # traversal of a CYCLIC graph terminate. UNION ALL appends unconditionally
+    # and relies on the iteration ceiling for cyclic input.
+    distinct = setop.get("set_quantifier") != "All"
+
+    anchor = _plan_cte_leg(query_ast, setop["left"], column_aliases, alias)
+    if _scans_of(anchor, alias):
+        raise UnsupportedSyntaxError(
+            f"Recursive CTE '{alias}' references itself in the anchor term. "
+            "Only the term after UNION ALL may reference the CTE."
+        )
+    term = _plan_cte_leg(query_ast, setop["right"], column_aliases, alias)
+    return RecursiveCteDefinition(anchor=anchor, term=term, distinct=distinct, name=alias)
+
+
 def extract_ctes(branch):
     ctes = {}
     with_clause = _query_body(branch).get("with")
     if with_clause:
-        if with_clause.get("recursive"):
-            # A recursive CTE needs a fixpoint operator in the execution engine — the
-            # plan graph must stay acyclic, so the loop has to live inside an operator.
-            # That does not exist yet. Until it does, say so: previously the self-
-            # reference was re-expanded forever and hung the planner.
-            raise UnsupportedSyntaxError(
-                "**WITH RECURSIVE** is not supported. Rewrite the query without recursion."
-            )
+        recursive = bool(with_clause.get("recursive"))
         for _ast in with_clause["cte_tables"]:
             alias = _ast.get("alias")["name"]["value"]
+            column_aliases = [
+                col["name"]["value"] for col in (_ast.get("alias").get("columns") or [])
+            ]
+            if recursive:
+                definition = _extract_recursive_cte(_ast, alias, column_aliases)
+                if definition is not None:
+                    ctes[alias] = definition
+                    continue
             # Plan the whole Query node, not just its `body`. ORDER BY / LIMIT / OFFSET
             # are siblings of `body` in the AST and it is plan_query that hoists them
             # into it. Planning `body` alone silently discarded them, so the LIMIT in
@@ -385,9 +480,6 @@ def extract_ctes(branch):
             # `WITH t(a, b) AS (...)` renames the CTE's output columns. The names were
             # previously parsed and dropped, so the rename silently did nothing and the
             # body's own column names leaked out.
-            column_aliases = [
-                col["name"]["value"] for col in (_ast.get("alias").get("columns") or [])
-            ]
             _apply_column_aliases(column_aliases, output_columns, alias)
 
             ctes[alias] = logical_plan
@@ -3425,6 +3517,23 @@ def create_node_relation(relation: dict):
             function_step.unnest_target = function["alias"]["name"]["value"]
         elif function["alias"] is not None:
             function_step.alias = function["alias"]["name"]["value"]
+            if function_name == "GENERATE_SERIES":
+                # Ruled (2026-08-22): the table form exposes ONE column NAMED BY
+                # ITS ALIAS; there is no `AS name(column)` form. Refuse it here —
+                # binding the alias as the column regardless used to surface as a
+                # baffling ColumnNotFoundError on the name the user declared.
+                if function["alias"]["columns"]:
+                    raise UnsupportedSyntaxError(
+                        "GENERATE_SERIES exposes one column, named by its alias — "
+                        "there is no `AS name(column)` form. Write `AS gx` and "
+                        "reference `gx`."
+                    )
+                # The column name is captured HERE, at declaration, because a
+                # CTE/view splice renames `alias` for uniqueness
+                # (rename_relations) and the column name must not follow it —
+                # re-deriving it from the live alias at bind time is what broke
+                # every CTE over GENERATE_SERIES.
+                function_step.series_column = function_step.alias
 
         args = []
         named_args = {}
@@ -3954,7 +4063,8 @@ def plan_show_variables(statement, **kwargs):
     if words == ["GRANTS"]:
         # `$grants` is INTERNAL_ONLY_DATASETS on the same rule: SHOW GRANTS is
         # its only surface. It reports the session's own policies and confers
-        # nothing — Opteryx has no GRANT/REVOKE.
+        # nothing; grant administration is the separate `GRANT`/`REVOKE`/
+        # `SHOW GRANTS ON` surface, intercepted pre-parse and never routed here.
         return _plan_virtual_dataset_scan("$grants", internal_relation=True)
     if words == ["LIKE"]:
         # The parser discards the pattern, so we cannot apply it.
@@ -5266,6 +5376,89 @@ def plan_alter_materialized_view_suspended(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
+# The object kinds the grant surface speaks, each an ARITY assertion on the
+# name and a mapping to the pattern the permissions capability stores:
+# (segments required, pattern template). A DATASET names three parts exactly;
+# a WORKSPACE grant covers the whole subtree, so it maps to `w.*` rather than
+# the bare name.
+_GRANT_OBJECT_KINDS = {
+    "workspace": (1, "{name}.*"),
+    "collection": (2, "{name}.*"),
+    "dataset": (3, "{name}"),
+}
+
+
+def _grant_object_pattern(object_kind: str, object_name: str) -> str:
+    """Map a statement's `<kind> <object>` to the pattern the capability speaks.
+
+    The kind is an arity assertion, checked here rather than guessed around: a
+    DATASET with two name parts is an error naming what a dataset looks like,
+    never a silent reinterpretation as a collection.
+    """
+    segments, template = _GRANT_OBJECT_KINDS[object_kind]
+    if object_name.count(".") != segments - 1:
+        shapes = {
+            "workspace": "one part, e.g. `opteryx`",
+            "collection": "two parts, e.g. `opteryx.ops`",
+            "dataset": "three parts, e.g. `opteryx.ops.audit_log`",
+        }
+        raise UnsupportedSyntaxError(
+            f"A {object_kind.upper()} is named with {shapes[object_kind]} - "
+            f"'{object_name}' does not name a {object_kind}."
+        )
+    return template.format(name=object_name)
+
+
+def _plan_grant_statement(statement, root: str, node_type) -> LogicalPlan:
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=node_type)
+    node.object_kind = statement[root]["object_kind"]
+    node.object_name = statement[root]["object_name"]
+    node.pattern = _grant_object_pattern(node.object_kind, node.object_name)
+    node.role = statement[root]["role"]
+    node.principal = statement[root]["principal"]
+
+    plan.add_node(random_string(), node)
+
+    return plan
+
+
+def plan_grant_access(statement, **kwargs) -> LogicalPlan:
+    """GRANT <role> ON <kind> <object> TO USER <user> — synthesized pre-parse.
+
+    Adds exactly ONE policy; the permissions capability owns every rule (owner
+    authority, no self-service, conflict refusal, audit). The binder gates it
+    for pre-flight; the statement applies at execution."""
+    return _plan_grant_statement(statement, "GrantAccess", LogicalPlanStepType.GrantAccess)
+
+
+def plan_revoke_access(statement, **kwargs) -> LogicalPlan:
+    """REVOKE <role> ON <kind> <object> FROM USER <user> — synthesized pre-parse.
+
+    Deletes exactly ONE policy, resolved 1:1 by (principal, pattern, role) —
+    access held through a policy at a different level is reported, never
+    narrowed and never silently left in place."""
+    return _plan_grant_statement(statement, "RevokeAccess", LogicalPlanStepType.RevokeAccess)
+
+
+def plan_show_grants_on(statement, **kwargs) -> LogicalPlan:
+    """SHOW GRANTS ON <kind> <object> — synthesized pre-parse.
+
+    Lists the stored policies on an object, one row per policy - the console's
+    access-list screen as SQL. Owner-gated on the same authority a GRANT there
+    would need: who may see the grants is who may change them."""
+    root = "ShowGrantsOn"
+    plan = LogicalPlan()
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.ShowGrantsOn)
+    node.object_kind = statement[root]["object_kind"]
+    node.object_name = statement[root]["object_name"]
+    node.pattern = _grant_object_pattern(node.object_kind, node.object_name)
+
+    plan.add_node(random_string(), node)
+
+    return plan
+
+
 def build_expression_tree(relation, dnf_list):
     """
     Recursively build an expression tree from a DNF-like list structure.
@@ -5441,6 +5634,11 @@ QUERY_BUILDERS = {
     "Update": plan_update,
     "Delete": plan_delete,
     "RefreshMaterializedView": plan_refresh_materialized_view,  # synthesized pre-parse
+    # grant administration — synthesized pre-parse; the permissions capability
+    # owns every rule, the engine parses, gates, and hands off
+    "GrantAccess": plan_grant_access,
+    "RevokeAccess": plan_revoke_access,
+    "ShowGrantsOn": plan_show_grants_on,
 }
 
 

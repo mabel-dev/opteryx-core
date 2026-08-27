@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "executor.hpp"
@@ -223,10 +224,40 @@ struct PipelineNode {
     PipelineSkew skew{};
 };
 
+// Fixpoint loop over a contiguous pipeline span — the recursive-CTE primitive
+// (docs/RECURSIVE_CTE_DESIGN.md). run() executes a control step on the driver
+// thread each time execution reaches `first` (the same between-pipelines spot
+// the runtime min/max filter publishes at — no concurrency): it promotes DELTA
+// into RESULT and WORKING, or declares convergence and skips the span. The
+// pipeline at `last` jumps back to `first` while the loop is active. The anchor
+// term's pipelines sit BEFORE `first` and append into DELTA, so the anchor
+// seeds the loop through the identical control path as every iteration.
+struct LoopSpan {
+    std::string name;        // the CTE's declared name (errors + telemetry)
+    size_t first;            // first pipeline of the recursive term
+    size_t last;             // last pipeline of the recursive term (its DELTA sink)
+    size_t working_buf;      // scratch (never-spill): the frontier the term reads
+    size_t delta_buf;        // scratch (never-spill): the term's output this pass
+    size_t result_buf;       // accumulated CTE value; consumers read this
+    bool   distinct = false; // UNION (true) / UNION ALL (false)
+    uint32_t max_iterations = 0;
+    bool   active = true;        // false once converged (delta came back empty)
+    uint32_t iterations_run = 0; // telemetry: recursive passes executed
+    std::string err_msg;         // owned storage for a ceiling error (ErrCtx::msg
+                                 // must outlive run(); see ErrCtx contract)
+    // UNION's persistent visited set: one 64-bit draken row hash (cxx_hash_c)
+    // per emitted row, across ALL iterations — hash identity IS row equality
+    // here, the same sanctioned contract native DISTINCT runs on (see
+    // DistinctSink, native_group_sinks.hpp). Convergence on a cyclic input is
+    // exactly this set refusing the rows it has already seen.
+    std::unordered_set<uint64_t> visited;
+};
+
 class Engine {
 public:
     std::vector<std::unique_ptr<PipelineNode>> pipelines;  // run in creation order
     std::vector<std::unique_ptr<MorselBuffer>> buffers;
+    std::vector<LoopSpan> loops;   // v1: at most one (compiler-enforced)
     SpillEnv spill_env;   // shared spill config/store for every buffer this run
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
     // Runtime min/max join filter slots. unique_ptr because a probe Source holds
@@ -342,6 +373,27 @@ public:
         return out;
     }
 
+    // ---- Recursive fixpoint readings (per LoopSpan) -------------------------------
+    // How many recursive passes each WITH RECURSIVE actually ran, and (UNION)
+    // how many distinct rows its visited set held at the end. Read after run(),
+    // alongside the other harvests — the spans live for the Engine's lifetime.
+    struct LoopReading {
+        std::string name;        // the CTE's declared name
+        uint32_t iterations;     // recursive passes executed
+        bool distinct;           // UNION (true) / UNION ALL (false)
+        uint64_t visited_rows;   // visited-set size; 0 for UNION ALL
+        uint32_t max_iterations; // the ceiling that applied
+    };
+    std::vector<LoopReading> collect_loop_stats() const {
+        std::vector<LoopReading> out;
+        out.reserve(loops.size());
+        for (const auto& L : loops)
+            out.push_back(LoopReading{L.name, L.iterations_run, L.distinct,
+                                      static_cast<uint64_t>(L.visited.size()),
+                                      L.max_iterations});
+        return out;
+    }
+
     // ---- Join2 build-side consolidation decisions (per build sink) ---------------
     // The build sink decides ONCE, at finalize, whether to consolidate its retained
     // payload into one block — which is what decides whether the probe emits the
@@ -441,6 +493,35 @@ public:
         buffers.push_back(std::make_unique<MorselBuffer>());
         buffers.back()->configure(&spill_env);
         return buffers.size() - 1;
+    }
+    size_t pipeline_count() const { return pipelines.size(); }
+    // Scratch buffer for a LoopSpan's WORKING/DELTA: deliberately NOT configured
+    // for spill, so reset_with()/take_resident() (driver-thread swap primitives)
+    // are always legal on it. It holds one frontier, not the accumulated result.
+    size_t new_scratch_buffer() {
+        buffers.push_back(std::make_unique<MorselBuffer>());
+        return buffers.size() - 1;
+    }
+    // Register the fixpoint span [first, last] (inclusive). v1: one loop per
+    // engine — the compiler rejects nested/multiple recursion at bind time, and
+    // this guards the invariant behind it.
+    void add_loop_span(size_t first, size_t last, size_t working, size_t delta,
+                       size_t result, bool distinct, uint32_t max_iterations,
+                       std::string name) {
+        if (!loops.empty())
+            throw std::runtime_error("engine supports one loop span per plan");
+        if (first > last || last >= pipelines.size())
+            throw std::runtime_error("loop span out of range");
+        LoopSpan L;
+        L.name = std::move(name);
+        L.first = first;
+        L.last = last;
+        L.working_buf = working;
+        L.delta_buf = delta;
+        L.result_buf = result;
+        L.distinct = distinct;
+        L.max_iterations = max_iterations;
+        loops.push_back(std::move(L));
     }
     // Spill root for this run's buffers (docs/MORSEL_SPILL_DESIGN.md). Set at
     // plan build, before any pipeline runs; empty = spill not configured and
@@ -1200,6 +1281,100 @@ public:
 
     // ---- execution (native; called once from the detached driver task) ------------
     // Invariant (compiler-enforced): the LAST pipeline's sink is the QueueSink.
+    // The fixpoint control step (docs/RECURSIVE_CTE_DESIGN.md §2). Driver thread,
+    // between pipelines — no concurrency. Promotes this pass's DELTA: rows are
+    // appended to RESULT (shared_ptr splice, no copy; RESULT may spill) and the
+    // same pile becomes the next WORKING frontier (semi-naive: the recursive
+    // term only ever sees the previous delta). An empty DELTA is convergence.
+    // Returns false only with an error latched in `err`.
+    bool loop_control_(LoopSpan& L, ErrCtx& err) {
+        MorselBuffer& delta = *buffers[L.delta_buf];
+        MorselBuffer& working = *buffers[L.working_buf];
+        MorselBuffer& result = *buffers[L.result_buf];
+        std::vector<MorselPtr> pile = delta.take_resident();
+        if (delta.failed()) {
+            err.code = 1;
+            err.msg = delta.error().c_str();
+            return false;
+        }
+        if (L.distinct) {
+            // UNION: keep only rows whose hash is new to the whole fixpoint.
+            // The anchor's rows pass through here too (first entry), so the
+            // anchor is deduplicated exactly as UNION requires.
+            std::vector<MorselPtr> survivors;
+            survivors.reserve(pile.size());
+            for (auto& m : pile) {
+                const uint32_t m_rows = m->num_rows();
+                if (m_rows == 0) continue;
+                const size_t ncols = m->columns.size();
+                std::vector<int32_t> col_idxs(ncols);
+                for (size_t c = 0; c < ncols; ++c) col_idxs[c] = static_cast<int32_t>(c);
+                CxxMorsel* hashm =
+                    cxx_hash_c(m.get(), col_idxs.data(), static_cast<uint32_t>(ncols));
+                if (hashm == nullptr) {
+                    err.code = 1;
+                    err.msg = "recursive UNION: row-hash allocation failed";
+                    return false;
+                }
+                const DrakenVector& hv = hashm->columns[0].view;
+                const uint64_t* row_hashes = static_cast<const uint64_t*>(hv.data);
+                const uint32_t* codes = hv.selection;   // never NULL (draken invariant)
+                std::vector<uint32_t> keep;
+                keep.reserve(m_rows);
+                for (uint32_t i = 0; i < m_rows; ++i)
+                    if (L.visited.insert(row_hashes[codes[i]]).second) keep.push_back(i);
+                cxx_morsel_delete(hashm);
+                if (keep.size() == m_rows) {
+                    survivors.push_back(m);   // all novel — pass through, zero copy
+                    continue;
+                }
+                if (keep.empty()) continue;
+                std::vector<MorselPtr> one{m};
+                std::vector<uint32_t> row_m(m_rows, 0), row_r(m_rows);
+                for (uint32_t i = 0; i < m_rows; ++i) row_r[i] = i;
+                MorselPtr filtered =
+                    gather_rows(one, keep, 0, static_cast<uint32_t>(keep.size()),
+                                row_m, row_r, m->names, err);
+                if (err.code != 0) return false;
+                survivors.push_back(std::move(filtered));
+            }
+            pile.swap(survivors);
+        }
+        size_t rows = 0;
+        for (const auto& m : pile) rows += m->num_rows();
+        if (rows == 0) {
+            L.active = false;
+            return true;
+        }
+        if (L.max_iterations != 0 && L.iterations_run >= L.max_iterations) {
+            // User-facing (kErrCodeDataError): the complete, actionable text.
+            L.err_msg = "recursive CTE '" + L.name + "' did not converge within " +
+                        std::to_string(L.max_iterations) +
+                        " iterations; a cycle under UNION ALL recurs forever — use "
+                        "UNION, bound the recursion with a depth column, or raise "
+                        "MAX_RECURSION_ITERATIONS";
+            err.code = kErrCodeDataError;
+            err.msg = L.err_msg.c_str();
+            return false;
+        }
+        ++L.iterations_run;
+        for (const auto& m : pile) {
+            if (!result.append(m)) {
+                err.code = 1;
+                err.msg = result.error().c_str();
+                return false;
+            }
+        }
+        // take_resident() left DELTA open and empty, ready for the next pass;
+        // reset_with() reopens WORKING (the pass's BufferSource sealed it).
+        if (!working.reset_with(std::move(pile))) {
+            err.code = 1;
+            err.msg = working.error().c_str();
+            return false;
+        }
+        return true;
+    }
+
     void run(int dop, void* pool, ErrCtx& err) {
         // Free each buffer's morsels after its LAST consumer completes: pipelines
         // run strictly in creation order, so once the highest-indexed pipeline
@@ -1212,8 +1387,36 @@ public:
             const int b = pipelines[i]->reads_buffer;
             if (b >= 0) last_consumer[static_cast<size_t>(b)] = static_cast<int>(i);
         }
+        // Loop-span liveness: a buffer whose last consumer lies INSIDE a span is
+        // re-read on every pass, so the per-pipeline release below must skip it —
+        // the whole span is ONE consumer for liveness purposes. The control step
+        // releases these (plus WORKING/DELTA) when the loop converges.
+        std::vector<uint8_t> loop_deferred(buffers.size(), 0);
+        for (const auto& L : loops)
+            for (size_t b = 0; b < last_consumer.size(); ++b)
+                if (last_consumer[b] >= static_cast<int>(L.first) &&
+                    last_consumer[b] <= static_cast<int>(L.last))
+                    loop_deferred[b] = 1;
+
         size_t pipeline_index = 0;
-        for (auto& pn : pipelines) {
+        while (pipeline_index < pipelines.size()) {
+            // Fixpoint control step: entered before EVERY pass over the span —
+            // the first entry promotes the anchor's rows, later entries each
+            // iteration's. On convergence the span (and its buffers) are done.
+            for (auto& L : loops) {
+                if (!L.active || pipeline_index != L.first) continue;
+                if (!loop_control_(L, err)) return;
+                if (!L.active) {
+                    for (size_t b = 0; b < last_consumer.size(); ++b)
+                        if (loop_deferred[b]) buffers[b]->release();
+                    buffers[L.working_buf]->release();
+                    buffers[L.delta_buf]->release();
+                    pipeline_index = L.last + 1;
+                }
+                break;   // one loop per engine (add_loop_span enforces)
+            }
+            if (pipeline_index >= pipelines.size()) break;
+            auto& pn = pipelines[pipeline_index];
             // Consumer abandoned (LIMIT early-exit / cursor dropped): stop between
             // pipelines — running the rest of the graph would be wasted work feeding
             // a closed queue. Not an error; matches QueueSink's dropped-put contract.
@@ -1230,8 +1433,11 @@ public:
             const uint64_t w0 = telem_now_ns();
             const uint64_t c0 = telem_process_cpu_now_ns();
             pn->result = run_pipeline(p, pdop, err, pool, &pn->skew);
-            pn->wall_ns = telem_now_ns() - w0;
-            pn->cpu_ns = telem_process_cpu_now_ns() - c0;
+            // Accumulate (not assign): a pipeline inside a LoopSpan runs once per
+            // iteration and its reading should cover all of them. Identical for
+            // the ordinary single-run pipeline, which starts from zero.
+            pn->wall_ns += telem_now_ns() - w0;
+            pn->cpu_ns += telem_process_cpu_now_ns() - c0;
             if (err.code != 0) return;
             if (pn->fill_join2_ref >= 0) {
                 const auto* bg = static_cast<const Join2BuildGlobal*>(pn->result.get());
@@ -1258,11 +1464,21 @@ public:
                 }
             }
             for (size_t b = 0; b < last_consumer.size(); ++b) {
-                if (last_consumer[b] == static_cast<int>(pipeline_index)) {
+                if (last_consumer[b] == static_cast<int>(pipeline_index) &&
+                    !loop_deferred[b]) {
                     buffers[b]->release();
                 }
             }
-            ++pipeline_index;
+            // End of an active span: jump back to its control step.
+            bool jumped = false;
+            for (const auto& L : loops) {
+                if (L.active && pipeline_index == L.last) {
+                    pipeline_index = L.first;
+                    jumped = true;
+                    break;
+                }
+            }
+            if (!jumped) ++pipeline_index;
         }
         // Courtesy empty-result morsel: a query that legitimately produced zero rows
         // still surfaces its output schema to the cursor (the old Exit `at_least_one`).

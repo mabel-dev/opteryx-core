@@ -176,6 +176,12 @@ execution starts and restored when result iteration completes.
 MAX_CONSECUTIVE_CACHE_FAILURES: int = int(get("MAX_CONSECUTIVE_CACHE_FAILURES", 10))
 """Maximum number of consecutive cache failures before disabling cache usage."""
 
+MAX_RECURSION_ITERATIONS: int = int(get("MAX_RECURSION_ITERATIONS", 1000))
+"""Iteration ceiling for a WITH RECURSIVE fixpoint (docs/RECURSIVE_CTE_DESIGN.md).
+A recursive term that has not converged by this many passes fails loud — never a
+truncated result. A cycle under UNION ALL recurs forever by definition; this is
+what stops it."""
+
 KVSTORE_LOCATION: str = str(get("KVSTORE_LOCATION", "")).strip()
 """Single-store KV location (e.g. file://, valkey://, gs://, memory://)."""
 

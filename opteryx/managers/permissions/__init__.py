@@ -23,13 +23,16 @@ Registration is the ONLY sanctioned way to change what a permission check
 means. There is no capability sniffing on the check path and no fallback:
 whatever is registered when a query binds is what decides it.
 
-A capability answers five questions:
+A capability answers eight questions:
 
     can_perform_action(execution_context, resource, action) -> bool
     can_perform_workspace_action(execution_context, workspace, action) -> bool
     can_principal_perform_action(principal, resource, action) -> bool
     can_principal_own_materialized_view(principal) -> bool
     grants(identity, policies) -> list[dict]
+    apply_grant(execution_context, pattern, role, principal) -> policy id
+    apply_revoke(execution_context, pattern, role, principal) -> policy id
+    grants_on(execution_context, pattern) -> list[dict]
 
 The first two are the gates the binder and `information_schema` call, and both
 ask about the session doing the asking.
@@ -55,6 +58,14 @@ asks rather than holding a list.
 The fifth backs `SHOW GRANTS` ($grants), so that what is reported and what is
 enforced come from one place and cannot drift into disagreeing.
 
+The last three are the grant-administration surface behind the engine's
+`GRANT`, `REVOKE`, and `SHOW GRANTS ON` statements. The engine speaks in
+patterns by the time these are called - the planner maps `WORKSPACE w` to
+`w.*`, `COLLECTION w.c` to `w.c.*`, `DATASET w.c.d` to `w.c.d` - and the
+capability owns every rule (owner authority, the no-self-service rule,
+1:1 resolution, conflict refusal, audit). The engine stores no policy and
+interprets nothing.
+
 Returning `False` is how a capability denies; the callers turn that into the
 refusal their layer reports. A capability may raise instead when it cannot
 decide at all - a malformed policy, an unreachable policy store - and that
@@ -70,10 +81,13 @@ from opteryx.exceptions import InvalidConfigurationError
 
 __all__ = (
     "active_permissions_capability",
+    "apply_grant",
+    "apply_revoke",
     "can_perform_action",
     "can_perform_workspace_action",
     "can_principal_own_materialized_view",
     "can_principal_perform_action",
+    "grants_on",
     "register_permissions_capability",
 )
 
@@ -86,6 +100,9 @@ _REQUIRED_MEMBERS = (
     "can_principal_perform_action",
     "can_principal_own_materialized_view",
     "grants",
+    "apply_grant",
+    "apply_revoke",
+    "grants_on",
 )
 
 
@@ -119,7 +136,31 @@ class PermitAll:
         describe a restriction that is not being applied - the one thing
         `SHOW GRANTS` exists to be trusted about.
         """
-        return [{"pattern": "*", "role": "*", "actions": "*"}]
+        return [{"pattern": "*", "level": "", "role": "*", "actions": "*"}]
+
+    def _refuse_administration(self, statement: str):
+        # A GRANT that "succeeded" here would be fake green: there is no policy
+        # store, so nothing was granted and nothing could ever be enforced.
+        # Loud refusal, never a no-op.
+        raise InvalidConfigurationError(
+            config_item="permissions_capability",
+            provided_value=self.name,
+            valid_value_description=(
+                f"a capability that can administer grants. {statement} needs a policy "
+                "service to act on; this engine has none registered, so there is nothing "
+                "to grant against and nothing that would enforce the result. Deployments "
+                "register one at startup with register_permissions_capability()."
+            ),
+        )
+
+    def apply_grant(self, execution_context, pattern: str, role: str, principal: str):
+        self._refuse_administration("GRANT")
+
+    def apply_revoke(self, execution_context, pattern: str, role: str, principal: str):
+        self._refuse_administration("REVOKE")
+
+    def grants_on(self, execution_context, pattern: str):
+        self._refuse_administration("SHOW GRANTS ON")
 
 
 _CORE = PermitAll()
@@ -231,3 +272,36 @@ def can_principal_own_materialized_view(principal: str) -> bool:
     and recognises no name - it asks, and refuses when the answer is no.
     """
     return _capability().can_principal_own_materialized_view(principal)
+
+
+def apply_grant(execution_context, pattern: str, role: str, principal: str):
+    """Add ONE policy: `role` on `pattern` to `principal`. Returns its id.
+
+    Behind `GRANT <role> ON <object> TO USER <principal>`, with the object
+    already mapped to its pattern by the planner. The capability owns every
+    rule - owner authority covering the pattern, the no-self-service rule,
+    conflict refusal, the audit record. There is no upgrade path: changing an
+    existing grant is REVOKE then GRANT, by the caller.
+    """
+    return _capability().apply_grant(execution_context, pattern, role, principal)
+
+
+def apply_revoke(execution_context, pattern: str, role: str, principal: str):
+    """Delete ONE policy: the exact (`principal`, `pattern`, `role`) match.
+
+    Behind `REVOKE <role> ON <object> FROM USER <principal>`. Strictly 1:1 -
+    access held through a policy at a different level is reported by the
+    capability (naming that policy and its level), never narrowed and never
+    silently left in place. Returns the revoked policy's id.
+    """
+    return _capability().apply_revoke(execution_context, pattern, role, principal)
+
+
+def grants_on(execution_context, pattern: str):
+    """The rows behind `SHOW GRANTS ON <object>`: one row per stored policy,
+    `(user, pattern, level, role)`.
+
+    Gated by the capability on the same authority a mutation needs: who may
+    see the grants on an object is who may change them.
+    """
+    return _capability().grants_on(execution_context, pattern)

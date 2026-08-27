@@ -54,6 +54,9 @@ from opteryx.planner.binder.relation import (
     visit_truncate_relation,
     visit_insert,
     visit_merge,
+    visit_grant_access,
+    visit_revoke_access,
+    visit_show_grants_on,
 )
 from opteryx.planner.logical_planner import LogicalPlan
 
@@ -271,6 +274,21 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_alter_materialized_view_suspended(self, node, context)
+
+    def visit_grant_access(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_grant_access(self, node, context)
+
+    def visit_revoke_access(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_revoke_access(self, node, context)
+
+    def visit_show_grants_on(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_show_grants_on(self, node, context)
 
     def visit_truncate_relation(
         self, node: Node, context: BindingContext

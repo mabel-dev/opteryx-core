@@ -290,6 +290,49 @@ def test_dense_hour_axis_finds_the_hours_with_no_traffic():
     ], result
 
 
+# --------------------------------------------------- CTE / view splice safety ---
+# The series' one output column is NAMED BY THE USER'S ALIAS, and that name is
+# captured at plan time (`series_column`). It used to be re-derived from the
+# LIVE alias at bind time — but rename_relations rewrites the alias when a CTE
+# or view body is spliced inline, so every single-referenced CTE over
+# GENERATE_SERIES failed with ColumnNotFoundError on a column plainly declared.
+
+
+def test_single_referenced_cte_over_generate_series():
+    assert values(
+        "WITH base AS (SELECT gx AS n FROM GENERATE_SERIES(3, 5) AS gx) "
+        "SELECT n FROM base"
+    ) == [3, 4, 5]
+
+
+def test_single_referenced_cte_bare_and_star():
+    assert values(
+        "WITH base AS (SELECT gx FROM GENERATE_SERIES(3, 5) AS gx) SELECT gx FROM base"
+    ) == [3, 4, 5]
+    assert values(
+        "WITH base AS (SELECT * FROM GENERATE_SERIES(3, 5) AS gx) SELECT gx FROM base"
+    ) == [3, 4, 5]
+
+
+def test_recursive_cte_anchor_over_generate_series():
+    assert values(
+        "WITH RECURSIVE r (n) AS ("
+        " SELECT gx AS n FROM GENERATE_SERIES(3, 5) AS gx"
+        " UNION ALL SELECT n - 1 FROM r WHERE n > 2)"
+        "SELECT n FROM r ORDER BY n"
+    ) == [2, 2, 2, 3, 3, 3, 4, 4, 5]
+
+
+def test_column_alias_form_is_refused_by_name():
+    # Ruled 2026-08-22: one column, named by the alias; no `AS name(column)`
+    # form. The refusal must say so — not a ColumnNotFoundError on the name
+    # the user declared.
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    with pytest.raises(UnsupportedSyntaxError, match="named by its alias"):
+        values("SELECT px FROM GENERATE_SERIES(0, 3) AS gx(px)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
