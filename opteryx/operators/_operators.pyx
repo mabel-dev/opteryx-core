@@ -157,6 +157,14 @@ cdef extern from "engine/native_group_sinks.hpp" namespace "opteryx::engine" nog
 cdef extern from "core/alloc.h" nogil:
     void draken_free(void* ptr)
 
+cdef extern from "engine/spill_store.hpp" namespace "opteryx::engine::spill_tel" nogil:
+    long long spill_tel_units "opteryx::engine::spill_tel::units_written_count" ()
+    long long spill_tel_bytes_written "opteryx::engine::spill_tel::bytes_written_count" ()
+    long long spill_tel_bytes_read "opteryx::engine::spill_tel::bytes_read_count" ()
+    long long spill_tel_rows "opteryx::engine::spill_tel::rows_spilled_count" ()
+    long long spill_tel_swept "opteryx::engine::spill_tel::sweep_removed_count" ()
+    void spill_tel_reset "opteryx::engine::spill_tel::reset" ()
+
 cdef extern from "engine/groupby_tel.hpp" namespace "opteryx::engine::groupby_tel" nogil:
     double gb_tel_hash_s "opteryx::engine::groupby_tel::hash_s" ()
     double gb_tel_probe_s "opteryx::engine::groupby_tel::probe_s" ()
@@ -252,6 +260,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         cppvector[pair[uint32_t, string]] collect_trace_symbols()
         size_t new_pipeline()
         size_t new_buffer()
+        void set_spill_root(string root)
         void set_scan_source(size_t p, void* scan_ptr, ScanPullFn fn, bint serialize_pull)
         void set_native_skene_scan_source(size_t p,
                                           const cppvector[string]* files,
@@ -644,6 +653,27 @@ def instr_gil_worker_report():
             "ns": <long long>_gil_instr_sites[i].ns,
         })
     return out
+
+
+def reset_spill_telemetry():
+    """Zero the morsel-spill counters (spill_store.hpp). Diagnostic only — call
+    before a traced query to attribute the reading to it."""
+    spill_tel_reset()
+
+
+def get_spill_telemetry():
+    """Return the process-wide morsel-spill counters since the last reset:
+    units_written (one .skene file per flush), bytes_written (encoded file
+    bytes), bytes_read (decoded morsel bytes on read-back), rows_spilled, and
+    sweep_removed (orphaned spill directories collected at store startup).
+    A spilling query must be VISIBLY a spilling query."""
+    return {
+        "units_written": spill_tel_units(),
+        "bytes_written": spill_tel_bytes_written(),
+        "bytes_read":    spill_tel_bytes_read(),
+        "rows_spilled":  spill_tel_rows(),
+        "sweep_removed": spill_tel_swept(),
+    }
 
 
 def reset_groupby_telemetry():
@@ -2387,6 +2417,18 @@ cdef class NativePlan:
         self.held = []
         self.scan_plans = []
         self.skene_scan_plans = []
+        # Spill root for this plan's MorselBuffers (docs/MORSEL_SPILL_DESIGN.md).
+        # KVSTORE_LOCATION is the per-query spill store the config has always
+        # documented; the native SpillStore is its first-party caller. Only a
+        # local filesystem location is reachable from GIL-released worker
+        # threads: `file://` (stripped) or a bare path. Any other scheme means
+        # spill stays unconfigured — the pre-spill engine, unbounded.
+        from opteryx import config as _config
+        cdef str _root = _config.KVSTORE_LOCATION
+        if _root.startswith("file://"):
+            _root = _root[7:]
+        if _root and "://" not in _root:
+            self._e.set_spill_root(_root.encode("utf-8"))
 
     def __dealloc__(self):
         if self._e != NULL:

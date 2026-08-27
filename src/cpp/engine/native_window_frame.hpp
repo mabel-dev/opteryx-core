@@ -512,7 +512,13 @@ struct FramedWindowSink : Sink, EmitSubset {
         for (ErrCtx& e : errs) {
             if (e.code != 0) { err = e; return; }
         }
-        for (MorselPtr& m : chunk_out) out->morsels.push_back(std::move(m));
+        for (MorselPtr& m : chunk_out) {
+            if (!out->append(m)) {
+                err.code = 1;
+                err.msg = out->error().c_str();
+                return;
+            }
+        }
     }
 
 private:

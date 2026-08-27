@@ -58,6 +58,8 @@ from opteryx.compiled.agg_budgets import array_agg_budget_bytes as _array_agg_bu
 from opteryx.compiled.agg_budgets import cidr_agg_emit_budget_bytes as _cidr_agg_emit_budget_bytes
 from opteryx.compiled.agg_budgets import cidr_agg_state_budget_bytes as _cidr_agg_state_budget_bytes
 from opteryx.compiled.agg_budgets import median_budget_bytes as _median_budget_bytes
+from opteryx.compiled.spill_budgets import spill_ceiling_bytes as _spill_ceiling_bytes
+from opteryx.compiled.spill_budgets import spill_flush_bytes as _spill_flush_bytes
 from opteryx.exceptions import PermissionsError, VariableNotFoundError, md_code, md_column
 from opteryx.types.logical_type import BOOLEAN, FLOAT64, INT64, VARCHAR, ARRAY, VARIANT
 
@@ -373,6 +375,14 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # ELEMENT cap that no longer exists (it bounded nothing — the group count is
     # unbounded — while refusing ordinary group sizes).
     "median_memory_budget_bytes": (INT64, _median_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    # Morsel spill (engine/spill_budgets.hpp, docs/MORSEL_SPILL_DESIGN.md): the
+    # flush trigger and the backpressure ceiling for buffered accumulation.
+    # Enforced only when a spill root is configured (KVSTORE_LOCATION);
+    # unconfigured, buffered accumulation is unbounded, exactly the pre-spill
+    # engine. A threshold nobody can discover makes a spilling query a mystery
+    # slowdown instead of an explained one.
+    "spill_flush_bytes": (INT64, _spill_flush_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    "spill_ceiling_bytes": (INT64, _spill_ceiling_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
     "array_agg_memory_budget_bytes": (INT64, _array_agg_budget_bytes(), VariableOwner.SERVER, Visibility.UNRESTRICTED),
     # CIDR_AGG reports TWO, because it has two independent ceilings and telling an
     # author only one of them would misdescribe which limit they hit. The state

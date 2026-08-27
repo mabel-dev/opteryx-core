@@ -63,9 +63,21 @@ struct ScalarGuardSource : Source {
         // One emission total: exactly one worker claims the (<= 1 row) result.
         if (g.claimed.exchange(true)) return SourceResult::FINISHED;
 
+        if (!buf->seal()) {
+            err.code = 1;
+            err.msg = buf->error().c_str();
+            return SourceResult::FINISHED;
+        }
         uint64_t rows = 0;
         MorselPtr the_row;
-        for (const MorselPtr& m : buf->morsels) {
+        const size_t n_claims = buf->claim_count();
+        for (size_t i = 0; i < n_claims && rows <= 1; ++i) {
+            MorselPtr m;
+            if (!buf->get(i, m)) {
+                err.code = 1;
+                err.msg = buf->error().c_str();
+                return SourceResult::FINISHED;
+            }
             rows += m->num_rows();
             if (m->num_rows() > 0 && the_row == nullptr) the_row = m;
         }

@@ -614,6 +614,28 @@
         "default_source": "environment",
         "environment_key": "SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS"
     },
+    "spill_ceiling_bytes": {
+        "name": "spill_ceiling_bytes",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": 1073741824,
+        "default_source": "literal"
+    },
+    "spill_flush_bytes": {
+        "name": "spill_flush_bytes",
+        "type": "INT64",
+        "owner": "SERVER",
+        "visibility": "UNRESTRICTED",
+        "settable": false,
+        "requires_entitlement": null,
+        "set_by": "not settable via SQL",
+        "default": 536870912,
+        "default_source": "literal"
+    },
     "sql_mode": {
         "name": "sql_mode",
         "type": "VARCHAR",

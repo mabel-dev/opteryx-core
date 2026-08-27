@@ -37,21 +37,25 @@ def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node
 
     if context.schema_only:
         # The Manifest IS this statement's result, and a schema-only bind deliberately
-        # did not read one. Falling through would report "no manifest support" for a
-        # relation that has one - a true-sounding sentence about the wrong thing.
-        raise UnsupportedSyntaxError(
-            f"**SHOW MANIFEST FOR** {node.relation} cannot be checked without reading "
-            "the manifest, which is the statement's own result. Run it to see it."
-        )
-
-    manifest = context.manifests.get(node.relation)
-    if manifest is None:
-        raise UnsupportedSyntaxError(
-            f"'{node.relation}' has no manifest support (its connector does not "
-            "expose file-level metadata)."
-        )
-    node.manifest = manifest
-    node.schema = manifest_output_schema(node.relation)
+        # did not read one. That is not a reason to refuse: the SHAPE of the answer is
+        # `manifest_output_schema`, which is fixed and knowable without reading
+        # anything, and the shape is all a check is being asked for. Only the ROWS are
+        # unknowable here, and no caller of a schema-only bind executes the plan, so
+        # `node.manifest` is left unset rather than faked.
+        #
+        # Refusing instead reported a valid statement as an error, and "no manifest
+        # support" - the message below - would have been a true-sounding sentence
+        # about the wrong thing.
+        node.schema = manifest_output_schema(node.relation)
+    else:
+        manifest = context.manifests.get(node.relation)
+        if manifest is None:
+            raise UnsupportedSyntaxError(
+                f"'{node.relation}' has no manifest support (its connector does not "
+                "expose file-level metadata)."
+            )
+        node.manifest = manifest
+        node.schema = manifest_output_schema(node.relation)
     node.columns = []
     for schema_column in node.schema.columns:
         column_reference = LogicalColumn(
@@ -76,24 +80,22 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
 
     if context.schema_only:
         # The history IS this statement's result, and a schema-only bind
-        # deliberately did not read one — the same reasoning as SHOW MANIFEST.
-        raise UnsupportedSyntaxError(
-            f"**SHOW SNAPSHOTS FOR** {node.relation} cannot be checked without reading "
-            "the relation's commit history, which is the statement's own result. "
-            "Run it to see it."
-        )
-
-    snapshots = context.snapshots.get(node.relation)
-    if snapshots is None:
-        # None is "this connector keeps no commit log", which is not the same
-        # answer as an empty list ("it does, and nothing has been committed").
-        raise UnsupportedSyntaxError(
-            f"'{node.relation}' has no snapshot history (its connector does not "
-            "keep a commit log)."
-        )
-    node.snapshots = snapshots
-    node.schema = snapshots_output_schema(node.relation)
-    node.schema.row_count_estimate = len(snapshots)
+        # deliberately did not read one — the same reasoning as SHOW MANIFEST:
+        # the output schema is fixed, so the statement checks clean and only the
+        # rows (and with them the row-count estimate) are left unknown.
+        node.schema = snapshots_output_schema(node.relation)
+    else:
+        snapshots = context.snapshots.get(node.relation)
+        if snapshots is None:
+            # None is "this connector keeps no commit log", which is not the same
+            # answer as an empty list ("it does, and nothing has been committed").
+            raise UnsupportedSyntaxError(
+                f"'{node.relation}' has no snapshot history (its connector does not "
+                "keep a commit log)."
+            )
+        node.snapshots = snapshots
+        node.schema = snapshots_output_schema(node.relation)
+        node.schema.row_count_estimate = len(snapshots)
     node.columns = []
     for schema_column in node.schema.columns:
         column_reference = LogicalColumn(

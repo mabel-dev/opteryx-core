@@ -525,6 +525,16 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA,
     ),
+    # Morsel-spill thresholds, for `SHOW VARIABLES` to report. Same header-only
+    # dependency-free pattern (and the same layering argument) as agg_budgets.
+    Extension(
+        "opteryx.compiled.spill_budgets",
+        sources=["opteryx/compiled/spill_budgets.pyx"],
+        include_dirs=include_dirs,
+        language="c++",
+        extra_compile_args=CPP_FLAGS,
+        extra_link_args=LD_EXTRA,
+    ),
     # Platform extension - exposes OS information without psutil dependency
     Extension(
         "opteryx.compiled.platform",

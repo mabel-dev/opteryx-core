@@ -227,6 +227,7 @@ class Engine {
 public:
     std::vector<std::unique_ptr<PipelineNode>> pipelines;  // run in creation order
     std::vector<std::unique_ptr<MorselBuffer>> buffers;
+    SpillEnv spill_env;   // shared spill config/store for every buffer this run
     std::vector<std::unique_ptr<Join2Ref>> join2_refs;
     // Runtime min/max join filter slots. unique_ptr because a probe Source holds
     // the ADDRESS of a slot from plan time until it builds its claim list, and
@@ -438,7 +439,18 @@ public:
     }
     size_t new_buffer() {
         buffers.push_back(std::make_unique<MorselBuffer>());
+        buffers.back()->configure(&spill_env);
         return buffers.size() - 1;
+    }
+    // Spill root for this run's buffers (docs/MORSEL_SPILL_DESIGN.md). Set at
+    // plan build, before any pipeline runs; empty = spill not configured and
+    // buffered accumulation is unbounded, exactly the pre-spill engine.
+    void set_spill_root(std::string root) { spill_env.root = std::move(root); }
+    // Labels the buffer with the sink's display name so a spill failure names
+    // the operator that overspent, then hands it to the sink.
+    MorselBuffer* sink_buffer_(size_t buf) {
+        buffers[buf]->set_label(current_display_name_);
+        return buffers[buf].get();
     }
     size_t new_join2_ref() {
         join2_refs.push_back(std::make_unique<Join2Ref>());
@@ -884,7 +896,7 @@ public:
         if (p2_pipeline != nullptr) p2_pipeline->set_trace_node_id(node_id);
     }
     void set_buffer_source(size_t p, size_t buf) {
-        set_source_(p, std::make_unique<BufferSource>(buffers[buf].get()));
+        set_source_(p, std::make_unique<BufferSource>(sink_buffer_(buf)));
         pipelines[p]->reads_buffer = static_cast<int>(buf);
     }
     // Scalar-subquery cardinality guard over a finalized buffer (see
@@ -910,7 +922,7 @@ public:
             schema->columns.push_back(make_empty_col(types[c], logical[c], element[c]));
         schema->names = std::move(names);
         schema->zero_col_rows = 0;
-        set_source_(p, std::make_unique<ScalarGuardSource>(buffers[buf].get(),
+        set_source_(p, std::make_unique<ScalarGuardSource>(sink_buffer_(buf),
                                                            std::move(schema)));
         pipelines[p]->reads_buffer = static_cast<int>(buf);
     }
@@ -1042,7 +1054,8 @@ public:
         // Plan-time materialization edge: a virtual dataset's (plan-constant)
         // morsels are placed in a buffer BEFORE run() — execution reads them
         // natively, never re-entering Python.
-        buffers[buf]->morsels.push_back(std::move(m));
+        if (!buffers[buf]->append(m))
+            throw std::runtime_error(buffers[buf]->error());
     }
     void set_pipeline_dop(size_t p, int dop) {
         pipelines[p]->dop_override = dop;
@@ -1054,13 +1067,13 @@ public:
     // is a real plan (COUNT(*) over an ordered subquery), not a mistake.
     void set_sort_sink(size_t p, std::vector<SortKeySpec> spec, size_t buf,
                        bool emit_prune, std::vector<uint32_t> emit_cols) {
-        set_sink_(p, std::make_unique<SortSink>(std::move(spec), buffers[buf].get(),
+        set_sink_(p, std::make_unique<SortSink>(std::move(spec), sink_buffer_(buf),
                                                 131072, emit_prune,
                                                 std::move(emit_cols)));
     }
     void set_topn_sink(size_t p, std::vector<SortKeySpec> spec, size_t n, size_t buf,
                        bool emit_prune, std::vector<uint32_t> emit_cols) {
-        set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, buffers[buf].get(),
+        set_sink_(p, std::make_unique<TopNSink>(std::move(spec), n, sink_buffer_(buf),
                                                 emit_prune, std::move(emit_cols)));
     }
     // Window functions: sort_spec = [partition keys asc..., order keys...]; n_part =
@@ -1080,7 +1093,7 @@ public:
             funcs.push_back({static_cast<WinFn>(fn_kinds[i]), fn_names[i],
                              fn_args[i], static_cast<int64_t>(fn_offsets[i])});
         set_sink_(p, std::make_unique<WindowSink>(
-            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get(), top_k,
+            std::move(sort_spec), n_part, std::move(funcs), sink_buffer_(buf), top_k,
             131072, emit_prune, std::move(emit_cols)));
     }
     // Streaming ROW_NUMBER top-K per partition (WindowTopKFusionStrategy) — no full
@@ -1090,7 +1103,7 @@ public:
                               bool ascending, size_t k, std::string out_name, size_t buf) {
         set_sink_(p, std::make_unique<WindowTopKSink>(
             std::move(part_idx), order_idx, ascending, k, std::move(out_name),
-            buffers[buf].get()));
+            sink_buffer_(buf)));
     }
     // Framed aggregate window functions: SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE
     // BETWEEN ...) — see native_window_frame.hpp. `sort_spec`/`n_part` are the same
@@ -1141,7 +1154,7 @@ public:
             funcs.push_back(std::move(spec));
         }
         set_sink_(p, std::make_unique<FramedWindowSink>(
-            std::move(sort_spec), n_part, std::move(funcs), buffers[buf].get(),
+            std::move(sort_spec), n_part, std::move(funcs), sink_buffer_(buf),
             131072, emit_prune, std::move(emit_cols)));
     }
     void add_select(size_t p, std::vector<size_t> indices, std::vector<std::string> names) {
@@ -1154,7 +1167,7 @@ public:
     }
     void set_agg_sink(size_t p, std::vector<AggSpec2> specs, size_t buf) {
         set_sink_(p,
-            std::make_unique<UngroupedAggSink>(std::move(specs), buffers[buf].get()));
+            std::make_unique<UngroupedAggSink>(std::move(specs), sink_buffer_(buf)));
     }
     // `key_emit` has one entry per key_idx entry: false = the key is hashed to
     // separate the groups but its values are never stored or emitted.
@@ -1164,16 +1177,16 @@ public:
                           std::vector<AggSpec2> specs, size_t buf, int64_t ndv_estimate) {
         set_sink_(p, std::make_unique<GroupBySink>(
             std::move(key_idx), std::move(key_names), std::move(key_emit),
-            std::move(specs), buffers[buf].get(), ndv_estimate));
+            std::move(specs), sink_buffer_(buf), ndv_estimate));
     }
     void set_distinct_sink(size_t p, std::vector<size_t> on_idx, size_t buf,
                            int64_t ndv_estimate) {
         set_sink_(p,
-            std::make_unique<DistinctSink>(std::move(on_idx), buffers[buf].get(),
+            std::make_unique<DistinctSink>(std::move(on_idx), sink_buffer_(buf),
                                            ndv_estimate));
     }
     void set_buffer_append_sink(size_t p, size_t buf) {
-        set_sink_(p, std::make_unique<BufferAppendSink>(buffers[buf].get()));
+        set_sink_(p, std::make_unique<BufferAppendSink>(sink_buffer_(buf)));
     }
     void set_final_schema(std::vector<std::string> names, std::vector<DrakenType> types,
                           std::vector<int> lt_kind, std::vector<int> lt_unit,
@@ -1246,8 +1259,7 @@ public:
             }
             for (size_t b = 0; b < last_consumer.size(); ++b) {
                 if (last_consumer[b] == static_cast<int>(pipeline_index)) {
-                    buffers[b]->morsels.clear();
-                    buffers[b]->morsels.shrink_to_fit();
+                    buffers[b]->release();
                 }
             }
             ++pipeline_index;

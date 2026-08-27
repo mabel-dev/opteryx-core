@@ -2307,7 +2307,10 @@ struct UngroupedAggSink : Sink {
             if (err.code != 0) return;
             m->names.push_back(specs[s].name);
         }
-        out->morsels.push_back(std::move(m));
+        if (!out->append(m)) {
+            err.code = 1;
+            err.msg = out->error().c_str();
+        }
     }
 };
 
@@ -3749,7 +3752,13 @@ struct GroupBySink : Sink {
             }
             if (!local_out.empty()) {
                 std::lock_guard<std::mutex> lk(out_mtx);
-                for (MorselPtr& m : local_out) out->morsels.push_back(std::move(m));
+                for (MorselPtr& m : local_out) {
+                    if (!out->append(m)) {
+                        errs[tid].code = 1;
+                        errs[tid].msg = out->error().c_str();
+                        break;
+                    }
+                }
             }
         };
         std::vector<std::thread> threads;
@@ -3977,7 +3986,13 @@ struct DistinctSink : Sink {
             }
             if (!local_out.empty()) {
                 std::lock_guard<std::mutex> lk(out_mtx);
-                for (MorselPtr& m : local_out) out->morsels.push_back(std::move(m));
+                for (MorselPtr& m : local_out) {
+                    if (!out->append(m)) {
+                        errs[tid].code = 1;
+                        errs[tid].msg = out->error().c_str();
+                        break;
+                    }
+                }
             }
         };
         std::vector<std::thread> threads;
@@ -4283,7 +4298,13 @@ struct WindowTopKSink : Sink {
         for (ErrCtx& e : errs) {
             if (e.code != 0) { err = e; return; }
         }
-        for (MorselPtr& m : chunk_out) out->morsels.push_back(std::move(m));
+        for (MorselPtr& m : chunk_out) {
+            if (!out->append(m)) {
+                err.code = 1;
+                err.msg = out->error().c_str();
+                return;
+            }
+        }
     }
 };
 

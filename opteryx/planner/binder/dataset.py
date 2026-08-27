@@ -12,9 +12,11 @@ from opteryx.exceptions import (
     AmbiguousDatasetError,
     InvalidFunctionParameterError,
     UnsupportedSyntaxError,
+    compose,
     md_cause,
     md_code,
     md_syntax,
+    md_table,
 )
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn, Node
@@ -1286,14 +1288,31 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             from opteryx.constants.row_identity import ROW_IDENTITY_FILE
             from opteryx.constants.row_identity import ROW_IDENTITY_ORDINAL
 
-            if node.manifest is None:
+            # `manifest is None` means "no file list" only when one was READ. A
+            # schema-only bind deliberately does not read one (see the branch
+            # above), so the same None there says nothing about the connector -
+            # reading it as "not catalog-backed" refused every UPDATE, DELETE and
+            # MERGE the checker was shown, including on relations that address
+            # rows perfectly well when the statement is actually run.
+            if node.manifest is None and not context.schema_only:
                 # No manifest means no file list, and without one an ordinal
                 # addresses nothing. Refusing here beats emitting a column of
                 # coordinates that point at no file.
+                if node.row_identity_statement is None:
+                    from opteryx.exceptions import InvalidInternalStateError
+
+                    raise InvalidInternalStateError(
+                        f"Scan of {node.relation} was asked for row identity without "
+                        "recording which statement asked for it"
+                    )
+                statement = md_syntax(node.row_identity_statement)
                 raise UnsupportedSyntaxError(
-                    f"{node.relation} cannot provide row identity - its connector "
-                    "reports no manifest, so a row has no addressable file and "
-                    "ordinal. MERGE requires a catalog-backed target."
+                    compose(
+                        f"{md_table(node.relation)} cannot provide row identity - its "
+                        "connector reports no manifest, so a row has no addressable "
+                        "file and ordinal",
+                        f"{statement} requires a catalog-backed target",
+                    )
                 )
             node.schema.columns = list(node.schema.columns) + [
                 SchemaColumn(

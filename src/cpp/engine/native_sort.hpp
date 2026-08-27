@@ -77,7 +77,13 @@ inline void sort_and_emit(const std::vector<MorselPtr>& ms,
                           const std::vector<uint32_t>* emit_cols = nullptr) {
     std::vector<MorselPtr> sorted;
     if (!sort_morsels(ms, spec, take_first, chunk_rows, sorted, err, emit_cols)) return;
-    for (MorselPtr& m : sorted) out->morsels.push_back(std::move(m));
+    for (MorselPtr& m : sorted) {
+        if (!out->append(m)) {
+            err.code = 1;
+            err.msg = out->error().c_str();
+            return;
+        }
+    }
 }
 
 // ---- SortSink ---------------------------------------------------------------------
@@ -177,7 +183,7 @@ struct TopNSink : Sink, EmitSubset {
         MorselBuffer tmp;
         sort_and_emit(l.morsels, spec, n_limit, n_limit == 0 ? 1 : n_limit, &tmp, err);
         if (err.code != 0) return;
-        l.morsels = std::move(tmp.morsels);
+        l.morsels = tmp.take_resident();
         l.rows = 0;
         for (const MorselPtr& m : l.morsels) l.rows += m->num_rows();
     }
@@ -667,7 +673,13 @@ struct WindowSink : Sink, EmitSubset {
         for (ErrCtx& e : errs) {
             if (e.code != 0) { err = e; return; }
         }
-        for (MorselPtr& m : chunk_out) out->morsels.push_back(std::move(m));
+        for (MorselPtr& m : chunk_out) {
+            if (!out->append(m)) {
+                err.code = 1;
+                err.msg = out->error().c_str();
+                return;
+            }
+        }
     }
 };
 

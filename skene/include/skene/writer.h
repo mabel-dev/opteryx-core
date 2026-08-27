@@ -62,7 +62,9 @@ struct WriteOptions {
     // text does not, and comment-style columns dominate real tables. Off, skene
     // is ~3x larger than zstd Parquet there; on, roughly at parity.
     //
-    // Off by default: spill wants raw bytes.
+    // Off by default: kNone is the neutral baseline; every caller with a read
+    // or capacity posture sets a codec deliberately (for_storage, for_fast_reads,
+    // and the engine's spill buffer, which uses zstd-1 for disk-ceiling headroom).
     SectionCodec codec = SectionCodec::kNone;
 
     // The zstd level, and ONLY meaningful when `codec == kZstd`. The two fields
@@ -125,8 +127,16 @@ struct WriteOptions {
     // on the zero-copy option it preserves, and the temporary A/B switch was
     // removed rather than left as a knob nothing should ever set.
 
-    // Spill: written once, read once, in-process, wall-clock bound. Nothing
-    // that trades write time for read time can pay, so the whole bundle is off.
+    // Spill: written once, read once, in-process. The READ-ACCELERATION bundle
+    // is off — nothing that trades write time for read time can pay on a file
+    // read exactly once. The CODEC is a separate axis: the engine's spill
+    // buffer (opteryx pipeline_buffers.hpp) layers zstd-1 on top of this
+    // posture, because spill's binding constraint is the ~9GB disk ceiling and
+    // ratio converts directly to queries that survive (architect, 2026-08-27;
+    // bakeoff: zstd-1 0.30x in 58ms vs lz4 0.43x in 44ms, decode level-flat).
+    // This function stays codec-free as the acceleration-off BASELINE posture
+    // (fixtures and tests build on it); it is not a statement that spill wants
+    // raw bytes.
     static WriteOptions for_spill() { return WriteOptions(); }
 
     // Stored data: read many times, kept for a long time, so read acceleration

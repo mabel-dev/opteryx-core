@@ -505,6 +505,10 @@ def plan_merge(statement, **kwargs):
     for _nid, node in plan.nodes(data=True):
         if node.node_type == LogicalPlanStepType.Scan and node.alias == target_alias:
             node.emit_row_identity = True
+            # What the statement is CALLED, carried so a refusal to address rows
+            # names the statement the reader wrote. UPDATE and DELETE desugar
+            # through this same sink, so "MERGE" is not a safe assumption there.
+            node.row_identity_statement = "MERGE INTO"
             stamped = True
     if not stamped:  # pragma: no cover - the join above always plans a target Scan
         from opteryx.exceptions import InvalidInternalStateError
@@ -696,6 +700,7 @@ def _stamp_target_scan(plan, relation_name: str, alias: str, keyword: str) -> No
             f"rows through, found {len(candidates)}"
         )
     candidates[0].emit_row_identity = True
+    candidates[0].row_identity_statement = keyword
 
 
 def _sink_node(relation_name: str, target_columns, alias: str, keyword: str, operation: str):
