@@ -1506,6 +1506,49 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             return False
         return True
 
+    def is_task(self, relation_name: str) -> bool:
+        """Whether the catalog holds a task under this name."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        # A catalog without the task API (older library, or a test double) has
+        # no tasks - checked before importing the exception types, which the
+        # older library does not define either.
+        if getattr(catalog, "get_task", None) is None:
+            return False
+
+        from opteryx_catalog.exceptions import TaskError
+        from opteryx_catalog.exceptions import TaskNotFound
+
+        try:
+            catalog.get_task(relative_id)
+        except (TaskNotFound, TaskError):
+            return False
+        return True
+
+    def task_definition(self, relation_name: str) -> str:
+        """The task's current statement, from the catalog's statement record."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        from opteryx_catalog.exceptions import TaskError
+        from opteryx_catalog.exceptions import TaskNotFound
+
+        try:
+            record = catalog.get_task(relative_id)
+        except (TaskNotFound, TaskError) as exc:
+            raise ValueError(f"{relation_name} is not a task") from exc
+
+        sql = record.get("sql")
+        if not sql:
+            # Registered as a task but with no statement behind it - refuse
+            # rather than execute nothing and report success.
+            raise ValueError(
+                f"task {relation_name} has no statement recorded; it cannot be "
+                "executed. Recreate it with CREATE OR REPLACE TASK."
+            )
+        return sql
+
     def materialized_view_definition(self, relation_name: str) -> str:
         """The view's current defining SELECT, from the catalog's statement record."""
         workspace, relative_id = self._parse_identifier(relation_name)

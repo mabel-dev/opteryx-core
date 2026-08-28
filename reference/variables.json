@@ -553,9 +553,8 @@
         "settable": true,
         "requires_entitlement": "platform_admin",
         "set_by": "platform_admin only",
-        "default": null,
-        "default_source": "environment",
-        "environment_key": "PARQUET_LOCAL_IO_WORKERS"
+        "default": 16,
+        "default_source": "literal"
     },
     "physical_memory_bytes": {
         "name": "physical_memory_bytes",

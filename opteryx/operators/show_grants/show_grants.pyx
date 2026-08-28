@@ -18,13 +18,27 @@ Show Grants Node
 
 This is a SQL Query Execution Plan Node.
 
-Answers `SHOW GRANTS ON <kind> <object>` — the stored policies on an object,
-one row per policy, `(user, pattern, level, role)`: the console's access-list
-screen, as SQL. The rows come from the registered permissions capability's
-`grants_on`, which also holds the gate (owner authority covering the object —
-the binder pre-checked the same question at bind time, but the capability's
-answer at execution is the authoritative one). Distinct from bare
-`SHOW GRANTS` ($grants), which reports the SESSION'S OWN grants.
+Answers the two grant listings on an object, both `(user, pattern, level,
+role)`, one row per policy:
+
+  SHOW GRANTS ON <kind> <object>            — the policies stored AT the
+      object, 1:1 with what a GRANT or REVOKE there would act on: the
+      console's access-list screen, as SQL.
+  SHOW EFFECTIVE GRANTS ON <kind> <object>  — every policy that COVERS the
+      object, the collection and workspace grants above it included, so a
+      dataset reachable only through the workspace owner's `w.*` names that
+      owner instead of returning nothing.
+
+One operator, because they differ only in which question is asked of the
+registered permissions capability (`grants_on` / `effective_grants_on`) — the
+columns, the ordering and the gate are one thing, and the console renders both
+with one renderer. The capability also holds that gate (owner authority
+covering the object — the binder pre-checked the same question at bind time,
+but the capability's answer at execution is the authoritative one), and owns
+the covering test, which is the matcher that decides real queries.
+
+Distinct from bare `SHOW GRANTS` ($grants), which reports the SESSION'S OWN
+grants.
 """
 
 from opteryx.models import QueryProperties
@@ -38,6 +52,8 @@ class ShowGrantsNode(BasePlanNode):
         self.pattern = parameters.get("pattern")
         self.object_kind = parameters.get("object_kind")
         self.object_name = parameters.get("object_name")
+        # Which of the two listings this is; set by the logical planner.
+        self.effective = bool(parameters.get("effective"))
         # Stashed by the binder (visit_show_grants_on): the capability needs
         # the acting identity, and there is no BindingContext here.
         self.execution_context = parameters.get("execution_context")
@@ -45,11 +61,15 @@ class ShowGrantsNode(BasePlanNode):
 
     @property
     def name(self):  # pragma: no cover
+        # One name for both listings: it is the registered operator name, and
+        # the key its timing is recorded under. Which listing this is belongs
+        # in `config`.
         return "Show Grants"
 
     @property
     def config(self):  # pragma: no cover
-        return f"on {self.object_kind} {self.object_name}"
+        listing = "effective grants on" if self.effective else "on"
+        return f"{listing} {self.object_kind} {self.object_name}"
 
     def execute(self, morsel):
         if self.seen:
@@ -59,11 +79,27 @@ class ShowGrantsNode(BasePlanNode):
         from draken.draken_native import DrakenType
         from draken.interop.vector_sequence import vector_from_sequence
         from draken.morsels.morsel import Morsel
+        from opteryx.managers.permissions import effective_grants_on
         from opteryx.managers.permissions import grants_on
 
         self.seen = True
 
-        rows = grants_on(self.execution_context, self.pattern)
+        if self.effective:
+            rows = effective_grants_on(self.execution_context, self.pattern)
+        else:
+            rows = grants_on(self.execution_context, self.pattern)
+            if not rows and self.object_kind != "workspace":
+                # An empty attached listing is indistinguishable from "nobody
+                # can reach this", and reading it that way is what prompted the
+                # effective listing to exist. The message names the other
+                # statement; it does not claim a covering policy exists, which
+                # would need a second read of the policy store to know.
+                self.telemetry.add_message(
+                    f"No grants are stored on {self.object_kind} {self.object_name}. "
+                    f"For the grants that COVER it - those held at the collection "
+                    f"or workspace above it - use SHOW EFFECTIVE GRANTS ON "
+                    f"{self.object_kind.upper()} {self.object_name}."
+                )
 
         users = []
         patterns = []

@@ -630,6 +630,8 @@ def _create_revoke_access_node(logical_node, query_properties, registry):
 
 
 def _create_show_grants_on_node(logical_node, query_properties, registry):
+    # Both listings, attached and effective: one operator, told which question
+    # to ask by the `effective` property the logical plan carries.
     return registry.create("Show Grants", query_properties, **logical_node.properties)
 
 
@@ -687,6 +689,7 @@ _DISPATCH = {
     LogicalPlanStepType.GrantAccess:      _create_grant_access_node,
     LogicalPlanStepType.RevokeAccess:     _create_revoke_access_node,
     LogicalPlanStepType.ShowGrantsOn:     _create_show_grants_on_node,
+    LogicalPlanStepType.ShowEffectiveGrantsOn: _create_show_grants_on_node,
 }
 
 

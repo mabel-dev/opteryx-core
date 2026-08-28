@@ -275,6 +275,20 @@
         "documentation": "The planner builds scans, joins, subqueries, and function datasets from FROM sources.",
         "notes": "Implicit cross joins are supported through relation lists."
     },
+    "grant": {
+        "canonical_name": "GRANT",
+        "planner_entry": "plan_grant_access",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "GRANT READER | WRITER | OWNER ON WORKSPACE workspace_name TO USER user_name",
+            "GRANT READER | WRITER | OWNER ON COLLECTION collection_name TO USER user_name",
+            "GRANT READER | WRITER | OWNER ON DATASET dataset_name TO USER user_name"
+        ],
+        "summary": "Grant a role on a workspace, collection, or dataset to a user.",
+        "documentation": "Adds exactly one access policy: the named role, on the named object, to the named user. The object kind asserts the name's shape - a WORKSPACE is one part, a COLLECTION two, a DATASET three - and a grant at a level covers everything below it. Roles are ranked (owner > writer > reader). The caller must hold OWNER covering the object; nobody can grant themselves access (ask another owner), which is also what stops the last owner being removed. Granting a role already conferred by an equal-or-broader policy is refused as redundant; granting onto an existing policy on the same object is refused - change a grant by REVOKE then GRANT. Every applied grant is audited.",
+        "notes": "Available only where the deployment registers a policy service; embedded and CLI sessions refuse the statement. Personal spaces and public cannot be granted on. The principal is always TO USER - roles and groups are not grantable."
+    },
     "group_by": {
         "canonical_name": "GROUP BY",
         "planner_entry": "plan_query",
@@ -417,6 +431,20 @@
         "documentation": "Re-runs the view's current definition and replaces its contents, reusing the CREATE OR REPLACE TABLE AS write path so the swap is atomic. Views also refresh automatically when a source table takes a user write; this statement is for rebuilding after a failed refresh or a redefinition.",
         "notes": "Takes no options. Refused if the target is not a materialized view. A materialized view is not a table: CTAS, INSERT, TRUNCATE and ALTER TABLE are all refused against one."
     },
+    "revoke": {
+        "canonical_name": "REVOKE",
+        "planner_entry": "plan_revoke_access",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "REVOKE READER | WRITER | OWNER ON WORKSPACE workspace_name FROM USER user_name",
+            "REVOKE READER | WRITER | OWNER ON COLLECTION collection_name FROM USER user_name",
+            "REVOKE READER | WRITER | OWNER ON DATASET dataset_name FROM USER user_name"
+        ],
+        "summary": "Revoke a granted role on a workspace, collection, or dataset from a user.",
+        "documentation": "Deletes exactly one access policy: the one granting exactly this role, on exactly this object, to this user. Resolution is strictly one-to-one - access held through a policy at a different level cannot be revoked by naming something narrower. Revoking READER on a dataset from a user whose read comes from a workspace-level policy is an error naming that policy and its level, never a silent no-op and never a narrowing of the broader grant. The caller must hold OWNER covering the object, and nobody can revoke their own access. Every applied revoke is audited.",
+        "notes": "Available only where the deployment registers a policy service; embedded and CLI sessions refuse the statement. There is no ALTER for grants - change a user's role with REVOKE then GRANT."
+    },
     "select": {
         "canonical_name": "SELECT",
         "planner_entry": "plan_query",
@@ -465,6 +493,20 @@
         "documentation": "Handled as a SHOW node with object metadata.",
         "notes": "Currently used for view-style objects."
     },
+    "show_effective_grants_on": {
+        "canonical_name": "SHOW EFFECTIVE GRANTS ON",
+        "planner_entry": "plan_show_effective_grants_on",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "SHOW EFFECTIVE GRANTS ON WORKSPACE workspace_name",
+            "SHOW EFFECTIVE GRANTS ON COLLECTION collection_name",
+            "SHOW EFFECTIVE GRANTS ON DATASET dataset_name"
+        ],
+        "summary": "List every grant that reaches a workspace, collection, or dataset.",
+        "documentation": "The same four columns as SHOW GRANTS ON - the user, the pattern, the object level that pattern addresses, and the role - but one row per policy that COVERS the object rather than per policy stored at it. A dataset with no grants of its own that sits under a workspace owner's grant lists that owner, and the pattern and level columns say which policy reaches it. One row per covering policy, not per user: a user may reach an object through several, and which one grants the access is what has to change to remove it. Naming a WORKSPACE returns what SHOW GRANTS ON WORKSPACE returns, since a workspace listing is already every policy at every level; the two differ only for a COLLECTION or a DATASET. The caller must hold OWNER covering the object, exactly as for SHOW GRANTS ON.",
+        "notes": "Coverage is decided by the permissions capability with the same matcher that decides real queries, so the listing cannot report access the engine would not grant. Available only where the deployment registers a policy service."
+    },
     "show_grants": {
         "canonical_name": "SHOW GRANTS",
         "planner_entry": "plan_show_variables",
@@ -473,9 +515,23 @@
         "syntax_forms": [
             "SHOW GRANTS"
         ],
-        "summary": "List the current session's policies.",
-        "documentation": "Reached through the parser's generic SHOW catch-all (ShowVariable, words == [\"GRANTS\"]) and answered from the $grants internal-only virtual dataset. Reports the session's own policies and confers nothing - Opteryx has no GRANT/REVOKE.",
+        "summary": "List the current session's own grants.",
+        "documentation": "Reached through the parser's generic SHOW catch-all (ShowVariable, words == [\"GRANTS\"]) and answered from the $grants internal-only virtual dataset. One row per grant the session holds - implicit grants first, in the order they are evaluated - with the pattern, the object level it addresses (workspace, collection, or dataset), the role, and the actions that role confers. Reports and confers nothing: the session's policies are issued at construction. To list who holds what on an object, use SHOW GRANTS ON.",
         "notes": "$grants is INTERNAL_ONLY_DATASETS; SHOW GRANTS is its only surface."
+    },
+    "show_grants_on": {
+        "canonical_name": "SHOW GRANTS ON",
+        "planner_entry": "plan_show_grants_on",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "SHOW GRANTS ON WORKSPACE workspace_name",
+            "SHOW GRANTS ON COLLECTION collection_name",
+            "SHOW GRANTS ON DATASET dataset_name"
+        ],
+        "summary": "List the grants held on a workspace, collection, or dataset.",
+        "documentation": "One row per stored policy - the user it is granted to, its pattern, the object level that pattern addresses, and the role - ordered by user. SHOW GRANTS ON WORKSPACE lists every policy in the workspace at every level; naming a COLLECTION or DATASET lists only the policies at exactly that object, one-to-one with what GRANT and REVOKE there act on (a broader covering grant is shown by SHOW EFFECTIVE GRANTS ON, and by the workspace listing). The caller must hold OWNER covering the object: who may see the grants on an object is who may change them.",
+        "notes": "Available only where the deployment registers a policy service; embedded and CLI sessions refuse the statement. For the session's own grants, use bare SHOW GRANTS."
     },
     "show_manifest": {
         "canonical_name": "SHOW MANIFEST",

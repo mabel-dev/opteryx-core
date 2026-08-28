@@ -595,6 +595,34 @@ class Writable:
             f"{self.__class__.__name__} does not support REFRESH MATERIALIZED VIEW"
         )
 
+    def is_task(self, relation_name: str) -> bool:
+        """Whether `relation_name` names a task.
+
+        Defaults to False so a store that has no concept of tasks answers the
+        question rather than raising: `EXECUTE` asks this of whatever connector
+        the name resolves to, and "not a task here" is a complete answer.
+        """
+        return False
+
+    def task_definition(self, relation_name: str) -> str:
+        """The statement a task is recorded as, as executable text.
+
+        `EXECUTE` is planned by binding the caller's arguments into this
+        statement and planning the result, so the definition has to be readable
+        at plan time. Read fresh rather than carried on the statement: a task
+        runs its *current* definition, which is what makes redefining one take
+        effect on its next execution rather than at some later moment nobody can
+        name.
+
+        Args:
+            relation_name: Fully-qualified name of the task
+
+        Raises:
+            ValueError: If the relation is not a task, or is one with no
+                recorded statement.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **EXECUTE**")
+
     def materialized_view_sources(self, relation_name: str) -> List[str]:
         """The catalog tables a materialized view reads, as recorded at registration.
 

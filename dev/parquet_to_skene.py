@@ -35,6 +35,12 @@ hold raw pointers and cannot cross a process boundary, so a worker owns a
 CONTIGUOUS RANGE OF INPUT FILES end to end and writes its own output files; only
 counts come back.
 
+INSIDE one worker the two phases are then PIPELINED against each other on two
+threads — see convert_dir. That is a different question from the one above: the
+process split is about running many files at once, this is about not leaving
+half of one worker idle. Measured per TPC-H-10 lineitem file before it, decode
+was 52% of the chunk and add_row_group 44%, strictly alternating.
+
 The single-writer alternative (parallel decode feeding one ordered writer) would
 have preserved the serial layout exactly, and was rejected on measurement: the
 write is 64% of the run, so serialising it caps the whole job at 1.6x.
@@ -66,8 +72,9 @@ Usage:
     python dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene_lz4 lz4
     python dev/parquet_to_skene.py testdata/tpch_10 testdata/tpch_10_skene_z9 zstd 9
 
-    -j / --workers sets the worker count. The default is three quarters of the
-    cores — NOT all of them, which measured 50% slower (see _default_workers).
+    -j / --workers sets the worker count. The default is ALL the cores as of
+    2026-08-28; it was three quarters of them before that, and _default_workers
+    carries both sweeps and why the older one is kept on record.
     `-j 1` runs in-process with no pool at all, which is the serial layout.
 
 The destination must not already hold .skene files. Output file names depend on
@@ -81,8 +88,10 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
+from queue import Queue
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _REPO_ROOT)
@@ -188,6 +197,58 @@ class _Packer:
         self._row_groups_in_file = 0
 
 
+# How many decoded morsels may sit between the decoder and the packer.
+#
+# 1 is all the overlap needs — the decoder is filling slot N+1 while the packer
+# drains slot N — and every slot beyond that buys jitter tolerance for MEMORY,
+# which is the resource this tool is already short of (see _default_workers).
+# 2 is the compromise: it absorbs a slow row group without letting a fast
+# decoder run away from a slow writer and pin a whole file in RAM.
+_QUEUE_DEPTH = 2
+
+# Sentinel for "the decoder is done". A dedicated object, not None, so it can
+# never collide with anything rugo could legitimately yield.
+_DECODE_DONE = object()
+
+
+def _decoded_morsels(parquet_paths: list):
+    """Yield every morsel of every file, decoded one bounded queue ahead.
+
+    The decode thread is a DAEMON: if the packer raises, this generator is
+    abandoned mid-queue and the thread is left blocked on `put`. A daemon does
+    not hold the interpreter open, so the worker still dies with its error
+    instead of hanging — which is what we want, because the error is the news.
+    """
+    queue: Queue = Queue(maxsize=_QUEUE_DEPTH)
+
+    def decode() -> None:
+        try:
+            for parquet_path in parquet_paths:
+                with read_parquet(parquet_path) as reader:
+                    for morsel in reader:
+                        queue.put(morsel)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the consumer
+            # NOT a swallow. A decode failure on this thread is invisible to the
+            # consumer, which would otherwise block on an empty queue forever;
+            # this hands the exception across the boundary to be re-raised there,
+            # with the traceback intact. Nothing is logged, degraded or retried.
+            queue.put(exc)
+        finally:
+            queue.put(_DECODE_DONE)
+
+    thread = threading.Thread(target=decode, name="parquet-decode", daemon=True)
+    thread.start()
+
+    while True:
+        item = queue.get()
+        if item is _DECODE_DONE:
+            break
+        if isinstance(item, BaseException):
+            raise item
+        yield item
+    thread.join()
+
+
 def convert_dir(
     parquet_paths: list,
     out_dir: str,
@@ -203,12 +264,24 @@ def convert_dir(
     size, so a row group can span two source files and a source file no longer
     corresponds to any particular output file. Under -j > 1 that spanning stops
     at the chunk boundary — see the module docstring.
+
+    DECODE RUNS ON ITS OWN THREAD, one bounded queue ahead of the packer, so a
+    morsel is being decoded while the previous one is being written. Measured on
+    one TPC-H-10 lineitem file the two phases are 52% and 44% of the chunk and
+    were strictly serial, which is the whole opportunity: neither phase gets
+    faster, they just stop waiting for each other.
+
+    Both phases release the GIL (rugo's decode, skene's add_row_group), which is
+    what makes a THREAD enough here where the cross-file split needed processes.
+
+    THE OUTPUT IS UNCHANGED, byte for byte. One producer feeding one consumer
+    over a FIFO preserves morsel order exactly, and the packer sees the identical
+    sequence it saw when it pulled the morsels itself — so this is invisible to
+    the layout, at every -j including 1.
     """
     packer = _Packer(out_dir, stem, codec, zstd_level, first_index)
-    for parquet_path in parquet_paths:
-        with read_parquet(parquet_path) as reader:
-            for morsel in reader:
-                packer.add(morsel)
+    for morsel in _decoded_morsels(parquet_paths):
+        packer.add(morsel)
     packer.close()
     if packer.files == 0:
         raise RuntimeError(
@@ -218,26 +291,53 @@ def convert_dir(
 
 
 def _default_workers() -> int:
-    """Three quarters of the cores, never all of them.
+    """ALL the cores. This was three quarters of them until 2026-08-28.
 
-    Measured, not guessed. Converting the 99-file ClickBench corpus on an
+    Re-measured on the 98-file, 39GB TPC-H-100 corpus with lz4, on the same
     18-core box, two rounds with the arm order reversed in the second so
-    position bias cancels (means of both rounds, which agreed within 1.6%):
+    position bias cancels (means of both rounds; every arm agreed within 5%,
+    most within 1%):
+
+                        this tool      before the convert_dir pipeline
+        -j 6              86.4s                     —
+        -j 9              65.4s                     —
+        -j 13             58.7s                   78.3s
+        -j 18 (all)       56.8s                   59.5s
+
+    MORE WORKERS IS MONOTONICALLY BETTER, and it was already better BEFORE the
+    pipeline landed: the old code runs 24% faster at 18 than at 13. Peak RSS is
+    2.7-3.7GB at every arm against 69GB of RAM, so nothing is close to
+    memory-bound and there is no ceiling here to leave headroom under.
+
+    >>> THIS CONTRADICTS THE SWEEP THIS DEFAULT WAS ORIGINALLY SET FROM. <<<
+    That sweep, on the 99-file ClickBench corpus and the same box, recorded:
 
         -j 1   358.4s      -j 9    58.7s
         -j 13   56.2s      -j 18   83.0s
 
-    SATURATING THE CORES COSTS 48% — 18 workers is materially slower than 13,
-    reproducibly and in both orders. The run goes memory- and scheduler-bound:
-    a worker holds a whole decoded parquet file (~2GB for a hits file, because
-    rugo decodes every row group in the file before the packer consumes any)
-    plus its growing output buffer. The plateau is broad and flat (9 and 13 are
-    within 4%), so this leaves headroom instead of chasing the exact peak.
+    — i.e. saturating the cores cost 48%. Those numbers are kept here rather
+    than deleted because they were a real measurement and this one does NOT
+    refute them: it was taken on a DIFFERENT CORPUS. ClickBench's wide string
+    columns decode into far larger per-worker buffers than any TPC-H table, and
+    that is exactly the pressure the old cap existed for. TPC-H-100 simply never
+    reproduces the collapse, on either version of the code.
 
-    An earlier version of this docstring quoted a sweep taken while another
-    benchmark shared the box; those numbers were wrong and are replaced here.
+    So this default is now right for the workload it was measured on and
+    UNVERIFIED for the one it was originally set from. If a ClickBench mirror
+    build regresses, that is the first thing to suspect, and the fix is `-j 13`
+    on that corpus — not a revert of this line. Architect ruling 2026-08-28,
+    taking the TPC-H-100 sweep as decisive.
+
+    Two earlier versions of this docstring were also wrong and are worth
+    recording, because both misattributed a real number to a wrong cause: one
+    quoted a sweep taken while another benchmark shared the box, and one blamed
+    the memory on rugo decoding every row group in a file before the packer
+    consumed any. That second claim is measurably false — on a TPC-H-10 lineitem
+    file the 15 morsels arrive at ~0.075s each, the first next() is 7.4% of
+    total decode, and peak RSS is 331MB, not the ~2GB claimed. Decode is
+    incremental, which is what makes the convert_dir pipeline possible at all.
     """
-    return max(1, (os.cpu_count() or 1) * 3 // 4)
+    return max(1, os.cpu_count() or 1)
 
 
 def _output_files_for(rows: int) -> int:

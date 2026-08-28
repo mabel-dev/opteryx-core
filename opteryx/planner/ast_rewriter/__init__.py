@@ -72,8 +72,17 @@ def parameter_list_binder(node: Union[Dict, List], parameter_set: List[Any]) -> 
         return [parameter_list_binder(child, parameter_set) for child in node]
 
     if isinstance(node, dict):
-        if "Value" in node and "Placeholder" in node["Value"]["value"]:
-            if node["Value"]["value"]["Placeholder"] != "?":
+        # Two spellings of the same node: the parser wraps a placeholder in a Value
+        # node with a span; the statements synthesized by `opteryx.planner.pre_parse`
+        # have no span to carry and emit the bare node. `parameter_dict_binder`
+        # matches the bare node for the same reason (it reaches it by recursion).
+        placeholder = None
+        if "Placeholder" in node:
+            placeholder = node["Placeholder"]
+        elif "Value" in node and "Placeholder" in node["Value"]["value"]:
+            placeholder = node["Value"]["value"]["Placeholder"]
+        if placeholder is not None:
+            if placeholder != "?":
                 raise ParameterError("Parameter lists are only used with qmark (?) parameters.")
             if not parameter_set:
                 raise ParameterError(

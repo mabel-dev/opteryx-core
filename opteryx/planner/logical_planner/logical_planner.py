@@ -123,6 +123,7 @@ class LogicalPlanStepType(int, Enum):
     GrantAccess = auto()
     RevokeAccess = auto()
     ShowGrantsOn = auto()
+    ShowEffectiveGrantsOn = auto()
 
 
 class LogicalPlan(Graph):
@@ -4893,6 +4894,186 @@ def plan_drop_workspace(statement, **kwargs):
     return plan
 
 
+def _execute_argument_value(expr: dict, argument_name: str):
+    """The constant behind one `USING <value> AS <name>` argument.
+
+    Task arguments are constants - the firing path binds a snapshot id, not an
+    expression for the engine to evaluate - so anything that is not a literal is
+    refused here. Letting a column reference through would fail much later, at
+    the parameter binder, naming the placeholder it could not fill rather than
+    the argument that could not be read.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    unary = expr.get("UnaryOp")
+    if unary is not None and unary.get("op") in ("Minus", "Plus"):
+        inner = _execute_argument_value(unary["expr"], argument_name)
+        if not isinstance(inner, (int, float)) or isinstance(inner, bool):
+            raise UnsupportedSyntaxError(
+                f"**EXECUTE** argument `{argument_name}` applies a sign to a value "
+                "that is not a number."
+            )
+        return -inner if unary["op"] == "Minus" else inner
+
+    value = expr.get("Value")
+    literal = value.get("value") if isinstance(value, dict) else None
+    if literal is None:
+        raise UnsupportedSyntaxError(
+            f"**EXECUTE** argument `{argument_name}` is not a constant. **USING** "
+            "takes literal values: a task's arguments are bound when it is fired, "
+            "not evaluated against a relation."
+        )
+    if literal == "Null":
+        return None
+    if "Number" in literal:
+        number = literal["Number"][0]
+        return float(number) if any(c in number for c in ".eE") else int(number)
+    if "Boolean" in literal:
+        return literal["Boolean"]
+    for quoted in ("SingleQuotedString", "DoubleQuotedString", "EscapedStringLiteral"):
+        if quoted in literal:
+            return literal[quoted]
+    raise UnsupportedSyntaxError(
+        f"**EXECUTE** argument `{argument_name}` is a literal that cannot be bound "
+        "to a task parameter."
+    )
+
+
+def plan_execute(statement, **kwargs):
+    """Plan `EXECUTE <task> USING <value> AS <name>, ...`.
+
+    Desugars to the task's own recorded statement, with the `USING` arguments
+    bound to its named placeholders, and plans that through the same builder
+    table the top level uses. A task is therefore any statement the engine can
+    already plan, and executing one grants nothing the author of that statement
+    did not already have.
+
+    The statement is read here, at plan time, rather than carried on the
+    EXECUTE: a task runs its CURRENT definition, so redefining one takes effect
+    on its next execution rather than at some later moment nobody can point to.
+    This mirrors `plan_refresh_materialized_view`, for the same reason.
+
+    Binding goes through `parameter_dict_binder` - the same path a user's own
+    parameterized query takes - so arguments are substituted into the AST only
+    after it has been parsed, and an argument can never change how the task's
+    SQL parses.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.planner.ast_rewriter import parameter_dict_binder
+    from opteryx.third_party import sqloxide
+
+    execute = statement["Execute"]
+
+    # Forms of EXECUTE that other dialects give the keyword and this one does
+    # not implement. Refused by name rather than ignored: silently dropping
+    # `INTO` or `IMMEDIATE` would run something other than what was written.
+    if execute.get("immediate"):
+        raise UnsupportedSyntaxError(
+            "**EXECUTE IMMEDIATE** is not supported. **EXECUTE** runs a task recorded "
+            "in the catalog: **EXECUTE** <task> [**USING** <value> **AS** <name>, ...]."
+        )
+    if execute.get("into"):
+        raise UnsupportedSyntaxError(
+            "**EXECUTE ... INTO** is not supported; a task writes to the target its "
+            "own statement names."
+        )
+    if execute.get("output") or execute.get("default"):
+        raise UnsupportedSyntaxError(
+            "**EXECUTE ... OUTPUT** and **EXECUTE ... DEFAULT** are not supported."
+        )
+    name_parts = execute.get("name") or []
+    if not name_parts:
+        raise UnsupportedSyntaxError(
+            "**EXECUTE** requires the name of a task: **EXECUTE** <task> "
+            "[**USING** <value> **AS** <name>, ...]."
+        )
+
+    # `EXECUTE IMMEDIATE 'sql'` and `EXECUTE TASK t` both PARSE, because neither
+    # word is a keyword to this dialect - each is taken as the object name, with
+    # what follows read as a positional argument. Left alone they would be
+    # refused for the wrong reason, several words away from the one at fault, so
+    # each is named here. (`immediate` above is the flag a dialect that does know
+    # the keyword would set; this dialect never does, and both are checked so
+    # neither arrangement can pass silently.)
+    if len(name_parts) == 1 and execute.get("parameters") and not execute.get("has_parentheses"):
+        noise_word = name_parts[0]["Identifier"]["value"].upper()
+        if noise_word == "IMMEDIATE":
+            raise UnsupportedSyntaxError(
+                "**EXECUTE IMMEDIATE** is not supported. **EXECUTE** runs a task "
+                "recorded in the catalog: **EXECUTE** <task> [**USING** <value> "
+                "**AS** <name>, ...]."
+            )
+        if noise_word == "TASK":
+            raise UnsupportedSyntaxError(
+                "There is no **TASK** keyword in **EXECUTE**; it would be read as the "
+                "task's own name. Write **EXECUTE** <task> [**USING** <value> **AS** "
+                "<name>, ...]."
+            )
+
+    if execute.get("parameters"):
+        raise UnsupportedSyntaxError(
+            "**EXECUTE** takes named arguments: **USING** <value> **AS** <name>. "
+            "Positional arguments are not supported - a task's parameters are matched "
+            "by name, so their order carries no meaning."
+        )
+
+    relation_name = ".".join(part["Identifier"]["value"] for part in name_parts)
+
+    arguments: dict = {}
+    for argument in execute.get("using") or []:
+        alias = argument.get("alias")
+        if alias is None:
+            raise UnsupportedSyntaxError(
+                "every **USING** argument must be named: **USING** <value> **AS** "
+                "<name>. A task's parameters are matched by name, never by position."
+            )
+        argument_name = alias["value"]
+        if argument_name in arguments:
+            raise UnsupportedSyntaxError(
+                f"**EXECUTE** argument `{argument_name}` is given more than once."
+            )
+        arguments[argument_name] = _execute_argument_value(argument["expr"], argument_name)
+
+    connector = connector_factory(relation_name, telemetry=None)
+    if not isinstance(connector, Writable) or not connector.is_task(relation_name):
+        raise UnsupportedSyntaxError(
+            f"{relation_name} is not a task; **EXECUTE** only runs tasks."
+        )
+
+    try:
+        task_sql = connector.task_definition(relation_name)
+    except ValueError as exc:
+        raise UnsupportedSyntaxError(str(exc)) from exc
+
+    parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
+    if len(parsed) != 1:
+        raise UnsupportedSyntaxError(
+            f"the recorded statement of task {relation_name} is not a single "
+            "statement; it cannot be executed."
+        )
+
+    bound = parameter_dict_binder(parsed[0], arguments)
+
+    inner_root = next(iter(bound))
+    if inner_root == "Execute":
+        # A task that runs a task is a chain this planner would have to follow at
+        # plan time, with no bound on its length and a cycle indistinguishable
+        # from a long chain. Refused at one level rather than defended at N.
+        raise UnsupportedSyntaxError(
+            f"task {relation_name} is recorded as an **EXECUTE**; a task cannot run "
+            "another task."
+        )
+    builder = QUERY_BUILDERS.get(inner_root)
+    if builder is None:
+        raise UnsupportedSyntaxError(
+            f"task {relation_name} is recorded as a **{inner_root.upper()}** "
+            "statement, which cannot be executed."
+        )
+    return builder(bound)
+
+
 def plan_refresh_materialized_view(statement, **kwargs):
     """Plan REFRESH MATERIALIZED VIEW <name>.
 
@@ -5346,11 +5527,18 @@ def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
     Unlike REFRESH, this does not desugar into a CTAS: nothing is read and
     nothing is written but one field on the view's record, so it gets its own
     node, its own binder visitor, and its own permission check."""
+    from opteryx.planner.pre_parse import resolve_slot_value
+
     root = "AlterMaterializedViewOwner"
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterMaterializedViewOwner)
     node.relation_name = statement[root]["name"]
-    node.new_owner = statement[root]["owner"]
+    new_owner = statement[root]["owner"]
+    # None is CURRENT_USER, which names no principal to resolve; anything else is
+    # either the literal written or the value bound to its placeholder.
+    node.new_owner = (
+        None if new_owner is None else resolve_slot_value(new_owner, "new owner")
+    )
     node.owner_is_current_user = statement[root].get("current_user", False)
 
     plan.add_node(random_string(), node)
@@ -5410,13 +5598,19 @@ def _grant_object_pattern(object_kind: str, object_name: str) -> str:
 
 
 def _plan_grant_statement(statement, root: str, node_type) -> LogicalPlan:
+    from opteryx.planner.pre_parse import resolve_slot_value
+
     plan = LogicalPlan()
     node = LogicalPlanNode(node_type=node_type)
     node.object_kind = statement[root]["object_kind"]
-    node.object_name = statement[root]["object_name"]
+    # The object and the principal are value slots: either the literal the
+    # pre-parse grammar captured, or the value bound to the placeholder written
+    # there. An unbound placeholder raises here rather than becoming a principal
+    # or an object named ":whatever".
+    node.object_name = resolve_slot_value(statement[root]["object_name"], "granted object")
     node.pattern = _grant_object_pattern(node.object_kind, node.object_name)
     node.role = statement[root]["role"]
-    node.principal = statement[root]["principal"]
+    node.principal = resolve_slot_value(statement[root]["principal"], "principal")
 
     plan.add_node(random_string(), node)
 
@@ -5441,22 +5635,56 @@ def plan_revoke_access(statement, **kwargs) -> LogicalPlan:
     return _plan_grant_statement(statement, "RevokeAccess", LogicalPlanStepType.RevokeAccess)
 
 
-def plan_show_grants_on(statement, **kwargs) -> LogicalPlan:
-    """SHOW GRANTS ON <kind> <object> — synthesized pre-parse.
+def _plan_grant_listing(statement, root: str, node_type, effective: bool) -> LogicalPlan:
+    """The shared plan for the two grant listings.
 
-    Lists the stored policies on an object, one row per policy - the console's
-    access-list screen as SQL. Owner-gated on the same authority a GRANT there
-    would need: who may see the grants is who may change them."""
-    root = "ShowGrantsOn"
+    They differ in one property - `effective` - which selects which question
+    the operator asks the capability. Everything else (the object-kind arity
+    map, the pattern, the owner gate the binder applies, the four columns) is
+    the same by construction, which is the point: the two statements are two
+    questions about one object, not two features.
+    """
+    from opteryx.planner.pre_parse import resolve_slot_value
+
     plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.ShowGrantsOn)
+    node = LogicalPlanNode(node_type=node_type)
     node.object_kind = statement[root]["object_kind"]
-    node.object_name = statement[root]["object_name"]
+    node.object_name = resolve_slot_value(statement[root]["object_name"], "granted object")
     node.pattern = _grant_object_pattern(node.object_kind, node.object_name)
+    node.effective = effective
 
     plan.add_node(random_string(), node)
 
     return plan
+
+
+def plan_show_grants_on(statement, **kwargs) -> LogicalPlan:
+    """SHOW GRANTS ON <kind> <object> — synthesized pre-parse.
+
+    Lists the stored policies AT an object, one row per policy - the console's
+    access-list screen as SQL, and 1:1 with what a GRANT or REVOKE there would
+    act on. Owner-gated on the same authority a GRANT there would need: who may
+    see the grants is who may change them."""
+    return _plan_grant_listing(
+        statement, "ShowGrantsOn", LogicalPlanStepType.ShowGrantsOn, effective=False
+    )
+
+
+def plan_show_effective_grants_on(statement, **kwargs) -> LogicalPlan:
+    """SHOW EFFECTIVE GRANTS ON <kind> <object> — synthesized pre-parse.
+
+    Lists every stored policy that COVERS the object - the one attached to it
+    plus the collection and workspace policies above it - so a dataset
+    reachable only through the workspace owner's `w.*` names that owner rather
+    than returning nothing. Same columns and same owner gate as SHOW GRANTS ON;
+    on a WORKSPACE the two return the same rows, since a workspace listing is
+    already every policy at every level."""
+    return _plan_grant_listing(
+        statement,
+        "ShowEffectiveGrantsOn",
+        LogicalPlanStepType.ShowEffectiveGrantsOn,
+        effective=True,
+    )
 
 
 def build_expression_tree(relation, dnf_list):
@@ -5609,6 +5837,9 @@ QUERY_BUILDERS = {
     "DropStatistics": plan_drop_statistics,
     "DropTrigger": plan_drop_trigger,
     "Comment": plan_comment,
+    # EXECUTE <task> USING ... — sqlparser parses this natively, so unlike
+    # RefreshMaterializedView it needs no pre-parse interception.
+    "Execute": plan_execute,
     "Explain": plan_explain,
     "Query": plan_query,
     "Set": plan_set_variable,
@@ -5639,6 +5870,7 @@ QUERY_BUILDERS = {
     "GrantAccess": plan_grant_access,
     "RevokeAccess": plan_revoke_access,
     "ShowGrantsOn": plan_show_grants_on,
+    "ShowEffectiveGrantsOn": plan_show_effective_grants_on,
 }
 
 

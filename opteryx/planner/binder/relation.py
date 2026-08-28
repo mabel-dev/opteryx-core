@@ -1405,3 +1405,15 @@ def visit_show_grants_on(self, node: Node, context: BindingContext) -> Tuple[Nod
     holds what.
     """
     return _bind_grant_administration(node, context, "GRANT"), context
+
+
+def visit_show_effective_grants_on(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind SHOW EFFECTIVE GRANTS ON <kind> <object>.
+
+    Identically gated to SHOW GRANTS ON, and not weakened because it reports
+    MORE: it names every principal who can reach the object, which is strictly
+    more of the thing the owner gate exists to protect.
+    """
+    return _bind_grant_administration(node, context, "GRANT"), context

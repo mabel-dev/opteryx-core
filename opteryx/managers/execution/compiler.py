@@ -47,7 +47,6 @@ from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 _FRAMED_KIND_NAMES = {code: name for name, code in FRAMED_AGGREGATE_FUNCTIONS.items()}
 from opteryx.types.logical_type import rescale_decimal_literal as _rescale_decimal_literal
 
-_MAX_WORKER_CAP = 16
 _QUEUE_DEPTH = 4
 
 # Per-driver-thread engine pool cache. The engine pool is driven via
@@ -95,12 +94,27 @@ _oversubscribe_warned = False
 
 
 def resolve_worker_count(requested) -> int:
-    """Effective degree of parallelism. Unset/"auto" is softcoded (cpu-2, capped);
-    an explicit positive request is HONOURED EXACTLY (warned if oversubscribed,
-    never silently reduced). DOP is a number, never a code-path selector."""
+    """Effective degree of parallelism. Unset/"auto" is softcoded —
+    `min(config.MAX_EXECUTION_WORKER_CAP, max(2, cpu - 2))` — while an explicit positive
+    request is HONOURED EXACTLY (warned if oversubscribed, never silently reduced). DOP is
+    a number, never a code-path selector.
+
+    The floor is 2, not 1: on a 2-vCPU host `cpu - 2` is 0, and the old `max(1, ...)`
+    turned that into single-worker execution. Two workers keeps a tiny host parallel at
+    all without meaningfully oversubscribing it. It is deliberately LOWER than the parquet
+    IO floor of 4 (`PARQUET_LOCAL_IO_WORKER_CAP`'s docstring carries that side): IO threads
+    spend their life blocked on the page cache, execution threads spend it on CPU, so the
+    IO pool tolerates a wider floor than the engine does. A cap below 2 still wins (cap 1
+    gives 1) — an explicit ceiling is never overridden by the floor.
+
+    The cap is read from config at CALL time, not bound at import, so a sweep can move
+    it — via the `MAX_EXECUTION_WORKER_CAP` env var or by setting the config attribute —
+    the same way the tests already move `MAX_EXECUTION_WORKERS`."""
+    from opteryx import config
+
     cpu = os.cpu_count() or 1
     if requested is None or requested <= 0:
-        return max(1, min(cpu - 2, _MAX_WORKER_CAP))
+        return min(config.MAX_EXECUTION_WORKER_CAP, max(2, cpu - 2))
     requested = int(requested)
     if requested > cpu:
         global _oversubscribe_warned

@@ -23,7 +23,7 @@ Registration is the ONLY sanctioned way to change what a permission check
 means. There is no capability sniffing on the check path and no fallback:
 whatever is registered when a query binds is what decides it.
 
-A capability answers eight questions:
+A capability answers nine questions:
 
     can_perform_action(execution_context, resource, action) -> bool
     can_perform_workspace_action(execution_context, workspace, action) -> bool
@@ -33,6 +33,7 @@ A capability answers eight questions:
     apply_grant(execution_context, pattern, role, principal) -> policy id
     apply_revoke(execution_context, pattern, role, principal) -> policy id
     grants_on(execution_context, pattern) -> list[dict]
+    effective_grants_on(execution_context, pattern) -> list[dict]
 
 The first two are the gates the binder and `information_schema` call, and both
 ask about the session doing the asking.
@@ -58,10 +59,13 @@ asks rather than holding a list.
 The fifth backs `SHOW GRANTS` ($grants), so that what is reported and what is
 enforced come from one place and cannot drift into disagreeing.
 
-The last three are the grant-administration surface behind the engine's
-`GRANT`, `REVOKE`, and `SHOW GRANTS ON` statements. The engine speaks in
-patterns by the time these are called - the planner maps `WORKSPACE w` to
-`w.*`, `COLLECTION w.c` to `w.c.*`, `DATASET w.c.d` to `w.c.d` - and the
+The last four are the grant-administration surface behind the engine's
+`GRANT`, `REVOKE`, `SHOW GRANTS ON`, and `SHOW EFFECTIVE GRANTS ON`
+statements. The last two are the two questions an object can be asked: what
+is stored AT it, and who can reach it at all (that, plus everything above it
+that covers it). The engine speaks in patterns by the time these are
+called - the planner maps `WORKSPACE w` to `w.*`, `COLLECTION w.c` to
+`w.c.*`, `DATASET w.c.d` to `w.c.d` - and the
 capability owns every rule (owner authority, the no-self-service rule,
 1:1 resolution, conflict refusal, audit). The engine stores no policy and
 interprets nothing.
@@ -87,6 +91,7 @@ __all__ = (
     "can_perform_workspace_action",
     "can_principal_own_materialized_view",
     "can_principal_perform_action",
+    "effective_grants_on",
     "grants_on",
     "register_permissions_capability",
 )
@@ -94,6 +99,13 @@ __all__ = (
 # The members a capability must provide. Checked once, at registration, so a
 # capability missing one is reported when it is installed rather than when the
 # first query happens to reach that gate.
+#
+# Adding a member here is a BREAKING CHANGE for any registered capability: one
+# written against the previous list fails at registration, loudly, at start-up.
+# That is the intended behaviour and the reason the check exists - a capability
+# that is missing a member the engine will call must not be installed and then
+# fail at the statement. `effective_grants_on` was added with
+# `SHOW EFFECTIVE GRANTS ON`; a deployment must upgrade its capability in step.
 _REQUIRED_MEMBERS = (
     "can_perform_action",
     "can_perform_workspace_action",
@@ -103,6 +115,7 @@ _REQUIRED_MEMBERS = (
     "apply_grant",
     "apply_revoke",
     "grants_on",
+    "effective_grants_on",
 )
 
 
@@ -161,6 +174,9 @@ class PermitAll:
 
     def grants_on(self, execution_context, pattern: str):
         self._refuse_administration("SHOW GRANTS ON")
+
+    def effective_grants_on(self, execution_context, pattern: str):
+        self._refuse_administration("SHOW EFFECTIVE GRANTS ON")
 
 
 _CORE = PermitAll()
@@ -298,10 +314,31 @@ def apply_revoke(execution_context, pattern: str, role: str, principal: str):
 
 
 def grants_on(execution_context, pattern: str):
-    """The rows behind `SHOW GRANTS ON <object>`: one row per stored policy,
-    `(user, pattern, level, role)`.
+    """The rows behind `SHOW GRANTS ON <object>`: one row per stored policy
+    AT the object, `(user, pattern, level, role)`.
 
     Gated by the capability on the same authority a mutation needs: who may
     see the grants on an object is who may change them.
     """
     return _capability().grants_on(execution_context, pattern)
+
+
+def effective_grants_on(execution_context, pattern: str):
+    """The rows behind `SHOW EFFECTIVE GRANTS ON <object>`: one row per stored
+    policy that COVERS the object, in the same four columns.
+
+    The other question an object can be asked. `grants_on` reports what is
+    stored at it - 1:1 with what a GRANT or REVOKE there would act on - and so
+    reports nothing for a dataset reachable only through the workspace owner's
+    `w.*`. This reports that owner, and the `pattern` and `level` columns say
+    which policy grants the access, which is what has to change to remove it.
+
+    One row per covering policy, not per user: a user may reach an object
+    through more than one, and collapsing them would hide the one an
+    administrator has to act on. Gated identically to `grants_on`.
+
+    Whether a policy covers the object is the capability's to decide, with the
+    same matcher that decides real queries - the engine holds no second
+    implementation of coverage to drift from it.
+    """
+    return _capability().effective_grants_on(execution_context, pattern)

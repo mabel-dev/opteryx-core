@@ -172,8 +172,8 @@ if __name__ == "__main__":  # pragma: no cover
     parser.add_argument(
         "--iterations",
         type=int,
-        default=3,
-        help="Rounds of the full battery (default: 3)",
+        default=5,
+        help="Rounds of the full battery (default: 5)",
     )
     parser.add_argument(
         "--json",

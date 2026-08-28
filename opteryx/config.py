@@ -201,15 +201,51 @@ KVSTORE_PREWARM_MEMORY_POOLS: bool = str(get("KVSTORE_PREWARM_MEMORY_POOLS", "1"
 # GCP project ID - for Google Cloud Data
 GCP_PROJECT_ID: str = get("GCP_PROJECT_ID")
 
+_parquet_local_io_cap_raw = str(get("PARQUET_LOCAL_IO_WORKER_CAP", "16")).strip()
+if not _parquet_local_io_cap_raw.isdigit() or int(_parquet_local_io_cap_raw) < 1:
+    raise ValueError(
+        f"Invalid PARQUET_LOCAL_IO_WORKER_CAP: {_parquet_local_io_cap_raw!r}. "
+        "Expected a positive integer."
+    )
+PARQUET_LOCAL_IO_WORKER_CAP: int = int(_parquet_local_io_cap_raw)
+"""Ceiling applied to the DERIVED `PARQUET_LOCAL_IO_WORKERS` default only.
+
+16 was measured (~8.4x decode scaling on a string-heavy ClickBench scan), not measured
+to be the optimum — nothing above 16 has been tried, so on a large host this cap, not
+the hardware, decides the local Parquet read width. Raising it is how that gets measured;
+it is the IO-side twin of [[MAX_EXECUTION_WORKER_CAP]].
+
+Applied AFTER the floor of 4, so a cap below 4 wins: setting it to 1 yields 1 worker.
+An invalid value raises rather than silently reverting to the default.
+
+⛔ Env-var-at-import ONLY. It feeds the derived default below, which is bound once at
+module import — assigning `config.PARQUET_LOCAL_IO_WORKER_CAP` at runtime does NOT
+recompute `PARQUET_LOCAL_IO_WORKERS`. A runtime sweep must set that value directly."""
+
 PARQUET_LOCAL_IO_WORKERS: int = int(
-    get("PARQUET_LOCAL_IO_WORKERS", min(16, max(8, (_os.cpu_count() or 8) - 2)))
+    get(
+        "PARQUET_LOCAL_IO_WORKERS",
+        min(PARQUET_LOCAL_IO_WORKER_CAP, max(4, (_os.cpu_count() or 8) - 2)),
+    )
 )
 """Worker threads for local-filesystem Parquet reads (mmap path, IO is near-free from OS cache).
 
-Default scales with the host: ``max(8, cpu_count - 2)`` capped at 16. Decode parallelises
-near-linearly (measured ~8.4x at 16 workers on a string-heavy ClickBench scan), so larger
-machines use their cores; the floor of 8 means small instances (e.g. <=8 vCPU Cloud Run) are
-never reduced below the historic default. Override via the env var to tune per deployment."""
+Default scales with the host: ``max(4, cpu_count - 2)`` capped at
+``PARQUET_LOCAL_IO_WORKER_CAP`` (16 unless overridden) — the same shape as the execution
+width and the same ceiling, differing ONLY in the floor: 4 here against the engine's 2.
+That gap is intentional. These threads block on the page cache rather than burning CPU,
+so a small host can carry more of them than it can execution workers.
+Decode parallelises near-linearly (measured ~8.4x at 16 workers on a string-heavy
+ClickBench scan), so larger machines use their cores.
+
+The floor is 4, NOT the historic 8. That floor previously held a <=8 vCPU host at 8 IO
+threads while execution collapsed to 1 — 8 IO threads onto 2 vCPUs, the exact
+oversubscription measured to cost 4.8x on a 2-core box. Halving it keeps a tiny host
+usefully parallel without reproducing that 4x oversubscription. Set by the architect
+2026-08-28.
+
+Override via the env var to tune per deployment; an explicit value is taken as-is and the
+cap does not apply to it."""
 
 PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 16))
 """Worker threads for GCS/HTTP Parquet reads.
@@ -333,6 +369,26 @@ win because they move together; this splits them. It also sizes the IO pool
 HTTP/2 contributes (with multiplexing unavailable, a low connection cap should
 become catastrophic rather than faster). Leaving it True forfeits multiplexing."""
 
+_max_worker_cap_raw = str(get("MAX_EXECUTION_WORKER_CAP", "16")).strip()
+if not _max_worker_cap_raw.isdigit() or int(_max_worker_cap_raw) < 1:
+    raise ValueError(
+        f"Invalid MAX_EXECUTION_WORKER_CAP: {_max_worker_cap_raw!r}. "
+        "Expected a positive integer."
+    )
+MAX_EXECUTION_WORKER_CAP: int = int(_max_worker_cap_raw)
+"""Ceiling applied to the SOFTCODED execution width only.
+
+`resolve_worker_count` derives the automatic degree of parallelism as
+``max(1, min(cpu_count - 2, MAX_EXECUTION_WORKER_CAP))``. The cap exists because the
+engine's scaling past 16 workers is UNMEASURED, not because 16 is known to be optimal:
+on a 192-vCPU ClickBench run (2026-08-27, c8g.metal-48xl) it held the engine to 16
+workers and the whole box delivered 1.10x the hot throughput of a 16-vCPU c8g.4xlarge —
+the ratio of the two resolved worker counts (16/14) and nothing else.
+
+Raising this is how that curve gets measured. It bounds the AUTO path ONLY: an explicit
+positive `MAX_EXECUTION_WORKERS` is still honoured exactly and is not clamped by it.
+An invalid value raises rather than silently reverting to the default."""
+
 _max_workers_raw = str(get("MAX_EXECUTION_WORKERS", "auto")).strip().lower()
 MAX_EXECUTION_WORKERS: int = (
     int(_max_workers_raw) if _max_workers_raw.lstrip("-").isdigit() else 0
@@ -340,7 +396,7 @@ MAX_EXECUTION_WORKERS: int = (
 """Central parallel execution scheduler width (M4). **Softcoded by default**:
 unset / "auto" / an impossible value (0 or less) is stored as 0 here, and
 resolve_worker_count derives the effective width from the core count,
-max(1, min(cpu-2, 16)). **An explicit positive integer is HONOURED EXACTLY** — never
+min(MAX_EXECUTION_WORKER_CAP, max(2, cpu-2)). **An explicit positive integer is HONOURED EXACTLY** — never
 clamped, never silently overridden, not even to the physical core count; set 128 and
 you get 128 workers (oversubscription is warned once, not reduced). Worker count is
 degree-of-parallelism only — it never selects a code path (W=1 is one worker, not the

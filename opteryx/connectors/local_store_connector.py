@@ -310,6 +310,25 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     def is_materialized_view(self, relation_name: str) -> bool:
         return os.path.isfile(self._mv_path(relation_name))
 
+    def _task_path(self, relation_name: str) -> str:
+        return os.path.join(self._relation_dir(relation_name), "task.json")
+
+    def is_task(self, relation_name: str) -> bool:
+        return os.path.isfile(self._task_path(relation_name))
+
+    def task_definition(self, relation_name: str) -> str:
+        task_path = self._task_path(relation_name)
+        if not os.path.isfile(task_path):
+            raise ValueError(f"{relation_name} is not a task")
+        with open(task_path) as f:
+            record = json.load(f)
+        sql = record.get("sql")
+        if not sql:
+            raise ValueError(
+                f"task {relation_name} has no statement recorded; it cannot be executed."
+            )
+        return sql
+
     def _read_mv_record(self, relation_name: str) -> Optional[dict]:
         mv_path = self._mv_path(relation_name)
         if not os.path.isfile(mv_path):

@@ -24,7 +24,90 @@ queueing) rejected every REFRESH, DROP TRIGGER and DROP STATISTICS submitted to 
 
 import re
 
+# --- value slots and parameter binding
+#
+# A synthesized statement is built from a regex match, not from the parser, so a
+# `:name` in it never became a Placeholder node and could never be bound - it was
+# captured as text and used as data. `GRANT ... TO USER :username` created a grant
+# for a principal literally called ":username".
+#
+# The slots below that hold a VALUE (a principal, the object a grant is
+# administered on) therefore accept a placeholder, and emit the same
+# `{"Placeholder": ":name"}` node sqlparser emits, which the AST rewriter binds
+# exactly as it binds one in a SELECT. The slots that hold an IDENTIFIER (a table,
+# a trigger, a materialized view) do NOT: a parameterised relation name would let
+# runtime data decide what the statement reads or writes, which is why the parser
+# does not accept `SELECT * FROM :t` either.
+#
+# Placeholders come FIRST in each alternation so `:name` is read as a parameter
+# rather than as a literal; the literal alternatives no longer admit a colon.
+_PLACEHOLDER = r":[A-Za-z_]\w*|\?"
+# A principal names a person: quoted (with '' / "" escaping the quote character,
+# so an identity containing one is expressible), or bare. A bare principal may
+# still contain a colon (`svc:account`) but may not START with one - that is the
+# character the placeholder alternative claims, and the reason `:username` used
+# to be taken as a literal principal name.
+_PRINCIPAL_SLOT = (
+    _PLACEHOLDER + r"|'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|[\w.@+-][\w.@:+-]*"
+)
+# A grant's object is a dotted name, checked for arity when it is planned.
+_OBJECT_SLOT = _PLACEHOLDER + r"|[A-Za-z_][\w.$]*"
+
+
+def _slot_value(raw: str):
+    """Turn one captured value slot into what the synthesized AST should carry.
+
+    A placeholder becomes the Placeholder node the AST rewriter binds; a quoted
+    literal is unquoted, doubled quote characters collapsing to one; anything else
+    is the bare text. The literal charsets exclude `:`, so a slot starting with one
+    is unambiguously a placeholder and can never be read back as a literal.
+    """
+    if raw[0] in ":?":
+        return {"Placeholder": raw}
+    if raw[0] == "'":
+        return raw[1:-1].replace("''", "'")
+    if raw[0] == '"':
+        return raw[1:-1].replace('""', '"')
+    return raw
+
+
+def resolve_slot_value(value, slot: str) -> str:
+    """Read a value slot back at plan time, after the AST rewriter has run.
+
+    The slot holds either the literal the regex captured, or - where it held a
+    placeholder - the literal node the rewriter substituted for it. An UNBOUND
+    placeholder arrives here still a Placeholder node (the rewriter does no work
+    when no parameters were supplied) and fails with the same error any other
+    unbound placeholder raises. It is never used as data: that is the whole point
+    of routing these slots through the rewriter.
+
+    Parameters:
+        value: the slot, as it stands on the statement.
+        slot:  what the slot is, for the error message.
+
+    Returns:
+        The string the statement should act on.
+    """
+    from opteryx.exceptions import ParameterError
+
+    if isinstance(value, str):
+        return value
+    if "Placeholder" in value:
+        raise ParameterError(
+            "Unresolved parameter in query. Supply a value for every placeholder in the statement."
+        )
+    literal = value.get("Value")
+    if isinstance(literal, dict) and "SingleQuotedString" in literal:
+        return literal["SingleQuotedString"]
+    raise ParameterError(
+        f"The {slot} must be a string; the value supplied for its placeholder is not one."
+    )
+
+
 # DROP STATISTICS ON <table> [FOR COLUMNS <c1>, <c2>, ...]
+# No placeholders: the table and the columns are identifiers, not values. A
+# parameterised relation or column name would let runtime data decide what the
+# statement acts on - the parser rejects `SELECT * FROM :t` for the same reason.
 _DROP_STATS_RE = re.compile(
     r"^\s*DROP\s+STATISTICS\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)"
     r"(?:\s+FOR\s+COLUMNS\s+(?P<cols>.+?))?\s*;?\s*$",
@@ -60,6 +143,7 @@ def _intercept_drop_statistics(clean_sql: str):
 
 
 # DROP TRIGGER [IF EXISTS] <name> ON <table>
+# No placeholders: both the trigger and the table are identifiers, not values.
 # The table is REQUIRED: trigger names are only unique per dataset, and naming
 # the table makes the permission target (WRITE on that table) explicit.
 _DROP_TRIGGER_RE = re.compile(
@@ -71,7 +155,8 @@ _DROP_TRIGGER_LEAD = re.compile(r"^\s*DROP\s+TRIGGER\b", re.IGNORECASE)
 _CREATE_TRIGGER_LEAD = re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b", re.IGNORECASE)
 
 # REFRESH MATERIALIZED VIEW <name>. sqlparser has no REFRESH statement in the
-# Opteryx dialect, so it takes the same pre-parse route DROP TRIGGER does.
+# Opteryx dialect, so it takes the same pre-parse route DROP TRIGGER does. No
+# placeholders: the view is an identifier, not a value.
 _REFRESH_MV_RE = re.compile(
     r"^\s*REFRESH\s+MATERIALIZED\s+VIEW\s+(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -102,14 +187,16 @@ def _intercept_refresh_statements(clean_sql: str):
     return [{"RefreshMaterializedView": {"name": match.group("name")}}]
 
 
-# ALTER MATERIALIZED VIEW <name> OWNER TO <principal>|CURRENT_USER. Same route as
+# ALTER MATERIALIZED VIEW <name> OWNER TO <principal>|CURRENT_USER. The owner is
+# a value and takes a placeholder, exactly as GRANT's principal does; the view it
+# is set on is an identifier and does not. Same route as
 # REFRESH, but narrower: ALTER has other legitimate forms (ALTER TABLE, ALTER
 # WORKSPACE), so anything not aimed at a materialized view falls through to the
 # parser untouched.
 _ALTER_MV_LEAD = re.compile(r"^\s*ALTER\s+MATERIALIZED\s+VIEW\b", re.IGNORECASE)
 _ALTER_MV_OWNER_RE = re.compile(
     r"^\s*ALTER\s+MATERIALIZED\s+VIEW\s+(?P<name>[A-Za-z_][\w.$]*)\s+"
-    r"OWNER\s+TO\s+(?P<owner>'[^']+'|\"[^\"]+\"|[\w.@:+-]+)\s*;?\s*$",
+    r"OWNER\s+TO\s+(?P<owner>" + _PRINCIPAL_SLOT + r")\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -146,15 +233,15 @@ def _intercept_alter_materialized_view(clean_sql: str):
 
     match = _ALTER_MV_OWNER_RE.match(clean_sql)
     if match is not None:
-        owner = match.group("owner")
-        quoted = owner[0] in "'\""
-        if quoted:
-            owner = owner[1:-1]
+        raw_owner = match.group("owner")
+        owner = _slot_value(raw_owner)
         # Bare CURRENT_USER means "me", resolved to the session identity when the
         # statement runs. Quoting it asks for a principal literally named
         # CURRENT_USER, which is the usual SQL distinction and worth keeping: it
-        # is the only way to name such a principal if one ever exists.
-        current_user = not quoted and owner.upper() == "CURRENT_USER"
+        # is the only way to name such a principal if one ever exists. A parameter
+        # is a value like a quoted string, so a bound "CURRENT_USER" names that
+        # principal too - what a placeholder carries is never a keyword.
+        current_user = raw_owner.upper() == "CURRENT_USER"
         return [
             {
                 "AlterMaterializedViewOwner": {
@@ -235,14 +322,28 @@ def _intercept_trigger_statements(clean_sql: str):
 _GRANT_LEAD = re.compile(r"^\s*(GRANT|REVOKE)\b", re.IGNORECASE)
 _GRANT_RE = re.compile(
     r"^\s*(?P<verb>GRANT|REVOKE)\s+(?P<role>READER|WRITER|OWNER)\s+"
-    r"ON\s+(?P<kind>WORKSPACE|COLLECTION|DATASET)\s+(?P<object>[A-Za-z_][\w.$]*)\s+"
-    r"(?P<direction>TO|FROM)\s+USER\s+(?P<user>'[^']+'|\"[^\"]+\"|[\w.@:+-]+)\s*;?\s*$",
+    r"ON\s+(?P<kind>WORKSPACE|COLLECTION|DATASET)\s+(?P<object>" + _OBJECT_SLOT + r")\s+"
+    r"(?P<direction>TO|FROM)\s+USER\s+(?P<user>" + _PRINCIPAL_SLOT + r")\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-_SHOW_GRANTS_ON_LEAD = re.compile(r"^\s*SHOW\s+GRANTS\s+ON\b", re.IGNORECASE)
+# Two statements, one grammar: `SHOW GRANTS ON <kind> <object>` lists what is
+# stored AT the object, `SHOW EFFECTIVE GRANTS ON <kind> <object>` lists every
+# policy that COVERS it. EFFECTIVE is a keyword from a closed set, matched here
+# rather than left as a value, because it decides WHICH statement this is.
+#
+# The second lead exists so `SHOW EFFECTIVE ...` in any other shape is rejected
+# by name here instead of reaching sqlparser, which knows no EFFECTIVE at all
+# and would report a syntax error pointing at a token several words away. Bare
+# `SHOW GRANTS` (the session's own grants) matches neither and still falls
+# through to the parser's ShowVariable catch-all.
+_SHOW_GRANTS_ON_LEAD = re.compile(
+    r"^\s*SHOW\s+(?:EFFECTIVE\s+)?GRANTS\s+ON\b", re.IGNORECASE
+)
+_SHOW_EFFECTIVE_LEAD = re.compile(r"^\s*SHOW\s+EFFECTIVE\b", re.IGNORECASE)
 _SHOW_GRANTS_ON_RE = re.compile(
-    r"^\s*SHOW\s+GRANTS\s+ON\s+(?P<kind>WORKSPACE|COLLECTION|DATASET)\s+"
-    r"(?P<object>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    r"^\s*SHOW\s+(?P<effective>EFFECTIVE\s+)?GRANTS\s+ON\s+"
+    r"(?P<kind>WORKSPACE|COLLECTION|DATASET)\s+"
+    r"(?P<object>" + _OBJECT_SLOT + r")\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -282,44 +383,58 @@ def _intercept_grant_statements(clean_sql: str):
             "**GRANT** grants **TO USER** and **REVOKE** revokes **FROM USER** - "
             f"'{verb} ... {direction} USER' mixes the two."
         )
-    principal = match.group("user")
-    if principal[0] in "'\"":
-        principal = principal[1:-1]
     root = "GrantAccess" if verb == "GRANT" else "RevokeAccess"
+    # The role and the object kind are keywords from a closed set, so they stay
+    # literal: a parameter there would make the SHAPE of the statement - which
+    # authority it confers, how many parts its object name has - depend on runtime
+    # data. The object and the principal are values, and take placeholders.
     return [
         {
             root: {
                 "role": match.group("role").lower(),
                 "object_kind": match.group("kind").lower(),
-                "object_name": match.group("object"),
-                "principal": principal,
+                "object_name": _slot_value(match.group("object")),
+                "principal": _slot_value(match.group("user")),
             }
         }
     ]
 
 
 def _intercept_show_grants_on(clean_sql: str):
-    """Recognize `SHOW GRANTS ON <kind> <object>` before the SQL parser.
+    """Recognize the two grant listings before the SQL parser.
+
+        SHOW GRANTS ON           WORKSPACE|COLLECTION|DATASET <object>
+        SHOW EFFECTIVE GRANTS ON WORKSPACE|COLLECTION|DATASET <object>
 
     Returns a synthesized single-statement AST list, or None when the statement
-    is not a SHOW GRANTS ON - bare `SHOW GRANTS` (the session's own grants)
-    falls through to the parser's ShowVariable catch-all untouched.
+    is neither - bare `SHOW GRANTS` (the session's own grants) falls through to
+    the parser's ShowVariable catch-all untouched.
+
+    They are two statements because they answer two questions: what is stored
+    AT an object (1:1 with what a GRANT or REVOKE there would act on) and who
+    can reach it at all (that policy plus every one above it that covers it).
+    They are one grammar because everything else about them - the object kinds,
+    the arity, the columns, the owner gate - is the same.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
 
-    if not _SHOW_GRANTS_ON_LEAD.match(clean_sql):
+    if not (_SHOW_GRANTS_ON_LEAD.match(clean_sql) or _SHOW_EFFECTIVE_LEAD.match(clean_sql)):
         return None
     match = _SHOW_GRANTS_ON_RE.match(clean_sql)
     if match is None:
         raise UnsupportedSyntaxError(
-            "Expected: **SHOW GRANTS ON** WORKSPACE|COLLECTION|DATASET <object>. "
-            "For the session's own grants, use bare **SHOW GRANTS**."
+            "Expected: **SHOW GRANTS ON** WORKSPACE|COLLECTION|DATASET <object> "
+            "(the grants stored on the object), or **SHOW EFFECTIVE GRANTS ON** "
+            "WORKSPACE|COLLECTION|DATASET <object> (those, plus the grants above "
+            "it that cover it). For the session's own grants, use bare "
+            "**SHOW GRANTS**."
         )
+    root = "ShowEffectiveGrantsOn" if match.group("effective") else "ShowGrantsOn"
     return [
         {
-            "ShowGrantsOn": {
+            root: {
                 "object_kind": match.group("kind").lower(),
-                "object_name": match.group("object"),
+                "object_name": _slot_value(match.group("object")),
             }
         }
     ]

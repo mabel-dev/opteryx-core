@@ -51,6 +51,7 @@ _SYNTHESIZED_TARGETS = {
     "GrantAccess": "object_name",
     "RevokeAccess": "object_name",
     "ShowGrantsOn": "object_name",
+    "ShowEffectiveGrantsOn": "object_name",
 }
 
 # What each synthesized statement is, and the role it needs. Kept beside the
@@ -78,8 +79,11 @@ _SYNTHESIZED_STATEMENTS = {
     "RevokeAccess": (False, True, "owner"),
     # Reads policy documents and changes nothing — neither mutation nor DDL —
     # but gated at owner all the same: who may see the grants on an object is
-    # who may change them.
+    # who may change them. The effective listing reports strictly more (every
+    # policy covering the object, not only those attached to it), so it is
+    # gated identically rather than more loosely.
     "ShowGrantsOn": (False, False, "owner"),
+    "ShowEffectiveGrantsOn": (False, False, "owner"),
 }
 
 
@@ -168,6 +172,12 @@ def _collect_statement_target(ast: Dict[str, Any], tables: Set[str]) -> None:
     synthesized_key = _SYNTHESIZED_TARGETS.get(statement_type)
     if synthesized_key is not None:
         name = body.get(synthesized_key)
+        # A grant's object can be a placeholder (see `pre_parse._slot_value`), and
+        # this is the PRE-rewrite AST, so it is still one here. There is no name to
+        # report - what the statement acts on is not decided until the parameters
+        # are bound - and the placeholder is reported in `parameters` instead. A
+        # caller pre-flighting permissions must read `parameters` and not treat an
+        # empty `tables` as "touches nothing".
         if isinstance(name, str) and name:
             tables.add(name)
         return

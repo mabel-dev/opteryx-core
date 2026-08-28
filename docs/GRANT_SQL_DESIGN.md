@@ -1,4 +1,4 @@
-# GRANT / REVOKE / SHOW GRANTS ON — SQL Access-Administration Surface
+# GRANT / REVOKE / SHOW [EFFECTIVE] GRANTS ON — SQL Access-Administration Surface
 
 **Status:** DELIVERED 2026-08-27 — both sides implemented. opteryx-access:
 `grants.revoke_grant`, `patterns.pattern_level`, capability
@@ -41,6 +41,7 @@ impedance mismatches.
 
 ```sql
 SHOW GRANTS ON [WORKSPACE|COLLECTION|DATASET] <object>
+SHOW EFFECTIVE GRANTS ON [WORKSPACE|COLLECTION|DATASET] <object>
 GRANT [READER|WRITER|OWNER] ON [WORKSPACE|COLLECTION|DATASET] <object> TO USER <user>
 REVOKE [READER|WRITER|OWNER] ON [WORKSPACE|COLLECTION|DATASET] <object> FROM USER <user>
 ```
@@ -210,3 +211,85 @@ the refusal for personal spaces just needs a message naming the rule.
 rulings — `SelfAccessError` on grant/update/revoke, `bootstrap_workspace`
 refuses an ownerless genesis, `owned_by()` exists for offboarding, and
 `can_administer_pattern` requires owner *covering* the pattern. No work.
+
+
+---
+
+## 8. `SHOW EFFECTIVE GRANTS ON` — DELIVERED 2026-08-28
+
+**The problem.** `SHOW GRANTS ON DATASET home.network.dns` returned zero rows
+on a dataset that is plainly reachable, because the workspace owner's policy
+is stored as `home.*`, not against the dataset. That is §7.3 working as ruled
+— a broader policy that merely covers the object is not that object's to show
+— but it leaves an object with two questions and one statement, and an empty
+result indistinguishable from "nobody can reach this".
+
+**The two questions.**
+
+- *attached* — what is stored AT this object, 1:1 with what a GRANT or REVOKE
+  here would act on. `SHOW GRANTS ON`, unchanged.
+- *effective* — who can reach this object at all, the covering collection and
+  workspace policies included. `SHOW EFFECTIVE GRANTS ON`, new.
+
+**Naming.** "Effective" is the platform's established word for this concept —
+the console's `effective-permissions.csv` report endpoint, `effectiveRole` in
+the web app's access-list grouping. Not CASCADING (names the mechanism, not
+the question) and not ALL (reads as "all grants everywhere").
+
+**Contract.**
+
+1. **The same four columns**, `(user, pattern, level, role)`. `pattern` and
+   `level` are what make a row explain itself: `(bob, home.*, workspace,
+   owner)` against a DATASET query says both who and why-they-reach-it with no
+   fifth column. One column set means the console renders both statements with
+   one renderer.
+2. **One row per covering policy, not per user.** No highest-role-wins
+   collapse: a user may reach an object through more than one policy, and
+   which policy grants it is exactly what an administrator has to change to
+   take it away. A consumer wanting one effective role per user collapses the
+   rows itself (as the console's `groupByPerson` already does).
+3. **The covering test is `resource_matches`** — the matcher that decides real
+   queries — never a second implementation. The whole value of the statement
+   is that it agrees with enforcement; a private matcher would drift and start
+   reporting access that does not exist, or hiding access that does. Same
+   reasoning as `opteryx/managers/virtual_datasets/grants.py`, which asks the
+   capability that decides queries for exactly this reason.
+4. **`ON WORKSPACE w` returns the same rows from both statements** — a
+   workspace listing is already every policy at every level, which is also
+   every policy that covers the workspace. Both modes skip the filter for a
+   `w.*` pattern, so this holds by construction rather than by coincidence.
+   The two differ only for a COLLECTION or a DATASET.
+5. **Identical gate**: `can_administer_pattern` (owner covering the pattern),
+   for reading exactly as for writing. Not weakened to `has_workspace_access`
+   — the effective listing reports strictly MORE of what that gate protects.
+6. **An empty attached listing points at the sibling.** `SHOW GRANTS ON` a
+   COLLECTION or DATASET that returns no rows emits a query message naming
+   `SHOW EFFECTIVE GRANTS ON`. It does not claim a covering policy exists —
+   knowing that would need a second read of the policy store — it names the
+   other question. Workspace listings carry no such message: there, empty
+   really does mean nobody holds anything.
+
+**Where it lives.** opteryx-access: `capability.effective_grants_on`, sharing
+`_policy_rows` with `grants_on` so the gate, ordering and columns cannot
+drift; the mode is one line (`covering`). opteryx-core: the pre-parse grammar
+gains an optional `EFFECTIVE` keyword (one grammar, two statement roots),
+`LogicalPlanStepType.ShowEffectiveGrantsOn` + `plan_show_effective_grants_on`
+(sharing `_plan_grant_listing`), `visit_show_effective_grants_on` on the same
+`_bind_grant_administration` gate, the same `ShowGrantsNode` operator told
+which question to ask by an `effective` property, and a `query_parser`
+preflight entry at `owner`.
+
+**Breaking change:** `effective_grants_on` joins `_REQUIRED_MEMBERS`, so a
+deployment must upgrade its permissions capability in step. That is the check
+working as intended — a capability missing a member the engine will call is
+refused at registration, at start-up, rather than failing at the statement.
+
+**Console follow-on:** the web app's manage-dataset page fetches the whole
+workspace listing and filters client-side to get the covering set. It can now
+ask one narrow question, and the covering logic stops being duplicated in
+JavaScript where it can drift from the engine's.
+
+Tests: `tests/storage/test_grant_statements.py` (engine),
+`../opteryx-access/tests/test_capability_administration.py` (library,
+including a test asserting every reported row is one `can_perform_action`
+would in fact honour).
