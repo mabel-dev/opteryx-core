@@ -540,12 +540,18 @@ class Writable:
         succeeds, and the engine never reads the declaration back to plan or
         rewrite a query. It is recorded for tooling and discovery.
 
-        The store is the workspace's own, at `<workspace>/$system/relationships`.
-        It is not a dataset: it has no catalog entry, appears in no listing, and
-        cannot be named in a query - `$` is rejected by the relation-name
-        validator, so a reader cannot spell it. Both ends are guaranteed by the
-        logical planner to be in the same workspace, which is what lets one
-        workspace's store answer for the whole relationship.
+        The store is the catalog's, and it is not a dataset: a `relationships`
+        subcollection on the dataset document that declares it, beside
+        `triggers`. It has no catalog entry of its own, appears in no listing,
+        and cannot be named in a query - it is not in the SQL namespace at all.
+        Both ends are guaranteed by the logical planner to be in the same
+        workspace, which is what lets the near dataset's subcollection answer
+        for the whole relationship.
+
+        Implementations back this differently, which is the point of it being a
+        capability: `OpteryxConnector` delegates to the catalog, which is where
+        declared relationships actually live; `LocalStoreConnector` keeps a file
+        beside the relation so the engine stays testable without one.
 
         Names arrive SPLIT, not dotted, and that is deliberate rather than
         stylistic: a dataset name may contain dots, and a dotted string has to
