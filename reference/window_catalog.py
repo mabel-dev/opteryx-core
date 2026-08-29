@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Any
 
 from opteryx.operators.aggregate.helpers import AGGREGATORS
+from opteryx.operators.aggregate.helpers import DISTINCT_SPELLINGS
 from opteryx.operators.window.helpers import FRAMED_AGGREGATE_FUNCTIONS
 from opteryx.operators.window.helpers import WINDOW_FUNCTIONS
 
@@ -397,7 +398,16 @@ def _aggregate_window_support() -> OrderedDict[str, dict[str, bool]]:
     """
     support: OrderedDict[str, dict[str, bool]] = OrderedDict()
     for aggregate in sorted(AGGREGATORS):
-        framed = aggregate in FRAMED_AGGREGATE_FUNCTIONS
+        # Test the name the PLANNER tests, not the one the user wrote. The builder
+        # rewrites the DISTINCT spellings to their base aggregate carrying
+        # duplicate_treatment="Distinct" before the window gate runs, so the gate
+        # sees `COUNT` for `COUNT_DISTINCT(x)` and accepts it — while a literal
+        # membership test here answered False and made the catalog contradict the
+        # engine. `APPROX_COUNT_DISTINCT` is NOT such a spelling; it is an aggregate
+        # in its own right, reaches the gate under its own name, and is refused —
+        # which is why this resolves through DISTINCT_SPELLINGS rather than
+        # stripping a `_DISTINCT` suffix, a rule that would wrongly promote it.
+        framed = DISTINCT_SPELLINGS.get(aggregate, aggregate) in FRAMED_AGGREGATE_FUNCTIONS
         support[aggregate] = {
             "over_empty": aggregate in _GLOBAL_SUPPORTED,
             "over_partition_by": aggregate in _GROUPED_SUPPORTED,

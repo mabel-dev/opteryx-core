@@ -13,8 +13,13 @@ tree topology, raw identifiers, and CTE definitions. Column types and statistics
 available. Strategies that require type information belong in the Optimizer.
 
 The primary purpose is to eliminate query shapes that the Binder cannot process correctly,
-or that are significantly cheaper to rewrite before schema resolution — most notably
-correlated subqueries, which reference outer-scope columns from inside an inner scope.
+or that are significantly cheaper to rewrite before schema resolution — today that is
+aggregate Window nodes (rewritten to joins, which must happen before join planning) and
+INTERSECT ALL / EXCEPT ALL. See `strategies/__init__.py` for the list and for what is
+deliberately NOT done here: correlated and IN/EXISTS subqueries decorrelate in the
+OPTIMIZER, because orientation needs schema, and the DISTINCT forms of INTERSECT/EXCEPT
+lower in the BINDER, because their ON condition pairs the legs' output columns
+positionally and that is knowable only once the legs are bound.
 
 Traversal is top-down (exit node → scans), mirroring the Optimizer. Strategies that need
 bottom-up processing should accumulate state in visit() and act in complete().

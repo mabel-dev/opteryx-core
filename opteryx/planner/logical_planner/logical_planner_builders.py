@@ -615,7 +615,7 @@ def extract_timetravel_version(version_clause) -> int:
     0 is reserved. The SQL rewriter turns `VERSION AS OF PREVIOUS` into
     `VERSION AS OF 0` and refuses a literal 0 from the reader before the parser ever
     sees it (`_rewrite_version_as_of_previous`), so a 0 reaching here always means
-    "the parent of the current snapshot" - never a snapshot the reader named.
+    "the previous version of the data" - never a snapshot the reader named.
 
     Raises:
         UnsupportedSyntaxError: If the literal is not a non-negative whole number.

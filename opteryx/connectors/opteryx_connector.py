@@ -324,13 +324,50 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         carries no manifest, so it cannot be pruned, costed or turned into a physical
         plan.
 
+        A relation with nothing committed resolves to no snapshot at all (see
+        `_resolve_snapshot`) and is served its DECLARED schema. That branch is
+        shared with `get_dataset_metadata` so the edit-time check and the run
+        cannot disagree about whether such a relation is readable.
+
         Returns:
             RelationSchema
         """
         self._resolve_snapshot()
+        if self.snapshot is None:
+            self.dataset_committed_at = None
+            return self.get_declared_schema()
         raw_schema = self.table.schema(self.snapshot.schema_id)
         self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
         self.dataset_committed_at = self.snapshot.timestamp_ms
+        return self.schema
+
+    def get_declared_schema(self) -> RelationSchema:
+        """The dataset's registered schema, read WITHOUT resolving a snapshot.
+
+        Overrides `BaseTable.get_declared_schema` because this reader's schema
+        is otherwise snapshot-scoped: every other schema path here goes through
+        `_resolve_snapshot` and answers as of the snapshot it settles on. A
+        write target has no snapshot to answer as of - a dataset created and not
+        yet written to has a schema (`metadata.current_schema_id`) and zero
+        snapshots, and reaching it through the snapshot-scoped path is what made
+        the FIRST `INSERT INTO` a freshly-created relation impossible.
+
+        Deliberately the CURRENT registered schema, not the current snapshot's:
+        rows being inserted now must conform to the relation as it is declared
+        now, not as it was at whatever commit the head points at.
+
+        The read paths call this too, but only for a relation with nothing
+        committed - where the declared schema is the only schema there is.
+
+        Returns:
+            RelationSchema
+        """
+        raw_schema = self.table.schema()
+        if raw_schema is None:
+            raise DatasetReadError(
+                f"The dataset {self.dataset} has no registered schema."
+            )
+        self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
         return self.schema
 
     def get_snapshots(self) -> list:
@@ -364,6 +401,10 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         if not snapshots:
             return []
 
+        # The catalog's head pointer. `current`, not `latest`: a rollback moves
+        # it BACKWARDS, so the snapshot it names is not necessarily the newest
+        # one generated - the same reason the stored key has always been
+        # `current-snapshot-id`.
         current_snapshot_id = dataset.metadata.current_snapshot_id
         ordered = sorted(
             snapshots, key=lambda s: (s.timestamp_ms, s.snapshot_id), reverse=True
@@ -376,11 +417,49 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         for tag in self.catalog.list_tags(self.dataset):
             tags_by_snapshot.setdefault(tag["snapshot-id"], []).append(tag["name"])
 
+        # `current` and `previous` are VIRTUAL tags: neither is in the tags
+        # subcollection and neither pins anything, they simply name the snapshots
+        # those two words resolve to today. They appear in this column because
+        # that is where a reader looks to find out what a name resolves to, and
+        # `VERSION AS OF current` reads exactly like `VERSION AS OF <any real
+        # tag>`. They are added here, after the real tags, so no dataset can be
+        # missing them and none can have two. `create_tag` refuses both names for
+        # the same reason.
+        #
+        # `previous` is the previous version of the DATA, NOT the previous
+        # snapshot: compaction and statistics refresh commit snapshots that
+        # rewrite files without changing a row, and putting `previous` on one of
+        # those would name a snapshot holding exactly the data an unqualified read
+        # already returns - a time-travel answer indistinguishable from no time
+        # travel at all. `previous_user_snapshot` walks past them, and is the SAME
+        # resolver `VERSION AS OF PREVIOUS` reads through, so the name shown here
+        # and the name written in SQL cannot drift apart.
+        #
+        # The dataset is already history-loaded, so that walk's parent hops are in
+        # memory - this column costs no extra catalog round trip.
+        previous_snapshot = dataset.previous_user_snapshot()
+        previous_snapshot_id = (
+            previous_snapshot.snapshot_id if previous_snapshot is not None else None
+        )
+
+        def _virtual_tags(snapshot_id: int) -> list:
+            # Ordered, not sorted: `current` before `previous` reads as the
+            # timeline does. The two cannot land on the same snapshot -
+            # `previous_user_snapshot` begins its second walk at the parent of the
+            # user commit the head rests on, so it can never return the head.
+            names = []
+            if current_snapshot_id is not None and snapshot_id == current_snapshot_id:
+                names.append("current")
+            if previous_snapshot_id is not None and snapshot_id == previous_snapshot_id:
+                names.append("previous")
+            return names
+
         return [
             normalize_snapshot(
                 snapshot,
                 current_snapshot_id,
-                tags=sorted(tags_by_snapshot.get(snapshot.snapshot_id, [])),
+                tags=sorted(tags_by_snapshot.get(snapshot.snapshot_id, []))
+                + _virtual_tags(snapshot.snapshot_id),
             )
             for snapshot in ordered
         ]
@@ -405,6 +484,22 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             # they are and stop; neither falls back to current data, which would
             # answer a question about February with March's numbers.
             from opteryx_catalog.exceptions import TagNotFound
+
+            if self.version_tag.lower() == "current":
+                # The virtual tag. It names the head, which is where an
+                # unqualified read already goes, so this resolves without a
+                # catalog lookup and cannot fail the way a real tag can. It
+                # exists so the name a reader sees in `SHOW SNAPSHOTS` is a name
+                # they can also write - and `create_tag` refuses to let anything
+                # take it, so no real tag can shadow this branch.
+                self.snapshot = self.table.snapshot()
+                if self.snapshot is None:
+                    raise DatasetReadError(
+                        f"The dataset {self.dataset} exists, but no data has been "
+                        "committed to it yet."
+                    )
+                self.snapshot_id = self.snapshot.snapshot_id
+                return
 
             try:
                 snapshot_id = self.catalog.resolve_tag(self.dataset, self.version_tag)
@@ -443,11 +538,21 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
 
             if self.version == 0:
                 # The rewriter's sentinel for VERSION AS OF PREVIOUS.
-                target_id = current.parent_snapshot_id
-                if target_id is None:
+                #
+                # NOT `current.parent_snapshot_id`. Somebody asking for the
+                # previous version is asking about their DATA, and compaction
+                # and statistics refresh commit snapshots that change no rows -
+                # so the literal parent is routinely the same data this read
+                # would return with no time-travel clause at all, which is the
+                # one answer a time-travel read must never give. The catalog
+                # walks past those; see `previous_user_snapshot`.
+                previous = self.table.previous_user_snapshot()
+                if previous is None:
                     raise DatasetReadError(
-                        f"No previous version for {self.dataset} - snapshot {current.snapshot_id} is the first."
+                        f"No previous version for {self.dataset} - snapshot "
+                        f"{current.snapshot_id} is the earliest version of its data."
                     )
+                target_id = previous.snapshot_id
             else:
                 target_id = self.version
 
@@ -468,10 +573,26 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             if not snapshots:
                 raise DatasetReadError("No data available for the specified date.")
 
+            # Only the history the head can actually see. A rollback moves the
+            # head backwards and leaves the snapshots it moved off live, so
+            # without this a point-in-time read would happily return the version
+            # that was rolled back - the one version the dataset's owner has
+            # said nobody should be reading. Naming such a snapshot's id
+            # explicitly still reads it: the version is retired, not hidden.
+            #
+            # The rule lives in the catalog (`visible_history`), with the
+            # `last_user_snapshot` and expiration uses of it, so a rolled-off
+            # snapshot cannot be invisible to one of them and visible to another.
+            from opteryx_catalog.catalog.dataset import visible_history
+
+            snapshots = visible_history(self.table.snapshot(), snapshots)
+            if not snapshots:
+                raise DatasetReadError("No data available for the specified date.")
+
             snapshots = sorted(snapshots, key=lambda s: s.timestamp_ms, reverse=False)
 
             # Honor dates before the first snapshot by rejecting them, but treat
-            # dates after the latest snapshot as selecting the latest snapshot
+            # dates after the newest snapshot as selecting the newest snapshot
             first_committed = snapshots[0].timestamp_ms
             last_committed = snapshots[-1].timestamp_ms
 
@@ -486,7 +607,8 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
                     f"No data available for the specified date - first available snapshot is {first_timestamp}."
                 )
             elif at_ms > last_committed:
-                # Point-in-time read after the latest snapshot — return current data
+                # Point-in-time read after the newest snapshot — return the data
+                # a read with no time-travel clause would return
                 selected = snapshots[-1]
             else:
                 selected = snapshots[0]
@@ -499,15 +621,39 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             self.snapshot_id = selected.snapshot_id
             self.snapshot = self.table.snapshot(self.snapshot_id)
 
-        # If the table has no snapshot and the read is not time-travel, use
-        # the table's declared schema (from metadata) and return an empty result set.
-        if self.snapshot is None:
-            self.snapshot = self.table.snapshot()
+            # Only reachable from this branch: a snapshot the history listed but
+            # the catalog would not hand back. It is NOT the no-data case handled
+            # below - falling through to that would answer a question about
+            # February with "this relation has never been written to".
             if self.snapshot is None:
                 raise DatasetReadError(
-                    "The dataset exists, but no data has been committed to it yet."
+                    f"Snapshot {self.snapshot_id} of {self.dataset} is in the relation's "
+                    "history but could not be read."
                 )
-            self.snapshot_id = self.snapshot.snapshot_id
+
+        else:
+            # No time-travel clause: the read sees the head.
+            #
+            # A relation with NO head has a registered schema and has never been
+            # committed to. That is the ONLY thing zero snapshots can mean here:
+            # `truncate()` appends a snapshot rather than clearing the chain, and
+            # nothing in the catalog ever clears `current-snapshot-id`, so this
+            # cannot be a half-written document or an expiry artefact - and a
+            # relation that does not exist at all raised DatasetNotFound before
+            # this reader was constructed.
+            #
+            # Such a relation reads as the schema it declares and no rows, which
+            # is the answer a TRUNCATEd relation already gives (its snapshot
+            # carries an empty manifest, and the scan serves that as one empty
+            # morsel). Erring here instead made the two states differ by an
+            # exception while being identical in data.
+            #
+            # `snapshot` and `snapshot_id` are left None rather than filled with
+            # a fabricated Snapshot: the two readers below branch on that
+            # explicitly, so nothing downstream resolves a schema, a scan or a
+            # commit timestamp against a snapshot that does not exist.
+            self.snapshot = self.table.snapshot()
+            self.snapshot_id = None if self.snapshot is None else self.snapshot.snapshot_id
 
     def get_dataset_metadata(self) -> Tuple[RelationSchema, Manifest]:
         """
@@ -520,6 +666,35 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             Tuple of (RelationSchema, Manifest)
         """
         self._resolve_snapshot()
+
+        if self.snapshot is None:
+            # Nothing committed - see _resolve_snapshot. The relation is served
+            # as declared with no files, which the scan turns into a single
+            # empty morsel: the same result a TRUNCATEd relation gives through
+            # its own empty manifest. There is no scan to run and no commit to
+            # timestamp, so neither is invented.
+            #
+            # `bounds_are_ordinal` is still demanded of the dataset even though
+            # an empty file list carries no bounds to misread: the declaration
+            # is a property of the metastore implementation, not of whether it
+            # holds data, so a backend missing it fails on the first READ rather
+            # than silently waiting for the first commit to corrupt pruning.
+            self.dataset_committed_at = None
+            self.schema = self.get_declared_schema()
+            bounds_are_ordinal = getattr(self.table, "bounds_are_ordinal", None)
+            if bounds_are_ordinal is None:
+                raise DatasetReadError(
+                    f"{type(self.table).__name__} does not declare `bounds_are_ordinal`, so the "
+                    "encoding of its manifest min/max bounds is unknown. Implementations of "
+                    "opteryx-catalog's `Dataset` must set it (True for Vector.ordinalize() keys, "
+                    "False for real decoded values); guessing either way silently corrupts pruning."
+                )
+            self.manifest = Manifest(
+                files=[],
+                schema=self.schema,
+                bounds_are_ordinal=bounds_are_ordinal,
+            )
+            return self.schema, self.manifest
 
         raw_schema = self.table.schema(self.snapshot.schema_id)
         self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
@@ -1722,6 +1897,117 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 "(use DROP TRIGGER IF EXISTS to make this quiet)"
             ) from exc
 
+    def _resolve_version_spec(
+        self,
+        catalog,
+        dataset,
+        relative_id: str,
+        relation_name: str,
+        version_spec: Optional[str],
+        allow_tag: bool,
+    ) -> int:
+        """The snapshot id a written version spec names.
+
+        One resolver for every statement that names a version, so `CURRENT` and
+        `PREVIOUS` cannot come to mean one thing on a read and another in DDL.
+        The spellings are:
+
+          <digits>    that snapshot id, verbatim
+          current     the head - what an unqualified read returns
+          previous    the previous VERSION OF THE DATA, which steps over the
+                      compaction and statistics commits that changed no rows
+          <name>      a tag, when `allow_tag` (rollback takes one, CREATE TAG
+                      does not - a tag whose version is another tag is a copy
+                      that silently stops tracking it)
+
+        The four cases cannot collide: `current` and `previous` are names the
+        catalog refuses to let a tag take, so a bare word is a tag name or it is
+        nothing.
+        """
+        spec = (version_spec or "current").strip()
+
+        if spec.isdigit():
+            return int(spec)
+
+        lowered = spec.lower()
+
+        if lowered == "current":
+            current = dataset.snapshot()
+            if current is None:
+                raise ValueError(
+                    f"The dataset {relation_name} exists, but no data has been committed "
+                    "to it yet, so there is no version to name."
+                )
+            return current.snapshot_id
+
+        if lowered == "previous":
+            if dataset.snapshot() is None:
+                raise ValueError(
+                    f"The dataset {relation_name} exists, but no data has been committed "
+                    "to it yet, so there is no version to name."
+                )
+            previous = dataset.previous_user_snapshot()
+            if previous is None:
+                raise ValueError(
+                    f"No previous version for {relation_name} - it is at the earliest "
+                    "version of its data."
+                )
+            return previous.snapshot_id
+
+        if not allow_tag:
+            raise ValueError(
+                f"'{spec}' is not a version. Write a snapshot id, CURRENT or PREVIOUS."
+            )
+
+        from opteryx_catalog.exceptions import TagNotFound
+
+        try:
+            return catalog.resolve_tag(relative_id, spec)
+        except TagNotFound as exc:
+            # Deliberately does NOT list the tags that do exist - somebody who
+            # cannot see a dataset's tags must not learn them from a failed
+            # guess. Same rule as the read path's tag resolution.
+            raise ValueError(f"No tag {spec} on {relation_name}.") from exc
+
+    def rollback_relation(
+        self,
+        relation_name: str,
+        version_spec: str,
+        author: Optional[str] = None,
+    ) -> dict:
+        """Move the relation's head to an older snapshot - `ROLLBACK TO VERSION`.
+
+        Every unqualified read of the relation sees the head, so this restores
+        that version of the data for everybody at once without moving a byte.
+        Nothing is deleted: the snapshots it moves off stay readable by id and
+        still appear in `SHOW SNAPSHOTS`, so the rollback is itself reversible
+        by rolling forward to the id it moved off - which the catalog returns.
+
+        Those snapshots are not PINNED, though. Ordinary retention still applies
+        to them and they expire on schedule, after which the rollback can no
+        longer be undone; a tag is what holds one indefinitely.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        dataset = catalog.load_dataset(relative_id)
+
+        snapshot_id = self._resolve_version_spec(
+            catalog, dataset, relative_id, relation_name, version_spec, allow_tag=True
+        )
+
+        from opteryx_catalog.exceptions import DatasetLocked
+        from opteryx_catalog.exceptions import SnapshotMissingError
+
+        try:
+            return catalog.rollback_dataset(relative_id, snapshot_id, author=author)
+        except (SnapshotMissingError, DatasetLocked) as exc:
+            # Translated at the boundary, as `create_tag` and `drop_tag` do: an
+            # `opteryx_catalog.exceptions` class name is not something a reader
+            # of SQL should be shown. The catalog's message already names the
+            # snapshot and what is wrong with it, so it is kept verbatim rather
+            # than reworded into a second place for that wording to drift.
+            raise ValueError(str(exc)) from exc
+
     def create_tag(
         self,
         relation_name: str,
@@ -1734,9 +2020,10 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         `version_spec` is what the reader wrote - a snapshot id, `current` or
         `previous` - and is resolved to an id HERE, where the catalog is, rather
         than in the planner. The resolution is deliberately identical to the read
-        path's: `CURRENT` is the dataset's current snapshot and `PREVIOUS` is that
-        snapshot's parent, so `CREATE TAG t AS OF VERSION PREVIOUS` names exactly
-        the snapshot `VERSION AS OF PREVIOUS` would have read.
+        path's, so `CREATE TAG t AS OF VERSION PREVIOUS` names exactly the
+        snapshot `VERSION AS OF PREVIOUS` would have read - including PREVIOUS
+        meaning the previous VERSION OF THE DATA rather than the literal parent
+        snapshot. See `_resolve_version_spec`.
 
         The tag stores an ID, never the word: a tag is immutable, and one holding
         the phrase "current" would silently mean something different tomorrow.
@@ -1745,25 +2032,9 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
         dataset = catalog.load_dataset(relative_id)
 
-        spec = (version_spec or "current").lower()
-        if spec in ("current", "previous"):
-            current = dataset.snapshot()
-            if current is None:
-                raise ValueError(
-                    f"The dataset {relation_name} exists, but no data has been committed "
-                    "to it yet, so there is no version to tag."
-                )
-            if spec == "current":
-                snapshot_id = current.snapshot_id
-            else:
-                snapshot_id = current.parent_snapshot_id
-                if snapshot_id is None:
-                    raise ValueError(
-                        f"No previous version for {relation_name} - snapshot "
-                        f"{current.snapshot_id} is the first."
-                    )
-        else:
-            snapshot_id = int(spec)
+        snapshot_id = self._resolve_version_spec(
+            catalog, dataset, relative_id, relation_name, version_spec, allow_tag=False
+        )
 
         from opteryx_catalog.exceptions import SnapshotMissingError
         from opteryx_catalog.exceptions import TagError

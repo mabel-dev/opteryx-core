@@ -78,12 +78,21 @@ def test_the_phrase_inside_a_string_literal_is_untouched():
     assert _rewritten(sql) == sql
 
 
-def test_current_is_refused_on_a_read():
-    """`CURRENT` is a CREATE TAG spelling. Accepting it here would silently look
-    up a tag named `current` and report it missing, which explains nothing."""
+def test_latest_is_refused_on_a_read():
+    """`latest` is retired, not aliased. Accepting it here would silently look up
+    a tag named `latest` and report it missing, which explains nothing - and
+    aliasing it would keep the misleading word in circulation."""
     with pytest.raises(UnsupportedSyntaxError) as err:
-        _rewritten("SELECT * FROM reports VERSION AS OF CURRENT")
+        _rewritten("SELECT * FROM reports VERSION AS OF LATEST")
     assert "CURRENT" in str(err.value)
+
+
+def test_current_is_passed_on_as_a_name_that_resolves():
+    """`current` is the virtual tag `SHOW SNAPSHOTS` puts on the head, and the
+    whole point of showing a name is that it can also be written. The rewriter
+    re-spells it like any other tag; resolving it is the connector's job."""
+    rewritten = _rewritten("SELECT * FROM reports VERSION AS OF CURRENT")
+    assert "AT(TAG => 'CURRENT')" in rewritten
 
 
 def test_positions_still_point_at_what_the_reader_typed():

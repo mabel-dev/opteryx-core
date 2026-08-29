@@ -271,6 +271,7 @@ run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch,
     if (dop < 1) dop = 1;
     std::unique_ptr<GlobalSourceState> gsrc = p.source->make_global();
     std::unique_ptr<GlobalSinkState>   gsink = p.sink->make_global();
+    gsink->exec_dop = dop;   // finalize()'s parallel width — see GlobalSinkState::exec_dop
     std::vector<ErrCtx> errs(static_cast<size_t>(dop));
     std::vector<WorkerCtx> ctxs(static_cast<size_t>(dop));
     for (int w = 0; w < dop; ++w) {

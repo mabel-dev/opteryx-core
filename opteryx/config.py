@@ -218,34 +218,69 @@ it is the IO-side twin of [[MAX_EXECUTION_WORKER_CAP]].
 Applied AFTER the floor of 4, so a cap below 4 wins: setting it to 1 yields 1 worker.
 An invalid value raises rather than silently reverting to the default.
 
-⛔ Env-var-at-import ONLY. It feeds the derived default below, which is bound once at
-module import — assigning `config.PARQUET_LOCAL_IO_WORKER_CAP` at runtime does NOT
-recompute `PARQUET_LOCAL_IO_WORKERS`. A runtime sweep must set that value directly."""
+Read at CALL time by `resolve_parquet_local_io_workers`, exactly as
+`MAX_EXECUTION_WORKER_CAP` is read by `resolve_worker_count` — assigning
+`config.PARQUET_LOCAL_IO_WORKER_CAP` at runtime moves the derived width for the next
+scan, so a sweep can walk the cap without a redeploy."""
 
-PARQUET_LOCAL_IO_WORKERS: int = int(
-    get(
-        "PARQUET_LOCAL_IO_WORKERS",
-        min(PARQUET_LOCAL_IO_WORKER_CAP, max(4, (_os.cpu_count() or 8) - 2)),
+_parquet_local_io_workers_raw = str(get("PARQUET_LOCAL_IO_WORKERS", "auto")).strip().lower()
+if _parquet_local_io_workers_raw not in ("auto", "") and not _parquet_local_io_workers_raw.lstrip(
+    "-"
+).isdigit():
+    raise ValueError(
+        f"Invalid PARQUET_LOCAL_IO_WORKERS: {_parquet_local_io_workers_raw!r}. "
+        "Expected a positive integer or 'auto'."
     )
+PARQUET_LOCAL_IO_WORKERS: int = (
+    int(_parquet_local_io_workers_raw)
+    if _parquet_local_io_workers_raw.lstrip("-").isdigit()
+    else 0
 )
 """Worker threads for local-filesystem Parquet reads (mmap path, IO is near-free from OS cache).
 
-Default scales with the host: ``max(4, cpu_count - 2)`` capped at
-``PARQUET_LOCAL_IO_WORKER_CAP`` (16 unless overridden) — the same shape as the execution
-width and the same ceiling, differing ONLY in the floor: 4 here against the engine's 2.
-That gap is intentional. These threads block on the page cache rather than burning CPU,
-so a small host can carry more of them than it can execution workers.
-Decode parallelises near-linearly (measured ~8.4x at 16 workers on a string-heavy
-ClickBench scan), so larger machines use their cores.
+**Softcoded by default**, the same shape as [[MAX_EXECUTION_WORKERS]]: unset / "auto" /
+an impossible value (0 or less) is stored as 0 here, and `resolve_parquet_local_io_workers`
+derives the effective width at CALL time. **An explicit positive integer is HONOURED
+EXACTLY** — the cap does not apply to it.
 
-The floor is 4, NOT the historic 8. That floor previously held a <=8 vCPU host at 8 IO
-threads while execution collapsed to 1 — 8 IO threads onto 2 vCPUs, the exact
-oversubscription measured to cost 4.8x on a 2-core box. Halving it keeps a tiny host
-usefully parallel without reproducing that 4x oversubscription. Set by the architect
-2026-08-28.
+Override via the env var to tune per deployment, or SET `parquet_local_io_workers` per
+query; either is taken as-is."""
 
-Override via the env var to tune per deployment; an explicit value is taken as-is and the
-cap does not apply to it."""
+
+def resolve_parquet_local_io_workers(
+    requested: Optional[int] = None, cap: Optional[int] = None
+) -> int:
+    """Effective local-Parquet IO width. Unset/"auto"/<=0 is softcoded —
+    ``min(config.PARQUET_LOCAL_IO_WORKER_CAP, max(4, cpu - 2))`` — while an explicit
+    positive request is HONOURED EXACTLY and is never clamped by the cap.
+
+    This is the IO-side twin of `resolve_worker_count`, and deliberately identical in
+    shape: both read their cap from the module at CALL time, so setting the cap at
+    runtime moves the next scan rather than doing nothing. The two differ ONLY in the
+    floor — 4 here against the engine's 2. That gap is intentional: these threads block
+    on the page cache rather than burning CPU, so a small host can carry more of them
+    than it can execution workers.
+
+    The floor is 4, NOT the historic 8. That floor previously held a <=8 vCPU host at 8
+    IO threads while execution collapsed to 1 — 8 IO threads onto 2 vCPUs, the exact
+    oversubscription measured to cost 4.8x on a 2-core box. Halving it keeps a tiny host
+    usefully parallel without reproducing that 4x oversubscription. Set by the architect
+    2026-08-28.
+
+    The cap is applied AFTER the floor, so a cap below the floor wins: cap 1 gives 1
+    worker. 16 was measured (~8.4x decode scaling on a string-heavy ClickBench scan) but
+    is not known to be optimal, so on a large host the cap — not the hardware — decides
+    the read width.
+    """
+    if requested is None:
+        requested = PARQUET_LOCAL_IO_WORKERS
+    if cap is None:
+        cap = PARQUET_LOCAL_IO_WORKER_CAP
+    requested = int(requested)
+    if requested <= 0:
+        return min(int(cap), max(4, (_os.cpu_count() or 8) - 2))
+    return requested
+
 
 PARQUET_GCS_IO_WORKERS: int = int(get("PARQUET_GCS_IO_WORKERS", 16))
 """Worker threads for GCS/HTTP Parquet reads.
@@ -379,7 +414,7 @@ MAX_EXECUTION_WORKER_CAP: int = int(_max_worker_cap_raw)
 """Ceiling applied to the SOFTCODED execution width only.
 
 `resolve_worker_count` derives the automatic degree of parallelism as
-``max(1, min(cpu_count - 2, MAX_EXECUTION_WORKER_CAP))``. The cap exists because the
+``min(MAX_EXECUTION_WORKER_CAP, max(2, cpu_count - 2))``. The cap exists because the
 engine's scaling past 16 workers is UNMEASURED, not because 16 is known to be optimal:
 on a 192-vCPU ClickBench run (2026-08-27, c8g.metal-48xl) it held the engine to 16
 workers and the whole box delivered 1.10x the hot throughput of a 16-vCPU c8g.4xlarge —
@@ -402,6 +437,44 @@ you get 128 workers (oversubscription is warned once, not reduced). Worker count
 degree-of-parallelism only — it never selects a code path (W=1 is one worker, not the
 serial engine). GROUP BY parallelises by ROW-ROUTING (disjoint key bins, no merge) —
 the only grouped strategy."""
+
+
+def resolve_max_execution_workers(
+    requested: Optional[int] = None, cap: Optional[int] = None
+) -> int:
+    """Effective execution width. The SINGLE derivation of the auto branch.
+
+    Exact twin of `resolve_parquet_local_io_workers`, differing only in the floor
+    (2 against the IO side's 4) and the cap it consults: unset/"auto"/<=0 derives
+    ``min(MAX_EXECUTION_WORKER_CAP, max(2, cpu - 2))``, an explicit positive request
+    is HONOURED EXACTLY and is never clamped by the cap.
+
+    This exists because `max_execution_workers` must be able to state the width the
+    engine ACTUALLY runs at. The system-variable table used to store the raw 0
+    sentinel, so `SHOW VARIABLES` reported 0 workers for a query that ran 16 — a row
+    whose only job is to describe the engine, reporting a width nothing ever ran at.
+    Architect ruling 2026-08-28: if it is not running with 0 threads, it is lying if
+    it says it is. The table now stores the resolved value (see FromConfig `via=` in
+    opteryx/variables.py).
+
+    `resolve_worker_count` in the compiler delegates its auto branch here rather than
+    repeating the formula — it keeps only what is execution-side, the honour-exactly
+    path and the one-shot oversubscription warning. Pre-resolving is idempotent
+    through it: a resolved 16 arrives as an explicit positive request and is honoured
+    as 16.
+
+    `cap` defaults to `MAX_EXECUTION_WORKER_CAP`, read from the module at CALL time so
+    moving it at runtime moves the next session rather than doing nothing. The compiler
+    passes its own, resolved through the same session-variable chain as the request.
+    """
+    if requested is None:
+        requested = MAX_EXECUTION_WORKERS
+    if cap is None:
+        cap = MAX_EXECUTION_WORKER_CAP
+    requested = int(requested)
+    if requested <= 0:
+        return min(int(cap), max(2, (_os.cpu_count() or 1) - 2))
+    return requested
 
 
 if environ.get("FEATURE_DRAKEN_DICT_EXPR_STRICT") is not None:

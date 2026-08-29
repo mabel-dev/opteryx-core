@@ -569,6 +569,10 @@ def _create_drop_tag_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_tag", **logical_node.properties)
 
 
+def _create_rollback_relation_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="rollback_relation", **logical_node.properties)
+
+
 def _create_rename_relation_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="rename_relation", **logical_node.properties)
 
@@ -587,6 +591,14 @@ def _create_rename_column_node(logical_node, query_properties, registry):
 
 def _create_alter_column_type_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="alter_column_type", **logical_node.properties)
+
+
+def _create_add_relationship_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="add_relationship", **logical_node.properties)
+
+
+def _create_drop_relationship_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="drop_relationship", **logical_node.properties)
 
 
 def _create_optimize_relation_node(logical_node, query_properties, registry):
@@ -674,10 +686,13 @@ _DISPATCH = {
     LogicalPlanStepType.RenameRelation:   _create_rename_relation_node,
     LogicalPlanStepType.CreateTag:        _create_create_tag_node,
     LogicalPlanStepType.DropTag:          _create_drop_tag_node,
+    LogicalPlanStepType.RollbackRelation: _create_rollback_relation_node,
     LogicalPlanStepType.AddColumn:        _create_add_column_node,
     LogicalPlanStepType.DropColumn:       _create_drop_column_node,
     LogicalPlanStepType.RenameColumn:     _create_rename_column_node,
     LogicalPlanStepType.AlterColumnType:  _create_alter_column_type_node,
+    LogicalPlanStepType.AddRelationship:  _create_add_relationship_node,
+    LogicalPlanStepType.DropRelationship: _create_drop_relationship_node,
     LogicalPlanStepType.OptimizeRelation: _create_optimize_relation_node,
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.DropWorkspace:    _create_drop_workspace_node,

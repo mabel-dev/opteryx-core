@@ -186,7 +186,16 @@ def _gen_dectime(path: str, rows: int, files: int, row_group_size: int) -> None:
 def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
     """Run `sql` `repeats` times (plus one unmeasured warmup) at the given dop and
     path. Returns median wall/cpu/throughput plus the WP-INSTR readings and pruning
-    facts from the LAST run (plan-time facts are run-invariant)."""
+    facts from the LAST run (plan-time facts are run-invariant).
+
+    The returned `dop_used` is the width the ENGINE reports, not the width asked
+    for, and `_run_scenario` prints that one. This is not defensive padding: the
+    system-variable table used to freeze `config.MAX_EXECUTION_WORKERS` at import,
+    so every column of every Part A sweep run before 2026-08-28 was executed at a
+    SINGLE dop — the first value of `--dops` — while the table printed 1/2/4/8
+    beside four identical measurements. A sweep that cannot see that is not a
+    measurement, so the dop is now read back rather than assumed.
+    """
     config.MAX_EXECUTION_WORKERS = dop
     config.OPTERYX_INSTRUMENT_ENGINE = True
 
@@ -223,6 +232,7 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
     # pruning facts (native path exposes native_scan_facts; both expose files_pruned).
     # native_scan_facts is intentionally stripped from as_dict() (it is overlaid onto
     # the scan's operation row by mermaid), so read it from the raw _reading dict.
+    dop_used = s._telemetry._reading.get("native_engine_dop")
     facts = s._telemetry._reading.get("native_scan_facts", {})
     rg_read = sum(v.get("row_groups_read", 0) for v in facts.values()) if facts else None
     rg_pruned = sum(v.get("row_groups_pruned", 0) for v in facts.values()) if facts else None
@@ -234,6 +244,7 @@ def _measure(sql: str, force_tramp: bool, dop: int, repeats: int) -> dict:
         purity = f"FLAG ({str(e).split(':')[-1].strip()[:40]})"
 
     return {
+        "dop_used": dop_used,
         "wall_ms": wall_ns / 1e6,
         "cpu_ms": cpu_ns / 1e6,
         "cores": (cpu_ns / wall_ns) if wall_ns else 0.0,
@@ -263,12 +274,20 @@ def _run_scenario(name: str, sql: str, dataset_rows: int, dops, repeats: int) ->
         for dop in dops:
             m = _measure(sql, force, dop, repeats)
             m["dop"] = dop
+            # The sweep is only a sweep if the engine actually moved. Abort rather
+            # than print a dop column that does not describe the run beside it.
+            if m["dop_used"] != dop:
+                raise SystemExit(
+                    f"dop {dop} was requested but the engine ran at "
+                    f"{m['dop_used']} — the worker setting is not reaching the "
+                    f"engine and this sweep would measure a single dop."
+                )
             # scan throughput = full dataset rows / wall (work the scan did), so
             # selective and non-selective are comparable across the A/B.
             scan_krps = (dataset_rows / (m["wall_ms"] / 1000.0)) / 1000.0 if m["wall_ms"] else 0.0
             m["scan_krows_s"] = scan_krps
             rows[key].append(m)
-            print(f"  {key:<9}{dop:>4}{m['wall_ms']:>10.1f}{m['krows_s']:>10.0f}{m['cores']:>7.2f}"
+            print(f"  {key:<9}{m['dop_used']:>4}{m['wall_ms']:>10.1f}{m['krows_s']:>10.0f}{m['cores']:>7.2f}"
                   f"{scan_krps:>11.0f}{m['gil_ms']:>9.1f}{m['tramp']:>7}"
                   f"{str(m['rg_read']):>7}{str(m['rg_pruned']):>7}  {m['purity']}")
     # cross-path correctness: identical survivor row count => predicate applied
@@ -308,6 +327,15 @@ def _concurrency_sweep(sql: str, dataset_rows: int, qs, per_query_dop: int, repe
 
     config.OPTERYX_INSTRUMENT_ENGINE = False
     config.MAX_EXECUTION_WORKERS = per_query_dop
+    _probe = opteryx.session()
+    for _ in _probe.execute_to_morsels("SELECT 1"):
+        pass
+    _probe_dop = _probe._telemetry._reading.get("native_engine_dop")
+    if _probe_dop != per_query_dop:
+        raise SystemExit(
+            f"per-query dop {per_query_dop} was requested but the engine ran at "
+            f"{_probe_dop} — the concurrency sweep would measure a single dop."
+        )
     print(f"\n### CONCURRENCY  {sql}")
     print(f"    (per-query dop={per_query_dop}; aggregate over Q concurrent queries)")
     print(f"  {'path':<9}{'Q':>4}{'wall_ms':>10}{'agg_krows_s':>13}{'cores':>8}{'scale':>8}")

@@ -10,7 +10,9 @@ One row per LIVE snapshot in a catalog-backed relation's commit history,
 newest first. Every column is a field of the catalog's own `Snapshot` record
 (opteryx_catalog.catalog.metadata.Snapshot), with the nine `summary` counters
 unpacked into columns of their own and `is_current` derived from the dataset's
-`current_snapshot_id`.
+head pointer. The pointer is called `current`, not `latest`: a rollback moves it
+BACKWARDS, so the snapshot it names is not necessarily the most recent one
+committed, and `latest` claimed a recency nothing here guarantees.
 
 The connector normalizes its history into these key names before it reaches
 here (see OpteryxConnector.get_snapshots), so this module depends only on
@@ -32,10 +34,16 @@ from typing import Dict, List, Optional
 _SNAPSHOT_COLUMNS = {
     "snapshot_id": "INTEGER",
     "committed_at": "TIMESTAMP",
+    # True for the head - the snapshot an unqualified read returns. Exactly one
+    # row has it, and after a rollback that row is NOT the newest one. That case
+    # is precisely why the column is `is_current` rather than `is_latest`.
     "is_current": "BOOLEAN",
     # The tags naming this snapshot, or an empty list. This is what makes a tag
     # visible: a tag pins its snapshot's storage indefinitely and that storage is
     # charged, so tags accumulating unseen is a bill nobody can account for.
+    # Includes the virtual tags `current` (on the head) and `previous` (on the
+    # previous version of the DATA), which are names that resolve rather than
+    # pins - see OpteryxConnector.get_snapshots.
     "tags": "ARRAY",
     "operation_type": "VARCHAR",
     "author": "VARCHAR",
@@ -139,10 +147,11 @@ def normalize_snapshot(
     row = {
         "snapshot_id": snapshot.snapshot_id,
         "committed_at": _ms_to_datetime(snapshot.timestamp_ms),
-        # A dataset with no current snapshot recorded has no current row, rather
-        # than every row being current — `None == None` must not read as a match.
+        # A dataset with no head recorded has no current row, rather than every
+        # row being current — `None == None` must not read as a match.
         "is_current": (
-            current_snapshot_id is not None and snapshot.snapshot_id == current_snapshot_id
+            current_snapshot_id is not None
+            and snapshot.snapshot_id == current_snapshot_id
         ),
         "tags": list(tags or []),
         "operation_type": snapshot.operation_type,

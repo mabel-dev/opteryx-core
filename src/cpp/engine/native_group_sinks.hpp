@@ -45,7 +45,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -65,6 +68,7 @@
                                  // make canonical string blocks
 #include "core/string_slot.h"
 #include "core/vector_owner.h"
+#include "core/vector_alloc.h"  // draken_identity_sel — the shared global identity permutation
 #include "logical_type.h"        // LogicalType definition (owner only forward-declares it)
 #include "xxhash.h"              // XXH3_64bits — long-slot hash32 (same as draken's builders)
 #include "morsels/cxx_hash.h"    // cxx_hash_c — draken owns the key hash (DISTINCT/GROUP BY)
@@ -785,17 +789,13 @@ inline CxxColumn emit_string_lane_column(const AggColMeta& meta,
             arena_pos += len;
         }
     }
-    uint32_t* sel = static_cast<uint32_t*>(
-        draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
     DrakenVector v;
-    v.data = sa; v.selection = sel; v.data_length = n; v.length = n;
+    v.data = sa; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
     v.validity = vbits; v.type = meta.type;
     v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
-                                          OwnedBuffer<uint8_t>(vbits),
-                                          OwnedBuffer<void>(sel));
+                                          OwnedBuffer<uint8_t>(vbits));
     c.own->logical_type = meta.logical;
     c.view = c.own->vec;
     return c;
@@ -828,15 +828,13 @@ inline CxxColumn emit_fixed_column(const int64_t* raws, const uint8_t* valid_fla
             }
             if (raws[i] != 0) data[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
         }
-        uint32_t* sel = static_cast<uint32_t*>(draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-        for (uint32_t i = 0; i < n; ++i) sel[i] = i;
         DrakenVector v;
-        v.data = data; v.selection = sel; v.data_length = n; v.length = n;
+        v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
         v.validity = vbits; v.type = t;
         v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
         CxxColumn c;
         c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                              OwnedBuffer<uint8_t>(vbits), OwnedBuffer<void>(sel));
+                                              OwnedBuffer<uint8_t>(vbits));
         c.own->logical_type = logical;
         c.view = c.own->vec;
         return c;
@@ -864,6 +862,26 @@ inline CxxColumn emit_fixed_column(const int64_t* raws, const uint8_t* valid_fla
     uint8_t* data = static_cast<uint8_t*>(draken_malloc(alloc_n * es));
     size_t vbytes = (static_cast<size_t>(n) + 7) / 8;
     uint8_t* vbits = nullptr;
+    if (es == 8 && t != DRAKEN_FLOAT32) {
+        // The lane is already a contiguous array of 8-byte containers and the
+        // output width is 8 (INT64/FLOAT64/DECIMAL — FLOAT64 bits pass through
+        // unchanged): the whole column is ONE memcpy, with NULL slots patched
+        // after. The per-element loop below issues one memcpy CALL per group —
+        // `es` is a runtime value, so the compiler cannot collapse it — which on
+        // a 99M-group emit was 99M calls, the finalize tail's largest term.
+        std::memcpy(data, raws, static_cast<size_t>(n) * 8u);
+        if (valid_flags != nullptr) {
+            for (uint32_t i = 0; i < n; ++i) {
+                if (valid_flags[i] != 0) continue;
+                if (vbits == nullptr) {
+                    vbits = static_cast<uint8_t*>(draken_malloc(vbytes == 0 ? 1 : vbytes));
+                    std::memset(vbits, 0xFF, vbytes == 0 ? 1 : vbytes);
+                }
+                vbits[i >> 3] &= static_cast<uint8_t>(~(1u << (i & 7)));
+                std::memset(data + static_cast<size_t>(i) * 8u, 0, 8u);
+            }
+        }
+    } else
     for (uint32_t i = 0; i < n; ++i) {
         if (valid_flags != nullptr && valid_flags[i] == 0) {
             if (vbits == nullptr) {
@@ -887,15 +905,13 @@ inline CxxColumn emit_fixed_column(const int64_t* raws, const uint8_t* valid_fla
             std::memcpy(data + static_cast<size_t>(i) * es, &raw, es);
         }
     }
-    uint32_t* sel = static_cast<uint32_t*>(draken_malloc(alloc_n * sizeof(uint32_t)));
-    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
     DrakenVector v;
-    v.data = data; v.selection = sel; v.data_length = n; v.length = n;
+    v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
     v.validity = vbits; v.type = t;
     v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                          OwnedBuffer<uint8_t>(vbits), OwnedBuffer<void>(sel));
+                                          OwnedBuffer<uint8_t>(vbits));
     c.own->logical_type = logical;
     c.view = c.own->vec;
     return c;
@@ -1248,15 +1264,13 @@ inline CxxColumn emit_i128_lane_column(const __int128* vals, const int64_t* vali
         }
         std::memcpy(data + static_cast<size_t>(i) * 16u, &vals[i], 16u);
     }
-    uint32_t* sel = static_cast<uint32_t*>(draken_malloc(alloc_n * sizeof(uint32_t)));
-    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
     DrakenVector v;
-    v.data = data; v.selection = sel; v.data_length = n; v.length = n;
+    v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
     v.validity = vbits; v.type = DRAKEN_DECIMAL128;
     v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                          OwnedBuffer<uint8_t>(vbits), OwnedBuffer<void>(sel));
+                                          OwnedBuffer<uint8_t>(vbits));
     c.own->logical_type = logical;
     c.view = c.own->vec;
     return c;
@@ -1437,17 +1451,13 @@ inline CxxColumn emit_array_lane_column(const AggColMeta& meta, const AggSpec2& 
         }
     }
 
-    uint32_t* sel = static_cast<uint32_t*>(
-        draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
     DrakenVector v;
-    v.data = offsets; v.selection = sel; v.data_length = n; v.length = n;
+    v.data = offsets; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
     v.validity = nullptr; v.type = DRAKEN_ARRAY;
     v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(offsets),
-                                          OwnedBuffer<uint8_t>(nullptr),
-                                          OwnedBuffer<void>(sel));
+                                          OwnedBuffer<uint8_t>(nullptr));
     c.own->child_owner = aa_steal_owner(std::move(child_col));
     c.view = c.own->vec;
     return c;
@@ -1530,17 +1540,13 @@ inline CxxColumn emit_cidr_lane_column(opteryx::roaring32::Roaring32* states,
     const size_t off_bytes = (static_cast<size_t>(n) + 1) * sizeof(int32_t);
     int32_t* offsets = static_cast<int32_t*>(draken_malloc(off_bytes));
     std::memcpy(offsets, offs.data(), off_bytes);
-    uint32_t* sel = static_cast<uint32_t*>(
-        draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
     DrakenVector v;
-    v.data = offsets; v.selection = sel; v.data_length = n; v.length = n;
+    v.data = offsets; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
     v.validity = nullptr; v.type = DRAKEN_ARRAY;
     v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(offsets),
-                                          OwnedBuffer<uint8_t>(nullptr),
-                                          OwnedBuffer<void>(sel));
+                                          OwnedBuffer<uint8_t>(nullptr));
     c.own->child_owner = aa_steal_owner(std::move(child_col));
     c.view = c.own->vec;
     return c;
@@ -1570,13 +1576,11 @@ inline CxxColumn emit_lane_column(const AggColMeta& meta, GBKind kind,
                                      (meta.type == DRAKEN_DECIMAL) ? meta.logical
                                                                    : nullptr, err);
         }
-        case GBKind::SumF: {
-            std::vector<int64_t> raws(n, 0);
-            for (uint32_t i = 0; i < n; ++i)
-                std::memcpy(&raws[i], &L.f64[i], sizeof(double));
-            return emit_fixed_column(raws.data(), valid_ok(), n, DRAKEN_FLOAT64,
-                                     nullptr, err);
-        }
+        case GBKind::SumF:
+            // The f64 lane's bits ARE the FLOAT64 output bits — reinterpret, no
+            // intermediate copy (emit_fixed_column bulk-copies 8-byte lanes).
+            return emit_fixed_column(reinterpret_cast<const int64_t*>(L.f64),
+                                     valid_ok(), n, DRAKEN_FLOAT64, nullptr, err);
         case GBKind::SumD128:
         case GBKind::MinMaxD128:
             return emit_i128_lane_column(L.i128, L.valid, n, meta.logical);
@@ -2449,13 +2453,24 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
     if (gb_key_is_string(col.type)) {
         const auto* src_slots = reinterpret_cast<const DrakenStringSlot*>(col.raw.data());
         const uint8_t* src_arena = col.arena.empty() ? nullptr : col.arena.data();
-        size_t total_arena = 0;
+        // Store arena bodies were APPENDED in group order, so the out-of-line
+        // bytes for [start, start+n) occupy one contiguous window — copy it with
+        // ONE memcpy and rebase each slot's offset by the window base, instead of
+        // one memcpy per string (18M calls on a GROUP BY URL emit). Bounds are
+        // min/max rather than first/last so correctness never leans on the append
+        // order: a gap would merely copy a few dead bytes, never mis-point a slot.
+        size_t win_lo = SIZE_MAX, win_hi = 0;
         for (uint32_t i = 0; i < n; ++i) {
             size_t g = start + i;
             if (row_is_null(g)) continue;
             const auto* slot = src_slots + g;
-            if (!str_is_inline(slot)) total_arena += str_length(slot);
+            if (str_is_inline(slot)) continue;
+            const size_t off = slot->ext.arena_offset;
+            if (off < win_lo) win_lo = off;
+            const size_t end = off + str_length(slot);
+            if (end > win_hi) win_hi = end;
         }
+        size_t total_arena = (win_lo == SIZE_MAX) ? 0 : win_hi - win_lo;
         size_t slots_off = sizeof(DrakenStringArena);
         size_t arena_off = slots_off + static_cast<size_t>(n == 0 ? 1 : n) * sizeof(DrakenStringSlot);
         uint8_t* blk = static_cast<uint8_t*>(draken_malloc(arena_off + total_arena));
@@ -2465,7 +2480,8 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
         sa->slots = dst; sa->arena = out_arena; sa->length = n;
         sa->arena_used = total_arena; sa->arena_cap = total_arena;
         sa->null_bitmap = nullptr; sa->owns_buffers = 0; sa->type = col.type;
-        size_t arena_pos = 0;
+        if (total_arena > 0)
+            std::memcpy(out_arena, src_arena + win_lo, total_arena);
         for (uint32_t i = 0; i < n; ++i) {
             size_t g = start + i;
             if (row_is_null(g)) {
@@ -2475,23 +2491,17 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
             }
             const auto* slot = src_slots + g;
             if (str_is_inline(slot)) dst[i] = *slot;
-            else {
-                uint32_t slen = str_length(slot);
-                std::memcpy(out_arena + arena_pos, str_data(slot, src_arena), slen);
-                str_clone_with_offset(&dst[i], slot, static_cast<uint32_t>(arena_pos));
-                arena_pos += slen;
-            }
+            else
+                str_clone_with_offset(&dst[i], slot,
+                    static_cast<uint32_t>(slot->ext.arena_offset - win_lo));
         }
-        uint32_t* sel = static_cast<uint32_t*>(draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-        for (uint32_t i = 0; i < n; ++i) sel[i] = i;
         DrakenVector v;
-        v.data = sa; v.selection = sel; v.data_length = n; v.length = n;
+        v.data = sa; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
         v.validity = vbits; v.type = col.type;
         v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
         CxxColumn c;
         c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(blk),
-                                              OwnedBuffer<uint8_t>(vbits),
-                                              OwnedBuffer<void>(sel));
+                                              OwnedBuffer<uint8_t>(vbits));
         c.own->logical_type = col.logical;
         c.view = c.own->vec;
         return c;
@@ -2508,30 +2518,47 @@ inline CxxColumn jpc_emit_range(const GroupKeyColumn& col, size_t start,
     } else {
         data = draken_malloc(static_cast<size_t>(n == 0 ? 1 : n) * col.elem_size);
         uint8_t* d = static_cast<uint8_t*>(data);
-        for (uint32_t i = 0; i < n; ++i) {
-            size_t g = start + i;
-            if (row_is_null(g)) {
+        // The store range [start, start+n) is contiguous — ONE memcpy, then zero
+        // the NULL groups' slots (a NULL group appended elem_size zero bytes, so
+        // even this patch loop only runs when the column has a validity mask).
+        std::memcpy(d, col.raw.data() + start * col.elem_size,
+                    static_cast<size_t>(n) * col.elem_size);
+        if (!col.validity.empty()) {
+            for (uint32_t i = 0; i < n; ++i) {
+                if (!row_is_null(start + i)) continue;
                 std::memset(d + static_cast<size_t>(i) * col.elem_size, 0, col.elem_size);
                 mark_null(i);
-                continue;
             }
-            std::memcpy(d + static_cast<size_t>(i) * col.elem_size,
-                        col.raw.data() + g * col.elem_size, col.elem_size);
         }
     }
-    uint32_t* sel = static_cast<uint32_t*>(draken_malloc((n == 0 ? 1 : n) * sizeof(uint32_t)));
-    for (uint32_t i = 0; i < n; ++i) sel[i] = i;
     DrakenVector v;
-    v.data = data; v.selection = sel; v.data_length = n; v.length = n;
+    v.data = data; v.selection = draken_identity_sel(n); v.data_length = n; v.length = n;
     v.validity = vbits; v.type = col.type;
     v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
     CxxColumn c;
     c.own = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(data),
-                                          OwnedBuffer<uint8_t>(vbits),
-                                          OwnedBuffer<void>(sel));
+                                          OwnedBuffer<uint8_t>(vbits));
     c.own->logical_type = col.logical;
     c.view = c.own->vec;
     return c;
+}
+
+// TEMPORARY finalize phase profile (2026-08-29): where does GroupBySink::finalize's
+// wall actually go — merge, key emit, lane emit, or the rest (alloc/append)?
+// Enabled by OPTERYX_GB_FINALIZE_PROF=1; totals printed to stderr once per finalize.
+// Measurement scaffolding for the emit investigation — delete when it is ruled.
+inline std::atomic<uint64_t> gb_fin_merge_ns{0}, gb_fin_keys_ns{0},
+                             gb_fin_lanes_ns{0}, gb_fin_total_ns{0};
+inline bool gb_finalize_prof_on() {
+    static const bool on = []() {
+        const char* v = getenv("OPTERYX_GB_FINALIZE_PROF");
+        return v != nullptr && v[0] == '1';
+    }();
+    return on;
+}
+inline uint64_t gb_prof_now() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 // Per-partition group table. The ad-hoc open-addressing GBPartition (table + stored
@@ -2604,6 +2631,41 @@ struct GBPartition {
 };
 
 
+// ---- ROUTED PROTOTYPE (2026-08-29, behind OPTERYX_GB_ROUTED=1) --------------------
+// Ownership routing instead of per-worker partial aggregation + merge. Each worker
+// OWNS a fixed set of partitions (owner(p) = p % nworkers); a worker that hashes a
+// row belonging to someone else's partition hands the owner a reference to the
+// morsel plus the row ids, and the owner does the probe. Every key is therefore
+// probed exactly ONCE globally instead of once per worker, and no two tables ever
+// hold the same group — so finalize has nothing to merge.
+//
+// NOTHING IS COPIED. MorselPtr is a shared_ptr and CxxMorsel is immutable here, so
+// a routed batch costs one refcount plus 4 bytes per row (the row id) and 8 (its
+// hash) — never the row data. The morsel dies when the last inbox entry referencing
+// it is consumed, which is refcount-automatic; the only thing under our control is
+// how many are alive at once, and that is the drain policy below.
+// The EXCHANGE unit (v2 — replaces the mask-passing GBRouteEntry, which was
+// measured 2026-08-29 to cost 2.1x sink CPU: the owner gathered key bytes by
+// random row-id out of a FOREIGN core's morsel, one cold cross-core miss per
+// probe). A batch is a self-contained per-morsel PARTIAL AGGREGATE, materialized
+// by the PRODUCER while the morsel is hot in its cache: one tuple per distinct
+// key (dict-shaped morsels — probe-once-per-distinct survives the exchange) or
+// per row (dense morsels, count=1 — pre-aggregation buys nothing at high NDV).
+// The owner consumes dense sequential arrays and never touches the source
+// morsel, so morsel lifetime ends at the scan boundary — nothing to manage.
+struct GBXBatch {
+    std::vector<uint64_t> hashes;             // one per tuple
+    std::vector<int64_t>  counts;             // rows folded into each tuple
+    std::vector<GroupKeyColumn> keycols;      // key VALUES per tuple (emitted keys only)
+};
+// One inbox per worker. A plain mutex + deque: a push is once per morsel per
+// OWNER (not per partition, not per row). If contention shows up,
+// morsel_queue.hpp already has the bounded moodycamel MPSC to graduate to.
+struct GBInbox {
+    std::mutex mtx;
+    std::deque<GBXBatch> q;
+};
+
 struct GroupByLocal : LocalSinkState {
     std::array<GBPartition, kGBParts> parts;
     std::vector<AggColMeta> meta;
@@ -2628,10 +2690,27 @@ struct GroupByLocal : LocalSinkState {
     std::vector<uint8_t>  dict_part;  // per code: partition index
     std::vector<uint32_t> dict_gid;   // per code: group id within that partition
     std::vector<uint64_t> cd_vhash;   // per row: value hash for a CountDistinct spec
+    // exchange: this worker's index, per-owner batches under construction, and
+    // per-morsel scratch (distinct-value counts + representatives on the dict path)
+    int widx = -1;
+    std::vector<GBXBatch> xstage;     // one per owner worker; moved out per morsel
+    std::vector<int64_t>  xcnt;       // dict path: rows per distinct code this morsel
+    std::vector<uint32_t> xrep;       // dict path: representative row per code
 };
 struct GroupByGlobal : GlobalSinkState {
     std::mutex mtx;
     std::array<std::vector<GBPartition>, kGBParts> pending;   // queued worker partitions
+    // ---- routed prototype ----
+    bool routed = false;
+    int  nworkers = 1;
+    bool route_init = false;
+    std::vector<std::unique_ptr<GBInbox>> inbox;   // one per worker
+    std::atomic<int> widx_next{0};
+    // Workers still able to PUSH. Decremented once as each worker enters combine();
+    // at zero no further push can occur, so one last drain per worker is sufficient.
+    // Out-of-band like morsel_queue.hpp's finish counter, and for the same reason:
+    // an in-band sentinel races across producers.
+    std::atomic<int> routing_live{0};
     std::vector<AggColMeta> meta;
     std::vector<GBKind> kinds;
     std::vector<KeyColMeta> key_meta;
@@ -2682,13 +2761,109 @@ struct GroupBySink : Sink {
     std::unique_ptr<GlobalSinkState> make_global() override {
         return std::make_unique<GroupByGlobal>();
     }
-    std::unique_ptr<LocalSinkState> make_local(GlobalSinkState&) override {
+    std::unique_ptr<LocalSinkState> make_local(GlobalSinkState& gs) override {
         auto l = std::make_unique<GroupByLocal>();
         if (low_card) {
             for (auto& P : l->parts) P.use_parvi = true;
             groupby_tel::parvi_sinks.fetch_add(1, std::memory_order_relaxed);
         }
+        // Routed prototype: arm the inboxes here, not in make_global — exec_dop is
+        // written by run_pipeline_impl AFTER make_global returns, and make_local runs
+        // once per worker after that, so this is the first point the width is known.
+        auto& g = static_cast<GroupByGlobal&>(gs);
+        {
+            std::lock_guard<std::mutex> lk(g.mtx);
+            if (!g.route_init) {
+                // Read per QUERY, never a process-lifetime static latch: a static
+                // here froze whichever value the process's first grouped query saw,
+                // which silently turned every arm of an in-process A/B into the
+                // first arm's configuration (the FROZENcfg trap, reproduced 2026-08-29
+                // — three sweeps voided).
+                const char* v = getenv("OPTERYX_GB_ROUTED");
+                const bool routed_on = v != nullptr && v[0] == '1' && v[1] == '\0';
+                g.nworkers = g.exec_dop > 0 ? g.exec_dop : 1;
+                g.routed = routed_on && g.nworkers > 1;
+                if (g.routed) {
+                    g.inbox.resize(static_cast<size_t>(g.nworkers));
+                    for (auto& b : g.inbox) b = std::make_unique<GBInbox>();
+                    g.routing_live.store(g.nworkers, std::memory_order_relaxed);
+                }
+                g.route_init = true;
+            }
+        }
+        if (g.routed) l->widx = g.widx_next.fetch_add(1, std::memory_order_relaxed);
         return l;
+    }
+
+    // owner(p): static partition ownership. Static (not work-stealing) is the whole
+    // point — a partition has ONE writer, so its table needs no lock and its adaptive
+    // parvi/medius front maps stay single-threaded exactly as they are today.
+    static inline int route_owner(size_t p, int nworkers) {
+        return static_cast<int>(p % static_cast<size_t>(nworkers));
+    }
+
+    // Owner-side init when a batch arrives before this worker has seen a morsel
+    // of its own: key/spec metadata was published to the global by the producer
+    // BEFORE it enqueued anything (see sink()), so it is always there to copy.
+    void init_local_from_global(GroupByGlobal& g, GroupByLocal& l, ErrCtx& err) {
+        std::lock_guard<std::mutex> lk(g.mtx);
+        if (!g.init) {
+            err.code = 1;
+            err.msg = "GROUP BY exchange: batch arrived before any producer "
+                      "published key metadata — ordering bug, fail loud";
+            return;
+        }
+        l.meta = g.meta;
+        l.kinds = g.kinds;
+        l.key_meta = g.key_meta;
+        l.has_rows = g.has_rows;
+        for (size_t p = 0; p < kGBParts; ++p) type_keycols(l.parts[p], l.key_meta);
+        l.init = true;
+    }
+
+    // Fold one exchange tuple stream into the partitions this worker owns. Every
+    // array read here is dense and sequential; the only random access is the
+    // probe into the owner's own table — the one intrinsic cost of building it.
+    void fold_batch(GroupByLocal& l, const GBXBatch& b, ErrCtx& err) {
+        const size_t nt = b.hashes.size();
+        const size_t nk = b.keycols.size();
+        for (size_t t = 0; t < nt; ++t) {
+            const uint64_t h = b.hashes[t];
+            GBPartition& P = l.parts[h >> kGBPartShift];
+            int64_t gid;
+            const bool is_new =
+                P.find_or_insert_group(h, static_cast<int64_t>(P.hashes.size()), gid);
+            if (is_new) {
+                P.hashes.push_back(h);
+                P.grows.push_back(0);   // grows tracks size exactly — sampled hot as
+                                        // a per-tuple resize (memset per element)
+                for (size_t j = 0; j < nk; ++j)
+                    P.keycols[j].append_from(b.keycols[j], t);
+            }
+            P.grows[static_cast<size_t>(gid)] += b.counts[t];
+        }
+        (void)err;
+    }
+
+    // Consume everything currently in this worker's inbox. Called from sink() on
+    // every morsel (keeps queues shallow) and from combine() as the quiesce drain.
+    void drain_inbox(GroupByGlobal& g, GroupByLocal& l, ErrCtx& err) {
+        GBInbox& box = *g.inbox[static_cast<size_t>(l.widx)];
+        for (;;) {
+            GBXBatch b;
+            {
+                std::lock_guard<std::mutex> lk(box.mtx);
+                if (box.q.empty()) return;
+                b = std::move(box.q.front());
+                box.q.pop_front();
+            }
+            if (!l.init) {
+                init_local_from_global(g, l, err);
+                if (err.code != 0) return;
+            }
+            fold_batch(l, b, err);
+            if (err.code != 0) return;
+        }
     }
 
     // Type a partition's per-group key store from the captured key metadata. Called
@@ -2875,6 +3050,154 @@ struct GroupBySink : Sink {
         uint32_t rows = in->num_rows();
         size_t nspecs = specs.size();
         groupby_tel::calls.fetch_add(1, std::memory_order_relaxed);
+
+        // ---- EXCHANGE (v2, behind OPTERYX_GB_ROUTED=1) -----------------------------
+        // Producer materializes per-OWNER partial-aggregate batches while the morsel
+        // is hot in its cache; owners fold dense batches into tables they alone
+        // write. No merge exists (one contributor per partition ⇒ finalize is pure
+        // emit), and the owner never touches a foreign morsel (the v1 mask-passing
+        // transport did, measured at 2.1x sink CPU from cold cross-core gathers).
+        auto& g_ = static_cast<GroupByGlobal&>(gs);
+        if (g_.routed) {
+            bool rows_only = l.has_rows;
+            for (size_t s = 0; s < nspecs && rows_only; ++s)
+                if (l.kinds[s] != GBKind::Rows) rows_only = false;
+            if (!rows_only) {
+                // Fail loud rather than quietly running the merge path — a prototype
+                // that silently covers only some shapes reports a comparison it did
+                // not actually run.
+                err.code = 1;
+                err.msg = "OPTERYX_GB_ROUTED covers only COUNT(*) GROUP BY in this "
+                          "prototype; unset it for other aggregate shapes";
+                return SinkResult::CONTINUE;
+            }
+            // Publish key metadata BEFORE anything can be enqueued: an owner that
+            // receives a batch before its own first morsel inits from the global.
+            if (!g_.init) {
+                std::lock_guard<std::mutex> lk(g_.mtx);
+                if (!g_.init) {
+                    g_.meta = l.meta;
+                    g_.kinds = l.kinds;
+                    g_.key_meta = l.key_meta;
+                    g_.has_rows = l.has_rows;
+                    g_.init = true;
+                }
+            }
+            const int W = g_.nworkers;
+            if (l.xstage.empty()) l.xstage.resize(static_cast<size_t>(W));
+            auto stage_keycols_ready = [&](GBXBatch& b) {
+                if (b.keycols.size() == store_key_pos.size()) return;
+                b.keycols.resize(store_key_pos.size());
+                for (size_t j = 0; j < store_key_pos.size(); ++j) {
+                    const KeyColMeta& m = l.key_meta[store_key_pos[j]];
+                    b.keycols[j].type = m.type;
+                    b.keycols[j].elem_size = gb_key_elem_size(m.type, m.logical);
+                    b.keycols[j].logical = m.logical;
+                }
+            };
+            // One tuple into own table or a per-owner batch. `count` rows of group
+            // hash `h`, key values at morsel row `rep`.
+            auto emit_tuple = [&](uint64_t h, int64_t count, uint32_t rep,
+                                  ErrCtx& e) -> bool {
+                const size_t pi = h >> kGBPartShift;
+                const int owner = route_owner(pi, W);
+                if (owner == l.widx) {
+                    GBPartition& P = l.parts[pi];
+                    int64_t gid;
+                    const bool is_new = P.find_or_insert_group(
+                        h, static_cast<int64_t>(P.hashes.size()), gid);
+                    if (is_new) {
+                        P.hashes.push_back(h);
+                        P.grows.push_back(0);
+                        for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                            P.keycols[j].append_row(in->columns[store_col_idx[j]].view,
+                                                    rep, e, "GROUP BY key value");
+                            if (e.code != 0) return false;
+                        }
+                    }
+                    P.grows[static_cast<size_t>(gid)] += count;
+                    return true;
+                }
+                GBXBatch& b = l.xstage[static_cast<size_t>(owner)];
+                stage_keycols_ready(b);
+                b.hashes.push_back(h);
+                b.counts.push_back(count);
+                for (size_t j = 0; j < store_col_idx.size(); ++j) {
+                    b.keycols[j].append_row(in->columns[store_col_idx[j]].view, rep, e,
+                                            "GROUP BY key value");
+                    if (e.code != 0) return false;
+                }
+                return true;
+            };
+            // Dict-shaped single keys keep probe-once-per-DISTINCT across the
+            // exchange: counts accumulate per code in one hot pass, then ONE tuple
+            // per distinct value travels. Dense/multi-key morsels ship one tuple per
+            // row with count=1 — at the NDV where morsels stop compressing,
+            // per-morsel pre-aggregation has nothing to fold.
+            static const bool gbx_dict_on = []() {
+                const char* v = getenv("OPTERYX_GB_DICT");
+                return !(v != nullptr && v[0] == '0' && v[1] == '\0');
+            }();
+            ShapedKeyHash skh;
+            bool dict = false;
+            if (gbx_dict_on && key_idx.size() == 1) {
+                GROUPBY_TEL_START(_gbX_t0);
+                if (!compute_row_hashes_shaped(in, key_idx, skh, err))
+                    return SinkResult::CONTINUE;
+                GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbX_t0);
+                dict = skh.compressed();
+                if (!dict) {
+                    l.mk_hash.resize(rows);
+                    for (uint32_t i = 0; i < rows; ++i)
+                        l.mk_hash[i] = skh.hashes[skh.codes[i]];
+                    cxx_morsel_delete(skh.owner);
+                    skh.owner = nullptr;
+                }
+            } else {
+                GROUPBY_TEL_START(_gbX_t0);
+                if (!compute_row_hashes(in, key_idx, l.mk_hash, err))
+                    return SinkResult::CONTINUE;
+                GROUPBY_TEL_ACCUM(groupby_tel::hash_ns, _gbX_t0);
+            }
+            if (dict) {
+                struct HmGuard {
+                    CxxMorsel* m;
+                    ~HmGuard() { if (m != nullptr) cxx_morsel_delete(m); }
+                } _hm_guard{skh.owner};
+                const uint32_t D = skh.data_length;
+                l.xcnt.assign(D, 0);
+                l.xrep.assign(D, UINT32_MAX);
+                for (uint32_t i = 0; i < rows; ++i) {
+                    const uint32_t c = skh.codes[i];
+                    l.xcnt[c] += 1;
+                    if (l.xrep[c] == UINT32_MAX) l.xrep[c] = i;
+                }
+                for (uint32_t d = 0; d < D; ++d) {
+                    if (l.xrep[d] == UINT32_MAX) continue;   // code never used
+                    if (!emit_tuple(skh.hashes[d], l.xcnt[d], l.xrep[d], err))
+                        return SinkResult::CONTINUE;
+                }
+            } else {
+                for (uint32_t i = 0; i < rows; ++i) {
+                    if (!emit_tuple(l.mk_hash[i], 1, i, err))
+                        return SinkResult::CONTINUE;
+                }
+            }
+            // Hand every non-empty staged batch to its owner, then consume our own
+            // inbox — the interleaved drain that keeps queues shallow.
+            for (int o = 0; o < W; ++o) {
+                GBXBatch& b = l.xstage[static_cast<size_t>(o)];
+                if (b.hashes.empty()) continue;
+                GBInbox& box = *g_.inbox[static_cast<size_t>(o)];
+                {
+                    std::lock_guard<std::mutex> lk(box.mtx);
+                    box.q.push_back(std::move(b));
+                }
+                b = GBXBatch();
+            }
+            drain_inbox(g_, l, err);
+            return SinkResult::CONTINUE;
+        }
 
         // Pass A: draken owns the key hash for the whole morsel (cxx_hash_c is
         // shape-preserving for a single key — it hashes each distinct value once).
@@ -3417,10 +3740,30 @@ struct GroupBySink : Sink {
         return SinkResult::CONTINUE;
     }
 
-    void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx&) override {
+    void combine(GlobalSinkState& gs, LocalSinkState& ls, ErrCtx& err) override {
         auto& l = static_cast<GroupByLocal&>(ls);
+        auto& g = static_cast<GroupByGlobal&>(gs);
+        if (g.routed) {
+            // QUIESCE. A worker that has entered combine() can no longer push, so once
+            // the count reaches zero no inbox can gain another entry and a single final
+            // drain is provably sufficient. Early finishers keep draining while others
+            // are still routing — that is productive work, not a spin.
+            g.routing_live.fetch_sub(1, std::memory_order_acq_rel);
+            while (g.routing_live.load(std::memory_order_acquire) > 0) {
+                drain_inbox(g, l, err);
+                if (err.code != 0) return;
+                std::this_thread::yield();
+            }
+            drain_inbox(g, l, err);
+            if (err.code != 0) return;
+            if (!l.init) return;   // never saw a morsel and owned nothing
+            // Each partition now has exactly ONE contributor, so finalize's merge loop
+            // (list.size() == 1) degenerates to a pure emit. Nothing else changes.
+            flush_locals(g, l);
+            return;
+        }
         if (!l.init) return;
-        flush_locals(static_cast<GroupByGlobal&>(gs), l);
+        flush_locals(g, l);
     }
 
     // Merge one partition's queued worker tables into the first, then emit it in
@@ -3441,6 +3784,8 @@ struct GroupBySink : Sink {
             merged.hashes.reserve(merge_total);
         }
         std::vector<uint32_t> ge;
+        const bool prof = gb_finalize_prof_on();
+        const uint64_t prof_t0 = prof ? gb_prof_now() : 0;
         for (size_t i = 1; i < list.size(); ++i) {
             GBPartition& src = list[i];
             uint32_t sn = static_cast<uint32_t>(src.size());
@@ -3662,6 +4007,8 @@ struct GroupBySink : Sink {
             }
             src = GBPartition();   // release the merged-in worker table
         }
+        if (prof) gb_fin_merge_ns.fetch_add(gb_prof_now() - prof_t0,
+                                            std::memory_order_relaxed);
         // Emit chunk_rows-group morsels — lanes are contiguous vectors, so a
         // chunk is a plain slice.
         size_t total = merged.size();
@@ -3672,11 +4019,15 @@ struct GroupBySink : Sink {
             // Group-key columns: materialize a contiguous [start, start+n) slice of
             // each per-group key store (GroupKeyColumn) into the output morsel. Only
             // the emitted keys have a store — a hash-only key has no column here.
+            const uint64_t prof_tk = prof ? gb_prof_now() : 0;
             for (size_t k = 0; k < merged.keycols.size(); ++k) {
                 m->columns.push_back(jpc_emit_range(merged.keycols[k], start, n, err));
                 if (err.code != 0) return;
                 m->names.push_back(store_names[k]);
             }
+            const uint64_t prof_tl = prof ? gb_prof_now() : 0;
+            if (prof) gb_fin_keys_ns.fetch_add(prof_tl - prof_tk,
+                                               std::memory_order_relaxed);
             for (size_t s = 0; s < nspecs; ++s) {
                 GBKind kind = g.kinds[s];
                 const GBLanes& L = merged.lanes[s];
@@ -3716,6 +4067,8 @@ struct GroupBySink : Sink {
                 if (err.code != 0) return;
                 m->names.push_back(specs[s].name);
             }
+            if (prof) gb_fin_lanes_ns.fetch_add(gb_prof_now() - prof_tl,
+                                                std::memory_order_relaxed);
             out_morsels.push_back(std::move(m));
         }
     }
@@ -3733,9 +4086,41 @@ struct GroupBySink : Sink {
             total_entries += part_entries;
             if (part_entries > 0) ++nonempty_parts;
         }
+        // The merge width is the query's DOP — the SAME width the pipeline ran at,
+        // not a second one derived from the hardware. This used to be
+        // `min(16, hardware_concurrency() - 2)`, which ignored DOP entirely: the
+        // merge ran 16-wide at DOP 2 and 16-wide at DOP 16, so its cost was constant
+        // in absolute ms across the whole sweep, and on a 32-192 vCPU host it stayed
+        // pinned at 16 while the pipeline ran far wider. Measured 2026-08-29 (DOP 16,
+        // local skene, medians of 3 rotated rounds): the merge is real parallel work
+        // — finalize on GROUP BY URL is 1344ms at width 1 and 222ms at width 16
+        // (6.04x), GROUP BY WatchID,ClientIP 4083ms -> 722ms (5.65x) — so the cap was
+        // load-bearing, not cosmetic. Efficiency is 35-52% at 16 and still falling;
+        // the residue is the largest SINGLE partition, which no thread count can
+        // split (kGBParts is 64 and a partition merges indivisibly).
+        //
+        // More threads than partitions is pure spawn cost (width 64 measured WORSE
+        // than 16 on every query), so nonempty_parts remains the ceiling.
         unsigned hw = std::thread::hardware_concurrency();
         unsigned nt = hw > 2 ? hw - 2 : 1;
         if (nt > 16) nt = 16;
+        // ...but never NARROWER than the width the pipeline itself ran at. The 16
+        // was the whole ceiling on a 32-192 vCPU host, where the pipeline runs at
+        // DOP 30+ and the merge stayed pinned at 16. Taking the MAX (rather than
+        // replacing the hardware derivation with exec_dop) is deliberate and was
+        // measured: width==DOP alone regressed every DOP<16 arm on an 18-core box
+        // — gb-vhigh 0.66x wall at DOP 2 — because the merge had always been
+        // running wider than the query's DOP and that width was load-bearing.
+        // This form can only ever widen the merge, never narrow it.
+        if (g.exec_dop > 0 && static_cast<unsigned>(g.exec_dop) > nt)
+            nt = static_cast<unsigned>(g.exec_dop);
+        // EXPERIMENT PROBE (temporary, 2026-08-29): force the merge width, so the
+        // pre-fix behaviour (16) can be measured against this one on a wide host.
+        // NOT an API — delete once that before/after is recorded.
+        if (const char* mw = std::getenv("OPTERYX_GB_MERGE_THREADS")) {
+            int v = std::atoi(mw);
+            if (v > 0) nt = static_cast<unsigned>(v);
+        }
         if (nt > nonempty_parts) nt = static_cast<unsigned>(nonempty_parts);
         if (total_entries < 65536) nt = 1;   // small agg: inline, no threads
         if (nt < 1) nt = 1;
@@ -3768,6 +4153,15 @@ struct GroupBySink : Sink {
         for (auto& th : threads) th.join();
         for (unsigned t = 0; t < nt; ++t) {
             if (errs[t].code != 0) { err = errs[t]; return; }
+        }
+        if (gb_finalize_prof_on()) {
+            fprintf(stderr,
+                    "[gb-finalize-prof] threads=%u merge=%.1fms keys=%.1fms "
+                    "lanes=%.1fms (cpu-sums across threads)\n",
+                    nt,
+                    gb_fin_merge_ns.exchange(0) / 1e6,
+                    gb_fin_keys_ns.exchange(0) / 1e6,
+                    gb_fin_lanes_ns.exchange(0) / 1e6);
         }
     }
 };
@@ -4272,17 +4666,13 @@ struct WindowTopKSink : Sink {
                 int64_t* data = static_cast<int64_t*>(
                     draken_malloc((cn == 0 ? 1 : cn) * sizeof(int64_t)));
                 for (uint32_t j = 0; j < cn; ++j) data[j] = rn[start + j];
-                uint32_t* sel = static_cast<uint32_t*>(
-                    draken_malloc((cn == 0 ? 1 : cn) * sizeof(uint32_t)));
-                for (uint32_t j = 0; j < cn; ++j) sel[j] = j;
                 DrakenVector v;
-                v.data = data; v.selection = sel; v.data_length = cn; v.length = cn;
+                v.data = data; v.selection = draken_identity_sel(cn); v.data_length = cn; v.length = cn;
                 v.validity = nullptr; v.type = DRAKEN_INT64;
                 v.flags = DRAKEN_SEL_IDENTITY | DRAKEN_SEL_PERMUTATION;
                 CxxColumn c;
                 c.own = std::make_shared<VectorOwner>(
-                    v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr),
-                    OwnedBuffer<void>(sel));
+                    v, OwnedBuffer<void>(data), OwnedBuffer<uint8_t>(nullptr));
                 c.own->logical_type = nullptr;
                 c.view = c.own->vec;
                 m->columns.push_back(std::move(c));

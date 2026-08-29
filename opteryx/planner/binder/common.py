@@ -33,6 +33,8 @@ from opteryx.planner.binder.view import (
 )
 from opteryx.planner.binder.relation import (
     visit_add_column,
+    visit_add_relationship,
+    visit_drop_relationship,
     visit_alter_column_type,
     visit_alter_materialized_view_owner,
     visit_alter_materialized_view_suspended,
@@ -46,6 +48,7 @@ from opteryx.planner.binder.relation import (
     visit_drop_relation,
     visit_create_tag,
     visit_drop_tag,
+    visit_rollback_relation,
     visit_drop_trigger,
     visit_drop_workspace,
     visit_optimize_relation,
@@ -266,6 +269,11 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_tag(self, node, context)
 
+    def visit_rollback_relation(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_rollback_relation(self, node, context)
+
     def visit_alter_materialized_view_owner(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -325,6 +333,16 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_rename_column(self, node, context)
+
+    def visit_add_relationship(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_add_relationship(self, node, context)
+
+    def visit_drop_relationship(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_drop_relationship(self, node, context)
 
     def visit_alter_column_type(
         self, node: Node, context: BindingContext

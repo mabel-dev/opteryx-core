@@ -6,11 +6,24 @@ every shape runs serial, so a serial-vs-concurrent routing bug gives byte-identi
 results in milliseconds (green suite, silent serialization — exactly the GROUP BY /
 agg / DISTINCT regression this guard now catches).
 
-Method (deterministic, not timing-based): force the row-floor to 0 so any data
-fans out, instrument ``CppThreadPool`` to record the max worker count requested
-during the query, and assert that each PARALLEL shape genuinely spawns > 1 worker.
-A shape routed to the serial drive (``drive_scan_to_sink`` / ``CppThreadPool(1)``)
-fails here.
+Method (deterministic, not timing-based): pin the DOP, then read back the degree
+each PIPELINE actually ran at from ``native_pipeline_stats``. That reading is the
+engine's own ``dop_used`` (engine.hpp: ``pn->dop_used = pdop``), so a pipeline
+forced to the serial drive — by a ``dop_override`` of 1, or by a routing bug —
+reports 1 and fails here.
+
+This guard previously instrumented ``CppThreadPool`` and asserted on the widest
+pool CONSTRUCTED during the query. That sensor died when engine pools became
+thread-local and reused across queries (``_acquire_engine_pool``): only the first
+query in a process constructs a pool, so every later test saw no construction at
+all and read 0. The result was a guard whose verdict depended on test ordering —
+all five shapes passed in isolation and four failed when run together — rather
+than on whether anything actually fanned out. ``dop_used`` is reported per query
+and per pipeline, so it is immune to pool reuse.
+
+The assertion is on the MINIMUM stage width, not the maximum: a shape whose scan
+fans out but whose aggregate silently serialises is precisely the regression this
+file exists to catch, and a maximum would hide it behind the healthy scan.
 """
 import os
 import sys
@@ -18,65 +31,71 @@ import sys
 sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 
 import opteryx
-import opteryx.compiled.thread_pool as _tp
 from opteryx import config
 
 
-def _max_workers_for(sql, workers=4):
-    """Run ``sql`` with the row-floor forced to 0 and DOP pinned, returning the max
-    worker count any ``CppThreadPool`` was created with during execution."""
-    real_pool = _tp.CppThreadPool
-    seen = []
+def _stage_dops(sql, workers=4):
+    """Run ``sql`` with DOP pinned; return ``[(pipeline_label, dop_used), ...]``.
 
-    def tracking_pool(w, name="guard"):
-        seen.append(int(w))
-        return real_pool(w, name)
-
-    # `_operators` cimports CppThreadPool as a TYPE (for the native fan-out's typed
-    # pool param + cdef submit_native); that bind resolves at _operators init by
-    # looking up the type in the thread_pool module. Trigger the normal execution
-    # import chain NOW (same module-load order a real query uses), so _operators binds
-    # the real class before we shadow it with a tracking function below.
-    from opteryx.managers.execution import execute  # noqa: F401
-
-    old_workers = config.MAX_EXECUTION_WORKERS
-    config.MAX_EXECUTION_WORKERS = workers
-    _tp.CppThreadPool = tracking_pool
+    The requested width is verified against ``native_engine_dop`` before anything
+    else is asserted. ``config.MAX_EXECUTION_WORKERS`` used to be a setting that
+    silently did nothing — the system-variable table froze it at import — and a
+    guard that cannot tell "ran wide" from "never applied my setting" is not a
+    guard. If the knob stops reaching the engine again, this fails first and says so.
+    """
+    saved = config.MAX_EXECUTION_WORKERS
     try:
+        config.MAX_EXECUTION_WORKERS = workers
         session = opteryx.session()
         for _ in session.execute_to_morsels(sql):
             pass
-        return max(seen) if seen else 0
+        reading = session._telemetry._reading
     finally:
-        _tp.CppThreadPool = real_pool
-        config.MAX_EXECUTION_WORKERS = old_workers
+        config.MAX_EXECUTION_WORKERS = saved
+
+    dop = reading.get("native_engine_dop")
+    assert dop == workers, (
+        f"asked for {workers} workers but the engine ran at dop={dop} — the worker "
+        f"setting is not reaching the engine, so this guard is measuring nothing."
+    )
+    stages = reading.get("native_pipeline_stats") or []
+    assert stages, (
+        f"no native_pipeline_stats for: {sql} — the guard has lost its sensor and "
+        f"would pass vacuously; it must fail instead."
+    )
+    return [(s["label"], s["dop"]) for s in stages]
+
+
+def _assert_fans_out(sql, workers=4):
+    stages = _stage_dops(sql, workers=workers)
+    serial = [label for label, dop in stages if dop < 2]
+    assert not serial, (
+        f"pipeline(s) {serial} ran serial (dop<2) at DOP {workers} for: {sql}\n"
+        f"stages={stages}"
+    )
 
 
 def test_stateless_is_concurrent():
     # scan -> filter/projection -> exit  (was already native-concurrent)
-    assert _max_workers_for("SELECT name FROM $planets WHERE id > 3") >= 2
+    _assert_fans_out("SELECT name FROM $planets WHERE id > 3")
 
 
 def test_grouped_aggregate_is_concurrent():
     # The shape my single-scan gate accidentally serialized — this is the guard for it.
-    assert _max_workers_for("SELECT name, COUNT(*) FROM $planets GROUP BY name") >= 2
+    _assert_fans_out("SELECT name, COUNT(*) FROM $planets GROUP BY name")
 
 
 def test_ungrouped_aggregate_is_concurrent():
-    assert _max_workers_for("SELECT COUNT(*), SUM(id) FROM $planets") >= 2
+    _assert_fans_out("SELECT COUNT(*), SUM(id) FROM $planets")
 
 
 def test_distinct_is_concurrent():
-    assert _max_workers_for("SELECT DISTINCT name FROM $planets") >= 2
+    _assert_fans_out("SELECT DISTINCT name FROM $planets")
 
 
 def test_inner_join_is_concurrent():
-    assert (
-        _max_workers_for(
-            "SELECT p.name FROM $planets AS p "
-            "INNER JOIN $planets AS q ON p.id = q.id"
-        )
-        >= 2
+    _assert_fans_out(
+        "SELECT p.name FROM $planets AS p INNER JOIN $planets AS q ON p.id = q.id"
     )
 
 

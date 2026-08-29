@@ -23,16 +23,20 @@ reproduces the original crash here.
 import opteryx
 from opteryx.connectors import register_workspace
 from opteryx.connectors.base.base_connector import BaseConnector
+from opteryx.connectors.base.base_connector import BaseTable
 from opteryx.connectors.capabilities import Writable
 from opteryx.models.file_entry import FileEntry
 
 
-class _NoFilesystemTable:
+class _NoFilesystemTable(BaseTable):
     """Table engine returned by table_engine() - shaped like OpteryxTable:
-    implements get_dataset_metadata(), nothing filesystem-specific."""
+    serves a schema, nothing filesystem-specific."""
 
     def __init__(self, schema):
         self.schema = schema
+
+    def get_dataset_schema(self):
+        return self.schema
 
     def get_dataset_metadata(self):
         return self.schema, None

@@ -32,10 +32,13 @@ from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
+from opteryx.planner.binder import do_bind_phase
 from opteryx.planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.logical_planner import do_logical_planning_phase
+from opteryx.planner.optimizer import do_optimizer
 from opteryx.planner.plan_rewriter import do_plan_rewrite
 from opteryx.planner.relation_resolver import do_resolve_relations
+from opteryx.models import ExecutionContext
 from opteryx.models import QueryTelemetry
 from opteryx.third_party import sqloxide
 
@@ -50,6 +53,26 @@ def _planned(sql):
     plan, _, ctes = do_logical_planning_phase(ast)
     plan = do_resolve_relations(plan, ctes, QueryTelemetry.detached())
     return do_plan_rewrite(plan, QueryTelemetry.detached())
+
+
+def _optimized(sql):
+    """`_planned`, then bound and optimized — the plan the PHYSICAL planner receives.
+
+    Subquery LOWERING (IN/EXISTS to a semi-join) is a semantic transformation and
+    runs post-bind, in the optimizer's decorrelate_subquery strategy: orientation
+    of `WHERE a = b` inside a subquery is undecidable from query text alone and
+    needs schema to settle. So "no SUBQUERY node survives" is a claim about THIS
+    plan, not about `_planned`'s — one taken pre-bind sees the node still in
+    place for every shape, inline ones included, and says nothing about whether
+    it reaches the engine.
+    """
+    bound = do_bind_phase(
+        _planned(sql),
+        execution_context=ExecutionContext(memberships=[]),
+        query_id="test_relation_resolver",
+        telemetry=QueryTelemetry.detached(),
+    )
+    return do_optimizer(bound, QueryTelemetry.detached())
 
 
 def _surviving_subquery_nodes(plan):
@@ -102,7 +125,12 @@ def views():
 # ---------------------------------------------------------------------------
 
 def test_in_subquery_in_a_cte_body_is_rewritten():
-    plan = _planned(
+    """Nothing must reach the engine still holding a SUBQUERY node — there is no
+    physical operator for one, which is how this failed in production
+    ("unsupported node type 39"). Checked on the optimized plan: see `_optimized`
+    for why the pre-bind plan is the wrong place to ask.
+    """
+    plan = _optimized(
         "WITH c AS (SELECT p.id FROM $planets AS p "
         "  WHERE p.id IN (SELECT q.id FROM $planets AS q WHERE q.id < 5)) SELECT * FROM c"
     )
@@ -158,6 +186,15 @@ def test_view_containing_a_cte_is_queryable(views):
 
 # ---------------------------------------------------------------------------
 # 3. termination — these all used to hang the planner forever
+#
+# A view or CTE defined in terms of itself is still an error: there is no
+# anchor, so there is nothing to terminate on. `WITH RECURSIVE` is the one
+# shape that now terminates by producing an ANSWER instead of an error — it
+# arrives from extract_ctes already split into an anchor and a recursive term
+# and is never spliced (see the relation_resolver module docstring and
+# docs/RECURSIVE_CTE_DESIGN.md), so the resolver cannot spin on it. A recursive
+# term that never runs dry is bounded at execution by
+# config.MAX_RECURSION_ITERATIONS, not here.
 # ---------------------------------------------------------------------------
 
 def test_self_referencing_view_fails_loud(views):
@@ -175,13 +212,19 @@ def test_self_referencing_cte_fails_loud():
         _rows("WITH t AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM t) SELECT * FROM t")
 
 
-def test_with_recursive_fails_loud():
-    """Not supported — but it must SAY so, not hang. Needs a native fixpoint operator."""
-    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*WITH RECURSIVE\*\* is not supported"):
-        _rows(
-            "WITH RECURSIVE t(n) AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 5) "
-            "SELECT * FROM t"
-        )
+def test_with_recursive_reaches_its_fixpoint():
+    """Terminates, and terminates on the RIGHT row set.
+
+    This used to spin the planner forever, then was refused outright while the
+    fixpoint operator did not exist. It is neither now: `t` is seeded with the
+    anchor and iterated to exhaustion, so the guard this test holds is that it
+    stops, and stops with 1..5 rather than with the anchor alone (which is what
+    a recursive term that is never re-fed would produce).
+    """
+    assert [tuple(row) for row in _rows(
+        "WITH RECURSIVE t(n) AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM t WHERE n < 5) "
+        "SELECT * FROM t"
+    )] == [(1,), (2,), (3,), (4,), (5,)]
 
 
 # ---------------------------------------------------------------------------
@@ -260,13 +303,27 @@ def test_explain_over_chained_ctes_resolves():
     )
 
 
-def test_explain_still_rejects_recursive():
-    """The recursion guard must fire through the wrapper too, not just on a bare query."""
-    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*WITH RECURSIVE\*\* is not supported"):
-        _rows(
+def test_explain_resolves_a_recursive_cte_through_the_wrapper():
+    """Resolution must reach a recursive CTE through EXPLAIN too, not only on a
+    bare query — the wrapper used to be a hole the guard did not see through.
+
+    The body here has NO termination predicate on purpose: EXPLAIN plans without
+    executing, so it must still return. If resolution ever went back to splicing
+    the recursive term into itself, this hangs rather than fails.
+    """
+    plan = [
+        tuple(row)
+        for morsel in opteryx.session().execute_to_morsels(
             "EXPLAIN WITH RECURSIVE t(n) AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM t) "
             "SELECT * FROM t"
         )
+        for row in morsel
+    ]
+    operators = b" ".join(row[0] for row in plan)
+
+    assert b"RECURSIVE CTE t" in operators
+    assert b"ANCHOR" in operators
+    assert b"RECURSIVE TERM" in operators
 
 
 # ---------------------------------------------------------------------------

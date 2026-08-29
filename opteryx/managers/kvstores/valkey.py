@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 from typing import Union
 
-from opteryx.config import MAX_CONSECUTIVE_CACHE_FAILURES
+from opteryx import config
 from opteryx.exceptions import MissingDependencyError
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 from opteryx.utils import single_item_cache
@@ -71,13 +71,13 @@ class ValkeyCache(BaseKeyValueStore):
             import datetime
 
             print(f"{datetime.datetime.now()} [CACHE] Unable to set up valkey cache.")
-            self._consecutive_failures: int = MAX_CONSECUTIVE_CACHE_FAILURES
+            self._consecutive_failures: int = config.MAX_CONSECUTIVE_CACHE_FAILURES
         else:
             self._consecutive_failures = 0
 
     def get(self, key: bytes) -> Union[bytes, None]:
         key = self._normalize_key(key)
-        if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+        if self._consecutive_failures >= config.MAX_CONSECUTIVE_CACHE_FAILURES:
             self.skips += 1
             return None
         try:
@@ -88,7 +88,7 @@ class ValkeyCache(BaseKeyValueStore):
                 return bytes(response)
         except Exception as err:  # pragma: no cover
             self._consecutive_failures += 1
-            if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+            if self._consecutive_failures >= config.MAX_CONSECUTIVE_CACHE_FAILURES:
                 import datetime
 
                 print(
@@ -111,7 +111,7 @@ class ValkeyCache(BaseKeyValueStore):
         keys = list(keys)
         if not keys:
             return {}
-        if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+        if self._consecutive_failures >= config.MAX_CONSECUTIVE_CACHE_FAILURES:
             self.skips += len(keys)
             return {}
         normalized = [self._normalize_key(k) for k in keys]
@@ -120,7 +120,7 @@ class ValkeyCache(BaseKeyValueStore):
             self._consecutive_failures = 0
         except Exception as err:  # pragma: no cover
             self._consecutive_failures += 1
-            if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+            if self._consecutive_failures >= config.MAX_CONSECUTIVE_CACHE_FAILURES:
                 import datetime
 
                 print(
@@ -140,12 +140,12 @@ class ValkeyCache(BaseKeyValueStore):
 
     def set(self, key: bytes, value: bytes) -> None:
         key = self._normalize_key(key)
-        if self._consecutive_failures < MAX_CONSECUTIVE_CACHE_FAILURES:
+        if self._consecutive_failures < config.MAX_CONSECUTIVE_CACHE_FAILURES:
             try:
                 self._server.set(key, value)
                 self.sets += 1
             except Exception as err:  # pragma: no cover
-                self._consecutive_failures = MAX_CONSECUTIVE_CACHE_FAILURES
+                self._consecutive_failures = config.MAX_CONSECUTIVE_CACHE_FAILURES
                 self.errors += 1
                 import datetime
 
@@ -164,7 +164,7 @@ class ValkeyCache(BaseKeyValueStore):
         items = dict(items)
         if not items:
             return
-        if self._consecutive_failures >= MAX_CONSECUTIVE_CACHE_FAILURES:
+        if self._consecutive_failures >= config.MAX_CONSECUTIVE_CACHE_FAILURES:
             self.skips += len(items)
             return
         normalized = {self._normalize_key(k): v for k, v in items.items()}
@@ -172,7 +172,7 @@ class ValkeyCache(BaseKeyValueStore):
             self._server.mset(normalized)
             self.sets += len(normalized)
         except Exception as err:  # pragma: no cover
-            self._consecutive_failures = MAX_CONSECUTIVE_CACHE_FAILURES
+            self._consecutive_failures = config.MAX_CONSECUTIVE_CACHE_FAILURES
             self.errors += 1
             import datetime
 

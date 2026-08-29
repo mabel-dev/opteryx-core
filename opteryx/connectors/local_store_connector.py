@@ -234,7 +234,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
             if if_exists:
                 return
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         shutil.rmtree(relation_dir)
 
@@ -252,7 +254,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
 
         if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         self._commit(relation_name, [])
 
@@ -511,7 +515,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         if not self.relation_exists(relation_name):
             if if_exists:
                 return
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
         if not self.is_materialized_view(relation_name):
             raise ValueError(
                 f"{relation_name} is not a materialized view; "
@@ -573,7 +579,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
 
         if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         # Read current file list and append new entries
         base_descriptor = self._read_dataset_json(relation_dir)
@@ -613,7 +621,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
 
         if not os.path.isfile(os.path.join(relation_dir, "dataset.json")):
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         self._commit(relation_name, file_entries, schema=schema)
 
@@ -622,7 +632,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
         if descriptor is None:
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
         return [c.name for c in descriptor.schema.columns]
 
     def _patch_column(
@@ -672,7 +684,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
         if descriptor is None:
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         current_files = self._read_current_file_entries(relation_dir, descriptor)
 
@@ -755,7 +769,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
         if descriptor is None:
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         columns = list(descriptor.schema.columns)
         if column_name in {c.name for c in columns}:
@@ -797,7 +813,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
         if descriptor is None:
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         columns = list(descriptor.schema.columns)
         names = [c.name for c in columns]
@@ -837,7 +855,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
         if descriptor is None:
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         columns = list(descriptor.schema.columns)
         names = [c.name for c in columns]
@@ -884,7 +904,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
         if descriptor is None:
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
 
         columns = list(descriptor.schema.columns)
         names = [c.name for c in columns]
@@ -916,7 +938,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(relation_name)
         descriptor = self._read_dataset_json(relation_dir)
         if descriptor is None:
-            raise ValueError(f"relation does not exist: {relation_name}")
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
         return {c.name: c.column_type for c in descriptor.schema.columns}
 
     def _commit(

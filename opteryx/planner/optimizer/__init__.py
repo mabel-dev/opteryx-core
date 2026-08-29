@@ -32,8 +32,6 @@ This module aims to enhance query performance through systematic and incremental
 from typing import Optional
 
 from opteryx import config
-from opteryx.config import DISABLE_OPTIMIZER
-from opteryx.config import VALIDATE_OPTIMIZER_PLANS
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import QueryTelemetry
 from opteryx.planner.logical_planner import LogicalPlan
@@ -394,7 +392,7 @@ class OptimizerVisitor:
                     before,
                     (len(current_plan), len(current_plan.edges())),
                 )
-                if VALIDATE_OPTIMIZER_PLANS:
+                if config.VALIDATE_OPTIMIZER_PLANS:
                     # Debug guardrail (WP-3): localise plan corruption to the
                     # strategy that produced it. Off by default; zero cost then.
                     validate_plan(current_plan, where=strategy.__class__.__name__)
@@ -436,7 +434,7 @@ def do_optimizer(
         (each body coordinated with its references and optimized in its own
         right — see opteryx/planner/optimizer/shared_cte.py).
     """
-    if DISABLE_OPTIMIZER:  # pragma: no cover
+    if config.DISABLE_OPTIMIZER:  # pragma: no cover
         message = "[OPTERYX] The optimizer has been disabled, 'DISABLE_OPTIMIZER' variable is TRUE."
         print(message)
         telemetry.add_message(message)

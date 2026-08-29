@@ -103,10 +103,13 @@ class LogicalPlanStepType(int, Enum):
     RenameRelation = auto()
     CreateTag = auto()
     DropTag = auto()
+    RollbackRelation = auto()
     AddColumn = auto()
     DropColumn = auto()
     RenameColumn = auto()
     AlterColumnType = auto()
+    AddRelationship = auto()
+    DropRelationship = auto()
     OptimizeRelation = auto()
     Insert = auto()
     Merge = auto()
@@ -4298,6 +4301,10 @@ def plan_alter_table(statement, **kwargs):
     ALTER TABLE [IF EXISTS] table_name ALTER COLUMN name TYPE type
     ALTER TABLE [IF EXISTS] table_name CREATE TAG name [AS OF VERSION id|CURRENT|PREVIOUS]
     ALTER TABLE [IF EXISTS] table_name DROP TAG name
+    ALTER TABLE [IF EXISTS] table_name ROLLBACK TO VERSION id|tag|PREVIOUS
+    ALTER TABLE [IF EXISTS] table_name ADD CONSTRAINT name
+        FOREIGN KEY (column) REFERENCES table (column) NOT ENFORCED
+    ALTER TABLE [IF EXISTS] table_name DROP CONSTRAINT [IF EXISTS] name
     """
     root_node = "AlterTable"
     plan = LogicalPlan()
@@ -4522,8 +4529,33 @@ def plan_alter_table(statement, **kwargs):
         plan.add_node(random_string(), alter_column_type_node)
         return plan
 
+    if "AddConstraint" in operation:
+        return _plan_add_constraint(
+            operation["AddConstraint"], relation_name, relation_name_parts, if_exists
+        )
+
+    if "DropConstraint" in operation:
+        drop_op = operation["DropConstraint"]
+        drop_behavior = drop_op.get("drop_behavior")
+        if drop_behavior is not None:
+            raise UnsupportedSyntaxError(
+                f"**ALTER TABLE ... DROP CONSTRAINT ... {drop_behavior.upper()}** is not "
+                "supported. A declared relationship is referenced by nothing, so there is "
+                "nothing for CASCADE or RESTRICT to decide."
+            )
+
+        drop_relationship_node = LogicalPlanNode(node_type=LogicalPlanStepType.DropRelationship)
+        drop_relationship_node.relation_name = relation_name
+        drop_relationship_node.relation_parts = _identifier_parts(relation_name_parts)
+        drop_relationship_node.if_exists = if_exists
+        drop_relationship_node.constraint_name = drop_op["name"]["value"]
+        drop_relationship_node.constraint_if_exists = drop_op.get("if_exists", False)
+
+        plan.add_node(random_string(), drop_relationship_node)
+        return plan
+
     if "SetTblProperties" in operation:
-        return _plan_tag_ddl(
+        return _plan_reserved_property_ddl(
             operation["SetTblProperties"].get("table_properties") or [],
             relation_name,
             if_exists,
@@ -4534,21 +4566,182 @@ def plan_alter_table(statement, **kwargs):
         "'**ALTER TABLE** ... RENAME TO ...', '**ALTER TABLE** ... ADD COLUMN ...', "
         "'**ALTER TABLE** ... DROP COLUMN ...', '**ALTER TABLE** ... RENAME COLUMN ... TO ...', "
         "'**ALTER TABLE** ... ALTER COLUMN ... TYPE ...', "
-        "'**ALTER TABLE** ... CREATE TAG ...' and '**ALTER TABLE** ... DROP TAG ...'."
+        "'**ALTER TABLE** ... CREATE TAG ...', '**ALTER TABLE** ... DROP TAG ...', "
+        "'**ALTER TABLE** ... ROLLBACK TO VERSION ...', "
+        "'**ALTER TABLE** ... ADD CONSTRAINT ... FOREIGN KEY ... REFERENCES ... NOT ENFORCED' "
+        "and '**ALTER TABLE** ... DROP CONSTRAINT ...'."
     )
+
+
+def _identifier_parts(clause) -> list:
+    """The parts of a dotted name, taken from the AST rather than re-split from text.
+
+    `extract_variable` collapses a one-part name to a bare string, which every
+    other caller wants and this one must not have: a relationship is stored as
+    split parts (workspace, collection, dataset), never as a dotted string,
+    because a dotted string has to be re-parsed by every consumer and they do
+    not all agree where the boundaries are. The parser already knows - it
+    tokenised the identifiers - so the split is taken from it once, here, and
+    never recovered from a joined string afterwards.
+    """
+    return [token["Identifier"]["value"] for token in clause]
+
+
+# Constraint kinds sqlparser can hand us. Only the informational foreign key is
+# admitted; the rest are named here so the refusal can say what was written
+# rather than "unsupported constraint".
+_CONSTRAINT_SPELLINGS = {
+    "PrimaryKey": "PRIMARY KEY",
+    "Unique": "UNIQUE",
+    "Check": "CHECK",
+    "Index": "INDEX",
+    "FulltextOrSpatial": "FULLTEXT/SPATIAL",
+}
+
+
+def _plan_add_constraint(add_op, relation_name: str, relation_name_parts, if_exists: bool):
+    """`ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... NOT ENFORCED`.
+
+    Opteryx enforces no constraints, and for that reason ADD CONSTRAINT was
+    refused outright: accepting one would imply behaviour the engine does not
+    have. Exactly one form escapes that argument, and it is the one the SQL
+    standard added for it. `NOT ENFORCED` says on its face that nothing is
+    checked, so accepting it promises nothing - it records a declaration that
+    two columns hold corresponding values, for tooling and discovery. A write
+    that breaks the relationship still succeeds.
+
+    Everything else stays refused, and `NOT ENFORCED` is never defaulted: a
+    bare FOREIGN KEY is an enforcing one, and silently reading it as
+    informational is exactly the implied behaviour this refuses to imply.
+    """
+    constraint = add_op.get("constraint")
+    kind = next(iter(constraint), None) if isinstance(constraint, dict) else constraint
+
+    if kind != "ForeignKey":
+        spelling = _CONSTRAINT_SPELLINGS.get(kind, kind)
+        raise UnsupportedSyntaxError(
+            f"**ALTER TABLE ... ADD CONSTRAINT ... {spelling}** is not supported. Opteryx "
+            "enforces no constraints, so the only one it accepts is an informational "
+            "'**FOREIGN KEY** (column) **REFERENCES** table (column) **NOT ENFORCED**', which "
+            "records that two columns hold corresponding values and is never checked."
+        )
+
+    foreign_key = constraint["ForeignKey"]
+
+    # `enforced` is False only for an explicit NOT ENFORCED. It is None when the
+    # clause was omitted entirely (a plain, enforcing foreign key) and True for
+    # an explicit ENFORCED - both of which promise validation that never happens.
+    characteristics = foreign_key.get("characteristics") or {}
+    if characteristics.get("enforced") is not False:
+        raise UnsupportedSyntaxError(
+            "**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY** must say **NOT ENFORCED**. "
+            "Opteryx never validates a foreign key - a write that breaks one succeeds - so "
+            "an enforcing constraint would promise behaviour the engine does not have. "
+            "NOT ENFORCED is not a default; it has to be written."
+        )
+
+    for spelling, key in (("DEFERRABLE", "deferrable"), ("INITIALLY", "initially")):
+        if characteristics.get(key) is not None:
+            raise UnsupportedSyntaxError(
+                f"**ALTER TABLE ... ADD CONSTRAINT ... {spelling}** is not supported. It says "
+                "when a constraint is checked, and this one is never checked."
+            )
+
+    for spelling, key in (
+        ("ON DELETE", "on_delete"),
+        ("ON UPDATE", "on_update"),
+        ("MATCH", "match_kind"),
+    ):
+        if foreign_key.get(key) is not None:
+            raise UnsupportedSyntaxError(
+                f"**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... {spelling}** is not "
+                "supported. A NOT ENFORCED foreign key is a declaration, not a rule, so there "
+                "is no referential action to take and no matching to do."
+            )
+
+    if add_op.get("not_valid"):
+        raise UnsupportedSyntaxError(
+            "**ALTER TABLE ... ADD CONSTRAINT ... NOT VALID** is not supported. It means "
+            "'do not check the rows already here, but check the ones to come', and nothing "
+            "is ever checked."
+        )
+
+    if foreign_key.get("index_name") is not None:
+        raise UnsupportedSyntaxError(
+            "**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY** does not support an index "
+            "name. Opteryx builds no index for a declared relationship."
+        )
+
+    name = foreign_key.get("name")
+    if name is None:
+        raise UnsupportedSyntaxError(
+            "**ALTER TABLE ... ADD CONSTRAINT** requires a constraint name - it is the only "
+            "handle **DROP CONSTRAINT** has on the relationship afterwards."
+        )
+
+    relation_parts = _identifier_parts(relation_name_parts)
+
+    columns = foreign_key.get("columns") or []
+    referred_columns = foreign_key.get("referred_columns") or []
+    if len(columns) != 1 or len(referred_columns) != 1:
+        raise UnsupportedSyntaxError(
+            "**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY** supports one column on each "
+            "side. What is recorded is that two columns hold corresponding values; a "
+            "composite key is a different shape and is not supported."
+        )
+
+    foreign_table_parts = _identifier_parts(foreign_key["foreign_table"])
+
+    # A relationship never leaves its workspace. The declaration is stored in the
+    # near dataset's workspace and nowhere else, so a far end outside it would be
+    # a row describing something the workspace does not contain - and the
+    # visibility model builds the read projection from one workspace's datasets,
+    # which cannot decide whether the reader may see a dataset in another. Same
+    # boundary RENAME TO enforces above, for the same reason: the two would live
+    # in different catalogs.
+    if relation_parts[0] != foreign_table_parts[0]:
+        raise UnsupportedSyntaxError(
+            f"**ALTER TABLE ... ADD CONSTRAINT ... REFERENCES** cannot cross workspaces "
+            f"({relation_name} -> {'.'.join(foreign_table_parts)}); a declared relationship "
+            "is held in the workspace of the table it is declared on, so both ends must be "
+            "in that workspace."
+        )
+
+    add_relationship_node = LogicalPlanNode(node_type=LogicalPlanStepType.AddRelationship)
+    add_relationship_node.relation_name = relation_name
+    add_relationship_node.relation_parts = relation_parts
+    add_relationship_node.if_exists = if_exists
+    add_relationship_node.constraint_name = name["value"]
+    add_relationship_node.column_name = columns[0]["value"]
+    # The dotted spelling exists only for the interfaces that take one - the
+    # connector factory and the permissions matcher. The parts are what is
+    # stored; nothing downstream re-splits this string.
+    add_relationship_node.references_relation_name = ".".join(foreign_table_parts)
+    add_relationship_node.references_relation_parts = foreign_table_parts
+    add_relationship_node.references_column_name = referred_columns[0]["value"]
+    # Declared, not derived: the FK form means many_to_one, and the engine never
+    # looks at the data to find out whether that is true.
+    add_relationship_node.cardinality = "many_to_one"
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), add_relationship_node)
+    return plan
 
 
 # Reserved property-key prefix. Keys under it are an INTERNAL transport between
 # `OpteryxDialect::parse_statement` and this module, never a spelling a reader may
-# use - see `_plan_tag_ddl`.
+# use - see `_plan_reserved_property_ddl`.
 _RESERVED_PROPERTY_PREFIX = "__opteryx."
 _TAG_ACTION_KEY = "__opteryx.tag.action"
 _TAG_NAME_KEY = "__opteryx.tag.name"
 _TAG_VERSION_KEY = "__opteryx.tag.version"
+_ROLLBACK_VERSION_KEY = "__opteryx.rollback.version"
 
 
-def _plan_tag_ddl(properties, relation_name: str, if_exists: bool):
-    """`ALTER TABLE ... CREATE TAG` / `DROP TAG`, arriving as table properties.
+def _plan_reserved_property_ddl(properties, relation_name: str, if_exists: bool):
+    """`ALTER TABLE ... CREATE TAG` / `DROP TAG` / `ROLLBACK TO VERSION`.
+
+    All three arrive as table properties.
 
     The dialect parses tag DDL itself - sqlparser has no grammar for it - but it
     cannot invent an AST node, so it hands the parsed result over inside
@@ -4578,12 +4771,25 @@ def _plan_tag_ddl(properties, relation_name: str, if_exists: bool):
             )
         values[name] = key_value["value"]["Value"]["value"]["SingleQuotedString"]
 
+    plan = LogicalPlan()
+
+    if _ROLLBACK_VERSION_KEY in values:
+        node = LogicalPlanNode(node_type=LogicalPlanStepType.RollbackRelation)
+        # Carried as text for the same reason CreateTag's is: `current`,
+        # `previous` and a tag name are all instructions to go and ask the
+        # catalog something, and a planner that resolved them would be reading
+        # the catalog to build a plan that then reads it again.
+        node.version_spec = values[_ROLLBACK_VERSION_KEY]
+        node.relation_name = relation_name
+        node.if_exists = if_exists
+        plan.add_node(random_string(), node)
+        return plan
+
     if _TAG_ACTION_KEY not in values:
         raise UnsupportedSyntaxError(
             "**ALTER TABLE ... SET TBLPROPERTIES** is not supported."
         )
 
-    plan = LogicalPlan()
     if values[_TAG_ACTION_KEY] == "create":
         node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTag)
         # Carried as text, not resolved here: CURRENT and PREVIOUS name a snapshot

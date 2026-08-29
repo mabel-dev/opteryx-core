@@ -89,7 +89,18 @@ struct OpStats {
 struct GlobalSourceState { virtual ~GlobalSourceState() = default; };
 struct LocalSourceState  { virtual ~LocalSourceState()  = default; };
 struct OperatorState     { virtual ~OperatorState()     = default; };
-struct GlobalSinkState   { virtual ~GlobalSinkState()   = default; };
+// `exec_dop` is the width the pipeline that produced this state actually ran at.
+// Set once by run_pipeline_impl immediately after make_global(), before any worker
+// starts, and read only in finalize() — which runs after every worker has joined,
+// so the write happens-before the read with no atomic needed. It exists because
+// finalize() is the breaker's own parallel phase (GroupBySink merges its 64
+// partitions concurrently) and had no way to know the query's authorised width:
+// it derived one from hardware_concurrency() capped at 16, which on a 32-192 vCPU
+// host silently held the merge to 16 threads no matter the DOP, and made the merge
+// cost identical at DOP 2 and DOP 16 (measured 2026-08-29). DOP is already resolved
+// from the core count by resolve_max_execution_workers; deriving a SECOND width
+// from the hardware behind its back is how the two disagreed.
+struct GlobalSinkState   { virtual ~GlobalSinkState()   = default; int exec_dop = 1; };
 struct LocalSinkState    { virtual ~LocalSinkState()    = default; };
 
 enum class SourceResult { HAVE_MORE, FINISHED };

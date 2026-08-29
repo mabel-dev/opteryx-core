@@ -646,12 +646,17 @@ def execute_logical_plan(
     telemetry.time_planning_relation_resolver += time.monotonic_ns() - start
 
     # Must run AFTER relation resolution and BEFORE the binder, exactly as query_planner
-    # orders it. An externally-supplied plan carries no subqueries of its own -- but once
+    # orders it. An externally-supplied plan carries no such shapes of its own -- but once
     # the resolver splices a VIEW body into it, it carries whatever SQL that view was
-    # written in. Constructs like IN (<subquery>) and INTERSECT/EXCEPT are *lowered* here
-    # (to semi/anti joins); nothing downstream can execute them un-lowered -- there is no
-    # physical operator for an InSubQuery -- so omitting this stage does not merely
-    # forfeit an optimisation, it makes any view containing one fail at execution.
+    # written in. INTERSECT ALL / EXCEPT ALL are *lowered* here (to ROW_NUMBER plus a
+    # semi/anti join) and aggregate Window nodes are turned into joins; nothing downstream
+    # can execute either un-lowered, so omitting this stage does not merely forfeit an
+    # optimisation, it makes any view containing one fail at execution.
+    #
+    # NOT here, though both used to be: IN (<subquery>) and EXISTS lower in the OPTIMIZER
+    # (post-bind -- which side of `WHERE a = b` is the outer reference is undecidable from
+    # query text and needs schema to settle), and the DISTINCT forms of INTERSECT/EXCEPT
+    # lower in the BINDER. See plan_rewriter/strategies/__init__.py, which is the list.
     start = time.monotonic_ns()
     logical_plan = do_plan_rewrite(logical_plan, telemetry)
     telemetry.time_planning_plan_rewriter += time.monotonic_ns() - start

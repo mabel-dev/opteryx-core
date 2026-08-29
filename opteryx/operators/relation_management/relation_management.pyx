@@ -24,6 +24,8 @@ from typing import Optional
 
 from opteryx.constants import QueryStatus
 from opteryx.exceptions import DatasetNotFoundError
+from opteryx.managers.relationships import declare_relationship
+from opteryx.managers.relationships import drop_relationship
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
@@ -69,11 +71,21 @@ class RelationManagementNode(BasePlanNode):
         self.new_column_name: Optional[str] = parameters.get("new_column_name")
         self.new_column_type = parameters.get("new_column_type")
 
-        # CREATE / DROP TAG
+        # ADD / DROP CONSTRAINT (declared column relationships)
+        self.constraint_name: Optional[str] = parameters.get("constraint_name")
+        self.constraint_if_exists: bool = parameters.get("constraint_if_exists", False)
+        # Split parts, never a dotted string - see opteryx.managers.relationships.
+        self.relation_parts = parameters.get("relation_parts")
+        self.references_relation_name: Optional[str] = parameters.get("references_relation_name")
+        self.references_relation_parts = parameters.get("references_relation_parts")
+        self.references_column_name: Optional[str] = parameters.get("references_column_name")
+        self.cardinality: Optional[str] = parameters.get("cardinality")
+
+        # CREATE / DROP TAG, ROLLBACK TO VERSION
         self.tag_name: Optional[str] = parameters.get("tag_name")
-        # "current" | "previous" | a snapshot id as text. Left as the reader wrote
-        # it: resolving CURRENT or PREVIOUS is a catalog read, and the connector
-        # is what holds the catalog.
+        # "current" | "previous" | a tag name | a snapshot id as text. Left as the
+        # reader wrote it: resolving any of the first three is a catalog read,
+        # and the connector is what holds the catalog.
         self.version_spec: Optional[str] = parameters.get("version_spec")
 
         # DROP TRIGGER
@@ -128,6 +140,14 @@ class RelationManagementNode(BasePlanNode):
             return f"rename column {self.column_name} to {self.new_column_name} on {self.relation_name}"
         if self.action == "alter_column_type":
             return f"alter column {self.column_name} on {self.relation_name} to {self.new_column_type}"
+        if self.action == "add_relationship":
+            return (
+                f"add constraint {self.constraint_name} on {self.relation_name} "
+                f"({self.column_name}) references {self.references_relation_name} "
+                f"({self.references_column_name}) not enforced"
+            )
+        if self.action == "drop_relationship":
+            return f"drop constraint {self.constraint_name} on {self.relation_name}"
         if self.action == "optimize_relation":
             return f"optimize {self.relation_name}"
         if self.action == "alter_workspace":
@@ -138,6 +158,8 @@ class RelationManagementNode(BasePlanNode):
             return f"create tag {self.tag_name} on {self.relation_name} as of {self.version_spec}"
         if self.action == "drop_tag":
             return f"drop tag {self.tag_name} on {self.relation_name}"
+        if self.action == "rollback_relation":
+            return f"rollback {self.relation_name} to version {self.version_spec}"
         if self.action == "drop_trigger":
             return f"drop trigger {self.trigger_name} on {self.table_name}"
         if self.action == "alter_materialized_view_suspended":
@@ -246,6 +268,40 @@ class RelationManagementNode(BasePlanNode):
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
+        elif self.action == "add_relationship":
+            if not self.connector.relation_exists(self.relation_name):
+                if self.if_exists:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            # The store is NOT the near relation's catalog - a relationship
+            # between two workspaces has no single-workspace home - so this does
+            # not go through the connector. See opteryx.managers.relationships:
+            # the seam is unwired on purpose and raises rather than guessing a
+            # location for the row.
+            declare_relationship(
+                relation_parts=self.relation_parts,
+                column_name=self.column_name,
+                references_relation_parts=self.references_relation_parts,
+                references_column_name=self.references_column_name,
+                constraint_name=self.constraint_name,
+                cardinality=self.cardinality,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_relationship":
+            if not self.connector.relation_exists(self.relation_name):
+                if self.if_exists:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
+            drop_relationship(
+                relation_parts=self.relation_parts,
+                constraint_name=self.constraint_name,
+                if_exists=self.constraint_if_exists,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
         elif self.action == "optimize_relation":
             if not self.connector.relation_exists(self.relation_name):
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
@@ -345,6 +401,14 @@ class RelationManagementNode(BasePlanNode):
             self.connector.drop_tag(
                 self.relation_name,
                 self.tag_name,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "rollback_relation":
+            self.connector.rollback_relation(
+                self.relation_name,
+                self.version_spec,
                 author=self._author,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)

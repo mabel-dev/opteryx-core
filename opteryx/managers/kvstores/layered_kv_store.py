@@ -13,7 +13,7 @@ from threading import RLock
 from typing import Iterable
 from typing import Union
 
-from opteryx.config import MAX_CONSECUTIVE_CACHE_FAILURES
+from opteryx import config
 from opteryx.managers.kvstores.base_kv_store import BaseKeyValueStore
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ class LayeredKeyValueStore(BaseKeyValueStore):
 
                 if (
                     getattr(layer.store, "_consecutive_failures", 0)
-                    >= MAX_CONSECUTIVE_CACHE_FAILURES
+                    >= config.MAX_CONSECUTIVE_CACHE_FAILURES
                 ):
                     last_error = RuntimeError(
                         f"layer {layer_index} unavailable due to consecutive backend failures"
@@ -125,7 +125,7 @@ class LayeredKeyValueStore(BaseKeyValueStore):
 
                 if (
                     getattr(layer.store, "_consecutive_failures", 0)
-                    >= MAX_CONSECUTIVE_CACHE_FAILURES
+                    >= config.MAX_CONSECUTIVE_CACHE_FAILURES
                 ):
                     last_error = RuntimeError(
                         f"layer {layer_index} unavailable due to consecutive backend failures"

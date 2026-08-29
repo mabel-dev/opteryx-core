@@ -78,9 +78,17 @@ def test_the_case_the_reader_typed_reaches_the_catalog():
     assert node.tag_name == "Report_202602"
 
 
-def test_a_version_that_is_neither_a_number_nor_a_keyword_is_refused():
+def test_create_tag_as_of_current():
+    node = _plan_node("ALTER TABLE reports CREATE TAG r1 AS OF VERSION CURRENT")
+    assert node.version_spec == "current"
+
+
+def test_the_old_spelling_latest_names_the_word_that_replaced_it():
+    """One concept, one name. `latest` is retired, not aliased: somebody who
+    wrote it needs to be told CURRENT, not silently given the old behaviour and
+    not told that what they wrote is unrecognisable."""
     with pytest.raises(Exception) as err:
-        _plan_node("ALTER TABLE reports CREATE TAG r1 AS OF VERSION nonsense")
+        _plan_node("ALTER TABLE reports CREATE TAG r1 AS OF VERSION LATEST")
     assert "CURRENT" in str(err.value)
 
 

@@ -27,9 +27,11 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-# `"name": (TYPE, config.CONSTANT, ...` — links a system variable to the config
-# constant supplying its default.
-_VARIABLE_TO_CONFIG = re.compile(r'"([a-z0-9_]+)":\s*\([^,]+,\s*config\.([A-Z0-9_]+)')
+# `"name": (TYPE, FromConfig("CONSTANT"), ...` — links a system variable to the
+# config constant supplying its default. The table holds the constant's NAME, not
+# its value, so that the default is read per session instead of being frozen at
+# import (see FromConfig in opteryx/variables.py); this pattern tracks that form.
+_VARIABLE_TO_CONFIG = re.compile(r'"([a-z0-9_]+)":\s*\([^,]+,\s*FromConfig\("([A-Z0-9_]+)"')
 
 # config's OWN get()/get_bool() helpers, never `environ.get(...)` — matching the
 # latter let a statement slice pick up an unrelated feature-flag key as a
@@ -86,13 +88,22 @@ def _variable_environment_keys() -> dict[str, str]:
     for index, match in enumerate(matches):
         constant = match.group(1)
         end = matches[index + 1].start() if index + 1 < len(matches) else len(config_source)
+        if constant in config_keys:
+            # The constant's OWN name is a get() key, so that is its environment
+            # key — checked BEFORE the positional scan because the scan is only a
+            # heuristic and can capture the wrong key entirely.
+            #
+            # MAX_EXECUTION_WORKER_CAP is the case that proved it: its get() sits on
+            # an earlier helper line (`_max_worker_cap_raw`), so the slice from its
+            # own assignment runs on to the NEXT constant and finds
+            # get("MAX_EXECUTION_WORKERS") — publishing the cap as being configured
+            # by the worker-count env var. An exact name match is unambiguous where
+            # a forward scan is a guess, so it wins.
+            config_to_env[constant] = constant
+            continue
         found = _CONFIG_ENV_KEY.search(config_source, match.end(), end)
         if found is not None:
             config_to_env[constant] = found.group(1)
-        elif constant in config_keys:
-            # Assigned from an intermediate (e.g. MAX_EXECUTION_WORKERS, whose
-            # get() is on an earlier helper line) but the key shares its name.
-            config_to_env[constant] = constant
 
     mapping: dict[str, str] = {}
     for variable, constant in _VARIABLE_TO_CONFIG.findall(_source_of(variables_module)):
@@ -103,6 +114,14 @@ def _variable_environment_keys() -> dict[str, str]:
 
 
 def _json_safe(value: Any) -> Any:
+    # A config-backed default reaches the catalog as the marker naming its config
+    # constant. Such variables normally take the "environment" branch below and
+    # never emit a default at all; reading the marker here means a regex that ever
+    # stops matching produces a real value rather than a `FromConfig(...)` repr.
+    from opteryx.variables import FromConfig
+
+    if isinstance(value, FromConfig):
+        value = value.read()
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (list, tuple)):

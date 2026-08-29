@@ -23,7 +23,8 @@ class DatasetDescriptor:
         format_version: Metadata format version (currently 1)
         relation_name: Fully-qualified relation name (e.g., "schema.sub.events")
         schema: RelationSchema defining the table structure
-        current_snapshot: Filename of current snapshot, or None for empty relation
+        current_snapshot: Filename of the CURRENT snapshot - the one an
+            unqualified read returns - or None for an empty relation
         created_at: ISO 8601 UTC timestamp when relation was created
     """
 
@@ -39,6 +40,11 @@ class DatasetDescriptor:
             "format_version": self.format_version,
             "relation_name": self.relation_name,
             "schema": self.schema.to_dict(),
+            # The attribute and the stored key are the same word now. They were
+            # not: the key has always been `current_snapshot` while the attribute
+            # said `latest`, and the two were mapped across on every read and
+            # write. The rename retires `latest`, so the mapping is gone rather
+            # than reversed - there is one name and nothing to keep in step.
             "current_snapshot": self.current_snapshot,
             "created_at": self.created_at,
         }

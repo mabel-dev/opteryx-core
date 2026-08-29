@@ -93,28 +93,44 @@ _COMPARE_OPS = {"Eq", "NotEq", "Lt", "Gt", "LtEq", "GtEq"}
 _oversubscribe_warned = False
 
 
-def resolve_worker_count(requested) -> int:
-    """Effective degree of parallelism. Unset/"auto" is softcoded —
-    `min(config.MAX_EXECUTION_WORKER_CAP, max(2, cpu - 2))` — while an explicit positive
+def resolve_worker_count(requested, cap) -> int:
+    """Effective degree of parallelism. Unset/"auto" is softcoded — `min(cap,
+    max(2, cpu - 2))`, with `cap` supplied by the caller — while an explicit positive
     request is HONOURED EXACTLY (warned if oversubscribed, never silently reduced). DOP is
     a number, never a code-path selector.
 
     The floor is 2, not 1: on a 2-vCPU host `cpu - 2` is 0, and the old `max(1, ...)`
     turned that into single-worker execution. Two workers keeps a tiny host parallel at
     all without meaningfully oversubscribing it. It is deliberately LOWER than the parquet
-    IO floor of 4 (`PARQUET_LOCAL_IO_WORKER_CAP`'s docstring carries that side): IO threads
+    IO floor of 4 (`config.resolve_parquet_local_io_workers` carries that side): IO threads
     spend their life blocked on the page cache, execution threads spend it on CPU, so the
     IO pool tolerates a wider floor than the engine does. A cap below 2 still wins (cap 1
     gives 1) — an explicit ceiling is never overridden by the floor.
 
-    The cap is read from config at CALL time, not bound at import, so a sweep can move
-    it — via the `MAX_EXECUTION_WORKER_CAP` env var or by setting the config attribute —
-    the same way the tests already move `MAX_EXECUTION_WORKERS`."""
+    The cap is passed in, resolved by the caller through the same session-variable
+    chain as `requested` (`max_execution_worker_cap`), so `SHOW VARIABLES` and the
+    engine cannot disagree about it and a `SET` reaches execution. It used to be read
+    straight off `config` here, which left it invisible to `SHOW VARIABLES` entirely.
+
+    `MAX_EXECUTION_WORKERS` reaches this function through the session variable rather
+    than through config, and that route used to be frozen: the system-variable table
+    seeded itself from `config` at import, so assigning the config attribute at runtime
+    did nothing. This docstring asserted the opposite ("the same way the tests already
+    move MAX_EXECUTION_WORKERS") and is a fair part of why six call sites believed it.
+    The defaults are now read per session (see FromConfig in opteryx/variables.py), so
+    both knobs are live — but note they are NOT interchangeable: the cap only applies on
+    the auto branch below, and an explicit positive request bypasses it entirely."""
     from opteryx import config
 
     cpu = os.cpu_count() or 1
     if requested is None or requested <= 0:
-        return min(config.MAX_EXECUTION_WORKER_CAP, max(2, cpu - 2))
+        # Delegated, not repeated: `config.resolve_max_execution_workers` is the one
+        # derivation of the auto branch, and the system-variable table applies the
+        # SAME function so the row and the engine cannot disagree. Reachable only for
+        # a caller with no session (EXPLAIN-only paths, direct-construction tests) —
+        # a session arrives here already resolved, and re-entering as an explicit
+        # positive request is idempotent.
+        return config.resolve_max_execution_workers(requested, cap)
     requested = int(requested)
     if requested > cpu:
         global _oversubscribe_warned
@@ -3423,10 +3439,12 @@ class _Compiler:
                 "parquet_gcs_io_workers",
                 getattr(scan.properties, "variables", None),
                 config.PARQUET_GCS_IO_WORKERS,
-            ) if connector_type in ("GCS", "GS", "S3") else _resolve_var(
-                "parquet_local_io_workers",
-                getattr(scan.properties, "variables", None),
-                config.PARQUET_LOCAL_IO_WORKERS,
+            ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
+                _resolve_var(
+                    "parquet_local_io_workers",
+                    getattr(scan.properties, "variables", None),
+                    config.PARQUET_LOCAL_IO_WORKERS,
+                )
             ),
             predicates=pruning or None,
             file_sizes=file_sizes or None,
@@ -3621,10 +3639,12 @@ class _Compiler:
             "parquet_gcs_io_workers",
             getattr(scan.properties, "variables", None),
             config.PARQUET_GCS_IO_WORKERS,
-        ) if connector_type in ("GCS", "GS", "S3") else _resolve_var(
-            "parquet_local_io_workers",
-            getattr(scan.properties, "variables", None),
-            config.PARQUET_LOCAL_IO_WORKERS,
+        ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
+            _resolve_var(
+                "parquet_local_io_workers",
+                getattr(scan.properties, "variables", None),
+                config.PARQUET_LOCAL_IO_WORKERS,
+            )
         )
         # Row-group pruning triples — identical to the single-pass path, applied to
         # BOTH plans so the two agree on which row groups exist. Pass 2 re-submits
@@ -5536,7 +5556,10 @@ def execute_native(plan, telemetry=None, trace_sink=None):
         getattr(plan[_first_nid].properties, "variables", None) if _first_nid is not None else None
     )
     dop = resolve_worker_count(
-        _resolve_var("max_execution_workers", _query_variables, config.MAX_EXECUTION_WORKERS)
+        _resolve_var("max_execution_workers", _query_variables, config.MAX_EXECUTION_WORKERS),
+        _resolve_var(
+            "max_execution_worker_cap", _query_variables, config.MAX_EXECUTION_WORKER_CAP
+        ),
     )
 
     # Gap #3 Phase 2b: the exec pool is now constructed BEFORE compilation (moved

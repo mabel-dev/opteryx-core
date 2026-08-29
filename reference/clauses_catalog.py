@@ -22,10 +22,12 @@ CLAUSE_DEFINITIONS = {
             "ALTER TABLE [IF EXISTS] table_name RENAME TO new_table_name",
             "ALTER TABLE [IF EXISTS] table_name CREATE TAG tag_name [AS OF VERSION snapshot_id | CURRENT | PREVIOUS]",
             "ALTER TABLE [IF EXISTS] table_name DROP TAG tag_name",
+            "ALTER TABLE [IF EXISTS] table_name ADD CONSTRAINT constraint_name FOREIGN KEY (column) REFERENCES table_name (column) NOT ENFORCED",
+            "ALTER TABLE [IF EXISTS] table_name DROP CONSTRAINT [IF EXISTS] constraint_name",
         ],
         "summary": (
-            "Change a table's columns, its clustering columns, its name, or the "
-            "tags naming its snapshots."
+            "Change a table's columns, its clustering columns, its name, the "
+            "tags naming its snapshots, or the relationships declared on it."
         ),
         "documentation": (
             "ADD/DROP/RENAME COLUMN and ALTER COLUMN ... TYPE change the table's "
@@ -40,7 +42,10 @@ CLAUSE_DEFINITIONS = {
             "expiry until the tag is dropped; the version defaults to CURRENT, "
             "the name may be quoted or bare and folds to lowercase, and the "
             "storage a tag pins is charged. DROP TAG releases it, which returns "
-            "the snapshot to the ordinary retention rules at once."
+            "the snapshot to the ordinary retention rules at once. ADD CONSTRAINT "
+            "records an informational foreign key: a declaration that one column holds "
+            "values corresponding to another, which nothing enforces and nothing plans "
+            "from. DROP CONSTRAINT removes one by name."
         ),
         "notes": (
             "One operation per statement. CLUSTER BY takes column names, not "
@@ -52,10 +57,19 @@ CLAUSE_DEFINITIONS = {
             "COLUMN) makes an already-settled COLUMN a no-op, which is what makes a "
             "migration script re-runnable. "
             "ALTER COLUMN ... TYPE rejects narrowing, integer-to-float, "
-            "cross-family changes, no-ops and USING. SET DEFAULT, DROP DEFAULT, SET "
-            "NOT NULL and ADD CONSTRAINT are rejected at plan time - the engine "
-            "enforces no constraints, so accepting them would imply behaviour it "
-            "does not have."
+            "cross-family changes, no-ops and USING. SET DEFAULT, DROP DEFAULT and SET "
+            "NOT NULL are rejected at plan time - the engine enforces no constraints, so "
+            "accepting them would imply behaviour it does not have. ADD CONSTRAINT admits "
+            "exactly one form on that same reasoning: 'FOREIGN KEY (column) REFERENCES "
+            "table (column) NOT ENFORCED', which says on its face that nothing is checked "
+            "and so implies nothing. It records that two columns hold corresponding values, "
+            "for tooling and discovery; a write that breaks the relationship still "
+            "succeeds, and the engine never uses the declaration to plan or rewrite a "
+            "query. NOT ENFORCED is never defaulted - a bare FOREIGN KEY is an enforcing "
+            "one and stays rejected, as do PRIMARY KEY, UNIQUE and CHECK, along with ON "
+            "DELETE/ON UPDATE/MATCH, DEFERRABLE and NOT VALID. The constraint must be "
+            "named (DROP CONSTRAINT has no other handle) and takes one column on each "
+            "side. DROP CONSTRAINT removes it by name and rejects CASCADE/RESTRICT."
         ),
     },
     "alter_view": {

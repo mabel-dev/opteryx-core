@@ -15,7 +15,7 @@ class Diachronic:
 
     def __init__(self, **kwargs):
         self.at_date = kwargs.get("at_date")
-        # A snapshot id, or 0 meaning "the parent of the current snapshot" - see
+        # A snapshot id, or 0 meaning "the previous version of the data" - see
         # extract_timetravel_version. None unless the query used VERSION AS OF.
         self.version = kwargs.get("version")
         # A tag NAMES a snapshot; it does not carry one. Kept separate from

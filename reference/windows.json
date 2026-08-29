@@ -376,8 +376,8 @@
             "COUNT_DISTINCT": {
                 "over_empty": true,
                 "over_partition_by": true,
-                "over_order_by": false,
-                "over_frame": false
+                "over_order_by": true,
+                "over_frame": true
             },
             "MAX": {
                 "over_empty": true,

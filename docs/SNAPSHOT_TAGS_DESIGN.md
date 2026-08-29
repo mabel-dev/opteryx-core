@@ -130,7 +130,7 @@ exists to make impossible.
 method is derived from that list, so naming the derived sites as separate edits (as an
 earlier draft did) invites three hand-maintained copies of one rule and permanent drift.
 Add the tagged snapshots to the retained set, after BOTH retention branches so the
-`retention_days` None/0 "keep only the latest" branch is covered too, and the three
+`retention_days` None/0 "keep only the current" branch is covered too, and the three
 protections follow on their own:
 
 1. **Not an expiry candidate** — `snapshots_to_delete` is the complement of the
@@ -315,8 +315,16 @@ evidence for *why* the dialect hook is the answer rather than a matter of taste.
 `CURRENT` and `PREVIOUS` are resolved to a concrete snapshot id **at creation time** —
 a tag stores an id, never a selector, or it would not be immutable.
 
-`CURRENT` is DDL-only. `VERSION AS OF CURRENT` on a read is just a read, and adding a
-second spelling for "no time travel" earns nothing.
+Amended 2026-08-29: this selector was briefly spelled `LATEST`. The head has one name
+now — `current` — in the catalog, in `SHOW SNAPSHOTS FOR` and in this grammar, and
+`VERSION AS OF CURRENT` resolves on a read too, against the virtual `current` tag (§8).
+`latest` is retired, not aliased: it is container-image vocabulary claiming a recency
+this pointer does not promise, since a rollback moves the head backwards. `LATEST` is
+refused with a message naming `CURRENT`, rather than left to a generic "expected a
+snapshot id": somebody who wrote the old word needs to be told the new one.
+
+`PREVIOUS` means the previous version of the **data**, not the parent snapshot. See
+[SNAPSHOT_ROLLBACK_DESIGN.md](SNAPSHOT_ROLLBACK_DESIGN.md) §3.
 
 ---
 
@@ -354,6 +362,17 @@ current data.
 `SHOW SNAPSHOTS FOR <relation>` gains a `tags` column (list of names on that snapshot),
 built in `normalize_snapshot` ([opteryx/models/snapshot_history.py](../opteryx/models/snapshot_history.py))
 and typed in the shared schema map there.
+
+Amended 2026-08-29: the column also carries the **virtual tags `current`** (on the head)
+and **`previous`** (on the previous version of the DATA). Neither is in the tags
+subcollection and neither pins anything — `current` names whichever snapshot the head
+points at today and moves when a rollback moves the head, and `previous` is resolved
+through `previous_user_snapshot`, the SAME resolver `VERSION AS OF PREVIOUS` reads
+through, so it steps over compaction and statistics commits that changed no rows. They
+are in this column because this column is where a reader finds out what names resolve,
+and `VERSION AS OF current` reads exactly like `VERSION AS OF <any tag>`. `current` and
+`previous` are reserved: `normalize_tag_name` refuses both, so no real tag can shadow
+either.
 
 Ruled 2026-08-25: this is the listing surface. A separate `SHOW TAGS FOR` is not
 proposed: every tag is on exactly one snapshot, so the snapshot listing already has a

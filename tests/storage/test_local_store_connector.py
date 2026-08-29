@@ -13,6 +13,7 @@ import pytest
 
 from opteryx.connectors.local_store_connector import LocalStoreConnector
 from opteryx.exceptions import ConcurrentModificationError
+from opteryx.exceptions import DatasetNotFoundError
 from opteryx.expression import NodeType
 from opteryx.models import Node
 from opteryx.models.file_entry import FileEntry
@@ -135,8 +136,13 @@ def test_drop_relation_removes_folder(connector, simple_schema):
 
 
 def test_drop_relation_missing_raises(connector):
-    """Test drop_relation with missing table."""
-    with pytest.raises(ValueError, match="relation does not exist"):
+    """Test drop_relation with missing table.
+
+    DatasetNotFoundError, not a bare ValueError: a missing relation is the same
+    condition however it is reached, and the catalog connector has always
+    reported it this way.
+    """
+    with pytest.raises(DatasetNotFoundError):
         connector.drop_relation("nonexistent")
 
     # With if_exists=True, should not raise

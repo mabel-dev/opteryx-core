@@ -191,6 +191,7 @@ fn parse_guarded_add_column(
 const TAG_ACTION_KEY: &str = "__opteryx.tag.action";
 const TAG_NAME_KEY: &str = "__opteryx.tag.name";
 const TAG_VERSION_KEY: &str = "__opteryx.tag.version";
+const ROLLBACK_VERSION_KEY: &str = "__opteryx.rollback.version";
 
 /// `ALTER TABLE [IF EXISTS] [ONLY] name (CREATE|DROP) TAG ...`, or nothing.
 struct TagDdl {
@@ -247,20 +248,27 @@ fn parse_tag_name(parser: &mut Parser) -> Result<String, ParserError> {
     }
 }
 
-/// `AS OF VERSION <snapshot id | CURRENT | PREVIOUS>`, defaulting to CURRENT.
+/// A version somebody named: `<snapshot id | CURRENT | PREVIOUS>`.
 ///
-/// Returned as text for the planner to interpret, because these are three
-/// different KINDS of answer - a literal id, and two instructions to go and look
-/// one up - and flattening them to a number here would need the catalog, which a
-/// parser does not have and must not acquire.
+/// Returned as TEXT for the planner to interpret, because these are different
+/// KINDS of answer - a literal id, and two instructions to go and look one up -
+/// and flattening them to a number here would need the catalog, which a parser
+/// does not have and must not acquire.
 ///
-/// CURRENT and PREVIOUS are matched as identifiers rather than keywords: PREVIOUS
-/// is not one, and reading both the same way keeps the two spellings symmetrical.
-fn parse_tag_version(parser: &mut Parser) -> Result<String, ParserError> {
-    if !parser.parse_keywords(&[Keyword::AS, Keyword::OF, Keyword::VERSION]) {
-        return Ok("current".to_string());
-    }
-
+/// CURRENT and PREVIOUS are matched as identifiers rather than keywords: neither
+/// is one here, and reading both the same way keeps the spellings symmetrical.
+///
+/// `LATEST` was the older spelling of CURRENT and is refused BY NAME rather than
+/// left to the generic "expected a snapshot id" message. The concept has one name
+/// now - the head is `current` in the catalog, in `SHOW SNAPSHOTS` and in this
+/// grammar - and somebody who wrote the old word needs to be told the new one,
+/// not told that what they wrote is unrecognisable.
+///
+/// The refusal runs the other way round to the one it replaces: `latest` claimed
+/// a recency this pointer does not promise - it names whichever snapshot the head
+/// points at, which a rollback can move BACKWARDS. `current` says only that, and
+/// is the word Iceberg, Delta and Hudi already use for it.
+fn parse_version_spec(parser: &mut Parser, what: &str) -> Result<String, ParserError> {
     let token = parser.peek_token();
     match &token.token {
         Token::Number(digits, _) => {
@@ -268,15 +276,35 @@ fn parse_tag_version(parser: &mut Parser) -> Result<String, ParserError> {
             Ok(digits.clone())
         }
         Token::Word(_) => {
-            let word = parser.parse_identifier()?.value.to_uppercase();
-            match word.as_str() {
+            let word = parser.parse_identifier()?.value;
+            match word.to_uppercase().as_str() {
                 "CURRENT" => Ok("current".to_string()),
                 "PREVIOUS" => Ok("previous".to_string()),
-                _ => parser.expected("a snapshot id, CURRENT or PREVIOUS", token),
+                "LATEST" => Err(ParserError::ParserError(
+                    "LATEST is spelled CURRENT. The snapshot a dataset reads by \
+                     default is its CURRENT snapshot, in SQL and in the catalog \
+                     alike - `current` names the snapshot the catalog points at \
+                     now, and claims nothing about which snapshot is newest."
+                        .to_string(),
+                )),
+                _ => Ok(word),
             }
         }
-        _ => parser.expected("a snapshot id, CURRENT or PREVIOUS", token),
+        Token::SingleQuotedString(value) => {
+            let value = value.clone();
+            parser.next_token();
+            Ok(value)
+        }
+        _ => parser.expected(what, token),
     }
+}
+
+/// `AS OF VERSION <snapshot id | CURRENT | PREVIOUS>`, defaulting to CURRENT.
+fn parse_tag_version(parser: &mut Parser) -> Result<String, ParserError> {
+    if !parser.parse_keywords(&[Keyword::AS, Keyword::OF, Keyword::VERSION]) {
+        return Ok("current".to_string());
+    }
+    parse_version_spec(parser, "a snapshot id, CURRENT or PREVIOUS")
 }
 
 /// The rest of a tag statement, once `TAG` has been seen and it can be nothing
@@ -336,6 +364,68 @@ fn parse_tag_ddl(parser: &mut Parser, prefix: TagDdl) -> Result<Statement, Parse
     }))
 }
 
+/// `ALTER TABLE [IF EXISTS] [ONLY] name ROLLBACK TO VERSION`, or nothing.
+struct RollbackDdl {
+    name: ObjectName,
+    if_exists: bool,
+    only: bool,
+}
+
+/// Errors mean "this is not that statement" and are discarded by the caller's
+/// `maybe_parse`, which rewinds the parser. Nothing here is a diagnostic.
+fn parse_rollback_ddl_prefix(parser: &mut Parser) -> Result<RollbackDdl, ParserError> {
+    parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
+    let if_exists = parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+    let only = parser.parse_keyword(Keyword::ONLY);
+    let name = parser.parse_object_name(false)?;
+
+    // All three words commit us. `ROLLBACK` alone is the transaction statement,
+    // which never follows a table name, but the probe rewinds on a miss anyway
+    // so nothing here depends on that.
+    if !parser.parse_keywords(&[Keyword::ROLLBACK, Keyword::TO, Keyword::VERSION]) {
+        return Err(ParserError::ParserError("not rollback DDL".to_string()));
+    }
+
+    Ok(RollbackDdl {
+        name,
+        if_exists,
+        only,
+    })
+}
+
+/// The rest of a rollback statement, once `ROLLBACK TO VERSION` has been seen
+/// and it can be nothing else. Errors from here ARE diagnostics.
+///
+/// Travels to the planner on the same internal transport tag DDL uses, and for
+/// the same reason: `AlterTableOperation` has no variant for this, and inventing
+/// one means forking sqlparser. See `parse_tag_ddl` for the full argument.
+///
+/// The version is carried as text and resolved against the catalog by the
+/// connector - `current`, `previous`, a snapshot id, or a tag name, which is
+/// unambiguous because `current` and `previous` are names no tag may take.
+fn parse_rollback_ddl(parser: &mut Parser, prefix: RollbackDdl) -> Result<Statement, ParserError> {
+    let version = parse_version_spec(parser, "a snapshot id, a tag name, or PREVIOUS")?;
+
+    let end_token = if parser.peek_token_ref().token == Token::SemiColon {
+        parser.peek_token_ref().clone()
+    } else {
+        parser.get_current_token().clone()
+    };
+
+    Ok(Statement::AlterTable(AlterTable {
+        name: prefix.name,
+        if_exists: prefix.if_exists,
+        only: prefix.only,
+        operations: vec![AlterTableOperation::SetTblProperties {
+            table_properties: vec![property(ROLLBACK_VERSION_KEY, &version)],
+        }],
+        location: None,
+        on_cluster: None,
+        table_type: None,
+        end_token: AttachedToken(end_token),
+    }))
+}
+
 /// One transport property. The key is an UNQUOTED identifier containing dots,
 /// which is a shape reader text cannot produce - a bare key cannot contain a dot,
 /// and a quoted one arrives carrying its quote style - so the planner can tell a
@@ -348,9 +438,10 @@ fn property(key: &str, value: &str) -> SqlOption {
 }
 
 impl Dialect for OpteryxDialect {
-    /// Opteryx owns two `ALTER TABLE` productions: snapshot tag DDL, which
-    /// upstream has no grammar for at all (see `parse_tag_ddl`), and
-    /// `ADD COLUMN IF NOT EXISTS` - see `parse_guarded_add_column_prefix`.
+    /// Opteryx owns three `ALTER TABLE` productions: snapshot tag DDL and
+    /// `ROLLBACK TO VERSION`, which upstream has no grammar for at all (see
+    /// `parse_tag_ddl` and `parse_rollback_ddl`), and `ADD COLUMN IF NOT
+    /// EXISTS` - see `parse_guarded_add_column_prefix`.
     ///
     /// Upstream gates the column-level guard on `dialect_of!(self is PostgreSql |
     /// BigQuery | DuckDb | Generic)` with no trait flag to opt into, so a custom
@@ -385,6 +476,12 @@ impl Dialect for OpteryxDialect {
         // probes rewind on a miss, so the order costs nothing but a peek.
         match parser.maybe_parse(parse_tag_ddl_prefix) {
             Ok(Some(prefix)) => return Some(parse_tag_ddl(parser, prefix)),
+            Ok(None) => {}
+            Err(err) => return Some(Err(err)),
+        }
+
+        match parser.maybe_parse(parse_rollback_ddl_prefix) {
+            Ok(Some(prefix)) => return Some(parse_rollback_ddl(parser, prefix)),
             Ok(None) => {}
             Err(err) => return Some(Err(err)),
         }

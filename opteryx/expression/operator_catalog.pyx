@@ -991,7 +991,7 @@ OPERATOR_DEFINITIONS = {
     ),
     "LongArrow": OperatorDefinition(
         summary="JSON text extraction operator.",
-        documentation="Returns the selected JSON value encoded as a blob or text-like binary value.",
+        documentation="Returns the selected JSON value as text (nvarchar), from a document given as text or binary JSON.",
         token="->>",
         category="extraction",
         node_kind="extraction",

@@ -45,7 +45,7 @@ e.g. disable_optimizer (default to False)
 import sys
 import sysconfig
 from enum import Enum
-from typing import Any, Dict, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 from opteryx import config
 from opteryx.__version__ import __build__
@@ -89,6 +89,66 @@ PLATFORM_ADMIN_ENTITLEMENT = "platform_admin"
 
 
 VariableSchema = Tuple[Type, Any, VariableOwner, Visibility]
+
+
+class FromConfig:
+    """A default READ FROM `opteryx.config` when a session container is built —
+    not frozen when this module is first imported.
+
+    The table below is the `code default -> environment variable` layer of the
+    resolution chain documented at the top of this file, and `opteryx.config`
+    collapses those two. Storing `config.X` *by value* therefore froze that layer
+    at the instant `opteryx.variables` was first imported — and that import is
+    LAZY, on the first query, not on `import opteryx`. The result was a knob that
+    lied in both directions: a change made before the first query latched forever,
+    and every change after it was silently discarded.
+
+    That is not a hypothetical. Six call sites believed they were varying a
+    setting and were each measuring a single value (four DOP tests, a dev worker
+    sweep, and a parquet late-materialization test), and the `disable_optimizer`
+    comment further down records the same trap being hit once before and worked
+    around by re-labelling the variable rather than fixing the mechanism.
+
+    Holding the NAME defers the read to `SystemVariablesContainer.__init__`, which
+    runs once per `ExecutionContext` — i.e. per session. The documented chain then
+    describes what the code actually does.
+
+    `or_else` substitutes for a falsy config value, preserving the one entry
+    (`gcp_project_id`) that needed `config.GCP_PROJECT_ID or ""` to keep a `None`
+    out of a VARCHAR variable.
+
+    `via` names a resolver function on `opteryx.config` to pass the raw value
+    through, for the softcoded knobs whose stored form is a sentinel rather than a
+    width — `MAX_EXECUTION_WORKERS` is 0 for "auto", but the engine never runs 0
+    workers. Without it the row reported 0 while execution ran 16, which is a row
+    describing the engine with a number nothing ever ran at (architect ruling
+    2026-08-28: if it is not running with 0 threads, it is lying if it says it is).
+
+    The resolver is NOT a second copy of the derivation — it is the same function
+    the read site calls, so the table and the engine cannot disagree, and applying
+    it here is idempotent: a resolved width re-enters the read site as an explicit
+    positive request and is honoured unchanged.
+    """
+
+    __slots__ = ("name", "or_else", "via")
+
+    def __init__(self, name: str, or_else: Any = None, via: Optional[str] = None):
+        self.name = name
+        self.or_else = or_else
+        self.via = via
+
+    def read(self) -> Any:
+        value = getattr(config, self.name)
+        if not value and self.or_else is not None:
+            return self.or_else
+        if self.via is not None:
+            return getattr(config, self.via)(value)
+        return value
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        if self.via is not None:
+            return f"FromConfig({self.name!r}, via={self.via!r})"
+        return f"FromConfig({self.name!r})"
 
 
 def _python_version() -> str:
@@ -164,8 +224,8 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # reasoning; RESTRICTED now additionally gates WRITE (see
     # SystemVariablesContainer.__setitem__), so doing so would require every
     # caller who needs a trace to hold `platform_admin`.
-    "trace": (BOOLEAN, config.OPTERYX_TRACE, VariableOwner.USER, Visibility.UNRESTRICTED),
-    "match_threshold": (FLOAT64, config.MATCH_THRESHOLD, VariableOwner.USER, Visibility.UNRESTRICTED),
+    "trace": (BOOLEAN, FromConfig("OPTERYX_TRACE"), VariableOwner.USER, Visibility.UNRESTRICTED),
+    "match_threshold": (FLOAT64, FromConfig("MATCH_THRESHOLD"), VariableOwner.USER, Visibility.UNRESTRICTED),
     # Runtime min/max join filters (docs/RUNTIME_MINMAX_FILTER_DESIGN.md), read
     # at COMPILE time by the native plan compiler. Named for the state the caller
     # probably does not want, per this module's feature-flag convention.
@@ -179,75 +239,99 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # attributing a measurement needs the off arm: the plan-time correlated
     # filter pushes range predicates onto the same scans.
     "disable_runtime_minmax_join_filter": (
-        BOOLEAN, config.DISABLE_RUNTIME_MINMAX_JOIN_FILTER,
+        BOOLEAN, FromConfig("DISABLE_RUNTIME_MINMAX_JOIN_FILTER"),
         VariableOwner.USER, Visibility.UNRESTRICTED),
     # Bind-time only (see binder.py's COMPARISON_OPERATOR handling), same
     # capture-at-bind reasoning as match_threshold above. UNRESTRICTED: tuning
     # a cost-estimation coefficient for one's own query is not a data-access
     # grant, same reasoning as match_threshold.
     "like_selectivity_decay": (
-        FLOAT64, config.LIKE_SELECTIVITY_DECAY, VariableOwner.USER, Visibility.UNRESTRICTED),
+        FLOAT64, FromConfig("LIKE_SELECTIVITY_DECAY"), VariableOwner.USER, Visibility.UNRESTRICTED),
     # Bind-time only, read by visit_insert into the InsertNode's parameters (see
     # insert.pyx) - same capture-at-bind reasoning as match_threshold. UNRESTRICTED:
     # tuning how your OWN CTAS/INSERT batches its output files is not a data-access
     # grant. The sink clamps this to rugo's max_rows_per_row_group itself, so a
     # caller cannot SET this past the row-group ceiling into multi-row-group files.
     "write_coalesce_rows": (
-        INT64, config.WRITE_COALESCE_ROWS, VariableOwner.USER, Visibility.UNRESTRICTED),
+        INT64, FromConfig("WRITE_COALESCE_ROWS"), VariableOwner.USER, Visibility.UNRESTRICTED),
     # Late-materialization tuning is per-QUERY: the right values depend on this
     # query's predicate selectivity, not on the deployment.
     "parquet_late_materialization_abandon_after": (
-        INT64, config.PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER,
+        INT64, FromConfig("PARQUET_LATE_MATERIALIZATION_ABANDON_AFTER"),
         VariableOwner.SERVER, Visibility.RESTRICTED),
     "parquet_late_materialization_max_selectivity": (
-        FLOAT64, config.PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY,
+        FLOAT64, FromConfig("PARQUET_LATE_MATERIALIZATION_MAX_SELECTIVITY"),
         VariableOwner.SERVER, Visibility.RESTRICTED),
     "skene_late_materialization_max_selectivity": (
-        FLOAT64, config.SKENE_LATE_MATERIALIZATION_MAX_SELECTIVITY,
+        FLOAT64, FromConfig("SKENE_LATE_MATERIALIZATION_MAX_SELECTIVITY"),
         VariableOwner.SERVER, Visibility.RESTRICTED),
     "skene_late_materialization_min_deferred_columns": (
-        INT64, config.SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS,
+        INT64, FromConfig("SKENE_LATE_MATERIALIZATION_MIN_DEFERRED_COLUMNS"),
         VariableOwner.SERVER, Visibility.RESTRICTED),
 
-    # ── USER + RESTRICTED — deployment-shaped, but deliberately SETTABLE for tuning.
-    # This is the entire reason this three-layer chain (default -> env -> SET) exists:
-    # `parquet_gcs_io_workers` is the exact variable a real investigation swept from
-    # 8 to 128 by redeploying six times to find the optimum for one query shape (the
-    # answer differs by query — narrow vs wide projection). RESTRICTED so an ordinary
-    # caller cannot perturb deployment-wide-looking knobs on their own query, but a
-    # `platform_admin` caller CAN — this is the mechanism by which "what happens if
-    # we set this to N" gets answered without a redeploy. Do not move these to plain
-    # SERVER in a future tidy-up without re-reading this comment.
-    "parquet_gcs_io_workers": (INT64, config.PARQUET_GCS_IO_WORKERS, VariableOwner.USER, Visibility.RESTRICTED),
-    "parquet_local_io_workers": (INT64, config.PARQUET_LOCAL_IO_WORKERS, VariableOwner.USER, Visibility.RESTRICTED),
-    "max_execution_workers": (INT64, config.MAX_EXECUTION_WORKERS, VariableOwner.USER, Visibility.RESTRICTED),
+    # ── SERVER + RESTRICTED — worker counts. NOT settable. ─────────────────────
+    # Architect ruling 2026-08-28: a worker count is a property of the ENGINE, not of
+    # an individual execution. It describes the process — how wide this deployment
+    # runs — so it cannot be a per-statement choice, and `SET` is refused.
+    #
+    # This REVERSES the note that stood here, which made these USER/RESTRICTED so a
+    # `platform_admin` could sweep them per session without a redeploy, and which
+    # asked not to move them to SERVER without being re-read. It has been re-read and
+    # overruled: the sweep it was defending is a deployment exercise (env var, or the
+    # config attribute, which is now live per session — see FromConfig above), and
+    # dressing a process-wide property as a per-query knob is what let the value and
+    # the engine drift apart in the first place.
+    #
+    # Scope is worker counts ONLY. The HTTP knobs, coalescing ratios and in-flight
+    # limit below remain USER/RESTRICTED — they are per-request IO shaping, and the
+    # ruling did not reach them.
+    "parquet_gcs_io_workers": (INT64, FromConfig("PARQUET_GCS_IO_WORKERS"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "parquet_local_io_workers": (INT64, FromConfig("PARQUET_LOCAL_IO_WORKERS", via="resolve_parquet_local_io_workers"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "max_execution_workers": (INT64, FromConfig("MAX_EXECUTION_WORKERS", via="resolve_max_execution_workers"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # The IO-side twin of `max_execution_worker_cap` below, and registered for the
+    # same reason: it decided the local-Parquet read width of every query while being
+    # readable only as an env var. Both caps are now rows, so the pair that governs
+    # the two auto branches is discoverable together rather than one visible and one
+    # not. SERVER/RESTRICTED under the ruling above — a cap on a worker count is as
+    # much an engine property as the count.
+    "parquet_local_io_worker_cap": (INT64, FromConfig("PARQUET_LOCAL_IO_WORKER_CAP"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    # The ceiling applied when `max_execution_workers` is left on "auto" (0): the
+    # engine then runs `min(cap, max(2, cpu - 2))`. It is a SEPARATE knob and not a
+    # synonym — an explicit positive `max_execution_workers` is honoured exactly and
+    # is NOT clamped by this, so setting the cap alone does nothing to a session that
+    # has pinned a worker count. Registered here because it was previously readable
+    # only as an env var: `SHOW VARIABLES` could not show the number that decided the
+    # default DOP of every query, which is precisely the invisibility the module
+    # docstring above calls out. SERVER/RESTRICTED to match `max_execution_workers`,
+    # under the ruling recorded at the head of this block.
+    "max_execution_worker_cap": (INT64, FromConfig("MAX_EXECUTION_WORKER_CAP"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Same reasoning as the three above, for the HTTP client that services GCS
     # range reads (src/cpp/http_client.cpp / rugo/src/parquet/io_pipeline.hpp).
     # Named for what they DO, not for the env var they replace — the old env-only
     # names (OPTERYX_HTTP_MIN_BW_MBPS etc.) were too terse to be self-explanatory
     # on a `SHOW VARIABLES` a caller has never seen before.
     "http_max_connections_per_host": (
-        INT64, config.HTTP_MAX_CONNECTIONS_PER_HOST, VariableOwner.USER, Visibility.RESTRICTED),
+        INT64, FromConfig("HTTP_MAX_CONNECTIONS_PER_HOST"), VariableOwner.USER, Visibility.RESTRICTED),
     "http_max_retries": (
-        INT64, config.HTTP_MAX_RETRIES, VariableOwner.USER, Visibility.RESTRICTED),
+        INT64, FromConfig("HTTP_MAX_RETRIES"), VariableOwner.USER, Visibility.RESTRICTED),
     "http_min_bandwidth_mbps": (
-        FLOAT64, config.HTTP_MIN_BANDWIDTH_MBPS, VariableOwner.USER, Visibility.RESTRICTED),
+        FLOAT64, FromConfig("HTTP_MIN_BANDWIDTH_MBPS"), VariableOwner.USER, Visibility.RESTRICTED),
     "http_request_timeout_floor_ms": (
-        INT64, config.HTTP_REQUEST_TIMEOUT_FLOOR_MS, VariableOwner.USER, Visibility.RESTRICTED),
+        INT64, FromConfig("HTTP_REQUEST_TIMEOUT_FLOOR_MS"), VariableOwner.USER, Visibility.RESTRICTED),
     # HTTP/2 multiplexing. Named for the state a caller does NOT want (per the
     # convention at the top of this file), so the default-False state is the fast
     # one. `disable_http_multiplexing` exists to A/B the CURLOPT_PIPEWAIT fix
     # against the old connection-per-range behaviour WITHOUT a redeploy — the
-    # same reason parquet_gcs_io_workers is settable. `disable_http2` is a
+    # reason the coalescing ratios below are settable. `disable_http2` is a
     # diagnostic, not a performance knob: it pins HTTP/1.1 so the contribution of
     # h2 can be measured (a low connection cap should then become catastrophic
     # rather than faster). See HttpTuning in src/cpp/http_client.hpp.
     "disable_http_multiplexing": (
-        BOOLEAN, config.DISABLE_HTTP_MULTIPLEXING, VariableOwner.USER, Visibility.RESTRICTED),
+        BOOLEAN, FromConfig("DISABLE_HTTP_MULTIPLEXING"), VariableOwner.USER, Visibility.RESTRICTED),
     "http_pipewait": (
-        BOOLEAN, config.HTTP_PIPEWAIT, VariableOwner.USER, Visibility.RESTRICTED),
+        BOOLEAN, FromConfig("HTTP_PIPEWAIT"), VariableOwner.USER, Visibility.RESTRICTED),
     "disable_http2": (
-        BOOLEAN, config.DISABLE_HTTP2, VariableOwner.USER, Visibility.RESTRICTED),
+        BOOLEAN, FromConfig("DISABLE_HTTP2"), VariableOwner.USER, Visibility.RESTRICTED),
     # Splits submission depth from thread count — `parquet_gcs_io_workers` alone
     # moves both, so the sweep that found 16 optimal could not attribute the win
     # to concurrency vs pipelining depth. Also drives IO pool size.
@@ -259,11 +343,11 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # link wants ~0 (never buy bytes to save a cheap round-trip), a high-RTT link
     # wants more (round-trips dominate, wasted bytes are cheap).
     "parquet_io_coalesce_waste_ratio": (
-        FLOAT64, config.PARQUET_IO_COALESCE_WASTE_RATIO, VariableOwner.USER, Visibility.RESTRICTED),
+        FLOAT64, FromConfig("PARQUET_IO_COALESCE_WASTE_RATIO"), VariableOwner.USER, Visibility.RESTRICTED),
     "parquet_io_coalesce_max_bytes": (
-        INT64, config.PARQUET_IO_COALESCE_MAX_BYTES, VariableOwner.USER, Visibility.RESTRICTED),
+        INT64, FromConfig("PARQUET_IO_COALESCE_MAX_BYTES"), VariableOwner.USER, Visibility.RESTRICTED),
     "parquet_io_in_flight_limit": (
-        INT64, config.PARQUET_IO_IN_FLIGHT_LIMIT, VariableOwner.USER, Visibility.RESTRICTED),
+        INT64, FromConfig("PARQUET_IO_IN_FLIGHT_LIMIT"), VariableOwner.USER, Visibility.RESTRICTED),
 
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an
@@ -298,30 +382,35 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     "result_retention_days": (INT64, 7, VariableOwner.SERVER, Visibility.UNRESTRICTED),
 
     # ── SERVER — the environment variable sets these; not settable mid-query ────
-    # There is no practical reason to disable the optimizer mid-query, and the read
-    # site binds `config.DISABLE_OPTIMIZER` by value at import
-    # (planner/optimizer/__init__.py), so a per-session value could not have taken
-    # effect anyway — as a USER variable this was a `SET` that silently did nothing.
-    # SERVER makes it honest: env-set at startup, discoverable, not settable.
+    # There is no practical reason to disable the optimizer mid-query, so SERVER is
+    # honest: env-set at startup, discoverable, not settable. As a USER variable this
+    # was a `SET` that silently did nothing.
+    #
+    # The original note here justified SERVER partly on the read site binding
+    # `config.DISABLE_OPTIMIZER` by value at import — that is no longer true. That
+    # site (and `validate_optimizer_plans`, and both `max_consecutive_cache_failures`
+    # sites in managers/kvstores) now reads the config attribute at CALL time, so the
+    # row this table advertises and the value the code obeys cannot drift. The
+    # SERVER ruling stands on its own merit above, NOT on the read site being frozen.
     # RESTRICTED because it is documented **DANGEROUS** (most queries fail with it on).
-    "disable_optimizer": (BOOLEAN, config.DISABLE_OPTIMIZER, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "disable_optimizer": (BOOLEAN, FromConfig("DISABLE_OPTIMIZER"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Deployment shape: where the caches live, which project.
-    "max_consecutive_cache_failures": (INT64, config.MAX_CONSECUTIVE_CACHE_FAILURES, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "local_store_root": (VARCHAR, config.LOCAL_STORE_ROOT, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "manifest_cache_path": (VARCHAR, config.MANIFEST_CACHE_PATH, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "manifest_cache_bytes": (INT64, config.MANIFEST_CACHE_BYTES, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "manifest_remote_location": (VARCHAR, config.MANIFEST_REMOTE_LOCATION, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "footer_remote_location": (VARCHAR, config.FOOTER_REMOTE_LOCATION, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "kvstore_location": (VARCHAR, config.KVSTORE_LOCATION, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "kvstore_key_prefix": (VARCHAR, config.KVSTORE_KEY_PREFIX, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "max_consecutive_cache_failures": (INT64, FromConfig("MAX_CONSECUTIVE_CACHE_FAILURES"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "local_store_root": (VARCHAR, FromConfig("LOCAL_STORE_ROOT"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "manifest_cache_path": (VARCHAR, FromConfig("MANIFEST_CACHE_PATH"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "manifest_cache_bytes": (INT64, FromConfig("MANIFEST_CACHE_BYTES"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "manifest_remote_location": (VARCHAR, FromConfig("MANIFEST_REMOTE_LOCATION"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "footer_remote_location": (VARCHAR, FromConfig("FOOTER_REMOTE_LOCATION"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "kvstore_location": (VARCHAR, FromConfig("KVSTORE_LOCATION"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "kvstore_key_prefix": (VARCHAR, FromConfig("KVSTORE_KEY_PREFIX"), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Credentials-adjacent: names the cloud project this deployment reads from.
-    "gcp_project_id": (VARCHAR, config.GCP_PROJECT_ID or "", VariableOwner.SERVER, Visibility.RESTRICTED),
+    "gcp_project_id": (VARCHAR, FromConfig("GCP_PROJECT_ID", or_else=""), VariableOwner.SERVER, Visibility.RESTRICTED),
     # Diagnostics — same class as `trace`, but process-wide rather than per-query,
     # so they are env-set rather than SET-able.
-    "opteryx_debug": (BOOLEAN, config.OPTERYX_DEBUG, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "instrument_engine": (BOOLEAN, config.OPTERYX_INSTRUMENT_ENGINE, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "disable_gc_during_query": (BOOLEAN, config.OPTERYX_DISABLE_GC_DURING_QUERY, VariableOwner.SERVER, Visibility.RESTRICTED),
-    "validate_optimizer_plans": (BOOLEAN, config.VALIDATE_OPTIMIZER_PLANS, VariableOwner.SERVER, Visibility.RESTRICTED),
+    "opteryx_debug": (BOOLEAN, FromConfig("OPTERYX_DEBUG"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "instrument_engine": (BOOLEAN, FromConfig("OPTERYX_INSTRUMENT_ENGINE"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "disable_gc_during_query": (BOOLEAN, FromConfig("OPTERYX_DISABLE_GC_DURING_QUERY"), VariableOwner.SERVER, Visibility.RESTRICTED),
+    "validate_optimizer_plans": (BOOLEAN, FromConfig("VALIDATE_OPTIMIZER_PLANS"), VariableOwner.SERVER, Visibility.RESTRICTED),
 
     # ── SERVER — host facts, detected once at import ────────────────────────────
     # No env var and no SET: these describe the machine the process landed on, so
@@ -396,9 +485,46 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
 # fmt: on
 
 
+# The config-backed entries, resolved once here so the per-session container does
+# not re-scan the whole table. Reading every named constant NOW also fails the
+# import outright if a `FromConfig` names a constant `opteryx.config` does not
+# define — a typo must not degrade into a variable that silently reports `None`.
+_CONFIG_BACKED_KEYS: Tuple[str, ...] = tuple(
+    key
+    for key, entry in SYSTEM_VARIABLES_DEFAULTS.items()
+    if isinstance(entry[1], FromConfig)
+)
+_MISSING = object()
+_resolver = None
+for _key in _CONFIG_BACKED_KEYS:
+    _source = SYSTEM_VARIABLES_DEFAULTS[_key][1]
+    if getattr(config, _source.name, _MISSING) is _MISSING:
+        raise RuntimeError(
+            f"System variable {_key!r} is declared FromConfig({_source.name!r}), "
+            f"but opteryx.config defines no such constant."
+        )
+    # `via` gets the same treatment for the same reason: a typo'd resolver name must
+    # fail the import, not degrade into a TypeError on the first session built.
+    if _source.via is not None:
+        _resolver = getattr(config, _source.via, _MISSING)
+        if _resolver is _MISSING or not callable(_resolver):
+            raise RuntimeError(
+                f"System variable {_key!r} is declared FromConfig(..., via={_source.via!r}), "
+                f"but opteryx.config defines no such callable."
+            )
+del _key, _source, _resolver
+
+
 class SystemVariablesContainer:
     def __init__(self, owner: VariableOwner = VariableOwner.USER):
-        self._variables = SYSTEM_VARIABLES_DEFAULTS.copy()
+        # `.copy()` is a C-speed shallow copy of the whole table; only the
+        # config-backed entries are then re-read. That keeps the per-session cost
+        # at one dict copy plus ~36 getattrs, rather than rebuilding every entry.
+        variables = SYSTEM_VARIABLES_DEFAULTS.copy()
+        for key in _CONFIG_BACKED_KEYS:
+            variable_type, source, variable_owner, visibility = variables[key]
+            variables[key] = (variable_type, source.read(), variable_owner, visibility)
+        self._variables = variables
         self._owner = owner
 
     def __getitem__(self, key: str) -> Any:

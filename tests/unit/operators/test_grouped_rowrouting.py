@@ -27,15 +27,25 @@ import opteryx
 from opteryx import config
 
 def _collect(sql):
+    """Rows, plus the DOP the engine ACTUALLY ran at.
+
+    The dop is returned, not inferred: `config.MAX_EXECUTION_WORKERS` was for a
+    long time a setting that silently did nothing (the system-variable table froze
+    it at import), so every test in this file ran both arms of its serial-vs-routed
+    comparison at the same width and passed without ever exercising row routing.
+    `native_engine_dop` is what the engine reports it used, so a knob that stops
+    working again fails these tests instead of quietly hollowing them out.
+    """
+    session = opteryx.session()
     out = []
-    for m in opteryx.session().execute_to_morsels(sql):
+    for m in session.execute_to_morsels(sql):
         names = [n if isinstance(n, bytes) else n.encode() for n in m.column_names]
         if not names:
             continue
         cols = [m.column(n).to_pylist() for n in names]
         for r in range(m.num_rows):
             out.append(tuple(c[r] for c in cols))
-    return out
+    return out, session._telemetry._reading.get("native_engine_dop")
 
 
 def _sortkey(row):
@@ -44,15 +54,24 @@ def _sortkey(row):
 
 
 def _run(sql, *, workers):
+    """Run `sql` at `workers` workers, asserting the engine honoured the request."""
     saved = config.MAX_EXECUTION_WORKERS
     try:
         config.MAX_EXECUTION_WORKERS = workers
-        return _collect(sql)
+        rows, dop = _collect(sql)
     finally:
         config.MAX_EXECUTION_WORKERS = saved
+    assert dop == workers, (
+        f"asked for {workers} workers but the engine ran at dop={dop} — the worker "
+        f"setting is not reaching the engine, so this comparison is meaningless."
+    )
+    return rows
 
 
 def _assert_matches_serial(sql, workers=4):
+    # A comparison of W=1 against W=1 asserts nothing. The oracle is only an oracle
+    # if the other arm is genuinely wider.
+    assert workers > 1, "the routed arm must use more than one worker to be a test"
     serial = _run(sql, workers=1)
     routed = _run(sql, workers=workers)
     assert sorted(routed, key=_sortkey) == sorted(serial, key=_sortkey), (
@@ -134,9 +153,14 @@ def _grouped_telemetry(sql, workers):
         session = opteryx.session()
         for _ in session.execute_to_morsels(sql):
             pass
-        return session._telemetry._reading
+        reading = session._telemetry._reading
     finally:
         config.MAX_EXECUTION_WORKERS = saved
+    assert reading.get("native_engine_dop") == workers, (
+        f"asked for {workers} workers but the engine ran at "
+        f"dop={reading.get('native_engine_dop')}"
+    )
+    return reading
 
 
 def test_grouped_counts_are_self_consistent():
@@ -144,15 +168,12 @@ def test_grouped_counts_are_self_consistent():
     # row count, the emitted group count must equal the key's exact NDV, and no
     # group may be emitted twice. A router that dropped, duplicated or mis-binned
     # rows moves one of these — which is what the old NDV/total telemetry watched.
-    saved = config.MAX_EXECUTION_WORKERS
-    try:
-        config.MAX_EXECUTION_WORKERS = 4
-        rows = _collect("SELECT gravity, COUNT(*) AS c FROM $planets GROUP BY gravity")
-    finally:
-        config.MAX_EXECUTION_WORKERS = saved
+    rows = _run(
+        "SELECT gravity, COUNT(*) AS c FROM $planets GROUP BY gravity", workers=4
+    )
 
-    total = _collect("SELECT COUNT(*) AS c FROM $planets")[0][0]
-    distinct = _collect("SELECT DISTINCT gravity FROM $planets")
+    total = _run("SELECT COUNT(*) AS c FROM $planets", workers=4)[0][0]
+    distinct = _run("SELECT DISTINCT gravity FROM $planets", workers=4)
 
     assert sum(r[1] for r in rows) == total
     assert len(rows) == len(distinct)
@@ -163,10 +184,15 @@ def test_w1_runs_the_same_grouped_path():
     # W=1 must run the SAME grouped path with one worker, not divert to a separate
     # serial implementation. The generic-pipeline reading that used to prove this is
     # gone; `native_engine_engaged` is the surviving one, and a serial divert would
-    # be a different operator. Paired with the serial-equality oracle so the
-    # assertion cannot pass vacuously.
+    # be a different operator.
+    #
+    # This previously also called `_assert_matches_serial(sql, workers=1)`, which
+    # compared W=1 against W=1 — it asserted nothing whatever the worker setting
+    # did, and `_assert_matches_serial` now rejects that call outright. The W=1
+    # grouped path is covered as the oracle of every other test in this file; what
+    # is specific here is that BOTH widths engage the native engine, and
+    # `_grouped_telemetry` confirms each run really used the width it asked for.
     sql = "SELECT gravity, COUNT(*) AS c FROM $planets GROUP BY gravity"
-    _assert_matches_serial(sql, workers=1)
 
     assert _grouped_telemetry(sql, 1).get("native_engine_engaged") == 1
     assert _grouped_telemetry(sql, 4).get("native_engine_engaged") == 1

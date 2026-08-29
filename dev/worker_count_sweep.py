@@ -35,17 +35,32 @@ def run_once(sql: str) -> None:
     try:
         for _ in session.execute_to_morsels(sql):
             pass
+        return session._telemetry._reading.get("native_engine_dop")
     finally:
         session.close()
 
 
-def best_ms(sql: str) -> float:
+def best_ms(sql: str, expect_dop: int) -> float:
+    """Fastest of ITERS runs, having verified the engine ran at `expect_dop`.
+
+    The check is the point, not ceremony: `config.MAX_EXECUTION_WORKERS` was for a
+    long time frozen at import by the system-variable table, so this sweep set W in
+    a loop and measured ONE width — printing a W=1..N table and a "speedup vs W=1"
+    column derived from N identical timings. A sweep that cannot detect that is
+    worse than no sweep, because it reports a scaling curve that never happened.
+    """
     samples = []
     for _ in range(ITERS):
         gc.collect()
         start = time.monotonic_ns()
-        run_once(sql)
+        dop = run_once(sql)
         samples.append((time.monotonic_ns() - start) / 1e6)
+        if dop != expect_dop:
+            raise SystemExit(
+                f"W={expect_dop} was requested but the engine ran at dop={dop} — "
+                f"the worker setting is not reaching the engine, so every column "
+                f"of this sweep would be the same width."
+            )
     return min(samples)
 
 
@@ -58,7 +73,7 @@ results = {}
 for qname, sql in QUERIES.items():
     for w in WORKERS:
         config.MAX_EXECUTION_WORKERS = w
-        results[(qname, w)] = best_ms(sql)
+        results[(qname, w)] = best_ms(sql, w)
         print(f"  {qname:<30} W={w:<2} -> {results[(qname, w)]:8.1f} ms", flush=True)
 
 print("\n" + "=" * 80)

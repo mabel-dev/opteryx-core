@@ -95,9 +95,17 @@ class ScriptedCapability:
     def grants(self, identity, policies):
         return self.rows
 
-    # The grant-administration surface (GRANT / REVOKE / SHOW GRANTS ON).
-    # Required members since 2026-08-27; none of this file's scenarios run
+    # The grant-administration surface (GRANT / REVOKE / SHOW GRANTS ON /
+    # SHOW EFFECTIVE GRANTS ON). Required members since 2026-08-27, joined by
+    # `effective_grants_on` on 2026-08-28; none of this file's scenarios run
     # those statements, so a call reaching one is itself a bug worth failing.
+    #
+    # Adding a member to _REQUIRED_MEMBERS is a deliberate BREAKING CHANGE for
+    # every registered capability, this one included - registration refuses a
+    # capability missing one rather than letting it fail at the statement. So
+    # this block tracks that tuple; when it goes stale every test in the file
+    # fails at install time, which is the intended signal and not a reason to
+    # loosen the check.
     def apply_grant(self, execution_context, pattern, role, principal):
         raise AssertionError("apply_grant should not be reached by these tests")
 
@@ -106,6 +114,9 @@ class ScriptedCapability:
 
     def grants_on(self, execution_context, pattern):
         raise AssertionError("grants_on should not be reached by these tests")
+
+    def effective_grants_on(self, execution_context, pattern):
+        raise AssertionError("effective_grants_on should not be reached by these tests")
 
 
 @pytest.fixture(autouse=True)
@@ -410,6 +421,71 @@ def test_rename_asks_for_both_the_source_and_the_target(tmp_path, install):
     # ALTER on the source is not enough; the new name is a CREATE of its own.
     assert ("ws.t", "ALTER") in capability.asked
     assert ("ws.renamed", "CREATE") in capability.asked
+
+
+def test_add_constraint_asks_for_owner_near_and_reader_far(tmp_path, install):
+    """The first statement in the engine that authorizes two datasets.
+
+    An informational FOREIGN KEY declares that a column here corresponds to a
+    column somewhere else, so it is gated at both ends and the two ends are
+    different questions: ALTER (owner) on the dataset being altered, the tier
+    every metadata change already uses, and READ on the one being referenced.
+
+    Reader-on-far is a correctness control, not a confidentiality one -- the
+    far dataset's name had to be typed to write the statement. What it stops is
+    declaring relationships into data the author has never seen.
+    """
+    _seed(tmp_path, install)
+    install(ScriptedCapability(allow={("ws.far", "CREATE")}))
+    session = opteryx.session(user="olive")
+    list(session.execute_to_morsels("CREATE TABLE ws.far (id BIGINT)"))
+    capability = install(ScriptedCapability(allow={("ws.t", "ALTER")}))
+
+    with pytest.raises(PermissionError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.t ADD CONSTRAINT t_far_fk FOREIGN KEY (id) "
+                "REFERENCES ws.far (id) NOT ENFORCED"
+            )
+        )
+
+    # ALTER on the near dataset is not enough on its own.
+    assert ("ws.t", "ALTER") in capability.asked
+    assert ("ws.far", "READ") in capability.asked
+
+
+def test_add_constraint_far_read_alone_is_not_enough(tmp_path, install):
+    """Reading the far dataset confers nothing over the near one."""
+    _seed(tmp_path, install)
+    install(ScriptedCapability(allow={("ws.far", "CREATE")}))
+    session = opteryx.session(user="olive")
+    list(session.execute_to_morsels("CREATE TABLE ws.far (id BIGINT)"))
+    capability = install(ScriptedCapability(allow={("ws.far", "READ")}))
+
+    with pytest.raises(PermissionError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.t ADD CONSTRAINT t_far_fk FOREIGN KEY (id) "
+                "REFERENCES ws.far (id) NOT ENFORCED"
+            )
+        )
+
+    assert ("ws.t", "ALTER") in capability.asked
+
+
+def test_drop_constraint_asks_only_about_the_near_dataset(tmp_path, install):
+    """DROP CONSTRAINT names the constraint, not the dataset it referenced, so
+    there is no far end to authorize and removing a declaration discloses
+    nothing about one."""
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability())
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError):
+        list(session.execute_to_morsels("ALTER TABLE ws.t DROP CONSTRAINT t_far_fk"))
+
+    assert ("ws.t", "ALTER") in capability.asked
+    assert not [resource for resource, _ in capability.asked if resource == "ws.far"]
 
 
 # --- workspace-level actions go through the other gate

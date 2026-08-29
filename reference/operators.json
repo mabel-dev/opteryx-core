@@ -2157,7 +2157,7 @@
         "node_kind": "extraction",
         "category": "extraction",
         "description": "JSON text extraction operator.",
-        "documentation": "Returns the selected JSON value encoded as a blob or text-like binary value.",
+        "documentation": "Returns the selected JSON value as text (nvarchar), from a document given as text or binary JSON.",
         "implemented": true,
         "syntax_forms": [
             "<document> ->> <path>"

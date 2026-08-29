@@ -11,7 +11,12 @@ from pathlib import Path
 import opteryx
 from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector
-from opteryx.exceptions import DatasetNotFoundError, ReadOnlyConnectorError, UnsupportedSyntaxError
+from opteryx.exceptions import (
+    ColumnNotFoundError,
+    DatasetNotFoundError,
+    ReadOnlyConnectorError,
+    UnsupportedSyntaxError,
+)
 
 
 def _setup_workspace(tmp_path):
@@ -191,9 +196,15 @@ def test_alter_table_cluster_by_readonly_rejected(tmp_path):
 
 
 def test_alter_table_unsupported_operation_rejected(tmp_path):
-    """Only CLUSTER BY, RENAME TO, and the four column operations are
-    supported; any other ALTER TABLE operation is rejected at plan time
-    rather than silently mishandled."""
+    """Only CLUSTER BY, RENAME TO, the four column operations and an
+    informational FOREIGN KEY are supported; any other ALTER TABLE operation is
+    rejected at plan time rather than silently mishandled.
+
+    PRIMARY KEY and UNIQUE stay rejected for the reason they always were: the
+    engine enforces nothing, so accepting them would imply behaviour it does
+    not have. NOT ENFORCED is the one form that escapes that argument, and it
+    is tested separately below.
+    """
     _setup_workspace(tmp_path)
     session = opteryx.session()
 
@@ -201,6 +212,202 @@ def test_alter_table_unsupported_operation_rejected(tmp_path):
 
     with pytest.raises(UnsupportedSyntaxError):
         list(session.execute_to_morsels("ALTER TABLE ws.events ADD CONSTRAINT pk PRIMARY KEY (id)"))
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(session.execute_to_morsels("ALTER TABLE ws.events ADD CONSTRAINT u UNIQUE (id)"))
+
+
+def _setup_two_tables(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, customer_ref BIGINT)"))
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+    return session
+
+
+_INFORMATIONAL_FK = (
+    "ALTER TABLE ws.events ADD CONSTRAINT events_customer_fk "
+    "FOREIGN KEY (customer_ref) REFERENCES ws.customers (id) NOT ENFORCED"
+)
+
+
+def test_alter_table_add_constraint_not_enforced_is_accepted(tmp_path):
+    """The one admitted constraint form gets past plan time.
+
+    It does not yet get past execution: where the declaration is stored is an
+    open design decision, so the write path is an explicit seam that raises
+    (opteryx/managers/relationships). What this pins is that the refusal is no
+    longer a SYNTAX refusal -- the statement parses, plans, binds and is
+    authorized, and stops only where there is genuinely nowhere to put the row.
+    """
+    session = _setup_two_tables(tmp_path)
+
+    with pytest.raises(NotImplementedError):
+        list(session.execute_to_morsels(_INFORMATIONAL_FK))
+
+
+def test_alter_table_add_constraint_requires_explicit_not_enforced(tmp_path):
+    """NOT ENFORCED is never defaulted.
+
+    A bare FOREIGN KEY is an enforcing one, and reading it as informational
+    would be exactly the implied behaviour the engine refuses to imply. So is
+    an explicit ENFORCED.
+    """
+    session = _setup_two_tables(tmp_path)
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events ADD CONSTRAINT events_customer_fk "
+                "FOREIGN KEY (customer_ref) REFERENCES ws.customers (id)"
+            )
+        )
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events ADD CONSTRAINT events_customer_fk "
+                "FOREIGN KEY (customer_ref) REFERENCES ws.customers (id) ENFORCED"
+            )
+        )
+
+
+def test_alter_table_add_constraint_rejects_clauses_that_imply_checking(tmp_path):
+    """A referential action, a check-time, or NOT VALID all describe enforcement."""
+    session = _setup_two_tables(tmp_path)
+
+    for tail in (
+        "ON DELETE CASCADE NOT ENFORCED",
+        "ON UPDATE CASCADE NOT ENFORCED",
+        "NOT ENFORCED DEFERRABLE",
+    ):
+        with pytest.raises(UnsupportedSyntaxError):
+            list(
+                session.execute_to_morsels(
+                    "ALTER TABLE ws.events ADD CONSTRAINT events_customer_fk "
+                    f"FOREIGN KEY (customer_ref) REFERENCES ws.customers (id) {tail}"
+                )
+            )
+
+
+def test_alter_table_add_constraint_cannot_cross_workspaces(tmp_path):
+    """A declared relationship is held in the workspace it is declared in.
+
+    Both ends must live there, so a REFERENCES into another workspace is refused
+    at plan time rather than producing a row describing a dataset the workspace
+    does not contain. The same boundary RENAME TO enforces.
+    """
+    session = _setup_two_tables(tmp_path)
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events ADD CONSTRAINT events_customer_fk "
+                "FOREIGN KEY (customer_ref) REFERENCES other.customers (id) NOT ENFORCED"
+            )
+        )
+
+
+def test_alter_table_add_constraint_requires_a_name(tmp_path):
+    """An unnamed constraint could never be dropped -- the name is the handle."""
+    session = _setup_two_tables(tmp_path)
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events ADD FOREIGN KEY (customer_ref) "
+                "REFERENCES ws.customers (id) NOT ENFORCED"
+            )
+        )
+
+
+def test_alter_table_add_constraint_checks_both_columns_exist(tmp_path):
+    """A declaration naming a column that is not there is not a relationship.
+
+    This statement is the only validation point the store has, so it validates
+    both ends, not just the one being altered.
+    """
+    session = _setup_two_tables(tmp_path)
+
+    with pytest.raises(ColumnNotFoundError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events ADD CONSTRAINT events_customer_fk "
+                "FOREIGN KEY (nope) REFERENCES ws.customers (id) NOT ENFORCED"
+            )
+        )
+
+    with pytest.raises(ColumnNotFoundError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events ADD CONSTRAINT events_customer_fk "
+                "FOREIGN KEY (customer_ref) REFERENCES ws.customers (nope) NOT ENFORCED"
+            )
+        )
+
+
+def test_alter_table_drop_constraint_is_accepted_by_name(tmp_path):
+    """DROP CONSTRAINT names the constraint, not the dataset it referenced.
+
+    Like ADD, it stops at the storage seam and nowhere earlier.
+    """
+    session = _setup_two_tables(tmp_path)
+
+    with pytest.raises(NotImplementedError):
+        list(session.execute_to_morsels("ALTER TABLE ws.events DROP CONSTRAINT events_customer_fk"))
+
+    with pytest.raises(NotImplementedError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events DROP CONSTRAINT IF EXISTS events_customer_fk"
+            )
+        )
+
+
+def test_alter_table_constraint_if_exists_is_a_no_op(tmp_path):
+    """IF EXISTS on the ALTER makes a missing TABLE a no-op, for constraints too.
+
+    Not inherited from the column statements, which report the very absence the
+    reader asked to tolerate. Nothing is declared, so neither end's columns are
+    checked -- including a far dataset that does not exist either.
+    """
+    session = _setup_two_tables(tmp_path)
+
+    list(
+        session.execute_to_morsels(
+            "ALTER TABLE IF EXISTS ws.missing ADD CONSTRAINT fk "
+            "FOREIGN KEY (id) REFERENCES ws.customers (id) NOT ENFORCED"
+        )
+    )
+    list(
+        session.execute_to_morsels(
+            "ALTER TABLE IF EXISTS ws.missing ADD CONSTRAINT fk "
+            "FOREIGN KEY (id) REFERENCES ws.also_missing (id) NOT ENFORCED"
+        )
+    )
+    list(session.execute_to_morsels("ALTER TABLE IF EXISTS ws.missing DROP CONSTRAINT fk"))
+
+    # The guard is IF EXISTS, not the constraint statement: without it the
+    # missing relation is still an error.
+    with pytest.raises(Exception):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.missing ADD CONSTRAINT fk "
+                "FOREIGN KEY (id) REFERENCES ws.customers (id) NOT ENFORCED"
+            )
+        )
+
+
+def test_alter_table_drop_constraint_rejects_cascade(tmp_path):
+    """Nothing references a declaration, so there is nothing for CASCADE to decide."""
+    session = _setup_two_tables(tmp_path)
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(
+            session.execute_to_morsels(
+                "ALTER TABLE ws.events DROP CONSTRAINT events_customer_fk CASCADE"
+            )
+        )
 
 
 def test_alter_table_rename_not_implemented_on_local_store(tmp_path):

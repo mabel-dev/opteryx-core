@@ -1606,9 +1606,11 @@ cdef class ParquetReadNode(ReaderNode):
                 decode_workers=_resolve_var(
                     "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
                     config.PARQUET_GCS_IO_WORKERS,
-                ) if connector_type in ("GCS", "GS", "S3") else _resolve_var(
-                    "parquet_local_io_workers", getattr(self.properties, "variables", None),
-                    config.PARQUET_LOCAL_IO_WORKERS,
+                ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
+                    _resolve_var(
+                        "parquet_local_io_workers", getattr(self.properties, "variables", None),
+                        config.PARQUET_LOCAL_IO_WORKERS,
+                    )
                 ),
                 predicates=self._sp_predicate_stats,
                 file_sizes=file_sizes or None,
@@ -1671,9 +1673,11 @@ cdef class ParquetReadNode(ReaderNode):
             decode_workers=_resolve_var(
                     "parquet_gcs_io_workers", getattr(self.properties, "variables", None),
                     config.PARQUET_GCS_IO_WORKERS,
-                ) if connector_type in ("GCS", "GS", "S3") else _resolve_var(
-                    "parquet_local_io_workers", getattr(self.properties, "variables", None),
-                    config.PARQUET_LOCAL_IO_WORKERS,
+                ) if connector_type in ("GCS", "GS", "S3") else config.resolve_parquet_local_io_workers(
+                    _resolve_var(
+                        "parquet_local_io_workers", getattr(self.properties, "variables", None),
+                        config.PARQUET_LOCAL_IO_WORKERS,
+                    )
                 ),
             predicates=self._sp_predicate_stats,
             file_sizes=file_sizes or None,

@@ -283,6 +283,125 @@ def visit_rename_column(self, node: Node, context: BindingContext) -> Tuple[Node
     return node, context
 
 
+def visit_add_relationship(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... NOT ENFORCED`.
+
+    This is the first statement in the engine that names two datasets, so it is
+    the first that has to authorize two, and the two ends are not the same
+    question.
+
+    The near (altered) dataset is gated at ALTER - owner - which is the tier
+    every statement that changes a dataset's metadata already uses, CLUSTER BY
+    among them. Nothing new.
+
+    The far (referenced) dataset is gated at READ, and that check has no
+    precedent here: no other DDL statement reaches a second dataset at all. It
+    is a correctness control, not a confidentiality one - you had to know the far
+    dataset's name to type the statement, so refusing it conceals nothing. What
+    it stops is somebody declaring relationships into data they have never seen,
+    which produces confident garbage and puts the far dataset's name in front of
+    everyone who can read the near one. Grants are per-dataset, so owning the
+    near table says nothing about being able to read the far one even though the
+    logical planner has already confined both to the same workspace.
+
+    Both columns are checked to exist. A declaration naming a column that is not
+    there is not a relationship, and this statement is the only validation point
+    the store has - the store is not writable any other way.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    if not can_perform_action(
+        context.execution_context, node.references_relation_name, action="READ"
+    ):
+        raise PermissionError(
+            f"User does not have permission to read {node.references_relation_name}, so it "
+            f"cannot be referenced by a constraint on {node.relation_name}"
+        )
+
+    _reject_materialized_view_target(node, "**ALTER TABLE ... ADD CONSTRAINT**")
+
+    # IF EXISTS makes a missing TABLE a no-op, and a relation that is not there
+    # has no columns to check. Without this the column check below would report
+    # the very absence the statement asked to tolerate, and it would report it
+    # as the connector's "relation does not exist", not as anything a reader
+    # could act on. The far end is not checked either - there is no declaration
+    # to validate when nothing is being declared - but both permission gates
+    # above have already been answered, since what the caller may do does not
+    # depend on what happens to exist.
+    if node.if_exists and not node.connector.relation_exists(node.relation_name):
+        node.columns = []
+        return node, context
+
+    _require_column(node.connector, node.relation_name, node.column_name)
+
+    # Read-only is enough for the far end: nothing is written there.
+    references_connector = connector_factory(
+        node.references_relation_name, telemetry=context.telemetry
+    )
+    _require_column(
+        references_connector, node.references_relation_name, node.references_column_name
+    )
+
+    node.columns = []
+    return node, context
+
+
+def visit_drop_relationship(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind `ALTER TABLE ... DROP CONSTRAINT`.
+
+    One end only: the constraint is named, not the dataset it referenced, and
+    removing a declaration discloses nothing about the far side. Owner on the
+    near dataset, the same tier that added it.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.relation_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.relation_name} does not support ALTER TABLE"
+        )
+
+    if not can_perform_action(context.execution_context, node.relation_name, action="ALTER"):
+        raise PermissionError(
+            f"User does not have permission to alter table {node.relation_name}"
+        )
+
+    _reject_materialized_view_target(node, "**ALTER TABLE ... DROP CONSTRAINT**")
+
+    node.columns = []
+    return node, context
+
+
+def _require_column(connector, relation_name: str, column_name: str) -> None:
+    """Refuse a relationship end that names a column the dataset does not have."""
+    column_types = connector.relation_column_types(relation_name)
+    if column_name not in column_types:
+        raise ColumnNotFoundError(
+            column=column_name,
+            dataset=relation_name,
+            suggestion=suggest_alternative(column_name, list(column_types)),
+        )
+
+
 def visit_alter_column_type(
     self, node: Node, context: BindingContext
 ) -> Tuple[Node, BindingContext]:
@@ -532,14 +651,15 @@ def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node,
     return node, context
 
 
-def _bind_tag_ddl(self, node: Node, context: BindingContext, statement: str):
-    """Shared binding for CREATE TAG and DROP TAG.
+def _bind_snapshot_ddl(self, node: Node, context: BindingContext, statement: str):
+    """Shared binding for CREATE TAG, DROP TAG and ROLLBACK TO VERSION.
 
-    Both are ALTER TABLE statements about one relation, and both are gated at the
-    same tier as every other ALTER: a tag pins its snapshot's storage indefinitely
-    and the pinned bytes are charged, so creating one commits the relation's owner
-    to an open-ended cost, and dropping one is how data stops being kept. Neither
-    is a writer's call.
+    All three are ALTER TABLE statements about one relation, and all three are
+    gated at the same tier as every other ALTER. A tag pins its snapshot's
+    storage indefinitely and the pinned bytes are charged, so creating one
+    commits the relation's owner to an open-ended cost, and dropping one is how
+    data stops being kept. A rollback replaces what every reader of the relation
+    sees. None of these is a writer's call.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -553,9 +673,9 @@ def _bind_tag_ddl(self, node: Node, context: BindingContext, statement: str):
             f"connector for {node.relation_name} does not support {statement}"
         )
     if not node.connector.supports_version_travel:
-        # Tags name snapshots. A store with no snapshots has nothing to tag, and
-        # saying so here beats a connector failing later on a method it has no
-        # business having.
+        # These statements all name snapshots. A store with no snapshots has
+        # nothing to tag and nothing to roll back to, and saying so here beats a
+        # connector failing later on a method it has no business having.
         raise UnsupportedSyntaxError(
             f"{statement} is not supported for {node.relation_name} - it requires a "
             "connector with snapshot-based time travel."
@@ -572,12 +692,19 @@ def _bind_tag_ddl(self, node: Node, context: BindingContext, statement: str):
 
 def visit_create_tag(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind ALTER TABLE ... CREATE TAG."""
-    return _bind_tag_ddl(self, node, context, "**ALTER TABLE ... CREATE TAG**")
+    return _bind_snapshot_ddl(self, node, context, "**ALTER TABLE ... CREATE TAG**")
 
 
 def visit_drop_tag(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind ALTER TABLE ... DROP TAG."""
-    return _bind_tag_ddl(self, node, context, "**ALTER TABLE ... DROP TAG**")
+    return _bind_snapshot_ddl(self, node, context, "**ALTER TABLE ... DROP TAG**")
+
+
+def visit_rollback_relation(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind ALTER TABLE ... ROLLBACK TO VERSION."""
+    return _bind_snapshot_ddl(self, node, context, "**ALTER TABLE ... ROLLBACK TO VERSION**")
 
 
 def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -1129,17 +1256,22 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     _enforce_egress(self, node, context)
 
     # Read the existing relation's schema through the connector-agnostic table
-    # engine - the same mechanism the SELECT binder uses (see dataset.py) -
-    # not _relation_dir/_read_dataset_json, which are LocalStoreConnector-only
-    # private filesystem helpers. Catalog-backed connectors (e.g.
-    # OpteryxConnector) have no such attributes, so calling them here crashed
-    # unconditionally on every non-local deployment: AttributeError:
-    # 'OpteryxConnector' object has no attribute '_relation_dir'.
+    # engine, not _relation_dir/_read_dataset_json, which are
+    # LocalStoreConnector-only private filesystem helpers. Catalog-backed
+    # connectors (e.g. OpteryxConnector) have no such attributes, so calling
+    # them here crashed unconditionally on every non-local deployment:
+    # AttributeError: 'OpteryxConnector' object has no attribute '_relation_dir'.
+    #
+    # The DECLARED schema, not the current snapshot's - see
+    # BaseTable.get_declared_schema. This used to read get_dataset_metadata(),
+    # which resolves a snapshot before it reads anything and so refused every
+    # relation with nothing committed to it: the FIRST insert into a
+    # freshly-created table could never run, and no SQL-driven pipeline could
+    # bootstrap its own tables. An INSERT never reads the target's data - it
+    # discarded that manifest, having paid a full table.scan() of every data
+    # file and its statistics to build it.
     table = node.connector.table_engine(node.relation_name, telemetry=context.telemetry)
-    if getattr(table, "get_dataset_metadata", None) is not None:
-        target_schema, _manifest = table.get_dataset_metadata()
-    else:
-        target_schema = table.get_dataset_schema()  # RelationSchema with SchemaColumn list
+    target_schema = table.get_declared_schema()  # RelationSchema with SchemaColumn list
 
     node.target_schema = target_schema
     node.columns = []  # binder convention; INSERT produces no output columns

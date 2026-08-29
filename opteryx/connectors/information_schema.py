@@ -568,10 +568,14 @@ class InformationSchemaColumnsTable(BaseTable, _KeyColumnPredicatePushable):
                     identifier = f"{collection}.{name}"
                     dataset = self.catalog.load_dataset(identifier)
                     snapshot = dataset.snapshot()
-                    if snapshot is None:
-                        # No data committed yet - the dataset has no known columns.
-                        continue
-                    raw_schema = dataset.schema(snapshot.schema_id)
+                    # A dataset with nothing committed has no snapshot to read a
+                    # schema AS OF, but it does have a registered one - and that
+                    # is what `SELECT` and `SHOW COLUMNS` now serve it as (see
+                    # OpteryxTable._resolve_snapshot). Skipping it here left this
+                    # view saying a readable relation has no columns.
+                    raw_schema = (
+                        dataset.schema() if snapshot is None else dataset.schema(snapshot.schema_id)
+                    )
                     relation_schema = OpteryxTable._normalize_schema(raw_schema, relation_name=identifier)
 
                     for position, column in enumerate(relation_schema.columns, start=1):

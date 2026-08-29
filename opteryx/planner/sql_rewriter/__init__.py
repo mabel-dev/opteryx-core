@@ -23,7 +23,7 @@ Responsibilities:
   to ALTER/DROP FUNCTION, so the parser accepts statements whose object types it
   has no grammar for
 - Rewrites VERSION AS OF PREVIOUS to VERSION AS OF 0 (the planner's sentinel for
-  "the parent of the current snapshot"), and refuses a literal VERSION AS OF 0
+  "the previous version of the data"), and refuses a literal VERSION AS OF 0
 - Rewrites VERSION AS OF <tag> to AT(TAG => '<tag>'), the version-space slot the
   grammar will accept a name in - VERSION AS OF itself parses only a number
 
@@ -247,7 +247,7 @@ _DROP_WORKSPACE = re.compile(r"^(\s*DROP\s+)WORKSPACE\b", re.IGNORECASE)
 # only accepts a bare number literal (no PREVIOUS, no expression), so PREVIOUS has to
 # be turned into a number before the statement reaches it. 0 is never a real snapshot
 # id - see _rewrite_version_as_of_previous - so it is free to use as the sentinel the
-# planner resolves to "the parent of the current snapshot".
+# planner resolves to "the previous version of the data".
 _VERSION_AS_OF = re.compile(
     rf"(?P<quoted>{_QUOTED_SPAN})" r"|\bVERSION\s+AS\s+OF\s+(?P<word>PREVIOUS|0)\b",
     re.IGNORECASE,
@@ -419,7 +419,7 @@ def _rewrite_version_as_of_previous(text: str) -> Tuple[str, List[Edit]]:
             return f"{prefix}0"
         raise UnsupportedSyntaxError(
             "VERSION AS OF 0 is not a valid snapshot id. Use `VERSION AS OF PREVIOUS` "
-            "for the version immediately before the current one, or a specific snapshot id."
+            "for the version of the data before the current one, or a specific snapshot id."
         )
 
     return _substitute(text, _VERSION_AS_OF, replace)
@@ -493,12 +493,21 @@ def _rewrite_version_as_of_tag(text: str) -> Tuple[str, List[Edit]]:
             return None
         tag = match.group("tag")
 
-        if tag.upper() == "CURRENT" and not tag.startswith("'"):
+        if tag.upper() == "LATEST" and not tag.startswith("'"):
             raise UnsupportedSyntaxError(
-                "VERSION AS OF CURRENT is not a time-travel read - reading the relation "
-                "without a version clause already reads the current version. `CURRENT` is "
-                "accepted only when CREATING a tag."
+                "LATEST is spelled CURRENT. The snapshot a relation reads by default is "
+                "its CURRENT snapshot, in SQL and in the catalog alike - `current` names "
+                "the snapshot the catalog points at now and claims nothing about which "
+                "snapshot is newest, which is what a rollback makes matter. Reading "
+                "without a version clause already reads it, so `VERSION AS OF CURRENT` "
+                "only earns its keep alongside a version clause you are about to change."
             )
+
+        # CURRENT is deliberately NOT rejected here, and is passed on as a tag
+        # name. It is a real name that resolves - the virtual tag `SHOW
+        # SNAPSHOTS` shows on the head - and the whole point of showing a name
+        # is that it can also be written. It resolves without a catalog lookup;
+        # see `OpteryxTable._resolve_snapshot`.
 
         literal = tag if tag.startswith("'") else f"'{tag}'"
         return f"AT(TAG => {literal})"

@@ -179,6 +179,26 @@ class BaseTable:
         """
         raise NotImplementedError("Subclasses must implement get_dataset_schema method.")
 
+    def get_declared_schema(self) -> RelationSchema:
+        """
+        Retrieve the relation's REGISTERED schema, independent of any snapshot.
+
+        This is what a WRITE needs. An INSERT maps its source columns onto the
+        target's declared columns and never reads the target's data, so it must
+        not be gated on the target having any: a relation that exists but has
+        never been committed to has a schema, and the first INSERT into it is
+        exactly the statement that gives it data.
+
+        For a reader whose schema is not versioned per snapshot this IS the
+        schema `get_dataset_schema` returns, so that is the definition here. A
+        reader that resolves its schema through a snapshot must override this
+        and read the registered schema directly - see `OpteryxTable`.
+
+        Returns:
+            A RelationSchema representing the declared schema of the relation.
+        """
+        return self.get_dataset_schema()
+
     def read_dataset(self, **kwargs) -> Iterable:  # pragma: no cover
         """
         Read a dataset and return a reader object.
