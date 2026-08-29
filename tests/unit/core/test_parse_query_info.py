@@ -535,6 +535,77 @@ def test_the_planner_and_analyze_query_agree_on_what_parses():
     assert pre_parse("SELECT * FROM users") is None
 
 
+# --- SAVE RESULTS OF <job> AS <dataset> -------------------------------------
+#
+# The statement that copies a completed job's results into a dataset. Same
+# pre-parse route as REFRESH, and for the same reason: the jobs API pre-flights
+# a statement with analyze_query before queueing it, so a statement the parser
+# has never heard of is rejected at submission with "Expected: an SQL statement,
+# found: SAVE" rather than running.
+
+
+def test_parse_save_results():
+    info = opteryx.analyze_query(
+        "SAVE RESULTS OF 20260829145017-34mo5tqwk8n77jsr AS personal.bastian.cve_stuff"
+    )
+
+    assert info["query_type"] == "SaveResults"
+    # The TARGET only. The job is not a relation - no catalog knows it and no
+    # policy covers it, so listing it would have the caller's read permission
+    # checked against a name the permission system cannot answer for.
+    assert info["tables"] == ["personal.bastian.cve_stuff"]
+    assert info["is_read"] is False
+    # Creates a dataset, so it is classed and gated as CTAS is.
+    assert info["is_ddl"] is True
+    assert info["is_mutation"] is False
+    assert info["permission_required"] == "owner"
+
+
+def test_save_results_accepts_a_real_job_handle():
+    """A job id opens with a digit and carries a hyphen, so it is not
+    identifier-shaped and cannot borrow the object slot the other statements use."""
+    from opteryx.planner.pre_parse import pre_parse
+    parsed = pre_parse("SAVE RESULTS OF 20260829145017-34mo5tqwk8n77jsr AS personal.b.x")
+
+    assert parsed == [
+        {
+            "SaveResults": {
+                "handle": "20260829145017-34mo5tqwk8n77jsr",
+                "name": "personal.b.x",
+            }
+        }
+    ]
+
+
+def test_save_results_takes_no_placeholder():
+    """The handle chooses WHOSE results get copied into the caller's workspace.
+    A parameterised one would let runtime data make that choice."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.planner.pre_parse import pre_parse
+    with pytest.raises(UnsupportedSyntaxError):
+        pre_parse("SAVE RESULTS OF :job AS personal.b.x")
+
+
+def test_a_malformed_save_names_the_statement_it_is_not():
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.planner.pre_parse import pre_parse
+    with pytest.raises(UnsupportedSyntaxError):
+        pre_parse("SAVE THE WHALES")
+    with pytest.raises(UnsupportedSyntaxError):
+        pre_parse("SAVE RESULTS OF abc")
+
+
+def test_save_is_not_planned_by_the_engine():
+    """Parsed and classified here, executed by the service that owns the results
+    bucket. Reaching the planner means a dispatcher did not recognise it, and the
+    message has to say that rather than 'Opteryx does not support SAVE RESULTS'."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+    session = opteryx.session(user="bastian")
+    with pytest.raises(UnsupportedSyntaxError) as err:
+        list(session.execute_to_morsels("SAVE RESULTS OF 20260829145017-abc AS personal.b.x"))
+    assert "not by the query engine" in str(err.value)
+
+
 if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 

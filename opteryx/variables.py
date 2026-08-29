@@ -373,13 +373,14 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # intended ceiling; nothing caps a result set at this value today. Wiring the
     # enforcement is deliberately separate work.
     "sql_select_limit": (INT64, 1073741824, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    # Days a JOB RECORD (the metadata: status, telemetry, error) survives. Mirrors
-    # jobs.opteryx's JOB_TTL_DAYS, which sets each job's `purge_at`.
-    "job_retention_days": (INT64, 14, VariableOwner.SERVER, Visibility.UNRESTRICTED),
-    # Days RESULTS stay downloadable — SHORTER than the record's lifetime above, so a
-    # job can still be inspected after its data has gone. Mirrors the jobs service
-    # withholding the results URL once a job started more than 7 days ago.
-    "result_retention_days": (INT64, 7, VariableOwner.SERVER, Visibility.UNRESTRICTED),
+    # Days a job survives — the RECORD (status, telemetry, error) and its RESULTS
+    # alike. One number, deliberately: there used to be a second variable,
+    # `job_retention_days`, declaring that the record outlived its data (14 vs 7),
+    # and the split meant three different answers in three different places. It was
+    # removed rather than set to the same value as this one, which would only invite
+    # the split to reopen. Mirrors jobs.opteryx's JOB_TTL_DAYS, which sets each job's
+    # `purge_at` AND gates every route that serves results.
+    "result_retention_days": (INT64, 10, VariableOwner.SERVER, Visibility.UNRESTRICTED),
 
     # ── SERVER — the environment variable sets these; not settable mid-query ────
     # There is no practical reason to disable the optimizer mid-query, so SERVER is

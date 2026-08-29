@@ -187,6 +187,62 @@ def _intercept_refresh_statements(clean_sql: str):
     return [{"RefreshMaterializedView": {"name": match.group("name")}}]
 
 
+# SAVE RESULTS OF <job> AS <dataset>. Copies the results a job already produced
+# into a new dataset, so they outlive the job's retention window.
+#
+# Neither slot takes a placeholder, and the job handle is the reason to be firm
+# about it. It names WHICH RESULTS get copied — a parameterised handle would let
+# runtime data choose whose results land in the caller's own workspace, which is
+# the identifier-slot rule in this module's header doing exactly the job it is
+# there for. The target is an identifier for the same reason relations always
+# are.
+#
+# The handle is not identifier-shaped: a job id is `YYYYMMDDHHMMSS-<random>`, so
+# it opens with a digit and carries a hyphen. It is matched as its own token
+# rather than borrowing _OBJECT_SLOT, which would reject every real one.
+_SAVE_RESULTS_RE = re.compile(
+    r"^\s*SAVE\s+RESULTS\s+OF\s+(?P<handle>[0-9A-Za-z][0-9A-Za-z_-]*)"
+    r"\s+AS\s+(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SAVE_LEAD = re.compile(r"^\s*SAVE\b", re.IGNORECASE)
+
+
+def _intercept_save_results(clean_sql: str):
+    """Recognize `SAVE RESULTS OF <job> AS <dataset>` before the SQL parser.
+
+    Same route as REFRESH: sqlparser's Opteryx dialect has no SAVE statement at
+    all, so without this the front of parsing reports `Expected: an SQL
+    statement, found: SAVE` — including through `analyze_query`, which is how
+    the jobs API pre-flights a statement before queueing it. A statement the
+    platform runs perfectly well would be rejected at submission.
+
+    Recognized here, planned nowhere: the engine has no idea its results are
+    written to a bucket, so it cannot be the thing that copies them. This makes
+    SAVE a statement the engine PARSES and CLASSIFIES — which is what the jobs
+    API needs to authorize it and what the worker needs to identify it — while
+    the copy itself belongs to the service that owns the results bucket.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _SAVE_LEAD.match(clean_sql):
+        return None
+    match = _SAVE_RESULTS_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **SAVE RESULTS OF** <job> **AS** <dataset>. It is the "
+            "only **SAVE** statement."
+        )
+    return [
+        {
+            "SaveResults": {
+                "handle": match.group("handle"),
+                "name": match.group("name"),
+            }
+        }
+    ]
+
+
 # ALTER MATERIALIZED VIEW <name> OWNER TO <principal>|CURRENT_USER. The owner is
 # a value and takes a placeholder, exactly as GRANT's principal does; the view it
 # is set on is an identifier and does not. Same route as
@@ -446,6 +502,7 @@ _INTERCEPTORS = (
     _intercept_drop_statistics,
     _intercept_trigger_statements,
     _intercept_refresh_statements,
+    _intercept_save_results,
     _intercept_alter_materialized_view,
     _intercept_grant_statements,
     _intercept_show_grants_on,

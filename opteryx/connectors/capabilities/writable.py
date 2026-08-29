@@ -523,6 +523,72 @@ class Writable:
             f"{self.__class__.__name__} does not support ALTER TABLE ... CLUSTER BY"
         )
 
+    def declare_relationship(
+        self,
+        relation_parts: "List[str]",
+        column_name: str,
+        references_relation_parts: "List[str]",
+        references_column_name: str,
+        constraint_name: str,
+        cardinality: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Record that two columns hold corresponding values.
+
+        `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... NOT ENFORCED`.
+        Nothing is enforced, now or later: a write that breaks the relationship
+        succeeds, and the engine never reads the declaration back to plan or
+        rewrite a query. It is recorded for tooling and discovery.
+
+        The store is the workspace's own, at `<workspace>/$system/relationships`.
+        It is not a dataset: it has no catalog entry, appears in no listing, and
+        cannot be named in a query - `$` is rejected by the relation-name
+        validator, so a reader cannot spell it. Both ends are guaranteed by the
+        logical planner to be in the same workspace, which is what lets one
+        workspace's store answer for the whole relationship.
+
+        Names arrive SPLIT, not dotted, and that is deliberate rather than
+        stylistic: a dataset name may contain dots, and a dotted string has to
+        be re-parsed by every consumer that reads it back. The parser tokenised
+        the identifiers already; the split it made is the split that is stored.
+
+        Args:
+            relation_parts: the altered relation's name, as identifier parts
+            column_name: its column, the near end of the relationship
+            references_relation_parts: the referenced relation, as parts
+            references_column_name: its column, the far end
+            constraint_name: the handle DROP CONSTRAINT removes it by
+            cardinality: declared, never derived from the data
+            author: session user the declaration is attributed to (see
+                create_relation)
+
+        Raises:
+            ValueError: if a constraint of that name already exists on the relation
+        """
+        # Reachable, like set_cluster_by below: a Writable connector with
+        # nowhere to keep a per-workspace store must say so rather than accept
+        # the statement and drop it. The message is part of the contract.
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support ALTER TABLE ... ADD CONSTRAINT"
+        )
+
+    def drop_relationship(
+        self,
+        relation_parts: "List[str]",
+        constraint_name: str,
+        if_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> bool:
+        """Remove one declared relationship by name.
+
+        Returns True if one was removed, False if there was none and
+        `if_exists` allowed that. Raises otherwise - a DROP that silently
+        matched nothing would let a typo read as success.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support ALTER TABLE ... DROP CONSTRAINT"
+        )
+
     def optimize_relation(self, relation_name: str, author: Optional[str] = None) -> bool:
         """Compact a relation's small data files into fewer, larger ones.
 

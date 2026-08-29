@@ -38,7 +38,8 @@ def test_write_morsel_creates_file(tmp_relation_dir):
 
     full_path = os.path.join(tmp_relation_dir, entry.file_path)
     assert os.path.isfile(full_path)
-    assert re.match(r"^data-[0-9A-Za-z]{32}\.parquet$", entry.file_path)
+    # {time_ns:x}-{mac:x}-{pid:x} — the platform's one collision-proof id shape
+    assert re.match(r"^data-[0-9a-f]+-[0-9a-f]+-[0-9a-f]+\.parquet$", entry.file_path)
 
 
 def test_write_morsel_empty_raises(tmp_relation_dir):

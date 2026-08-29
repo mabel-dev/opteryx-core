@@ -183,10 +183,10 @@ def test_informational_variables_declare_system_behaviour():
         # Mirrors jobs.opteryx's submit-time sql_text guard, in CHARACTERS.
         "max_sql_length": "256000",
         "sql_select_limit": "1073741824",
-        # Two DIFFERENT lifetimes, deliberately: the job RECORD outlives its DATA, so
-        # a job stays inspectable for 14 days but downloadable for only 7.
-        "job_retention_days": "14",
-        "result_retention_days": "7",
+        # ONE lifetime: the record and its results expire together. The second
+        # variable that used to sit here (`job_retention_days`, 14 against this
+        # one's 7) is gone — see the note in variables.py.
+        "result_retention_days": "10",
     }
     # _shown() yields (name, visibility); this test needs the VALUE column, so it
     # reads the morsel directly.

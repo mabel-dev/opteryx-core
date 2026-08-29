@@ -14,6 +14,7 @@ from opteryx.utils._sql_utils import (
     random_int,
     random_string,
     single_item_cache,
+    unique_id,
 )
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "random_int",
     "random_string",
     "single_item_cache",
+    "unique_id",
     "suggest_alternative",
     "Timer",
     "is_windows",

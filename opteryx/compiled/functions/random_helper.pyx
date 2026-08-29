@@ -12,10 +12,14 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 from libc.stdlib cimport malloc, free
 from libc.stdint cimport uint32_t
 
-from opteryx.third_party.pcg.pcg cimport oneseq_xsh_rs_32_16, static_arbitrary_seed
+from opteryx.third_party.pcg.pcg cimport nondeterministic_seed, oneseq_xsh_rs_32_16
 
+# Seeded from OS entropy once per process at import. NOT fork-safe: a process
+# that forks after import copies this state into every child, so ids that must
+# never collide across processes cannot come from this RNG - use
+# opteryx.utils.unique_id (structural time/mac/pid uniqueness) for those.
 cdef oneseq_xsh_rs_32_16 _util_rng
-_util_rng.seed(static_arbitrary_seed())
+_util_rng.seed(nondeterministic_seed())
 
 # default charset (same as _sql_utils)
 cdef bytes DEFAULT_CHARSET = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

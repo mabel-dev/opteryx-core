@@ -28,6 +28,27 @@ __all__ = [
 F = TypeVar("F", bound=Callable[..., Any])
 
 
+def unique_id() -> str:
+    """Mint a platform-unique identifier: ``{time_ns:x}-{mac:x}-{pid:x}``.
+
+    The one approach for naming things that must never collide across the
+    platform (data files, blob ids). Uniqueness is structural, not
+    statistical: two calls can only collide if they come from the same
+    process on the same machine in the same nanosecond. Never use
+    `random_string` for this - the RNG behind it replays an identical
+    sequence in every fresh process of the same build, so two scale-from-zero
+    workers mint the SAME "random" name and silently overwrite each other's
+    committed files (the security.nvd_vulnerabilities corruption,
+    opteryx.app#164). Same formula as opteryx-catalog's data-file writer,
+    with the pid read per-call rather than at import so a post-import fork
+    (gunicorn preload) cannot hand two workers the same id.
+    """
+    import os
+    import uuid
+
+    return f"{time.time_ns():x}-{uuid.getnode():x}-{os.getpid():x}"
+
+
 def random_string(length: int = 8, charset: str = None) -> str:
     """Generate a random alphanumeric string.
 

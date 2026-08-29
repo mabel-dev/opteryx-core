@@ -24,8 +24,6 @@ from typing import Optional
 
 from opteryx.constants import QueryStatus
 from opteryx.exceptions import DatasetNotFoundError
-from opteryx.managers.relationships import declare_relationship
-from opteryx.managers.relationships import drop_relationship
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
@@ -273,12 +271,10 @@ class RelationManagementNode(BasePlanNode):
                 if self.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            # The store is NOT the near relation's catalog - a relationship
-            # between two workspaces has no single-workspace home - so this does
-            # not go through the connector. See opteryx.managers.relationships:
-            # the seam is unwired on purpose and raises rather than guessing a
-            # location for the row.
-            declare_relationship(
+            # The workspace's own store, not the relation's catalog entry -
+            # see Writable.declare_relationship. Both ends are in this
+            # workspace; the logical planner refused the statement otherwise.
+            self.connector.declare_relationship(
                 relation_parts=self.relation_parts,
                 column_name=self.column_name,
                 references_relation_parts=self.references_relation_parts,
@@ -294,13 +290,15 @@ class RelationManagementNode(BasePlanNode):
                 if self.if_exists:
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.relation_name)
-            drop_relationship(
+            removed = self.connector.drop_relationship(
                 relation_parts=self.relation_parts,
                 constraint_name=self.constraint_name,
                 if_exists=self.constraint_if_exists,
                 author=self._author,
             )
-            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+            return NonTabularResult(
+                record_count=1 if removed else 0, status=QueryStatus.SQL_SUCCESS
+            )
 
         elif self.action == "optimize_relation":
             if not self.connector.relation_exists(self.relation_name):

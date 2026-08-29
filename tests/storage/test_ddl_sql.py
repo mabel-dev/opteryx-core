@@ -231,19 +231,56 @@ _INFORMATIONAL_FK = (
 )
 
 
-def test_alter_table_add_constraint_not_enforced_is_accepted(tmp_path):
-    """The one admitted constraint form gets past plan time.
+def test_alter_table_add_constraint_not_enforced_is_recorded(tmp_path):
+    """The one admitted constraint form is accepted and stored.
 
-    It does not yet get past execution: where the declaration is stored is an
-    open design decision, so the write path is an explicit seam that raises
-    (opteryx/managers/relationships). What this pins is that the refusal is no
-    longer a SYNTAX refusal -- the statement parses, plans, binds and is
-    authorized, and stops only where there is genuinely nowhere to put the row.
+    Kept in the relation's own directory beside triggers.json, mirroring the
+    catalog's relationships subcollection under the dataset document -- so
+    "what relates to this dataset" is a keyed read.
     """
     session = _setup_two_tables(tmp_path)
 
-    with pytest.raises(NotImplementedError):
+    list(session.execute_to_morsels(_INFORMATIONAL_FK))
+
+    store = tmp_path / "ws" / "events" / "relationships.jsonl"
+    assert store.exists()
+    with open(store) as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "maps"
+    assert row["constraint_name"] == "events_customer_fk"
+    assert row["origin"] == "asserted"
+    assert row["cardinality"] == "many_to_one"
+    # Names are stored SPLIT, never as a dotted string.
+    assert row["from_relation"] == ["ws", "events"]
+    assert row["from_column"] == "customer_ref"
+    assert row["to_relation"] == ["ws", "customers"]
+    assert row["to_column"] == "id"
+    # One row, not two: there is no mirrored copy and no direction column.
+    assert "direction" not in row
+
+
+def test_alter_table_add_constraint_rejects_a_duplicate_name(tmp_path):
+    """The name is the only handle DROP CONSTRAINT has, so two of them on one
+    relation would make a drop ambiguous."""
+    session = _setup_two_tables(tmp_path)
+    list(session.execute_to_morsels(_INFORMATIONAL_FK))
+
+    with pytest.raises(ValueError, match="constraint already exists"):
         list(session.execute_to_morsels(_INFORMATIONAL_FK))
+
+
+def test_the_relationship_store_is_not_a_relation(tmp_path):
+    """The store is a file in the relation's directory, where a relation is a
+    directory containing dataset.json -- so no scan can resolve it, and the
+    visibility model does not rest on a name check."""
+    session = _setup_two_tables(tmp_path)
+    list(session.execute_to_morsels(_INFORMATIONAL_FK))
+
+    with pytest.raises(Exception):
+        list(session.execute_to_morsels("SELECT * FROM ws.events.relationships"))
 
 
 def test_alter_table_add_constraint_requires_explicit_not_enforced(tmp_path):
@@ -346,22 +383,25 @@ def test_alter_table_add_constraint_checks_both_columns_exist(tmp_path):
         )
 
 
-def test_alter_table_drop_constraint_is_accepted_by_name(tmp_path):
-    """DROP CONSTRAINT names the constraint, not the dataset it referenced.
+def test_alter_table_drop_constraint_removes_it_by_name(tmp_path):
+    """DROP CONSTRAINT names the constraint, not the dataset it referenced."""
+    session = _setup_two_tables(tmp_path)
+    list(session.execute_to_morsels(_INFORMATIONAL_FK))
 
-    Like ADD, it stops at the storage seam and nowhere earlier.
-    """
+    list(session.execute_to_morsels("ALTER TABLE ws.events DROP CONSTRAINT events_customer_fk"))
+
+    # The last row out takes the store file with it.
+    assert not (tmp_path / "ws" / "events" / "relationships.jsonl").exists()
+
+
+def test_alter_table_drop_constraint_missing_needs_if_exists(tmp_path):
+    """A DROP that silently matched nothing would let a typo read as success."""
     session = _setup_two_tables(tmp_path)
 
-    with pytest.raises(NotImplementedError):
-        list(session.execute_to_morsels("ALTER TABLE ws.events DROP CONSTRAINT events_customer_fk"))
+    with pytest.raises(ValueError, match="no constraint"):
+        list(session.execute_to_morsels("ALTER TABLE ws.events DROP CONSTRAINT no_such_fk"))
 
-    with pytest.raises(NotImplementedError):
-        list(
-            session.execute_to_morsels(
-                "ALTER TABLE ws.events DROP CONSTRAINT IF EXISTS events_customer_fk"
-            )
-        )
+    list(session.execute_to_morsels("ALTER TABLE ws.events DROP CONSTRAINT IF EXISTS no_such_fk"))
 
 
 def test_alter_table_constraint_if_exists_is_a_no_op(tmp_path):

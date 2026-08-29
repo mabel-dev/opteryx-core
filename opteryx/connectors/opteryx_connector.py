@@ -1171,13 +1171,13 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """
         from rugo.parquet import write_parquet
 
-        from opteryx.utils import random_string
+        from opteryx.utils import unique_id
 
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         location = self._dataset_location(relation_name)
 
-        file_name = f"data-{random_string(32)}.parquet"
+        file_name = f"data-{unique_id()}.parquet"
         data_path = f"{location}/data/{file_name}"
 
         pdata = write_parquet(morsel, compression="zstd", bloom_filters=True)
@@ -1895,6 +1895,74 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             raise ValueError(
                 f"trigger {trigger_name} does not exist on {relation_name} "
                 "(use DROP TRIGGER IF EXISTS to make this quiet)"
+            ) from exc
+
+    def declare_relationship(
+        self,
+        relation_parts: List[str],
+        column_name: str,
+        references_relation_parts: List[str],
+        references_column_name: str,
+        constraint_name: str,
+        cardinality: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Record one declared, unenforced relationship, delegating to the catalog.
+
+        The catalog holds it as a subcollection under the dataset the
+        constraint is declared on - the same shape as triggers - so "what
+        relates to this dataset" is a keyed read. Nothing is enforced: a write
+        that breaks the relationship succeeds.
+
+        Names arrive split and are rejoined only at this boundary, because the
+        catalog's API takes an identifier. What the catalog then STORES is split
+        again, into its own fields; the dotted form never reaches storage.
+        """
+        workspace, relative_id = self._parse_identifier(".".join(relation_parts))
+        _, references_relative_id = self._parse_identifier(".".join(references_relation_parts))
+        catalog = self._get_catalog(workspace)
+        catalog.declare_relationship(
+            relative_id,
+            constraint_name,
+            column_name,
+            references_relative_id,
+            references_column_name,
+            cardinality,
+            author=author,
+        )
+
+    def drop_relationship(
+        self,
+        relation_parts: List[str],
+        constraint_name: str,
+        if_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> bool:
+        """Remove one declared relationship by name, delegating to the catalog.
+
+        A missing constraint is translated into a clear ValueError unless
+        `if_exists`, in which case the catalog returns False and nothing is
+        raised.
+        """
+        try:
+            from opteryx_catalog.exceptions import ConstraintNotFound
+        except ImportError:
+            # An installed opteryx_catalog wheel that predates declared
+            # relationships - same skew tolerance as drop_trigger above. The
+            # real ConstraintNotFound subclasses KeyError, so this stays correct
+            # when the newer wheel arrives.
+            ConstraintNotFound = KeyError
+
+        workspace, relative_id = self._parse_identifier(".".join(relation_parts))
+        catalog = self._get_catalog(workspace)
+        try:
+            return catalog.drop_relationship(
+                relative_id, constraint_name, author=author, missing_ok=if_exists
+            )
+        except ConstraintNotFound as exc:
+            raise ValueError(
+                f"constraint {constraint_name} does not exist on {'.'.join(relation_parts)} "
+                "(use DROP CONSTRAINT IF EXISTS to make this quiet)"
             ) from exc
 
     def _resolve_version_spec(

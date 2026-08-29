@@ -46,6 +46,12 @@ _SYNTHESIZED_TARGETS = {
     "DropTrigger": "table_name",
     "RefreshMaterializedView": "name",
     "AlterMaterializedViewOwner": "name",
+    # The dataset being CREATED. The job whose results are copied is deliberately
+    # NOT a relation: it is not in the catalog, nobody holds a policy on it, and
+    # listing it here would have the caller's read permission checked against a
+    # name no permission system knows. Who may copy a job's results is a
+    # different question, answered where those results live.
+    "SaveResults": "name",
     # The permission target is the object the grant is being administered on;
     # the principal receiving/losing it names a person, not a relation.
     "GrantAccess": "object_name",
@@ -66,6 +72,10 @@ _SYNTHESIZED_STATEMENTS = {
     # Replaces the view's contents from its definition. Nothing about the
     # relation itself changes, so it is a mutation and not DDL.
     "RefreshMaterializedView": (True, False, "writer"),
+    # Creates a dataset, so it is classed and gated exactly as CTAS is: DDL,
+    # owner-tier on the target. The rows come from a completed job rather than
+    # from a SELECT, which changes who may run it, not what it makes.
+    "SaveResults": (False, True, "owner"),
     # Drops a stored object rather than data; the binder gates it at ALTER.
     "DropStatistics": (False, True, "owner"),
     # WRITE on the table the trigger hangs off, symmetric with creating one.

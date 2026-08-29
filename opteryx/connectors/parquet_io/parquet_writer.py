@@ -18,13 +18,13 @@ from draken.morsels.morsel import Morsel
 from rugo.parquet import write_parquet_with_bounds
 
 from opteryx.models.file_entry import FileEntry
-from opteryx.utils import random_string
+from opteryx.utils import unique_id
 
 
 def write_morsel(morsel: Morsel, relation_dir: str) -> FileEntry:
     """Write a Morsel as a single parquet file in relation_dir.
 
-    File name is data-{random_string}.parquet (relative path stored in FileEntry).
+    File name is data-{unique_id}.parquet (relative path stored in FileEntry).
 
     Args:
         morsel: Draken Morsel containing the rows to write.
@@ -44,7 +44,7 @@ def write_morsel(morsel: Morsel, relation_dir: str) -> FileEntry:
 
     data, bounds = write_parquet_with_bounds(morsel, compression="zstd")
 
-    file_name = f"data-{random_string(32)}.parquet"
+    file_name = f"data-{unique_id()}.parquet"
     full_path = os.path.join(relation_dir, file_name)
     tmp_path = f"{full_path}.tmp"
 

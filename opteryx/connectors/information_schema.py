@@ -10,7 +10,7 @@ information_schema
 Minimum information_schema surface. Backed by the real Opteryx catalog
 (opteryx_catalog) via list_collections()/list_datasets()/list_views() -
 NOT a static/generated snapshot. Currently implements `tables`, `columns`,
-`views`, `schemata`, and `triggers`.
+`views`, `schemata`, `triggers`, and `column_relationships`.
 
 information_schema is a reserved nested schema inside a catalog workspace,
 addressed as `<workspace>.information_schema.<table>` - e.g.
@@ -826,6 +826,175 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
 
+class InformationSchemaColumnRelationshipsTable(BaseTable, _KeyColumnPredicatePushable):
+    """Reads `information_schema.column_relationships` from the catalog's
+    per-dataset relationship listings - list_collections() -> list_datasets()
+    -> list_relationships(), one round trip per dataset.
+
+    A relationship is a DECLARATION that two columns hold corresponding values.
+    Nothing enforces it: a write that breaks it succeeds, and no query plan
+    consults it. This projection is the only way to read one back.
+
+    TWO datasets, so two READ checks, and that is what makes this table
+    different from every other one here. A trigger row is about the dataset it
+    hangs off; a relationship row NAMES A SECOND DATASET - its collection,
+    dataset and column - so showing it to someone who can read only the near
+    side discloses the existence and shape of data they hold no grant on. Rows
+    are therefore built only where both ends are readable, rather than built and
+    then filtered: a row the caller may not see is never constructed. Copying
+    the single-check shape from the triggers table would fail open, quietly, and
+    only for the people it should protect.
+
+    Only the near side is enumerated. "What points AT this dataset" is
+    `find_relationships_to` on the catalog, a collection group query - not
+    something this walk answers, and deliberately not a mirrored row.
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
+    # BaseTable also declares this (False); it comes first in the MRO, so it
+    # would otherwise shadow _KeyColumnPredicatePushable's True.
+    supports_predicate_pushdown = True
+
+    _COLUMNS = (
+        "constraint_catalog",
+        "constraint_collection",
+        "constraint_name",
+        "table_name",
+        "column_name",
+        "referenced_table_name",
+        "referenced_column_name",
+        "relationship_kind",
+        "cardinality",
+        "origin",
+        "status",
+        "asserted_by",
+        "asserted_at",
+        "verified_at",
+    )
+
+    # constraint_catalog/constraint_collection/table_name are known before the
+    # per-dataset list_relationships() round trip, so pushing them skips those
+    # calls entirely - which is what makes the `$metadata` read ("what relates
+    # to THIS dataset") one subcollection read rather than a workspace walk.
+    # constraint_name only prunes rows after the listing.
+    _pushable_columns = frozenset(
+        {"constraint_catalog", "constraint_collection", "table_name", "constraint_name"}
+    )
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        PredicatePushable.__init__(self, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationSchema:
+        column_types = {
+            "constraint_catalog": _lt.VARCHAR,
+            "constraint_collection": _lt.VARCHAR,
+            "constraint_name": _lt.VARCHAR,
+            "table_name": _lt.VARCHAR,
+            "column_name": _lt.VARCHAR,
+            "referenced_table_name": _lt.VARCHAR,
+            "referenced_column_name": _lt.VARCHAR,
+            "relationship_kind": _lt.VARCHAR,
+            "cardinality": _lt.VARCHAR,
+            "origin": _lt.VARCHAR,
+            "status": _lt.VARCHAR,
+            "asserted_by": _lt.VARCHAR,
+            "asserted_at": _lt.TIMESTAMP(),
+            "verified_at": _lt.TIMESTAMP(),
+        }
+        self.schema = RelationSchema(
+            name="information_schema.column_relationships",
+            columns=[
+                SchemaColumn(
+                    name=column_name,
+                    column_type=column_types[column_name],
+                    identity=mint_column_identity(
+                        "information_schema.column_relationships", column_name
+                    ),
+                )
+                for column_name in self._COLUMNS
+            ],
+        )
+        return self.schema
+
+    def read_dataset(self, predicates=None, **kwargs) -> Iterable[Morsel]:
+        compiled = _compile_key_predicates(predicates, self._pushable_columns)
+
+        rows = {column_name: [] for column_name in self._COLUMNS}
+
+        # See InformationSchemaTablesTable.read_dataset - constraint_catalog is
+        # constant per reader, so an excluding predicate skips enumeration
+        # entirely rather than filtering row by row.
+        if _key_predicates_allow(compiled, {"constraint_catalog": self.workspace}):
+            for collection in self.catalog.list_collections():
+                if not _key_predicates_allow(compiled, {"constraint_collection": collection}):
+                    continue
+                for name in self.catalog.list_datasets(collection):
+                    table_name = f"{collection}.{name}"
+                    if not _key_predicates_allow(compiled, {"table_name": table_name}):
+                        continue
+                    if not _readable(self.execution_context, self.workspace, collection, name):
+                        continue
+                    for relationship in self.catalog.list_relationships(table_name):
+                        constraint_name = relationship.get("name")
+                        if not _key_predicates_allow(
+                            compiled, {"constraint_name": constraint_name}
+                        ):
+                            continue
+
+                        # The far end, and the check the triggers table has no
+                        # equivalent of. A relationship the caller may only half
+                        # see is not shown at all: the alternative - blanking the
+                        # far columns - still discloses that SOMETHING over there
+                        # is related, which is most of what was worth hiding.
+                        far_collection = relationship.get("references-collection")
+                        far_dataset = relationship.get("references-dataset")
+                        if not _readable(
+                            self.execution_context, self.workspace, far_collection, far_dataset
+                        ):
+                            continue
+
+                        rows["constraint_catalog"].append(self.workspace)
+                        rows["constraint_collection"].append(collection)
+                        rows["constraint_name"].append(constraint_name)
+                        rows["table_name"].append(table_name)
+                        rows["column_name"].append(relationship.get("column"))
+                        rows["referenced_table_name"].append(f"{far_collection}.{far_dataset}")
+                        rows["referenced_column_name"].append(
+                            relationship.get("references-column")
+                        )
+                        rows["relationship_kind"].append(relationship.get("kind"))
+                        rows["cardinality"].append(relationship.get("cardinality"))
+                        rows["origin"].append(relationship.get("origin"))
+                        rows["status"].append(relationship.get("status"))
+                        rows["asserted_by"].append(relationship.get("asserted-by"))
+                        rows["asserted_at"].append(
+                            _ms_to_datetime(relationship.get("asserted-at-ms"))
+                        )
+                        rows["verified_at"].append(
+                            _ms_to_datetime(relationship.get("verified-at-ms"))
+                        )
+
+        _TIMESTAMP_COLUMNS = {"asserted_at", "verified_at"}
+        vectors = [
+            vector_from_sequence(
+                rows[column_name],
+                dtype=(
+                    DrakenType.TIMESTAMP64
+                    if column_name in _TIMESTAMP_COLUMNS
+                    else DrakenType.VARCHAR
+                ),
+            )
+            for column_name in self._COLUMNS
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
 class InformationSchemaSchemataTable(BaseTable, _KeyColumnPredicatePushable):
     """Reads `information_schema.schemata` from the catalog's collection listing.
 
@@ -898,4 +1067,5 @@ _TABLE_CLASSES = {
     "views": InformationSchemaViewsTable,
     "schemata": InformationSchemaSchemataTable,
     "triggers": InformationSchemaTriggersTable,
+    "column_relationships": InformationSchemaColumnRelationshipsTable,
 }

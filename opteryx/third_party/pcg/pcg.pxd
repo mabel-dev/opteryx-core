@@ -23,4 +23,4 @@ cdef extern from "../../third_party/pcg/pcg_random.hpp" namespace "pcg_engines":
 
 
 cdef extern from "../../third_party/pcg/pcg_pyhelpers.hpp":
-    uint64_t static_arbitrary_seed() nogil
+    uint64_t nondeterministic_seed() nogil

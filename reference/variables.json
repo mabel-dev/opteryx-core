@@ -275,17 +275,6 @@
         "default_source": "environment",
         "environment_key": "OPTERYX_INSTRUMENT_ENGINE"
     },
-    "job_retention_days": {
-        "name": "job_retention_days",
-        "type": "INT64",
-        "owner": "SERVER",
-        "visibility": "UNRESTRICTED",
-        "settable": false,
-        "requires_entitlement": null,
-        "set_by": "not settable via SQL",
-        "default": 14,
-        "default_source": "literal"
-    },
     "kvstore_key_prefix": {
         "name": "kvstore_key_prefix",
         "type": "VARCHAR",
@@ -611,7 +600,7 @@
         "settable": false,
         "requires_entitlement": null,
         "set_by": "not settable via SQL",
-        "default": 7,
+        "default": 10,
         "default_source": "literal"
     },
     "skene_late_materialization_max_selectivity": {

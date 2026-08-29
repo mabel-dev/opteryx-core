@@ -6192,6 +6192,19 @@ def do_logical_planning_phase(parsed_statement: dict) -> tuple:
         from opteryx.exceptions import UnsupportedSyntaxError
         from opteryx.utils.sql import convert_camel_to_sql_case
 
+        # SAVE RESULTS is parsed and classified here but executed by the service
+        # that owns the results bucket — the engine does not know its results are
+        # written to one, so it cannot be the thing that copies them. Reaching the
+        # planner means whoever dispatched the statement did not recognize it,
+        # which is a deployment skew rather than a statement the platform lacks:
+        # say so, instead of "Opteryx does not support SAVE RESULTS", which sends
+        # the reader looking for a missing feature.
+        if statement_type == "SaveResults":
+            raise UnsupportedSyntaxError(
+                "**SAVE RESULTS** is run by the platform, not by the query engine. "
+                "Reaching the engine means the service that dispatched it does not "
+                "recognize the statement - check that it is up to date."
+            )
         raise UnsupportedSyntaxError(
             f"Opteryx does not support '{convert_camel_to_sql_case(statement_type)}' type queries."
         )

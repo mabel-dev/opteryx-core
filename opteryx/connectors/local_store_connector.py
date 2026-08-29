@@ -28,7 +28,7 @@ from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.models.manifest_io import write_manifest_parquet
 from opteryx.types.schema import RelationSchema
-from opteryx.utils import random_string, suggest_alternative
+from opteryx.utils import suggest_alternative, unique_id
 
 
 def _now_utc_iso() -> str:
@@ -430,6 +430,126 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             json.dump(triggers, f)
         os.replace(tmp_path, triggers_path)
 
+    # --- declared relationships (ALTER TABLE ... ADD/DROP CONSTRAINT) --------
+    #
+    # Kept in the relation's OWN directory, beside triggers.json, mirroring the
+    # catalog's relationships subcollection under the dataset document. That is
+    # what makes "what relates to THIS dataset" a keyed read rather than a scan,
+    # and it means a dropped relation takes its declarations with it.
+    #
+    # It is not a relation and cannot become one: this is a file, where a
+    # dataset is a directory containing dataset.json, so no scan can resolve it.
+
+    # JSON LINES, not a JSON document. The neighbouring triggers.json is an
+    # array, but a relation carries a handful of triggers and may accumulate
+    # relationships without limit; an array would mean rewriting the whole file
+    # to add one row. It is also the row-oriented shape the catalog stores, so
+    # the two do not diverge.
+    _RELATIONSHIP_STORE_FILE = "relationships.jsonl"
+
+    def _relationship_store_path(self, relation_parts: List[str]) -> str:
+        """Where this relation keeps the relationships declared ON it."""
+        return os.path.join(
+            self._relation_dir(".".join(relation_parts)), self._RELATIONSHIP_STORE_FILE
+        )
+
+    def _read_relationships(self, relation_parts: List[str]) -> List[dict]:
+        path = self._relationship_store_path(relation_parts)
+        if not os.path.isfile(path):
+            return []
+        with open(path) as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def _append_relationship(self, relation_parts: List[str], row: dict) -> None:
+        """Add one row without touching the ones already there."""
+        path = self._relationship_store_path(relation_parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(row) + "\n")
+
+    def _rewrite_relationships(self, relation_parts: List[str], rows: List[dict]) -> None:
+        """Replace the whole store. Only a removal needs this; an add appends."""
+        path = self._relationship_store_path(relation_parts)
+        if not rows:
+            if os.path.isfile(path):
+                os.remove(path)
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
+        os.replace(tmp_path, path)
+
+    def declare_relationship(
+        self,
+        relation_parts: List[str],
+        column_name: str,
+        references_relation_parts: List[str],
+        references_column_name: str,
+        constraint_name: str,
+        cardinality: str,
+        author: Optional[str] = None,
+    ) -> None:
+        rows = self._read_relationships(relation_parts)
+
+        # A constraint name is the only handle DROP CONSTRAINT has, so two of
+        # them on one relation would make a drop ambiguous. Scoped to the
+        # relation, not the workspace: two tables may each have an `owner_fk`.
+        # Scoped to this relation because the store is: two relations may each
+        # carry an `owner_fk`, and neither can see the other's.
+        for row in rows:
+            if row["constraint_name"] == constraint_name:
+                raise ValueError(
+                    f"constraint already exists: {constraint_name} on "
+                    f"{'.'.join(relation_parts)}"
+                )
+
+        self._append_relationship(
+            relation_parts,
+            {
+                "relationship_id": unique_id(),
+                "kind": "maps",
+                "constraint_name": constraint_name,
+                # Parts, never a dotted string - the whole reason names are
+                # carried split from the parser down to here.
+                "from_workspace": relation_parts[0],
+                "from_relation": list(relation_parts),
+                "from_column": column_name,
+                "to_workspace": references_relation_parts[0],
+                "to_relation": list(references_relation_parts),
+                "to_column": references_column_name,
+                "cardinality": cardinality,
+                # Asserted by a person, never inferred, so no confidence and no
+                # evidence - those belong to a proposal, which this is not.
+                "origin": "asserted",
+                "confidence": None,
+                "evidence": None,
+                "status": "active",
+                "asserted_by": author,
+                "asserted_at": datetime.now(timezone.utc).isoformat(),
+                "verified_at": None,
+            },
+        )
+
+    def drop_relationship(
+        self,
+        relation_parts: List[str],
+        constraint_name: str,
+        if_exists: bool = False,
+        author: Optional[str] = None,
+    ) -> bool:
+        rows = self._read_relationships(relation_parts)
+        remaining = [row for row in rows if row["constraint_name"] != constraint_name]
+        if len(remaining) == len(rows):
+            if if_exists:
+                return False
+            raise ValueError(
+                f"There is no constraint {constraint_name} on {'.'.join(relation_parts)}."
+            )
+        self._rewrite_relationships(relation_parts, remaining)
+        return True
+
     def drop_trigger(
         self,
         relation_name: str,
@@ -708,7 +828,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                     f.read(), drop=drop, rename=rename, add=add, retype=retype
                 )
 
-            file_name = f"data-{random_string(32)}.parquet"
+            file_name = f"data-{unique_id()}.parquet"
             full_path = os.path.join(relation_dir, file_name)
             tmp_path = f"{full_path}.tmp"
             with open(tmp_path, "wb") as f:
