@@ -90,6 +90,20 @@ class RelationManagementNode(BasePlanNode):
         self.trigger_name: Optional[str] = parameters.get("trigger_name")
         self.table_name: Optional[str] = parameters.get("table_name")
 
+        # CREATE TASK / DROP TASK. `statement` carries the task's SQL with its
+        # `:name` placeholders intact - they are bound when it is EXECUTEd, not
+        # when it is defined.
+        self.task_name: Optional[str] = parameters.get("task_name")
+        # CREATE TASK ... ON <table>: the dataset whose commits fire it. The
+        # trigger is created alongside the task, so one statement leaves nothing
+        # half-wired.
+        self.on_table: Optional[str] = parameters.get("on_table")
+        # ALTER TASK ... OWNER TO. `resolved_owner` is the binder's answer, with
+        # CURRENT_USER already turned into the principal it names.
+        self.resolved_owner: Optional[str] = parameters.get("resolved_owner")
+        self.statement: Optional[str] = parameters.get("statement")
+        self.or_replace: bool = parameters.get("or_replace", False)
+
         # ALTER MATERIALIZED VIEW ... OWNER TO
         self.new_owner: Optional[str] = parameters.get("new_owner")
         self.owner_is_current_user: bool = parameters.get("owner_is_current_user", False)
@@ -110,6 +124,10 @@ class RelationManagementNode(BasePlanNode):
         # capability needs the acting identity at execution time, where there
         # is no BindingContext to read it from.
         self.execution_context = parameters.get("execution_context")
+
+        # CALL <procedure>(...)
+        self.procedure_name: Optional[str] = parameters.get("procedure_name")
+        self.arguments: Optional[list] = parameters.get("arguments")
 
         # CREATE / TRUNCATE / ALTER
         self.connector = parameters.get("connector")
@@ -160,6 +178,17 @@ class RelationManagementNode(BasePlanNode):
             return f"rollback {self.relation_name} to version {self.version_spec}"
         if self.action == "drop_trigger":
             return f"drop trigger {self.trigger_name} on {self.table_name}"
+        if self.action == "create_task":
+            on = f" on {self.on_table}" if self.on_table else ""
+            return f"create task {self.task_name}{on}"
+        if self.action == "create_trigger":
+            return f"create trigger {self.trigger_name} on {self.table_name} execute {self.task_name}"
+        if self.action == "alter_trigger_suspended":
+            return f"alter trigger {self.trigger_name} on {self.table_name} {'suspend' if self.suspended else 'resume'}"
+        if self.action == "drop_task":
+            return f"drop task {self.task_name}"
+        if self.action == "alter_trigger_owner":
+            return f"alter trigger {self.trigger_name} on {self.table_name} owner to {'CURRENT_USER' if self.owner_is_current_user else self.new_owner}"
         if self.action == "alter_materialized_view_suspended":
             return f"alter materialized view {self.relation_name} {'suspend' if self.suspended else 'resume'}"
         if self.action == "alter_materialized_view_owner":
@@ -168,6 +197,11 @@ class RelationManagementNode(BasePlanNode):
             return f"grant {self.role} on {self.object_kind} {self.object_name} to user {self.principal}"
         if self.action == "revoke_access":
             return f"revoke {self.role} on {self.object_kind} {self.object_name} from user {self.principal}"
+        if self.action == "call_procedure":
+            # The ARGUMENT VALUES are not rendered. They are whatever the caller wrote
+            # - a message body, a recipient - and this string reaches EXPLAIN output
+            # and the query log, so the name is shown and the payload is not.
+            return f"call {self.procedure_name} ({len(self.arguments or [])} argument(s))"
         return f"{self.action} {self.relation_name}"
 
     @property
@@ -373,6 +407,71 @@ class RelationManagementNode(BasePlanNode):
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
+        elif self.action == "create_task":
+            self.connector.create_task(
+                self.task_name,
+                self.statement,
+                author=self._author,
+                or_replace=self.or_replace,
+            )
+            if self.on_table:
+                # Derived, not authored: the statement declared the dependency,
+                # so the trigger that implements it is this statement's to make -
+                # the same bargain CREATE MATERIALIZED VIEW strikes. `or_replace`
+                # is passed so re-running the statement repoints its own trigger
+                # rather than colliding with it.
+                if not self.connector.relation_exists(self.on_table):
+                    raise DatasetNotFoundError(connector=self.connector, dataset=self.on_table)
+                self.connector.create_trigger(
+                    self.on_table,
+                    f"task__{self.task_name.replace('.', '__')}",
+                    self.task_name,
+                    author=self._author,
+                    or_replace=True,
+                )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "create_trigger":
+            if not self.connector.relation_exists(self.table_name):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+            self.connector.create_trigger(
+                self.table_name,
+                self.trigger_name,
+                self.task_name,
+                author=self._author,
+                or_replace=self.or_replace,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "alter_trigger_suspended":
+            if not self.connector.relation_exists(self.table_name):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+            self.connector.set_trigger_suspended(
+                self.table_name,
+                self.trigger_name,
+                self.suspended,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "alter_trigger_owner":
+            # The binder resolved CURRENT_USER to the session identity and proved
+            # that principal can be billed; this records the transfer.
+            if not self.connector.relation_exists(self.table_name):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+            self.connector.set_trigger_owner(
+                self.table_name, self.trigger_name, self.resolved_owner, author=self._author
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "drop_task":
+            self.connector.drop_task(
+                self.task_name,
+                if_exists=self.if_exists,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
         elif self.action == "drop_trigger":
             # The table must exist regardless of IF EXISTS - that modifier
             # speaks about the trigger, not the table it hangs off.
@@ -464,6 +563,41 @@ class RelationManagementNode(BasePlanNode):
             from opteryx.managers.permissions import apply_revoke
 
             apply_revoke(self.execution_context, self.pattern, self.role, self.principal)
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "call_procedure":
+            # Re-resolved by name rather than carried as a callable on the plan, so
+            # nothing live is pinned into a plan that gets copied and explained.
+            # `plan_call` already proved the name resolves and the arity matches; a
+            # miss here means the registry changed underneath the statement, which is
+            # an error and not a no-op.
+            from opteryx.procedures import get_procedure
+
+            procedure = get_procedure(self.procedure_name)
+            if procedure is None:
+                raise ValueError(f"procedure is no longer registered: {self.procedure_name}")
+
+            # Who is calling. Built here rather than captured at registration because
+            # the registry is process-global: one registration serves every session, so
+            # a procedure that addresses the caller ("notify SELF") can only learn who
+            # that is from the statement being executed. `_author` is the same
+            # `external_user` resolution the DDL actions above attribute with, and it
+            # passes None through rather than inventing an identity.
+            from opteryx.procedures import ProcedureContext
+            from opteryx.variables import resolve
+
+            context = ProcedureContext(
+                user=self._author,
+                billing_account=resolve("billing_account", self.properties.variables, None)
+                or None,
+                query_id=self.properties.query_id,
+            )
+
+            # Runs EXACTLY ONCE, and the handler is the only judge of whether it
+            # worked: there is no success value to inspect, so a failure raises and the
+            # statement fails with it. Nothing is caught here - swallowing the
+            # exception would report SQL_SUCCESS for a notification that never sent.
+            procedure.handler(context, *(self.arguments or []))
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         else:

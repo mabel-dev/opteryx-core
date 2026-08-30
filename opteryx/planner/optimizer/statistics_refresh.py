@@ -1111,7 +1111,9 @@ def _join_stats(
     merged = _drop_histograms(_merge_columns(left, right))
     # Equi-join: matching join keys see their range intersected and NDV reduced
     # to min(left, right). Non-key columns just get NDV capped at output rows.
-    merged = _intersect_join_keys(merged, left, right, left_keys, right_keys)
+    merged = _intersect_join_keys(
+        merged, left, right, left_keys, right_keys, estimator_type
+    )
     merged = _scale_total_bytes_by_origin(merged, left, right, out_rows)
     # A later join keys off a column belonging to one of the base relations
     # under this subtree; we can't tell which, so keep the largest domain --
@@ -1124,14 +1126,39 @@ def _join_stats(
     )
 
 
+# Which side of an equi-join has its key narrowed to the match. A PRESERVED side
+# keeps its own range and NDV: an outer join emits its preserved rows whether or
+# not they matched, so values outside the intersection still reach the output and
+# claiming otherwise describes a relation the join does not produce.
+_NARROWABLE_JOIN_SIDES = {
+    "inner": ("left", "right"),
+    "left": ("right",),  # left preserved
+    "right": ("left",),  # right preserved
+    "outer": (),  # both preserved
+}
+
+
 def _intersect_join_keys(
     merged: Dict[bytes, ColumnStatistics],
     left: RelationStatistics,
     right: RelationStatistics,
     left_keys: List[bytes],
     right_keys: List[bytes],
+    estimator_type: str = "inner",
 ) -> Dict[bytes, ColumnStatistics]:
-    """Intersect ranges and reduce NDV for equi-join keys on both sides."""
+    """Intersect ranges and reduce NDV for equi-join keys, on the matched sides.
+
+    For an INNER join every output row matched, so both keys are bounded by the
+    intersection and by each other's NDV. An OUTER join preserves one side (or
+    both), and a preserved row that found no match is emitted null-filled --
+    its key keeps whatever value it had. Narrowing a preserved key was therefore
+    describing a narrower relation than the join emits, and any consumer reading
+    that range as truth (correlated filters transporting it onto the opposite
+    leg's scan) would turn an under-claimed estimate into dropped rows.
+    """
+    narrowable = _NARROWABLE_JOIN_SIDES.get(estimator_type, ("left", "right"))
+    if not narrowable:
+        return merged
     out = dict(merged)
     for lk, rk in zip(left_keys, right_keys):
         l_col = left.columns.get(lk)
@@ -1146,9 +1173,13 @@ def _intersect_join_keys(
             new_ndv = l_col.distinct_count
         elif r_col.distinct_count is not None:
             new_ndv = r_col.distinct_count
-        for key in (lk, rk):
-            if key in out:
-                out[key] = out[key].but(value_range=intersected_range, distinct_count=new_ndv)
+        keys = tuple(
+            key
+            for key, side in ((lk, "left"), (rk, "right"))
+            if side in narrowable and key in out
+        )
+        for key in keys:
+            out[key] = out[key].but(value_range=intersected_range, distinct_count=new_ndv)
     return out
 
 

@@ -360,6 +360,36 @@ def render_analyze(node: LogicalPlanNode) -> str:
     return f"ANALYZE TABLE ({node.table_name})"
 
 
+@register_render(LogicalPlanStepType.CreateTrigger)
+def render_create_trigger(node: LogicalPlanNode) -> str:
+    or_replace = "OR REPLACE " if node.or_replace else ""
+    return f"CREATE {or_replace}TRIGGER ({node.trigger_name}) ON ({node.table_name}) EXECUTE ({node.task_name})"
+
+
+@register_render(LogicalPlanStepType.AlterTriggerSuspended)
+def render_alter_trigger_suspended(node: LogicalPlanNode) -> str:
+    state = "SUSPEND" if node.suspended else "RESUME"
+    return f"ALTER TRIGGER ({node.trigger_name}) ON ({node.table_name}) {state}"
+
+
+@register_render(LogicalPlanStepType.CreateTask)
+def render_create_task(node: LogicalPlanNode) -> str:
+    or_replace = "OR REPLACE " if node.or_replace else ""
+    return f"CREATE {or_replace}TASK ({node.task_name})"
+
+
+@register_render(LogicalPlanStepType.AlterTriggerOwner)
+def render_alter_trigger_owner(node: LogicalPlanNode) -> str:
+    owner = "CURRENT_USER" if node.owner_is_current_user else node.new_owner
+    return f"ALTER TRIGGER ({node.trigger_name}) ON ({node.table_name}) OWNER TO ({owner})"
+
+
+@register_render(LogicalPlanStepType.DropTask)
+def render_drop_task(node: LogicalPlanNode) -> str:
+    if_exists = "IF EXISTS " if node.if_exists else ""
+    return f"DROP TASK {if_exists}({node.task_name})"
+
+
 @register_render(LogicalPlanStepType.DropTrigger)
 def render_drop_trigger(node: LogicalPlanNode) -> str:
     if_exists = "IF EXISTS " if node.if_exists else ""

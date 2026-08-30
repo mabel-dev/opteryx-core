@@ -1622,6 +1622,31 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             return
         self._alter_columns(relation_name, author, drop=[column_name])
 
+        # The column is gone, so every relationship through it now points at
+        # nothing. Marked broken, never deleted - the row is the record that
+        # this column was depended on, and it is what an owner reads to find
+        # out. The plan-time guard already refused the case worth refusing (an
+        # asserted relationship declared HERE); what is left is proposals and
+        # inbound references from datasets this caller may not be able to see.
+        #
+        # After the drop, not before: a break recorded against a column that
+        # then failed to drop would be a lie about the data.
+        # Non-fatal: the column is already gone, and raising here would fail a
+        # statement that has in fact succeeded. What a failed sweep leaves is a
+        # relationship still marked active against a column that no longer
+        # exists - which is the state this whole check improves on, and which
+        # `fsck` finds - rather than a half-applied DDL statement.
+        try:
+            self.break_relationships_through_column(relation_name, column_name, author=author)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "dropped %s.%s but could not mark the relationships through it broken; "
+                "they now reference a column that does not exist",
+                relation_name,
+                column_name,
+                exc_info=True,
+            )
+
     def rename_column(
         self,
         relation_name: str,
@@ -1680,6 +1705,205 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         except (DatasetNotFound, MaterializedViewError):
             return False
         return True
+
+    def create_task(
+        self,
+        relation_name: str,
+        statement: str,
+        author: Optional[str] = None,
+        or_replace: bool = False,
+    ) -> None:
+        """Register a task in the catalog.
+
+        The binder has already established that `author` could have run
+        `statement` themselves and may own a task at all, so nothing is
+        re-litigated here - this records what it is given, as `create_relation`
+        does.
+
+        `runs_as` is passed as the author and pinned by the catalog on first
+        registration only, so CREATE OR REPLACE edits the statement without ever
+        moving whose authority it runs with. There is deliberately no way to name
+        another principal: that argument would BE the escalation this whole gate
+        exists to prevent.
+        """
+        try:
+            from opteryx_catalog.exceptions import TaskAlreadyExists
+        except ImportError:
+            # An installed opteryx_catalog wheel that predates tasks - same skew
+            # tolerance as drop_trigger above. The real TaskAlreadyExists
+            # subclasses KeyError, so this stays correct once it arrives.
+            TaskAlreadyExists = KeyError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.create_task(
+                relative_id,
+                sql=statement,
+                author=author,
+                runs_as=author,
+                update_if_exists=or_replace,
+            )
+        except TaskAlreadyExists as exc:
+            raise ValueError(
+                f"task {relation_name} already exists "
+                "(use CREATE OR REPLACE TASK to redefine it)"
+            ) from exc
+
+    def drop_task(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop a task from the catalog.
+
+        The catalog's own `drop_task` returns quietly when the task is absent,
+        so the not-found case is detected here rather than caught - that is what
+        makes plain DROP TASK an error and DROP TASK IF EXISTS a no-op.
+        """
+        try:
+            from opteryx_catalog.exceptions import TaskNotFound
+        except ImportError:
+            TaskNotFound = KeyError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        if not if_exists:
+            try:
+                catalog.get_task(relative_id)
+            except TaskNotFound as exc:
+                raise ValueError(
+                    f"task {relation_name} does not exist "
+                    "(use DROP TASK IF EXISTS to make this quiet)"
+                ) from exc
+
+        catalog.drop_task(relative_id, author=author)
+
+    def create_task(
+        self,
+        relation_name: str,
+        statement: str,
+        author: Optional[str] = None,
+        or_replace: bool = False,
+    ) -> None:
+        """Register a task in the catalog.
+
+        The binder has already established that `author` could have run
+        `statement` themselves and may own a task at all, so nothing here
+        re-litigates either - this records what it is given, as every other
+        connector write does.
+        """
+        from opteryx_catalog.exceptions import TaskAlreadyExists
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.create_task(
+                relative_id,
+                sql=statement,
+                author=author,
+                update_if_exists=or_replace,
+            )
+        except TaskAlreadyExists as exc:
+            raise ValueError(
+                f"task already exists: {relation_name} "
+                "(use CREATE OR REPLACE TASK to redefine it)"
+            ) from exc
+
+    def drop_task(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop a task. The catalog's own drop is a no-op on a missing task, so
+        the not-found case is detected here to honour IF EXISTS faithfully."""
+        from opteryx_catalog.exceptions import TaskNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        if not if_exists:
+            try:
+                catalog.get_task(relative_id)
+            except TaskNotFound as exc:
+                raise ValueError(
+                    f"task {relation_name} does not exist "
+                    "(use DROP TASK IF EXISTS to make this quiet)"
+                ) from exc
+
+        catalog.drop_task(relative_id, author=author)
+
+    def create_trigger(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        task_name: str,
+        author: Optional[str] = None,
+        or_replace: bool = False,
+    ) -> None:
+        """Attach a task trigger to the dataset whose commits should fire it."""
+        from opteryx_catalog.exceptions import MaterializedViewError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        if or_replace:
+            # `create_trigger` refuses to repoint an existing trigger, which is
+            # right for the implicit MV path but is exactly what OR REPLACE asks
+            # for. Drop first so the guard has nothing to refuse.
+            catalog.drop_trigger(relative_id, trigger_name, author=author, missing_ok=True)
+
+        try:
+            catalog.create_trigger(
+                relative_id,
+                trigger_name,
+                target_task=task_name,
+                kind="task",
+                author=author,
+            )
+        except MaterializedViewError as exc:
+            # The repoint guard. Surfaced as ValueError so the statement reads as
+            # a caller error rather than an MV failure, which it is not.
+            raise ValueError(str(exc)) from exc
+
+    def set_trigger_owner(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        new_owner: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Repoint the identity a trigger's unattended runs execute as."""
+        from opteryx_catalog.exceptions import TriggerNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.set_trigger_owner(relative_id, trigger_name, new_owner, author=author)
+        except TriggerNotFound as exc:
+            raise ValueError(
+                f"trigger {trigger_name} does not exist on {relation_name}"
+            ) from exc
+
+    def set_trigger_suspended(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        suspended: bool,
+        author: Optional[str] = None,
+    ) -> None:
+        """Suspend or resume a trigger, leaving it in place either way."""
+        from opteryx_catalog.exceptions import TriggerNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.set_trigger_suspended(relative_id, trigger_name, suspended, author=author)
+        except TriggerNotFound as exc:
+            raise ValueError(
+                f"trigger {trigger_name} does not exist on {relation_name}"
+            ) from exc
 
     def is_task(self, relation_name: str) -> bool:
         """Whether the catalog holds a task under this name."""
@@ -1964,6 +2188,66 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 f"constraint {constraint_name} does not exist on {'.'.join(relation_parts)} "
                 "(use DROP CONSTRAINT IF EXISTS to make this quiet)"
             ) from exc
+
+    def relationships_through_column(
+        self, relation_name: str, column_name: str
+    ) -> List[dict]:
+        """Declared relationships through one column, from the catalog.
+
+        Normalised on the way out: the catalog stores hyphenated, split fields
+        and the binder wants one flat shape it can read whichever connector
+        answered. The far end is rejoined into a dotted string HERE and only
+        for display - nothing reads it back, so the dots-in-names ambiguity the
+        split storage exists to avoid is not reintroduced.
+
+        Inbound rows are carried through with their flag intact and are NOT
+        stripped: the binder needs to know they exist in order to not act on
+        them, and dropping them here would make that decision unmakeable.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        # A catalog wheel that predates §9's verification has no such method.
+        # Same skew tolerance as drop_relationship: the drop then proceeds
+        # unguarded, exactly as it did before this existed.
+        lookup = getattr(catalog, "relationships_through_column", None)
+        if lookup is None:
+            return []
+
+        rows = []
+        for row in lookup(relative_id, column_name):
+            far = ".".join(
+                part
+                for part in (
+                    row.get("references-collection"),
+                    row.get("references-dataset"),
+                    row.get("references-column"),
+                )
+                if part
+            )
+            rows.append(
+                {
+                    "constraint_name": row.get("name"),
+                    "origin": row.get("origin"),
+                    "status": row.get("status"),
+                    "kind": row.get("kind"),
+                    "inbound": bool(row.get("inbound")),
+                    "references": far,
+                }
+            )
+        return rows
+
+    def break_relationships_through_column(
+        self, relation_name: str, column_name: str, author: Optional[str] = None
+    ) -> List[dict]:
+        """Mark broken what the dropped column left pointing at nothing."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        breaker = getattr(catalog, "break_relationships_through_column", None)
+        if breaker is None:
+            return []
+        return breaker(relative_id, column_name, author=author)
 
     def _resolve_version_spec(
         self,

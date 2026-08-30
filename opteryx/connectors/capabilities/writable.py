@@ -595,6 +595,52 @@ class Writable:
             f"{self.__class__.__name__} does not support ALTER TABLE ... DROP CONSTRAINT"
         )
 
+    def relationships_through_column(
+        self, relation_name: str, column_name: str
+    ) -> "List[dict]":
+        """Declared relationships that would point at nothing if a column went.
+
+        Read at PLAN TIME by `ALTER TABLE ... DROP COLUMN`, so that someone is
+        told before the damage rather than after it. Both directions are
+        reported and they are not interchangeable to the caller:
+
+          outbound (`inbound=False`) declared ON this relation, at this column.
+            Its author is this relation's owner, so naming it back to them
+            discloses nothing.
+          inbound (`inbound=True`)   declared elsewhere, referencing this
+            column. Its near end may be a dataset the caller holds no grant on,
+            so a caller MUST NOT name these in a message or refuse on them -
+            doing either discloses data the caller cannot read. They are here
+            to be broken and to be notified about.
+
+        Returns normalised dicts, because the two stores spell their rows
+        differently and the binder should not have to know which it is talking
+        to: `constraint_name`, `origin`, `status`, `kind`, `inbound`, and
+        `references` (the far end, for display only).
+
+        The default is "none", and unlike the methods above that is a truthful
+        answer rather than a silent one: a connector with no relationship store
+        has no relationships to break. A connector that DOES keep them must
+        override this, or its columns become droppable without warning.
+        """
+        return []
+
+    def break_relationships_through_column(
+        self, relation_name: str, column_name: str, author: Optional[str] = None
+    ) -> "List[dict]":
+        """Mark broken every relationship that ran through a dropped column.
+
+        Called AFTER the column is gone, by whoever executed the drop. What
+        reaches here is what the plan-time guard let through: proposals, and
+        inbound references the dropper was deliberately not told about.
+
+        BROKEN, NEVER DELETED. "This used to reference a column that no longer
+        exists" is information, and removing the row would hide the problem
+        instead of surfacing it. Returns what it broke so a caller can tell the
+        people who asserted them.
+        """
+        return []
+
     def optimize_relation(self, relation_name: str, author: Optional[str] = None) -> bool:
         """Compact a relation's small data files into fewer, larger ones.
 
@@ -675,6 +721,106 @@ class Writable:
         the name resolves to, and "not a task here" is a complete answer.
         """
         return False
+
+    def create_trigger(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        task_name: str,
+        author: Optional[str] = None,
+        or_replace: bool = False,
+    ) -> None:
+        """Attach a trigger to `relation_name` that runs `task_name` on commit.
+
+        The binder has established the caller may write `relation_name`; a
+        trigger confers no authority of its own, so nothing here re-checks what
+        the task may do - that was settled against the task's author when it was
+        created.
+
+        Args:
+            relation_name: dataset whose user-created commits fire the trigger
+            trigger_name: name, unique per dataset
+            task_name: the task to run
+            author: session user this is attributed to
+            or_replace: repoint an existing trigger of this name rather than
+                refusing
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **CREATE TRIGGER**")
+
+    def set_trigger_owner(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        new_owner: str,
+        author: Optional[str] = None,
+    ) -> None:
+        """Repoint the identity an unattended run of this trigger executes as.
+
+        The binder has established that the incoming owner is one who can be
+        billed, and that the caller may write the table the trigger hangs off.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support **ALTER TRIGGER ... OWNER TO**"
+        )
+
+    def set_trigger_suspended(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        suspended: bool,
+        author: Optional[str] = None,
+    ) -> None:
+        """Suspend or resume a trigger.
+
+        A suspended trigger still exists and is still reached; it enqueues
+        nothing. Deliberately distinct from dropping it - the suppression stays
+        visible where an operator looks for why a table stopped updating.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **ALTER TRIGGER**")
+
+    def create_task(
+        self,
+        relation_name: str,
+        statement: str,
+        author: Optional[str] = None,
+        or_replace: bool = False,
+    ) -> None:
+        """Register a task: a statement the platform runs on its own.
+
+        The binder has already established that `author` could have run
+        `statement` themselves, and that they may own a task at all. A store
+        implementing this does not re-litigate either - it records what it is
+        given, exactly as `create_relation` does.
+
+        Args:
+            relation_name: Fully-qualified task name
+            statement: the SQL the task runs, with `:name` placeholders intact
+            author: session user this registration is attributed to, and the
+                identity the task will run as
+            or_replace: replace an existing task of this name rather than
+                refusing. The prior statement is kept as a version by stores
+                that version them.
+
+        Raises:
+            ValueError: If the task exists and `or_replace` is False
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **CREATE TASK**")
+
+    def drop_task(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        """Drop a task. A task owns no storage, so nothing is reclaimed.
+
+        Triggers that fire it are NOT swept: a trigger lives on the dataset that
+        fires it, and reaching across to delete other datasets' documents from a
+        drop is how a partial failure leaves a trigger nobody can see.
+
+        Args:
+            relation_name: Fully-qualified task name
+            if_exists: If True, do not raise when the task does not exist
+            author: session user the drop is attributed to
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **DROP TASK**")
 
     def task_definition(self, relation_name: str) -> str:
         """The statement a task is recorded as, as executable text.

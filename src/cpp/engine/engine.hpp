@@ -795,6 +795,7 @@ public:
                                       const std::vector<int>* column_types,
                                       const std::vector<int>* retag_units,
                                       const std::vector<int>* emit_indices,
+                                      const std::vector<int>* length_only,
                                       void* instrs, int count,
                                       std::vector<int> col_idx,
                                       std::vector<void*> lit_dv,
@@ -821,7 +822,7 @@ public:
         zone.ordinals = zone_ordinals;
         set_source_(p, std::make_unique<NativeSkeneScanSource>(
                            files, column_names, out_identities, column_types,
-                           retag_units, emit_indices,
+                           retag_units, emit_indices, length_only,
                            program != nullptr ? fn : nullptr, program, zone,
                            row_groups_total, row_groups_pruned,
                            row_groups_pruned_runtime, bytes_claimed));
@@ -844,10 +845,12 @@ public:
                                       const std::vector<std::string>* p1_column_names,
                                       const std::vector<int>* p1_column_types,
                                       const std::vector<int>* p1_retag_units,
+                                      const std::vector<int>* p1_length_only,
                                       const std::vector<std::string>* out_column_names,
                                       const std::vector<std::string>* out_identities,
                                       const std::vector<int>* out_column_types,
                                       const std::vector<int>* out_retag_units,
+                                      const std::vector<int>* out_length_only,
                                       void* pred_fn, void* pred_ctx,
                                       const std::vector<int>* pred_col_to_p1,
                                       int sort_p1_index, bool sort_ascending,
@@ -864,8 +867,8 @@ public:
         zone.ordinals = zone_ordinals;
         set_source_(p, std::make_unique<NativeSkeneLatmatScanSource>(
                            files, p1_column_names, p1_column_types, p1_retag_units,
-                           out_column_names, out_identities, out_column_types,
-                           out_retag_units,
+                           p1_length_only, out_column_names, out_identities,
+                           out_column_types, out_retag_units, out_length_only,
                            reinterpret_cast<SkeneLatmatPredFn>(pred_fn), pred_ctx,
                            pred_col_to_p1, sort_p1_index, sort_ascending, topn_limit,
                            zone, row_groups_total, row_groups_pruned,

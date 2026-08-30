@@ -574,6 +574,7 @@ class NativeSkeneScanSource : public Source {
                           const std::vector<int>* column_types,
                           const std::vector<int>* retag_units,
                           const std::vector<int>* emit_indices,
+                          const std::vector<int>* length_only,
                           ExprFilterFn filter_fn,
                           ExprProgram* filter,
                           SkeneZoneMap zone,
@@ -587,6 +588,10 @@ class NativeSkeneScanSource : public Source {
           column_types_(column_types),
           retag_units_(retag_units),
           emit_indices_(emit_indices),
+          length_only_(length_only == nullptr
+                           ? std::vector<uint8_t>()
+                           : std::vector<uint8_t>(length_only->begin(),
+                                                  length_only->end())),
           filter_fn_(filter_fn),
           filter_(filter),
           zone_(zone),
@@ -676,6 +681,7 @@ class NativeSkeneScanSource : public Source {
 
             skene::ReadOptions options;
             options.columns = *column_names_;
+            options.length_only = length_only_;
 
             auto morsel = std::make_shared<CxxMorsel>();
             skene::Status status =
@@ -839,6 +845,13 @@ class NativeSkeneScanSource : public Source {
     const std::vector<int>* retag_units_;
     // Positions in the read set this scan emits (the projection). See the ctor.
     const std::vector<int>* emit_indices_;
+    // Parallel to column_names_ (or empty): 1 = the optimizer PROVED every read
+    // of that column is length-answerable, so the reader records each value's
+    // length and never materializes the payload arena. Owned rather than
+    // borrowed because ReadOptions wants uint8_t and the plan holds int — an
+    // 8-byte-per-column copy made once, not per row group. See
+    // skene::ReadOptions::length_only for the contract this asserts.
+    const std::vector<uint8_t> length_only_;
     // The pushed predicate. `filter_fn_ == nullptr` means nothing was pushed.
     ExprFilterFn filter_fn_;
     ExprProgram* filter_;

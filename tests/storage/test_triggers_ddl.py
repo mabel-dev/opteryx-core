@@ -178,11 +178,16 @@ def test_replace_mv_reconciles_triggers_against_new_sources(tmp_path):
     assert len(_source_triggers(tmp_path, "ws.second")) == 1
 
 
-def test_create_trigger_rejected(tmp_path):
+def test_postgres_style_create_trigger_rejected(tmp_path):
+    """CREATE TRIGGER exists now, but only in this dialect's one form:
+    `ON <table> EXECUTE <task>`. The postgres row-trigger shape (AFTER INSERT,
+    EXECUTE FUNCTION) has no meaning here and is refused by pointing at the
+    grammar that does - it used to be refused because no CREATE TRIGGER existed
+    at all."""
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
 
-    with pytest.raises(UnsupportedSyntaxError, match="CREATE MATERIALIZED VIEW"):
+    with pytest.raises(UnsupportedSyntaxError, match="EXECUTE"):
         list(
             owner.execute_to_morsels(
                 "CREATE TRIGGER t AFTER INSERT ON ws.src EXECUTE FUNCTION f()"
@@ -320,11 +325,48 @@ def test_information_schema_triggers_row_shape(catalog_workspace):
     assert row["trigger_name"] == "refresh__coll1__mv"
     assert row["event_object_table"] == "coll1.src"
     assert row["action_kind"] == "materialized_view_refresh"
-    assert row["target_view"] == "coll1.mv"
+    assert row["target"] == "coll1.mv"
     assert row["created_by"] == "olive"
     assert row["created_at"] is not None
     assert row["last_fired_at"] is None
     assert row["last_fired_status"] is None
+
+
+def test_information_schema_reports_what_a_task_trigger_runs(catalog_workspace, monkeypatch):
+    """A task trigger used to show nothing under `target_view`: the view read
+    that field only, so the one thing you consult SHOW TRIGGERS to learn - what
+    it fires - was the one thing missing. `target` now carries either kind.
+
+    The task trigger is scoped to this test rather than added to the shared
+    fixture, which several tests assert holds exactly one row.
+    """
+    monkeypatch.setattr(
+        catalog_workspace,
+        "list_triggers",
+        lambda self, identifier: (
+            [
+                {
+                    "name": "task__coll1__ingest",
+                    "kind": "task",
+                    "target-task": "cat.coll1.ingest",
+                    "created-by": "olive",
+                    "created-at-ms": _NOW_MS,
+                    "last-fired-at-ms": None,
+                    "last-fired-status": None,
+                }
+            ]
+            if identifier == "coll1.src"
+            else []
+        ),
+    )
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    rows = _morsels_to_rows(
+        session.execute_to_morsels("SELECT * FROM cat.information_schema.triggers")
+    )
+
+    row = next(r for r in rows if r["action_kind"] == "task")
+    assert row["trigger_name"] == "task__coll1__ingest"
+    assert row["target"] == "cat.coll1.ingest"
 
 
 def test_information_schema_triggers_denies_without_execution_context():

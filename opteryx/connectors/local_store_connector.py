@@ -8,6 +8,7 @@ Local file-based storage connector implementing Writable interface.
 """
 
 import json
+import logging
 import os
 import time
 import re
@@ -28,6 +29,8 @@ from opteryx.models.manifest import Manifest
 from opteryx.models.manifest_io import read_manifest_file_entries
 from opteryx.models.manifest_io import write_manifest_parquet
 from opteryx.types.schema import RelationSchema
+
+logger = logging.getLogger(__name__)
 from opteryx.utils import suggest_alternative, unique_id
 
 
@@ -196,8 +199,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
 
         if os.path.isfile(os.path.join(relation_dir, "dataset.json")):
             raise ValueError(f"relation already exists: {relation_name}")
-        if os.path.isfile(os.path.join(relation_dir, "view.json")):
-            raise ValueError(f"view already exists: {relation_name}")
+        self.assert_name_free(relation_name, "table")
 
         os.makedirs(relation_dir, exist_ok=True)
 
@@ -314,11 +316,141 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     def is_materialized_view(self, relation_name: str) -> bool:
         return os.path.isfile(self._mv_path(relation_name))
 
+    # `workspace.collection.<object>` is ONE namespace: a name identifies a
+    # table, a view or a task, never two of them. All three sentinels sit in the
+    # same directory, so this is the list every creator checks.
+    _NAME_SENTINELS = (("dataset.json", "table"), ("view.json", "view"), ("task.json", "task"))
+
+    def name_holder(self, relation_name: str) -> Optional[str]:
+        """Which kind of object holds this name, or None if it is free."""
+        relation_dir = self._relation_dir(relation_name)
+        for sentinel, kind in self._NAME_SENTINELS:
+            if os.path.isfile(os.path.join(relation_dir, sentinel)):
+                return kind
+        return None
+
+    def assert_name_free(self, relation_name: str, kind: str) -> None:
+        """Refuse the name if another KIND already holds it.
+
+        The same-kind case is the creator's own business, which knows whether it
+        is a replace; this answers only "is this name someone else's".
+        """
+        holder = self.name_holder(relation_name)
+        if holder is not None and holder != kind:
+            raise ValueError(
+                f"{relation_name} already exists as a {holder}. A table, a view and a "
+                "task share one namespace, so a name identifies exactly one of them."
+            )
+
     def _task_path(self, relation_name: str) -> str:
         return os.path.join(self._relation_dir(relation_name), "task.json")
 
     def is_task(self, relation_name: str) -> bool:
         return os.path.isfile(self._task_path(relation_name))
+
+    def create_trigger(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        task_name: str,
+        author: Optional[str] = None,
+        or_replace: bool = False,
+    ) -> None:
+        triggers = self.list_triggers(relation_name)
+        existing = next((t for t in triggers if t.get("name") == trigger_name), None)
+        if existing is not None:
+            claimed = existing.get("target-task") or existing.get("target-view")
+            if not or_replace and claimed != task_name:
+                # Same guard the catalog applies: a blind overwrite would leave
+                # the first target with no trigger and nothing to report it.
+                raise ValueError(
+                    f"trigger {trigger_name} on {relation_name} already runs {claimed}; "
+                    f"refusing to repoint it at {task_name}"
+                )
+            triggers = [t for t in triggers if t.get("name") != trigger_name]
+        triggers.append(
+            {
+                "name": trigger_name,
+                "kind": "task",
+                "target-task": task_name,
+                "created-by": author,
+                # The identity an UNATTENDED run carries. Pinned to the author on
+                # creation; moved only by ALTER TRIGGER ... OWNER TO.
+                "runs-as": (existing or {}).get("runs-as") or author,
+                "suspended-at-ms": (existing or {}).get("suspended-at-ms"),
+            }
+        )
+        self._write_triggers(relation_name, triggers)
+
+    def set_trigger_owner(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        new_owner: str,
+        author: Optional[str] = None,
+    ) -> None:
+        triggers = self.list_triggers(relation_name)
+        target = next((t for t in triggers if t.get("name") == trigger_name), None)
+        if target is None:
+            raise ValueError(f"trigger not found: {trigger_name} on {relation_name}")
+        target["runs-as"] = new_owner
+        self._write_triggers(relation_name, triggers)
+
+    def set_trigger_suspended(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        suspended: bool,
+        author: Optional[str] = None,
+    ) -> None:
+        triggers = self.list_triggers(relation_name)
+        target = next((t for t in triggers if t.get("name") == trigger_name), None)
+        if target is None:
+            raise ValueError(f"trigger not found: {trigger_name} on {relation_name}")
+        target["suspended-at-ms"] = int(time.time() * 1000) if suspended else None
+        target["suspended-by"] = author if suspended else None
+        self._write_triggers(relation_name, triggers)
+
+    def create_task(
+        self,
+        relation_name: str,
+        statement: str,
+        author: Optional[str] = None,
+        or_replace: bool = False,
+    ) -> None:
+        self.assert_name_free(relation_name, "task")
+        task_path = self._task_path(relation_name)
+        if os.path.isfile(task_path) and not or_replace:
+            raise ValueError(f"task already exists: {relation_name}")
+        os.makedirs(os.path.dirname(task_path), exist_ok=True)
+        existing = {}
+        if os.path.isfile(task_path):
+            with open(task_path) as f:
+                existing = json.load(f)
+        with open(task_path, "w") as f:
+            # No `runs-as`: a task carries no identity. EXECUTE runs it as the
+            # invoker, and an unattended run carries the TRIGGER's owner.
+            json.dump({"sql": statement, "author": author}, f)
+
+    def _rewrite_task(self, relation_name: str, **fields) -> None:
+        task_path = self._task_path(relation_name)
+        if not os.path.isfile(task_path):
+            raise ValueError(f"task not found: {relation_name}")
+        with open(task_path) as f:
+            record = json.load(f)
+        record.update(fields)
+        with open(task_path, "w") as f:
+            json.dump(record, f)
+
+    def drop_task(
+        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
+    ) -> None:
+        task_path = self._task_path(relation_name)
+        if not os.path.isfile(task_path):
+            if if_exists:
+                return
+            raise ValueError(f"task not found: {relation_name}")
+        os.remove(task_path)
 
     def task_definition(self, relation_name: str) -> str:
         task_path = self._task_path(relation_name)
@@ -548,6 +680,60 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 f"There is no constraint {constraint_name} on {'.'.join(relation_parts)}."
             )
         self._rewrite_relationships(relation_parts, remaining)
+
+    def relationships_through_column(
+        self, relation_name: str, column_name: str
+    ) -> List[dict]:
+        """Declared relationships through one column of this relation.
+
+        OUTBOUND ONLY, and the omission is structural rather than an oversight.
+        This store is one file per relation with no reverse index, so "what
+        points AT this column" would mean walking every relation directory
+        under the store root - the exact scan the catalog answers with one
+        collection group query. The local store exists so the engine stays
+        testable without a catalog, not to reproduce its indexes, and the cost
+        of the gap is bounded: an inbound reference here is left stale, which
+        is what the catalog did for everything until §9.
+        """
+        rows = []
+        for row in self._read_relationships(relation_name.split(".")):
+            if row.get("from_column") != column_name:
+                continue
+            rows.append(
+                {
+                    "constraint_name": row.get("constraint_name"),
+                    "origin": row.get("origin"),
+                    "status": row.get("status"),
+                    "kind": row.get("kind"),
+                    "inbound": False,
+                    "references": ".".join(
+                        list(row.get("to_relation") or []) + [str(row.get("to_column"))]
+                    ),
+                }
+            )
+        return rows
+
+    def break_relationships_through_column(
+        self, relation_name: str, column_name: str, author: Optional[str] = None
+    ) -> List[dict]:
+        """Mark broken - never remove - what a dropped column orphaned."""
+        relation_parts = relation_name.split(".")
+        rows = self._read_relationships(relation_parts)
+
+        broken = []
+        changed = False
+        for row in rows:
+            if row.get("from_column") != column_name or row.get("status") == "broken":
+                continue
+            row["status"] = "broken"
+            row["broken_reason"] = "column-dropped"
+            row["broken_detail"] = f"column {relation_name}.{column_name} was dropped"
+            row["verified_at"] = datetime.now(timezone.utc).isoformat()
+            changed = True
+            broken.append(dict(row))
+        if changed:
+            self._rewrite_relationships(relation_parts, rows)
+        return broken
         return True
 
     def drop_trigger(
@@ -961,6 +1147,24 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             keep=keep,
         )
 
+        # After the patch, never before: a break recorded against a column that
+        # then failed to drop would be a lie about the data.
+        # Non-fatal: the column is already gone, and raising here would fail a
+        # statement that has in fact succeeded. What a failed sweep leaves is a
+        # relationship still marked active against a column that no longer
+        # exists - which is the state this whole check improves on, and which
+        # `fsck` finds - rather than a half-applied DDL statement.
+        try:
+            self.break_relationships_through_column(relation_name, column_name, author=author)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "dropped %s.%s but could not mark the relationships through it broken; "
+                "they now reference a column that does not exist",
+                relation_name,
+                column_name,
+                exc_info=True,
+            )
+
     def rename_column(
         self,
         relation_name: str,
@@ -1235,8 +1439,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_dir = self._relation_dir(view_name)
         view_path = os.path.join(relation_dir, "view.json")
 
-        if os.path.isfile(os.path.join(relation_dir, "dataset.json")):
-            raise ValueError(f"relation already exists: {view_name}")
+        self.assert_name_free(view_name, "view")
         if os.path.isfile(view_path) and not update_if_exists:
             raise ValueError(f"view already exists: {view_name}")
 

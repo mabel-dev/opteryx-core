@@ -25,13 +25,32 @@ the number of bounds differ. Strict comparators are transported as non-strict
 (``>`` becomes ``>=`` on the same value), which weakens the derived filter and so
 can only ever forgo pruning, never drop a matching row.
 
+A second, stronger transport rides the same machinery: CONSTANT PROPAGATION. When
+one operand of an equi-join resolves to a column a Project binds to a LITERAL --
+the shape `WITH params AS (SELECT 'CVE-2023-49105' AS cve_id)` takes, and every
+single-row parameter relation with it -- the other operand's value is not merely
+bounded, it is KNOWN, and `target = <literal>` goes onto the opposite scan. That
+constant is read from the PLAN (the producing Project), never from `value_range`,
+which holds numbers and nothing else by ruling (see `_orderable_bound` and the
+manifest inlet in statistics_refresh) and so could not carry a VARCHAR key at all.
+Being an equality rather than a pair of bounds, it also reaches the connectors'
+equality pushdown and the dictionary skip probes, which a range does not.
+
+Constant propagation additionally runs on OUTER joins, into the NULL-SUPPLYING leg
+only. A row of that leg which fails the ON condition contributes nothing but the
+nulls it would have contributed by being absent, so removing it early is invisible;
+the preserved leg is untouchable for the reason the range transport gives above.
+
 This runs *after* PredicatePushdown so the original predicates are already on the
 scans and their effect is reflected in the propagated key ranges. The derived
 range predicates are appended directly onto the target scan's ``predicates``
 list (the same channel PredicatePushdown feeds), so no second pushdown pass is
 needed; scans whose connector can't take pushed predicates get a Filter node
-instead. Only inner / nested-loop joins are eligible — the pushed range is a
-necessary condition for a match, which would be unsound for outer joins.
+instead. The RANGE transport stays restricted to inner / nested-loop joins: it
+reads its bound from the propagated key statistics, and an outer join's preserved
+key is not narrowed to the match there (see `_intersect_join_keys`), so there is
+nothing sound for it to carry across one. Constant propagation has no such
+dependency — it reads the plan — and takes the outer-join legs described above.
 """
 
 import decimal
@@ -547,6 +566,156 @@ def _range_conditions(target_col, value_range):
     return conditions
 
 
+# Descending past one of these would leave the identity ambiguous: a set operation
+# has two branches that can both feed the same output column, so a literal found
+# under one of them describes only half the rows reaching the join.
+_SET_OPERATIONS = (
+    LogicalPlanStepType.Union,
+    LogicalPlanStepType.Intersect,
+    LogicalPlanStepType.Except,
+    LogicalPlanStepType.Difference,
+)
+
+
+def _constant_literal_for(plan, start_nid, identity):
+    """The single LITERAL a Project below *start_nid* binds to *identity*, else None.
+
+    An outer join BELOW this point can null-fill the column, so the honest reading
+    of what is found here is "this column is that constant or NULL". Both callers
+    want it as a necessary condition for an equi-join MATCH, and NULL never matches,
+    so the weaker reading is the one that is used and the nulls need no accounting.
+
+    Refuses when two Projects disagree about the identity. Constant identities are
+    minted from the value, so agreement is the norm and disagreement would mean the
+    identity is not the unique handle this relies on.
+    """
+    found = []
+    seen = set()
+    stack = [start_nid]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        node = plan[nid]
+        if node is None:
+            continue
+        if node.node_type in _SET_OPERATIONS:
+            continue
+        if node.node_type == LogicalPlanStepType.Project:
+            for column in getattr(node, "columns", None) or []:
+                if (
+                    column.node_type == NodeType.LITERAL
+                    and _phys_identity(column) == identity
+                ):
+                    found.append(column)
+        stack.extend(edge[0] for edge in plan.ingoing_edges(nid))
+    if not found:
+        return None
+    first = found[0]
+    for other in found[1:]:
+        if type(other.value) is not type(first.value) or other.value != first.value:
+            return None
+    return first
+
+
+def _constant_condition(target_col, literal):
+    """`target_col = <literal>` as a scan predicate, or None when *literal*'s value
+    has no EXACT spelling in the target's type.
+
+    Exactness is the whole gate. A range bound may be rounded outward because a
+    wider necessary condition only prunes less, but an equality that moves by any
+    amount selects a different set of rows, so every category here either carries
+    the value unchanged or declines. Declining costs pruning and nothing else --
+    the join still enforces the predicate.
+
+    Temporals decline: their literal is a raw int in a unit that is not recoverable
+    from the type (the TIMESTAMP-unit hazard documented above `_TEMPORAL_NATIVE`),
+    and an equality read in the wrong unit lands in 1970 and returns nothing.
+    """
+    target_type = _column_type(target_col)
+    if target_type is None:
+        return None
+    category = target_type.category
+    value = literal.value
+    if getattr(value, "item", None) is not None:
+        value = value.item()
+
+    if category in (LogicalCategory.VARCHAR, LogicalCategory.NVARCHAR):
+        # The engine spells a VARCHAR predicate literal as UTF-8 BYTES -- that is
+        # what the parser emits for `WHERE cve_id = 'x'` -- while a Project holds
+        # a folded string literal as `str`. Both reach the same value through
+        # `_materialise_constant_literal`, but the manifest/dictionary pruning that
+        # is the entire point of this push compares against stored bytes, so the
+        # pushed predicate is minted in the canonical spelling rather than a second
+        # one that only agrees at execution time.
+        if type(value) is str:
+            value = value.encode("utf-8")
+        elif type(value) is not bytes:
+            return None
+    elif category is LogicalCategory.VARBINARY:
+        if type(value) is not bytes:
+            return None
+    elif category is LogicalCategory.BOOLEAN:
+        if type(value) is not bool:
+            return None
+    elif category is LogicalCategory.INTEGER:
+        # `bool` is an `int` to isinstance; True is not an integer key value.
+        if type(value) is not int or not _representable(value, target_type):
+            return None
+    elif category is LogicalCategory.FLOAT:
+        if type(value) not in (int, float):
+            return None
+        as_float = _as_float(value, target_type, keep_upper=True)
+        # `_as_float` nudges to stay a valid BOUND; for an equality the only
+        # acceptable outcome is the value itself, unchanged by the round trip.
+        if as_float is None or as_float != value:
+            return None
+        value = as_float
+    elif category is LogicalCategory.DECIMAL:
+        if not isinstance(value, decimal.Decimal):
+            return None
+    else:
+        return None
+
+    return Node(
+        NodeType.COMPARISON_OPERATOR,
+        value="Eq",
+        left=target_col,
+        right=build_literal_node(value, suggested_type=target_type),
+    )
+
+
+# Legs that may RECEIVE a constant derived from the opposite operand. A leg
+# qualifies when discarding its non-matching rows early is invisible downstream:
+# true for both legs of an inner join, and for the NULL-SUPPLYING leg of an outer
+# join, whose unmatched rows contribute exactly the nulls their absence would.
+# A PRESERVED leg never qualifies -- its unmatched rows are output rows.
+# Semi/anti are absent deliberately: anti-join emits the left rows that found NO
+# match, so shrinking either leg changes which rows qualify, and semi is left out
+# with it rather than reasoned about in passing for a case nothing needs yet.
+_CONSTANT_RECEIVING_LEGS = {
+    "inner": ("left", "right"),
+    "nested loop": ("left", "right"),
+    "left outer": ("right",),
+    "left": ("right",),
+    "right outer": ("left",),
+    "right": ("left",),
+}
+
+
+def _leg_of(join_node, target_col):
+    """"left" / "right" for the leg *target_col* comes from, else None."""
+    target_relation = getattr(target_col, "source", None)
+    if target_relation is None:
+        return None
+    if target_relation in (join_node.left_relation_names or []):
+        return "left"
+    if target_relation in (join_node.right_relation_names or []):
+        return "right"
+    return None
+
+
 def _predicate_already_present(predicates, condition):
     """True if *predicates* already contains an equivalent (op, column, literal)."""
     op = getattr(condition, "value", None)
@@ -570,25 +739,35 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
     requires = ("predicates-pushed",)
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
-        if node.node_type == LogicalPlanStepType.Join and node.type in ("inner", "nested loop"):
-            join_stats = getattr(node, "statistics", None)
-            if join_stats is None:
-                return context
+        if node.node_type != LogicalPlanStepType.Join:
+            return context
 
-            uuid_to_nid = {}
-            for nid in list(context.optimized_plan.nodes()):
-                plan_node = context.optimized_plan[nid]
-                node_uuid = getattr(plan_node, "uuid", None) if plan_node is not None else None
-                if node_uuid:
-                    uuid_to_nid[node_uuid] = nid
+        correlations = _correlated_join_predicates(node.on)
+        if not correlations:
+            return context
 
+        ranges_eligible = (
+            node.type in ("inner", "nested loop") and getattr(node, "statistics", None) is not None
+        )
+        constants_eligible = bool(_CONSTANT_RECEIVING_LEGS.get(node.type))
+        if not ranges_eligible and not constants_eligible:
+            return context
+
+        uuid_to_nid = {}
+        for nid in list(context.optimized_plan.nodes()):
+            plan_node = context.optimized_plan[nid]
+            node_uuid = getattr(plan_node, "uuid", None) if plan_node is not None else None
+            if node_uuid:
+                uuid_to_nid[node_uuid] = nid
+
+        if ranges_eligible:
             for (
                 left_col,
                 right_col,
                 offset_terms,
                 left_bounds,
                 right_bounds,
-            ) in _correlated_join_predicates(node.on):
+            ) in correlations:
                 # The predicate reads `left_col <op> right_col + delta`. The
                 # right's realized range shifted FORWARD by delta bounds the left;
                 # the left's range shifted BACK by delta bounds the right.
@@ -599,7 +778,42 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                     context, node, right_col, left_col, offset_terms, right_bounds, -1, uuid_to_nid
                 )
 
+        if constants_eligible:
+            self._propagate_constants(context, node, correlations, uuid_to_nid)
         return context
+
+    def _propagate_constants(self, context, join_node, correlations, uuid_to_nid):
+        """Push `target = <literal>` for equi-join operands whose partner is a
+        statically known constant."""
+        receivable = _CONSTANT_RECEIVING_LEGS[join_node.type]
+        join_nid = uuid_to_nid.get(getattr(join_node, "uuid", None))
+        if join_nid is None:
+            return
+
+        for left_col, right_col, offset_terms, left_bounds, _ in correlations:
+            # `_TRANSPORTED_BOUNDS` gives "both" to Eq alone, so this is the
+            # equality test; a displaced key is a different value from the constant.
+            if offset_terms or left_bounds != "both":
+                continue
+            for target_col, source_col in ((left_col, right_col), (right_col, left_col)):
+                leg = _leg_of(join_node, target_col)
+                if leg not in receivable:
+                    continue
+                source_identity = _phys_identity(source_col)
+                if source_identity is None:
+                    continue
+                literal = _constant_literal_for(
+                    context.optimized_plan, join_nid, source_identity
+                )
+                if literal is None:
+                    continue
+                condition = _constant_condition(target_col, literal)
+                if condition is None:
+                    continue
+                self._push_conditions(
+                    context, join_node, target_col, [condition], uuid_to_nid,
+                    telemetry_reading="optimization_join_constant_propagation",
+                )
 
     def _transport(
         self,
@@ -631,17 +845,47 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
     def _push_range(self, context, join_node, target_col, value_range, uuid_to_nid):
         """Push *value_range* onto *target_col*'s scan(s): append to the scan's
         predicate list when the connector supports it, else add a Filter node."""
-        target_relation = getattr(target_col, "source", None)
-        if target_relation in (join_node.left_relation_names or []):
-            readers = join_node.left_readers or []
-        elif target_relation in (join_node.right_relation_names or []):
-            readers = join_node.right_readers or []
-        else:
-            return
-
         conditions = _range_conditions(target_col, value_range)
         if not conditions:
             return
+        self._push_conditions(
+            context,
+            join_node,
+            target_col,
+            conditions,
+            uuid_to_nid,
+            # REDUNDANCY GUARD: compare against the SCAN's own range, not the
+            # join's. _intersect_join_keys has already replaced both keys'
+            # ranges on the join node with their intersection, so at that level
+            # every pair looks identical and nothing would ever push.
+            skip_scan=lambda scan: not _tightens(
+                value_range, _key_value_range(getattr(scan, "statistics", None), target_col)
+            ),
+        )
+
+    def _push_conditions(
+        self,
+        context,
+        join_node,
+        target_col,
+        conditions,
+        uuid_to_nid,
+        skip_scan=None,
+        telemetry_reading="optimization_inner_join_correlated_filter",
+    ):
+        """Append *conditions* to the scan(s) producing *target_col*: onto the
+        scan's predicate list when the connector supports pushdown, else as a
+        Filter node above it.
+
+        The guards below are shared by both transports because they are about the
+        TARGET -- which scan really produces this column -- and not about how the
+        condition was derived.
+        """
+        leg = _leg_of(join_node, target_col)
+        if leg is None:
+            return
+        target_relation = getattr(target_col, "source", None)
+        readers = (join_node.left_readers if leg == "left" else join_node.right_readers) or []
 
         for reader_uuid in readers:
             reader_nid = uuid_to_nid.get(reader_uuid)
@@ -682,13 +926,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
             if target_identity is None or target_identity not in scan_identities:
                 continue
 
-            # REDUNDANCY GUARD: compare against the SCAN's own range, not the
-            # join's. _intersect_join_keys has already replaced both keys'
-            # ranges on the join node with their intersection, so at that level
-            # every pair looks identical and nothing would ever push.
-            if not _tightens(
-                value_range, _key_value_range(getattr(scan, "statistics", None), target_col)
-            ):
+            if skip_scan is not None and skip_scan(scan):
                 continue
 
             connector = getattr(scan, "connector", None)
@@ -698,7 +936,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                 for condition in conditions:
                     if not _predicate_already_present(scan.predicates, condition):
                         scan.predicates.append(condition)
-                        self.telemetry.optimization_inner_join_correlated_filter += 1
+                        self.telemetry.increase(telemetry_reading)
             else:
                 # Fallback for non-pushdown connectors: a Filter node still
                 # filters at execution, just without row-group pruning.
@@ -713,7 +951,7 @@ class CorrelatedFiltersStrategy(OptimizationStrategy):
                     context.optimized_plan.insert_node_after(
                         random_string(), filter_node, reader_nid
                     )
-                    self.telemetry.optimization_inner_join_correlated_filter += 1
+                    self.telemetry.increase(telemetry_reading)
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         # This strategy mutates scan predicates / adds Filter nodes, so the

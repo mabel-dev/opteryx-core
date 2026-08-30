@@ -281,6 +281,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[int]* column_types,
                                           const cppvector[int]* retag_units,
                                           const cppvector[int]* emit_indices,
+                                          const cppvector[int]* length_only,
                                           void* instrs, int count,
                                           cppvector[int] col_idx,
                                           cppvector[void*] lit_dv,
@@ -299,10 +300,12 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           const cppvector[string]* p1_column_names,
                                           const cppvector[int]* p1_column_types,
                                           const cppvector[int]* p1_retag_units,
+                                          const cppvector[int]* p1_length_only,
                                           const cppvector[string]* out_column_names,
                                           const cppvector[string]* out_identities,
                                           const cppvector[int]* out_column_types,
                                           const cppvector[int]* out_retag_units,
+                                          const cppvector[int]* out_length_only,
                                           void* pred_fn, void* pred_ctx,
                                           const cppvector[int]* pred_col_to_p1,
                                           int sort_p1_index, bint sort_ascending,
@@ -2155,6 +2158,13 @@ cdef class SkeneScanPlan:
     # pushed predicate touches — so this is what narrows a predicate-only column
     # back out. Without a pushed predicate it is simply 0..n-1.
     cdef cppvector[int] emit_indices
+    # Parallel to column_names (or empty): 1 = LengthOnlyColumnStrategy PROVED
+    # every read of that column, anywhere in the plan, is answerable from a
+    # value's stored length. The reader then records each value's length and its
+    # 4-byte prefix but never materializes the payload arena — see
+    # skene::ReadOptions::length_only. Empty is always legal: eliding is an
+    # optimisation, so a plan that omits it is slower and never wrong.
+    cdef cppvector[int] length_only
     # ROW-GROUP zone map: a CONJUNCTION of (physical column name, op, ordinal)
     # terms, from Manifest.ordinal_zone_map_terms. Parallel, and empty when
     # nothing is prunable. Names are the FILE's names, not identities — the Source
@@ -2190,13 +2200,22 @@ cdef class SkeneScanPlan:
 
     def __init__(self, list files, list column_names, list out_identities,
                  list column_types, list retag_units, list emit_indices,
-                 list zone_terms=None):
+                 list zone_terms=None, list length_only=None):
         if not (len(column_names) == len(out_identities) == len(column_types)
                 == len(retag_units)):
             raise ValueError(
                 "SkeneScanPlan: column_names/out_identities/column_types/retag_units "
                 "must be parallel — the Source indexes all four by the same position."
             )
+        if length_only is not None:
+            if len(length_only) != len(column_names):
+                raise ValueError(
+                    "SkeneScanPlan: length_only must be parallel to column_names "
+                    f"({len(column_names)}); got {len(length_only)}. A misaligned "
+                    "flag list would elide the wrong column's payloads."
+                )
+            for flag in length_only:
+                self.length_only.push_back(<int>(1 if flag else 0))
         for emit_index in emit_indices:
             if not 0 <= emit_index < len(column_names):
                 raise ValueError(
@@ -2287,6 +2306,17 @@ cdef class SkeneLatmatScanPlan:
     cdef cppvector[string] out_identities
     cdef cppvector[int] out_column_types
     cdef cppvector[int] out_retag_units
+    # The length-only flags of SkeneScanPlan.length_only, resolved TWICE because
+    # this Source reads two different column sets: once against the pass-1 columns
+    # (the predicate's columns plus the sort key, decoded for EVERY row group —
+    # where the elision is worth having) and once against the projection (decoded
+    # only for the row groups that still hold a top-n candidate). Either may be
+    # empty; empty means "elide nothing", which is slower and never wrong.
+    #
+    # A flag set on the SORT KEY is refused by __init__: `build_sort_keys` reads a
+    # string key's payload with no per-slot elision check.
+    cdef cppvector[int] p1_length_only
+    cdef cppvector[int] out_length_only
     # pred_col_to_p1[k] = position in p1_column_names of the predicate's k-th column,
     # in the order the Pass1PredCtx's col_idx expects.
     cdef cppvector[int] pred_col_to_p1
@@ -2311,7 +2341,8 @@ cdef class SkeneLatmatScanPlan:
     def __init__(self, list files, list p1_column_names, list p1_column_types,
                  list p1_retag_units, list out_column_names, list out_identities,
                  list out_column_types, list out_retag_units, list pred_col_to_p1,
-                 list zone_terms=None):
+                 list zone_terms=None, list p1_length_only=None,
+                 list out_length_only=None, int sort_p1_index=-1):
         if not (len(p1_column_names) == len(p1_column_types) == len(p1_retag_units)):
             raise ValueError(
                 "SkeneLatmatScanPlan: p1_column_names/p1_column_types/p1_retag_units "
@@ -2324,6 +2355,34 @@ cdef class SkeneLatmatScanPlan:
                 "out_retag_units must be parallel — the Source indexes all four by the "
                 "same position."
             )
+        if p1_length_only is not None:
+            if len(p1_length_only) != len(p1_column_names):
+                raise ValueError(
+                    "SkeneLatmatScanPlan: p1_length_only must be parallel to "
+                    f"p1_column_names ({len(p1_column_names)}); got "
+                    f"{len(p1_length_only)}. A misaligned flag list would elide the "
+                    "wrong column's payloads."
+                )
+            if 0 <= sort_p1_index < len(p1_length_only) and p1_length_only[sort_p1_index]:
+                raise ValueError(
+                    "SkeneLatmatScanPlan: the sort key "
+                    f"({p1_column_names[sort_p1_index]!r}) is flagged length-only. "
+                    "ORDER BY reads the value, not its length, so the column cannot "
+                    "be eligible — and build_sort_keys dereferences a string key's "
+                    "payload with no elision check."
+                )
+            for flag in p1_length_only:
+                self.p1_length_only.push_back(<int>(1 if flag else 0))
+        if out_length_only is not None:
+            if len(out_length_only) != len(out_column_names):
+                raise ValueError(
+                    "SkeneLatmatScanPlan: out_length_only must be parallel to "
+                    f"out_column_names ({len(out_column_names)}); got "
+                    f"{len(out_length_only)}. A misaligned flag list would elide the "
+                    "wrong column's payloads."
+                )
+            for flag in out_length_only:
+                self.out_length_only.push_back(<int>(1 if flag else 0))
         for path in files:
             self.files.push_back(<string>(path.encode("utf-8") if isinstance(path, str) else path))
         for name in p1_column_names:
@@ -2650,7 +2709,7 @@ cdef class NativePlan:
             self._e.set_native_skene_scan_source(
                 p, &splan.files, &splan.column_names, &splan.out_identities,
                 &splan.column_types, &splan.retag_units, &splan.emit_indices,
-                NULL, 0, col_idx, lit_dv, _expr_filter_tramp,
+                &splan.length_only, NULL, 0, col_idx, lit_dv, _expr_filter_tramp,
                 &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
                 &splan.row_groups_total, &splan.row_groups_pruned,
                 &splan.row_groups_pruned_runtime, &splan.bytes_claimed)
@@ -2667,6 +2726,7 @@ cdef class NativePlan:
         self._e.set_native_skene_scan_source(
             p, &splan.files, &splan.column_names, &splan.out_identities,
             &splan.column_types, &splan.retag_units, &splan.emit_indices,
+            &splan.length_only,
             <void*>filter_bc.instrs, <int>filter_bc.count, col_idx, lit_dv,
             _expr_filter_tramp,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,
@@ -2711,8 +2771,9 @@ cdef class NativePlan:
         self.held.append(pred_anchor)
         self._e.set_skene_latmat_scan_source(
             p, &splan.files, &splan.p1_column_names, &splan.p1_column_types,
-            &splan.p1_retag_units, &splan.out_column_names, &splan.out_identities,
-            &splan.out_column_types, &splan.out_retag_units,
+            &splan.p1_retag_units, &splan.p1_length_only, &splan.out_column_names,
+            &splan.out_identities, &splan.out_column_types, &splan.out_retag_units,
+            &splan.out_length_only,
             <void*>pred_fn, <void*>pred_ctx, &splan.pred_col_to_p1,
             sort_p1_index, sort_ascending, topn_limit,
             &splan.zone_columns, &splan.zone_ops, &splan.zone_ordinals,

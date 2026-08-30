@@ -989,14 +989,22 @@ struct BuildContext {
 };
 
 Status build_column(const BuildContext& ctx, const ParsedColumn& parsed,
-                    CxxColumn* out);
+                    bool length_only, CxxColumn* out);
 
 // Rebuilds the DrakenStringArena block. `slots` and `arena` are ABSOLUTE
 // pointers in memory and are never stored, so the block is allocated fresh and
 // the two pointers are pointed into it:
 //   [ DrakenStringArena | DrakenStringSlot[n] | arena bytes ]
+// `length_only`: the CALLER has proven every read of this column is answerable
+// from a value's stored length, so the long-form payload bytes are never
+// dereferenced. The arena section is then not materialized at all — on a wide
+// string column that is the overwhelming majority of the column's bytes — and
+// every long slot is stamped with STR_ELIDED_PAYLOAD_OFFSET so a payload read
+// faults instead of returning adjacent memory. Lengths and the 4-byte prefix are
+// still recorded exactly as they are on the full path; only bytes nothing reads
+// are skipped. See ReadOptions::length_only for the contract.
 Status build_string_data(const BuildContext& ctx, const ParsedColumn& parsed,
-                         OwnedBuffer<void>* out_block) {
+                         bool length_only, OwnedBuffer<void>* out_block) {
     const ColumnEntryHead& head = parsed.head;
     const char* name = parsed.name.c_str();
 
@@ -1043,13 +1051,33 @@ Status build_string_data(const BuildContext& ctx, const ParsedColumn& parsed,
     const uint64_t expect_slots =
         head.string_slot_count * sizeof(DrakenStringSlot);
     std::vector<uint8_t> slot_storage(static_cast<size_t>(expect_slots));
+    // A file may ALREADY be written payload-elided, in which case there is
+    // nothing to skip and the slots already carry the trap offset. `elide` is
+    // the read-time elision only.
+    const bool elide = length_only && !head.string_payloads_elided;
     {
         uint32_t* words = reinterpret_cast<uint32_t*>(slot_storage.data());
-        for (uint64_t i = 0; i < head.string_slot_count; ++i) {
-            words[i * 4 + 0] = lanes[0][i];
-            words[i * 4 + 1] = lanes[1][i];
-            words[i * 4 + 2] = lanes[2][i];
-            words[i * 4 + 3] = lanes[3][i];
+        if (elide) {
+            // Lane 3 is a long slot's arena_offset but an INLINE slot's payload
+            // bytes 8..11, so it cannot be skipped — only rewritten, and only
+            // where lane 0 (the length) proves the slot is long. The loop is
+            // duplicated rather than branched so the ordinary path below keeps
+            // its straight-line fuse.
+            for (uint64_t i = 0; i < head.string_slot_count; ++i) {
+                const uint32_t length = lanes[0][i];
+                words[i * 4 + 0] = length;
+                words[i * 4 + 1] = lanes[1][i];
+                words[i * 4 + 2] = lanes[2][i];
+                words[i * 4 + 3] = length > STR_INLINE_MAX
+                                       ? STR_ELIDED_PAYLOAD_OFFSET : lanes[3][i];
+            }
+        } else {
+            for (uint64_t i = 0; i < head.string_slot_count; ++i) {
+                words[i * 4 + 0] = lanes[0][i];
+                words[i * 4 + 1] = lanes[1][i];
+                words[i * 4 + 2] = lanes[2][i];
+                words[i * 4 + 3] = lanes[3][i];
+            }
         }
     }
     const uint8_t* slot_bytes = slot_storage.data();
@@ -1068,7 +1096,12 @@ Status build_string_data(const BuildContext& ctx, const ParsedColumn& parsed,
     const uint64_t arena_len   = arena_section.plain_bytes;
     const bool     arena_present = arena_section.present;
     std::vector<uint8_t> arena_storage;
-    if (arena_present)
+    // THE WIN: under elision the arena section is never decoded, never copied
+    // and never touched, so its pages are never faulted in either. Its declared
+    // extent is still checked against the head below — that is metadata the
+    // footer already carries, and a file whose two accounts of its own arena
+    // disagree is malformed whether or not this read needs the bytes.
+    if (arena_present && !elide)
         SKENE_RETURN_IF_ERROR(materialize(arena_section, name, &arena_storage));
     const uint8_t* arena_bytes = arena_storage.data();
     if (arena_present && arena_len != head.string_arena_used)
@@ -1103,7 +1136,13 @@ Status build_string_data(const BuildContext& ctx, const ParsedColumn& parsed,
                             "value", name, static_cast<unsigned long long>(i),
                             slots[i].ext.arena_offset);
         }
-    } else {
+    } else if (!elide) {
+        // Skipped under elision, and ONLY because there is then nothing to
+        // bound: no slot addresses the arena any more (every long one was
+        // stamped with the trap offset above) and the arena itself was never
+        // materialized. This validates a buffer, not the file's integrity in
+        // general — running it over a buffer no read can reach would cost a
+        // full pass over the slots to prove something nothing relies on.
         for (uint64_t i = 0; i < head.string_slot_count; ++i) {
             if (str_is_inline(&slots[i])) continue;
             const uint64_t end = static_cast<uint64_t>(slots[i].ext.arena_offset)
@@ -1121,7 +1160,8 @@ Status build_string_data(const BuildContext& ctx, const ParsedColumn& parsed,
 
     const size_t struct_end  = sizeof(DrakenStringArena);
     const size_t slots_bytes = static_cast<size_t>(expect_slots);
-    const size_t arena_size  = static_cast<size_t>(head.string_arena_used);
+    const size_t arena_size  = elide ? 0u
+                                    : static_cast<size_t>(head.string_arena_used);
     const size_t total = struct_end + (slots_bytes > 0 ? slots_bytes
                                                        : sizeof(DrakenStringSlot))
                        + arena_size;
@@ -1146,11 +1186,11 @@ Status build_string_data(const BuildContext& ctx, const ParsedColumn& parsed,
     sa->slots           = dst_slots;
     sa->arena           = dst_arena;
     sa->length          = head.string_slot_count;
-    sa->arena_used      = head.string_arena_used;
-    sa->arena_cap       = head.string_arena_used;  // the block holds exactly this
+    sa->arena_used      = arena_size;
+    sa->arena_cap       = arena_size;              // the block holds exactly this
     sa->null_bitmap     = nullptr;                 // set by the caller, which owns validity
     sa->owns_buffers    = 0;                       // the VectorOwner IS the record
-    sa->payloads_elided = head.string_payloads_elided;
+    sa->payloads_elided = (head.string_payloads_elided || elide) ? 1u : 0u;
     sa->type            = static_cast<DrakenType>(head.type);
 
     out_block->reset(guard.release());
@@ -1207,10 +1247,22 @@ Status validate_head_consistency(const ParsedColumn& parsed) {
 }
 
 Status build_column(const BuildContext& ctx, const ParsedColumn& parsed,
-                    CxxColumn* out) {
+                    bool length_only, CxxColumn* out) {
     const ColumnEntryHead& head = parsed.head;
     const char* name = parsed.name.c_str();
     const DrakenType type = static_cast<DrakenType>(head.type);
+
+    // Enforced, not assumed. NVARCHAR's LENGTH is a codepoint count that scans
+    // the bytes and VARIANT is parsed as JSON, so neither is answerable from the
+    // stored length — asking to elide one is a caller bug that would return
+    // wrong answers, so it fails here rather than being quietly honoured or
+    // quietly ignored. Same for a non-string column, which has no payload to
+    // elide in the first place.
+    if (length_only && type != DRAKEN_VARCHAR && type != DRAKEN_VARBINARY)
+        return fail(Code::kUnsupportedType,
+                    "column '%s': length-only decode was requested but physical "
+                    "type %u is not VARCHAR or VARBINARY — only those answer "
+                    "every read from the stored length", name, head.type);
 
     SKENE_RETURN_IF_ERROR(validate_head_consistency(parsed));
     SKENE_RETURN_IF_ERROR(ctx.resolver->check_kinds(head, name));
@@ -1251,7 +1303,7 @@ Status build_column(const BuildContext& ctx, const ParsedColumn& parsed,
     // ── Payload ──
     OwnedBuffer<void> data_buf(nullptr);
     if (draken_type_is_string_storage(type)) {
-        SKENE_RETURN_IF_ERROR(build_string_data(ctx, parsed, &data_buf));
+        SKENE_RETURN_IF_ERROR(build_string_data(ctx, parsed, length_only, &data_buf));
         DrakenStringArena* sa = static_cast<DrakenStringArena*>(data_buf.get());
         // draken keeps this as a convenience alias of the vector's validity; the
         // DrakenVector's own `validity` stays authoritative.
@@ -1377,7 +1429,9 @@ Status build_column(const BuildContext& ctx, const ParsedColumn& parsed,
                         parsed.children.size());
 
         CxxColumn child;
-        SKENE_RETURN_IF_ERROR(build_column(ctx, parsed.children[0], &child));
+        // Never elided: `length_only` is rejected for ARRAY above, so reaching
+        // here means the caller asked for the whole column.
+        SKENE_RETURN_IF_ERROR(build_column(ctx, parsed.children[0], false, &child));
 
         // Offsets must be monotonic and must not address past the child, or
         // every array-row read walks off the end of the element vector.
@@ -1613,6 +1667,21 @@ Status read_morsel(const uint8_t* file, size_t file_bytes,
 
     // Select columns. A requested name that is not present is an error: silently
     // returning fewer columns than asked for hides the caller's bug.
+    // Length-only flags are POSITIONAL over `columns`, so they are meaningless
+    // without an explicit projection and wrong at any other length. Both are
+    // caller bugs that would silently elide the wrong column.
+    if (!options.length_only.empty()) {
+        if (options.columns.empty())
+            return fail(Code::kMalformed,
+                        "read_morsel: length_only was given without an explicit "
+                        "column list to index");
+        if (options.length_only.size() != options.columns.size())
+            return fail(Code::kMalformed,
+                        "read_morsel: length_only has %zu entries but %zu columns "
+                        "were requested — the two are positional",
+                        options.length_only.size(), options.columns.size());
+    }
+
     std::vector<const ParsedColumn*> wanted;
     if (options.columns.empty()) {
         for (const ParsedColumn& column : footer.columns) wanted.push_back(&column);
@@ -1632,9 +1701,12 @@ Status read_morsel(const uint8_t* file, size_t file_bytes,
     CxxMorsel morsel;
     morsel.columns.reserve(wanted.size());
     morsel.names.reserve(wanted.size());
-    for (const ParsedColumn* column : wanted) {
+    for (size_t w = 0; w < wanted.size(); ++w) {
+        const ParsedColumn* column = wanted[w];
+        const bool length_only =
+            w < options.length_only.size() && options.length_only[w] != 0;
         CxxColumn built;
-        SKENE_RETURN_IF_ERROR(build_column(ctx, *column, &built));
+        SKENE_RETURN_IF_ERROR(build_column(ctx, *column, length_only, &built));
         if (built.view.length != footer.header.row_count)
             return fail(Code::kMalformed,
                         "column '%s' has %u rows but the file declares %llu",

@@ -725,7 +725,15 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             // Two-pass string gather into ONE canonical consolidated block:
             // [DrakenStringArena header | slots[n] | arena bytes] — `data` points at
             // the header, exactly what draken's own kernels read (buffers.h contract).
+            // A long slot's OWN offset says whether its payload exists
+            // (STR_ELIDED_PAYLOAD_OFFSET = it does not) — checked per slot, never
+            // inferred from DrakenStringArena.payloads_elided, which is a struct
+            // byte and not a proof. An elided payload contributes no arena bytes
+            // here and is carried through as the same trap offset below, so the
+            // gathered vector keeps saying exactly what the source said: this
+            // value's length is known and its bytes were never materialized.
             size_t total_arena = 0;
+            bool any_elided = false;
             for (uint32_t i = 0; i < n; ++i) {
                 uint32_t g = order[first + i];
                 if (g == kGatherNullRow) continue;   // NULL row: no arena bytes
@@ -733,7 +741,9 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
                 uint32_t r = row_r[g];
                 if (!sort_row_valid(v, r)) continue;
                 const DrakenStringSlot* slot = &string_arena_of(v)->slots[v.selection[r]];
-                if (!str_is_inline(slot)) total_arena += str_length(slot);
+                if (str_is_inline(slot)) continue;
+                if (slot->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) any_elided = true;
+                else total_arena += str_length(slot);
             }
             size_t slots_off = sizeof(DrakenStringArena);
             size_t arena_off = slots_off + static_cast<size_t>(n == 0 ? 1 : n) * sizeof(DrakenStringSlot);
@@ -748,7 +758,7 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
             sa_out->arena_cap = total_arena;
             sa_out->null_bitmap = nullptr;
             sa_out->owns_buffers = 0;   // the VectorOwner frees the one block
-            sa_out->payloads_elided = 0;
+            sa_out->payloads_elided = any_elided ? 1u : 0u;
             sa_out->type = t;
             size_t arena_pos = 0;
             for (uint32_t i = 0; i < n; ++i) {
@@ -769,6 +779,11 @@ inline MorselPtr gather_rows(const std::vector<MorselPtr>& ms,
                 const DrakenStringSlot* slot = &sa->slots[v.selection[r]];
                 if (str_is_inline(slot)) {
                     dst[i] = *slot;
+                } else if (slot->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) {
+                    // No bytes to copy and none to point at: the trap offset is
+                    // propagated verbatim so a later read faults instead of
+                    // landing on whatever this gather's arena happens to hold.
+                    str_clone_with_offset(&dst[i], slot, STR_ELIDED_PAYLOAD_OFFSET);
                 } else {
                     uint32_t slen = str_length(slot);
                     std::memcpy(out_arena + arena_pos, str_data(slot, sa->arena), slen);

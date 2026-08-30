@@ -193,6 +193,16 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         predicate program the engine's Filter operator would have run, so what it
         can apply is what a Filter can apply.
 
+        skene ALSO sets PUSHABLE_SCALAR_FUNCTIONS (same place, same reason): a
+        scalar FUNCTION may sit anywhere in the predicate, so `LENGTH(URL) > 5`
+        pushes. It was declined purely for being a COMPARISON over a FUNCTION,
+        while `URL <> ''` — the same length-answerable test — pushed because
+        predicate_rewriter had already normalised it into a UNARY_OPERATOR. That
+        was a shape accident, not a capability boundary. PARQUET deliberately does
+        NOT set it: its pushed predicate routes through `_native_scan_plan`, which
+        DECLINES to StreamingScanSource on a program it cannot lower c-natively, so
+        widening it changes scan ROUTING and needs its own measurement.
+
         This REVERSES the earlier decline (architect ruling, 2026-08-21). That
         decline's rationale — "a reader-side row filter serializes work the
         parallel engine Filter does concurrently, +460ms across TPC-H SF1" — was
@@ -583,6 +593,11 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             # admissible for it where it is not for the parquet reader's own gate —
             # see SKENE_PUSHABLE_TYPES.
             self.PUSHABLE_TYPES = self.SKENE_PUSHABLE_TYPES
+            # Same reason, same per-instance placement: skene's reader-side filter
+            # runs the engine's own predicate VM, so a scalar FUNCTION inside the
+            # predicate is no harder for it than for a Filter node. The parquet
+            # reader's own gate is left alone — see can_push.
+            self.PUSHABLE_SCALAR_FUNCTIONS = True
         manifest_path = os.path.join(self.dataset, DATASET_MANIFEST_NAME)
         # Stat the manifest alongside the data: ANALYZE rewrites only the manifest,
         # so a data-only signature would serve stale sketches from cache forever.

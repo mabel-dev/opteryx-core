@@ -120,6 +120,11 @@ class LogicalPlanStepType(int, Enum):
     DropWorkspace = auto()
 
     DropTrigger = auto()
+    CreateTrigger = auto()
+    AlterTriggerSuspended = auto()
+    CreateTask = auto()
+    DropTask = auto()
+    AlterTriggerOwner = auto()
     AlterMaterializedViewOwner = auto()
     AlterMaterializedViewSuspended = auto()
 
@@ -127,6 +132,8 @@ class LogicalPlanStepType(int, Enum):
     RevokeAccess = auto()
     ShowGrantsOn = auto()
     ShowEffectiveGrantsOn = auto()
+
+    CallProcedure = auto()  # CALL <procedure>(<literals>)
 
 
 class LogicalPlan(Graph):
@@ -5709,6 +5716,166 @@ def plan_drop_statistics(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
+def plan_create_task(statement, **kwargs) -> LogicalPlan:
+    """CREATE [OR REPLACE] TASK <name> AS <statement> — synthesized by pre-parse.
+
+    The statement is parsed here - so a task that is not valid SQL is refused at
+    creation rather than discovered when it fires, by which time the failure is a
+    job nobody is watching and a derived table quietly going stale.
+
+    It is deliberately NOT planned. A task's statement carries `:name`
+    placeholders that are bound when it is EXECUTEd, and planning refuses an
+    unbound placeholder ("Unresolved parameter in query") - so demanding a full
+    plan here would reject exactly the parameterised tasks the design exists to
+    support. Binding dummy values to get past that would be worse: they would
+    decide types and constant-fold, so the thing checked would not be the thing
+    that runs.
+
+    The relations are read off the AST for the same reason. A task runs as a
+    pinned identity, so `CREATE TASK` is "create a thing that executes as
+    principal X"; what it reads and writes is what lets the binder insist the
+    AUTHOR could have run it themselves.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.third_party import sqloxide
+    from opteryx.utils.query_parser import _extract_table_name
+    from opteryx.utils.query_parser import _extract_tables_from_ast
+
+    root = "CreateTask"
+    task_sql = statement[root]["statement"]
+
+    parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
+    if len(parsed) != 1:
+        raise UnsupportedSyntaxError(
+            f"A task runs ONE statement; this defines it with {len(parsed)}. "
+            "Create a task per statement."
+        )
+
+    inner = parsed[0]
+    inner_root = next(iter(inner))
+    if inner_root in ("CreateTask", "DropTask", "Execute"):
+        # A task that creates, drops or runs a task is a chain the planner would
+        # have to follow, unbounded, with a cycle indistinguishable from a long
+        # chain. Refused at one level rather than defended at N - the same rule
+        # `plan_execute` applies.
+        raise UnsupportedSyntaxError(
+            f"A task cannot be defined as a **{inner_root.upper()}** statement; a "
+            "task may not create, drop or run another task."
+        )
+    if inner_root not in QUERY_BUILDERS:
+        raise UnsupportedSyntaxError(
+            f"A task cannot be defined as a **{inner_root.upper()}** statement."
+        )
+
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTask)
+    node.task_name = statement[root]["name"]
+    node.statement = task_sql
+    node.or_replace = statement[root].get("or_replace", False)
+    # The dataset whose commits fire this task, if one was named. The trigger is
+    # created alongside the task, the way a view's are - see the note on
+    # `_CREATE_TASK_RE` for why it is declared rather than derived.
+    node.on_table = statement[root].get("on_table")
+
+    # Where it writes, separated from what it reads: the target needs WRITE and
+    # the sources need only READ, so folding them together would demand read
+    # access on a table a write-only grant covers.
+    target = None
+    body = inner.get(inner_root)
+    if isinstance(body, dict) and isinstance(body.get("table"), dict):
+        target = _extract_table_name(body["table"].get("TableName") or [])
+    node.target_table = target
+    node.source_tables = [r for r in _extract_tables_from_ast(inner) if r != target]
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_drop_task(statement, **kwargs) -> LogicalPlan:
+    """DROP TASK [IF EXISTS] <name> — synthesized by pre-parse.
+
+    A task owns no storage, so dropping one reclaims nothing and there is
+    nothing for CASCADE or RESTRICT to decide. Triggers that fire it are left
+    alone deliberately: they live on the datasets that fire them, and sweeping
+    other datasets' documents from this statement is how a partial failure
+    leaves a trigger nobody can see.
+    """
+    root = "DropTask"
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.DropTask)
+    node.task_name = statement[root]["name"]
+    node.if_exists = statement[root].get("if_exists", False)
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
+    """CREATE [OR REPLACE] TRIGGER <name> ON <table> EXECUTE <task> — synthesized
+    by pre-parse.
+
+    Standalone triggers exist because a task's firing condition is not always
+    derivable from the task: the same task can be fired by several datasets, or
+    by none. A materialized view's triggers ARE derived, and stay that way -
+    this statement does not touch them.
+    """
+    root = "CreateTrigger"
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTrigger)
+    node.trigger_name = statement[root]["trigger_name"]
+    node.table_name = statement[root]["table_name"]
+    node.task_name = statement[root]["task_name"]
+    node.or_replace = statement[root].get("or_replace", False)
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_alter_trigger_owner(statement, **kwargs) -> LogicalPlan:
+    """ALTER TRIGGER <name> ON <table> OWNER TO <principal>|CURRENT_USER.
+
+    The identity an UNATTENDED run executes as. It is the trigger's rather than
+    the task's because that is exactly what separates unattended from attended:
+    a person running `EXECUTE` runs it as themselves and answers for it, so
+    there is nothing to pin. A trigger fires with nobody present.
+    """
+    from opteryx.planner.pre_parse import resolve_slot_value
+
+    root = "AlterTriggerOwner"
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerOwner)
+    node.trigger_name = statement[root]["trigger_name"]
+    node.table_name = statement[root]["table_name"]
+    node.owner_is_current_user = statement[root].get("owner_is_current_user", False)
+    node.new_owner = (
+        None
+        if node.owner_is_current_user
+        else resolve_slot_value(statement[root]["new_owner"], "new owner")
+    )
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_alter_trigger_suspended(statement, **kwargs) -> LogicalPlan:
+    """ALTER TRIGGER <name> ON <table> SUSPEND|RESUME — synthesized by pre-parse.
+
+    A suspended trigger still exists and still records that it was reached; it
+    just enqueues nothing. That is deliberately different from dropping it: the
+    suppression stays visible where an operator looks for why a table stopped
+    updating.
+    """
+    root = "AlterTriggerSuspended"
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerSuspended)
+    node.trigger_name = statement[root]["trigger_name"]
+    node.table_name = statement[root]["table_name"]
+    node.suspended = statement[root]["suspended"]
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
 def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
     """DROP TRIGGER [IF EXISTS] <name> ON <table> — synthesized by the planner's
     pre-parse interception (OpteryxDialect has no native sqlparser grammar for
@@ -6035,6 +6202,115 @@ from opteryx.planner.logical_planner.merge_desugar import plan_delete  # noqa: E
 from opteryx.planner.logical_planner.merge_desugar import plan_merge  # noqa: E402
 from opteryx.planner.logical_planner.merge_desugar import plan_update  # noqa: E402
 
+def plan_call(statement, **kwargs) -> LogicalPlan:
+    """Plan `CALL <procedure>(<literal>, ...)`.
+
+    CALL runs a procedure the HOST PROCESS registered (see `opteryx.procedures`), and
+    it is the only way to reach one. A procedure is side-effecting, so it is a
+    statement and never an expression: as a function it would be constant-folded at
+    plan time, duplicated by common-subexpression elimination and evaluated once per
+    row per morsel, making the number of times the side effect happens a property of
+    the data rather than of the statement. As a statement it runs exactly once and no
+    optimizer strategy can see it.
+
+    Arguments must be LITERALS. A procedure is planned with no relation beneath it, so
+    a column reference has nothing to resolve against; refusing it here names the
+    argument at fault instead of failing later with an unbound identifier.
+
+    The procedure is resolved at plan time so an unknown name or a wrong argument count
+    fails before anything runs, and re-resolved at execution by name - the plan carries
+    the name, not the callable, so nothing live is pinned into it.
+    """
+    from opteryx.procedures import get_procedure
+
+    call = statement["Call"]
+
+    # sqlparser reuses its Function node for CALL, so this branch can carry
+    # function-call syntax that means nothing for a procedure - a procedure yields no
+    # rows, so there is nothing to window over, filter or order. Each form is refused
+    # by name rather than parsed and dropped: silently ignoring OVER would run
+    # something other than what was written.
+    if call.get("over") is not None:
+        raise UnsupportedSyntaxError(
+            f"{md_syntax('CALL')} does not take an {md_syntax('OVER')} clause; "
+            "a procedure returns no rows to window over."
+        )
+    if call.get("filter") is not None:
+        raise UnsupportedSyntaxError(
+            f"{md_syntax('CALL')} does not take a {md_syntax('FILTER')} clause."
+        )
+    if call.get("within_group"):
+        raise UnsupportedSyntaxError(
+            f"{md_syntax('CALL')} does not take a {md_syntax('WITHIN GROUP')} clause."
+        )
+    if call.get("null_treatment") is not None:
+        raise UnsupportedSyntaxError(
+            f"{md_syntax('CALL')} does not take {md_syntax('IGNORE NULLS')} or "
+            f"{md_syntax('RESPECT NULLS')}."
+        )
+
+    name_parts = call.get("name") or []
+    if not name_parts:
+        raise UnsupportedSyntaxError(
+            f"{md_syntax('CALL')} requires the name of a procedure: "
+            f"{md_code('CALL <procedure>(<value>, ...)')}."
+        )
+    procedure_name = ".".join(
+        logical_planner_builders.build(part).value for part in name_parts
+    ).upper()
+
+    arguments = []
+    args_branch = call.get("args")
+    if args_branch not in (None, "None"):
+        argument_list = args_branch["List"]
+        if argument_list.get("duplicate_treatment") is not None:
+            raise UnsupportedSyntaxError(
+                f"{md_syntax('CALL')} does not take {md_syntax('DISTINCT')} or "
+                f"{md_syntax('ALL')} before its arguments."
+            )
+        if argument_list.get("clauses"):
+            raise UnsupportedSyntaxError(
+                f"{md_syntax('CALL')} does not take {md_syntax('ORDER BY')} or "
+                f"{md_syntax('LIMIT')} inside its arguments."
+            )
+        arguments = [logical_planner_builders.build(a) for a in argument_list["args"]]
+
+    values = []
+    for position, argument in enumerate(arguments, start=1):
+        if argument.node_type != NodeType.LITERAL:
+            raise UnsupportedSyntaxError(
+                compose(
+                    f"Argument {position} of {md_code(procedure_name)} is "
+                    f"{md_code(format_expression(argument))}, which is not a literal",
+                    f"{md_syntax('CALL')} runs a procedure on its own, with no relation "
+                    "beneath it, so an argument cannot reference a column. Pass a value.",
+                )
+            )
+        values.append(argument.value)
+
+    procedure = get_procedure(procedure_name)
+    if procedure is None:
+        # Deliberately does NOT list what IS registered: procedures are host-registered
+        # and this engine exposes no discovery surface for them, so an error message is
+        # not the place to become one.
+        raise UnsupportedSyntaxError(
+            f"Unknown procedure {md_code(procedure_name)}."
+        )
+    if len(values) != len(procedure.parameters):
+        raise UnsupportedSyntaxError(
+            f"{md_code(procedure_name)} takes {len(procedure.parameters)} argument(s) "
+            f"({', '.join(procedure.parameters) or 'none'}); {len(values)} given."
+        )
+
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.CallProcedure)
+    node.procedure_name = procedure_name
+    node.arguments = values
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
 QUERY_BUILDERS = {
     "Analyze": plan_analyze_query,
     # synthesized pre-parse, like DropTrigger and RefreshMaterializedView
@@ -6042,7 +6318,17 @@ QUERY_BUILDERS = {
     "AlterMaterializedViewSuspended": plan_alter_materialized_view_suspended,
     "DropStatistics": plan_drop_statistics,
     "DropTrigger": plan_drop_trigger,
+    # CREATE/DROP TASK — synthesized pre-parse; sqlparser has no TASK object
+    # type, unlike EXECUTE which it parses natively.
+    "CreateTrigger": plan_create_trigger,
+    "AlterTriggerOwner": plan_alter_trigger_owner,
+    "AlterTriggerSuspended": plan_alter_trigger_suspended,
+    "CreateTask": plan_create_task,
+    "DropTask": plan_drop_task,
     "Comment": plan_comment,
+    # CALL <procedure>(...) - sqlparser parses this natively, on the same branch
+    # shape as a function call. The procedure is host-registered; see opteryx.procedures.
+    "Call": plan_call,
     # EXECUTE <task> USING ... — sqlparser parses this natively, so unlike
     # RefreshMaterializedView it needs no pre-parse interception.
     "Execute": plan_execute,

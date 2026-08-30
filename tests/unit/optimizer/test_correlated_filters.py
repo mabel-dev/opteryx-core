@@ -216,3 +216,123 @@ def test_derived_bound_is_dropped_when_it_cannot_be_carried():
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+# ---- constant propagation ---------------------------------------------------
+#
+# When one equi-join operand is a column a Project binds to a LITERAL -- the shape
+# a single-row parameter CTE takes -- the other operand's value is KNOWN, not
+# merely bounded, and an equality goes onto the opposite scan. The constant is read
+# from the plan, not from `value_range`, which holds numbers only by ruling and so
+# cannot carry the VARCHAR keys this shape is overwhelmingly used with.
+
+
+_PARAMS_CTE = "WITH params AS (SELECT 'Clerk#000000001' AS ck) "
+
+
+def _scan_predicates(plan, alias):
+    from opteryx.planner.logical_planner import LogicalPlanStepType
+
+    for _, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Scan and getattr(node, "alias", None) == alias:
+            return [
+                (c.value, c.left.value, c.right.value) for c in (getattr(node, "predicates", None) or [])
+            ]
+    return None
+
+
+def test_constant_pushed_onto_null_supplying_leg_of_left_join():
+    plan = _optimized_plan(
+        _PARAMS_CTE + "SELECT p.ck, o.o_orderkey FROM params p "
+        "LEFT JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck"
+    )
+    # VARCHAR literals are spelled as UTF-8 BYTES everywhere else in the engine;
+    # the pushed predicate must be indistinguishable from a hand-written one or
+    # the manifest/dictionary pruning it exists for compares against the wrong
+    # representation.
+    assert _scan_predicates(plan, "o") == [("Eq", "o_clerk", b"Clerk#000000001")]
+
+
+def test_constant_pushed_for_an_integer_key():
+    plan = _optimized_plan(
+        "WITH params AS (SELECT 42 AS k) SELECT p.k, o.o_orderkey FROM params p "
+        "LEFT JOIN testdata.tpch_001.orders o ON o.o_orderkey = p.k"
+    )
+    assert _scan_predicates(plan, "o") == [("Eq", "o_orderkey", 42)]
+
+
+def test_constant_reaches_every_leg_of_a_fanned_out_chain():
+    """The motivating shape: one params CTE LEFT JOINed to several relations. The
+    constant must survive the joins below to reach the later legs' scans."""
+    plan = _optimized_plan(
+        _PARAMS_CTE + "SELECT p.ck FROM params p "
+        "LEFT JOIN testdata.tpch_001.orders o  ON o.o_clerk  = p.ck "
+        "LEFT JOIN testdata.tpch_001.orders o2 ON o2.o_clerk = p.ck "
+        "LEFT JOIN testdata.tpch_001.orders o3 ON o3.o_clerk = p.ck"
+    )
+    for alias in ("o", "o2", "o3"):
+        assert _scan_predicates(plan, alias) == [("Eq", "o_clerk", b"Clerk#000000001")], alias
+
+
+def test_constant_not_pushed_onto_a_preserved_leg():
+    """RIGHT JOIN preserves `orders`: an unmatched orders row is an OUTPUT row, so
+    filtering that leg would delete rows the query must return."""
+    plan = _optimized_plan(
+        _PARAMS_CTE + "SELECT p.ck, o.o_orderkey FROM params p "
+        "RIGHT JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck"
+    )
+    assert _scan_predicates(plan, "o") == []
+
+
+def test_constant_not_pushed_across_a_full_outer_join():
+    plan = _optimized_plan(
+        _PARAMS_CTE + "SELECT p.ck, o.o_orderkey FROM params p "
+        "FULL OUTER JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck"
+    )
+    assert _scan_predicates(plan, "o") == []
+
+
+def test_constant_not_taken_through_a_set_operation():
+    """Two UNION branches feed the same output column, so a literal found under one
+    of them describes only half the rows arriving at the join."""
+    plan = _optimized_plan(
+        "WITH params AS (SELECT 'Clerk#000000001' AS ck UNION ALL SELECT 'Clerk#000000002' AS ck) "
+        "SELECT p.ck, o.o_orderkey FROM params p "
+        "LEFT JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck"
+    )
+    assert _scan_predicates(plan, "o") == []
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # a constant that MATCHES
+        _PARAMS_CTE + "SELECT p.ck, COUNT(o.o_orderkey) AS c FROM params p "
+        "LEFT JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck GROUP BY p.ck",
+        # a constant that matches NOTHING: the preserved row must still be emitted,
+        # null-filled. This is the shape a leg-filtering bug would silently delete.
+        "WITH params AS (SELECT 'NOSUCHCLERK' AS ck) "
+        "SELECT COUNT(*) AS c FROM params p "
+        "LEFT JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck",
+        "WITH params AS (SELECT 'NOSUCHCLERK' AS ck) "
+        "SELECT COUNT(*) AS c FROM params p "
+        "FULL OUTER JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck",
+        _PARAMS_CTE + "SELECT COUNT(*) AS c FROM params p "
+        "RIGHT JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck",
+        "WITH params AS (SELECT 'Clerk#000000001' AS ck UNION ALL SELECT 'Clerk#000000002' AS ck) "
+        "SELECT COUNT(*) AS c FROM params p "
+        "LEFT JOIN testdata.tpch_001.orders o ON o.o_clerk = p.ck",
+    ],
+)
+def test_constant_propagation_preserves_results(sql):
+    import opteryx.planner.optimizer.strategies.correlated_filters as cf
+
+    on_result = _count(sql)
+    original = cf.CorrelatedFiltersStrategy.should_i_run
+    try:
+        cf.CorrelatedFiltersStrategy.should_i_run = lambda self, plan: False
+        off_result = _count(sql)
+    finally:
+        cf.CorrelatedFiltersStrategy.should_i_run = original
+    assert on_result == off_result, (on_result, off_result)
+    assert on_result > 0

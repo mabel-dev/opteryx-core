@@ -292,6 +292,46 @@ def test_disjunction_is_not_pushed_and_stays_correct(dataset, monkeypatch):
     assert len(rows) == 149
 
 
+def test_scalar_function_predicate_is_pushed(dataset, monkeypatch):
+    """`LENGTH(tag) > 6` — a COMPARISON over a FUNCTION.
+
+    Declined until PUSHABLE_SCALAR_FUNCTIONS, and declined for the SHAPE alone:
+    the length-answerable `tag <> \'\'` pushed only because predicate_rewriter had
+    already normalised it into a UNARY_OPERATOR. skene's reader-side filter runs
+    the engine's own predicate VM, so a scalar function is no harder for it than
+    for a Filter node."""
+    _parity(dataset, "k FROM {DATASET} WHERE LENGTH(tag) > 6", monkeypatch)
+
+
+def test_scalar_function_on_a_predicate_only_column(dataset, monkeypatch):
+    """The function's column is not projected: it has to reach the read set through
+    the predicate and be narrowed back off again, same as a bare column does."""
+    rows, names, _facts = _parity(
+        dataset, "k FROM {DATASET} WHERE LENGTH(tag) > 6 AND k > 900", monkeypatch)
+    assert names == ["k"], "the scan emitted %r — the predicate-only column leaked" % names
+
+
+def test_computed_array_operand_is_not_pushed(dataset, monkeypatch):
+    """`LENGTH(SPLIT(tag,'-')) > 1` must DECLINE, and this is a correctness gate,
+    not a missed optimization.
+
+    A Filter node is lowered only after `_hoist_array_operands` materializes the
+    computed ARRAY into its own column — LENGTH over an array needs its operand to
+    BE a column. A PUSHED predicate is lowered verbatim, with no hoist, so
+    admitting this shape would turn a working query into a compile-time refusal.
+    `can_push` reuses the compiler's own `_computed_array_subexpression` to spot
+    it, so the two cannot drift apart.
+
+    Pinning it here means widening the gate to cover computed arrays has to come
+    past this test rather than silently."""
+    sql = ("SELECT k FROM '%s' WHERE LENGTH(SPLIT(tag, '-')) > 1" % dataset)
+    rows, _names, _sources, pushed, _facts = _drain(sql, True, monkeypatch)
+    ref_rows, _ref_names, _ref_sources, _ref_pushed, _rf = _drain(sql, False, monkeypatch)
+    assert pushed == 0
+    assert sorted(rows) == sorted(ref_rows)
+    assert len(rows) == N
+
+
 def test_order_by_limit_over_a_narrow_projection(dataset, monkeypatch):
     """Filtered top-N over a projection too narrow for the two-pass path: it stays
     on the single-pass Source, which applies the predicate itself."""

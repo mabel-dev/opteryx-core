@@ -91,12 +91,19 @@ cdef class SkeneReadNode(ReaderNode):
     # columns (physical name = schema_column.name; see _skene_scan_config).
     # Empty means COUNT(*)-style zero-column reads with no predicates.
     cdef public list skene_read_schema_columns
+    # Column identities proven to be read only through length-answerable
+    # operations (set by LengthOnlyColumnStrategy via node properties). The
+    # reader records each value's length and never materializes the payload
+    # arena for these — see skene::ReadOptions::length_only. Same property, same
+    # spelling and same carrier as ParquetReaderNode's.
+    cdef public object _length_only_columns
     cdef object _filesystem
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.skene_files = list(parameters.get("skene_files") or [])
         self.skene_read_schema_columns = list(parameters.get("skene_read_schema_columns") or [])
+        self._length_only_columns = parameters.get("length_only_columns")
         self._filesystem = None
 
     @property

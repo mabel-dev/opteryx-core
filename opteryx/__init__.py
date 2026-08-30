@@ -88,6 +88,9 @@ if OPTERYX_DEBUG:  # pragma: no cover
 from opteryx.connectors import register_workspace
 from opteryx.connectors import set_default_connector
 from opteryx.managers.permissions import register_permissions_capability
+# The host process's hook for exposing a Python callable to SQL as CALL <name>(...).
+# A plain module-level registry - no planner state, nothing to import lazily.
+from opteryx.procedures import register_procedure
 
 from opteryx.__version__ import __author__
 from opteryx.__version__ import __build__
@@ -215,6 +218,9 @@ __all__ = [
     # engine allows everything - access control belongs to a deployment, not
     # to the engine. See opteryx.managers.permissions.
     "register_permissions_capability",
+    # Exposes a host Python callable as `CALL <name>(...)`. Statement-only and
+    # side-effecting by design; see opteryx.procedures for why it is not a function.
+    "register_procedure",
     "__author__",
     "__build__",
     "__version__",

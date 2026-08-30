@@ -197,6 +197,29 @@ struct ReadOptions {
     // for a column that is not there has a bug, and returning fewer columns than
     // requested hides it.
     std::vector<std::string> columns;
+
+    // LENGTH-ONLY decode. Parallel to `columns` (or empty, meaning "none"): a
+    // non-zero entry says the caller has PROVEN every read of that column is
+    // answerable from a value's stored length, so the long-form payload bytes
+    // are never dereferenced.
+    //
+    // A skene string column stores its slots (length | prefix | hash | arena
+    // offset) and its long-form payloads in SEPARATE sections, so honouring this
+    // is not a cheaper copy — the arena section is never materialized at all,
+    // which is the whole cost. What comes back records every value's true length
+    // and its 4-byte prefix; long slots carry STR_ELIDED_PAYLOAD_OFFSET, so a
+    // read of a payload that was skipped faults instead of returning adjacent
+    // bytes, and DrakenStringArena.payloads_elided states it explicitly.
+    //
+    // Restricted to VARCHAR/VARBINARY, and enforced here rather than assumed:
+    // NVARCHAR's LENGTH is a codepoint count that scans the bytes, and VARIANT
+    // holds JSON that is parsed, so neither is length-answerable and asking for
+    // it is a caller bug. Setting an entry for a non-string column is likewise
+    // an error, never a no-op.
+    //
+    // Empty is always legal and always correct: eliding is an optimisation, so
+    // a reader that ignores it (v1) returns the same answers, only slower.
+    std::vector<uint8_t> length_only;
 };
 
 // Probes a column's bloom filter with a value's native bytes — the same bytes

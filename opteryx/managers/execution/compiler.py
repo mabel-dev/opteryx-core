@@ -2949,6 +2949,17 @@ class _Compiler:
                 # own footer schema, which is file-named. `sc.name` is the same
                 # spelling `read_columns` uses.
                 zone_terms = manifest.ordinal_zone_map_terms(predicates)
+        # Columns the optimizer proved are read ONLY through length-answerable
+        # operations (LengthOnlyColumnStrategy). This is the identity -> positional
+        # translation point — identities do not cross the native boundary — and it
+        # is over the READ SET, so a predicate-only column is covered too. skene
+        # stores a string column's slots and its long-form payload arena in
+        # SEPARATE sections, so honouring this is not a cheaper copy: the arena is
+        # never decoded, never copied and never faulted in. No kill switch of its
+        # own: FEATURE_DISABLE_LENGTH_ONLY_COLUMN unregisters the strategy, so the
+        # annotation is simply absent and this list is all zeros.
+        _length_only_ids = getattr(scan, "_length_only_columns", None) or frozenset()
+        length_only = [1 if sc.identity in _length_only_ids else 0 for sc in read_columns]
         splan = SkeneScanPlan(
             list(scan.skene_files),
             [sc.name for sc in read_columns],
@@ -2960,6 +2971,7 @@ class _Compiler:
             ],
             emit_indices,
             zone_terms,
+            length_only,
         )
         splan.scan_identity = scan.identity
         return splan, filter_bc, read_layout, emit_ids
@@ -3190,6 +3202,36 @@ class _Compiler:
         # every conjunct here is ANDed into the effective WHERE.
         zone_terms = manifest.ordinal_zone_map_terms(predicates)
 
+        # Columns the optimizer proved are read ONLY through length-answerable
+        # operations (LengthOnlyColumnStrategy), as the identity -> positional
+        # translation the native boundary needs. Resolved TWICE because this Source
+        # has two column sets, and the two are worth very different amounts:
+        #
+        #   pass 1  the predicate's columns + the sort key, decoded for EVERY row
+        #           group. A predicate-only string column (`WHERE Referer <> ''`,
+        #           Referer read nowhere else) is the whole prize here — skene keeps
+        #           a string column's slots and its payload arena in separate
+        #           sections, so the arena is never decoded, copied or faulted in.
+        #   pass 2  the projection, decoded only for the row groups that still hold
+        #           a top-n candidate. Sound for the same reason and near worthless
+        #           in practice: a PROJECTED column is a raw use, so it is not
+        #           eligible, and what is left is the predicate-only columns for a
+        #           handful of surviving row groups.
+        #
+        # The sort key can never carry the flag — `ORDER BY col` is a raw use, which
+        # disqualifies the column — and must never carry it, because build_sort_keys
+        # (draken/morsels/sort.hpp) reads a string key's payload with no per-slot
+        # elision check. SkeneLatmatScanPlan is given `sort_p1_index` so it refuses
+        # the plan outright rather than trusting that argument.
+        #
+        # No kill switch of its own: FEATURE_DISABLE_LENGTH_ONLY_COLUMN unregisters
+        # the strategy, so the annotation is simply absent and both lists are zeros.
+        _length_only_ids = getattr(scan, "_length_only_columns", None) or frozenset()
+        p1_length_only = [1 if sc.identity in _length_only_ids else 0 for sc in p1_scs]
+        out_length_only = [
+            1 if sc.identity in _length_only_ids else 0 for sc in read_columns
+        ]
+
         splan = SkeneLatmatScanPlan(
             list(scan.skene_files),
             p1_names,
@@ -3207,6 +3249,9 @@ class _Compiler:
             ],
             pred_col_to_p1,
             zone_terms,
+            p1_length_only,
+            out_length_only,
+            p1_index_by_name[sort_sc.name],
         )
         splan.scan_identity = scan.identity
         return (splan, resolver, p1_index_by_name[sort_sc.name], bool(ascending),

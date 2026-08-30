@@ -1374,6 +1374,11 @@ Status read_morsel(const uint8_t* file, size_t file_bytes,
                    uint64_t footer_offset, uint32_t footer_bytes,
                    uint32_t row_group, const ReadOptions& options, CxxMorsel* out) {
     (void)file_bytes;
+    // ReadOptions::length_only is deliberately NOT honoured here. v1 is the
+    // migration-only reader; eliding payloads is purely an optimisation, so
+    // ignoring it decodes MORE than asked and returns identical answers. It is
+    // not a silent degradation of behaviour — there is no behaviour to degrade,
+    // only bytes copied that a v2 file would not have copied.
     ParsedFileFooter file_footer;
     ParsedRowGroupFooter footer;
     RowGroupEntry entry{};

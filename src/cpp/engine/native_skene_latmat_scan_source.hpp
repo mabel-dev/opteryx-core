@@ -42,6 +42,23 @@
 // predicate itself) for any predicate it cannot lower for pass 1, rather than
 // planning a pass 1 that quietly evaluates a subset.
 //
+// ── Length-only column elision ─────────────────────────────────────────────────────
+// Both passes honour skene::ReadOptions::length_only, resolved against their own
+// column set by compiler.py::_skene_latmat_scan_plan. It is PASS 1 that matters:
+// pass 1 sweeps every row group, so a predicate-only string column the optimizer
+// proved is read only through length-answerable operations (`WHERE Referer <> ''`,
+// Referer projected nowhere) never has its payload arena decoded, copied or faulted
+// in at all — skene keeps a string column's slots and its arena in separate
+// sections. Measured on scratch.hits_skene (99M rows, 383 row groups, DOP 8, scan
+// cpu_time, median of 5): 2533ms -> 1744ms for one such column, 4054ms -> 2372ms
+// for two. Pass 2's flags are sound for the same reason and worth almost nothing,
+// since it only opens the row groups that still hold a top-n candidate.
+//
+// The SORT KEY can never be flagged: `ORDER BY col` is a raw use, so the column is
+// not eligible. It must never be, either — `build_sort_keys` dereferences a string
+// key's payload with no per-slot elision check — so the flag is refused at plan
+// time (SkeneLatmatScanPlan) and again here, in pass1_row_group.
+//
 // ── Differences from the parquet twin, all forced by the format ────────────────────
 //   * The pass-1/pass-2 unit is a ROW GROUP, and a .skene file holds up to 16 of
 //     them. Both passes claim from the same flat (file, row group) list, so a
@@ -174,10 +191,12 @@ class NativeSkeneLatmatScanSource : public Source {
                                 const std::vector<std::string>* p1_column_names,
                                 const std::vector<int>* p1_column_types,
                                 const std::vector<int>* p1_retag_units,
+                                const std::vector<int>* p1_length_only,
                                 const std::vector<std::string>* out_column_names,
                                 const std::vector<std::string>* out_identities,
                                 const std::vector<int>* out_column_types,
                                 const std::vector<int>* out_retag_units,
+                                const std::vector<int>* out_length_only,
                                 SkeneLatmatPredFn pred_fn, void* pred_ctx,
                                 const std::vector<int>* pred_col_to_p1,
                                 int sort_p1_index, bool sort_ascending,
@@ -190,10 +209,18 @@ class NativeSkeneLatmatScanSource : public Source {
           p1_column_names_(p1_column_names),
           p1_column_types_(p1_column_types),
           p1_retag_units_(p1_retag_units),
+          p1_length_only_(p1_length_only == nullptr
+                              ? std::vector<uint8_t>()
+                              : std::vector<uint8_t>(p1_length_only->begin(),
+                                                     p1_length_only->end())),
           out_column_names_(out_column_names),
           out_identities_(out_identities),
           out_column_types_(out_column_types),
           out_retag_units_(out_retag_units),
+          out_length_only_(out_length_only == nullptr
+                               ? std::vector<uint8_t>()
+                               : std::vector<uint8_t>(out_length_only->begin(),
+                                                      out_length_only->end())),
           pred_fn_(pred_fn),
           pred_ctx_(pred_ctx),
           pred_col_to_p1_(pred_col_to_p1),
@@ -287,6 +314,7 @@ class NativeSkeneLatmatScanSource : public Source {
         const SkeneFileMapping& mapping = g.work_set.mapping(claim.file_idx);
         skene::ReadOptions options;
         options.columns = *p1_column_names_;
+        options.length_only = p1_length_only_;
 
         auto m = std::make_shared<CxxMorsel>();
         skene::Status status =
@@ -355,6 +383,22 @@ class NativeSkeneLatmatScanSource : public Source {
             err.code = 1;
             err_buf = "NativeSkeneLatmatScanSource: sort-key index out of range for the "
                       "pass-1 layout";
+            err.msg = err_buf.c_str();
+            return false;
+        }
+        // The sort key may NEVER be length-only elided. `build_sort_keys` (the
+        // reduction below) dereferences a string key's payload through
+        // `str_data(slot, arena)` with no per-slot elision check — an elided key
+        // would segfault there, not return a wrong answer. It cannot happen:
+        // `ORDER BY col` is a raw use, which disqualifies the column in
+        // LengthOnlyColumnStrategy, and the compiler refuses the plan outright if
+        // the flag ever arrives set. This is the second half of that pair, because
+        // the flag vector and the sort index reach here as independent inputs.
+        if (static_cast<size_t>(sort_p1_index_) < p1_length_only_.size() &&
+            p1_length_only_[static_cast<size_t>(sort_p1_index_)] != 0) {
+            err.code = 1;
+            err_buf = "NativeSkeneLatmatScanSource: the sort key is flagged "
+                      "length-only — its payload is required to build a sort key";
             err.msg = err_buf.c_str();
             return false;
         }
@@ -511,6 +555,7 @@ class NativeSkeneLatmatScanSource : public Source {
         const SkeneFileMapping& mapping = g.work_set.mapping(item.claim.file_idx);
         skene::ReadOptions options;
         options.columns = *out_column_names_;
+        options.length_only = out_length_only_;
 
         auto m = std::make_shared<CxxMorsel>();
         skene::Status status =
@@ -565,6 +610,13 @@ class NativeSkeneLatmatScanSource : public Source {
     const std::vector<std::string>* p1_column_names_;
     const std::vector<int>*         p1_column_types_;
     const std::vector<int>*         p1_retag_units_;
+    // Parallel to p1_column_names_ (or empty): 1 = the optimizer PROVED every read
+    // of that column, anywhere in the plan, is answerable from a value's stored
+    // length, so pass 1 records lengths and never materializes the payload arena.
+    // This is where the elision pays on this Source: pass 1 sweeps EVERY row group.
+    // Owned rather than borrowed for the same reason as the single-pass Source's —
+    // ReadOptions wants uint8_t and the plan holds int.
+    const std::vector<uint8_t>      p1_length_only_;
 
     // Pass 2 / output: the scan's full projection, same four parallel arrays plus the
     // plan identities the columns are emitted under.
@@ -572,6 +624,11 @@ class NativeSkeneLatmatScanSource : public Source {
     const std::vector<std::string>* out_identities_;
     const std::vector<int>*         out_column_types_;
     const std::vector<int>*         out_retag_units_;
+    // The same flags resolved against the PROJECTION. Sound for the same reason —
+    // an eligible column has no raw read anywhere in the plan — but worth far less
+    // than the pass-1 vector: pass 2 only ever decodes the row groups that still
+    // hold a top-n candidate.
+    const std::vector<uint8_t>      out_length_only_;
 
     SkeneLatmatPredFn        pred_fn_;
     void*                    pred_ctx_;

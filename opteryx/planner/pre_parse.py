@@ -154,6 +154,55 @@ _DROP_TRIGGER_RE = re.compile(
 _DROP_TRIGGER_LEAD = re.compile(r"^\s*DROP\s+TRIGGER\b", re.IGNORECASE)
 _CREATE_TRIGGER_LEAD = re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b", re.IGNORECASE)
 
+# CREATE [OR REPLACE] TRIGGER <name> ON <table> EXECUTE <task>
+#
+# `ON <table>` is a CATALOG event: the trigger fires when that dataset takes a
+# user-created commit. Two other event kinds are imaginable and neither is
+# accepted, because neither has anything to fire it - see `_TRIGGER_EVENT_LEAD`
+# below. A trigger that is stored but never dispatched is worse than one that
+# does not exist: the table it maintains silently stops updating, and the
+# trigger record says it is fine.
+_CREATE_TRIGGER_RE = re.compile(
+    r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TRIGGER\s+"
+    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)\s+"
+    r"EXECUTE\s+(?P<task>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# The event kinds this engine can express but cannot yet dispatch. Matched so
+# they are refused BY NAME rather than as a generic syntax error, and so the
+# refusal can say what is missing rather than that the word is unknown.
+_TRIGGER_EVENT_LEAD = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+[A-Za-z_][\w$]*\s+ON\s+"
+    r"(?P<kind>SCHEDULE|EVERY|EVENT|SIGNAL)\b",
+    re.IGNORECASE,
+)
+
+# ALTER TRIGGER <name> ON <table> SUSPEND|RESUME
+#
+# Suspension is expressed on the TRIGGER, unlike a materialized view's, which is
+# expressed on the view: a view owns its triggers and suspending some of them
+# would leave it refreshing from a subset of its sources. A task's triggers are
+# independent of each other, so pausing one is a coherent thing to want.
+_ALTER_TRIGGER_LEAD = re.compile(r"^\s*ALTER\s+TRIGGER\b", re.IGNORECASE)
+_ALTER_TRIGGER_RE = re.compile(
+    r"^\s*ALTER\s+TRIGGER\s+(?P<name>[A-Za-z_][\w$]*)\s+ON\s+"
+    r"(?P<table>[A-Za-z_][\w.$]*)\s+(?P<state>SUSPEND|RESUME)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# ALTER TRIGGER <name> ON <table> OWNER TO <principal>|CURRENT_USER
+#
+# The identity an UNATTENDED run executes as. It lives on the trigger rather
+# than the task because that is what distinguishes unattended from attended: a
+# person running `EXECUTE` runs it as themselves and answers for it, so nothing
+# needs pinning. A trigger fires with nobody present, so it must say whose
+# authority it carries - and one task fired by two triggers can legitimately run
+# as two different principals.
+_ALTER_TRIGGER_OWNER_RE = re.compile(
+    r"^\s*ALTER\s+TRIGGER\s+(?P<name>[A-Za-z_][\w$]*)\s+ON\s+"
+    r"(?P<table>[A-Za-z_][\w.$]*)\s+OWNER\s+TO\s+(?P<owner>" + _PRINCIPAL_SLOT + r")\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # REFRESH MATERIALIZED VIEW <name>. sqlparser has no REFRESH statement in the
 # Opteryx dialect, so it takes the same pre-parse route DROP TRIGGER does. No
 # placeholders: the view is an identifier, not a value.
@@ -339,10 +388,69 @@ def _intercept_trigger_statements(clean_sql: str):
     from opteryx.exceptions import UnsupportedSyntaxError
 
     if _CREATE_TRIGGER_LEAD.match(clean_sql):
-        raise UnsupportedSyntaxError(
-            "CREATE TRIGGER is not supported; triggers are created automatically "
-            "by **CREATE MATERIALIZED VIEW**. A materialized view gets its trigger when it is created."
-        )
+        event = _TRIGGER_EVENT_LEAD.match(clean_sql)
+        if event is not None:
+            # Expressible, and deliberately not accepted: nothing dispatches
+            # either kind. A catalog event fires from the commit path; a clock
+            # event needs something that polls for due triggers and a user event
+            # needs a surface to signal one, and neither exists. Storing such a
+            # trigger would leave a table quietly never updating while its
+            # trigger record claimed otherwise.
+            raise UnsupportedSyntaxError(
+                f"**ON {event.group('kind').upper()}** triggers are not dispatched yet. A "
+                "trigger fires on a catalog event - a commit to a dataset - written "
+                "**ON** <table>. Clock and signal events need a dispatcher that does "
+                "not exist, and a trigger nothing fires is worse than none."
+            )
+        match = _CREATE_TRIGGER_RE.match(clean_sql)
+        if match is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON** "
+                "<table> **EXECUTE** <task>. The table is the dataset whose commits "
+                "fire it; the task is what it runs."
+            )
+        return [
+            {
+                "CreateTrigger": {
+                    "trigger_name": match.group("name"),
+                    "table_name": match.group("table"),
+                    "task_name": match.group("task"),
+                    "or_replace": match.group("or_replace") is not None,
+                }
+            }
+        ]
+
+    if _ALTER_TRIGGER_LEAD.match(clean_sql):
+        match = _ALTER_TRIGGER_OWNER_RE.match(clean_sql)
+        if match is not None:
+            owner_raw = match.group("owner")
+            return [
+                {
+                    "AlterTriggerOwner": {
+                        "trigger_name": match.group("name"),
+                        "table_name": match.group("table"),
+                        "new_owner": _slot_value(owner_raw),
+                        "owner_is_current_user": owner_raw.strip().upper() == "CURRENT_USER",
+                    }
+                }
+            ]
+        match = _ALTER_TRIGGER_RE.match(clean_sql)
+        if match is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **ALTER TRIGGER** <name> **ON** <table> "
+                "**SUSPEND**|**RESUME**, or **... OWNER TO** <principal>. What a "
+                "trigger runs is changed by recreating it, not altered in place."
+            )
+        return [
+            {
+                "AlterTriggerSuspended": {
+                    "trigger_name": match.group("name"),
+                    "table_name": match.group("table"),
+                    "suspended": match.group("state").upper() == "SUSPEND",
+                }
+            }
+        ]
+
     if not _DROP_TRIGGER_LEAD.match(clean_sql):
         return None
     match = _DROP_TRIGGER_RE.match(clean_sql)
@@ -362,6 +470,116 @@ def _intercept_trigger_statements(clean_sql: str):
             }
         }
     ]
+
+
+# CREATE [OR REPLACE] TASK <name> AS <statement>
+# DROP TASK [IF EXISTS] <name>
+#
+# sqlparser has no TASK object type at all - `CREATE TASK` fails with "Expected:
+# an object type after CREATE" - so these take the same pre-parse route as
+# REFRESH and DROP TRIGGER. `EXECUTE` needed none of this: sqlparser parses it
+# natively, which is why only the DDL is intercepted here.
+#
+# The task's name is an IDENTIFIER slot, so it admits no placeholder, for the
+# reason given at the top of this module: a parameterised name would let runtime
+# data decide which task is defined. The STATEMENT is captured as raw text and
+# not examined here - whether it parses, and whether it is something a task may
+# run, is the planner's question, asked where the answer can be a useful error.
+_CREATE_TASK_LEAD = re.compile(r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TASK\b", re.IGNORECASE)
+# `ON <table>` is optional and declares the dataset whose commits fire this
+# task, creating the trigger alongside it - the way CREATE MATERIALIZED VIEW
+# creates one per source. Omit it and the task is defined but nothing fires it,
+# which is what a backfill or a replay is: EXECUTE by hand, on purpose.
+#
+# NOT derived from the statement's own sources, which is where this departs from
+# a view. A view must track every source to stay consistent, so implying the
+# triggers is right for one. A task's read set and its firing condition are
+# different intents - a task joining a small event table to a large reference
+# table wants to fire on the event table only - and an implication would give no
+# way to say so.
+_CREATE_TASK_RE = re.compile(
+    r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TASK\s+"
+    r"(?P<name>[A-Za-z_][\w.$]*)\s+(?:ON\s+(?P<on>[A-Za-z_][\w.$]*)\s+)?"
+    r"AS\s+(?P<statement>.+?)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_DROP_TASK_LEAD = re.compile(r"^\s*DROP\s+TASK\b", re.IGNORECASE)
+_DROP_TASK_RE = re.compile(
+    r"^\s*DROP\s+TASK\s+(?P<if_exists>IF\s+EXISTS\s+)?"
+    r"(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# ALTER TASK has no forms. A task is a statement and nothing else: what it runs
+# is changed by redefining it, and the two things one might expect to alter -
+# who it runs as, and whether it runs - belong to the TRIGGER, which is what
+# fires unattended. Refused here by name so the reader is told that, rather than
+# meeting a parser error pointing at the word TASK.
+_ALTER_TASK_LEAD = re.compile(r"^\s*ALTER\s+TASK\b", re.IGNORECASE)
+
+
+def _intercept_alter_task(clean_sql: str):
+    """Refuse ALTER TASK, naming the statement that does what was meant."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _ALTER_TASK_LEAD.match(clean_sql):
+        return None
+    raise UnsupportedSyntaxError(
+        "**ALTER TASK** has no forms. Change what a task runs with **CREATE OR "
+        "REPLACE TASK**. Who it runs as, and whether it runs, belong to the trigger "
+        "that fires it: **ALTER TRIGGER** <name> **ON** <table> **OWNER TO** "
+        "<principal>, or **... SUSPEND**|**RESUME**."
+    )
+
+
+def _intercept_task_statements(clean_sql: str):
+    """Recognize `CREATE [OR REPLACE] TASK` and `DROP TASK` before the parser.
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    is neither. Anything beginning with those words but not matching is rejected
+    BY NAME here rather than left to sqlparser, which knows no TASK at all and
+    would report a syntax error pointing at the word after it.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if _CREATE_TASK_LEAD.match(clean_sql):
+        match = _CREATE_TASK_RE.match(clean_sql)
+        if match is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **CREATE** [**OR REPLACE**] **TASK** <name> [**ON** <table>] "
+                "**AS** <statement>. A task is a statement the platform runs for you; "
+                "the statement is what it runs."
+            )
+        return [
+            {
+                "CreateTask": {
+                    "name": match.group("name"),
+                    "statement": match.group("statement"),
+                    "or_replace": match.group("or_replace") is not None,
+                    "on_table": match.group("on"),
+                }
+            }
+        ]
+
+    if _DROP_TASK_LEAD.match(clean_sql):
+        match = _DROP_TASK_RE.match(clean_sql)
+        if match is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **DROP TASK** [**IF EXISTS**] <name>. **DROP TASK** takes "
+                "no other options - a task owns no storage, so there is nothing for "
+                "CASCADE or RESTRICT to decide."
+            )
+        return [
+            {
+                "DropTask": {
+                    "name": match.group("name"),
+                    "if_exists": match.group("if_exists") is not None,
+                }
+            }
+        ]
+
+    return None
 
 
 # GRANT <role> ON <kind> <object> TO USER <user>
@@ -501,6 +719,9 @@ def _intercept_show_grants_on(clean_sql: str):
 _INTERCEPTORS = (
     _intercept_drop_statistics,
     _intercept_trigger_statements,
+    _intercept_task_statements,
+    _intercept_alter_task,
+    _intercept_task_statements,
     _intercept_refresh_statements,
     _intercept_save_results,
     _intercept_alter_materialized_view,

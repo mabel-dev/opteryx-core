@@ -251,6 +251,7 @@ def visit_drop_column(self, node: Node, context: BindingContext) -> Tuple[Node, 
         )
 
     _reject_materialized_view_target(node, "**ALTER TABLE ... DROP COLUMN**")
+    _guard_relationships_through_dropped_column(node, context)
 
     node.columns = []
     return node, context
@@ -622,6 +623,209 @@ def visit_alter_materialized_view_suspended(
     return node, context
 
 
+def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind CREATE TASK.
+
+    A task is stored SQL and nothing more - it carries NO identity. A person
+    running it with EXECUTE runs it as themselves, gated by the binder at that
+    moment against their own policies; an unattended run carries the TRIGGER's
+    pinned owner and is gated against that principal when it executes. So
+    creating a task confers no authority, and this deliberately does NOT check
+    what the statement reads or writes: those checks belong where they are
+    enforced - at execution, against whoever the run actually is - and a
+    creation-time copy of them would be checked against the wrong principal the
+    moment the task is run by anyone but its author.
+
+    What IS gated here is the write this statement performs: registering an
+    object under this name. `ON <table>` additionally lands a trigger, checked
+    below at the same tier CREATE TRIGGER is.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+    from opteryx.managers.permissions import can_principal_own_materialized_view
+
+    node.connector = connector_factory(node.task_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.task_name} does not support CREATE TASK"
+        )
+
+    if not can_perform_action(context.execution_context, node.task_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to create task {node.task_name}"
+        )
+
+    # `ON <table>` lands a trigger on that dataset, whose unattended runs will
+    # carry THIS author's identity - so it takes both of CREATE TRIGGER's gates:
+    # WRITE on the table, and an author who can be billed. One statement must
+    # not do by implication what the explicit statement would refuse.
+    if getattr(node, "on_table", None):
+        if not can_perform_action(context.execution_context, node.on_table, action="WRITE"):
+            raise PermissionError(
+                f"User does not have permission to create a trigger on table "
+                f"{node.on_table}, which would fire {node.task_name}"
+            )
+        author = context.execution_context.user
+        if not can_principal_own_materialized_view(author):
+            raise PermissionError(
+                f"{author} cannot own the trigger this statement creates. It is a "
+                "platform identity rather than an account, so work it performs is "
+                "billed to nobody - and a trigger runs its task as its owner."
+            )
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_trigger_owner(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind ALTER TRIGGER ... OWNER TO.
+
+    The owner is the identity an UNATTENDED run carries. A person running
+    `EXECUTE` runs the task as themselves and answers for it; a trigger fires
+    with nobody present, so it must name whose authority it uses - and one task
+    fired by two triggers can legitimately run as two different principals.
+
+    Two gates, both the materialized view's:
+
+    - WRITE on the TABLE the trigger hangs off, matching creation: landing or
+      changing a trigger is an update to that table.
+    - The incoming owner must be able to PAY. Platform identities are refused,
+      which is a billing question rather than a permissions one - they can read
+      a great deal but carry no billing account, so work pinned to one runs on a
+      schedule forever and lands on nobody's bill.
+
+    Asked of the RESOLVED owner, so CURRENT_USER is judged as the principal it
+    names rather than exempted for having been spelled differently.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+    from opteryx.managers.permissions import can_principal_own_materialized_view
+
+    node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.table_name} does not support ALTER TRIGGER"
+        )
+
+    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to alter a trigger on table {node.table_name}"
+        )
+
+    owner = context.execution_context.user if node.owner_is_current_user else node.new_owner
+    if not can_principal_own_materialized_view(owner):
+        raise PermissionError(
+            f"{owner} cannot be made the owner of trigger {node.trigger_name}. It is a "
+            "platform identity rather than an account, so work it performs is billed to "
+            "nobody - and a trigger runs its task as its owner. Transfer it to a user or "
+            "to a service account, both of which carry a billing account."
+        )
+    node.resolved_owner = owner
+
+    node.columns = []
+    return node, context
+
+
+def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind DROP TASK.
+
+    Gated at WRITE on the task itself, symmetric with creation. A task owns no
+    storage, so this is not the DROP tier a table's would be - there is nothing
+    to reclaim and nothing unrecoverable about it, since the statement can be
+    registered again.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.task_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.task_name} does not support DROP TASK"
+        )
+
+    if not can_perform_action(context.execution_context, node.task_name, action="WRITE"):
+        raise PermissionError(f"User does not have permission to drop task {node.task_name}")
+
+    node.columns = []
+    return node, context
+
+
+def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind CREATE TRIGGER.
+
+    Two gates. WRITE on the TABLE the trigger hangs off - symmetric with
+    `visit_drop_trigger`, landing a trigger is an update to that dataset. And
+    the author must be a principal who can be BILLED, because the trigger's
+    unattended runs execute as its owner and the owner pins to the author here.
+    This is where authority is actually conferred - a task is just stored SQL,
+    and a person running EXECUTE answers for themselves - so this is where the
+    gate lives.
+
+    What the task may do is NOT re-checked: its statement is gated by the binder
+    at execution, against the owner, every time it fires. A creation-time copy
+    of that check would go stale the moment the owner's grants changed.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+    from opteryx.managers.permissions import can_principal_own_materialized_view
+
+    node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.table_name} does not support CREATE TRIGGER"
+        )
+
+    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to create a trigger on table {node.table_name}"
+        )
+
+    author = context.execution_context.user
+    if not can_principal_own_materialized_view(author):
+        raise PermissionError(
+            f"{author} cannot own trigger {node.trigger_name}. It is a platform "
+            "identity rather than an account, so work it performs is billed to "
+            "nobody - and a trigger runs its task as its owner."
+        )
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_trigger_suspended(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind ALTER TRIGGER ... SUSPEND|RESUME. Same tier as creating one."""
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.table_name} does not support ALTER TRIGGER"
+        )
+
+    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+        raise PermissionError(
+            f"User does not have permission to alter a trigger on table {node.table_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
 def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the DROP TRIGGER node to determine which connector should handle
@@ -861,6 +1065,87 @@ def _types_compatible(src, tgt) -> bool:
     if src_lc == LogicalCategory.INTEGER and tgt_lc == LogicalCategory.FLOAT:
         return True
     return False
+
+
+def _guard_relationships_through_dropped_column(node, context) -> None:
+    """Refuse or warn when `DROP COLUMN` would leave a relationship pointing at
+    nothing.
+
+    WARN AT PLAN TIME, because telling someone before the damage beats
+    recording it after. Until this existed a dropped column silently orphaned
+    every relationship through it: the rows stayed `active`, the projection
+    kept emitting them, and a BI client kept being handed a NavigationProperty
+    onto a column that no longer existed.
+
+    Two outcomes, and the split is by `origin`:
+
+      ASSERTED  -> REFUSED. A person declared this, and the column it runs
+                   through is the entire content of the declaration. Dropping
+                   the column does not falsify the claim, it makes it
+                   unstatable - so the right answer is not to record a broken
+                   row, it is to make the person retract the claim first. This
+                   is `RESTRICT` semantics, and it is the same shape as
+                   `drop_dataset` refusing while a materialized view reads the
+                   dataset. It does NOT contradict "nothing is enforced, ever"
+                   (§6.1): that rule is about DML, a write whose VALUES break a
+                   relationship, which still succeeds. This is DDL removing the
+                   object a declaration names.
+
+      INFERRED  -> WARNED. A proposal is a machine's guess that nobody has
+                   answered. Blocking a schema change on one would let the
+                   inference job veto DDL, which is a much worse failure than
+                   losing a proposal - and the proposal is not lost, it is
+                   marked broken after the drop.
+
+    INBOUND REFERENCES NEITHER REFUSE NOR APPEAR IN THE MESSAGE, and that is a
+    visibility rule, not an oversight. A relationship declared on another
+    dataset that points at this column belongs to someone who may hold a grant
+    this caller does not - naming it here would disclose the existence, name
+    and shape of data they cannot read, which is exactly what §8.2 constructs
+    the projection to prevent. Refusing on one would disclose it just as
+    surely, by making the drop fail for a reason the caller cannot see, and it
+    would also let any workspace member block another team's schema change by
+    declaring a constraint at it. So inbound references are broken after the
+    fact and their owners are told through their own catalog.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    lookup = getattr(node.connector, "relationships_through_column", None)
+    if lookup is None:
+        return
+
+    try:
+        through = lookup(node.relation_name, node.column_name)
+    except Exception as err:  # noqa: BLE001
+        # The check is advisory and the drop is the user's statement, so a
+        # store that cannot answer must not block it. It must not pass
+        # silently either - a guard that fails open without saying so is worse
+        # than no guard, because the absence of a warning starts to mean
+        # something it does not.
+        context.telemetry.add_message(
+            f"could not check which relationships run through {node.relation_name}."
+            f"{node.column_name} ({type(err).__name__}); they may be left broken"
+        )
+        return
+
+    outbound = [row for row in through if not row.get("inbound")]
+    asserted = [row for row in outbound if row.get("origin") == "asserted"]
+    if asserted:
+        names = ", ".join(sorted(str(row.get("constraint_name")) for row in asserted))
+        raise UnsupportedSyntaxError(
+            f"{node.relation_name}.{node.column_name} is referenced by declared "
+            f"relationship(s) {names}, which would be left pointing at nothing. "
+            f"Remove them first with **ALTER TABLE {node.relation_name} DROP "
+            "CONSTRAINT <name>**, then drop the column."
+        )
+
+    proposals = [row for row in outbound if row.get("origin") != "asserted"]
+    if proposals:
+        context.telemetry.add_message(
+            f"dropping {node.relation_name}.{node.column_name} breaks "
+            f"{len(proposals)} suggested relationship(s); they will be marked "
+            "broken rather than removed"
+        )
 
 
 def _reject_materialized_view_target(node, statement: str) -> None:

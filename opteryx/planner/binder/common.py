@@ -50,6 +50,11 @@ from opteryx.planner.binder.relation import (
     visit_drop_tag,
     visit_rollback_relation,
     visit_drop_trigger,
+    visit_create_task,
+    visit_create_trigger,
+    visit_alter_trigger_suspended,
+    visit_drop_task,
+    visit_alter_trigger_owner,
     visit_drop_workspace,
     visit_optimize_relation,
     visit_rename_column,
@@ -87,6 +92,10 @@ NO_BINDER_REQUIRED = frozenset(
         "Limit",  # row count only
         "HeapSort",  # rewritten from Order + Limit, both bound
         "Difference",  # unreachable: no builder emits it
+        # CALL carries a procedure name and literal argument VALUES, both resolved by
+        # `plan_call` against the procedure registry. There is no relation beneath it
+        # and no identifier in it, so there is nothing for the binder to bind.
+        "CallProcedure",
     }
 )
 
@@ -258,6 +267,31 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_trigger(self, node, context)
+
+    def visit_create_trigger(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_create_trigger(self, node, context)
+
+    def visit_alter_trigger_suspended(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_trigger_suspended(self, node, context)
+
+    def visit_create_task(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_create_task(self, node, context)
+
+    def visit_alter_trigger_owner(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_trigger_owner(self, node, context)
+
+    def visit_drop_task(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_drop_task(self, node, context)
 
     def visit_create_tag(
         self, node: Node, context: BindingContext

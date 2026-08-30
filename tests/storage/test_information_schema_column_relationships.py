@@ -62,30 +62,37 @@ class _FakeCatalog:
         _FakeCatalog.calls.append(("list_datasets", collection))
         return {"helpdesk": ["tickets", "agents"], "crm": ["customers"]}[collection]
 
+    _RELATIONSHIP = {
+        "name": "tickets_customer_fk",
+        "kind": "maps",
+        "workspace": "cat",
+        "collection": "helpdesk",
+        "dataset": "tickets",
+        "column": "customer_ref",
+        "references-workspace": "cat",
+        "references-collection": "crm",
+        "references-dataset": "customers",
+        "references-column": "id",
+        "cardinality": "many_to_one",
+        "origin": "asserted",
+        "status": "active",
+        "asserted-by": "olive",
+        "asserted-at-ms": _NOW_MS,
+        "verified-at-ms": None,
+    }
+
     def list_relationships(self, identifier):
         _FakeCatalog.calls.append(("list_relationships", identifier))
         if identifier != "helpdesk.tickets":
             return []
-        return [
-            {
-                "name": "tickets_customer_fk",
-                "kind": "maps",
-                "workspace": "cat",
-                "collection": "helpdesk",
-                "dataset": "tickets",
-                "column": "customer_ref",
-                "references-workspace": "cat",
-                "references-collection": "crm",
-                "references-dataset": "customers",
-                "references-column": "id",
-                "cardinality": "many_to_one",
-                "origin": "asserted",
-                "status": "active",
-                "asserted-by": "olive",
-                "asserted-at-ms": _NOW_MS,
-                "verified-at-ms": None,
-            }
-        ]
+        return [dict(_FakeCatalog._RELATIONSHIP)]
+
+    def list_workspace_relationships(self):
+        """The whole workspace in one read - what the reader uses when no
+        predicate pins a dataset. Each row carries its own near address, which
+        is what makes enumerating datasets unnecessary."""
+        _FakeCatalog.calls.append(("list_workspace_relationships",))
+        return [dict(_FakeCatalog._RELATIONSHIP)]
 
     def dataset_exists(self, identifier):
         return True
@@ -224,14 +231,35 @@ def test_an_unreadable_near_end_yields_nothing(catalog_workspace, permissions_st
 
 def test_a_predicate_on_the_table_prunes_the_catalog_round_trips(catalog_workspace):
     """This is where the read pattern pays: `$metadata` asks "what relates to
-    THIS dataset", and the pushdown turns that into one listing rather than one
-    per dataset in the workspace."""
+    THIS dataset", and the pushdown turns that into one keyed subcollection
+    read."""
     _FakeCatalog.calls = []
     rows = _read(where=" WHERE table_name = 'helpdesk.tickets'")
 
     assert len(rows) == 1
-    listed = [call[1] for call in _FakeCatalog.calls if call[0] == "list_relationships"]
-    assert listed == ["helpdesk.tickets"]
+    assert _FakeCatalog.calls == [("list_relationships", "helpdesk.tickets")]
+
+
+def test_the_reader_never_enumerates_datasets(catalog_workspace):
+    """The whole point of the read shape. Enumerating collections and then each
+    one's datasets costs `1 + collections + datasets` sequential round trips to
+    return rows that number in the tens, and it grows with the workspace rather
+    than with the relationships in it. Neither read may do it - so this asserts
+    on the calls, not on the rows, which were identical before and after."""
+    _FakeCatalog.calls = []
+    assert len(_read()) == 1
+    assert _FakeCatalog.calls == [("list_workspace_relationships",)]
+
+    _FakeCatalog.calls = []
+    assert len(_read(where=" WHERE table_name = 'helpdesk.tickets'")) == 1
+    assert _FakeCatalog.calls == [("list_relationships", "helpdesk.tickets")]
+
+
+def test_a_predicate_on_the_collection_still_filters(catalog_workspace):
+    """constraint_collection no longer prunes a round trip - it is pushed so it
+    settles here rather than in a Filter node, and it must still be applied."""
+    assert len(_read(where=" WHERE constraint_collection = 'helpdesk'")) == 1
+    assert _read(where=" WHERE constraint_collection = 'crm'") == []
 
 
 def test_a_predicate_on_the_catalog_skips_enumeration_entirely(catalog_workspace):
@@ -252,3 +280,102 @@ def test_denies_without_execution_context():
     )
     rows = _morsels_to_rows(table.read_dataset())
     assert rows == []
+
+
+# --- inferred proposals -------------------------------------------------
+#
+# A proposal is a row like any other here, and that is deliberate: it is
+# VISIBLE (in this projection and in the Studio, carrying its evidence) but
+# INERT (never a NavigationProperty - that filter lives in odata.opteryx).
+#
+# What must NOT be different is the visibility rule. The inference job runs as
+# a service identity and can see pairs no single person can, so a proposal it
+# writes may name a dataset the reader holds no grant on. The both-ends check
+# is what stops that reaching them, and it has to cover inferred rows exactly
+# as it covers asserted ones.
+
+_PROPOSAL = {
+    **_FakeCatalog._RELATIONSHIP,
+    "name": "inferred_customer_ref_a1b2c3d4e5f60718",
+    "origin": "inferred",
+    "status": "unverified",
+    "confidence": 0.94,
+    "evidence": {"overlap": 0.94, "values-compared": 1685},
+    "asserted-by": None,
+    "asserted-at-ms": None,
+    "proposed-by": "inference-job",
+}
+
+
+@pytest.fixture
+def proposal_workspace(monkeypatch):
+    """A catalog whose only relationship is an unconfirmed proposal."""
+    _FakeCatalog.calls = []
+    monkeypatch.setattr(
+        _FakeCatalog, "list_workspace_relationships", lambda self: [dict(_PROPOSAL)]
+    )
+    monkeypatch.setattr(
+        _FakeCatalog,
+        "list_relationships",
+        lambda self, identifier: (
+            [dict(_PROPOSAL)] if identifier == "helpdesk.tickets" else []
+        ),
+    )
+    register_workspace("cat", OpteryxConnector, catalog=_FakeCatalog)
+    return _FakeCatalog
+
+
+def test_a_proposal_is_visible_with_its_evidence(proposal_workspace):
+    """Visible but inert. The owner has to be able to see it to judge it, and
+    the evidence is what they judge -- a bare confidence number is not
+    something anyone can act on."""
+    (row,) = _read()
+    assert row["origin"] == "inferred"
+    assert row["status"] == "unverified"
+    assert row["confidence"] == pytest.approx(0.94)
+    assert '"overlap":0.94' in row["evidence"]
+    assert '"values-compared":1685' in row["evidence"]
+    # A proposal has no author. The job's name goes in `proposed-by`, which is
+    # not this column: filling it in here would make a guess read as a person's
+    # statement to everything that reads the graph.
+    assert row["asserted_by"] is None
+
+
+def test_an_asserted_row_carries_no_confidence_or_evidence(catalog_workspace):
+    """Absent, not zero. A relationship someone typed was never measured, and
+    an empty evidence object would suggest it had been."""
+    (row,) = _read()
+    assert row["confidence"] is None
+    assert row["evidence"] is None
+
+
+def test_a_proposal_naming_an_unreadable_dataset_is_not_emitted(
+    proposal_workspace, permissions_state
+):
+    """The disclosure the inference job creates, and the check that closes it.
+
+    The job runs as a service identity, so it can compare `helpdesk.tickets`
+    against `crm.customers` for a caller who holds nothing on `crm`. The
+    proposal it writes NAMES that dataset and its column. Emitting it would
+    tell the caller that `crm.customers.id` exists and that their data lines up
+    with it -- a leak the job itself created, out of a pair no person could
+    have put together.
+
+    Nothing here is special-cased for inferred rows. This asserts that the
+    both-ends rule already covers them, which is the whole reason the job may
+    run as one identity and be read by many.
+    """
+    _install(permissions_state, readable={"cat.helpdesk.tickets", "cat.helpdesk.agents"})
+    assert _read() == []
+
+
+def test_a_proposal_is_emitted_when_both_ends_are_readable(
+    proposal_workspace, permissions_state
+):
+    """The other half: the rule is not simply refusing every inferred row."""
+    _install(
+        permissions_state,
+        readable={"cat.helpdesk.tickets", "cat.helpdesk.agents", "cat.crm.customers"},
+    )
+    (row,) = _read()
+    assert row["origin"] == "inferred"

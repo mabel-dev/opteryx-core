@@ -56,8 +56,9 @@ class PredicatePushable:
     PUSHABLE_TYPES: set = {t for t in LogicalCategory}
 
     # Node kinds a pushed predicate may be built from. A boolean-returning FUNCTION
-    # is itself a predicate, so FUNCTION joins the set for that shape only — CASE and
-    # everything else stay out.
+    # is itself a predicate, so FUNCTION joins the set for that shape — and, for a
+    # connector that opts into PUSHABLE_SCALAR_FUNCTIONS below, anywhere in the tree.
+    # CASE and everything else stay out.
     _SIMPLE_NODE_TYPES = (
         NodeType.IDENTIFIER,
         NodeType.LITERAL,
@@ -65,6 +66,19 @@ class PredicatePushable:
         NodeType.BETWEEN,
         NodeType.UNARY_OPERATOR,
     )
+
+    # Opt-in widening for a reader whose row filter IS the engine's own predicate
+    # VM (skene — see FileSystemTable.can_push). For those, a scalar FUNCTION may
+    # appear ANYWHERE in the predicate, not only as the boolean root: `LENGTH(URL)
+    # > 5` is a COMPARISON over a FUNCTION and was declined for that shape alone,
+    # while the identical-cost `URL <> ''` pushed (predicate_rewriter had already
+    # normalised it to a UNARY_OPERATOR).
+    #
+    # OFF by default, and it must stay off for any connector that TRANSLATES a
+    # pushed predicate into a foreign dialect (remote SQL, rugo tuples) rather than
+    # running it: those translate `column <op> literal` and a FUNCTION on the left
+    # has nowhere to go.
+    PUSHABLE_SCALAR_FUNCTIONS: bool = False
 
     def can_push(self, operator: Node, types: set = None) -> bool:
         condition = operator.condition
@@ -81,11 +95,37 @@ class PredicatePushable:
 
         # we can only push simple expressions
         allowed_node_types = self._SIMPLE_NODE_TYPES
-        if is_boolean_function:
+        if is_boolean_function or self.PUSHABLE_SCALAR_FUNCTIONS:
             allowed_node_types = allowed_node_types + (NodeType.FUNCTION,)
         all_nodes = get_all_nodes_of_type(condition, ("*",))
         if any(n.node_type not in allowed_node_types for n in all_nodes):
             return False
+
+        # The ONE shape the widening admits that the scan cannot then run.
+        #
+        # A pushed predicate is lowered verbatim (compiler `_skene_scan_plan` ->
+        # `_lower_expression`). A predicate left as a Filter node is lowered through
+        # the SAME gate, but only after `_hoist_array_operands` has materialized any
+        # computed-ARRAY operand into its own column — SORT/GREATEST/LEAST/LENGTH
+        # over an array need their operand to BE a column, because an ARRAY's
+        # elements hang off the column owner and a mid-expression intermediate has no
+        # identity to resolve against. There is no hoist on the pushed path, so
+        # `LENGTH(SPLIT(url,'/')) > 2` would be admitted here and then REFUSED at
+        # compile time — a query that works today turning into an error.
+        #
+        # `_computed_array_subexpression` is the compiler's own detector for exactly
+        # that operand (it is what names the array in the refusal message), imported
+        # rather than restated so the two cannot drift apart.
+        #
+        # Scoped to the widened admission: a boolean-root FUNCTION could already
+        # carry a computed array through this gate (`ARRAY_CONTAINS(SPLIT(x),'y')`)
+        # and lowers fine — nothing consumes it element-wise — so narrowing that path
+        # would decline a predicate that works.
+        if not is_boolean_function and self.PUSHABLE_SCALAR_FUNCTIONS:
+            from opteryx.managers.execution.compiler import _computed_array_subexpression
+
+            if _computed_array_subexpression(condition) is not None:
+                return False
 
         # we can only push certain types. `types` is derived by the caller from the
         # condition's left/right legs, which are None for a FUNCTION — so read the

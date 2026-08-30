@@ -347,7 +347,7 @@
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "MERGE INTO target AS t USING source AS s ON predicate WHEN MATCHED [AND predicate] THEN UPDATE SET column = expression, ... WHEN MATCHED [AND predicate] THEN DELETE WHEN NOT MATCHED [AND predicate] THEN INSERT (column, ...) VALUES (expression, ...)"
+            "MERGE INTO target AS t USING source AS s ON predicate [WHEN MATCHED [AND predicate] THEN UPDATE SET column = expression, ...] [WHEN MATCHED [AND predicate] THEN DELETE] [WHEN NOT MATCHED [AND predicate] THEN INSERT (column, ...) VALUES (expression, ...)]"
         ],
         "summary": "Apply a set of changes to a table in one atomic statement.",
         "documentation": "Desugars to a single LEFT JOIN with the SOURCE on the left, so a row is matched exactly when the ON condition is true. One CASE chain over the arm conditions produces both the action code and every output column, so classification and blending run natively in the projection. Merge-on-read: a replaced row's old version is marked deleted by its (file, ordinal) address and its replacement appended, both landing in ONE snapshot. Rows no arm claims cost nothing - they are not read past the join, not rewritten, and contribute no delete position.",

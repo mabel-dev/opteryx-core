@@ -490,10 +490,15 @@ CLAUSE_DEFINITIONS = {
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
+            # Each arm is bracketed as the optional clause it is. Not cosmetic:
+            # run together, "THEN DELETE WHEN NOT MATCHED" reads as one
+            # contiguous keyword run to anything scanning this for the
+            # operations a statement has - which is how the docs' coverage
+            # check came to demand a clause that does not exist.
             "MERGE INTO target AS t USING source AS s ON predicate "
-            "WHEN MATCHED [AND predicate] THEN UPDATE SET column = expression, ... "
-            "WHEN MATCHED [AND predicate] THEN DELETE "
-            "WHEN NOT MATCHED [AND predicate] THEN INSERT (column, ...) VALUES (expression, ...)",
+            "[WHEN MATCHED [AND predicate] THEN UPDATE SET column = expression, ...] "
+            "[WHEN MATCHED [AND predicate] THEN DELETE] "
+            "[WHEN NOT MATCHED [AND predicate] THEN INSERT (column, ...) VALUES (expression, ...)]",
         ],
         "summary": "Apply a set of changes to a table in one atomic statement.",
         "documentation": (

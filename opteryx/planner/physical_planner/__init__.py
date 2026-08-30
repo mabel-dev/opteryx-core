@@ -625,6 +625,26 @@ def _create_drop_trigger_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_trigger", **logical_node.properties)
 
 
+def _create_create_trigger_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="create_trigger", **logical_node.properties)
+
+
+def _create_alter_trigger_suspended_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="alter_trigger_suspended", **logical_node.properties)
+
+
+def _create_create_task_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="create_task", **logical_node.properties)
+
+
+def _create_alter_trigger_owner_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="alter_trigger_owner", **logical_node.properties)
+
+
+def _create_drop_task_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="drop_task", **logical_node.properties)
+
+
 def _create_alter_materialized_view_owner_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="alter_materialized_view_owner", **logical_node.properties)
 
@@ -639,6 +659,15 @@ def _create_grant_access_node(logical_node, query_properties, registry):
 
 def _create_revoke_access_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="revoke_access", **logical_node.properties)
+
+
+def _create_call_procedure_node(logical_node, query_properties, registry):
+    # CALL rides the same operator as the DDL statements. Its name reads oddly here -
+    # a procedure call manages no relation - but that operator is what actually
+    # executes every non-tabular statement (GRANT and REVOKE are already there for the
+    # same reason), and it is the path that runs OFF the native per-morsel engine,
+    # which is where a Python callable belongs.
+    return registry.create("Relation Management", query_properties, action="call_procedure", **logical_node.properties)
 
 
 def _create_show_grants_on_node(logical_node, query_properties, registry):
@@ -699,10 +728,16 @@ _DISPATCH = {
     LogicalPlanStepType.Insert:           _create_insert_node,
     LogicalPlanStepType.Merge:            _create_merge_node,
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
+    LogicalPlanStepType.CreateTrigger:    _create_create_trigger_node,
+    LogicalPlanStepType.AlterTriggerSuspended: _create_alter_trigger_suspended_node,
+    LogicalPlanStepType.CreateTask:       _create_create_task_node,
+    LogicalPlanStepType.DropTask:         _create_drop_task_node,
+    LogicalPlanStepType.AlterTriggerOwner: _create_alter_trigger_owner_node,
     LogicalPlanStepType.AlterMaterializedViewOwner: _create_alter_materialized_view_owner_node,
     LogicalPlanStepType.AlterMaterializedViewSuspended: _create_alter_materialized_view_suspended_node,
     LogicalPlanStepType.GrantAccess:      _create_grant_access_node,
     LogicalPlanStepType.RevokeAccess:     _create_revoke_access_node,
+    LogicalPlanStepType.CallProcedure:    _create_call_procedure_node,
     LogicalPlanStepType.ShowGrantsOn:     _create_show_grants_on_node,
     LogicalPlanStepType.ShowEffectiveGrantsOn: _create_show_grants_on_node,
 }
