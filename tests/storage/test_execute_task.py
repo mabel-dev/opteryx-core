@@ -282,3 +282,97 @@ def test_arguments_cannot_change_how_the_task_parses(tmp_path):
 
     rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.sink"))
     assert rows == []
+
+
+# --- symbolic versions: CURRENT / PREVIOUS -------------------------------------
+#
+# Attended-run sugar, by the invoker's explicit choice: a person typing CURRENT
+# is standing there choosing "the head, now" and answers for it. The firing
+# path never uses these - it binds literal ids, because an unattended window
+# must mean the same thing however late the worker runs it.
+
+
+def _parse_one(sql):
+    from opteryx.third_party import sqloxide
+
+    return sqloxide.parse_sql(sql, _dialect="opteryx")[0]
+
+
+def test_symbolic_words_resolve_to_real_ids_at_plan_time(monkeypatch):
+    """CURRENT/PREVIOUS become literal snapshot ids via the connector's own
+    virtual-tag resolver - never the engine's resolve-at-read sentinel."""
+    import opteryx.connectors as connectors
+    from opteryx.planner.logical_planner.logical_planner import _resolve_symbolic_versions
+    from opteryx.planner.logical_planner.logical_planner import _SymbolicVersion
+
+    class _Travels:
+        supports_version_travel = True
+
+        def resolve_named_version(self, relation, word):
+            return {"CURRENT": 200, "PREVIOUS": 100}[word]
+
+    monkeypatch.setattr(connectors, "connector_factory", lambda name, telemetry=None: _Travels())
+
+    parsed = _parse_one(
+        "SELECT * FROM cat.coll.t VERSION AS OF :cur AS c "
+        "LEFT ANTI JOIN cat.coll.t VERSION AS OF :par AS p ON c.a = p.a"
+    )
+    resolved = _resolve_symbolic_versions(
+        parsed, {"cur": _SymbolicVersion("CURRENT"), "par": _SymbolicVersion("PREVIOUS")}
+    )
+
+    assert resolved == {"cur": 200, "par": 100}
+
+
+def test_a_symbol_used_outside_version_as_of_is_refused(monkeypatch):
+    """A snapshot word in a predicate position has no meaning to resolve."""
+    from opteryx.planner.logical_planner.logical_planner import _resolve_symbolic_versions
+    from opteryx.planner.logical_planner.logical_planner import _SymbolicVersion
+
+    parsed = _parse_one("SELECT * FROM cat.coll.t WHERE a > :cur")
+    with pytest.raises(UnsupportedSyntaxError, match="VERSION AS OF"):
+        _resolve_symbolic_versions(parsed, {"cur": _SymbolicVersion("CURRENT")})
+
+
+def test_a_symbol_spanning_two_relations_is_ambiguous(monkeypatch):
+    """One placeholder time-travelling two relations would name a different
+    snapshot for each - refused, not guessed."""
+    from opteryx.planner.logical_planner.logical_planner import _resolve_symbolic_versions
+    from opteryx.planner.logical_planner.logical_planner import _SymbolicVersion
+
+    parsed = _parse_one(
+        "SELECT * FROM cat.coll.a VERSION AS OF :v AS x "
+        "LEFT JOIN cat.coll.b VERSION AS OF :v AS y ON x.a = y.a"
+    )
+    with pytest.raises(UnsupportedSyntaxError, match="ambiguous"):
+        _resolve_symbolic_versions(parsed, {"v": _SymbolicVersion("CURRENT")})
+
+
+def test_a_symbol_used_both_in_and_out_of_version_position_is_refused(monkeypatch):
+    from opteryx.planner.logical_planner.logical_planner import _resolve_symbolic_versions
+    from opteryx.planner.logical_planner.logical_planner import _SymbolicVersion
+
+    parsed = _parse_one("SELECT * FROM cat.coll.t VERSION AS OF :v WHERE a > :v")
+    with pytest.raises(UnsupportedSyntaxError, match="outside"):
+        _resolve_symbolic_versions(parsed, {"v": _SymbolicVersion("CURRENT")})
+
+
+def test_symbols_against_a_connector_without_version_travel_are_refused(tmp_path):
+    """The local store cannot time-travel, so a symbol cannot resolve there."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    _write_task(tmp_path, "ws.t", "SELECT a FROM ws.src VERSION AS OF :cur")
+
+    with pytest.raises(UnsupportedSyntaxError, match="version travel"):
+        list(owner.execute_to_morsels("EXECUTE ws.t USING CURRENT AS cur"))
+
+
+def test_other_identifiers_are_still_not_constants(tmp_path):
+    """Admitting two words must not quietly admit every identifier."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _write_task(tmp_path, "ws.t", "SELECT 1")
+
+    with pytest.raises(UnsupportedSyntaxError, match="not a constant"):
+        list(owner.execute_to_morsels("EXECUTE ws.t USING some_column AS cur"))

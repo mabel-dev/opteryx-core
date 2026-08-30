@@ -129,6 +129,10 @@ class RelationManagementNode(BasePlanNode):
         self.procedure_name: Optional[str] = parameters.get("procedure_name")
         self.arguments: Optional[list] = parameters.get("arguments")
 
+        # CREATE TABLE ... CONSTRAINT - the relationships the statement declared,
+        # validated by the logical planner and authorized by the binder.
+        self.relationships = parameters.get("relationships")
+
         # CREATE / TRUNCATE / ALTER
         self.connector = parameters.get("connector")
 
@@ -140,6 +144,11 @@ class RelationManagementNode(BasePlanNode):
     def config(self):
         if self.action == "drop_relation":
             return f"drop {', '.join(self.relation_names or [])}"
+        if self.action == "create_relation" and self.relationships:
+            return (
+                f"create {self.relation_name} with "
+                f"{len(self.relationships)} declared relationship(s)"
+            )
         if self.action == "create_collection":
             return f"create collection {self.collection_name}"
         if self.action == "drop_collection":
@@ -222,6 +231,21 @@ class RelationManagementNode(BasePlanNode):
                     return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
                 raise ValueError(f"relation already exists: {self.relation_name}")
             self.connector.create_relation(self.relation_name, self.schema, author=self._author)
+            # CREATE TABLE ... CONSTRAINT. Written after the relation exists,
+            # because the store is a subcollection on the dataset document and
+            # there is nothing to hang one on before that. The binder has
+            # already authorized every far end and checked both columns, so
+            # what is left here is the write.
+            for relationship in self.relationships or []:
+                self.connector.declare_relationship(
+                    relation_parts=relationship["relation_parts"],
+                    column_name=relationship["column_name"],
+                    references_relation_parts=relationship["references_relation_parts"],
+                    references_column_name=relationship["references_column_name"],
+                    constraint_name=relationship["constraint_name"],
+                    cardinality=relationship["cardinality"],
+                    author=self._author,
+                )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_relation":

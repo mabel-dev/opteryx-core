@@ -582,6 +582,56 @@ def _intercept_task_statements(clean_sql: str):
     return None
 
 
+# SHOW CREATE MATERIALIZED VIEW <name>
+# SHOW CREATE TASK <name>
+#
+# sqlparser's ShowCreateObject enum has TABLE, VIEW, TRIGGER, FUNCTION,
+# PROCEDURE and EVENT, and no way to add to it from a dialect - so these two
+# take the same pre-parse route as CREATE TASK, and for the same reason. TABLE
+# and VIEW parse natively and are deliberately NOT intercepted: the fewer
+# spellings that come through here, the fewer places the grammar lives.
+#
+# The object name is an IDENTIFIER slot and admits no placeholder (see the top
+# of this module): which object's definition is shown is not a runtime decision.
+_SHOW_CREATE_LEAD = re.compile(r"^\s*SHOW\s+CREATE\s+(MATERIALIZED\s+VIEW|TASK)\b", re.IGNORECASE)
+_SHOW_CREATE_RE = re.compile(
+    r"^\s*SHOW\s+CREATE\s+(?P<kind>MATERIALIZED\s+VIEW|TASK)\s+"
+    r"(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _intercept_show_create(clean_sql: str):
+    """Recognize `SHOW CREATE MATERIALIZED VIEW` and `SHOW CREATE TASK`.
+
+    Synthesized into the same ShowCreate shape sqlparser produces for TABLE and
+    VIEW, down to the identifier-part list, so the logical planner has one path
+    for all four object types rather than one per spelling.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _SHOW_CREATE_LEAD.match(clean_sql):
+        return None
+    match = _SHOW_CREATE_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **SHOW CREATE MATERIALIZED VIEW** <name> or **SHOW CREATE TASK** "
+            "<name>. The statement takes one object name and nothing else."
+        )
+    kind = "MaterializedView" if match.group("kind").upper().startswith("MATERIALIZED") else "Task"
+    return [
+        {
+            "ShowCreate": {
+                "obj_type": kind,
+                "obj_name": [
+                    {"Identifier": {"value": part, "quote_style": None}}
+                    for part in match.group("name").split(".")
+                ],
+            }
+        }
+    ]
+
+
 # GRANT <role> ON <kind> <object> TO USER <user>
 # REVOKE <role> ON <kind> <object> FROM USER <user>
 # SHOW GRANTS ON <kind> <object>
@@ -721,12 +771,12 @@ _INTERCEPTORS = (
     _intercept_trigger_statements,
     _intercept_task_statements,
     _intercept_alter_task,
-    _intercept_task_statements,
     _intercept_refresh_statements,
     _intercept_save_results,
     _intercept_alter_materialized_view,
     _intercept_grant_statements,
     _intercept_show_grants_on,
+    _intercept_show_create,
 )
 
 

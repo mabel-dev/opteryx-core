@@ -985,6 +985,61 @@ class Writable:
         """
         raise NotImplementedError
 
+    def relation_schema(self, relation_name: str) -> "RelationSchema":
+        """Return the relation's current schema, whole.
+
+        `relation_column_names` drops the types and `relation_column_types`
+        drops nullability; `SHOW CREATE TABLE` needs both, in declaration order,
+        because it renders a column definition rather than asking a question
+        about one column. There is no truthful empty answer to this, so a
+        connector that cannot produce a schema must say so rather than return an
+        empty one - a CREATE TABLE with no columns is not a description of
+        anything.
+
+        Args:
+            relation_name: Fully-qualified relation name
+
+        Raises:
+            ValueError: If relation doesn't exist
+        """
+        raise NotImplementedError
+
+    def cluster_by_columns(self, relation_name: str) -> "List[str]":
+        """The relation's clustering columns, in priority order.
+
+        Empty is the truthful default here, unlike `relation_schema` above: a
+        connector that cannot store a sort order (`set_cluster_by` raises for
+        it) cannot have one to report, so "none" is an answer rather than a
+        silence. A connector that DOES store one must override this, or a table
+        recreated from `SHOW CREATE TABLE` would silently lose its layout.
+
+        Args:
+            relation_name: Fully-qualified relation name
+        """
+        return []
+
+    def list_relationships(self, relation_name: str) -> "List[dict]":
+        """Every relationship declared ON this relation, normalised.
+
+        The outbound half of `relationships_through_column`, without the column
+        filter: what `SHOW CREATE TABLE` re-renders as CONSTRAINT clauses.
+        Inbound relationships - declared elsewhere, pointing here - are NOT
+        returned, and that is not an omission: they belong to the CREATE of the
+        relation that declared them, and their near end may be a dataset the
+        caller holds no grant on.
+
+        Keys, matching what the logical planner hands the write side:
+        `constraint_name`, `column_name`, `references_relation_parts`,
+        `references_column_name`, `cardinality`.
+
+        Empty is truthful for the same reason as `cluster_by_columns`: a
+        connector with no relationship store has no relationships.
+
+        Args:
+            relation_name: Fully-qualified relation name
+        """
+        return []
+
 
 def build_column_donor(column_name: str, column_type: "ColumnType", value: object) -> bytes:
     """Build the one-row parquet file that describes a column being ADDed.

@@ -124,12 +124,13 @@
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "CREATE TABLE [IF NOT EXISTS] table_name (column_name column_type [NOT NULL], ...)",
+            "CREATE TABLE [IF NOT EXISTS] table_name (column_name column_type [NOT NULL] [CONSTRAINT constraint_name REFERENCES table_name (column) NOT ENFORCED], ...)",
+            "CREATE TABLE [IF NOT EXISTS] table_name (column_name column_type, ..., CONSTRAINT constraint_name FOREIGN KEY (column) REFERENCES table_name (column) NOT ENFORCED)",
             "CREATE [OR REPLACE] TABLE table_name AS query"
         ],
         "summary": "Create a table, optionally from a query result.",
-        "documentation": "The explicit-column form builds a RelationSchema, resolving each declared type exactly as a CAST target resolves. The AS query form (CTAS) plans the SELECT and attaches an Insert sink, deriving the target schema at bind time.",
-        "notes": "OR REPLACE applies to the CTAS form only. EXTERNAL, TEMPORARY, TRANSIENT, VOLATILE and ICEBERG are rejected, as is a column list on a CTAS."
+        "documentation": "The explicit-column form builds a RelationSchema, resolving each declared type exactly as a CAST target resolves, and records any declared relationships once the relation exists. The AS query form (CTAS) plans the SELECT and attaches an Insert sink, deriving the target schema at bind time.",
+        "notes": "OR REPLACE applies to the CTAS form only. EXTERNAL, TEMPORARY, TRANSIENT, VOLATILE and ICEBERG are rejected, as is a column list on a CTAS. A column declares a name, a type, nullability and informational foreign keys and nothing else: DEFAULT, PRIMARY KEY, UNIQUE, CHECK, COLLATE and a column COMMENT are each refused by name - they parse, and none of them has anywhere to be stored. A CONSTRAINT takes the same one form ALTER TABLE ... ADD CONSTRAINT takes, validated by the same rules and stored in the same place: named, one column each side, NOT ENFORCED written out, both ends in one workspace. Both columns are checked and the referenced relation is gated at READ. The CTAS form cannot carry one - its columns are not known until the SELECT binds - and clustering has no CREATE TABLE spelling at all, so a table with a sort order is recreated as a CREATE followed by an ALTER TABLE ... CLUSTER BY."
     },
     "create_view": {
         "canonical_name": "CREATE VIEW",
@@ -489,11 +490,14 @@
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "SHOW CREATE VIEW object_name"
+            "SHOW CREATE TABLE object_name",
+            "SHOW CREATE VIEW object_name",
+            "SHOW CREATE MATERIALIZED VIEW object_name",
+            "SHOW CREATE TASK object_name"
         ],
-        "summary": "Show CREATE SQL for an object.",
-        "documentation": "Handled as a SHOW node with object metadata.",
-        "notes": "Currently used for view-style objects."
+        "summary": "Show the DDL that creates an object.",
+        "documentation": "One row, naming the object and the statement that creates it. A VIEW, a MATERIALIZED VIEW and a TASK each kept the statement that defined them, so showing one returns that statement verbatim rather than a re-printed normalisation of it. A TABLE kept none - its shape is the catalog's, not a statement anybody stored - so its DDL is RECONSTRUCTED from the columns, their nullability, the relationships declared on it and its clustering. The reconstruction recreates the table's shape and is not the statement that was typed: a table created by CTAS renders as an explicit-column CREATE TABLE, because the defining query was never kept. Column types are rendered in the canonical spelling a CAST target parses from, so precision, timestamp unit and array element survive the round trip. Gated at READ for every object type - the same tier as reading the object, and no file path or storage layout is disclosed, which is what puts SHOW MANIFEST at owner instead.",
+        "notes": "A clustered table returns TWO statements - a CREATE TABLE followed by an ALTER TABLE ... CLUSTER BY - because CREATE TABLE has no CLUSTER BY clause to carry it. Constraints need no such split: CREATE TABLE takes them. A column DEFAULT is never rendered, because none is stored - ADD COLUMN ... DEFAULT is a backfill value, not state a later INSERT consults. A task's ON clause is not rendered either: it creates a trigger rather than belonging to the task, and SHOW TRIGGERS FOR shows those. MATERIALIZED VIEW and TASK are recognised before the parser - sqlparser's ShowCreateObject has neither and no dialect hook to add them - and naming an object of the wrong kind is not found rather than answered from whatever holds the name. TRIGGER, FUNCTION, PROCEDURE and EVENT parse and are refused: Opteryx has no such object to define."
     },
     "show_effective_grants_on": {
         "canonical_name": "SHOW EFFECTIVE GRANTS ON",

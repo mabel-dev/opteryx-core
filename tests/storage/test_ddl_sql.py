@@ -283,6 +283,177 @@ def test_the_relationship_store_is_not_a_relation(tmp_path):
         list(session.execute_to_morsels("SELECT * FROM ws.events.relationships"))
 
 
+def _read_relationships(tmp_path, relation="events"):
+    store = tmp_path / "ws" / relation / "relationships.jsonl"
+    if not store.exists():
+        return []
+    with open(store) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def test_create_table_records_a_table_level_constraint(tmp_path):
+    """A CONSTRAINT written in the CREATE is recorded by the CREATE.
+
+    It parses, so it has to mean something: it used to be read off the AST and
+    dropped, leaving a statement that appeared to declare a relationship and
+    declared nothing. The declaration is written after the relation exists -
+    the store hangs off the dataset document - and lands in the same store,
+    with the same shape, as the ALTER TABLE spelling.
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+
+    list(
+        session.execute_to_morsels(
+            "CREATE TABLE ws.events (id BIGINT, customer_ref BIGINT, "
+            "CONSTRAINT events_customer_fk FOREIGN KEY (customer_ref) "
+            "REFERENCES ws.customers (id) NOT ENFORCED)"
+        )
+    )
+
+    rows = _read_relationships(tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["constraint_name"] == "events_customer_fk"
+    assert row["cardinality"] == "many_to_one"
+    assert row["from_relation"] == ["ws", "events"]
+    assert row["from_column"] == "customer_ref"
+    assert row["to_relation"] == ["ws", "customers"]
+    assert row["to_column"] == "id"
+
+
+def test_create_table_records_a_column_level_constraint(tmp_path):
+    """`col TYPE CONSTRAINT name REFERENCES t (col) NOT ENFORCED`.
+
+    The near end is the column it is written on, and the name lives on the
+    option rather than inside the foreign key - the two spellings reach the
+    same store with the same row.
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+
+    list(
+        session.execute_to_morsels(
+            "CREATE TABLE ws.events (id BIGINT, customer_ref BIGINT CONSTRAINT events_customer_fk "
+            "REFERENCES ws.customers (id) NOT ENFORCED)"
+        )
+    )
+
+    rows = _read_relationships(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["from_column"] == "customer_ref"
+    assert rows[0]["to_relation"] == ["ws", "customers"]
+
+
+def test_create_table_constraint_refuses_what_add_constraint_refuses(tmp_path):
+    """One vocabulary: the two statements accept and refuse the same form.
+
+    An unnamed constraint has no handle for DROP CONSTRAINT, a bare FOREIGN KEY
+    is an enforcing one, a composite key is a different shape, and PRIMARY KEY
+    promises uniqueness nothing checks.
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+
+    for columns in (
+        # unnamed - nothing to drop it by
+        "id BIGINT, FOREIGN KEY (id) REFERENCES ws.customers (id) NOT ENFORCED",
+        # enforcing - promises validation that never happens
+        "id BIGINT, CONSTRAINT fk FOREIGN KEY (id) REFERENCES ws.customers (id)",
+        # composite - a different shape
+        "id BIGINT, b BIGINT, CONSTRAINT fk FOREIGN KEY (id, b) REFERENCES ws.customers (id, label) NOT ENFORCED",
+        # referential action - a NOT ENFORCED key takes none
+        "id BIGINT, CONSTRAINT fk FOREIGN KEY (id) REFERENCES ws.customers (id) ON DELETE CASCADE NOT ENFORCED",
+        # the constraint kinds the engine cannot honour
+        "id BIGINT PRIMARY KEY",
+        "id BIGINT UNIQUE",
+        "id BIGINT DEFAULT 1",
+        "id BIGINT CHECK (id > 0)",
+    ):
+        with pytest.raises(UnsupportedSyntaxError):
+            list(session.execute_to_morsels(f"CREATE TABLE ws.events ({columns})"))
+        assert not (tmp_path / "ws" / "events").exists(), columns
+
+
+def test_create_table_constraint_near_column_must_be_declared(tmp_path):
+    """The near end names a column of the table being created.
+
+    This is the only validation point the store has, and on CREATE the columns
+    to check against are the ones the statement declares - there is no relation
+    yet to ask.
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+
+    with pytest.raises(ColumnNotFoundError):
+        list(
+            session.execute_to_morsels(
+                "CREATE TABLE ws.events (id BIGINT, CONSTRAINT fk FOREIGN KEY (missing) "
+                "REFERENCES ws.customers (id) NOT ENFORCED)"
+            )
+        )
+
+
+def test_create_table_constraint_far_column_must_exist(tmp_path):
+    """And so does the far end - checked against the referenced relation."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+
+    with pytest.raises(ColumnNotFoundError):
+        list(
+            session.execute_to_morsels(
+                "CREATE TABLE ws.events (id BIGINT, CONSTRAINT fk FOREIGN KEY (id) "
+                "REFERENCES ws.customers (missing) NOT ENFORCED)"
+            )
+        )
+
+
+def test_create_table_as_select_cannot_declare_a_constraint(tmp_path):
+    """CTAS parses one and cannot honour it - so it says so.
+
+    The columns come from the SELECT and are not known until it binds, so there
+    is nothing to check a near end against. Refused, not dropped.
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(
+            session.execute_to_morsels(
+                "CREATE TABLE ws.events (CONSTRAINT fk FOREIGN KEY (id) "
+                "REFERENCES ws.customers (id) NOT ENFORCED) AS SELECT 1 AS id"
+            )
+        )
+
+
+def test_create_table_rejects_two_constraints_of_one_name(tmp_path):
+    """Caught before anything is written.
+
+    The store rejects a repeated name, but these are written one at a time
+    after the table exists - so without this the table would be created and the
+    first declaration recorded before the second failed.
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+    list(session.execute_to_morsels("CREATE TABLE ws.customers (id BIGINT, label VARCHAR)"))
+
+    with pytest.raises(UnsupportedSyntaxError):
+        list(
+            session.execute_to_morsels(
+                "CREATE TABLE ws.events (id BIGINT, b BIGINT, "
+                "CONSTRAINT fk FOREIGN KEY (id) REFERENCES ws.customers (id) NOT ENFORCED, "
+                "CONSTRAINT fk FOREIGN KEY (b) REFERENCES ws.customers (id) NOT ENFORCED)"
+            )
+        )
+    assert not (tmp_path / "ws" / "events").exists()
+
+
 def test_alter_table_add_constraint_requires_explicit_not_enforced(tmp_path):
     """NOT ENFORCED is never defaulted.
 
@@ -838,13 +1009,18 @@ def test_drop_restrict_rejected(tmp_path):
 # no longer a rejection.
 
 
-def test_show_create_table_rejected_at_plan_time(tmp_path):
-    """Rejected by name, rather than as 'Invalid SHOW statement' at execution."""
+def test_show_create_rejects_an_object_type_with_no_definition(tmp_path):
+    """Rejected by name, rather than as 'Invalid SHOW statement' at execution.
+
+    TABLE, VIEW, MATERIALIZED VIEW and TASK are answered (see
+    tests/storage/test_show_create.py); the other object types sqlparser
+    parses are not objects Opteryx has.
+    """
     _seed_relations(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
 
-    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*SHOW CREATE\*\* TABLE"):
-        list(owner.execute_to_morsels("SHOW CREATE TABLE ws.t"))
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*SHOW CREATE\*\* TRIGGER"):
+        list(owner.execute_to_morsels("SHOW CREATE TRIGGER ws.t"))
 
 
 def test_comment_on_column_rejected(tmp_path):

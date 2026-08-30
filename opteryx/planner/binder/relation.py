@@ -36,6 +36,40 @@ def visit_create_relation(self, node: Node, context: BindingContext) -> Tuple[No
             f"User does not have permission to create table {node.relation_name}"
         )
 
+    # A CONSTRAINT declared in the CREATE carries the same two obligations
+    # ALTER TABLE ... ADD CONSTRAINT carries, and for the same reasons - see
+    # visit_add_relationship. The far end is gated at READ so nobody declares
+    # relationships into data they have never seen, and both columns are checked
+    # because this is the only validation point the store has.
+    #
+    # The near end differs in one way: the table does not exist yet, so its
+    # columns are the ones this statement declares rather than the ones a
+    # connector reports.
+    declared_columns = {column.name for column in node.schema.columns}
+    for relationship in node.relationships or []:
+        if relationship["column_name"] not in declared_columns:
+            raise ColumnNotFoundError(
+                column=relationship["column_name"],
+                dataset=node.relation_name,
+                suggestion=suggest_alternative(relationship["column_name"], sorted(declared_columns)),
+            )
+
+        references_relation_name = relationship["references_relation_name"]
+        if not can_perform_action(
+            context.execution_context, references_relation_name, action="READ"
+        ):
+            raise PermissionError(
+                f"User does not have permission to read {references_relation_name}, so it "
+                f"cannot be referenced by a constraint on {node.relation_name}"
+            )
+
+        references_connector = connector_factory(
+            references_relation_name, telemetry=context.telemetry
+        )
+        _require_column(
+            references_connector, references_relation_name, relationship["references_column_name"]
+        )
+
     node.columns = []
     return node, context
 

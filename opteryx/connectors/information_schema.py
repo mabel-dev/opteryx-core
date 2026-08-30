@@ -87,6 +87,8 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
 from opteryx.managers.permissions import can_perform_action
+from opteryx.models.sort_order import _resolve_name
+from opteryx.models.sort_order import normalize_sort_order
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import RelationSchema
 from opteryx.types.schema import SchemaColumn
@@ -172,71 +174,21 @@ def _evidence_text(evidence) -> Optional[str]:
         return str(evidence)
 
 
-def _normalize_sort_order(sort_orders) -> Optional[dict]:
-    """Reduce a stored `dataset.metadata.sort_orders` value to its primary sort
-    key in canonical form: {"name", "field_id", "index", "ascending"}.
-
-    `sort_orders` has been written in three incompatible shapes over time: a
-    positional int index into the schema's columns, a bare column-name
-    string, or an Iceberg-style {"fields": [{"name", "direction"}]} dict.
-    This mirrors opteryx_catalog.catalog.compaction.normalize_sort_order (the
-    write side owns the authoritative logic) rather than importing it - the
-    currently-installed opteryx_catalog wheel predates that helper.
-    Resolution precedence downstream is field_id -> name -> index.
-    """
-    if not sort_orders:
-        return None
-    entry = sort_orders[0]
-
-    if isinstance(entry, bool):
-        return None  # bool is an int subclass; never a valid column index
-    if isinstance(entry, int):
-        return {"name": None, "field_id": None, "index": entry, "ascending": True}
-    if isinstance(entry, str):
-        return {"name": entry, "field_id": None, "index": None, "ascending": True}
-
-    if isinstance(entry, dict):
-        field = entry
-        fields = entry.get("fields")
-        if isinstance(fields, (list, tuple)) and fields:
-            field = fields[0]
-        if not isinstance(field, dict):
-            return None
-
-        name = field.get("name")
-        field_id = field.get("source-id")
-        if field_id is None:
-            field_id = field.get("field-id")
-        ascending = str(field.get("direction", "asc")).lower() != "desc"
-
-        if name is None and field_id is None:
-            return None
-        return {"name": name, "field_id": field_id, "index": None, "ascending": ascending}
-
-    return None
-
-
 def _render_sort_order(sort_orders, relation_schema) -> Optional[str]:
     """Render the primary sort key as "<column> ASC|DESC", resolving a
     field_id/index against `relation_schema` (the dataset's raw catalog
     schema) to a column name. None when there is no sort key configured or
     it can't be resolved to a column name.
+
+    The three stored shapes are read by opteryx.models.sort_order, which owns
+    that knowledge for every reader - see `sort_order_column_names` for the
+    whole-key form SHOW CREATE TABLE needs.
     """
-    normalized = _normalize_sort_order(sort_orders)
+    normalized = normalize_sort_order(sort_orders)
     if normalized is None:
         return None
 
-    name = normalized["name"]
-    columns = relation_schema.columns if relation_schema is not None else []
-    if name is None and normalized["field_id"] is not None:
-        for column in columns:
-            if getattr(column, "id", None) == normalized["field_id"]:
-                name = column.name
-                break
-    if name is None and normalized["index"] is not None:
-        index = normalized["index"]
-        if 0 <= index < len(columns):
-            name = columns[index].name
+    name = _resolve_name(normalized, relation_schema.columns if relation_schema is not None else [])
     if name is None:
         return None
 

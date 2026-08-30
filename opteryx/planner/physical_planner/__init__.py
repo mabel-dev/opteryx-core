@@ -490,7 +490,7 @@ def _create_show_node(logical_node, query_properties, registry):
 
     if object_type == "VARIABLE":
         return registry.create("Show Value", query_properties, kind=node_config["items"][1], value=node_config["items"][1], **node_config)
-    elif object_type == "VIEW":
+    elif object_type in ("TABLE", "VIEW", "MATERIALIZED VIEW", "TASK"):
         return registry.create("Show Create", query_properties, **node_config)
     else:
         raise UnsupportedSyntaxError(f"Unsupported SHOW type '{object_type}'")

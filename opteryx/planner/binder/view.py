@@ -109,23 +109,45 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
 
 
 def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    """Bind SHOW CREATE VIEW.
+    """Bind SHOW CREATE.
 
-    A view's body names the relations it reads and the shape of the query over
-    them, so showing it is a read of the view - gated at READ, the same tier as
-    selecting from it. Without this the statement reached its operator with no
-    authorization at all, because a node type with no visitor was silently
-    passed through (see BinderVisitor.visit_node).
+    Gated at READ for all four object types, which is the same tier as reading
+    the object itself and is the right one for each of them:
+
+      VIEW, MATERIALIZED VIEW, TASK - the definition IS a query over relations,
+        so showing it discloses the shape of a read the caller may already make.
+      TABLE - the DDL is the column list, the declared relationships and the
+        clustering, all of which information_schema already answers at READ. It
+        is NOT the manifest: no file path or storage layout is disclosed here,
+        which is what puts SHOW MANIFEST at owner instead.
+
+    Without this the statement reached its operator with no authorization at
+    all, because a node type with no visitor was silently passed through (see
+    BinderVisitor.visit_node).
     """
     from opteryx.connectors import connector_factory
     from opteryx.managers.permissions import can_perform_action
 
     if not can_perform_action(context.execution_context, node.object_name, action="READ"):
         raise PermissionError(
-            f"User does not have permission to read view {node.object_name}"
+            f"User does not have permission to read {node.object_type.lower()} "
+            f"{node.object_name}"
         )
 
     node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
+
+    # Every object type but VIEW is read back through the Writable capability -
+    # the definition stores hang off it - so a connector without it cannot
+    # answer, and must say so rather than fail later with a missing attribute.
+    if node.object_type != "VIEW":
+        from opteryx.connectors.capabilities import Writable
+        from opteryx.exceptions import UnsupportedSyntaxError
+
+        if not isinstance(node.connector, Writable):
+            raise UnsupportedSyntaxError(
+                f"connector for {node.object_name} cannot show a "
+                f"**{node.object_type}** definition."
+            )
 
     node.columns = []
     return node, context

@@ -1535,6 +1535,61 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         schema = catalog.load_dataset(relative_id).schema()
         return [c.name for c in schema.columns]
 
+    def relation_schema(self, relation_name: str) -> RelationSchema:
+        """The dataset's current schema, whole - see Writable.relation_schema.
+
+        Normalized on the way out, exactly as a scan normalizes it: the catalog
+        stores a column's type as the STRING `str(ColumnType)` produces, and a
+        caller rendering a column definition needs the object.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        raw_schema = catalog.load_dataset(relative_id).schema()
+        return OpteryxTable._normalize_schema(raw_schema, relation_name=relation_name)
+
+    def cluster_by_columns(self, relation_name: str) -> List[str]:
+        """The dataset's clustering columns - see Writable.cluster_by_columns.
+
+        The stored value is read by opteryx.models.sort_order, which knows the
+        three shapes it has been written in; resolving a field id or a position
+        to a name needs the schema, so it is loaded alongside.
+        """
+        from opteryx.models.sort_order import sort_order_column_names
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        dataset = catalog.load_dataset(relative_id)
+        return sort_order_column_names(dataset.metadata.sort_orders, dataset.schema())
+
+    def list_relationships(self, relation_name: str) -> List[dict]:
+        """Relationships declared ON this dataset - see Writable.list_relationships.
+
+        Broken rows are skipped: one whose column was dropped is a record of
+        what went wrong, not a declaration to re-issue.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        declarations = []
+        for relationship in catalog.list_relationships(relative_id):
+            if relationship.get("status") == "broken":
+                continue
+            declarations.append(
+                {
+                    "constraint_name": relationship.get("name"),
+                    "column_name": relationship.get("column"),
+                    # The catalog stores the far end as collection + dataset,
+                    # which is the split the parts list wants anyway.
+                    "references_relation_parts": [
+                        workspace,
+                        relationship.get("references-collection"),
+                        relationship.get("references-dataset"),
+                    ],
+                    "references_column_name": relationship.get("references-column"),
+                    "cardinality": relationship.get("cardinality"),
+                }
+            )
+        return declarations
+
     def relation_column_types(self, relation_name: str):
         """Return the dataset's current column name -> ColumnType mapping.
 
@@ -2248,6 +2303,22 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         if breaker is None:
             return []
         return breaker(relative_id, column_name, author=author)
+
+    def resolve_named_version(self, relation_name: str, word: str) -> int:
+        """The snapshot id `CURRENT` or `PREVIOUS` names for this relation, now.
+
+        The public face of `_resolve_version_spec` for EXECUTE's symbolic
+        arguments: same resolver, same virtual-tag semantics (`previous` is the
+        previous version of the DATA, walking past compaction), but with tags
+        excluded - a task argument names a moment, and a tag smuggled through
+        here would be a value the argument's word does not say it is.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        dataset = catalog.load_dataset(relative_id)
+        return self._resolve_version_spec(
+            catalog, dataset, relative_id, relation_name, word, allow_tag=False
+        )
 
     def _resolve_version_spec(
         self,

@@ -4132,15 +4132,26 @@ def plan_show_create_query(statement, **kwargs):
     root_node = "ShowCreate"
     plan = LogicalPlan()
     show_step = LogicalPlanNode(node_type=LogicalPlanStepType.Show)
-    show_step.object_type = statement[root_node]["obj_type"].upper()
-    if show_step.object_type != "VIEW":
-        # Rejected here, by name, rather than at execution time: a table has no
-        # stored CREATE statement to show (its schema is the catalog's, not a
-        # statement we kept), so no amount of planning makes this answerable.
+    # sqlparser spells these `Table`/`View`; MATERIALIZED VIEW and TASK arrive
+    # from pre-parse, which has no ShowCreateObject to spell them with (see
+    # _intercept_show_create).
+    _OBJECT_TYPES = {
+        "TABLE": "TABLE",
+        "VIEW": "VIEW",
+        "MATERIALIZEDVIEW": "MATERIALIZED VIEW",
+        "TASK": "TASK",
+    }
+    obj_type = statement[root_node]["obj_type"].upper()
+    if obj_type not in _OBJECT_TYPES:
+        # Rejected here, by name, rather than at execution time. sqlparser also
+        # parses TRIGGER, FUNCTION, PROCEDURE and EVENT; Opteryx has none of the
+        # four as an object with a definition to show.
         raise UnsupportedSyntaxError(
-            f"Opteryx does not support '**SHOW CREATE** {show_step.object_type}'; "
-            "only `SHOW CREATE VIEW <view>` is supported."
+            f"Opteryx does not support '**SHOW CREATE** {obj_type}'; the object types "
+            "with a definition to show are **TABLE**, **VIEW**, **MATERIALIZED VIEW** "
+            "and **TASK**."
         )
+    show_step.object_type = _OBJECT_TYPES[obj_type]
     show_step.object_name = extract_variable(statement[root_node]["obj_name"])
     if isinstance(show_step.object_name, list):
         show_step.object_name = ".".join(show_step.object_name)
@@ -4606,6 +4617,261 @@ _CONSTRAINT_SPELLINGS = {
 }
 
 
+# Column-definition options sqlparser can hand us. `CREATE TABLE` declares a
+# name, a type, nullability and informational foreign keys - nothing else - so
+# every other option is refused by name here. They used to be dropped on the
+# floor: the column loop scanned for NotNull and discarded the rest, so an
+# inline REFERENCES, a PRIMARY KEY or a DEFAULT was accepted and recorded
+# nowhere.
+#
+# NOTE the two AST shapes - NotNull and Null arrive as bare strings, the rest as
+# single-key dicts - so a dict-only test would miss the two that are strings.
+_UNSUPPORTED_COLUMN_OPTIONS = {
+    "PrimaryKey": (
+        "**PRIMARY KEY**",
+        "Opteryx enforces no constraints, so it would promise uniqueness the engine never checks.",
+    ),
+    "Unique": (
+        "**UNIQUE**",
+        "Opteryx enforces no constraints, so it would promise uniqueness the engine never checks.",
+    ),
+    "Check": (
+        "**CHECK**",
+        "Opteryx enforces no constraints, so nothing would ever evaluate it.",
+    ),
+    "Default": (
+        "**DEFAULT**",
+        "Opteryx stores no column default to consult on a later **INSERT** - a DEFAULT is only "
+        "the value **ALTER TABLE ... ADD COLUMN** writes into the rows that already exist.",
+    ),
+    "Comment": (
+        "a column **COMMENT**",
+        "Opteryx comments tables and views, not columns; use '**COMMENT ON TABLE** ... IS ...'.",
+    ),
+    "Collation": (
+        "**COLLATE**",
+        "Opteryx has one collation and no way to record another.",
+    ),
+}
+
+
+def _read_column_options(column_name: str, options, relation_name: str, relation_parts):
+    """Return `(nullable, declarations)` for one column definition.
+
+    NOT NULL is honoured, NULL is the default said out loud, a named REFERENCES
+    is an informational foreign key, and everything else is refused by name -
+    recording state nothing reads is what this exists to stop.
+    """
+    nullable = True
+    declarations = []
+    for option in options or []:
+        key = option.get("option")
+        key = key if isinstance(key, str) else next(iter(key), None)
+        if key == "NotNull":
+            nullable = False
+            continue
+        if key == "Null":
+            continue
+        if key == "ForeignKey":
+            # The column-level spelling puts the constraint name on the OPTION
+            # (`a INT CONSTRAINT fk REFERENCES ...`), not inside the ForeignKey
+            # payload where the table-level spelling keeps it - so it is read
+            # here and handed to the validator, which is otherwise identical.
+            declarations.append(
+                _validate_foreign_key(
+                    option["option"]["ForeignKey"],
+                    stem="CREATE TABLE ... CONSTRAINT",
+                    relation_name=relation_name,
+                    relation_parts=relation_parts,
+                    constraint_name=option.get("name"),
+                    near_column=column_name,
+                )
+            )
+            continue
+        spelling, reason = _UNSUPPORTED_COLUMN_OPTIONS.get(key, (f"**{key}**", ""))
+        raise UnsupportedSyntaxError(
+            f"**CREATE TABLE** does not support {spelling} on column '{column_name}'. "
+            f"{reason}".strip()
+        )
+    return nullable, declarations
+
+
+def _reject_duplicate_constraint_names(relationships) -> None:
+    """Refuse two constraints of the same name in one CREATE TABLE.
+
+    The store rejects a repeated name, but only when it is written - and these
+    are written one at a time after the table exists, so the second would fail
+    with the table already created and the first declaration already recorded.
+    Caught here, nothing has happened yet.
+    """
+    seen = set()
+    for declaration in relationships:
+        name = declaration["constraint_name"]
+        if name in seen:
+            raise UnsupportedSyntaxError(
+                f"**CREATE TABLE** declares more than one constraint named '{name}'. A "
+                "constraint name is the handle **DROP CONSTRAINT** removes it by, so it has "
+                "to name one relationship."
+            )
+        seen.add(name)
+
+
+def _read_table_constraints(create_stmt, relation_name: str, relation_parts):
+    """Read the table-level constraint clause of a CREATE TABLE.
+
+    Both forms parse one and neither ever read it, so a declared FOREIGN KEY was
+    accepted and stored nowhere. The informational foreign key is now recorded
+    by the statement that declares it; every other constraint kind stays refused
+    for the reason ADD CONSTRAINT refuses it - the engine enforces nothing.
+    """
+    declarations = []
+    for constraint in create_stmt.get("constraints") or []:
+        kind = next(iter(constraint), None) if isinstance(constraint, dict) else constraint
+        if kind != "ForeignKey":
+            spelling = _CONSTRAINT_SPELLINGS.get(kind, kind)
+            raise UnsupportedSyntaxError(
+                f"**CREATE TABLE ... {spelling}** is not supported. Opteryx enforces no "
+                "constraints, so the only one it accepts is an informational "
+                "'**FOREIGN KEY** (column) **REFERENCES** table (column) **NOT ENFORCED**', "
+                "which records that two columns hold corresponding values and is never checked."
+            )
+        declarations.append(
+            _validate_foreign_key(
+                constraint["ForeignKey"],
+                stem="CREATE TABLE ... CONSTRAINT",
+                relation_name=relation_name,
+                relation_parts=relation_parts,
+            )
+        )
+    return declarations
+
+
+def _validate_foreign_key(
+    foreign_key,
+    *,
+    stem: str,
+    relation_name: str,
+    relation_parts,
+    not_valid=None,
+    constraint_name=None,
+    near_column: Optional[str] = None,
+):
+    """Validate an informational foreign key, for whichever statement declared it.
+
+    `ALTER TABLE ... ADD CONSTRAINT` and `CREATE TABLE ... CONSTRAINT` accept the
+    same one form and refuse the same everything-else, so the rules live here
+    once and each caller passes the `stem` its messages name. Splitting them
+    would be how the two statements come to disagree about what a foreign key is.
+
+    `near_column` is for the column-level spelling, where the near end is the
+    column being defined rather than a parenthesised list.
+    """
+    # `enforced` is False only for an explicit NOT ENFORCED. It is None when the
+    # clause was omitted entirely (a plain, enforcing foreign key) and True for
+    # an explicit ENFORCED - both of which promise validation that never happens.
+    characteristics = foreign_key.get("characteristics") or {}
+    if characteristics.get("enforced") is not False:
+        raise UnsupportedSyntaxError(
+            f"**{stem} ... FOREIGN KEY** must say **NOT ENFORCED**. "
+            "Opteryx never validates a foreign key - a write that breaks one succeeds - so "
+            "an enforcing constraint would promise behaviour the engine does not have. "
+            "NOT ENFORCED is not a default; it has to be written."
+        )
+
+    for spelling, key in (("DEFERRABLE", "deferrable"), ("INITIALLY", "initially")):
+        if characteristics.get(key) is not None:
+            raise UnsupportedSyntaxError(
+                f"**{stem} ... {spelling}** is not supported. It says "
+                "when a constraint is checked, and this one is never checked."
+            )
+
+    for spelling, key in (
+        ("ON DELETE", "on_delete"),
+        ("ON UPDATE", "on_update"),
+        ("MATCH", "match_kind"),
+    ):
+        if foreign_key.get(key) is not None:
+            raise UnsupportedSyntaxError(
+                f"**{stem} ... FOREIGN KEY ... {spelling}** is not "
+                "supported. A NOT ENFORCED foreign key is a declaration, not a rule, so there "
+                "is no referential action to take and no matching to do."
+            )
+
+    if not_valid:
+        raise UnsupportedSyntaxError(
+            f"**{stem} ... NOT VALID** is not supported. It means "
+            "'do not check the rows already here, but check the ones to come', and nothing "
+            "is ever checked."
+        )
+
+    if foreign_key.get("index_name") is not None:
+        raise UnsupportedSyntaxError(
+            f"**{stem} ... FOREIGN KEY** does not support an index "
+            "name. Opteryx builds no index for a declared relationship."
+        )
+
+    name = constraint_name if constraint_name is not None else foreign_key.get("name")
+    if name is None:
+        raise UnsupportedSyntaxError(
+            f"**{stem}** requires a constraint name - it is the only "
+            "handle **DROP CONSTRAINT** has on the relationship afterwards."
+        )
+
+    columns = foreign_key.get("columns") or []
+    referred_columns = foreign_key.get("referred_columns") or []
+    if near_column is not None:
+        # The column-level spelling names its near end by position, so a
+        # parenthesised list here would be a second, contradicting answer.
+        column_name = near_column
+        if columns:
+            raise UnsupportedSyntaxError(
+                f"**{stem}** on a column does not take a column list - the "
+                "column it is written on is the near end of the relationship."
+            )
+    elif len(columns) == 1:
+        column_name = columns[0]["value"]
+    else:
+        column_name = None
+    if column_name is None or len(referred_columns) != 1:
+        raise UnsupportedSyntaxError(
+            f"**{stem} ... FOREIGN KEY** supports one column on each "
+            "side. What is recorded is that two columns hold corresponding values; a "
+            "composite key is a different shape and is not supported."
+        )
+
+    foreign_table_parts = _identifier_parts(foreign_key["foreign_table"])
+
+    # A relationship never leaves its workspace. The declaration is stored in the
+    # near dataset's workspace and nowhere else, so a far end outside it would be
+    # a row describing something the workspace does not contain - and the
+    # visibility model builds the read projection from one workspace's datasets,
+    # which cannot decide whether the reader may see a dataset in another. Same
+    # boundary RENAME TO enforces above, for the same reason: the two would live
+    # in different catalogs.
+    if relation_parts[0] != foreign_table_parts[0]:
+        raise UnsupportedSyntaxError(
+            f"**{stem} ... REFERENCES** cannot cross workspaces "
+            f"({relation_name} -> {'.'.join(foreign_table_parts)}); a declared relationship "
+            "is held in the workspace of the table it is declared on, so both ends must be "
+            "in that workspace."
+        )
+
+    return {
+        "constraint_name": name["value"] if isinstance(name, dict) else name,
+        "column_name": column_name,
+        "relation_parts": relation_parts,
+        # The dotted spelling exists only for the interfaces that take one - the
+        # connector factory and the permissions matcher. The parts are what is
+        # stored; nothing downstream re-splits this string.
+        "references_relation_name": ".".join(foreign_table_parts),
+        "references_relation_parts": foreign_table_parts,
+        "references_column_name": referred_columns[0]["value"],
+        # Declared, not derived: the FK form means many_to_one, and the engine
+        # never looks at the data to find out whether that is true.
+        "cardinality": "many_to_one",
+    }
+
+
 def _plan_add_constraint(add_op, relation_name: str, relation_name_parts, if_exists: bool):
     """`ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... NOT ENFORCED`.
 
@@ -4633,102 +4899,28 @@ def _plan_add_constraint(add_op, relation_name: str, relation_name_parts, if_exi
             "records that two columns hold corresponding values and is never checked."
         )
 
-    foreign_key = constraint["ForeignKey"]
-
-    # `enforced` is False only for an explicit NOT ENFORCED. It is None when the
-    # clause was omitted entirely (a plain, enforcing foreign key) and True for
-    # an explicit ENFORCED - both of which promise validation that never happens.
-    characteristics = foreign_key.get("characteristics") or {}
-    if characteristics.get("enforced") is not False:
-        raise UnsupportedSyntaxError(
-            "**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY** must say **NOT ENFORCED**. "
-            "Opteryx never validates a foreign key - a write that breaks one succeeds - so "
-            "an enforcing constraint would promise behaviour the engine does not have. "
-            "NOT ENFORCED is not a default; it has to be written."
-        )
-
-    for spelling, key in (("DEFERRABLE", "deferrable"), ("INITIALLY", "initially")):
-        if characteristics.get(key) is not None:
-            raise UnsupportedSyntaxError(
-                f"**ALTER TABLE ... ADD CONSTRAINT ... {spelling}** is not supported. It says "
-                "when a constraint is checked, and this one is never checked."
-            )
-
-    for spelling, key in (
-        ("ON DELETE", "on_delete"),
-        ("ON UPDATE", "on_update"),
-        ("MATCH", "match_kind"),
-    ):
-        if foreign_key.get(key) is not None:
-            raise UnsupportedSyntaxError(
-                f"**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... {spelling}** is not "
-                "supported. A NOT ENFORCED foreign key is a declaration, not a rule, so there "
-                "is no referential action to take and no matching to do."
-            )
-
-    if add_op.get("not_valid"):
-        raise UnsupportedSyntaxError(
-            "**ALTER TABLE ... ADD CONSTRAINT ... NOT VALID** is not supported. It means "
-            "'do not check the rows already here, but check the ones to come', and nothing "
-            "is ever checked."
-        )
-
-    if foreign_key.get("index_name") is not None:
-        raise UnsupportedSyntaxError(
-            "**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY** does not support an index "
-            "name. Opteryx builds no index for a declared relationship."
-        )
-
-    name = foreign_key.get("name")
-    if name is None:
-        raise UnsupportedSyntaxError(
-            "**ALTER TABLE ... ADD CONSTRAINT** requires a constraint name - it is the only "
-            "handle **DROP CONSTRAINT** has on the relationship afterwards."
-        )
-
-    relation_parts = _identifier_parts(relation_name_parts)
-
-    columns = foreign_key.get("columns") or []
-    referred_columns = foreign_key.get("referred_columns") or []
-    if len(columns) != 1 or len(referred_columns) != 1:
-        raise UnsupportedSyntaxError(
-            "**ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY** supports one column on each "
-            "side. What is recorded is that two columns hold corresponding values; a "
-            "composite key is a different shape and is not supported."
-        )
-
-    foreign_table_parts = _identifier_parts(foreign_key["foreign_table"])
-
-    # A relationship never leaves its workspace. The declaration is stored in the
-    # near dataset's workspace and nowhere else, so a far end outside it would be
-    # a row describing something the workspace does not contain - and the
-    # visibility model builds the read projection from one workspace's datasets,
-    # which cannot decide whether the reader may see a dataset in another. Same
-    # boundary RENAME TO enforces above, for the same reason: the two would live
-    # in different catalogs.
-    if relation_parts[0] != foreign_table_parts[0]:
-        raise UnsupportedSyntaxError(
-            f"**ALTER TABLE ... ADD CONSTRAINT ... REFERENCES** cannot cross workspaces "
-            f"({relation_name} -> {'.'.join(foreign_table_parts)}); a declared relationship "
-            "is held in the workspace of the table it is declared on, so both ends must be "
-            "in that workspace."
-        )
+    declaration = _validate_foreign_key(
+        constraint["ForeignKey"],
+        stem="ALTER TABLE ... ADD CONSTRAINT",
+        relation_name=relation_name,
+        relation_parts=_identifier_parts(relation_name_parts),
+        not_valid=add_op.get("not_valid"),
+    )
+    relation_parts = declaration["relation_parts"]
 
     add_relationship_node = LogicalPlanNode(node_type=LogicalPlanStepType.AddRelationship)
     add_relationship_node.relation_name = relation_name
     add_relationship_node.relation_parts = relation_parts
     add_relationship_node.if_exists = if_exists
-    add_relationship_node.constraint_name = name["value"]
-    add_relationship_node.column_name = columns[0]["value"]
+    add_relationship_node.constraint_name = declaration["constraint_name"]
+    add_relationship_node.column_name = declaration["column_name"]
     # The dotted spelling exists only for the interfaces that take one - the
     # connector factory and the permissions matcher. The parts are what is
     # stored; nothing downstream re-splits this string.
-    add_relationship_node.references_relation_name = ".".join(foreign_table_parts)
-    add_relationship_node.references_relation_parts = foreign_table_parts
-    add_relationship_node.references_column_name = referred_columns[0]["value"]
-    # Declared, not derived: the FK form means many_to_one, and the engine never
-    # looks at the data to find out whether that is true.
-    add_relationship_node.cardinality = "many_to_one"
+    add_relationship_node.references_relation_name = declaration["references_relation_name"]
+    add_relationship_node.references_relation_parts = declaration["references_relation_parts"]
+    add_relationship_node.references_column_name = declaration["references_column_name"]
+    add_relationship_node.cardinality = declaration["cardinality"]
 
     plan = LogicalPlan()
     plan.add_node(random_string(), add_relationship_node)
@@ -5107,6 +5299,27 @@ def plan_drop_workspace(statement, **kwargs):
     return plan
 
 
+# The two SYMBOLIC argument values EXECUTE accepts, and the only two: the
+# virtual-tag vocabulary the rest of the engine already speaks. `CURRENT` is
+# the head; `PREVIOUS` is the previous version of the DATA, stepping over the
+# compaction and statistics commits that changed no rows (the same
+# `previous_user_snapshot` walk `VERSION AS OF PREVIOUS` reads through).
+#
+# These exist for ATTENDED runs only, and by the invoker's explicit choice.
+# The firing path never uses them - it binds the literal ids of the commit that
+# fired, because an unattended window must mean the same thing however late the
+# worker runs it. A person typing CURRENT is standing there choosing "the head,
+# now", and answers for it - which is what makes live resolution legitimate
+# here and a race everywhere else. They are resolved to REAL snapshot ids at
+# plan time (never to the engine's `VERSION AS OF 0` sentinel, whose
+# resolve-at-read behaviour is the exact race the task design removes).
+_SYMBOLIC_VERSION_WORDS = ("CURRENT", "PREVIOUS")
+
+
+class _SymbolicVersion(str):
+    """Marker: an argument that names a snapshot symbolically, not a value."""
+
+
 def _execute_argument_value(expr: dict, argument_name: str):
     """The constant behind one `USING <value> AS <name>` argument.
 
@@ -5115,8 +5328,18 @@ def _execute_argument_value(expr: dict, argument_name: str):
     refused here. Letting a column reference through would fail much later, at
     the parameter binder, naming the placeholder it could not fill rather than
     the argument that could not be read.
+
+    Two bare words are admitted as SYMBOLIC values rather than refused as
+    identifiers - see `_SYMBOLIC_VERSION_WORDS`. Exactly two: they are the
+    virtual-tag vocabulary, and one vocabulary means no aliases.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
+
+    identifier = expr.get("Identifier")
+    if isinstance(identifier, dict):
+        word = str(identifier.get("value", "")).upper()
+        if word in _SYMBOLIC_VERSION_WORDS:
+            return _SymbolicVersion(word)
 
     unary = expr.get("UnaryOp")
     if unary is not None and unary.get("op") in ("Minus", "Plus"):
@@ -5150,6 +5373,106 @@ def _execute_argument_value(expr: dict, argument_name: str):
         f"**EXECUTE** argument `{argument_name}` is a literal that cannot be bound "
         "to a task parameter."
     )
+
+
+def _placeholder_sites(node, in_version_of=False, relation=None, sites=None):
+    """Where each `:name` placeholder sits in a parsed statement.
+
+    Returns `{name: {"total": n, "version_of": n, "relations": {..}}}` -
+    everything `_resolve_symbolic_versions` needs to decide whether a symbolic
+    argument is usable: symbols only mean something in `VERSION AS OF` position,
+    and only when every such position names ONE relation.
+    """
+    if sites is None:
+        sites = {}
+    if isinstance(node, list):
+        for child in node:
+            _placeholder_sites(child, in_version_of, relation, sites)
+        return sites
+    if not isinstance(node, dict):
+        return sites
+
+    if "Table" in node and isinstance(node["Table"], dict):
+        table = node["Table"]
+        name = ".".join(
+            part["Identifier"]["value"]
+            for part in (table.get("name") or [])
+            if isinstance(part, dict) and "Identifier" in part
+        )
+        for key, child in table.items():
+            _placeholder_sites(child, key == "version", name or relation, sites)
+        return sites
+
+    if "Placeholder" in node:
+        raw = node["Placeholder"]
+        raw = raw.get("value") if isinstance(raw, dict) else raw
+        name = str(raw).lstrip(":?")
+        entry = sites.setdefault(name, {"total": 0, "version_of": 0, "relations": set()})
+        entry["total"] += 1
+        if in_version_of:
+            entry["version_of"] += 1
+            if relation:
+                entry["relations"].add(relation)
+        return sites
+
+    for child in node.values():
+        _placeholder_sites(child, in_version_of, relation, sites)
+    return sites
+
+
+def _resolve_symbolic_versions(parsed: dict, arguments: dict) -> dict:
+    """Turn CURRENT/PREVIOUS arguments into real snapshot ids, at plan time.
+
+    A symbol names a snapshot OF something, and an EXECUTE argument is just a
+    name - so the something is read from where the task's own statement puts the
+    placeholder. That is only well-defined when every use is a `VERSION AS OF`
+    position and all of them name one relation; anything else is refused with
+    the reason, not guessed at.
+
+    Resolution goes through the connector's own virtual-tag semantics, so
+    PREVIOUS here is exactly what `VERSION AS OF PREVIOUS` would read: the
+    previous version of the DATA, stepping over compaction and statistics
+    commits that changed no rows. The ids bound are real and literal - the plan
+    that runs is indistinguishable from one the user typed with numbers, and
+    nothing resolves later.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    sites = _placeholder_sites(parsed)
+    resolved = dict(arguments)
+    for name, value in arguments.items():
+        if not isinstance(value, _SymbolicVersion):
+            continue
+        site = sites.get(name)
+        if site is None or site["version_of"] == 0:
+            raise UnsupportedSyntaxError(
+                f"**{value}** only means something in a **VERSION AS OF** position, "
+                f"and the task never uses `:{name}` there. Pass a literal value."
+            )
+        if site["total"] != site["version_of"]:
+            raise UnsupportedSyntaxError(
+                f"the task uses `:{name}` outside **VERSION AS OF** as well, where "
+                f"**{value}** has no meaning. Pass a literal snapshot id."
+            )
+        if len(site["relations"]) != 1:
+            raise UnsupportedSyntaxError(
+                f"`:{name}` time-travels more than one relation, so **{value}** is "
+                "ambiguous - it would name a different snapshot for each. Pass a "
+                "literal snapshot id."
+            )
+        (relation,) = site["relations"]
+        connector = connector_factory(relation, telemetry=None)
+        if not getattr(connector, "supports_version_travel", False):
+            raise UnsupportedSyntaxError(
+                f"{relation} does not support version travel, so **{value}** cannot "
+                "be resolved against it."
+            )
+        try:
+            resolved[name] = connector.resolve_named_version(relation, str(value))
+        except ValueError as exc:
+            raise UnsupportedSyntaxError(str(exc)) from exc
+    return resolved
 
 
 def plan_execute(statement, **kwargs):
@@ -5266,6 +5589,9 @@ def plan_execute(statement, **kwargs):
             f"the recorded statement of task {relation_name} is not a single "
             "statement; it cannot be executed."
         )
+
+    if any(isinstance(v, _SymbolicVersion) for v in arguments.values()):
+        arguments = _resolve_symbolic_versions(parsed[0], arguments)
 
     bound = parameter_dict_binder(parsed[0], arguments)
 
@@ -5426,6 +5752,11 @@ def plan_create_table(statement, **kwargs):
     # Extract IF NOT EXISTS flag
     create_table_node.if_not_exists = statement[root_node].get("if_not_exists", False)
 
+    relation_parts = _identifier_parts(table_name_parts)
+    relationships = _read_table_constraints(
+        statement[root_node], create_table_node.relation_name, relation_parts
+    )
+
     # CTAS path
     query_ast = statement[root_node].get("query")
     if query_ast is not None:
@@ -5436,6 +5767,17 @@ def plan_create_table(statement, **kwargs):
         column_defs = statement[root_node].get("columns", [])
         if column_defs:
             raise UnsupportedSyntaxError("**CREATE TABLE** AS **SELECT** cannot specify column definitions. The column names and types come from the **SELECT**.")
+        if relationships:
+            # Not a silent drop and not an oversight: a CTAS plan is headed by an
+            # Insert sink, and its columns are not known until the SELECT binds,
+            # so there is nothing here to check a near end against. Declare it
+            # once the table exists.
+            raise UnsupportedSyntaxError(
+                "**CREATE TABLE** AS **SELECT** cannot declare a **CONSTRAINT** - the columns "
+                "come from the **SELECT** and are not known until it is bound. Declare it "
+                "afterwards with '**ALTER TABLE** ... ADD CONSTRAINT ... **FOREIGN KEY** "
+                "(column) **REFERENCES** table (column) **NOT ENFORCED**'."
+            )
         return _plan_ctas(
             relation_name=create_table_node.relation_name,
             if_not_exists=create_table_node.if_not_exists,
@@ -5476,14 +5818,10 @@ def plan_create_table(statement, **kwargs):
                 f"unsupported column type in **CREATE TABLE** for '{col_name}': {err}"
             ) from err
 
-        # Check for NOT NULL constraint
-        col_nullable = True
-        col_options = col_def.get("options", [])
-        if col_options:
-            for opt in col_options:
-                if isinstance(opt, dict) and opt.get("option") == "NotNull":
-                    col_nullable = False
-                    break
+        col_nullable, col_relationships = _read_column_options(
+            col_name, col_def.get("options"), create_table_node.relation_name, relation_parts
+        )
+        relationships.extend(col_relationships)
 
         # Create SchemaColumn
         from opteryx.types.schema import mint_column_identity
@@ -5501,6 +5839,12 @@ def plan_create_table(statement, **kwargs):
     # Build RelationSchema
     schema = RelationSchema(name=create_table_node.relation_name, columns=columns)
     create_table_node.schema = schema
+    # Declared here, written by the operator after the relation exists - the
+    # store hangs off the dataset document, so there is nothing to hang one on
+    # until then. The binder authorizes each far end and checks both columns,
+    # exactly as it does for ALTER TABLE ... ADD CONSTRAINT.
+    create_table_node.relationships = relationships
+    _reject_duplicate_constraint_names(relationships)
 
     plan.add_node(random_string(), create_table_node)
     return plan

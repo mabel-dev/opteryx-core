@@ -1257,6 +1257,39 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         # are carried over rather than dropped.
         self._patch_column(relation_name, new_columns=new_columns, retype=donors)
 
+    def relation_schema(self, relation_name: str) -> RelationSchema:
+        """The relation's current schema, whole - see Writable.relation_schema."""
+        relation_dir = self._relation_dir(relation_name)
+        descriptor = self._read_dataset_json(relation_dir)
+        if descriptor is None:
+            raise DatasetNotFoundError(
+                dataset=relation_name, connector=self.__class__.__name__
+            )
+        return descriptor.schema
+
+    def list_relationships(self, relation_name: str) -> List[dict]:
+        """Relationships declared ON this relation - see Writable.list_relationships.
+
+        Broken rows are skipped: a relationship whose column was dropped is kept
+        as a record of what went wrong, not as a declaration to re-issue, and
+        rendering one into a CREATE TABLE would produce a statement that names a
+        column the CREATE does not declare.
+        """
+        declarations = []
+        for row in self._read_relationships(relation_name.split(".")):
+            if row.get("status") == "broken":
+                continue
+            declarations.append(
+                {
+                    "constraint_name": row["constraint_name"],
+                    "column_name": row["from_column"],
+                    "references_relation_parts": list(row["to_relation"]),
+                    "references_column_name": row["to_column"],
+                    "cardinality": row.get("cardinality"),
+                }
+            )
+        return declarations
+
     def relation_column_types(self, relation_name: str) -> Dict[str, "ColumnType"]:
         """Return the relation's current column name -> ColumnType mapping."""
         relation_dir = self._relation_dir(relation_name)
