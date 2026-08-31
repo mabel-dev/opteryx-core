@@ -1771,9 +1771,9 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """Register a task in the catalog.
 
         The binder has already established that `author` could have run
-        `statement` themselves and may own a task at all, so nothing is
-        re-litigated here - this records what it is given, as `create_relation`
-        does.
+        `statement` themselves and may own a task at all, so nothing here
+        re-litigates either - this records what it is given, as every other
+        connector write does.
 
         `runs_as` is passed as the author and pinned by the catalog on first
         registration only, so CREATE OR REPLACE edits the statement without ever
@@ -1784,8 +1784,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         try:
             from opteryx_catalog.exceptions import TaskAlreadyExists
         except ImportError:
-            # An installed opteryx_catalog wheel that predates tasks - same skew
-            # tolerance as drop_trigger above. The real TaskAlreadyExists
+            # An installed opteryx_catalog wheel that predates tasks - same
+            # skew tolerance as drop_trigger below. The real TaskAlreadyExists
             # subclasses KeyError, so this stays correct once it arrives.
             TaskAlreadyExists = KeyError
 
@@ -1819,59 +1819,6 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             from opteryx_catalog.exceptions import TaskNotFound
         except ImportError:
             TaskNotFound = KeyError
-
-        workspace, relative_id = self._parse_identifier(relation_name)
-        catalog = self._get_catalog(workspace)
-
-        if not if_exists:
-            try:
-                catalog.get_task(relative_id)
-            except TaskNotFound as exc:
-                raise ValueError(
-                    f"task {relation_name} does not exist "
-                    "(use DROP TASK IF EXISTS to make this quiet)"
-                ) from exc
-
-        catalog.drop_task(relative_id, author=author)
-
-    def create_task(
-        self,
-        relation_name: str,
-        statement: str,
-        author: Optional[str] = None,
-        or_replace: bool = False,
-    ) -> None:
-        """Register a task in the catalog.
-
-        The binder has already established that `author` could have run
-        `statement` themselves and may own a task at all, so nothing here
-        re-litigates either - this records what it is given, as every other
-        connector write does.
-        """
-        from opteryx_catalog.exceptions import TaskAlreadyExists
-
-        workspace, relative_id = self._parse_identifier(relation_name)
-        catalog = self._get_catalog(workspace)
-
-        try:
-            catalog.create_task(
-                relative_id,
-                sql=statement,
-                author=author,
-                update_if_exists=or_replace,
-            )
-        except TaskAlreadyExists as exc:
-            raise ValueError(
-                f"task already exists: {relation_name} "
-                "(use CREATE OR REPLACE TASK to redefine it)"
-            ) from exc
-
-    def drop_task(
-        self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
-    ) -> None:
-        """Drop a task. The catalog's own drop is a no-op on a missing task, so
-        the not-found case is detected here to honour IF EXISTS faithfully."""
-        from opteryx_catalog.exceptions import TaskNotFound
 
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)

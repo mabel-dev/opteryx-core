@@ -220,11 +220,15 @@ def test_malformed_create_task_is_rejected_by_name(tmp_path):
 # --- the gates
 
 
-def test_creating_a_task_checks_nothing_but_the_name(tmp_path, install):
-    """A task is stored SQL with no identity, so creating one confers no
-    authority - the statement is gated at EXECUTION, against whoever the run
-    actually is. A creation-time copy of those checks would be checked against
-    the wrong principal the moment anyone else runs it."""
+def test_creating_a_task_is_bounded_by_its_authors_own_grants(tmp_path, install):
+    """A task may only do what its author could do at the moment they wrote it.
+
+    Execution-time checks alone are not enough: the principal a task RUNS as
+    need not be the one who last edited it. A trigger pins its owner and keeps
+    it across edits, so a name-only gate would let anyone holding write on that
+    name rewrite the statement and have it fire under the trigger owner's
+    authority - the editor supplying the instructions, a higher-privileged
+    principal supplying the permissions."""
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
     _seed(owner, "ws.secret")
@@ -233,11 +237,42 @@ def test_creating_a_task_checks_nothing_but_the_name(tmp_path, install):
     install(ScriptedCapability(allow={("ws.leak", "WRITE")}))
     mallory = opteryx.session(user="mallory")
 
-    list(mallory.execute_to_morsels("CREATE TASK ws.leak AS SELECT a FROM ws.secret"))
+    with pytest.raises(PermissionError, match="permission to read ws.secret"):
+        list(mallory.execute_to_morsels("CREATE TASK ws.leak AS SELECT a FROM ws.secret"))
 
-    # ... but RUNNING it is gated against the invoker, where it belongs.
-    with pytest.raises(PermissionError):
-        list(mallory.execute_to_morsels("EXECUTE ws.leak"))
+
+def test_an_author_who_can_read_the_source_may_create_the_task(tmp_path, install):
+    """The bound is the author's own grants, not ownership of the source."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner, "ws.secret")
+
+    install(ScriptedCapability(allow={("ws.ok", "WRITE"), ("ws.secret", "READ")}))
+    rhea = opteryx.session(user="rhea")
+
+    list(rhea.execute_to_morsels("CREATE TASK ws.ok AS SELECT a FROM ws.secret"))
+
+
+def test_replacing_a_task_is_bounded_the_same_way(tmp_path, install):
+    """The confused deputy is created by the EDIT, so CREATE OR REPLACE is
+    checked on every registration rather than only the first."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner, "ws.secret")
+
+    install(ScriptedCapability(allow={("ws.t", "WRITE"), ("ws.src", "READ")}))
+    mallory = opteryx.session(user="mallory")
+
+    list(mallory.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
+
+    # Repointing it at data mallory cannot read is refused, even though the task
+    # already exists and mallory may write its name.
+    with pytest.raises(PermissionError, match="permission to read ws.secret"):
+        list(
+            mallory.execute_to_morsels(
+                "CREATE OR REPLACE TASK ws.t AS SELECT a FROM ws.secret"
+            )
+        )
 
 
 def test_creating_a_task_still_needs_write_on_its_name(tmp_path, install):
