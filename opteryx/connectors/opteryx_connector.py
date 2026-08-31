@@ -1775,11 +1775,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         re-litigates either - this records what it is given, as every other
         connector write does.
 
-        `runs_as` is passed as the author and pinned by the catalog on first
-        registration only, so CREATE OR REPLACE edits the statement without ever
-        moving whose authority it runs with. There is deliberately no way to name
-        another principal: that argument would BE the escalation this whole gate
-        exists to prevent.
+        NO `runs_as` is passed, because a task carries no identity: it is stored
+        SQL. `EXECUTE` runs it as the invoker, and an unattended run carries the
+        TRIGGER's pinned owner, resolved from the trigger's own record when it
+        fires. `author` is recorded for attribution, not authority.
+
         """
         try:
             from opteryx_catalog.exceptions import TaskAlreadyExists
@@ -1797,7 +1797,6 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 relative_id,
                 sql=statement,
                 author=author,
-                runs_as=author,
                 update_if_exists=or_replace,
             )
         except TaskAlreadyExists as exc:
