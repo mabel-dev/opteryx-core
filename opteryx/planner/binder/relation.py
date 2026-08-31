@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+from typing import Optional
 from typing import Tuple
 
 from opteryx.exceptions import ColumnNotFoundError
@@ -661,18 +662,32 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
     """Bind CREATE TASK.
 
     A task is stored SQL and nothing more - it carries NO identity. A person
-    running it with EXECUTE runs it as themselves, gated by the binder at that
-    moment against their own policies; an unattended run carries the TRIGGER's
-    pinned owner and is gated against that principal when it executes. So
-    creating a task confers no authority, and this deliberately does NOT check
-    what the statement reads or writes: those checks belong where they are
-    enforced - at execution, against whoever the run actually is - and a
-    creation-time copy of them would be checked against the wrong principal the
-    moment the task is run by anyone but its author.
+    running it with EXECUTE runs it as themselves; an unattended run carries the
+    TRIGGER's pinned owner. Both are gated again at execution, against whoever
+    the run actually is, and nothing here replaces that.
 
-    What IS gated here is the write this statement performs: registering an
-    object under this name. `ON <table>` additionally lands a trigger, checked
-    below at the same tier CREATE TRIGGER is.
+    What this adds is an AUTHORING bound: a task may only do what its author
+    could do at the moment they wrote it. Execution-time checks alone are not
+    enough, because the principal a task runs as need not be the one who last
+    edited it. A trigger pins its owner on creation and keeps it across edits,
+    so with only a WRITE-on-the-name gate, anyone holding write on that name
+    could rewrite the statement and have it fire under the trigger owner's
+    authority - the editor supplying the instructions and a higher-privileged
+    principal supplying the permissions. That is a confused deputy, and it is
+    created by the EDIT, which is why the check belongs here.
+
+    So the author must independently be able to READ every source and WRITE the
+    target, checked on every registration rather than only the first - a
+    `CREATE OR REPLACE` that repoints a task is exactly the case that matters.
+
+    Deliberately NOT a durable guarantee: the author's grants may be revoked
+    later while the task remains, and the task will still run as whoever the
+    trigger names. That is accepted - this bounds what can be AUTHORED, not what
+    remains true forever. Execution-time checks are what cover the rest.
+
+    Also gated: the write this statement performs, registering an object under
+    this name. `ON <table>` additionally lands a trigger, checked below at the
+    same tier CREATE TRIGGER is.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -690,6 +705,35 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
         raise PermissionError(
             f"User does not have permission to create task {node.task_name}"
         )
+
+    # THE AUTHORING BOUND. `plan_create_task` reads these off the task's AST for
+    # exactly this check. Sources need only READ and the target needs WRITE -
+    # folding them together would demand read access on a table a write-only
+    # grant covers, the same split `visit_insert` makes for a materialized view.
+    #
+    # Virtual and information_schema relations are skipped: they are not catalog
+    # objects, carry no grants to check, and are governed by their own visibility
+    # rules at execution. Skipped explicitly rather than silently - a task that
+    # reads only these is bounded by nothing here, which is correct, because
+    # there is no authority to borrow.
+    for source in node.source_tables or []:
+        if source.startswith("$") or "information_schema" in source.split("."):
+            continue
+        if not can_perform_action(context.execution_context, source, action="READ"):
+            raise PermissionError(
+                f"User does not have permission to read {source}, a source of task "
+                f"{node.task_name} (read required). A task may only do what its "
+                "author could do: an unattended run carries the trigger's owner, so "
+                "authoring one that reads what you cannot would borrow their authority."
+            )
+
+    if node.target_table:
+        if not can_perform_action(context.execution_context, node.target_table, action="WRITE"):
+            raise PermissionError(
+                f"User does not have permission to write {node.target_table}, the target "
+                f"of task {node.task_name} (write required). A task may only do what its "
+                "author could do."
+            )
 
     # `ON <table>` lands a trigger on that dataset, whose unattended runs will
     # carry THIS author's identity - so it takes both of CREATE TRIGGER's gates:
@@ -713,6 +757,57 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
     return node, context
 
 
+def _trigger_work_relations(visitor, connector, trigger: dict, context) -> Tuple[list, Optional[str]]:
+    """`(sources, target)` for the work a trigger fires.
+
+    A trigger points at one of two things and the catalog records which: a TASK
+    (`target-task`), whose stored statement is re-read and its relations taken
+    off the AST exactly as `plan_create_task` takes them; or a materialized VIEW
+    (`target-view`), whose sources the catalog already records and whose target
+    is the view itself.
+
+    The task's statement is parsed here rather than planned, for the reason
+    `plan_create_task` gives: it may carry `:name` placeholders that only bind at
+    EXECUTE, and planning would refuse them.
+    """
+    from opteryx.exceptions import InvalidInternalStateError
+    from opteryx.third_party import sqloxide
+    from opteryx.utils.query_parser import _extract_table_name
+    from opteryx.utils.query_parser import _extract_tables_from_ast
+
+    target_task = trigger.get("target-task")
+    if target_task:
+        task_sql = connector.task_definition(target_task)
+        parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
+        inner = parsed[0]
+        inner_root = next(iter(inner))
+        body = inner.get(inner_root)
+        target = None
+        if isinstance(body, dict) and isinstance(body.get("table"), dict):
+            target = _extract_table_name(body["table"].get("TableName") or [])
+        sources = [
+            relation
+            for relation in _extract_tables_from_ast(inner)
+            if relation != target
+            and not relation.startswith("$")
+            and "information_schema" not in relation.split(".")
+        ]
+        return sources, target
+
+    target_view = trigger.get("target-view")
+    if target_view:
+        return list(connector.materialized_view_sources(target_view) or []), target_view
+
+    # A trigger record naming neither is one whose work cannot be established, so
+    # there is nothing to check an incoming owner against. Deliberately NOT
+    # treated as "allowed": a gate that passes because it found nothing to look
+    # at is the hole the check exists to close.
+    raise InvalidInternalStateError(
+        "trigger record names neither a target task nor a target view, so there is "
+        "nothing to establish what its owner would be running."
+    )
+
+
 def visit_alter_trigger_owner(
     self, node: Node, context: BindingContext
 ) -> Tuple[Node, BindingContext]:
@@ -723,7 +818,7 @@ def visit_alter_trigger_owner(
     with nobody present, so it must name whose authority it uses - and one task
     fired by two triggers can legitimately run as two different principals.
 
-    Two gates, both the materialized view's:
+    Three gates, matching the materialized view's:
 
     - WRITE on the TABLE the trigger hangs off, matching creation: landing or
       changing a trigger is an update to that table.
@@ -731,6 +826,13 @@ def visit_alter_trigger_owner(
       which is a billing question rather than a permissions one - they can read
       a great deal but carry no billing account, so work pinned to one runs on a
       schedule forever and lands on nobody's bill.
+    - The incoming owner must independently be able to do what the task DOES -
+      READ its sources and WRITE its target. Without this, a caller holding only
+      write on the table can aim a task at a higher-privileged principal and have
+      it run with that principal's authority, which is the escalation `CREATE
+      TASK`'s authoring bound and `CREATE TRIGGER`'s pin-to-author close on the
+      other two paths. It also refuses a transfer that would leave a trigger only
+      able to fail, the same reason the view's owner-change checks its sources.
 
     Asked of the RESOLVED owner, so CURRENT_USER is judged as the principal it
     names rather than exempted for having been spelled differently.
@@ -740,6 +842,7 @@ def visit_alter_trigger_owner(
     from opteryx.exceptions import ReadOnlyConnectorError
     from opteryx.managers.permissions import can_perform_action
     from opteryx.managers.permissions import can_principal_own_materialized_view
+    from opteryx.managers.permissions import can_principal_perform_action
 
     node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable):
@@ -760,6 +863,49 @@ def visit_alter_trigger_owner(
             "nobody - and a trigger runs its task as its owner. Transfer it to a user or "
             "to a service account, both of which carry a billing account."
         )
+
+    # What the trigger actually fires, and what that work touches. Read off the
+    # trigger's own record rather than taken from the statement: the caller names
+    # a trigger, not a task, and the binding between them is the catalog's.
+    trigger = next(
+        (t for t in node.connector.list_triggers(node.table_name) if t.get("name") == node.trigger_name),
+        None,
+    )
+    if trigger is None:
+        raise ColumnNotFoundError(
+            f"trigger {node.trigger_name} was not found on {node.table_name}, so there is "
+            f"nothing to establish that {owner} can perform the work it fires."
+        )
+
+    sources, target = _trigger_work_relations(self, node.connector, trigger, context)
+
+    # Asked of the incoming owner's OWN grants, inheriting nothing from the caller
+    # - a deputy that borrowed the transferrer's authority would be the very thing
+    # this gate exists to stop.
+    for source in sources:
+        if node.owner_is_current_user:
+            permitted = can_perform_action(context.execution_context, source, action="READ")
+        else:
+            permitted = can_principal_perform_action(owner, source, action="READ")
+        if not permitted:
+            raise PermissionError(
+                f"{owner} does not have permission to read {source}, which trigger "
+                f"{node.trigger_name} reads when it fires (read required). An unattended "
+                "run carries the trigger's owner and inherits nothing from whoever "
+                "transferred it."
+            )
+
+    if target:
+        if node.owner_is_current_user:
+            permitted = can_perform_action(context.execution_context, target, action="WRITE")
+        else:
+            permitted = can_principal_perform_action(owner, target, action="WRITE")
+        if not permitted:
+            raise PermissionError(
+                f"{owner} does not have permission to write {target}, which trigger "
+                f"{node.trigger_name} writes when it fires (write required)."
+            )
+
     node.resolved_owner = owner
 
     node.columns = []
