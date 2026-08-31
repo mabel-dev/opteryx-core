@@ -719,6 +719,13 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         "event_object_table",
         "action_kind",
         "target",
+        # WHOSE AUTHORITY the trigger's unattended runs carry - the trigger's
+        # `runs-as`, and the single most important thing about a row here. A
+        # trigger fires with nobody present, so this is the only place the
+        # identity behind that work is visible; without it, `created_by` reads
+        # like the answer and is not one. Null for a refresh trigger, which
+        # resolves its identity from the view's own record.
+        "runs_as",
         "created_by",
         "created_at",
         "last_fired_at",
@@ -747,6 +754,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             "event_object_table": _lt.VARCHAR,
             "action_kind": _lt.VARCHAR,
             "target": _lt.VARCHAR,
+            "runs_as": _lt.VARCHAR,
             "created_by": _lt.VARCHAR,
             "created_at": _lt.TIMESTAMP(),
             "last_fired_at": _lt.TIMESTAMP(),
@@ -779,6 +787,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         # and why a task trigger showed a NULL target and no way to see what it
         # fired.
         target = []
+        runs_as = []
         created_by = []
         created_at = []
         last_fired_at = []
@@ -807,6 +816,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
                         event_object_table.append(source_table)
                         action_kind.append(trigger.get("kind"))
                         target.append(trigger.get("target-view") or trigger.get("target-task"))
+                        runs_as.append(trigger.get("runs-as"))
                         created_by.append(trigger.get("created-by"))
                         created_at.append(_ms_to_datetime(trigger.get("created-at-ms")))
                         last_fired_at.append(_ms_to_datetime(trigger.get("last-fired-at-ms")))
@@ -819,6 +829,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             vector_from_sequence(event_object_table, dtype=DrakenType.VARCHAR),
             vector_from_sequence(action_kind, dtype=DrakenType.VARCHAR),
             vector_from_sequence(target, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(runs_as, dtype=DrakenType.VARCHAR),
             vector_from_sequence(created_by, dtype=DrakenType.VARCHAR),
             vector_from_sequence(created_at, dtype=DrakenType.TIMESTAMP64),
             vector_from_sequence(last_fired_at, dtype=DrakenType.TIMESTAMP64),

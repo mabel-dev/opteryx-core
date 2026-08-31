@@ -349,7 +349,8 @@ def test_information_schema_reports_what_a_task_trigger_runs(catalog_workspace, 
                     "name": "task__coll1__ingest",
                     "kind": "task",
                     "target-task": "cat.coll1.ingest",
-                    "created-by": "olive",
+                    "runs-as": "olive",
+                    "created-by": "mallory",
                     "created-at-ms": _NOW_MS,
                     "last-fired-at-ms": None,
                     "last-fired-status": None,
@@ -367,6 +368,11 @@ def test_information_schema_reports_what_a_task_trigger_runs(catalog_workspace, 
     row = next(r for r in rows if r["action_kind"] == "task")
     assert row["trigger_name"] == "task__coll1__ingest"
     assert row["target"] == "cat.coll1.ingest"
+    # Whose authority the unattended run carries, which is NOT who created the
+    # trigger - the two are deliberately different here, because a projection
+    # that showed only `created_by` reads as if it answered this question.
+    assert row["runs_as"] == "olive"
+    assert row["created_by"] == "mallory"
 
 
 def test_information_schema_triggers_denies_without_execution_context():
