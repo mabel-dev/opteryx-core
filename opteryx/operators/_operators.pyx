@@ -295,6 +295,8 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                           int64_t* bytes_claimed)
         size_t new_runtime_bound()
         void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
+        void add_parquet_runtime_bound(size_t p, size_t bound_idx, string column,
+                                       int64_t* pruned_slot)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* p1_column_names,
@@ -2752,6 +2754,25 @@ cdef class NativePlan:
         would mean the compiler's eligibility test and the plan disagree."""
         cdef bytes name = column if isinstance(column, bytes) else str(column).encode("utf-8")
         self._e.add_skene_runtime_bound(p, bound_idx, <string>name)
+
+    def add_parquet_runtime_bound(self, size_t p, size_t bound_idx, object column,
+                                  NativeScanPlan splan):
+        """Wire pipeline ``p``'s native parquet scan to runtime bound ``bound_idx``
+        on physical column ``column``.
+
+        The parquet twin of ``add_skene_runtime_bound``. The difference is where
+        the bound lands: skene folds it into the zone map as two extra terms,
+        parquet drops work items in ``make_global`` (there is no shared zone-map
+        machinery on that path). ``splan`` is the same NativeScanPlan the Source
+        already borrows every other pointer from — it owns the marginal-prune
+        counter the Source writes, and it outlives the run.
+
+        Fails loud (from C++) when the pipeline's source is not a native parquet
+        scan: reaching here with another source means the compiler's eligibility
+        test and the plan disagree, which is a bug, not a shape to tolerate."""
+        cdef bytes name = column.encode("utf-8") if isinstance(column, str) else column
+        self._e.add_parquet_runtime_bound(p, bound_idx, <string>name,
+                                          &splan.row_groups_pruned_runtime)
 
     def set_skene_latmat_scan_source(self, size_t p, SkeneLatmatScanPlan splan,
                                      size_t pred_fn, size_t pred_ctx,

@@ -21,7 +21,7 @@ Date: 2026-06-23
     UNCOMPRESSED, single row group.
 
 - **Phase 2a (ZSTD compression) — DONE.** Architect approved vendoring the
-  zstd **compress** sources (zstd 1.5.5 `lib/compress/*.c`, byte-identical to
+  zstd **compress** sources (zstd 1.5.7 `lib/compress/*.c`, byte-identical to
   upstream, renamed `.cpp` like the decompress set; single-threaded — no
   zstdmt/pool/threading). Added `get_zstd_compress_sources()` in `setup.py`;
   writer extension now links common + decompress + compress. Codec threaded

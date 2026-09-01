@@ -684,7 +684,7 @@ is network bytes rather than warm mmap pages.
 
 ### 9.5 Known limits of v1
 
-* **Parquet carries no bound.** D4 is unresolved and the parquet path is untouched.
+* ~~**Parquet carries no bound.**~~ Delivered — see §10.
 * **Skene two-pass (latmat) scans carry no bound** — they are simply absent from
   `skene_scan_pipelines`, so they refuse by construction.
 * **ASOF refused**, pending a ruling on its unmatched-probe-row semantics.
@@ -700,3 +700,110 @@ is network bytes rather than warm mmap pages.
   sql-signatures`) has not been run for the new variable; `reference/variables.json` here is
   current.
 
+---
+
+## 10. What landed (parquet)
+
+Delivered 2026-08-31, resolving D3/D4. §3.3's option **(b)** was taken: parquet
+statistics are converted FORWARD into draken's ordinal space rather than the
+build-side ordinal being encoded back into parquet stat bytes. Option (a) was
+rejected for the reason §3.3 already gives — `CompareStatBytes` falls through to
+a lexicographic compare for `fixed_len_byte_array`, which is wrong for negative
+big-endian two's complement, and adopting it would have inherited that bug.
+
+### 10.1 The mechanism
+
+`stat_bytes_to_ordinal` (`src/cpp/engine/parquet_stat_ordinal.hpp`) turns a
+`ColumnStats` min/max into an ordinal. `NativeParquetScanSource::apply_runtime_bounds`
+runs in `make_global()` — on the driver thread, at the start of the probe
+pipeline, which is after the build pipeline completed and `Engine::run()`
+published the bound — and drops work items whose row-group range is disjoint
+from the bound. The surviving indices live in `NativeParquetScanGlobal::kept`.
+
+Where skene folds the bound into two extra zone-map terms and reuses its claim
+builder, parquet has no shared zone-map machinery on that path, so the pruning
+is a work-list filter instead. Both consume the same `RuntimeKeyBound` slots
+and the same eligibility test; only the consumer differs.
+
+Three things were deduplicated rather than copied:
+
+* `StatsLogicalIsUnsigned` moved from a file-local `static` in
+  `rugo/src/parquet/metadata.cpp` into `metadata.hpp`. Plan-time comparison and
+  runtime ordinalization must agree about signedness or the filter prunes row
+  groups that genuinely match.
+* `SkeneRuntimeBounds` became an alias of a shared `RuntimeBoundSet` in
+  `runtime_bound.hpp`, so "parallel arrays" cannot come to mean two things.
+* Eligibility condition 2 widened from "the probe pipeline's source is a native
+  skene scan" to "…is a native skene scan OR a native parquet scan". The barrier
+  argument is about what a pipeline's SOURCE is, not which format it reads, so it
+  carries over unchanged. The two-pass latmat sources remain out of scope by
+  construction — they are absent from both pipeline maps.
+
+### 10.2 Order of operations, and why
+
+`apply_runtime_bounds` runs BEFORE `limit_submit_cap`. The two interact: a row
+group the bound removed cannot contribute rows to a scan-pushed LIMIT, so
+counting it toward the cap would freeze the submit frontier too early and the
+scan would return fewer rows than the LIMIT asked for.
+
+### 10.3 Deliberate v1 limits
+
+* **INT32/INT64 only** (signed, plus unsigned via the logical type).
+  Everything else — `int96`, `float`, `double`, `byte_array`,
+  `fixed_len_byte_array`, and so DECIMAL and VARCHAR — returns false from
+  `stat_bytes_to_ordinal` and contributes no term. This is the same posture
+  `valid == 0` already carries: prunes nothing, costs a read rather than an
+  answer. Note this is NARROWER than skene, which does bound VARCHAR keys
+  through the lossy 8-byte prefix ordinal. Widening it is a measurement
+  question, not a correctness one.
+* A short statistic buffer refuses rather than guessing — a malformed footer is
+  not a value.
+* Every failure mode fails OPEN: unresolvable path, missing statistic,
+  unsupported type, unfilled bound all keep the row group.
+
+### 10.4 Measured
+
+`testdata/job` (parquet), `movie_info` ⋈ `info_type` on `info_type_id` —
+`movie_info.info_type_id` has a mean row-group range width of 0.103 over 30 row
+groups, and `info_type.info = '<one value>'` is a single-row build side, so this
+is §5.5's rule satisfied on both counts. Filter on vs off, minimum of 4
+interleaved rounds, answers verified identical in every arm:
+
+| build side | bytes off | bytes on | share | time off | time on |
+|---|---|---|---|---|---|
+| `info = 'genres'` | 329.1 MB | 5.1 MB | **1.5%** | 0.173 s | **0.023 s** |
+| `info = 'countries'` | 329.1 MB | 130.9 MB | 39.8% | 0.176 s | 0.164 s |
+| `info = 'release dates'` | 329.1 MB | 222.0 MB | 67.4% | 0.189 s | 0.170 s |
+
+`testdata/tpcds_1` (parquet), the positive control the test asserts:
+`inventory ⋈ date_dim` on one month prunes **94 of 96 row groups**, where
+plan-time pruning gets zero — §6.2's gap, now closed on parquet too.
+
+The spread across the three JOB arms is the point, not the best number: the same
+mechanism yields 7.5x, 7% and 10% purely on how contiguous the build side's key
+window is. That is a property of the data, exactly as §5.5 says.
+
+### 10.5 Known limits
+
+* The build-side capture cost is still unmeasured at scale (§9.5 carries the
+  same caveat for skene); nothing here changes that.
+* **Confirmed on x86** (2026-09-01, Debian 12 / gcc 12 / `-march=haswell`,
+  Intel i5-8500; the Mac figures are clang / NEON). The pruning is
+  BYTE-IDENTICAL across the two — 1.5% / 39.8% / 67.4% on the three JOB arms,
+  and 94-of-96 row groups on the TPC-DS control, to the same decimal. That is
+  the result that matters: the bound is derived from footer statistics and
+  draken ordinals, so an arch-dependent byte figure would have meant a real bug.
+
+  The TIME saved is larger on x86, because the work avoided is worth more on the
+  slower box: `genres` goes 0.880s → 0.058s (**15.2x**, against 7.5x on ARM),
+  `countries` 0.889s → 0.673s (24%, against 7%), `release dates` 0.905s → 0.784s
+  (13%, against 10%). Do not read the absolute times across machines; only the
+  ratios are comparable.
+
+  `make q` is 462/462 on both. `tests/sql` on the x86 box is not a clean signal:
+  606 of its tests need `pyarrow`, which that pyenv does not carry, and 38 more
+  need `testdata/band_join`, which was not synced. No engine failure appeared on
+  either platform.
+* ClickBench cannot exercise this at all: it is a single-table benchmark with no
+  joins. TPC-H prunes zero for the reason §5.2 already establishes. The parquet
+  win is a JOB/TPC-DS-shaped one.

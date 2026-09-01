@@ -2064,6 +2064,9 @@ cdef class NativeScanPlan:
         self.in_flight_limit = 0
         self.n_items = 0
         self.pruned_items = 0
+        # -1 = no runtime bound wired (see the pxd). Only the Source overwrites it.
+        self.row_groups_pruned_runtime = -1
+        self.scan_identity = None
         self._closed = False
         self._pool = None
         self.footer_fetch_ns = 0
@@ -2084,6 +2087,20 @@ cdef class NativeScanPlan:
         time (WP-02). 0 when no predicates are pushed. `row_group_count +
         pruned_row_group_count` == every row group in the projected files."""
         return self.pruned_items
+
+    @property
+    def runtime_pruned_row_groups(self):
+        """Row groups the RUNTIME min/max join bound excluded beyond what plan-time
+        pruning had already dropped, or None when no bound was wired for this scan.
+
+        None and 0 mean different things and any telemetry fold must keep them
+        apart: None is "no eligible join fed this scan", 0 is "a bound was applied
+        and the data layout did not support pruning". Reading a 0 as an absent
+        feature is exactly the misreading docs/RUNTIME_MINMAX_FILTER_DESIGN.md
+        §5.5 warns about."""
+        if self.row_groups_pruned_runtime < 0:
+            return None
+        return int(self.row_groups_pruned_runtime)
 
     @property
     def surviving_row_count(self):

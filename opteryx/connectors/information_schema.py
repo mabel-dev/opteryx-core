@@ -10,7 +10,7 @@ information_schema
 Minimum information_schema surface. Backed by the real Opteryx catalog
 (opteryx_catalog) via list_collections()/list_datasets()/list_views() -
 NOT a static/generated snapshot. Currently implements `tables`, `columns`,
-`views`, `schemata`, `triggers`, and `column_relationships`.
+`views`, `schemata`, `triggers`, `tasks`, and `column_relationships`.
 
 information_schema is a reserved nested schema inside a catalog workspace,
 addressed as `<workspace>.information_schema.<table>` - e.g.
@@ -701,8 +701,12 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
     A trigger hangs off the dataset whose commits fire it (the SOURCE table),
     not off its target view, so the per-row READ check is on that source table
     - matching DROP TRIGGER's WRITE gate, which is also on the source. An MV
-    whose refresh trigger has been dropped simply has no row here: that
-    absence is the documented way to see a "paused" MV.
+    whose refresh trigger has been dropped simply has no row here.
+
+    A SUSPENDED trigger is a row, and says so: `suspended_at`/`suspended_by`.
+    That is the difference between a trigger somebody paused and one that was
+    dropped or never made, and it is the whole reason `ALTER TRIGGER ...
+    SUSPEND` is not just `DROP TRIGGER`.
     """
 
     __mode__ = "Internal"
@@ -730,11 +734,28 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         "created_at",
         "last_fired_at",
         "last_fired_status",
+        # DELIBERATELY OFF, not stored anywhere: suspension only ever became
+        # observable AFTER a write to the source, when the refused fire stamped
+        # `last_fired_status: suspended`. On a quiet source a paused trigger
+        # read as a healthy one. These two say so with nobody writing.
+        #
+        # Two columns and not a third: `suspended` as a boolean is
+        # `suspended_at IS NOT NULL` and nothing else, and a derived column that
+        # can disagree with the column it derives from is a bug waiting for a
+        # partial write.
+        "suspended_at",
+        "suspended_by",
     )
 
     # trigger_catalog/trigger_collection/event_object_table are known before
     # the per-dataset list_triggers() round trip, so pushing them skips those
     # calls entirely; trigger_name only prunes rows after the listing.
+    #
+    # suspended_at/suspended_by are NOT here. They are known only once the
+    # listing has been read, so pushing them would skip no round trip, and
+    # `_extract_key_predicate` takes string literals only - a timestamp or a
+    # null-ness test is declined and left as an ordinary Filter, which is the
+    # right answer for both.
     _pushable_columns = frozenset(
         {"trigger_catalog", "trigger_collection", "event_object_table", "trigger_name"}
     )
@@ -759,6 +780,8 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             "created_at": _lt.TIMESTAMP(),
             "last_fired_at": _lt.TIMESTAMP(),
             "last_fired_status": _lt.VARCHAR,
+            "suspended_at": _lt.TIMESTAMP(),
+            "suspended_by": _lt.VARCHAR,
         }
         self.schema = RelationSchema(
             name="information_schema.triggers",
@@ -792,6 +815,8 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         created_at = []
         last_fired_at = []
         last_fired_status = []
+        suspended_at = []
+        suspended_by = []
 
         # See InformationSchemaTablesTable.read_dataset - trigger_catalog is
         # constant per reader, so an excluding predicate skips enumeration
@@ -821,6 +846,11 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
                         created_at.append(_ms_to_datetime(trigger.get("created-at-ms")))
                         last_fired_at.append(_ms_to_datetime(trigger.get("last-fired-at-ms")))
                         last_fired_status.append(trigger.get("last-fired-status"))
+                        # Both are cleared to None on RESUME, so a resumed
+                        # trigger reports nulls rather than the stamp of the
+                        # suspension it came out of.
+                        suspended_at.append(_ms_to_datetime(trigger.get("suspended-at-ms")))
+                        suspended_by.append(trigger.get("suspended-by"))
 
         vectors = [
             vector_from_sequence(trigger_catalog, dtype=DrakenType.VARCHAR),
@@ -834,6 +864,186 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             vector_from_sequence(created_at, dtype=DrakenType.TIMESTAMP64),
             vector_from_sequence(last_fired_at, dtype=DrakenType.TIMESTAMP64),
             vector_from_sequence(last_fired_status, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(suspended_at, dtype=DrakenType.TIMESTAMP64),
+            vector_from_sequence(suspended_by, dtype=DrakenType.VARCHAR),
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
+class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
+    """Reads `information_schema.tasks` - every task registered in the workspace.
+
+    A task is a statement the platform runs on its own. Until this table there
+    was no way to LIST them: a task read only as the single row of its own
+    definition, so seeing the workspace's tasks cost one request each and
+    knowing their names in advance.
+
+    `writes` is why this exists in the shape it does. A trigger records which
+    dataset FIRES a task; nothing recorded which dataset it FEEDS, so a pipeline
+    of `raw -> task -> curated -> task -> marts` read as disconnected fragments.
+    It is derived from the task's own statement at registration - never
+    declared - so it cannot disagree with what the task will actually do.
+
+    Cost, stated plainly: one catalog listing per collection, plus one
+    `get_task` per task (which itself reads the task document and its current
+    statement document). This collapses N client requests into one query; it
+    does not collapse the N catalog reads behind them.
+
+    READ is checked on the task's own name. A task shares one namespace with
+    tables and views - a name identifies exactly one of them - so the grant that
+    governs the name governs the row.
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    self_governs_permissions = True  # read_dataset() filters rows by READ access itself
+    supports_predicate_pushdown = True
+
+    _COLUMNS = (
+        "task_catalog",
+        "task_collection",
+        "task_name",
+        "description",
+        # The task's CURRENT statement, resolved through `statement-id` from the
+        # subcollection that versions it - the same storage a view's definition
+        # uses, and the reason a row here costs a second read.
+        "statement",
+        "statement_id",
+        # WHAT THE STATEMENT WRITES, derived from its own AST at registration.
+        # Comma-separated, which is unambiguous because a relation name cannot
+        # contain a comma; empty for a task that writes no relation contents, and
+        # for one registered before the field existed - a record that was never
+        # asked the question answers "nothing", which is the honest reading.
+        "writes",
+        "created_by",
+        "created_at",
+        # Who last changed the STATEMENT, which is a different question from who
+        # created the task and often a different person.
+        "last_updated_by",
+        "last_updated_at",
+        "suspended_at",
+        "suspended_by",
+        "last_fired_at",
+        "last_fired_status",
+        # The `current_version` the last SUCCESSFUL run consumed to - a version
+        # number, not a timestamp, and stamped only on success, so a gap behind a
+        # failed run stays visible.
+        "last_window_to",
+    )
+
+    # task_catalog/task_collection are known before the per-collection listing,
+    # so pushing them skips it entirely; task_name prunes before the `get_task`
+    # round trip, which is the expensive one.
+    _pushable_columns = frozenset({"task_catalog", "task_collection", "task_name"})
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        PredicatePushable.__init__(self, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationSchema:
+        column_types = {
+            "task_catalog": _lt.VARCHAR,
+            "task_collection": _lt.VARCHAR,
+            "task_name": _lt.VARCHAR,
+            "description": _lt.VARCHAR,
+            "statement": _lt.VARCHAR,
+            "statement_id": _lt.VARCHAR,
+            "writes": _lt.VARCHAR,
+            "created_by": _lt.VARCHAR,
+            "created_at": _lt.TIMESTAMP(),
+            "last_updated_by": _lt.VARCHAR,
+            "last_updated_at": _lt.TIMESTAMP(),
+            "suspended_at": _lt.TIMESTAMP(),
+            "suspended_by": _lt.VARCHAR,
+            "last_fired_at": _lt.TIMESTAMP(),
+            "last_fired_status": _lt.VARCHAR,
+            "last_window_to": _lt.INT64,
+        }
+        self.schema = RelationSchema(
+            name="information_schema.tasks",
+            columns=[
+                SchemaColumn(
+                    name=column_name,
+                    column_type=column_types[column_name],
+                    identity=mint_column_identity("information_schema.tasks", column_name),
+                )
+                for column_name in self._COLUMNS
+            ],
+        )
+        return self.schema
+
+    def read_dataset(self, predicates=None, **kwargs) -> Iterable[Morsel]:
+        compiled = _compile_key_predicates(predicates, self._pushable_columns)
+
+        task_catalog = []
+        task_collection = []
+        task_name = []
+        description = []
+        statement = []
+        statement_id = []
+        writes = []
+        created_by = []
+        created_at = []
+        last_updated_by = []
+        last_updated_at = []
+        suspended_at = []
+        suspended_by = []
+        last_fired_at = []
+        last_fired_status = []
+        last_window_to = []
+
+        # See InformationSchemaTablesTable.read_dataset - task_catalog is
+        # constant per reader, so an excluding predicate skips enumeration
+        # entirely rather than filtering row by row.
+        if _key_predicates_allow(compiled, {"task_catalog": self.workspace}):
+            for collection in self.catalog.list_collections():
+                if not _key_predicates_allow(compiled, {"task_collection": collection}):
+                    continue
+                for name in self.catalog.list_tasks(collection):
+                    if not _key_predicates_allow(compiled, {"task_name": name}):
+                        continue
+                    # Checked BEFORE `get_task`, so a task the caller may not
+                    # read costs no round trip and discloses nothing.
+                    if not _readable(self.execution_context, self.workspace, collection, name):
+                        continue
+                    record = self.catalog.get_task(f"{collection}.{name}")
+                    task_catalog.append(self.workspace)
+                    task_collection.append(collection)
+                    task_name.append(name)
+                    description.append(record.get("description"))
+                    statement.append(record.get("sql"))
+                    statement_id.append(record.get("statement-id"))
+                    writes.append(",".join(record.get("writes") or []))
+                    created_by.append(record.get("created-by"))
+                    created_at.append(_ms_to_datetime(record.get("created-at-ms")))
+                    last_updated_by.append(record.get("last-updated-by"))
+                    last_updated_at.append(_ms_to_datetime(record.get("last-updated-at-ms")))
+                    suspended_at.append(_ms_to_datetime(record.get("suspended-at-ms")))
+                    suspended_by.append(record.get("suspended-by"))
+                    last_fired_at.append(_ms_to_datetime(record.get("last-fired-at-ms")))
+                    last_fired_status.append(record.get("last-fired-status"))
+                    last_window_to.append(record.get("last-window-to"))
+
+        vectors = [
+            vector_from_sequence(task_catalog, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(task_collection, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(task_name, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(description, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(statement, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(statement_id, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(writes, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(created_by, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(created_at, dtype=DrakenType.TIMESTAMP64),
+            vector_from_sequence(last_updated_by, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(last_updated_at, dtype=DrakenType.TIMESTAMP64),
+            vector_from_sequence(suspended_at, dtype=DrakenType.TIMESTAMP64),
+            vector_from_sequence(suspended_by, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(last_fired_at, dtype=DrakenType.TIMESTAMP64),
+            vector_from_sequence(last_fired_status, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(last_window_to, dtype=DrakenType.INT64),
         ]
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
@@ -1125,5 +1335,6 @@ _TABLE_CLASSES = {
     "views": InformationSchemaViewsTable,
     "schemata": InformationSchemaSchemataTable,
     "triggers": InformationSchemaTriggersTable,
+    "tasks": InformationSchemaTasksTable,
     "column_relationships": InformationSchemaColumnRelationshipsTable,
 }

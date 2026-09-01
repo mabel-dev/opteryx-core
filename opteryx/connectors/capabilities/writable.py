@@ -784,6 +784,7 @@ class Writable:
         statement: str,
         author: Optional[str] = None,
         or_replace: bool = False,
+        writes: Optional[List[str]] = None,
     ) -> None:
         """Register a task: a statement the platform runs on its own.
 
@@ -800,6 +801,13 @@ class Writable:
             or_replace: replace an existing task of this name rather than
                 refusing. The prior statement is kept as a version by stores
                 that version them.
+            writes: the relations whose contents `statement` writes, derived
+                from its own AST by the planner. Recorded so a pipeline that
+                passes through a task can be followed end to end - without it,
+                a task is a graph node with edges only coming in. Written on
+                EVERY registration, never carried from the previous one: it is
+                a property of the statement, so a replaced statement must not
+                leave the old answer standing.
 
         Raises:
             ValueError: If the task exists and `or_replace` is False

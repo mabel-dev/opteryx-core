@@ -275,6 +275,138 @@ def test_replacing_a_task_is_bounded_the_same_way(tmp_path, install):
         )
 
 
+# --- what a task writes
+
+
+def _writes(tmp_path, task):
+    return _task_record(tmp_path / "ws", task)["writes"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO ws.sink SELECT a FROM ws.src",
+        "CREATE TABLE ws.sink AS SELECT a FROM ws.src",
+        "UPDATE ws.sink SET a = 2",
+        "DELETE FROM ws.sink WHERE a = 1",
+        "MERGE INTO ws.sink t USING ws.src s ON t.a = s.a WHEN MATCHED THEN UPDATE SET t.a = s.a",
+        "TRUNCATE TABLE ws.sink",
+    ],
+)
+def test_every_write_form_records_what_it_writes(tmp_path, statement):
+    """Derived from the statement's own AST, so it cannot disagree with it.
+
+    Every form is here because the derivation used to read INSERT's target
+    only: a task doing anything else recorded no output, and its target fell
+    through into the SOURCE list where it was checked at READ.
+    """
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TABLE ws.sink (a BIGINT)"))
+
+    list(owner.execute_to_morsels(f"CREATE TASK ws.t AS {statement}"))
+
+    assert _writes(tmp_path, "t") == ["ws.sink"]
+
+
+def test_a_task_that_writes_nothing_records_nothing(tmp_path):
+    """A SELECT task is not a pipeline edge, and says so - empty rather than
+    absent, so a reader never has to tell "writes nothing" from "not asked"."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+
+    list(owner.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
+
+    assert _writes(tmp_path, "t") == []
+
+
+def test_truncate_records_every_table_it_names(tmp_path):
+    """The one form with more than one target, and the reason `writes` is a
+    list rather than a single name."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(owner.execute_to_morsels("CREATE TABLE ws.one (a BIGINT)"))
+    list(owner.execute_to_morsels("CREATE TABLE ws.two (a BIGINT)"))
+
+    list(owner.execute_to_morsels("CREATE TASK ws.t AS TRUNCATE TABLE ws.one, ws.two"))
+
+    assert _writes(tmp_path, "t") == ["ws.one", "ws.two"]
+
+
+def test_replacing_a_task_re_derives_what_it_writes(tmp_path):
+    """It describes THIS statement. A replacement that no longer writes the old
+    target must not leave it standing - a stale edge draws a pipeline that does
+    not exist, which is worse than drawing none."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TABLE ws.sink (a BIGINT)"))
+
+    list(
+        owner.execute_to_morsels("CREATE TASK ws.t AS INSERT INTO ws.sink SELECT a FROM ws.src")
+    )
+    assert _writes(tmp_path, "t") == ["ws.sink"]
+
+    list(owner.execute_to_morsels("CREATE OR REPLACE TASK ws.t AS SELECT a FROM ws.src"))
+    assert _writes(tmp_path, "t") == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO ws.sink SELECT a FROM ws.src",
+        "CREATE TABLE ws.sink AS SELECT a FROM ws.src",
+        "UPDATE ws.sink SET a = 2",
+        "DELETE FROM ws.sink WHERE a = 1",
+        "MERGE INTO ws.sink t USING ws.src s ON t.a = s.a WHEN MATCHED THEN UPDATE SET t.a = s.a",
+        "TRUNCATE TABLE ws.sink",
+    ],
+)
+def test_the_authoring_bound_covers_every_write_form(tmp_path, install, statement):
+    """A task may only WRITE what its author could write.
+
+    The author here holds READ on the target and no more. That used to be
+    enough for everything but INSERT: the target was classed as a source, so a
+    READ grant satisfied a check that should have demanded WRITE - and the
+    statement would then fire under a trigger owner's authority.
+    """
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TABLE ws.sink (a BIGINT)"))
+
+    install(
+        ScriptedCapability(
+            allow={("ws.t", "WRITE"), ("ws.src", "READ"), ("ws.sink", "READ")}
+        )
+    )
+    mallory = opteryx.session(user="mallory")
+
+    with pytest.raises(PermissionError, match="permission to write ws.sink"):
+        list(mallory.execute_to_morsels(f"CREATE TASK ws.t AS {statement}"))
+
+
+def test_an_author_who_can_write_the_target_may_create_the_task(tmp_path, install):
+    """The bound is the author's own grants - held, it lets the task through."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TABLE ws.sink (a BIGINT)"))
+
+    install(
+        ScriptedCapability(
+            allow={("ws.t", "WRITE"), ("ws.src", "READ"), ("ws.sink", "WRITE")}
+        )
+    )
+    rhea = opteryx.session(user="rhea")
+
+    list(rhea.execute_to_morsels("CREATE TASK ws.t AS UPDATE ws.sink SET a = 2"))
+
+    assert _writes(tmp_path, "t") == ["ws.sink"]
+
+
 def test_creating_a_task_still_needs_write_on_its_name(tmp_path, install):
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)

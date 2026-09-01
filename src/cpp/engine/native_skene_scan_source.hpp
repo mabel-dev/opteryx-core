@@ -359,13 +359,9 @@ struct SkeneZoneMap {
 // a direct scan column, ordinal comparability of the two sides' types — is
 // settled at plan time by the compiler. Nothing here re-decides it; this only
 // turns a filled bound into two ordinary zone terms.
-struct SkeneRuntimeBounds {
-    std::vector<std::string>            columns;   // physical (in-file) names
-    std::vector<const RuntimeKeyBound*> bounds;    // parallel; engine-owned
-
-    bool empty() const { return columns.empty(); }
-    size_t size() const { return columns.size(); }
-};
+// The shape moved to runtime_bound.hpp when the parquet scan gained the same
+// filter — one definition, so "parallel arrays" cannot come to mean two things.
+using SkeneRuntimeBounds = RuntimeBoundSet;
 
 // ─── The claim unit ─────────────────────────────────────────────────────────
 //

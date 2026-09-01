@@ -3,7 +3,6 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-from typing import Optional
 from typing import Tuple
 
 from opteryx.exceptions import ColumnNotFoundError
@@ -707,9 +706,16 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
         )
 
     # THE AUTHORING BOUND. `plan_create_task` reads these off the task's AST for
-    # exactly this check. Sources need only READ and the target needs WRITE -
+    # exactly this check. Sources need only READ and a target needs WRITE -
     # folding them together would demand read access on a table a write-only
     # grant covers, the same split `visit_insert` makes for a materialized view.
+    #
+    # `target_tables` is a LIST because TRUNCATE names several; every other write
+    # form names one. It covers every statement that changes a relation's
+    # contents - INSERT, CTAS, UPDATE, DELETE, MERGE, TRUNCATE - which it did not
+    # always: while the derivation read only INSERT's target, the target of an
+    # UPDATE or a MERGE fell through into `source_tables` and was checked at READ,
+    # leaving this bound armed for one statement form out of six.
     #
     # Virtual and information_schema relations are skipped: they are not catalog
     # objects, carry no grants to check, and are governed by their own visibility
@@ -727,10 +733,10 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
                 "authoring one that reads what you cannot would borrow their authority."
             )
 
-    if node.target_table:
-        if not can_perform_action(context.execution_context, node.target_table, action="WRITE"):
+    for target in node.target_tables or []:
+        if not can_perform_action(context.execution_context, target, action="WRITE"):
             raise PermissionError(
-                f"User does not have permission to write {node.target_table}, the target "
+                f"User does not have permission to write {target}, a target "
                 f"of task {node.task_name} (write required). A task may only do what its "
                 "author could do."
             )
@@ -757,8 +763,8 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
     return node, context
 
 
-def _trigger_work_relations(visitor, connector, trigger: dict, context) -> Tuple[list, Optional[str]]:
-    """`(sources, target)` for the work a trigger fires.
+def _trigger_work_relations(visitor, connector, trigger: dict, context) -> Tuple[list, list]:
+    """`(sources, targets)` for the work a trigger fires.
 
     A trigger points at one of two things and the catalog records which: a TASK
     (`target-task`), whose stored statement is re-read and its relations taken
@@ -772,31 +778,32 @@ def _trigger_work_relations(visitor, connector, trigger: dict, context) -> Tuple
     """
     from opteryx.exceptions import InvalidInternalStateError
     from opteryx.third_party import sqloxide
-    from opteryx.utils.query_parser import _extract_table_name
     from opteryx.utils.query_parser import _extract_tables_from_ast
+    from opteryx.utils.query_parser import extract_write_targets
 
     target_task = trigger.get("target-task")
     if target_task:
         task_sql = connector.task_definition(target_task)
         parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
         inner = parsed[0]
-        inner_root = next(iter(inner))
-        body = inner.get(inner_root)
-        target = None
-        if isinstance(body, dict) and isinstance(body.get("table"), dict):
-            target = _extract_table_name(body["table"].get("TableName") or [])
+        # The SAME derivation `plan_create_task` records as the task's `writes`,
+        # called rather than restated - two spellings of "what does this write"
+        # would drift, and the one that drifts low is a gate that stops checking.
+        # Read from the statement and not from the recorded `writes`, because a
+        # task registered before that field existed has none.
+        targets = extract_write_targets(inner)
         sources = [
             relation
             for relation in _extract_tables_from_ast(inner)
-            if relation != target
+            if relation not in targets
             and not relation.startswith("$")
             and "information_schema" not in relation.split(".")
         ]
-        return sources, target
+        return sources, targets
 
     target_view = trigger.get("target-view")
     if target_view:
-        return list(connector.materialized_view_sources(target_view) or []), target_view
+        return list(connector.materialized_view_sources(target_view) or []), [target_view]
 
     # A trigger record naming neither is one whose work cannot be established, so
     # there is nothing to check an incoming owner against. Deliberately NOT
@@ -877,7 +884,7 @@ def visit_alter_trigger_owner(
             f"nothing to establish that {owner} can perform the work it fires."
         )
 
-    sources, target = _trigger_work_relations(self, node.connector, trigger, context)
+    sources, targets = _trigger_work_relations(self, node.connector, trigger, context)
 
     # Asked of the incoming owner's OWN grants, inheriting nothing from the caller
     # - a deputy that borrowed the transferrer's authority would be the very thing
@@ -895,7 +902,7 @@ def visit_alter_trigger_owner(
                 "transferred it."
             )
 
-    if target:
+    for target in targets:
         if node.owner_is_current_user:
             permitted = can_perform_action(context.execution_context, target, action="WRITE")
         else:

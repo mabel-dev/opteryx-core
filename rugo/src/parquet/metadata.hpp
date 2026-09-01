@@ -173,6 +173,21 @@ bool TestBloomFilterBytes(const uint8_t *data, size_t len,
 // Aggregated per-column statistics across all row groups.
 // Used by the planning phase to extract min/max/null_count without building
 // per-row-group Python dicts.
+// E33: does this logical type mark the column UNSIGNED? Matches the innermost
+// "uint<width>" so a LIST leaf ("array<uint32>") is caught too — same rule as
+// decode_column.cpp's IntType detection and rugo.parquet.decode_value.
+//
+// Lives in the header, not in metadata.cpp, because two callers need it and a
+// second copy is exactly the drift this rule exists to prevent: AggregateColumnStats'
+// CompareStatBytes (metadata.cpp) and the engine's stat_bytes_to_ordinal
+// (src/cpp/engine/parquet_stat_ordinal.hpp), which must agree about signedness or
+// a runtime min/max filter prunes row groups that genuinely match.
+inline bool StatsLogicalIsUnsigned(const std::string &lt) {
+  size_t pos = lt.rfind("uint");
+  return pos != std::string::npos && pos + 4 < lt.size() &&
+         lt[pos + 4] >= '0' && lt[pos + 4] <= '9';
+}
+
 struct AggColumnStat {
   std::string name;          // top-level (display) name
   std::string physical_type; // from ColumnStats leaf

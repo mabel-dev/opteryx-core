@@ -183,9 +183,10 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
     """
     if telemetry is None:
         return
-    plans = getattr(nplan, "skene_scan_plans", None)
-    if not plans:
-        return
+    # NOTE: no early return on an empty `plans`. A parquet-only query has no
+    # skene plans at all, and the parquet fold at the bottom of this function
+    # still has work to do — returning here would silently drop it.
+    plans = getattr(nplan, "skene_scan_plans", None) or []
 
     # Query-wide physical read volume for skene, accumulated BEFORE the
     # native_scan_facts guard below: the facts dict is a per-node diagnostic and
@@ -237,6 +238,31 @@ def _fold_skene_scan_facts(nplan, telemetry) -> None:
         runtime_pruned = getattr(plan, "row_groups_pruned_at_runtime", None)
         if runtime_pruned is not None:
             entry["row_groups_pruned_runtime"] = runtime_pruned
+
+    # The parquet twin. Separate loop, not a shared one: the two plan types
+    # report DIFFERENT things at compile time. A skene scan's `row_groups_pruned`
+    # is unknown until the claim builder runs, so the fold above writes both
+    # halves. A parquet scan's plan-time pruning is already stamped into the facts
+    # by `_compile_scan` (splan.pruned_row_group_count is known before the run),
+    # so here we only ADD the runtime filter's marginal share and move that many
+    # row groups from the read column to the pruned column.
+    parquet_plans = getattr(nplan, "scan_plans", None)
+    for plan in parquet_plans or []:
+        identity = getattr(plan, "scan_identity", None)
+        if identity is None:
+            continue
+        runtime_pruned = getattr(plan, "runtime_pruned_row_groups", None)
+        if runtime_pruned is None:
+            # No bound was wired to this scan. Absent, not 0 — see above.
+            continue
+        entry = facts.get(identity)
+        if entry is None:
+            continue
+        entry["row_groups_pruned_runtime"] = runtime_pruned
+        entry["row_groups_pruned"] = entry.get("row_groups_pruned", 0) + runtime_pruned
+        entry["row_groups_read"] = max(
+            0, entry.get("row_groups_read", 0) - runtime_pruned
+        )
 
 
 def _and_conjuncts(node):
@@ -710,6 +736,13 @@ class _Compiler:
         # NOT shared with the CTE body compilers (unlike cte_buffers): a body's
         # pipelines belong to a different compile and must not be wired here.
         self.skene_scan_pipelines: dict = {}
+        # The parquet twin of skene_scan_pipelines: pipeline index -> (identity ->
+        # physical column name, NativeScanPlan). The barrier argument is the same
+        # one, and for the same reason: a probe leg with its own breaker, or one
+        # reading a shared CTE, sources from a BUFFER rather than from a scan, so
+        # it is simply absent from this map and refused. The NativeScanPlan rides
+        # along because the Source writes its marginal-prune counter into it.
+        self.parquet_scan_pipelines: dict = {}
         # Runtime min/max join filters: resolved ONCE per compile through the
         # variable chain (default -> env -> SET), not read from `config` at each
         # decision, so a `SET disable_runtime_minmax_join_filter` on this session
@@ -3983,6 +4016,20 @@ class _Compiler:
             # `_apply_to_scan`), so no downstream LimitOperator truncates. Pushdown
             # only fires with no pushed predicate and no OFFSET.
             self.nplan.set_native_scan_source(p, splan, getattr(scan, "limit", None))
+            # RUNTIME MIN/MAX JOIN FILTER (parquet): same record, same purpose and
+            # same refusal semantics as skene_scan_pipelines above. The projection
+            # is the right key set: a probe-side join key must be emitted by the
+            # scan for the join to read it, so a key that is not here is not a key
+            # this scan could serve. `sc.name` is the PHYSICAL (in-file) name —
+            # the same thing the latmat plan passes as `col_names`.
+            splan.scan_identity = scan.identity
+            self.parquet_scan_pipelines[p] = (
+                {
+                    col.schema_column.identity: col.schema_column.name
+                    for col in (scan.columns or [])
+                },
+                splan,
+            )
             self._remember_types(scan.columns)
             if reloc is None:
                 return p, [col.schema_column.identity for col in scan.columns]
@@ -5301,11 +5348,17 @@ class _Compiler:
 
         1. The mode emits probe rows only when they match (`_RUNTIME_BOUND_MODES`),
            and is not an existence-flag join (those keep every probe row).
-        2. The probe pipeline's SOURCE is a native skene scan. This single test
-           also excludes every case where the barrier does not hold: a probe leg
-           with its own breaker sources from a buffer, and a probe leg reading a
-           SHARED CTE sources from a buffer whose body already ran (CTE bodies are
-           compiled — and therefore run — before every join build).
+        2. The probe pipeline's SOURCE is a native skene scan OR a native parquet
+           scan. This single test also excludes every case where the barrier does
+           not hold: a probe leg with its own breaker sources from a buffer, and a
+           probe leg reading a SHARED CTE sources from a buffer whose body already
+           ran (CTE bodies are compiled — and therefore run — before every join
+           build). That argument is about what a pipeline's SOURCE is, not about
+           which format it reads, so it carries over to parquet unchanged.
+
+           The two-pass latmat sources (parquet and skene) are deliberately NOT
+           here: they are absent from both maps by construction, so they refuse
+           without needing a test.
         3. The probe key is a DIRECT column of that scan's read set. A coerced or
            computed key has no scanned column whose statistics could be tested.
         4. The two sides' types are comparable in draken's ordinal space.
@@ -5323,7 +5376,14 @@ class _Compiler:
             return 0
         if probe_pipeline <= build_pipeline:
             return 0
+        # Skene first, then parquet: a pipeline is in at most one of these maps
+        # (its source is one Source), so the order is presentation, not precedence.
         scan_columns = self.skene_scan_pipelines.get(probe_pipeline)
+        parquet_plan = None
+        if not scan_columns:
+            parquet_entry = self.parquet_scan_pipelines.get(probe_pipeline)
+            if parquet_entry is not None:
+                scan_columns, parquet_plan = parquet_entry
         if not scan_columns:
             return 0
         if len(build_keys) != len(probe_keys):
@@ -5337,7 +5397,11 @@ class _Compiler:
                 slots.append(-1)
                 continue
             bound_idx = self.nplan.new_runtime_bound()
-            self.nplan.add_skene_runtime_bound(probe_pipeline, bound_idx, physical)
+            if parquet_plan is None:
+                self.nplan.add_skene_runtime_bound(probe_pipeline, bound_idx, physical)
+            else:
+                self.nplan.add_parquet_runtime_bound(
+                    probe_pipeline, bound_idx, physical, parquet_plan)
             slots.append(bound_idx)
             wired += 1
         if wired == 0:

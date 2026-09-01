@@ -185,6 +185,17 @@ cdef class NativeScanPlan:
     # plan time. n_items is the SURVIVING (scanned) count; pruned + n_items ==
     # every row group in the projected files. 0 when no predicates are pushed.
     cdef int pruned_items
+    # Runtime min/max join filter: row groups the RUN-TIME bound excluded that
+    # plan-time pruning had not already dropped — the MARGINAL win, which is the
+    # only number worth reporting. -1 means no bound was wired for this scan, so
+    # "the filter did not fire here" stays distinguishable from "it fired and
+    # pruned nothing". Written once by the Source in make_global, on the driver
+    # thread, and read by Python only after the driver has finished.
+    cdef int64_t row_groups_pruned_runtime
+    # Which scan node this plan belongs to, so the post-run telemetry fold can
+    # attribute the Source's counters. Set by the compiler; None on a plan the
+    # compiler did not record (nothing to attribute).
+    cdef public object scan_identity
     cdef bint _closed
     cdef MemoryPool _pool
     # Wall time spent fetching/parsing footers not already in _PARSED_FOOTER_CACHE

@@ -181,8 +181,10 @@ _TRIGGER_EVENT_LEAD = re.compile(
 #
 # Suspension is expressed on the TRIGGER, unlike a materialized view's, which is
 # expressed on the view: a view owns its triggers and suspending some of them
-# would leave it refreshing from a subset of its sources. A task's triggers are
-# independent of each other, so pausing one is a coherent thing to want.
+# would leave it refreshing from a subset of its sources. A task has exactly one
+# trigger (the catalog's one-trigger rule - a task's window is one source's
+# version sequence), so suspending it is suspending the task's unattended runs
+# entirely; there is no subset to be left half-firing.
 _ALTER_TRIGGER_LEAD = re.compile(r"^\s*ALTER\s+TRIGGER\b", re.IGNORECASE)
 _ALTER_TRIGGER_RE = re.compile(
     r"^\s*ALTER\s+TRIGGER\s+(?P<name>[A-Za-z_][\w$]*)\s+ON\s+"
@@ -195,8 +197,9 @@ _ALTER_TRIGGER_RE = re.compile(
 # than the task because that is what distinguishes unattended from attended: a
 # person running `EXECUTE` runs it as themselves and answers for it, so nothing
 # needs pinning. A trigger fires with nobody present, so it must say whose
-# authority it carries - and one task fired by two triggers can legitimately run
-# as two different principals.
+# authority it carries. A task has one trigger, so that is one unattended
+# identity per task - the field lives on the trigger because that is where
+# "unattended" is decided, not because a task could have several.
 _ALTER_TRIGGER_OWNER_RE = re.compile(
     r"^\s*ALTER\s+TRIGGER\s+(?P<name>[A-Za-z_][\w$]*)\s+ON\s+"
     r"(?P<table>[A-Za-z_][\w.$]*)\s+OWNER\s+TO\s+(?P<owner>" + _PRINCIPAL_SLOT + r")\s*;?\s*$",

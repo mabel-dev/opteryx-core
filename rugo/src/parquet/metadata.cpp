@@ -1363,14 +1363,9 @@ FileStats ReadParquetMetadata(const std::string &path) {
 
 // ------------------- AggregateColumnStats -------------------
 //
-// E33: does this logical type mark the column UNSIGNED? Matches the innermost
-// "uint<width>" so a LIST leaf ("array<uint32>") is caught too — same rule as
-// decode_column.cpp's IntType detection and rugo.parquet.decode_value.
-static inline bool StatsLogicalIsUnsigned(const std::string &lt) {
-  size_t pos = lt.rfind("uint");
-  return pos != std::string::npos && pos + 4 < lt.size() &&
-         lt[pos + 4] >= '0' && lt[pos + 4] <= '9';
-}
+// StatsLogicalIsUnsigned now lives in metadata.hpp — the engine's
+// stat_bytes_to_ordinal needs the same rule, and two copies would let the
+// signedness decision drift between plan-time and runtime pruning.
 
 // Compare two raw-bytes statistics values for a given physical type.
 // Returns <0 if a < b, 0 if equal, >0 if a > b.

@@ -330,6 +330,114 @@ def test_information_schema_triggers_row_shape(catalog_workspace):
     assert row["created_at"] is not None
     assert row["last_fired_at"] is None
     assert row["last_fired_status"] is None
+    # A trigger nobody has suspended holds neither field, so the projection
+    # reads them off a document that does not have them at all.
+    assert row["suspended_at"] is None
+    assert row["suspended_by"] is None
+
+
+def test_information_schema_reports_a_suspended_trigger(catalog_workspace, monkeypatch):
+    """Suspension used to become visible only AFTER a write to the source, when
+    the refused fire stamped `last_fired_status: suspended`. On a quiet source a
+    paused trigger was indistinguishable from a healthy one, which is the whole
+    thing ALTER TRIGGER ... SUSPEND exists to be distinguishable from."""
+    monkeypatch.setattr(
+        catalog_workspace,
+        "list_triggers",
+        lambda self, identifier: (
+            [
+                {
+                    "name": "refresh__coll1__mv",
+                    "kind": "materialized_view_refresh",
+                    "target-view": "coll1.mv",
+                    "created-by": "olive",
+                    "created-at-ms": _NOW_MS,
+                    "suspended-at-ms": _NOW_MS,
+                    "suspended-by": "justin",
+                    # Never fired since - the point of the row is that this
+                    # says nothing about whether it is running.
+                    "last-fired-at-ms": None,
+                    "last-fired-status": None,
+                }
+            ]
+            if identifier == "coll1.src"
+            else []
+        ),
+    )
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    rows = _morsels_to_rows(
+        session.execute_to_morsels("SELECT * FROM cat.information_schema.triggers")
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert isinstance(row["suspended_at"], datetime.datetime)
+    assert row["suspended_at"].year == 2025
+    assert row["suspended_by"] == "justin"
+    assert row["last_fired_status"] is None
+
+
+def test_information_schema_resumed_trigger_reports_no_suspension(
+    catalog_workspace, monkeypatch
+):
+    """RESUME clears both fields to None rather than deleting them, so the
+    projection must read a present-but-null field as "running" - not carry the
+    stamp of the suspension it came out of."""
+    monkeypatch.setattr(
+        catalog_workspace,
+        "list_triggers",
+        lambda self, identifier: (
+            [
+                {
+                    "name": "refresh__coll1__mv",
+                    "kind": "materialized_view_refresh",
+                    "target-view": "coll1.mv",
+                    "created-by": "olive",
+                    "created-at-ms": _NOW_MS,
+                    "suspended-at-ms": None,
+                    "suspended-by": None,
+                }
+            ]
+            if identifier == "coll1.src"
+            else []
+        ),
+    )
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    rows = _morsels_to_rows(
+        session.execute_to_morsels("SELECT * FROM cat.information_schema.triggers")
+    )
+
+    assert rows[0]["suspended_at"] is None
+    assert rows[0]["suspended_by"] is None
+
+
+def test_information_schema_triggers_filters_on_suspension(catalog_workspace, monkeypatch):
+    """suspended_at is not a pushable key column - it is known only once the
+    per-dataset listing has been read - so the predicate stays an ordinary
+    Filter downstream. It still has to WORK, and the pushdown layer must not
+    have quietly accepted and dropped it."""
+    monkeypatch.setattr(
+        catalog_workspace,
+        "list_triggers",
+        lambda self, identifier: (
+            [
+                {"name": "paused", "kind": "task", "target-task": "cat.coll1.a",
+                 "suspended-at-ms": _NOW_MS, "suspended-by": "justin"},
+                {"name": "running", "kind": "task", "target-task": "cat.coll1.b"},
+            ]
+            if identifier == "coll1.src"
+            else []
+        ),
+    )
+    session = opteryx.session(user="alice", access_policies=_OWNER_POLICY)
+    rows = _morsels_to_rows(
+        session.execute_to_morsels(
+            "SELECT trigger_name FROM cat.information_schema.triggers "
+            "WHERE suspended_at IS NOT NULL"
+        )
+    )
+
+    assert [r["trigger_name"] for r in rows] == ["paused"]
 
 
 def test_information_schema_reports_what_a_task_trigger_runs(catalog_workspace, monkeypatch):

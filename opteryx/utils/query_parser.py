@@ -247,6 +247,104 @@ def _extract_table_name(name_parts: List[Dict[str, Any]]) -> Optional[str]:
     return ".".join(parts) if parts else None
 
 
+# Where a statement names the relation whose CONTENTS it writes, as distinct
+# from the relations it reads. Each value is the path through the statement body
+# to an identifier-part list.
+#
+# `CreateTable` covers CTAS and a bare CREATE TABLE alike: both make the
+# relation, and a reader asking "what does this write" wants the same answer for
+# either. DELETE and TRUNCATE name theirs in shapes a fixed path cannot reach,
+# and are read out in `extract_write_targets` itself.
+#
+# DDL that changes a relation's DEFINITION rather than its contents - DROP,
+# ALTER TABLE, CREATE VIEW - is deliberately ABSENT. Those are owner-tier acts,
+# and a caller gating on this map checks WRITE, so listing one here would answer
+# an ownership question with a write grant. They are also not pipeline edges:
+# nothing downstream reads rows that a DROP produced.
+_WRITE_TARGET_PATHS = {
+    "Insert": ("table", "TableName"),
+    "CreateTable": ("name",),
+    "Update": ("table", "relation", "Table", "name"),
+    "Merge": ("table", "Table", "name"),
+}
+
+
+def _relation_node_name(node: Any) -> Optional[str]:
+    """The name out of a `{"Table": {"name": [...]}}` relation node, or None."""
+    if not isinstance(node, dict):
+        return None
+    table = node.get("Table")
+    if not isinstance(table, dict):
+        return None
+    return _extract_table_name(table.get("name"))
+
+
+def extract_write_targets(ast: Dict[str, Any]) -> List[str]:
+    """Every relation whose CONTENTS a statement writes, in sorted order.
+
+    The counterpart to `_extract_tables_from_ast`, which reports everything a
+    statement touches without saying in which direction. Callers that must tell
+    a read from a write - the authoring bound on CREATE TASK, and the `writes`
+    recorded on a task so a pipeline can be followed through it - need the
+    split, because a source needs only READ while a target needs WRITE.
+
+    A list rather than a single name: TRUNCATE takes several tables, and every
+    other form takes exactly one, so returning a list means a caller never has
+    two shapes to handle. An empty list means the statement writes no relation
+    contents - a SELECT, or DDL (see `_WRITE_TARGET_PATHS`).
+
+    The target is always a static identifier. A parameterised one is not
+    representable: placeholders are excluded from identifier slots, so
+    `INSERT INTO :table` is a parse error rather than a name this cannot settle.
+    """
+    statement_type = next(iter(ast), None)
+    body = ast.get(statement_type)
+    if not isinstance(body, dict):
+        return []
+
+    targets: Set[str] = set()
+
+    if statement_type == "Truncate":
+        for entry in body.get("table_names") or []:
+            if isinstance(entry, dict):
+                name = _extract_table_name(entry.get("name"))
+                if name:
+                    targets.add(name)
+        return sorted(targets)
+
+    if statement_type == "Delete":
+        # The parser wraps the FROM clause in a key naming whether the keyword
+        # was written (`DELETE FROM t` / `DELETE t`), so the relations are taken
+        # from whichever list is there rather than from a key spelled out here.
+        from_clause = body.get("from")
+        entries: List[Any] = []
+        if isinstance(from_clause, dict):
+            for value in from_clause.values():
+                if isinstance(value, list):
+                    entries.extend(value)
+        elif isinstance(from_clause, list):
+            entries = list(from_clause)
+        for entry in entries:
+            if isinstance(entry, dict):
+                name = _relation_node_name(entry.get("relation"))
+                if name:
+                    targets.add(name)
+        return sorted(targets)
+
+    path = _WRITE_TARGET_PATHS.get(statement_type)
+    if path is None:
+        return []
+
+    node: Any = body
+    for step in path:
+        if not isinstance(node, dict):
+            return []
+        node = node.get(step)
+
+    name = _extract_table_name(node)
+    return [name] if name else []
+
+
 def _extract_placeholders(node: Any) -> Set[str]:
     """
     Recursively walk a parsed AST (or any sub-node of one) collecting the

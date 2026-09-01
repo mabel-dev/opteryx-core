@@ -5375,6 +5375,15 @@ def _execute_argument_value(expr: dict, argument_name: str):
     )
 
 
+# The two names a trigger-fired run binds - `_fire_task` writes
+# `USING <parent> AS parent_version, <current> AS current_version` - and
+# therefore the names by which a recorded statement declares itself WINDOWED. A
+# task that reads either one processes the delta of one commit rather than
+# rescanning, which is why running it by hand without saying which delta is
+# refused below rather than defaulted.
+WINDOW_PARAMETERS = frozenset({"parent_version", "current_version"})
+
+
 def _placeholder_sites(node, in_version_of=False, relation=None, sites=None):
     """Where each `:name` placeholder sits in a parsed statement.
 
@@ -5589,6 +5598,27 @@ def plan_execute(statement, **kwargs):
             f"the recorded statement of task {relation_name} is not a single "
             "statement; it cannot be executed."
         )
+
+    # A WINDOWED task run by hand must say which window. There is no default,
+    # and specifically not (mark, head): the unattended window is bound from the
+    # commit that fired the task, and a hand-run that quietly took "everything
+    # since the last success" would be an unlogged catch-up - it consumes ground
+    # the next triggered run then skips as superseded, or widens over, with
+    # nothing recording that a person took it. The names it wants are the names
+    # its own statement uses, so they are read back out and quoted.
+    if not arguments:
+        wanted = sorted(WINDOW_PARAMETERS.intersection(_placeholder_sites(parsed[0])))
+        if wanted:
+            raise UnsupportedSyntaxError(
+                f"task {relation_name} consumes a window ("
+                + ", ".join(f"`:{name}`" for name in wanted)
+                + ") and no **USING** was given. There is no default window - an "
+                "unattended run binds one from the commit that fired it, and "
+                "guessing one here would make a hand-run a catch-up nothing "
+                f"recorded. Name it: **EXECUTE** {relation_name} **USING** "
+                + ", ".join(f"<value> **AS** {name}" for name in wanted)
+                + "."
+            )
 
     if any(isinstance(v, _SymbolicVersion) for v in arguments.values()):
         arguments = _resolve_symbolic_versions(parsed[0], arguments)
@@ -6082,8 +6112,8 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
     """
     from opteryx.exceptions import UnsupportedSyntaxError
     from opteryx.third_party import sqloxide
-    from opteryx.utils.query_parser import _extract_table_name
     from opteryx.utils.query_parser import _extract_tables_from_ast
+    from opteryx.utils.query_parser import extract_write_targets
 
     root = "CreateTask"
     task_sql = statement[root]["statement"]
@@ -6120,15 +6150,17 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
     # `_CREATE_TASK_RE` for why it is declared rather than derived.
     node.on_table = statement[root].get("on_table")
 
-    # Where it writes, separated from what it reads: the target needs WRITE and
-    # the sources need only READ, so folding them together would demand read
-    # access on a table a write-only grant covers.
-    target = None
-    body = inner.get(inner_root)
-    if isinstance(body, dict) and isinstance(body.get("table"), dict):
-        target = _extract_table_name(body["table"].get("TableName") or [])
-    node.target_table = target
-    node.source_tables = [r for r in _extract_tables_from_ast(inner) if r != target]
+    # Where it writes, separated from what it reads: a target needs WRITE and the
+    # sources need only READ, so folding them together would demand read access
+    # on a table a write-only grant covers.
+    #
+    # This is also what the task RECORDS as its `writes`, which is what lets a
+    # pipeline be followed through a task rather than ending at it. Derived here
+    # rather than declared, so it cannot disagree with the statement: a
+    # `CREATE OR REPLACE` that repoints the task re-derives it in the same breath.
+    targets = extract_write_targets(inner)
+    node.target_tables = targets
+    node.source_tables = [r for r in _extract_tables_from_ast(inner) if r not in targets]
 
     plan = LogicalPlan()
     plan.add_node(random_string(), node)

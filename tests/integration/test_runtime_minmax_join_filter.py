@@ -11,6 +11,14 @@ before its probe side starts, so the OBSERVED ordinal range of the build keys ca
 be handed to the probe scan's row-group zone map and row groups that provably hold
 no matching row are never read.
 
+Every test here runs against BOTH storage formats — the skene mirror and the
+parquet source of the same TPC-DS data. They share the eligibility rules, the
+bound slots and the join-side capture, but nothing else: skene resolves a bound
+into two extra zone-map terms its claim builder already knows how to evaluate,
+whereas parquet converts each row group's raw statistic BYTES into draken's
+ordinal space and drops work items in the Source's make_global. A bug in either
+consumer is invisible from the other side.
+
 The filter is PURE PRUNING: turning it off can only make a query read more, never
 change what it returns. This file is what holds that claim up, and it does so in
 three independent ways, because each catches a different class of failure:
@@ -46,97 +54,113 @@ import pytest
 import opteryx
 
 DS = "testdata.tpcds_1_skene."
+# The SAME data as parquet. Both formats are exercised by every test below,
+# because the two scans consume the bound through completely different
+# machinery: skene folds it into its row-group zone map as two extra terms,
+# parquet drops work items in the Source's make_global (there is no shared
+# zone-map machinery on that path). A bug in one is invisible from the other.
+DS_PARQUET = "testdata.tpcds_1."
+DATASETS = (DS, DS_PARQUET)
 
-# Shapes that MUST be answered identically with the filter on and off. A mix of
-# eligible and refused modes on purpose: the refused ones are here to prove the
-# refusal does not itself change an answer.
-# fmt:off
-ORACLE_STATEMENTS = [
-    # --- eligible: INNER on a clustered key with a genuinely narrow build range.
-    # This is the shape the feature exists for (TPC-DS Q21's join).
-    f"SELECT SUM(inv_quantity_on_hand) q, COUNT(*) c "
-    f"FROM {DS}inventory, {DS}date_dim "
-    f"WHERE inv_date_sk = d_date_sk AND d_year = 2001 AND d_moy = 1",
 
-    # --- eligible: the same join emitting real rows, not just an aggregate, so a
-    # dropped row group cannot hide inside a sum.
-    f"SELECT inv_item_sk, inv_warehouse_sk, inv_quantity_on_hand, d_date "
-    f"FROM {DS}inventory, {DS}date_dim "
-    f"WHERE inv_date_sk = d_date_sk AND d_date = CAST('2001-03-14' AS DATE) "
-    f"ORDER BY inv_item_sk, inv_warehouse_sk LIMIT 200",
+def _oracle_statements(ds):
 
-    # --- eligible: SEMI (IN a subquery).
-    f"SELECT COUNT(*) c FROM {DS}inventory WHERE inv_date_sk IN "
-    f"(SELECT d_date_sk FROM {DS}date_dim WHERE d_year = 2000 AND d_moy = 1)",
+    # Shapes that MUST be answered identically with the filter on and off. A mix of
+    # eligible and refused modes on purpose: the refused ones are here to prove the
+    # refusal does not itself change an answer.
+    # fmt:off
+    return [
+        # --- eligible: INNER on a clustered key with a genuinely narrow build range.
+        # This is the shape the feature exists for (TPC-DS Q21's join).
+        f"SELECT SUM(inv_quantity_on_hand) q, COUNT(*) c "
+        f"FROM {ds}inventory, {ds}date_dim "
+        f"WHERE inv_date_sk = d_date_sk AND d_year = 2001 AND d_moy = 1",
 
-    # --- eligible: SEMI (EXISTS).
-    f"SELECT COUNT(*) c FROM {DS}catalog_sales cs WHERE EXISTS "
-    f"(SELECT 1 FROM {DS}date_dim WHERE d_date_sk = cs.cs_sold_date_sk AND d_year = 1999)",
+        # --- eligible: the same join emitting real rows, not just an aggregate, so a
+        # dropped row group cannot hide inside a sum.
+        f"SELECT inv_item_sk, inv_warehouse_sk, inv_quantity_on_hand, d_date "
+        f"FROM {ds}inventory, {ds}date_dim "
+        f"WHERE inv_date_sk = d_date_sk AND d_date = CAST('2001-03-14' AS DATE) "
+        f"ORDER BY inv_item_sk, inv_warehouse_sk LIMIT 200",
 
-    # --- eligible, but the bound is USELESS: the build side spans the whole key
-    # range. Must still be exactly right, and is the case that proves a wide
-    # bound degrades to "prune nothing" rather than to "prune wrongly".
-    f"SELECT COUNT(*) c FROM {DS}inventory, {DS}date_dim "
-    f"WHERE inv_date_sk = d_date_sk",
+        # --- eligible: SEMI (IN a subquery).
+        f"SELECT COUNT(*) c FROM {ds}inventory WHERE inv_date_sk IN "
+        f"(SELECT d_date_sk FROM {ds}date_dim WHERE d_year = 2000 AND d_moy = 1)",
 
-    # --- eligible: the build side is EMPTY. An unfilled bound must prune nothing
-    # and the join must still produce the empty answer by itself.
-    f"SELECT COUNT(*) c FROM {DS}inventory, {DS}date_dim "
-    f"WHERE inv_date_sk = d_date_sk AND d_year = 9999",
+        # --- eligible: SEMI (EXISTS).
+        f"SELECT COUNT(*) c FROM {ds}catalog_sales cs WHERE EXISTS "
+        f"(SELECT 1 FROM {ds}date_dim WHERE d_date_sk = cs.cs_sold_date_sk AND d_year = 1999)",
 
-    # --- eligible: a VARCHAR key, whose ordinal is a LOSSY 8-byte prefix. Sound
-    # because the mapping is monotone and equal values share an ordinal, but it is
-    # the type most likely to expose a broken bound.
-    f"SELECT COUNT(*) c FROM {DS}item, {DS}item i2 "
-    f"WHERE item.i_category = i2.i_category AND i2.i_category = 'Music'",
+        # --- eligible, but the bound is USELESS: the build side spans the whole key
+        # range. Must still be exactly right, and is the case that proves a wide
+        # bound degrades to "prune nothing" rather than to "prune wrongly".
+        f"SELECT COUNT(*) c FROM {ds}inventory, {ds}date_dim "
+        f"WHERE inv_date_sk = d_date_sk",
 
-    # --- eligible: NULL keys on the PROBE side. cs_sold_date_sk carries nulls;
-    # skene's statistics are over non-null values, and a null key can never
-    # equi-match, so pruning must be unaffected by them.
-    f"SELECT COUNT(*) c FROM {DS}catalog_sales, {DS}date_dim "
-    f"WHERE cs_sold_date_sk = d_date_sk AND d_year = 2000",
+        # --- eligible: the build side is EMPTY. An unfilled bound must prune nothing
+        # and the join must still produce the empty answer by itself.
+        f"SELECT COUNT(*) c FROM {ds}inventory, {ds}date_dim "
+        f"WHERE inv_date_sk = d_date_sk AND d_year = 9999",
 
-    # --- refused modes. Present so a refusal cannot silently change an answer.
-    f"SELECT COUNT(*) c FROM {DS}inventory LEFT OUTER JOIN {DS}date_dim "
-    f"ON inv_date_sk = d_date_sk AND d_year = 2001",
-    f"SELECT COUNT(*) c FROM {DS}inventory WHERE inv_date_sk NOT IN "
-    f"(SELECT d_date_sk FROM {DS}date_dim WHERE d_year = 2001)",
-    f"SELECT COUNT(*) c FROM {DS}inventory i WHERE NOT EXISTS "
-    f"(SELECT 1 FROM {DS}date_dim WHERE d_date_sk = i.inv_date_sk AND d_year = 2001)",
-]
+        # --- eligible: a VARCHAR key, whose ordinal is a LOSSY 8-byte prefix. Sound
+        # because the mapping is monotone and equal values share an ordinal, but it is
+        # the type most likely to expose a broken bound.
+        f"SELECT COUNT(*) c FROM {ds}item, {ds}item i2 "
+        f"WHERE item.i_category = i2.i_category AND i2.i_category = 'Music'",
 
-# (statement, expected_bounds_wired). The mode allow-list, asserted directly.
-# A shape that refuses must arm ZERO bounds — not "arm one that prunes nothing".
-MODE_EXPECTATIONS = [
-    # INNER and SEMI arm. One bound each: a single-column equi key.
-    (f"SELECT COUNT(*) c FROM {DS}inventory, {DS}date_dim "
-     f"WHERE inv_date_sk = d_date_sk AND d_year = 2001", 1),
-    (f"SELECT COUNT(*) c FROM {DS}inventory WHERE inv_date_sk IN "
-     f"(SELECT d_date_sk FROM {DS}date_dim WHERE d_year = 2001)", 1),
-    # LEFT OUTER: the probe leg is the PRESERVED side.
-    (f"SELECT COUNT(*) c FROM {DS}inventory LEFT OUTER JOIN {DS}date_dim "
-     f"ON inv_date_sk = d_date_sk AND d_year = 2001", 0),
-    # FULL OUTER: both sides preserved.
-    (f"SELECT COUNT(*) c FROM {DS}inventory FULL OUTER JOIN {DS}date_dim "
-     f"ON inv_date_sk = d_date_sk", 0),
-    # NOT IN — null-aware ANTI. Emits exactly the probe rows a bound would prune.
-    (f"SELECT COUNT(*) c FROM {DS}inventory WHERE inv_date_sk NOT IN "
-     f"(SELECT d_date_sk FROM {DS}date_dim WHERE d_year = 2001)", 0),
-    # NOT EXISTS — plain ANTI. Same reason.
-    (f"SELECT COUNT(*) c FROM {DS}inventory i WHERE NOT EXISTS "
-     f"(SELECT 1 FROM {DS}date_dim WHERE d_date_sk = i.inv_date_sk AND d_year = 2001)", 0),
-    # EXCEPT / INTERSECT — the not-distinct key rule: NULL is a matchable VALUE,
-    # and skene's min/max are over NON-NULL values, so a row group outside the
-    # bound can still hold NULL rows that match.
-    (f"SELECT d_date_sk FROM {DS}date_dim EXCEPT SELECT inv_date_sk FROM {DS}inventory", 0),
-    (f"SELECT d_date_sk FROM {DS}date_dim INTERSECT SELECT inv_date_sk FROM {DS}inventory", 0),
-    # Projected IN — the existence-FLAG mode. It reuses SEMI's key rule but emits
-    # every probe row with a verdict appended, so a bound would delete rows that
-    # should have come back FALSE.
-    (f"SELECT inv_date_sk IN (SELECT d_date_sk FROM {DS}date_dim WHERE d_year = 2001) f "
-     f"FROM {DS}inventory LIMIT 10", 0),
-]
-# fmt:on
+        # --- eligible: NULL keys on the PROBE side. cs_sold_date_sk carries nulls;
+        # skene's statistics are over non-null values, and a null key can never
+        # equi-match, so pruning must be unaffected by them.
+        f"SELECT COUNT(*) c FROM {ds}catalog_sales, {ds}date_dim "
+        f"WHERE cs_sold_date_sk = d_date_sk AND d_year = 2000",
+
+        # --- refused modes. Present so a refusal cannot silently change an answer.
+        f"SELECT COUNT(*) c FROM {ds}inventory LEFT OUTER JOIN {ds}date_dim "
+        f"ON inv_date_sk = d_date_sk AND d_year = 2001",
+        f"SELECT COUNT(*) c FROM {ds}inventory WHERE inv_date_sk NOT IN "
+        f"(SELECT d_date_sk FROM {ds}date_dim WHERE d_year = 2001)",
+        f"SELECT COUNT(*) c FROM {ds}inventory i WHERE NOT EXISTS "
+        f"(SELECT 1 FROM {ds}date_dim WHERE d_date_sk = i.inv_date_sk AND d_year = 2001)",
+    ]
+
+
+def _mode_expectations(ds):
+    # (statement, expected_bounds_wired). The mode allow-list, asserted directly.
+    # A shape that refuses must arm ZERO bounds — not "arm one that prunes nothing".
+    return [
+        # INNER and SEMI arm. One bound each: a single-column equi key.
+        (f"SELECT COUNT(*) c FROM {ds}inventory, {ds}date_dim "
+         f"WHERE inv_date_sk = d_date_sk AND d_year = 2001", 1),
+        (f"SELECT COUNT(*) c FROM {ds}inventory WHERE inv_date_sk IN "
+         f"(SELECT d_date_sk FROM {ds}date_dim WHERE d_year = 2001)", 1),
+        # LEFT OUTER: the probe leg is the PRESERVED side.
+        (f"SELECT COUNT(*) c FROM {ds}inventory LEFT OUTER JOIN {ds}date_dim "
+         f"ON inv_date_sk = d_date_sk AND d_year = 2001", 0),
+        # FULL OUTER: both sides preserved.
+        (f"SELECT COUNT(*) c FROM {ds}inventory FULL OUTER JOIN {ds}date_dim "
+         f"ON inv_date_sk = d_date_sk", 0),
+        # NOT IN — null-aware ANTI. Emits exactly the probe rows a bound would prune.
+        (f"SELECT COUNT(*) c FROM {ds}inventory WHERE inv_date_sk NOT IN "
+         f"(SELECT d_date_sk FROM {ds}date_dim WHERE d_year = 2001)", 0),
+        # NOT EXISTS — plain ANTI. Same reason.
+        (f"SELECT COUNT(*) c FROM {ds}inventory i WHERE NOT EXISTS "
+         f"(SELECT 1 FROM {ds}date_dim WHERE d_date_sk = i.inv_date_sk AND d_year = 2001)", 0),
+        # EXCEPT / INTERSECT — the not-distinct key rule: NULL is a matchable VALUE,
+        # and skene's min/max are over NON-NULL values, so a row group outside the
+        # bound can still hold NULL rows that match.
+        (f"SELECT d_date_sk FROM {ds}date_dim EXCEPT SELECT inv_date_sk FROM {ds}inventory", 0),
+        (f"SELECT d_date_sk FROM {ds}date_dim INTERSECT SELECT inv_date_sk FROM {ds}inventory", 0),
+        # Projected IN — the existence-FLAG mode. It reuses SEMI's key rule but emits
+        # every probe row with a verdict appended, so a bound would delete rows that
+        # should have come back FALSE.
+        (f"SELECT inv_date_sk IN (SELECT d_date_sk FROM {ds}date_dim WHERE d_year = 2001) f "
+         f"FROM {ds}inventory LIMIT 10", 0),
+    ]
+    # fmt:on
+
+
+ORACLE_STATEMENTS = [stmt for ds in DATASETS for stmt in _oracle_statements(ds)]
+MODE_EXPECTATIONS = [pair for ds in DATASETS for pair in _mode_expectations(ds)]
 
 
 def _run_with_filter(sql, enabled):
@@ -193,14 +217,22 @@ def test_refused_for_unsound_modes(statement, expected):
         )
 
 
-def test_positive_control_fires_and_prunes():
+@pytest.mark.parametrize("ds", DATASETS)
+def test_positive_control_fires_and_prunes(ds):
     """The feature must actually skip row groups on the shape it exists for.
 
     Without this, both tests above would pass with the filter doing nothing.
     `inv_date_sk` is clustered (mean row-group range ~2% of the column's span)
-    and one month of `date_dim` is a narrow contiguous window of it."""
+    and one month of `date_dim` is a narrow contiguous window of it.
+
+    Run for BOTH formats. The parquet arm is not a formality: skene resolves the
+    bound into zone-map terms that its existing claim builder evaluates, while
+    parquet converts each row group's raw stat BYTES into draken's ordinal space
+    (stat_bytes_to_ordinal) and drops work items. The signedness and
+    short-buffer handling in that conversion have no skene counterpart to fail
+    alongside them."""
     statement = (
-        f"SELECT COUNT(*) c FROM {DS}inventory, {DS}date_dim "
+        f"SELECT COUNT(*) c FROM {ds}inventory, {ds}date_dim "
         f"WHERE inv_date_sk = d_date_sk AND d_year = 2000 AND d_moy = 1"
     )
     _, off = _run_with_filter(statement, False)

@@ -417,6 +417,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         statement: str,
         author: Optional[str] = None,
         or_replace: bool = False,
+        writes: Optional[List[str]] = None,
     ) -> None:
         self.assert_name_free(relation_name, "task")
         task_path = self._task_path(relation_name)
@@ -430,7 +431,14 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         with open(task_path, "w") as f:
             # No `runs-as`: a task carries no identity. EXECUTE runs it as the
             # invoker, and an unattended run carries the TRIGGER's owner.
-            json.dump({"sql": statement, "author": author}, f)
+            #
+            # `writes` is written from the incoming statement every time rather
+            # than carried from `existing`: it describes THIS statement, so a
+            # replacement that no longer writes must not inherit a target it no
+            # longer has.
+            json.dump(
+                {"sql": statement, "author": author, "writes": list(writes or [])}, f
+            )
 
     def _rewrite_task(self, relation_name: str, **fields) -> None:
         task_path = self._task_path(relation_name)

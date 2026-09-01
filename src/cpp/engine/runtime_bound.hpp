@@ -24,6 +24,8 @@
 // and it belongs in the join, not in the scan.)
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace opteryx::engine {
 
@@ -31,6 +33,24 @@ struct RuntimeKeyBound {
     int64_t lo = 0;
     int64_t hi = 0;
     uint8_t valid = 0;   // 0 = unusable -> prunes nothing
+};
+
+// The per-scan collection of bounds, appended at PLAN time (after the Source was
+// constructed — the probe scan is compiled before the join that supplies the
+// bound has finished wiring) and read at RUN time in the scan's make_global /
+// first-worker init, by which point Engine::run() has published the values.
+//
+// Lives here rather than in either scan's header because both consumers need the
+// identical shape: two copies would be free to drift in what "parallel" means.
+// Owned by the Source (not borrowed): a handful of strings and pointers, empty
+// for every scan the compiler did not find eligible, which is the overwhelming
+// majority.
+struct RuntimeBoundSet {
+    std::vector<std::string>            columns;   // physical (in-file) names
+    std::vector<const RuntimeKeyBound*> bounds;    // parallel; engine-owned
+
+    bool empty() const { return columns.empty(); }
+    size_t size() const { return columns.size(); }
 };
 
 }  // namespace opteryx::engine

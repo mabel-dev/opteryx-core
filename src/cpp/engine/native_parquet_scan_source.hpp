@@ -102,6 +102,8 @@
 #include "scan_tel.hpp"           // scan_tel::str_* — shape the ENGINE receives
 #include "io_pipeline.hpp"        // rugo::ParquetIOPipeline, MorselRef, ColumnOut, DK_*
 #include "metadata.hpp"           // FileStats, RowGroupStats, ColumnStats
+#include "runtime_bound.hpp"       // RuntimeKeyBound — runtime min/max join filter
+#include "parquet_stat_ordinal.hpp"  // stat_bytes_to_ordinal — footer stats -> draken ordinal
 #include "core/vector_alloc.h"    // draken_vector_from_dense / draken_vector_from_dict
 #include "core/vector_owner.h"    // VectorOwner, OwnedBuffer
 #include "memory_pool.hpp"        // opteryx::MemoryPool
@@ -613,9 +615,25 @@ struct NativeParquetScanGlobal : GlobalSourceState {
     // decision and the submit decision must see one consistent view.
     int64_t rows_emitted = 0;
     // R2: work-item frontier beyond which no row group can contribute to the
-    // LIMIT (computed once from the footer row counts; == work_items->size()
+    // LIMIT (computed once from the footer row counts; == kept.size()
     // when unlimited). Read-only after make_global.
     int submit_cap = 0;
+    // Runtime min/max join filter: indices into `work_items` that survived the
+    // bound, in work-item order. EMPTY means "no bound was applied" and the
+    // scan indexes `work_items` directly — byte-for-byte the pre-feature path,
+    // and distinct from "the bound pruned everything", which is a kept list of
+    // size 0 with `pruned_applied` set. Read-only after make_global.
+    std::vector<int> kept;
+    bool pruned_applied = false;
+
+    // Work-item index for the i-th submittable unit.
+    int item_index(int i) const {
+        return pruned_applied ? kept[static_cast<size_t>(i)] : i;
+    }
+    int item_count(size_t n_work_items) const {
+        return pruned_applied ? static_cast<int>(kept.size())
+                              : static_cast<int>(n_work_items);
+    }
 };
 
 struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
@@ -646,6 +664,31 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // is equally order-nondeterministic at dop>1 (concurrent `_single_pass_next`
     // pulls commit under `_scan_mtx` in completion order, not file order).
     int64_t row_limit;
+
+    // Runtime min/max join filter — OWNED, appended at plan time by
+    // add_runtime_bound below, AFTER this Source was constructed (the probe scan
+    // is compiled before the join that supplies the bound is finished wiring).
+    // Empty for every scan the compiler did not find eligible.
+    RuntimeBoundSet runtime_;
+    // Marginal row groups the runtime bound excluded that plan-time pruning had
+    // not already dropped. Borrowed from the NativeScanPlan, which outlives the
+    // run; written exactly once, in make_global, on the driver thread. Left at
+    // its -1 sentinel when no bound was wired, so "the filter did not fire here"
+    // stays distinguishable from "it fired and pruned nothing" — the design note
+    // is explicit that an absent win must read as "the layout does not support
+    // it", not as "the filter is broken".
+    int64_t* row_groups_pruned_runtime_ = nullptr;
+
+    // Plan-time only, on the compiler's thread, before run() is entered. `bound`
+    // is an engine-owned RuntimeKeyBound slot whose address is stable for the
+    // query; it may still be unfilled at this point (it is filled when the build
+    // pipeline completes) and an unfilled bound contributes no term.
+    void add_runtime_bound(std::string physical_column, const RuntimeKeyBound* bound) {
+        runtime_.columns.push_back(std::move(physical_column));
+        runtime_.bounds.push_back(bound);
+    }
+
+    void set_runtime_pruned_counter(int64_t* slot) { row_groups_pruned_runtime_ = slot; }
 
     NativeParquetScanSource(rugo::ParquetIOPipeline* pipeline_,
                             const std::unordered_map<std::string, FileStats>* footer_map_,
@@ -683,16 +726,21 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
     // in before the first morsel is emitted — measured 31 row groups for a
     // LIMIT 5 over tpch_1.lineitem. Capping the frontier here reads exactly the
     // one row group that can actually contribute.
-    int limit_submit_cap() const {
-        const int n_items = static_cast<int>(work_items->size());
+    // Runs AFTER the runtime bound has pruned, over the surviving units, because
+    // the two interact: a row group the bound removed cannot contribute rows to
+    // the LIMIT, so counting it here would cap the frontier too early and the
+    // scan would return fewer rows than the LIMIT asked for.
+    int limit_submit_cap(const NativeParquetScanGlobal& g) const {
+        const int n_items = g.item_count(work_items->size());
         if (row_limit < 0 || footer_map == nullptr) return n_items;
         int64_t cumulative = 0;
         for (int i = 0; i < n_items; ++i) {
-            auto fit = footer_map->find((*work_items)[i].first);
+            const int w = g.item_index(i);
+            auto fit = footer_map->find((*work_items)[w].first);
             // A path we cannot resolve here is not a place to guess — fall back to
             // the unbounded frontier and let submit_one fail loud on it.
             if (fit == footer_map->end()) return n_items;
-            const size_t rg_idx = static_cast<size_t>((*work_items)[i].second);
+            const size_t rg_idx = static_cast<size_t>((*work_items)[w].second);
             if (rg_idx >= fit->second.row_groups.size()) return n_items;
             cumulative += fit->second.row_groups[rg_idx].num_rows;
             if (cumulative >= row_limit) return i + 1;
@@ -702,11 +750,78 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
 
     std::unique_ptr<GlobalSourceState> make_global() override {
         auto g = std::make_unique<NativeParquetScanGlobal>();
-        // Computed once, before any worker runs (make_global is called on the
-        // driver thread ahead of the fan-out), so get_morsel never re-walks the
-        // work list under its lock.
-        g->submit_cap = limit_submit_cap();
+        // Both computed once, before any worker runs (make_global is called on
+        // the driver thread ahead of the fan-out), so get_morsel never re-walks
+        // the work list under its lock.
+        //
+        // ORDER MATTERS: prune first, cap second — see limit_submit_cap.
+        //
+        // This is also the point the whole runtime-bound feature rests on: the
+        // driver reaches make_global for the PROBE pipeline only after the build
+        // pipeline has completed and Engine::run() has published the bound, so
+        // every bound this reads is either filled or honestly invalid.
+        apply_runtime_bounds(*g);
+        g->submit_cap = limit_submit_cap(*g);
         return g;
+    }
+
+    // Drop work items whose row-group statistics prove the bound cannot match.
+    //
+    // Every step fails OPEN — an unresolvable path, a missing statistic, a type
+    // outside stat_bytes_to_ordinal's set, or an unfilled bound all keep the row
+    // group. `valid == 0` means PRUNES NOTHING (runtime_bound.hpp), never
+    // "prunes everything", and the same posture applies to every other reason we
+    // cannot decide. A bound we cannot evaluate costs a read; a bound we
+    // evaluate wrongly costs an answer.
+    void apply_runtime_bounds(NativeParquetScanGlobal& g) const {
+        if (runtime_.empty() || footer_map == nullptr) return;
+        // Resolve the usable bounds once, outside the row-group loop.
+        std::vector<const std::string*> cols;
+        std::vector<const RuntimeKeyBound*> bounds;
+        for (size_t b = 0; b < runtime_.size(); ++b) {
+            const RuntimeKeyBound* bound = runtime_.bounds[b];
+            if (bound == nullptr || bound->valid == 0) continue;
+            cols.push_back(&runtime_.columns[b]);
+            bounds.push_back(bound);
+        }
+        if (cols.empty()) return;   // armed but nothing filled — pre-feature path
+
+        const int n = static_cast<int>(work_items->size());
+        std::vector<int> kept;
+        kept.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            auto fit = footer_map->find((*work_items)[i].first);
+            if (fit == footer_map->end()) { kept.push_back(i); continue; }
+            const size_t rg_idx = static_cast<size_t>((*work_items)[i].second);
+            if (rg_idx >= fit->second.row_groups.size()) { kept.push_back(i); continue; }
+            const RowGroupStats& rg = fit->second.row_groups[rg_idx];
+            bool excluded = false;
+            for (size_t b = 0; b < cols.size() && !excluded; ++b) {
+                for (const ColumnStats& cs : rg.columns) {
+                    if (cs.name != *cols[b]) continue;
+                    if (!cs.has_min || !cs.has_max) break;   // no zone map -> keep
+                    int64_t lo_ord = 0, hi_ord = 0;
+                    if (!stat_bytes_to_ordinal(cs.physical_type, cs.logical_type,
+                                               cs.min, &lo_ord)) break;
+                    if (!stat_bytes_to_ordinal(cs.physical_type, cs.logical_type,
+                                               cs.max, &hi_ord)) break;
+                    // Disjoint ranges -> no row in this group can join. Note the
+                    // row group's own [min,max] may be inverted only if the
+                    // footer is corrupt; a corrupt footer that inverts the test
+                    // keeps the group, which is the safe direction.
+                    if (hi_ord < bounds[b]->lo || lo_ord > bounds[b]->hi) {
+                        excluded = true;
+                    }
+                    break;
+                }
+            }
+            if (!excluded) kept.push_back(i);
+        }
+        if (row_groups_pruned_runtime_ != nullptr)
+            *row_groups_pruned_runtime_ = static_cast<int64_t>(n) -
+                                          static_cast<int64_t>(kept.size());
+        g.kept = std::move(kept);
+        g.pruned_applied = true;
     }
     std::unique_ptr<LocalSourceState> make_local(GlobalSourceState&) override {
         return std::make_unique<LocalSourceState>();
@@ -788,7 +903,9 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
             }
 
             for (int idx = submit_start; idx < submit_end; ++idx) {
-                submit_one(static_cast<size_t>(idx), err);
+                // `idx` counts submittable units; the runtime bound may have
+                // removed work items between them, so resolve to the real index.
+                submit_one(static_cast<size_t>(g.item_index(idx)), err);
                 if (err.code != 0) return SourceResult::FINISHED;
             }
 

@@ -103,6 +103,11 @@ class RelationManagementNode(BasePlanNode):
         self.resolved_owner: Optional[str] = parameters.get("resolved_owner")
         self.statement: Optional[str] = parameters.get("statement")
         self.or_replace: bool = parameters.get("or_replace", False)
+        # What the task's statement WRITES, derived from its own AST by
+        # `plan_create_task` and recorded so a pipeline can be followed THROUGH a
+        # task rather than ending at it. A list because TRUNCATE names several;
+        # empty for a task that reads and writes nothing back.
+        self.target_tables: list = parameters.get("target_tables") or []
 
         # ALTER MATERIALIZED VIEW ... OWNER TO
         self.new_owner: Optional[str] = parameters.get("new_owner")
@@ -437,6 +442,7 @@ class RelationManagementNode(BasePlanNode):
                 self.statement,
                 author=self._author,
                 or_replace=self.or_replace,
+                writes=self.target_tables,
             )
             if self.on_table:
                 # Derived, not authored: the statement declared the dependency,

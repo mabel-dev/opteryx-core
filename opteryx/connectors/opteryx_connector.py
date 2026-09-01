@@ -1767,6 +1767,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         statement: str,
         author: Optional[str] = None,
         or_replace: bool = False,
+        writes: Optional[List[str]] = None,
     ) -> None:
         """Register a task in the catalog.
 
@@ -1798,6 +1799,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 sql=statement,
                 author=author,
                 update_if_exists=or_replace,
+                # Derived from the statement's own AST, so it cannot disagree
+                # with it. Passed unconditionally - a catalog too old to accept
+                # it raises here rather than recording a task whose outputs are
+                # silently invisible to the workflow graph.
+                writes=list(writes or []),
             )
         except TaskAlreadyExists as exc:
             raise ValueError(

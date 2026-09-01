@@ -579,7 +579,7 @@ def get_text_writer_cast_sources():
 def get_zstd_compress_sources():
     """Return the vendored zstd COMPRESSION sources (single-threaded; no zstdmt,
     so no pool/threading deps). Compiled as C++ — byte-identical to upstream
-    zstd 1.5.5 lib/compress/*.c, renamed .cpp like the decompress set.
+    zstd 1.5.7 lib/compress/*.c, renamed .cpp like the decompress set.
 
     Canonical single copy lives under ``third_party/zstd`` (shared by both wheels)."""
     ZSTD = "third_party/zstd"
@@ -596,6 +596,9 @@ def get_zstd_compress_sources():
         "zstd_lazy",
         "zstd_ldm",
         "zstd_opt",
+        # New in 1.5.7: zstd_compress.c includes zstd_preSplit.h and calls into
+        # it unconditionally, so it is not optional for a compress-capable build.
+        "zstd_preSplit",
     ]
     return [f"{ZSTD}/compress/{n}.cpp" for n in names]
 

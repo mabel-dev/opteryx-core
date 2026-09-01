@@ -376,3 +376,84 @@ def test_other_identifiers_are_still_not_constants(tmp_path):
 
     with pytest.raises(UnsupportedSyntaxError, match="not a constant"):
         list(owner.execute_to_morsels("EXECUTE ws.t USING some_column AS cur"))
+
+
+# --- a windowed task run by hand must name its window ---------------------------
+#
+# The unattended window is bound from the commit that fired the task
+# (`trigger_firing._fire_task`). A person typing EXECUTE has no such commit, and
+# defaulting to (mark, head) would make an ordinary hand-run an unlogged
+# catch-up: it consumes ground the next triggered run then skips as superseded,
+# or widens over, with nothing recording that anyone took it.
+
+
+def test_a_windowed_task_with_no_using_is_refused(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TABLE ws.sink (a BIGINT)"))
+    _write_task(
+        tmp_path,
+        "ws.windowed",
+        "INSERT INTO ws.sink SELECT a FROM ws.src "
+        "WHERE a > :parent_version AND a <= :current_version",
+    )
+
+    with pytest.raises(UnsupportedSyntaxError, match="no default window"):
+        list(owner.execute_to_morsels("EXECUTE ws.windowed"))
+
+    # Refused, not partially run.
+    rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.sink"))
+    assert rows == []
+
+
+def test_the_refusal_names_the_parameters_the_statement_uses(tmp_path):
+    """The names come out of the task's own statement, so someone meeting this
+    is told exactly what to type - including when only one is consumed."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    _write_task(tmp_path, "ws.windowed", "SELECT a FROM ws.src WHERE a > :parent_version")
+
+    with pytest.raises(UnsupportedSyntaxError) as caught:
+        list(owner.execute_to_morsels("EXECUTE ws.windowed"))
+    assert ":parent_version" in str(caught.value)
+    assert "current_version" not in str(caught.value)
+
+
+def test_naming_the_window_runs_it(tmp_path):
+    """The constraint is on the silent default, not on the hand-run: a person
+    who says which window is running a replay on purpose."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TABLE ws.sink (a BIGINT)"))
+    _write_task(
+        tmp_path,
+        "ws.windowed",
+        "INSERT INTO ws.sink SELECT a FROM ws.src "
+        "WHERE a > :parent_version AND a <= :current_version",
+    )
+
+    list(
+        owner.execute_to_morsels(
+            "EXECUTE ws.windowed USING 0 AS parent_version, 2 AS current_version"
+        )
+    )
+
+    rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.sink"))
+    assert sorted(r["a"] for r in rows) == [1, 2]
+
+
+def test_a_task_that_consumes_no_window_still_runs_bare(tmp_path):
+    """Most tasks are not windowed, and EXECUTE with no USING is how they run."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TABLE ws.sink (a BIGINT)"))
+    _write_task(tmp_path, "ws.plain", "INSERT INTO ws.sink SELECT a FROM ws.src WHERE a > 0")
+
+    list(owner.execute_to_morsels("EXECUTE ws.plain"))
+
+    rows = _morsels_to_rows(owner.execute_to_morsels("SELECT * FROM ws.sink"))
+    assert sorted(r["a"] for r in rows) == [1, 2, 3]

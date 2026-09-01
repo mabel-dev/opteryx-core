@@ -558,6 +558,20 @@ public:
                 "add_skene_runtime_bound: pipeline source is not a skene scan");
         src->add_runtime_bound(std::move(column), runtime_bounds[bound_idx].get());
     }
+    // The parquet twin. Same contract, same fail-loud posture; the difference is
+    // where the bound lands — the skene scan turns it into two extra zone-map
+    // terms, the parquet scan drops work items in make_global (there is no
+    // shared zone-map machinery on that path). `pruned_slot` is the plan's
+    // marginal-prune counter, borrowed for the run.
+    void add_parquet_runtime_bound(size_t p, size_t bound_idx, std::string column,
+                                   int64_t* pruned_slot) {
+        auto* src = dynamic_cast<NativeParquetScanSource*>(pipelines[p]->source.get());
+        if (src == nullptr)
+            throw std::runtime_error(
+                "add_parquet_runtime_bound: pipeline source is not a native parquet scan");
+        src->add_runtime_bound(std::move(column), runtime_bounds[bound_idx].get());
+        src->set_runtime_pruned_counter(pruned_slot);
+    }
     // payload_types/lt_* are the build-side payload columns' PLAN-KNOWN physical +
     // logical types (same shape as set_final_schema) — sized/typed into the build
     // sink's row-store up front, so a build side that streams zero rows (a filtered-
