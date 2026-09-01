@@ -5381,7 +5381,10 @@ def _execute_argument_value(expr: dict, argument_name: str):
 # task that reads either one processes the delta of one commit rather than
 # rescanning, which is why running it by hand without saying which delta is
 # refused below rather than defaulted.
-WINDOW_PARAMETERS = frozenset({"parent_version", "current_version"})
+# Ordered parent-then-current, the order `_fire_task` writes them and the only
+# order a window reads in - a suggested spelling that came out alphabetical
+# would tell someone to type their window backwards.
+WINDOW_PARAMETERS = ("parent_version", "current_version")
 
 
 def _placeholder_sites(node, in_version_of=False, relation=None, sites=None):
@@ -5607,7 +5610,8 @@ def plan_execute(statement, **kwargs):
     # nothing recording that a person took it. The names it wants are the names
     # its own statement uses, so they are read back out and quoted.
     if not arguments:
-        wanted = sorted(WINDOW_PARAMETERS.intersection(_placeholder_sites(parsed[0])))
+        used = _placeholder_sites(parsed[0])
+        wanted = [name for name in WINDOW_PARAMETERS if name in used]
         if wanted:
             raise UnsupportedSyntaxError(
                 f"task {relation_name} consumes a window ("
