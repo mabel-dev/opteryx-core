@@ -504,6 +504,51 @@ def _get_equi_join_pairs(on_node):
     return []
 
 
+def _is_pushable_condition_shape(condition) -> bool:
+    """Can a Filter with this condition be COLLECTED and carried down the plan?
+
+    Collecting a predicate only decides that it may move; where it lands is decided
+    per node by column availability (`_predicate_column_ids` against what a node
+    emits), and whether a SCAN absorbs it is the connector's `can_push` — which
+    refuses anything but its own simple node types and operators, leaving the
+    predicate as a Filter directly above the reader. So the shapes admitted here
+    need not be reader-pushable; they need to be predicates whose placement the
+    column-availability gates can reason about, which is any boolean tree over
+    comparisons, unary tests and boolean functions.
+
+    A NOT root and an OR/CNF root were previously refused outright. That left
+    `NOT _STARTS_WITH(name, 'E')` (what `name NOT LIKE 'E%'` lowers to),
+    `NOT (x IS NULL)` and every single-relation OR — `x IN (..) OR x IN (..)`,
+    `x <= 3 OR x >= 7` — stranded above the join instead of on their leg, filtering
+    the materialised join product.
+
+    A NOT wrapping something this test rejects (e.g. a CASE) is still refused: the
+    node types below it are not ones the gates or the connectors understand.
+    """
+    while condition is not None and condition.node_type == NodeType.NESTED:
+        condition = condition.centre
+    if condition is None:
+        return False
+    node_type = condition.node_type
+    if node_type in (NodeType.COMPARISON_OPERATOR, NodeType.BETWEEN, NodeType.UNARY_OPERATOR):
+        return True
+    if node_type == NodeType.FUNCTION:
+        return (
+            getattr(getattr(condition, "schema_column", None), "category", None)
+            == LogicalCategory.BOOLEAN
+        )
+    if node_type == NodeType.NOT:
+        return _is_pushable_condition_shape(condition.centre)
+    if node_type == NodeType.OR:
+        return _is_pushable_condition_shape(condition.left) and _is_pushable_condition_shape(
+            condition.right
+        )
+    if node_type == NodeType.CNF:
+        parameters = condition.parameters or []
+        return bool(parameters) and all(_is_pushable_condition_shape(p) for p in parameters)
+    return False
+
+
 def _normalize_col_op_lit(condition):
     """Return (ident, op, literal) for a simple col OP literal predicate, col on left.
 
@@ -818,20 +863,10 @@ class PredicatePushdownStrategy(OptimizationStrategy):
 
             # Allow pushdown if:
             # 1. Has aggregators (HAVING clause) - will be pushed into aggregate
-            # 2. OR: references relations AND no aggregators AND simple comparison (regular predicate)
-            is_simple_comparison = (
-                node.condition.node_type
-                in (
-                    NodeType.COMPARISON_OPERATOR,
-                    NodeType.BETWEEN,
-                    NodeType.UNARY_OPERATOR,  # IsNull, IsNotNull, IsEmpty, IsNotEmpty
-                )
-                and len(identifiers) >= 1  # At least one column reference
-            ) or (
-                node.condition.node_type == NodeType.FUNCTION
-                and len(identifiers) >= 1
-                and getattr(getattr(node.condition, "schema_column", None), "category", None)
-                == LogicalCategory.BOOLEAN
+            # 2. OR: references relations AND no aggregators AND a pushable shape
+            #    (regular predicate) — see _is_pushable_condition_shape
+            is_simple_comparison = len(identifiers) >= 1 and _is_pushable_condition_shape(
+                node.condition
             )
 
             is_having_predicate = bool(has_agg)

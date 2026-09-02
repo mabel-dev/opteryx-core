@@ -35,6 +35,7 @@ expr = v1 OR expr = v2 OR ... OR expr = vN  → expr IN (v1, ..., vN) (CNF branc
 CONCAT(x, y, z)                             → x || y || z (CONCAT to operators)
 CONCAT_WS(x, y, z)                          → y || x || z (CONCAT_WS to operators)
 x = 'a' OR x = 'b' OR x = 'c'               → x IN ('a', 'b', 'c') (for ORed Equals conditions)
+x IN (a, b) OR x IN (c) OR 'd' = x          → x IN (a, b, c, d) (IN-list members and literal-left merge too)
 a = ANY(z) OR b = ANY(z) OR c = ANY(z)      → (a, b, c) @> z
 addr <<= '10.0.0.0/8'                       → addr BETWEEN base AND broadcast (so it prunes)
 addr <<= '1.2.3.4/32'                       → addr = 16909060 (a /32 is one host)
@@ -577,83 +578,162 @@ def rewrite_cnf_any_eq_to_contains(condition, telemetry):
     return result
 
 
+def _point_membership_branch(node):
+    """(column_node, values, element_type) for an OR-branch that is a point test on
+    one column — `col = lit`, `lit = col` or `col IN (lits)` — else None.
+
+    `col = NULL` is not a point test: it has three-valued (UNKNOWN) semantics
+    distinct from a membership test, and a NULL-mixed literal array is rejected
+    outright at parse time (ArrayWithMixedTypesError, logical_planner_builders
+    .in_list) — the optimizer must not manufacture what the front door forbids.
+    Such a branch is left untouched and compiles on its own via the native
+    NULL-comparison short-circuit.
+    """
+    if node.node_type != NodeType.COMPARISON_OPERATOR or node.left is None or node.right is None:
+        return None
+    if node.value == "Eq":
+        if node.left.node_type == NodeType.IDENTIFIER and node.right.node_type == NodeType.LITERAL:
+            column, literal = node.left, node.right
+        elif node.right.node_type == NodeType.IDENTIFIER and node.left.node_type == NodeType.LITERAL:
+            column, literal = node.right, node.left
+        else:
+            return None
+        if literal.value is None:
+            return None
+        return column, [literal.value], literal.type
+    if node.value == "InList":
+        if node.left.node_type != NodeType.IDENTIFIER or node.right.node_type != NodeType.LITERAL:
+            return None
+        values = node.right.value
+        if not isinstance(values, (list, tuple, set, frozenset)) or any(v is None for v in values):
+            return None
+        array_type = node.right.type
+        element_type = array_type.element if isinstance(array_type, ColumnType) else None
+        return node.left, list(values), element_type
+    return None
+
+
+def _make_inlist_node(node, column, values, element_type):
+    """Turn `node` (an Eq or InList) into `column IN (values)` in place."""
+    ordered = sorted(set(values), key=str)
+    if node.value == "Eq" and node.left is not column:
+        # literal-left spelling: `'x' = col` — put the column where InList reads it
+        node.left, node.right = node.right, node.left
+    node.value = "InList"
+    array_type = _lt.ARRAY(element_type if isinstance(element_type, ColumnType) else _lt.VARIANT)
+    node.right.value = ordered
+    node.right.type = array_type
+    node.right.schema_column = ConstantColumn(
+        name=node.right.name,
+        column_type=array_type,
+        value=ordered,
+    )
+
+
 def rewrite_ored_eq_to_inlist(predicate, telemetry):
     """
-    Rewrite multiple OR'ed Equals conditions on the same column to a single regex pattern.
+    Rewrite multiple OR'ed point tests on the same column into a single IN-list.
 
     Example:
     name = 'Earth' OR name = 'Mars' OR name = 'Venus'
     -->
     name IN ('Earth', 'Mars', 'Venus')
+
+    `col IN (..)` branches merge in the same way (`id IN (1, 2) OR id IN (3, 4)`
+    and `id = 1 OR id IN (3, 4)` both become one IN-list), and the literal may be
+    on either side of an equality. Absorbed branches are neutralised to LITERAL
+    False — a binary tree cannot be restructured from inside a collector — and
+    `_prune_false_or_branches` removes them once every OR rewrite has run.
     """
-    # Collect Equals conditions that can be combined
-    eq_conditions = {}
+    groups: dict = {}  # column identity -> {"values", "nodes", "column", "element_type"}
 
-    def collect_eqs(node, eqs_dict):
-        # Base case: LIKE/ILIKE condition
-        if node.node_type == NodeType.COMPARISON_OPERATOR and node.value in {"Eq"}:
-            # Only proceed if the right side is a literal
-            if node.right.node_type == NodeType.LITERAL:
-                # `col = NULL` cannot be folded into the same-column IN-list: it has
-                # three-valued (UNKNOWN) semantics distinct from a membership test,
-                # and a NULL-mixed literal array is rejected outright at parse time
-                # (ArrayWithMixedTypesError, logical_planner_builders.in_list) — the
-                # optimizer must not manufacture what the front door forbids. Leave
-                # `col = NULL` branches untouched; each compiles on its own via the
-                # native NULL-comparison short-circuit.
-                if node.right.value is None:
-                    return
-                # Get column identifier for grouping
-                col_id = None
-                if node.left.node_type == NodeType.IDENTIFIER:
-                    col_id = node.left.schema_column.identity
-
-                if col_id:
-                    if col_id not in eqs_dict:
-                        eqs_dict[col_id] = {
-                            "values": [],
-                            "nodes": [],
-                        }
-
-                    eqs_dict[col_id]["values"].append(node.right.value)
-                    eqs_dict[col_id]["nodes"].append(node)
-            return
-
-        # Recursive cases
-        if node.node_type == NodeType.OR:
-            collect_eqs(node.left, eqs_dict)
-            collect_eqs(node.right, eqs_dict)
-
-    collect_eqs(predicate, eq_conditions)
-
-    for col_id, eq_data in eq_conditions.items():
-        if len(eq_data["values"]) > 1:
-            telemetry.optimization_predicate_rewriter_eqs_to_list += 1
-            # Create a new regex pattern
-            new_node = eq_data["nodes"][0]
-            new_node.value = "InList"
-            # Sorted, not `list(set(...))`: set iteration order is not stable across
-            # runs, so the same query compiled twice rendered its IN-list literals in
-            # different orders. Matches the CNF counterpart (rewrite_cnf_eq_to_inlist)
-            # — sort by string repr for a deterministic order across mixed literal
-            # types while keeping the actual typed values. `col = NULL` branches are
-            # already excluded by collect_eqs, so there is no None to compare.
-            new_node.right.value = sorted(set(eq_data["values"]), key=str)
-            # Phase 2: build ARRAY ColumnType from old element type.
-            _old_elem_ct_2 = new_node.right.type
-            _arr_ct_2 = _lt.ARRAY(_old_elem_ct_2) if isinstance(_old_elem_ct_2, ColumnType) else _lt.ARRAY(_lt.VARIANT)
-            new_node.right.type = _arr_ct_2
-            new_node.right.schema_column = ConstantColumn(
-                name=new_node.right.name,
-                column_type=_arr_ct_2,
-                value=new_node.right.value,
+    def collect(node):
+        branch = _point_membership_branch(node)
+        if branch is not None:
+            column, values, element_type = branch
+            if column.schema_column is None:
+                return
+            group = groups.setdefault(
+                column.schema_column.identity,
+                {"values": [], "nodes": [], "column": column, "element_type": None},
             )
-            for node in eq_data["nodes"][1:]:
+            group["values"].extend(values)
+            group["nodes"].append(node)
+            if group["element_type"] is None:
+                group["element_type"] = element_type
+            return
+        if node.node_type == NodeType.OR:
+            collect(node.left)
+            collect(node.right)
+
+    collect(predicate)
+
+    for group in groups.values():
+        if len(group["nodes"]) > 1:
+            telemetry.optimization_predicate_rewriter_eqs_to_list += 1
+            first = group["nodes"][0]
+            first_column = _point_membership_branch(first)[0]
+            _make_inlist_node(first, first_column, group["values"], group["element_type"])
+            for node in group["nodes"][1:]:
                 node.value = False
                 node.node_type = NodeType.LITERAL
                 node.type = _lt.BOOLEAN
+                node.left = None
+                node.right = None
 
     return predicate
+
+
+def _prune_false_or_branches(predicate):
+    """Drop the LITERAL False branches the OR rewrites leave behind.
+
+    The three OR-side fusions (`rewrite_ored_like_to_any`, `rewrite_ored_eq_to_inlist`,
+    `rewrite_ored_any_eq_to_contains`) neutralise absorbed branches in place rather
+    than restructure the tree. Left in, `x IN (..) OR False` reached execution as
+    written whenever the second ConstantFolding pass skipped it — `_fold` skips a
+    root the first pass stamped, and an in-place child swap keeps the root — and the
+    duplicate the DisjunctiveDomainPushdown strategy had already pushed was evaluated
+    a second time above the join. Pruning here means the rewrite hands back the
+    shape it means, and no other pass has to notice.
+    """
+    branches = []
+    pruned = 0
+
+    def flatten(node):
+        nonlocal pruned
+        if node.node_type == NodeType.OR:
+            flatten(node.left)
+            flatten(node.right)
+        elif node.node_type == NodeType.LITERAL and node.value is False:
+            pruned += 1
+        else:
+            branches.append(node)
+
+    flatten(predicate)
+    if not pruned or not branches:
+        # Nothing absorbed: hand back the tree AS IS. Rebuilding it would mint a
+        # root without the original's schema_column — fatal in a SELECT list,
+        # where the OR's root IS the projected column (`x NOT BETWEEN a AND b AS c`).
+        return predicate
+
+    # The root's identity (schema_column / alias / query_column) must survive the
+    # rebuild for the same reason: this rewrite also runs over projections and
+    # aggregates (FunctionRewriteStrategy). A single survivor is wrapped in the
+    # planner's transparent NESTED node — it lowers to its centre at compile time
+    # while carrying the OR's identity, the same mechanism constant folding uses
+    # for `x OR False` — and the Filter visitor strips the wrapper again, where
+    # the identity is not needed and a bare root is what pushdown keys on.
+    if len(branches) == 1:
+        result = Node(node_type=NodeType.NESTED)
+        result.centre = branches[0]
+    else:
+        result = branches[0]
+        for branch in branches[1:]:
+            result = Node(node_type=NodeType.OR, left=result, right=branch)
+    result.schema_column = predicate.schema_column
+    result.query_column = predicate.query_column
+    result.alias = predicate.alias
+    return result
 
 
 def rewrite_cnf_eq_to_inlist(condition, telemetry):
@@ -665,6 +745,7 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
 
     Unlike rewrite_ored_eq_to_inlist this works on any left-hand expression
     (identifiers, function calls, etc.) using the canonical string as the key.
+    `expr IN (..)` branches on a plain column merge in too.
     """
     if condition.node_type != NodeType.CNF:
         return condition
@@ -673,45 +754,54 @@ def rewrite_cnf_eq_to_inlist(condition, telemetry):
     non_eq = []
 
     for branch in condition.parameters:
+        column = values = element_type = None
         if (
             branch.node_type == NodeType.COMPARISON_OPERATOR
             and branch.value == "Eq"
-            and branch.right.node_type == NodeType.LITERAL
-            # `col = NULL` cannot be folded into the same-column IN-list — see the
-            # matching guard in rewrite_ored_eq_to_inlist.collect_eqs above.
-            and branch.right.value is not None
+            and branch.left is not None
+            and branch.right is not None
         ):
-            key = format_expression(branch.left)
-            if key not in groups:
-                groups[key] = {"values": [], "node": branch}
-            groups[key]["values"].append(branch.right.value)
+            # Any left-hand expression, literal on either side. `col = NULL` cannot be
+            # folded into the same-column IN-list — see _point_membership_branch.
+            if branch.right.node_type == NodeType.LITERAL and branch.left.node_type != NodeType.LITERAL:
+                column, literal = branch.left, branch.right
+            elif branch.left.node_type == NodeType.LITERAL and branch.right.node_type != NodeType.LITERAL:
+                column, literal = branch.right, branch.left
+            else:
+                literal = None
+            if literal is not None and literal.value is not None:
+                values, element_type = [literal.value], literal.type
+            else:
+                column = None
         else:
+            point = _point_membership_branch(branch)
+            if point is not None and branch.value == "InList":
+                column, values, element_type = point
+
+        if column is None:
             non_eq.append(branch)
+            continue
+        key = format_expression(column)
+        if key not in groups:
+            groups[key] = {"values": [], "node": branch, "column": column, "element_type": None}
+        groups[key]["values"].extend(values)
+        groups[key]["count"] = groups[key].get("count", 0) + 1
+        if groups[key]["element_type"] is None:
+            groups[key]["element_type"] = element_type
 
     new_params = list(non_eq)
     rewrote = False
 
     for data in groups.values():
-        if len(data["values"]) > 1:
+        if data["count"] > 1:
             node = data["node"]
             # Values arrive already typed/coerced by the binder (e.g. VARCHAR/
-            # VARBINARY literals are bytes, not str) — sort by string repr for a
-            # deterministic order across mixed literal types, but keep the actual
-            # typed values. A prior version stringified and re-coerced through
-            # str(v), which corrupted bytes literals into their Python repr
-            # (b'x' -> "b'x'") instead of round-tripping them.
-            values = sorted(set(data["values"]), key=str)
-            node.value = "InList"
-            node.right.value = values
-            # Phase 2: build ARRAY ColumnType from old element type.
-            _old_elem_ct_3 = node.right.type
-            _arr_ct_3 = _lt.ARRAY(_old_elem_ct_3 if isinstance(_old_elem_ct_3, ColumnType) else _lt.VARIANT)
-            node.right.type = _arr_ct_3
-            node.right.schema_column = ConstantColumn(
-                name=node.right.name,
-                column_type=_arr_ct_3,
-                value=node.right.value,
-            )
+            # VARBINARY literals are bytes, not str) — `_make_inlist_node` sorts by
+            # string repr for a deterministic order across mixed literal types, but
+            # keeps the actual typed values. A prior version stringified and
+            # re-coerced through str(v), which corrupted bytes literals into their
+            # Python repr (b'x' -> "b'x'") instead of round-tripping them.
+            _make_inlist_node(node, data["column"], data["values"], data["element_type"])
             new_params.append(node)
             telemetry.optimization_predicate_rewriter_eqs_to_list = (
                 getattr(telemetry, "optimization_predicate_rewriter_eqs_to_list", 0) + 1
@@ -1526,13 +1616,21 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     ):
         return _rewrite_rlike_to_dfa(predicate, telemetry)
 
-    # Fuse OR'd LIKE/ILIKE on one column into a single native LIKE ANY.
+    # Fuse OR'd LIKE/ILIKE on one column into a single native LIKE ANY, OR'd
+    # point tests into one IN-list, OR'd `lit = ANY(col)` into one containment.
+    # Each fusion neutralises the branches it absorbed to LITERAL False; prune
+    # those here so the shape handed on IS the fused predicate, not `X OR False`.
+    # A fully-collapsed OR is re-entered as whatever it became (an InList still
+    # gets the single-member -> Eq rewrite below, and so on).
     if predicate.node_type == NodeType.OR:
-        rewritten = rewrite_ored_like_to_any(predicate, telemetry)
-        rewritten = rewrite_ored_eq_to_inlist(rewritten, telemetry)
-        rewritten = rewrite_ored_any_eq_to_contains(rewritten, telemetry)
-        if rewritten != predicate:
-            return rewritten
+        rewrite_ored_like_to_any(predicate, telemetry)
+        rewrite_ored_eq_to_inlist(predicate, telemetry)
+        rewrite_ored_any_eq_to_contains(predicate, telemetry)
+        predicate = _prune_false_or_branches(predicate)
+        if predicate.node_type == NodeType.NESTED:
+            # one survivor: keep the identity-carrying wrapper, rewrite what is inside
+            predicate.centre = _rewrite_predicate(predicate.centre, telemetry)
+            return predicate
 
     if predicate.node_type == NodeType.CNF:
         predicate = rewrite_cnf_eq_to_inlist(predicate, telemetry)
@@ -1607,6 +1705,11 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 predicate.value = INSTR_REWRITES[predicate.value]
 
         if predicate.value in {"Like", "ILike", "NotLike", "NotILike"}:
+            # The minted function node carries a BOOLEAN schema_column: the positive
+            # form reuses the comparison node (and its column) in place, but the
+            # negated form wraps a FRESH node in NOT, and a boolean function with no
+            # column reads as "not a predicate" to the pushdown gate — which left
+            # every `NOT LIKE 'x%'` stranded above its join.
             if (
                 predicate.right.value.endswith("%")
                 and "%" not in predicate.right.value[:-1]
@@ -1616,7 +1719,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[:-1].encode()
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_STARTS_WITH" if predicate.value in {"ILike", "NotILike"} else "_STARTS_WITH"
-                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 if negated:
                     predicate.node_type = NodeType.NOT
@@ -1640,7 +1743,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[1:].encode()
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_ENDS_WITH" if predicate.value in {"ILike", "NotILike"} else "_ENDS_WITH"
-                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 if negated:
                     predicate.node_type = NodeType.NOT
@@ -1691,7 +1794,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[:-1]
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_STARTS_WITH" if predicate.value in {"ILike", "NotILike"} else "_STARTS_WITH"
-                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 if negated:
                     predicate.node_type = NodeType.NOT
@@ -1715,7 +1818,7 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
                 pattern_bytes = predicate.right.value[1:]
                 negated = predicate.value in {"NotLike", "NotILike"}
                 func_name = "_CI_ENDS_WITH" if predicate.value in {"ILike", "NotILike"} else "_ENDS_WITH"
-                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)])
+                fn_node = Node(node_type=NodeType.FUNCTION, value=func_name, parameters=[predicate.left, build_literal_node(pattern_bytes)], schema_column=ExpressionColumn(name="", column_type=_lt.BOOLEAN))
                 _rebind_function_node(fn_node)
                 if negated:
                     predicate.node_type = NodeType.NOT
@@ -2070,7 +2173,14 @@ def _rewrite_function(function, telemetry: QueryTelemetry):
 class PredicateRewriteStrategy(OptimizationStrategy):
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter:
-            node.condition = _rewrite_predicate(node.condition, self.telemetry)
+            condition = _rewrite_predicate(node.condition, self.telemetry)
+            # A Filter's root carries no identity anything reads, and pushdown /
+            # compaction key on a BARE root — strip the transparent wrapper an OR
+            # collapse leaves (see _prune_false_or_branches), exactly as boolean
+            # simplification already peels a NESTED root.
+            while condition is not None and condition.node_type == NodeType.NESTED:
+                condition = condition.centre
+            node.condition = condition
             context.optimized_plan[context.node_id] = node
 
         return context

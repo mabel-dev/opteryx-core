@@ -356,6 +356,7 @@ def test_internal_relations_are_asked_about_too(tmp_path, install):
         ("CREATE TRIGGER trg ON ws.t EXECUTE ws.task", ("ws.t", "AUTOMATE")),
         ("DROP TRIGGER trg ON ws.t", ("ws.t", "AUTOMATE")),
         ("ALTER TRIGGER trg ON ws.t SUSPEND", ("ws.t", "AUTOMATE")),
+        ("ALTER TRIGGER trg ON ws.t SET MINIMUM INTERVAL TO 120 SECONDS", ("ws.t", "AUTOMATE")),
         ("SHOW SNAPSHOTS FOR ws.t", ("ws.t", "READ")),
         ("COMMENT ON TABLE ws.t IS 'hello'", ("ws.t", "WRITE")),
     ],
@@ -823,8 +824,10 @@ def _materialized_view(tmp_path, install):
 
 
 def _runs_as(tmp_path):
-    with open(tmp_path / "ws" / "mv" / "materialized_view.json") as f:
-        return json.load(f)["runs-as"]
+    """The view's identity lives on its refresh trigger, beside the SOURCE."""
+    with open(tmp_path / "ws" / "b" / "triggers.json") as f:
+        [trigger] = [t for t in json.load(f) if t.get("target-view") == "ws.mv"]
+    return trigger["runs-as"]
 
 
 def test_alter_owner_asks_whether_the_new_owner_can_read_the_sources(tmp_path, install):

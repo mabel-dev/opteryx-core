@@ -637,6 +637,10 @@ def _create_alter_trigger_suspended_node(logical_node, query_properties, registr
     return registry.create("Relation Management", query_properties, action="alter_trigger_suspended", **logical_node.properties)
 
 
+def _create_alter_trigger_minimum_interval_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="alter_trigger_minimum_interval", **logical_node.properties)
+
+
 def _create_create_task_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="create_task", **logical_node.properties)
 
@@ -647,6 +651,14 @@ def _create_alter_trigger_owner_node(logical_node, query_properties, registry):
 
 def _create_drop_task_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_task", **logical_node.properties)
+
+
+def _create_listen_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="listen", **logical_node.properties)
+
+
+def _create_unlisten_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="unlisten", **logical_node.properties)
 
 
 def _create_alter_materialized_view_owner_node(logical_node, query_properties, registry):
@@ -735,8 +747,11 @@ _DISPATCH = {
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
     LogicalPlanStepType.CreateTrigger:    _create_create_trigger_node,
     LogicalPlanStepType.AlterTriggerSuspended: _create_alter_trigger_suspended_node,
+    LogicalPlanStepType.AlterTriggerMinimumInterval: _create_alter_trigger_minimum_interval_node,
     LogicalPlanStepType.CreateTask:       _create_create_task_node,
     LogicalPlanStepType.DropTask:         _create_drop_task_node,
+    LogicalPlanStepType.Listen:           _create_listen_node,
+    LogicalPlanStepType.Unlisten:         _create_unlisten_node,
     LogicalPlanStepType.AlterTriggerOwner: _create_alter_trigger_owner_node,
     LogicalPlanStepType.AlterMaterializedViewOwner: _create_alter_materialized_view_owner_node,
     LogicalPlanStepType.AlterMaterializedViewSuspended: _create_alter_materialized_view_suspended_node,

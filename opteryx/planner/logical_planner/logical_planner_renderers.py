@@ -371,13 +371,32 @@ def render_analyze(node: LogicalPlanNode) -> str:
 @register_render(LogicalPlanStepType.CreateTrigger)
 def render_create_trigger(node: LogicalPlanNode) -> str:
     or_replace = "OR REPLACE " if node.or_replace else ""
-    return f"CREATE {or_replace}TRIGGER ({node.trigger_name}) ON ({node.table_name}) EXECUTE ({node.task_name})"
+    event_kind = getattr(node, "event_kind", None) or "commit"
+    if event_kind == "schedule":
+        event = f"ON SCHEDULE ('{node.schedule}')"
+        if getattr(node, "time_zone", None):
+            event += f" AT TIME ZONE ('{node.time_zone}')"
+    elif event_kind == "signal":
+        event = "ON SIGNAL"
+    else:
+        event = f"ON ({node.table_name})"
+    if getattr(node, "window_source", None):
+        event += f" OVER ({node.window_source})"
+    return f"CREATE {or_replace}TRIGGER ({node.trigger_name}) {event} EXECUTE ({node.task_name})"
 
 
 @register_render(LogicalPlanStepType.AlterTriggerSuspended)
 def render_alter_trigger_suspended(node: LogicalPlanNode) -> str:
     state = "SUSPEND" if node.suspended else "RESUME"
     return f"ALTER TRIGGER ({node.trigger_name}) ON ({node.table_name}) {state}"
+
+
+@register_render(LogicalPlanStepType.AlterTriggerMinimumInterval)
+def render_alter_trigger_minimum_interval(node: LogicalPlanNode) -> str:
+    return (
+        f"ALTER TRIGGER ({node.trigger_name}) ON ({node.table_name}) "
+        f"SET MINIMUM INTERVAL TO ({node.minimum_interval_seconds} SECONDS)"
+    )
 
 
 @register_render(LogicalPlanStepType.CreateTask)
@@ -396,6 +415,16 @@ def render_alter_trigger_owner(node: LogicalPlanNode) -> str:
 def render_drop_task(node: LogicalPlanNode) -> str:
     if_exists = "IF EXISTS " if node.if_exists else ""
     return f"DROP TASK {if_exists}({node.task_name})"
+
+
+@register_render(LogicalPlanStepType.Listen)
+def render_listen(node: LogicalPlanNode) -> str:
+    return f"LISTEN TO ({node.task_name}) FOR {node.outcome}"
+
+
+@register_render(LogicalPlanStepType.Unlisten)
+def render_unlisten(node: LogicalPlanNode) -> str:
+    return f"UNLISTEN ({node.task_name})"
 
 
 @register_render(LogicalPlanStepType.DropTrigger)

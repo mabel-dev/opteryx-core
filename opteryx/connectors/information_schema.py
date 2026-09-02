@@ -10,7 +10,8 @@ information_schema
 Minimum information_schema surface. Backed by the real Opteryx catalog
 (opteryx_catalog) via list_collections()/list_datasets()/list_views() -
 NOT a static/generated snapshot. Currently implements `tables`, `columns`,
-`views`, `schemata`, `triggers`, `tasks`, `column_relationships`, and `grants`.
+`views`, `schemata`, `triggers`, `tasks`, `column_relationships`, `grants` and
+`listeners`.
 
 information_schema is a reserved nested schema inside a catalog workspace,
 addressed as `<workspace>.information_schema.<table>` - e.g.
@@ -746,17 +747,19 @@ class InformationSchemaViewsTable(BaseTable, _KeyColumnPredicatePushable):
 
 
 class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
-    """Reads `information_schema.triggers` from the catalog's per-dataset
-    trigger listings - list_collections() -> list_datasets() -> list_triggers(),
-    one round trip per dataset.
+    """Reads `information_schema.triggers` from the catalog's per-holder
+    trigger listings - list_collections() -> list_datasets() -> list_triggers()
+    for the triggers datasets hold, then list_tasks() -> list_triggers(...,
+    holder_kind="task") for the ones tasks hold; one round trip per holder.
 
-    A trigger hangs off the dataset whose commits fire it (the SOURCE table),
-    not off its target view, so the per-row check is on that source table -
-    and it is AUTOMATE, matching CREATE/DROP/ALTER TRIGGER's gate, which is
-    also on the source. A row here names the identity unattended runs carry
-    and what they fire; only an owner could have made that arrangement or can
-    change it, so only an owner sees it. An MV whose refresh trigger has been
-    dropped simply has no row here.
+    A commit trigger hangs off the dataset whose commits fire it (the SOURCE
+    table), not off its target view. A schedule or signal trigger has no source
+    dataset and hangs off the TASK it fires. Either way the per-row check is on
+    that holder - and it is AUTOMATE, matching CREATE/DROP/ALTER TRIGGER's
+    gate, which is also on the holder. A row here names the identity
+    unattended runs carry and what they fire; only an owner could have made
+    that arrangement or can change it, so only an owner sees it. An MV whose
+    refresh trigger has been dropped simply has no row here.
 
     A SUSPENDED trigger is a row, and says so: `suspended_at`/`suspended_by`.
     That is the difference between a trigger somebody paused and one that was
@@ -775,15 +778,33 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         "trigger_catalog",
         "trigger_collection",
         "trigger_name",
+        # What the trigger HANGS OFF, as `collection.name`: the dataset whose
+        # commits fire a commit trigger, or the task a schedule or signal
+        # trigger fires. `SHOW TRIGGERS FOR <name>` filters on this, so it
+        # answers for a table and for a task alike.
+        "trigger_holder",
+        # The dataset the fired run's window is bound from: the holder for a
+        # commit trigger (its window is the commit), the OVER table for a
+        # schedule or signal trigger, null when such a trigger has none.
         "event_object_table",
+        # WHAT FIRES IT - commit, schedule or signal - and for a schedule, when.
+        # A record written before events were told apart has no `event-kind`
+        # and is a commit trigger, the only kind there was.
+        "event_kind",
+        "schedule",
+        "time_zone",
+        "next_due_at",
         "action_kind",
         "target",
         # WHOSE AUTHORITY the trigger's unattended runs carry - the trigger's
         # `runs-as`, and the single most important thing about a row here. A
         # trigger fires with nobody present, so this is the only place the
         # identity behind that work is visible; without it, `created_by` reads
-        # like the answer and is not one. Null for a refresh trigger, which
-        # resolves its identity from the view's own record.
+        # like the answer and is not one. Populated for EVERY kind: a view's
+        # refresh trigger carries its own, as a task's does. The view itself
+        # has none - it is stored SQL, and a person running REFRESH runs it as
+        # themselves - so the refresh row here is where its unattended
+        # identity lives, not somewhere on the view.
         "runs_as",
         "created_by",
         "created_at",
@@ -800,11 +821,17 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         # partial write.
         "suspended_at",
         "suspended_by",
+        # The floor between two firings, in seconds. Null for a trigger that
+        # predates the field - which fires on every commit - and 0 for one
+        # whose floor was removed; the two read differently on purpose.
+        "minimum_interval_seconds",
     )
 
-    # trigger_catalog/trigger_collection/event_object_table are known before
-    # the per-dataset list_triggers() round trip, so pushing them skips those
-    # calls entirely; trigger_name only prunes rows after the listing.
+    # trigger_catalog/trigger_collection/trigger_holder are known before the
+    # per-holder list_triggers() round trip, so pushing them skips those calls
+    # entirely; so is event_object_table for a dataset's triggers, where it is
+    # the holder. For a task's triggers it is read off the record, so it is
+    # applied after the listing there, as trigger_name is everywhere.
     #
     # suspended_at/suspended_by are NOT here. They are known only once the
     # listing has been read, so pushing them would skip no round trip, and
@@ -812,7 +839,13 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
     # null-ness test is declined and left as an ordinary Filter, which is the
     # right answer for both.
     _pushable_columns = frozenset(
-        {"trigger_catalog", "trigger_collection", "event_object_table", "trigger_name"}
+        {
+            "trigger_catalog",
+            "trigger_collection",
+            "trigger_holder",
+            "event_object_table",
+            "trigger_name",
+        }
     )
 
     def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
@@ -827,7 +860,12 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             "trigger_catalog": _lt.VARCHAR,
             "trigger_collection": _lt.VARCHAR,
             "trigger_name": _lt.VARCHAR,
+            "trigger_holder": _lt.VARCHAR,
             "event_object_table": _lt.VARCHAR,
+            "event_kind": _lt.VARCHAR,
+            "schedule": _lt.VARCHAR,
+            "time_zone": _lt.VARCHAR,
+            "next_due_at": _lt.TIMESTAMP(),
             "action_kind": _lt.VARCHAR,
             "target": _lt.VARCHAR,
             "runs_as": _lt.VARCHAR,
@@ -837,6 +875,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             "last_fired_status": _lt.VARCHAR,
             "suspended_at": _lt.TIMESTAMP(),
             "suspended_by": _lt.VARCHAR,
+            "minimum_interval_seconds": _lt.INT64,
         }
         self.schema = RelationSchema(
             name="information_schema.triggers",
@@ -857,7 +896,12 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         trigger_catalog = []
         trigger_collection = []
         trigger_name = []
+        trigger_holder = []
         event_object_table = []
+        event_kind = []
+        schedule = []
+        time_zone = []
+        next_due_at = []
         action_kind = []
         # What the trigger RUNS, whichever kind it is. A trigger has exactly one
         # target, so this is one column rather than a `target_view`/`target_task`
@@ -872,46 +916,87 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         last_fired_status = []
         suspended_at = []
         suspended_by = []
+        minimum_interval_seconds = []
+
+        def emit(collection: str, holder: str, window_from, trigger: dict) -> None:
+            """One row, from a trigger record and the holder it was read off."""
+            name_value = trigger.get("name")
+            if not _key_predicates_allow(compiled, {"trigger_name": name_value}):
+                return
+            trigger_catalog.append(self.workspace)
+            trigger_collection.append(collection)
+            trigger_name.append(name_value)
+            trigger_holder.append(holder)
+            event_object_table.append(window_from)
+            event_kind.append(trigger.get("event-kind") or "commit")
+            schedule.append(trigger.get("schedule"))
+            time_zone.append(trigger.get("time-zone"))
+            next_due_at.append(_ms_to_datetime(trigger.get("next-due-at-ms")))
+            action_kind.append(trigger.get("kind"))
+            target.append(trigger.get("target-view") or trigger.get("target-task"))
+            runs_as.append(trigger.get("runs-as"))
+            created_by.append(trigger.get("created-by"))
+            created_at.append(_ms_to_datetime(trigger.get("created-at-ms")))
+            last_fired_at.append(_ms_to_datetime(trigger.get("last-fired-at-ms")))
+            last_fired_status.append(trigger.get("last-fired-status"))
+            # Both are cleared to None on RESUME, so a resumed trigger reports
+            # nulls rather than the stamp of the suspension it came out of.
+            suspended_at.append(_ms_to_datetime(trigger.get("suspended-at-ms")))
+            suspended_by.append(trigger.get("suspended-by"))
+            minimum_interval_seconds.append(trigger.get("minimum-interval-seconds"))
 
         # See InformationSchemaTablesTable.read_dataset - trigger_catalog is
         # constant per reader, so an excluding predicate skips enumeration
         # entirely rather than filtering row by row.
         if _key_predicates_allow(compiled, {"trigger_catalog": self.workspace}):
+            # Task-held triggers exist only where the catalog has tasks at all.
+            # An older library, or a test double, has no `list_tasks` and so
+            # nothing a task could hold - the guard `is_task` applies in the
+            # connector, for the same reason.
+            list_tasks = getattr(self.catalog, "list_tasks", None)
             for collection in self.catalog.list_collections():
                 if not _key_predicates_allow(compiled, {"trigger_collection": collection}):
                     continue
                 for name in self.catalog.list_datasets(collection):
                     source_table = f"{collection}.{name}"
-                    if not _key_predicates_allow(compiled, {"event_object_table": source_table}):
+                    # A commit trigger's holder IS its event_object_table, so a
+                    # predicate on either skips the round trip.
+                    if not _key_predicates_allow(
+                        compiled,
+                        {"trigger_holder": source_table, "event_object_table": source_table},
+                    ):
                         continue
                     if not _automatable(self.execution_context, self.workspace, collection, name):
                         continue
                     for trigger in self.catalog.list_triggers(source_table):
-                        name_value = trigger.get("name")
-                        if not _key_predicates_allow(compiled, {"trigger_name": name_value}):
+                        emit(collection, source_table, source_table, trigger)
+                if list_tasks is None:
+                    continue
+                for name in list_tasks(collection):
+                    holder = f"{collection}.{name}"
+                    if not _key_predicates_allow(compiled, {"trigger_holder": holder}):
+                        continue
+                    if not _automatable(self.execution_context, self.workspace, collection, name):
+                        continue
+                    for trigger in self.catalog.list_triggers(holder, holder_kind="task"):
+                        # The window source is on the record, so a pushed
+                        # event_object_table predicate is honoured here, after
+                        # the round trip it could not skip.
+                        window_from = trigger.get("window-source")
+                        if not _key_predicates_allow(compiled, {"event_object_table": window_from}):
                             continue
-                        trigger_catalog.append(self.workspace)
-                        trigger_collection.append(collection)
-                        trigger_name.append(name_value)
-                        event_object_table.append(source_table)
-                        action_kind.append(trigger.get("kind"))
-                        target.append(trigger.get("target-view") or trigger.get("target-task"))
-                        runs_as.append(trigger.get("runs-as"))
-                        created_by.append(trigger.get("created-by"))
-                        created_at.append(_ms_to_datetime(trigger.get("created-at-ms")))
-                        last_fired_at.append(_ms_to_datetime(trigger.get("last-fired-at-ms")))
-                        last_fired_status.append(trigger.get("last-fired-status"))
-                        # Both are cleared to None on RESUME, so a resumed
-                        # trigger reports nulls rather than the stamp of the
-                        # suspension it came out of.
-                        suspended_at.append(_ms_to_datetime(trigger.get("suspended-at-ms")))
-                        suspended_by.append(trigger.get("suspended-by"))
+                        emit(collection, holder, window_from, trigger)
 
         vectors = [
             vector_from_sequence(trigger_catalog, dtype=DrakenType.VARCHAR),
             vector_from_sequence(trigger_collection, dtype=DrakenType.VARCHAR),
             vector_from_sequence(trigger_name, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(trigger_holder, dtype=DrakenType.VARCHAR),
             vector_from_sequence(event_object_table, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(event_kind, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(schedule, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(time_zone, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(next_due_at, dtype=DrakenType.TIMESTAMP64),
             vector_from_sequence(action_kind, dtype=DrakenType.VARCHAR),
             vector_from_sequence(target, dtype=DrakenType.VARCHAR),
             vector_from_sequence(runs_as, dtype=DrakenType.VARCHAR),
@@ -921,6 +1006,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             vector_from_sequence(last_fired_status, dtype=DrakenType.VARCHAR),
             vector_from_sequence(suspended_at, dtype=DrakenType.TIMESTAMP64),
             vector_from_sequence(suspended_by, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(minimum_interval_seconds, dtype=DrakenType.INT64),
         ]
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
@@ -987,6 +1073,12 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
         # number, not a timestamp, and stamped only on success, so a gap behind a
         # failed run stays visible.
         "last_window_to",
+        # YOUR OWN subscription to this task, or null - "ERROR", "SUCCESS" or
+        # "EVERYTHING". Deliberately NOT a count of subscribers: that would tell
+        # everyone who can read this table how many people watch a task, and on
+        # a small team that is the subscriber list. Reading it costs no extra
+        # round trip - one collection-group query answers for every row.
+        "listening",
     )
 
     # task_catalog/task_collection are known before the per-collection listing,
@@ -1019,6 +1111,7 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
             "last_fired_at": _lt.TIMESTAMP(),
             "last_fired_status": _lt.VARCHAR,
             "last_window_to": _lt.INT64,
+            "listening": _lt.VARCHAR,
         }
         self.schema = RelationSchema(
             name="information_schema.tasks",
@@ -1052,6 +1145,20 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
         last_fired_at = []
         last_fired_status = []
         last_window_to = []
+        listening = []
+
+        # The caller's OWN subscriptions, read once for the whole listing rather
+        # than per task: one collection-group query answers every row, so the
+        # column costs no round trip per task. Keyed by (collection, task) -
+        # the workspace is constant for this reader.
+        user = self.execution_context.user if self.execution_context else None
+        lister = getattr(self.catalog, "list_listeners_for_user", None)
+        subscriptions = {}
+        if user and lister is not None:
+            subscriptions = {
+                (row.get("collection"), row.get("task")): row.get("outcome")
+                for row in lister(user)
+            }
 
         # See InformationSchemaTablesTable.read_dataset - task_catalog is
         # constant per reader, so an excluding predicate skips enumeration
@@ -1084,6 +1191,9 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
                     last_fired_at.append(_ms_to_datetime(record.get("last-fired-at-ms")))
                     last_fired_status.append(record.get("last-fired-status"))
                     last_window_to.append(record.get("last-window-to"))
+                    # Null where this caller does not listen. NOT a subscriber
+                    # count - see the column comment.
+                    listening.append(subscriptions.get((collection, name)))
 
         vectors = [
             vector_from_sequence(task_catalog, dtype=DrakenType.VARCHAR),
@@ -1102,6 +1212,7 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
             vector_from_sequence(last_fired_at, dtype=DrakenType.TIMESTAMP64),
             vector_from_sequence(last_fired_status, dtype=DrakenType.VARCHAR),
             vector_from_sequence(last_window_to, dtype=DrakenType.INT64),
+            vector_from_sequence(listening, dtype=DrakenType.VARCHAR),
         ]
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
@@ -1634,6 +1745,110 @@ class InformationSchemaGrantsTable(BaseTable, _KeyColumnPredicatePushable):
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
 
+class InformationSchemaListenersTable(BaseTable):
+    """Reads `information_schema.listeners` - the tasks the CALLER listens to.
+
+    Self-scoped, and that is the whole of its authority model. It returns the
+    session user's own subscriptions and nobody else's: there is no form that
+    lists another user's, and none that lists a task's subscribers, which would
+    tell whoever asked who else is watching it - the same leak that keeps
+    listeners out of SHOW CREATE TASK.
+
+    So it needs no permission check. Every row it can return was authorized by
+    the LISTEN that wrote it, against what the task writes, at the moment it was
+    written.
+
+    This is the PRIMARY surface for a subscriber, not a convenience.
+    `information_schema.tasks` carries the same answer in its `listening`
+    column, but that table is AUTOMATE-gated and readable only by a task's
+    OWNER - while LISTEN is gated on READ over what the task writes, so a
+    subscriber who does not own the task cannot read it at all. `SHOW LISTENERS`
+    is planned as a wildcard read of this table.
+
+    One catalog query, not a walk: subscriptions live under the tasks they
+    belong to, and `list_listeners_for_user` reaches them with a single
+    collection-group read rather than a `get_task` per task.
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    self_governs_permissions = True  # rows are the caller's own; there is nothing else to filter
+
+    _COLUMNS = (
+        "task_catalog",
+        "task_collection",
+        "task_name",
+        # "ERROR" | "SUCCESS" | "EVERYTHING" - which outcomes this subscription
+        # asked to hear about. Never null: a LISTEN with no FOR clause is
+        # recorded as EVERYTHING rather than as an absence.
+        "outcome",
+        "created_at",
+    )
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationSchema:
+        column_types = {
+            "task_catalog": _lt.VARCHAR,
+            "task_collection": _lt.VARCHAR,
+            "task_name": _lt.VARCHAR,
+            "outcome": _lt.VARCHAR,
+            "created_at": _lt.TIMESTAMP(),
+        }
+        self.schema = RelationSchema(
+            name="information_schema.listeners",
+            columns=[
+                SchemaColumn(
+                    name=column_name,
+                    column_type=column_types[column_name],
+                    identity=mint_column_identity("information_schema.listeners", column_name),
+                )
+                for column_name in self._COLUMNS
+            ],
+        )
+        return self.schema
+
+    def read_dataset(self, **kwargs):
+        from draken.draken_native import DrakenType
+        from draken.interop.vector_sequence import vector_from_sequence
+        from draken.morsels.morsel import Morsel
+
+        user = self.execution_context.user if self.execution_context else None
+
+        task_catalog = []
+        task_collection = []
+        task_name = []
+        outcome = []
+        created_at = []
+
+        # No user, no subscriptions. An unauthenticated session holds none -
+        # LISTEN refuses to record one - so this is an empty answer, not a
+        # missing filter.
+        if user:
+            # A catalog that predates listeners has none: the same skew
+            # tolerance `InformationSchemaTriggersTable` applies to `list_tasks`.
+            lister = getattr(self.catalog, "list_listeners_for_user", None)
+            for row in lister(user) if lister is not None else []:
+                task_catalog.append(row.get("workspace"))
+                task_collection.append(row.get("collection"))
+                task_name.append(row.get("task"))
+                outcome.append(row.get("outcome"))
+                created_at.append(_ms_to_datetime(row.get("created-at-ms")))
+
+        vectors = [
+            vector_from_sequence(task_catalog, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(task_collection, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(task_name, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(outcome, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(created_at, dtype=DrakenType.TIMESTAMP64),
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
 _TABLE_CLASSES = {
     "tables": InformationSchemaTablesTable,
     "columns": InformationSchemaColumnsTable,
@@ -1643,4 +1858,5 @@ _TABLE_CLASSES = {
     "tasks": InformationSchemaTasksTable,
     "column_relationships": InformationSchemaColumnRelationshipsTable,
     "grants": InformationSchemaGrantsTable,
+    "listeners": InformationSchemaListenersTable,
 }

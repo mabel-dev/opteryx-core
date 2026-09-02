@@ -591,6 +591,7 @@ class Features:
     disable_group_key_reduction = get_bool("FEATURE_DISABLE_GROUP_KEY_REDUCTION", False)
     disable_hash_map_variant = get_bool("FEATURE_DISABLE_HASH_MAP_VARIANT", False)
     disable_join_build_shape = get_bool("FEATURE_DISABLE_JOIN_BUILD_SHAPE", False)
+    disable_join_condition_hoist = get_bool("FEATURE_DISABLE_JOIN_CONDITION_HOIST", False)
     disable_join_elimination = get_bool("FEATURE_DISABLE_JOIN_ELIMINATION", False)
     disable_join_key_materialization = get_bool(
         "FEATURE_DISABLE_JOIN_KEY_MATERIALIZATION", False

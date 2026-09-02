@@ -54,7 +54,10 @@ from opteryx.planner.binder.relation import (
     visit_create_task,
     visit_create_trigger,
     visit_alter_trigger_suspended,
+    visit_alter_trigger_minimum_interval,
     visit_drop_task,
+    visit_listen,
+    visit_unlisten,
     visit_alter_trigger_owner,
     visit_drop_workspace,
     visit_optimize_relation,
@@ -279,6 +282,11 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_alter_trigger_suspended(self, node, context)
 
+    def visit_alter_trigger_minimum_interval(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_trigger_minimum_interval(self, node, context)
+
     def visit_create_task(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -293,6 +301,12 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_drop_task(self, node, context)
+
+    def visit_listen(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        return visit_listen(self, node, context)
+
+    def visit_unlisten(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+        return visit_unlisten(self, node, context)
 
     def visit_create_tag(
         self, node: Node, context: BindingContext

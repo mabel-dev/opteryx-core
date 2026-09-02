@@ -219,13 +219,27 @@ def _http(url: str, headers=None, timeout=_METADATA_TIMEOUT_SECONDS, method="GET
     Every failure returns None rather than raising. A credential source that is
     not present (no instance metadata on a laptop, no container endpoint
     outside ECS) must fall through to the next source, not end the chain.
+
+    The one exception is a URL that is not http(s): that is a misconfiguration
+    (AWS_CONTAINER_CREDENTIALS_FULL_URI and AWS_EC2_METADATA_SERVICE_ENDPOINT
+    are operator-supplied), not an absent source, and it raises.
     """
     import urllib.error
     import urllib.request
 
+    # urllib would open file:/ or data: for a misconfigured endpoint and hand
+    # the result back as a credential document. Only http(s) may reach urlopen.
+    scheme = urllib.parse.urlsplit(url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"Credential endpoint '{url}' must use http or https, got '{scheme or 'no scheme'}'."
+        )
+
     request = urllib.request.Request(url, headers=headers or {}, data=data, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        # nosec B310 - scheme is restricted to http(s) above; the hosts are AWS's
+        # link-local metadata addresses and STS, never user data.
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
             return response.read()
     except (urllib.error.URLError, OSError, ValueError):
         return None
@@ -251,7 +265,12 @@ def _from_web_identity(region: str) -> Optional[AWSCredentials]:
     unsigned, because the identity token IS the proof - which is why it needs
     no SDK and no bootstrap credential.
     """
-    import xml.etree.ElementTree as ElementTree
+    # nosec B405 - no defusedxml: the engine has zero dependencies. The stdlib
+    # expat bundled with every supported Python (>= 2.4.1) enforces entity
+    # amplification limits, and ElementTree never resolves external entities
+    # or fetches DTDs. The document is the reply to a request this module
+    # addressed to an AWS endpoint; it is not user-supplied.
+    import xml.etree.ElementTree as ElementTree  # nosec B405
 
     from opteryx import config
 
@@ -291,7 +310,8 @@ def _from_web_identity(region: str) -> Optional[AWSCredentials]:
         return None
 
     try:
-        root = ElementTree.fromstring(raw)
+        # nosec B314 - see the import above.
+        root = ElementTree.fromstring(raw)  # nosec B314
     except ElementTree.ParseError:  # pragma: no cover - STS returned non-XML
         return None
 
@@ -318,9 +338,7 @@ def _from_shared_file() -> Optional[AWSCredentials]:
 
     from opteryx import config
 
-    path = config.get("AWS_SHARED_CREDENTIALS_FILE") or os.path.expanduser(
-        "~/.aws/credentials"
-    )
+    path = config.get("AWS_SHARED_CREDENTIALS_FILE") or os.path.expanduser("~/.aws/credentials")
     if not os.path.exists(path):
         return None
 
@@ -757,7 +775,12 @@ class OpteryxS3FileSystem:
         Paginates - a dataset can exceed the 1000-key page limit, and a
         truncated listing would silently under-read rather than fail.
         """
-        import xml.etree.ElementTree as ElementTree
+        # nosec B405 - no defusedxml: the engine has zero dependencies. The stdlib
+        # expat bundled with every supported Python (>= 2.4.1) enforces entity
+        # amplification limits, and ElementTree never resolves external entities
+        # or fetches DTDs. The document is the reply to a request this module
+        # addressed to an AWS endpoint; it is not user-supplied.
+        import xml.etree.ElementTree as ElementTree  # nosec B405
 
         bucket, prefix = split_path(base_dir.rstrip("/"))
         # Trailing slash = directory semantics (see docstring). An empty prefix
@@ -784,7 +807,8 @@ class OpteryxS3FileSystem:
             except RuntimeError as err:
                 raise DatasetReadError(f"Unable to list '{base_dir}' - {err}") from err
 
-            root = ElementTree.fromstring(raw) if raw else None
+            # nosec B314 - see the import above.
+            root = ElementTree.fromstring(raw) if raw else None  # nosec B314
             if root is None:
                 return blobs
 

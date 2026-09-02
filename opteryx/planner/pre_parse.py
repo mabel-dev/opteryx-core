@@ -156,26 +156,63 @@ _CREATE_TRIGGER_LEAD = re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b", r
 
 # CREATE [OR REPLACE] TRIGGER <name> ON <table> EXECUTE <task>
 #
-# `ON <table>` is a CATALOG event: the trigger fires when that dataset takes a
-# user-created commit. Two other event kinds are imaginable and neither is
-# accepted, because neither has anything to fire it - see `_TRIGGER_EVENT_LEAD`
-# below. A trigger that is stored but never dispatched is worse than one that
-# does not exist: the table it maintains silently stops updating, and the
-# trigger record says it is fine.
+# A trigger is an EVENT plus the identity its unattended runs carry; the task it
+# fires has neither. Three events, told apart by what follows `ON`:
+#
+#   ON <table>                  a commit to that dataset. The trigger lives
+#                               under the dataset, whose commits it answers to.
+#   ON SCHEDULE '<cron>'        a clock tick. No dataset is involved, so the
+#       [AT TIME ZONE '<zone>']  trigger lives under the TASK it fires - the
+#       [OVER <table>]          holder is the task.
+#   ON SIGNAL [OVER <table>]    an inbound signal, held by the task likewise.
+#
+# `OVER <table>` is the window a clock or a signal has no commit to supply: the
+# fired run is windowed over that dataset's head (see visit_create_trigger for
+# the windowless rule when it is absent). The schedule and zone are VALUES and
+# so are quoted; every name here is an identifier and takes no placeholder, for
+# the reason given at the top of this module.
 _CREATE_TRIGGER_RE = re.compile(
     r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TRIGGER\s+"
     r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)\s+"
     r"EXECUTE\s+(?P<task>[A-Za-z_][\w.$]*)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-# The event kinds this engine can express but cannot yet dispatch. Matched so
-# they are refused BY NAME rather than as a generic syntax error, and so the
-# refusal can say what is missing rather than that the word is unknown.
+_CREATE_TRIGGER_SCHEDULE_RE = re.compile(
+    r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TRIGGER\s+"
+    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+SCHEDULE\s+'(?P<schedule>(?:[^']|'')*)'"
+    r"(?:\s+AT\s+TIME\s+ZONE\s+'(?P<zone>(?:[^']|'')*)')?"
+    r"(?:\s+OVER\s+(?P<over>[A-Za-z_][\w.$]*))?"
+    r"\s+EXECUTE\s+(?P<task>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_CREATE_TRIGGER_SIGNAL_RE = re.compile(
+    r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TRIGGER\s+"
+    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+SIGNAL\b"
+    r"(?:\s+OVER\s+(?P<over>[A-Za-z_][\w.$]*))?"
+    r"\s+EXECUTE\s+(?P<task>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# Which event a CREATE TRIGGER names, before the form is matched in full - so a
+# malformed schedule form is refused as a schedule form, with that grammar in
+# the message, rather than as a commit form missing its table.
 _TRIGGER_EVENT_LEAD = re.compile(
     r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+[A-Za-z_][\w$]*\s+ON\s+"
-    r"(?P<kind>SCHEDULE|EVERY|EVENT|SIGNAL)\b",
+    r"(?P<kind>SCHEDULE|SIGNAL|EVERY|EVENT)\b",
     re.IGNORECASE,
 )
+# The commit form takes neither modifier: a commit supplies its own window (the
+# commit itself) and happens in no time zone. Matched so they are refused by
+# name rather than as a generic syntax error.
+_CREATE_TRIGGER_COMMIT_MODIFIER_RE = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+[A-Za-z_][\w$]*\s+ON\s+"
+    r"(?!SCHEDULE\b|SIGNAL\b|EVERY\b|EVENT\b)[A-Za-z_][\w.$]*\s+"
+    r"(?:.*\s)?(?P<modifier>OVER|AT\s+TIME\s+ZONE)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+# A cron expression has five whitespace-separated fields. Checked only for
+# shape here: the catalog parses it properly when the trigger is armed, and a
+# malformed field is refused there before anything is stored.
+_CRON_FIELD_COUNT = 5
 
 # ALTER TRIGGER <name> ON <table> SUSPEND|RESUME
 #
@@ -203,6 +240,27 @@ _ALTER_TRIGGER_RE = re.compile(
 _ALTER_TRIGGER_OWNER_RE = re.compile(
     r"^\s*ALTER\s+TRIGGER\s+(?P<name>[A-Za-z_][\w$]*)\s+ON\s+"
     r"(?P<table>[A-Za-z_][\w.$]*)\s+OWNER\s+TO\s+(?P<owner>" + _PRINCIPAL_SLOT + r")\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# ALTER TRIGGER <name> ON <table> SET MINIMUM INTERVAL TO <n> [SECONDS|MINUTES]
+#
+# The floor between two firings of this trigger. The catalog writes a default
+# onto every NEW trigger and enforces it with a transactional claim at fire
+# time; this is the operator's knob - the only way a trigger that predates the
+# field acquires one, and the way to turn the default off (`TO 0`) for a
+# trigger that needs every commit. Spelled MINIMUM in full: next to a unit of
+# time, MIN reads as minutes.
+#
+# The value is a LITERAL non-negative integer, deliberately not a placeholder
+# slot: how often unattended work may run is a property of the trigger's
+# definition, not something runtime data decides. SECONDS is the default unit
+# and the unit the catalog stores; MINUTES is converted here so one field
+# reaches the planner.
+_ALTER_TRIGGER_MINIMUM_INTERVAL_RE = re.compile(
+    r"^\s*ALTER\s+TRIGGER\s+(?P<name>[A-Za-z_][\w$]*)\s+ON\s+"
+    r"(?P<table>[A-Za-z_][\w.$]*)\s+SET\s+MINIMUM\s+INTERVAL\s+TO\s+"
+    r"(?P<value>\d+)\s*(?P<unit>SECONDS?|MINUTES?)?\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -301,6 +359,13 @@ def _intercept_save_results(clean_sql: str):
 # REFRESH, but narrower: ALTER has other legitimate forms (ALTER TABLE, ALTER
 # WORKSPACE), so anything not aimed at a materialized view falls through to the
 # parser untouched.
+#
+# A CONVENIENCE over ALTER TRIGGER ... OWNER TO. A view carries no identity of
+# its own - its refresh triggers do, one per source, exactly as a task's trigger
+# carries the identity of the run it starts - and this repoints every refresh
+# trigger of the view in one batch, so the view never refreshes as two
+# identities depending on which source was written to last. ALTER TRIGGER moves
+# one trigger, and stays available for that.
 _ALTER_MV_LEAD = re.compile(r"^\s*ALTER\s+MATERIALIZED\s+VIEW\b", re.IGNORECASE)
 _ALTER_MV_OWNER_RE = re.compile(
     r"^\s*ALTER\s+MATERIALIZED\s+VIEW\s+(?P<name>[A-Za-z_][\w.$]*)\s+"
@@ -379,49 +444,137 @@ def _intercept_alter_materialized_view(clean_sql: str):
     )
 
 
-def _intercept_trigger_statements(clean_sql: str):
-    """Recognize `DROP TRIGGER [IF EXISTS] <name> ON <table>` before the SQL
-    parser (OpteryxDialect is not in sqlparser's allowlist for trigger
-    statements, so they would otherwise fail to parse with an unhelpful error).
+def _intercept_create_trigger(clean_sql: str):
+    """The three CREATE TRIGGER forms, told apart by the event after `ON`.
 
-    Returns a synthesized single-statement AST list, or None if the statement
-    is not a trigger statement. `CREATE TRIGGER` is rejected here by name -
-    triggers exist only as the automatic artifact of CREATE MATERIALIZED VIEW.
+    Every form synthesizes one `CreateTrigger` node. `table_name` is the HOLDER
+    - the dataset for a commit trigger, the task itself for a schedule or signal
+    trigger, which has no source dataset to live under. `event_kind` says which;
+    `schedule`, `time_zone` and `window_source` are None where the form has no
+    such clause.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
 
-    if _CREATE_TRIGGER_LEAD.match(clean_sql):
-        event = _TRIGGER_EVENT_LEAD.match(clean_sql)
-        if event is not None:
-            # Expressible, and deliberately not accepted: nothing dispatches
-            # either kind. A catalog event fires from the commit path; a clock
-            # event needs something that polls for due triggers and a user event
-            # needs a surface to signal one, and neither exists. Storing such a
-            # trigger would leave a table quietly never updating while its
-            # trigger record claimed otherwise.
-            raise UnsupportedSyntaxError(
-                f"**ON {event.group('kind').upper()}** triggers are not dispatched yet. A "
-                "trigger fires on a catalog event - a commit to a dataset - written "
-                "**ON** <table>. Clock and signal events need a dispatcher that does "
-                "not exist, and a trigger nothing fires is worse than none."
-            )
-        match = _CREATE_TRIGGER_RE.match(clean_sql)
+    event = _TRIGGER_EVENT_LEAD.match(clean_sql)
+    kind = event.group("kind").upper() if event is not None else None
+
+    if kind in ("EVERY", "EVENT"):
+        # Not forms. `ON EVERY <interval>` is a schedule spelled without a cron
+        # expression, and `ON EVENT <name>` a signal spelled with one; both are
+        # refused by name so the refusal can say what the forms are, rather than
+        # that the word is unknown.
+        raise UnsupportedSyntaxError(
+            f"**ON {kind}** is not a trigger event. A trigger fires on a commit "
+            "(**ON** <table>), on a clock (**ON SCHEDULE** '<cron>' [**AT TIME ZONE** "
+            "'<zone>'] [**OVER** <table>]) or on a signal (**ON SIGNAL** [**OVER** "
+            "<table>]), and then **EXECUTE** <task>."
+        )
+
+    if kind == "SCHEDULE":
+        match = _CREATE_TRIGGER_SCHEDULE_RE.match(clean_sql)
         if match is None:
             raise UnsupportedSyntaxError(
-                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON** "
-                "<table> **EXECUTE** <task>. The table is the dataset whose commits "
-                "fire it; the task is what it runs."
+                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON SCHEDULE** "
+                "'<cron>' [**AT TIME ZONE** '<zone>'] [**OVER** <table>] **EXECUTE** "
+                "<task>. The cron expression has five fields (minute, hour, day of "
+                "month, month, day of week); the table, if given, is the dataset the "
+                "run is windowed over."
+            )
+        schedule = match.group("schedule").replace("''", "'").strip()
+        if len(schedule.split()) != _CRON_FIELD_COUNT:
+            raise UnsupportedSyntaxError(
+                f"**ON SCHEDULE** '{schedule}' is not a cron expression: expected "
+                f"{_CRON_FIELD_COUNT} whitespace-separated fields (minute, hour, day "
+                f"of month, month, day of week), e.g. '0 * * * *' for every hour."
+            )
+        zone = match.group("zone")
+        return [
+            {
+                "CreateTrigger": {
+                    "trigger_name": match.group("name"),
+                    "table_name": match.group("task"),
+                    "task_name": match.group("task"),
+                    "or_replace": match.group("or_replace") is not None,
+                    "event_kind": "schedule",
+                    "schedule": schedule,
+                    "time_zone": zone.replace("''", "'") if zone is not None else None,
+                    "window_source": match.group("over"),
+                }
+            }
+        ]
+
+    if kind == "SIGNAL":
+        match = _CREATE_TRIGGER_SIGNAL_RE.match(clean_sql)
+        if match is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON SIGNAL** "
+                "[**OVER** <table>] **EXECUTE** <task>. A signal carries no schedule "
+                "and no time zone; the table, if given, is the dataset the run is "
+                "windowed over."
             )
         return [
             {
                 "CreateTrigger": {
                     "trigger_name": match.group("name"),
-                    "table_name": match.group("table"),
+                    "table_name": match.group("task"),
                     "task_name": match.group("task"),
                     "or_replace": match.group("or_replace") is not None,
+                    "event_kind": "signal",
+                    "schedule": None,
+                    "time_zone": None,
+                    "window_source": match.group("over"),
                 }
             }
         ]
+
+    modifier = _CREATE_TRIGGER_COMMIT_MODIFIER_RE.match(clean_sql)
+    if modifier is not None:
+        spelled = " ".join(modifier.group("modifier").upper().split())
+        raise UnsupportedSyntaxError(
+            f"**{spelled}** does not apply to a commit trigger. A trigger **ON** "
+            "<table> is windowed by the commit that fires it and fires at the moment "
+            "of that commit; **OVER** and **AT TIME ZONE** belong to the **ON SCHEDULE** "
+            "and **ON SIGNAL** forms, which have no commit to take either from."
+        )
+    match = _CREATE_TRIGGER_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON** "
+            "<table> **EXECUTE** <task>, or **ON SCHEDULE** '<cron>' [**AT TIME ZONE** "
+            "'<zone>'] [**OVER** <table>], or **ON SIGNAL** [**OVER** <table>]. The "
+            "table is the dataset whose commits fire it; the task is what it runs."
+        )
+    return [
+        {
+            "CreateTrigger": {
+                "trigger_name": match.group("name"),
+                "table_name": match.group("table"),
+                "task_name": match.group("task"),
+                "or_replace": match.group("or_replace") is not None,
+                "event_kind": "commit",
+                "schedule": None,
+                "time_zone": None,
+                "window_source": None,
+            }
+        }
+    ]
+
+
+def _intercept_trigger_statements(clean_sql: str):
+    """Recognize the trigger statements before the SQL parser (OpteryxDialect
+    is not in sqlparser's allowlist for trigger statements, so they would
+    otherwise fail to parse with an unhelpful error).
+
+    Returns a synthesized single-statement AST list, or None if the statement
+    is not a trigger statement. In ALTER and DROP, `ON <holder>` names what the
+    trigger hangs off: a dataset for a commit trigger, the task itself for a
+    schedule or signal trigger. The grammar cannot tell the two apart and does
+    not try; the binder asks the connector which the name is.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if _CREATE_TRIGGER_LEAD.match(clean_sql):
+        return _intercept_create_trigger(clean_sql)
 
     if _ALTER_TRIGGER_LEAD.match(clean_sql):
         match = _ALTER_TRIGGER_OWNER_RE.match(clean_sql)
@@ -437,12 +590,28 @@ def _intercept_trigger_statements(clean_sql: str):
                     }
                 }
             ]
+        match = _ALTER_TRIGGER_MINIMUM_INTERVAL_RE.match(clean_sql)
+        if match is not None:
+            seconds = int(match.group("value"))
+            if (match.group("unit") or "").upper().startswith("MINUTE"):
+                seconds *= 60
+            return [
+                {
+                    "AlterTriggerMinimumInterval": {
+                        "trigger_name": match.group("name"),
+                        "table_name": match.group("table"),
+                        "minimum_interval_seconds": seconds,
+                    }
+                }
+            ]
         match = _ALTER_TRIGGER_RE.match(clean_sql)
         if match is None:
             raise UnsupportedSyntaxError(
                 "Expected: **ALTER TRIGGER** <name> **ON** <table> "
-                "**SUSPEND**|**RESUME**, or **... OWNER TO** <principal>. What a "
-                "trigger runs is changed by recreating it, not altered in place."
+                "**SUSPEND**|**RESUME**, **... OWNER TO** <principal>, or "
+                "**... SET MINIMUM INTERVAL TO** <n> [**SECONDS**|**MINUTES**] "
+                "(a whole number; 0 removes the floor). What a trigger runs is "
+                "changed by recreating it, not altered in place."
             )
         return [
             {
@@ -664,6 +833,96 @@ def _intercept_task_statements(clean_sql: str):
     return None
 
 
+# LISTEN TO <task> [FOR ERROR | SUCCESS | EVERYTHING]
+# UNLISTEN <task>
+# SHOW LISTENERS
+#
+# sqlparser 0.62 HAS LISTEN/UNLISTEN/NOTIFY, and they are deliberately not used.
+# They are gated behind `Dialect::supports_listen_notify()`, which defaults false
+# and which OpteryxDialect does not override; their grammar is Postgres's
+# `LISTEN <channel>` - a bare identifier, no TO and no modifier; and their AST
+# reports `Span::empty()`, which forfeits the position information every error
+# this engine raises carries. Enabling the flag would make `LISTEN foo` parse as
+# a session-scoped Postgres channel subscription that is not what this is: these
+# subscriptions are durable, owned by a user, and fire when nobody is connected.
+#
+# The task name is an IDENTIFIER slot and admits no placeholder, for the reason
+# at the top of this module: which task you are subscribed to is not a runtime
+# decision.
+#
+# There is no `UNLISTEN *`. The task is named, always - a statement that silently
+# empties every subscription a user holds is not something to be one keystroke
+# away from `UNLISTEN t`.
+_LISTEN_LEAD = re.compile(r"^\s*LISTEN\b", re.IGNORECASE)
+_LISTEN_RE = re.compile(
+    r"^\s*LISTEN\s+TO\s+(?P<name>[A-Za-z_][\w.$]*)"
+    r"(?:\s+FOR\s+(?P<outcome>ERROR|SUCCESS|EVERYTHING))?\s*;?\s*$",
+    re.IGNORECASE,
+)
+_UNLISTEN_LEAD = re.compile(r"^\s*UNLISTEN\b", re.IGNORECASE)
+_UNLISTEN_RE = re.compile(
+    r"^\s*UNLISTEN\s+(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE,
+)
+_SHOW_LISTENERS_LEAD = re.compile(r"^\s*SHOW\s+LISTENERS\b", re.IGNORECASE)
+_SHOW_LISTENERS_RE = re.compile(r"^\s*SHOW\s+LISTENERS\s*;?\s*$", re.IGNORECASE)
+
+
+def _intercept_listen_statements(clean_sql: str):
+    """Recognize `LISTEN TO`, `UNLISTEN` and `SHOW LISTENERS` before the parser.
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    is none of them. As with the task statements, anything opening with these
+    words but not matching is rejected BY NAME rather than left to sqlparser -
+    which, with `supports_listen_notify` false, reports a syntax error on the
+    word LISTEN itself and says nothing about what was expected after it.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if _SHOW_LISTENERS_LEAD.match(clean_sql):
+        if _SHOW_LISTENERS_RE.match(clean_sql) is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **SHOW LISTENERS**, which takes no arguments. It lists "
+                "the tasks YOU listen to; there is no form that lists anyone "
+                "else's subscriptions."
+            )
+        return [{"ShowListeners": {}}]
+
+    if _LISTEN_LEAD.match(clean_sql):
+        match = _LISTEN_RE.match(clean_sql)
+        if match is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **LISTEN TO** <task> [**FOR ERROR**|**SUCCESS**|"
+                "**EVERYTHING**]. A subscription is to a TASK - not to a trigger "
+                "or a table - and without **FOR** it covers every outcome."
+            )
+        outcome = match.group("outcome")
+        return [
+            {
+                "Listen": {
+                    "name": match.group("name"),
+                    # No FOR clause means every outcome. Resolved here rather
+                    # than left None so one spelling reaches the catalog.
+                    "outcome": outcome.upper() if outcome else "EVERYTHING",
+                }
+            }
+        ]
+
+    if _UNLISTEN_LEAD.match(clean_sql):
+        match = _UNLISTEN_RE.match(clean_sql)
+        if match is None:
+            raise UnsupportedSyntaxError(
+                "Expected: **UNLISTEN** <task>. The task is named - there is no "
+                "wildcard form that drops every subscription at once. **UNLISTEN** "
+                "takes no **FOR** clause either: a subscription is removed whole, "
+                "and changing which outcomes you hear about is **UNLISTEN** then "
+                "**LISTEN TO**."
+            )
+        return [{"Unlisten": {"name": match.group("name")}}]
+
+    return None
+
+
 # SHOW CREATE MATERIALIZED VIEW <name>
 # SHOW CREATE TASK <name>
 #
@@ -852,6 +1111,7 @@ _INTERCEPTORS = (
     _intercept_drop_statistics,
     _intercept_trigger_statements,
     _intercept_task_statements,
+    _intercept_listen_statements,
     _intercept_alter_task,
     _intercept_alter_workspace_secure,
     _intercept_refresh_statements,

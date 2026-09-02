@@ -123,6 +123,7 @@ class LogicalPlanStepType(int, Enum):
     DropTrigger = auto()
     CreateTrigger = auto()
     AlterTriggerSuspended = auto()
+    AlterTriggerMinimumInterval = auto()
     CreateTask = auto()
     DropTask = auto()
     AlterTriggerOwner = auto()
@@ -133,6 +134,9 @@ class LogicalPlanStepType(int, Enum):
     RevokeAccess = auto()
     ShowGrantsOn = auto()
     ShowEffectiveGrantsOn = auto()
+
+    Listen = auto()
+    Unlisten = auto()
 
     CallProcedure = auto()  # CALL <procedure>(<literals>)
 
@@ -3993,9 +3997,14 @@ def _plan_show_snapshots(table_name: str) -> LogicalPlan:
 
 
 def _plan_show_triggers(table_name: str) -> LogicalPlan:
-    """`SHOW TRIGGERS FOR <table>` — desugars to
+    """`SHOW TRIGGERS FOR <holder>` — desugars to
     `SELECT * FROM <workspace>.information_schema.triggers
-     WHERE event_object_table = '<collection.table>'`.
+     WHERE trigger_holder = '<collection.name>'`.
+
+    The holder is what the trigger hangs off: a dataset for a commit trigger,
+    the task itself for a schedule or signal trigger. A commit trigger's holder
+    IS its `event_object_table`, so for a table this reads exactly as it did;
+    for a task it lists the trigger the task is fired by.
 
     Not a virtual dataset like SHOW USER/GRANTS: those read only session
     variables, while triggers live in the workspace's catalog, which is only
@@ -4004,7 +4013,7 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
     why the bare `SHOW TRIGGERS` form is rejected in plan_show_variables (the
     planner has no session default workspace to scan).
 
-    The filter lands on `event_object_table`, a pushable key column of the
+    The filter lands on `trigger_holder`, a pushable key column of the
     triggers reader, so the predicate-pushdown pass turns it into skipped
     catalog round trips rather than a post-hoc row filter.
     """
@@ -4012,7 +4021,7 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
     if not relative:
         raise UnsupportedSyntaxError(
             "`SHOW TRIGGERS FOR <table>` requires a workspace-qualified table "
-            "name, e.g. `SHOW TRIGGERS FOR opteryx.test.pypi`."
+            "or task name, e.g. `SHOW TRIGGERS FOR opteryx.test.pypi`."
         )
     relation = f"{workspace}.information_schema.triggers"
 
@@ -4027,7 +4036,7 @@ def _plan_show_triggers(table_name: str) -> LogicalPlan:
 
     filter_node = LogicalPlanNode(node_type=LogicalPlanStepType.Filter)
     filter_node.condition = build_expression_tree(
-        relation, [("event_object_table", "Eq", relative)]
+        relation, [("trigger_holder", "Eq", relative)]
     )
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, filter_node)
@@ -6255,13 +6264,22 @@ def plan_drop_task(statement, **kwargs) -> LogicalPlan:
 
 
 def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
-    """CREATE [OR REPLACE] TRIGGER <name> ON <table> EXECUTE <task> — synthesized
-    by pre-parse.
+    """CREATE [OR REPLACE] TRIGGER <name> ON <table> EXECUTE <task>, and the
+    ON SCHEDULE / ON SIGNAL forms — synthesized by pre-parse.
 
     Standalone triggers exist because a task's firing condition is not always
-    derivable from the task: the same task can be fired by several datasets, or
-    by none. A materialized view's triggers ARE derived, and stay that way -
-    this statement does not touch them.
+    derivable from the task: a task may be fired by a dataset it does not read,
+    by a clock, by a signal, or by nothing at all. A task has at most one
+    trigger (the catalog's one-trigger rule - its window is one sequence), so
+    this statement is also where that one firing condition is chosen. A
+    materialized view's triggers ARE derived, and stay that way - this
+    statement does not touch them.
+
+    `table_name` is the HOLDER the trigger lives under: the dataset whose
+    commits fire it, or - for a schedule or signal trigger, which has no source
+    dataset - the task itself. `event_kind` says which; `schedule`, `time_zone`
+    and `window_source` describe the event and are None where the form has no
+    such clause.
     """
     root = "CreateTrigger"
     node = LogicalPlanNode(node_type=LogicalPlanStepType.CreateTrigger)
@@ -6269,6 +6287,10 @@ def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
     node.table_name = statement[root]["table_name"]
     node.task_name = statement[root]["task_name"]
     node.or_replace = statement[root].get("or_replace", False)
+    node.event_kind = statement[root].get("event_kind") or "commit"
+    node.schedule = statement[root].get("schedule")
+    node.time_zone = statement[root].get("time_zone")
+    node.window_source = statement[root].get("window_source")
 
     plan = LogicalPlan()
     plan.add_node(random_string(), node)
@@ -6320,6 +6342,26 @@ def plan_alter_trigger_suspended(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
+def plan_alter_trigger_minimum_interval(statement, **kwargs) -> LogicalPlan:
+    """ALTER TRIGGER <name> ON <table> SET MINIMUM INTERVAL TO <n> [SECONDS|MINUTES]
+    — synthesized by pre-parse, which has already reduced the value to seconds.
+
+    The floor between two firings of the trigger. Enforced by the catalog at
+    fire time with a transactional claim, so two commits milliseconds apart
+    cannot both fire; a commit inside the floor is recorded as `throttled`.
+    0 removes the floor.
+    """
+    root = "AlterTriggerMinimumInterval"
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTriggerMinimumInterval)
+    node.trigger_name = statement[root]["trigger_name"]
+    node.table_name = statement[root]["table_name"]
+    node.minimum_interval_seconds = int(statement[root]["minimum_interval_seconds"])
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
 def plan_drop_trigger(statement, **kwargs) -> LogicalPlan:
     """DROP TRIGGER [IF EXISTS] <name> ON <table> — synthesized by the planner's
     pre-parse interception (OpteryxDialect has no native sqlparser grammar for
@@ -6342,8 +6384,10 @@ def plan_alter_materialized_view_owner(statement, **kwargs) -> LogicalPlan:
     planner's pre-parse interception.
 
     Unlike REFRESH, this does not desugar into a CTAS: nothing is read and
-    nothing is written but one field on the view's record, so it gets its own
-    node, its own binder visitor, and its own permission check."""
+    nothing is written but `runs-as` on each of the view's refresh triggers -
+    all of them at once, which is the point of naming the view rather than a
+    trigger - so it gets its own node, its own binder visitor, and its own
+    permission check."""
     from opteryx.planner.pre_parse import resolve_slot_value
 
     root = "AlterMaterializedViewOwner"
@@ -6501,6 +6545,73 @@ def plan_show_effective_grants_on(statement, **kwargs) -> LogicalPlan:
         "ShowEffectiveGrantsOn",
         LogicalPlanStepType.ShowEffectiveGrantsOn,
         effective=True,
+    )
+
+
+def plan_listen(statement, **kwargs) -> LogicalPlan:
+    """LISTEN TO <task> [FOR ...] — synthesized pre-parse.
+
+    Subscribes the SESSION USER to a task's run outcomes; there is no form that
+    subscribes anyone else, because a subscription is a claim on someone's
+    attention and one person does not make it for another. The subscriber is
+    therefore not carried on the node - the operator takes it from the execution
+    context, which is the only place it can honestly come from.
+    """
+    root = "Listen"
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.Listen)
+    node.task_name = statement[root]["name"]
+    # Already resolved to one of ERROR/SUCCESS/EVERYTHING by pre-parse; a
+    # missing FOR clause arrives as EVERYTHING rather than as None.
+    node.outcome = statement[root]["outcome"]
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_unlisten(statement, **kwargs) -> LogicalPlan:
+    """UNLISTEN <task> — synthesized pre-parse.
+
+    Removes the session user's own subscription, whole. There is no FOR clause:
+    changing which outcomes you hear about is UNLISTEN then LISTEN TO, which is
+    also what the duplicate-LISTEN refusal hands the caller.
+    """
+    root = "Unlisten"
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.Unlisten)
+    node.task_name = statement[root]["name"]
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
+def plan_show_listeners(statement, **kwargs) -> LogicalPlan:
+    """SHOW LISTENERS — recognized, and refused pending an architect ruling.
+
+    The statement names no object, and `information_schema` in this engine is
+    always WORKSPACE-QUALIFIED: every reader of it is built by
+    `OpteryxConnector.table_engine()` for one workspace, and `information_schema
+    .listeners` unqualified resolves to a workspace literally called
+    `information_schema`. There is no session current-workspace to fall back on
+    - `execution_context.schema` is carried for `current_schema()` and routes
+    nothing - and `SHOW TASKS`, which would have had the same problem, does not
+    exist.
+
+    So there is nothing for a bare SHOW LISTENERS to read. Refused by name,
+    naming the form that works, rather than shipped as a keyword that resolves
+    to a baffling "dataset information_schema/listeners cannot be found" - and
+    rather than quietly given a workspace slot the architect did not rule.
+
+    The table itself is delivered and is the surface today; see
+    docs/LISTEN_SQL_DESIGN.md §4.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    raise UnsupportedSyntaxError(
+        "**SHOW LISTENERS** cannot yet name the workspace to read, so it lists "
+        "nothing. Your subscriptions are in **information_schema.listeners**, "
+        "qualified with the workspace: **SELECT** * **FROM** "
+        "<workspace>.information_schema.listeners."
     )
 
 
@@ -6767,8 +6878,14 @@ QUERY_BUILDERS = {
     "CreateTrigger": plan_create_trigger,
     "AlterTriggerOwner": plan_alter_trigger_owner,
     "AlterTriggerSuspended": plan_alter_trigger_suspended,
+    "AlterTriggerMinimumInterval": plan_alter_trigger_minimum_interval,
     "CreateTask": plan_create_task,
     "DropTask": plan_drop_task,
+    # LISTEN/UNLISTEN/SHOW LISTENERS — synthesized pre-parse. sqlparser HAS a
+    # LISTEN grammar and it is deliberately unused; see pre_parse for why.
+    "Listen": plan_listen,
+    "Unlisten": plan_unlisten,
+    "ShowListeners": plan_show_listeners,
     "Comment": plan_comment,
     # CALL <procedure>(...) - sqlparser parses this natively, on the same branch
     # shape as a function call. The procedure is host-registered; see opteryx.procedures.

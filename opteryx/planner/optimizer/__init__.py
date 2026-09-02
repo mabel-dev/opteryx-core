@@ -53,6 +53,7 @@ from opteryx.planner.optimizer.strategies import (
     GroupKeyReductionStrategy,
     HashMapVariantStrategy,
     JoinBuildShapeStrategy,
+    JoinConditionHoistStrategy,
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
     JoinOrderingStrategy,
@@ -109,6 +110,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "GroupKeyReductionStrategy": "disable_group_key_reduction",
     "HashMapVariantStrategy": "disable_hash_map_variant",
     "JoinBuildShapeStrategy": "disable_join_build_shape",
+    "JoinConditionHoistStrategy": "disable_join_condition_hoist",
     "JoinEliminationStrategy": "disable_join_elimination",
     "JoinKeyMaterializationStrategy": "disable_join_key_materialization",
     "JoinOrderingStrategy": "disable_join_ordering",
@@ -188,6 +190,10 @@ class OptimizerVisitor:
             # before any strategy that reasons about joins or pushes predicates,
             # since it introduces a join and moves a predicate across it.
             DecorrelateSubqueryStrategy(telemetry),
+            # Moves an INNER join's single-leg ON conjuncts into a Filter above
+            # the join, so every expression rewrite below (which visit Filter
+            # nodes only) sees them exactly as it sees a WHERE predicate.
+            JoinConditionHoistStrategy(telemetry),
             ConstantFoldingStrategy(telemetry),
             # Drops no-op LIMITs before StatisticsOnlyResponseStrategy runs, so
             # e.g. `SELECT COUNT(*) FROM t LIMIT n` is answered from the
@@ -223,6 +229,12 @@ class OptimizerVisitor:
             # Runs after pushdown so join-key ranges (from scan predicates) are
             # propagated; pushes the realized range onto the opposite scan.
             CorrelatedFiltersStrategy(telemetry),
+            # Second compaction pass: CorrelatedFilters has just copied ranges
+            # across equi-join keys onto the opposite leg, where they meet the
+            # leg's own bounds for the first time. `p.id > 5 AND s.id < 3` over
+            # `p.id = s.id` lands `id > 5 AND id < 3` on BOTH legs — a
+            # contradiction the first pass ran too early to see.
+            PredicateCompactionStrategy(telemetry),
             # Narrow a decorrelated subquery's leg to the keys the join can
             # consume. After pushdown, which is what makes the opposite leg
             # narrow enough to be worth copying.

@@ -148,6 +148,28 @@ CLAUSE_DEFINITIONS = {
         ),
         "notes": "Synthesized by the planner's pre-parse interception (no native sqlparser grammar).",
     },
+    "alter_trigger_minimum_interval": {
+        "canonical_name": "ALTER TRIGGER ... SET MINIMUM INTERVAL TO",
+        "planner_entry": "plan_alter_trigger_minimum_interval",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "ALTER TRIGGER trigger_name ON table_name SET MINIMUM INTERVAL TO n [SECONDS|MINUTES]"
+        ],
+        "summary": "Set the floor between two firings of a trigger.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception (no native sqlparser "
+            "grammar). A trigger fires at most once per interval: the first commit in a "
+            "burst fires, and a commit inside the interval after it is recorded on the "
+            "trigger as throttled and enqueues nothing. New triggers get 120 seconds; "
+            "this is how an existing trigger acquires a floor, and TO 0 removes one."
+        ),
+        "notes": (
+            "The value is a literal whole number, not a placeholder. SECONDS is the "
+            "default unit; MINUTES is converted to seconds. Spelled MINIMUM in full. "
+            "Requires AUTOMATE on the table, as SUSPEND does."
+        ),
+    },
     "refresh_materialized_view": {
         "canonical_name": "REFRESH MATERIALIZED VIEW",
         "planner_entry": "plan_refresh_materialized_view",

@@ -33,7 +33,13 @@ real one). That makes it safe to push down as an extra, additive filter — it
 can only discard rows the original filter would also discard — but it can
 NEVER replace the original filter, which stays in the plan unmodified and
 still does the real correctness work post-join. This strategy only ADDS
-predicates; it never removes or rewrites the OR.
+predicates in that case; it never rewrites the OR.
+
+The one exception is the degenerate OR that IS a domain: every branch a single
+point test on one column (`id IN (1, 2) OR id IN (3, 4)`, `'a' = x OR x = 'b'`).
+There the derived IN-list is equivalent, not weaker, and the OR is REPLACED by
+it — leaving both meant the pushed copy filtered the leg and the original
+filtered the joined rows again.
 
 The same reasoning extends to range predicates: if every branch bounds a
 column between two literals, the UNION of those per-branch ranges is implied
@@ -74,7 +80,7 @@ from opteryx.types.logical_type import ARRAY as _CT_ARRAY
 from opteryx.types.logical_type import BOOLEAN as _CT_BOOLEAN
 from opteryx.types.schema import ConstantColumn
 
-from .disjunction_simplification import _split_and, _split_or
+from .disjunction_simplification import _build_and, _split_and, _split_or
 from .optimization_strategy import OptimizationStrategy, OptimizerContext
 from .predicate_pushdown import _normalize_col_op_lit
 
@@ -97,6 +103,15 @@ def _classify_leaf(leaf: Node) -> Optional[Tuple[str, Node, str, tuple]]:
 
     if leaf.value in ("Eq", "InList"):
         left, right = leaf.left, leaf.right
+        if (
+            leaf.value == "Eq"
+            and left is not None
+            and right is not None
+            and left.node_type == NodeType.LITERAL
+            and right.node_type == NodeType.IDENTIFIER
+        ):
+            # `'x' = col` — the literal-left spelling is the same point test
+            left, right = right, left
         if (
             left is None
             or right is None
@@ -284,10 +299,19 @@ def _build_range_nodes(ident: Node, lo: Optional[_Bound], hi: Optional[_Bound]) 
     return nodes
 
 
-def _derive_domain_predicates(condition: Node) -> List[Node]:
+def _derive_domain_predicates(condition: Node) -> Tuple[List[Node], bool]:
+    """(derived predicates, exact).
+
+    `exact` is True when the derived predicate is not merely IMPLIED by the OR but
+    EQUIVALENT to it: every branch is exactly one point test on the same single
+    column (`id IN (1, 2) OR id IN (3, 4)`, `'a' = x OR x = 'b'`), so the union of
+    the points is the whole condition. The caller then REPLACES the OR rather than
+    ANDing a copy alongside it — otherwise the OR stayed above the join, filtering
+    every joined row a second time by a test the leg had already applied.
+    """
     branches = _split_or(condition)
     if len(branches) < 2:
-        return []
+        return [], False
 
     branch_domains = [_branch_column_domains(branch) for branch in branches]
 
@@ -295,9 +319,10 @@ def _derive_domain_predicates(condition: Node) -> List[Node]:
     for domains in branch_domains[1:]:
         candidate_identities &= set(domains.keys())
     if not candidate_identities:
-        return []
+        return [], False
 
     derived: List[Node] = []
+    exact = False
     for identity in sorted(candidate_identities):
         domain = _domain_for_column(branch_domains, identity)
         if domain is None:
@@ -306,10 +331,16 @@ def _derive_domain_predicates(condition: Node) -> List[Node]:
         if kind == "points":
             values, element_type = payload
             derived.append(_build_points_node(ident, values, element_type))
+            exact = len(candidate_identities) == 1 and all(
+                len(_split_and(branch)) == 1
+                and _classify_leaf(_split_and(branch)[0]) is not None
+                and _classify_leaf(_split_and(branch)[0])[0] == identity
+                for branch in branches
+            )
         else:
             lo, hi = payload
             derived.extend(_build_range_nodes(ident, lo, hi))
-    return derived
+    return derived, exact
 
 
 class DisjunctiveDomainPushdownStrategy(OptimizationStrategy):
@@ -322,21 +353,27 @@ class DisjunctiveDomainPushdownStrategy(OptimizationStrategy):
 
     def visit(self, node: LogicalPlanNode, context: OptimizerContext) -> OptimizerContext:
         if node.node_type == LogicalPlanStepType.Filter and node.condition is not None:
+            conjuncts: List[Node] = []
             derived: List[Node] = []
+            changed = False
             for conjunct in _split_and(node.condition):
-                while conjunct is not None and conjunct.node_type == NodeType.NESTED:
-                    conjunct = conjunct.centre
-                if conjunct is not None and conjunct.node_type == NodeType.OR:
-                    derived.extend(_derive_domain_predicates(conjunct))
+                unwrapped = conjunct
+                while unwrapped is not None and unwrapped.node_type == NodeType.NESTED:
+                    unwrapped = unwrapped.centre
+                if unwrapped is not None and unwrapped.node_type == NodeType.OR:
+                    predicates, exact = _derive_domain_predicates(unwrapped)
+                    if exact:
+                        # Equivalent, not merely implied: the derived test IS the OR.
+                        conjuncts.extend(predicates)
+                        changed = True
+                        self.telemetry.optimization_disjunctive_domain_replaced += 1
+                        continue
+                    derived.extend(predicates)
+                conjuncts.append(conjunct)
 
-            if derived:
+            if derived or changed:
                 new_node = context.optimized_plan[context.node_id]
-                new_condition = new_node.condition
-                for predicate in derived:
-                    wrapper = Node(node_type=NodeType.AND)
-                    wrapper.left = new_condition
-                    wrapper.right = predicate
-                    new_condition = wrapper
+                new_condition = _build_and(conjuncts + derived)
                 new_node.condition = new_condition
                 new_node.columns = get_all_nodes_of_type(
                     new_condition, select_nodes=(NodeType.IDENTIFIER,)

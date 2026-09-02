@@ -19,10 +19,25 @@ Example:
     col > 10 AND col < 5
     => FALSE (contradictory condition)
 
+    col IN (1, 2, 3) AND col IN (2, 3, 4) AND col > 2
+    => col = 3 (point sets intersect, then the range prunes the points)
+
+    col != 1 AND col != 2 AND col != 3
+    => col NOT IN (1, 2, 3) (one probe, not three passes)
+
+    col = 5 AND col IS NOT NULL   => col = 5 (the test is implied)
+    col > 5 AND col IS NULL       => FALSE (nothing is both)
+
 This enables better predicate pushdown by simplifying the filter expression.
+
+The strategy runs TWICE: once after the split (the WHERE clause's own conjuncts),
+and again after CorrelatedFilters has copied ranges across equi-join keys onto
+the opposite leg, where they meet that leg's own bounds for the first time.
 """
 
 from dataclasses import dataclass
+from dataclasses import field
+from decimal import Decimal
 from typing import Any
 from typing import Dict
 from typing import List
@@ -35,6 +50,8 @@ from opteryx.models import Node
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
+from opteryx.types import logical_type as _lt
+from opteryx.types.schema import ConstantColumn
 
 from .optimization_strategy import OptimizationStrategy
 from .optimization_strategy import OptimizerContext
@@ -185,6 +202,9 @@ def _literal_domain_key(literal_node) -> Any:
     literal_type = getattr(literal_node, "type", None)
     if literal_type is None:
         return None
+    if literal_type.element is not None:
+        # an IN-list's ARRAY literal: its members live in the ELEMENT's domain
+        literal_type = literal_type.element
     physical = literal_type.physical
     if physical not in _TEMPORAL_PHYSICALS:
         return None
@@ -214,11 +234,57 @@ class BoundCandidate:
 
 @dataclass
 class ColumnAnalysisResult:
-    """Outcome of analyzing predicates for a single column."""
+    """Outcome of analyzing predicates for a single column.
+
+    status is one of "unchanged", "unsupported", "contradiction" or "rewritten".
+    For "rewritten": `required` lists the occurrences that survive AS WRITTEN, and
+    `replacements` the new nodes that stand in for every other occurrence (a
+    BETWEEN for a bounded range, one IN-list for intersected point sets, one
+    NOT IN for a chain of `!=`).
+    """
 
     status: str
-    required: Optional[List[PredicateOccurrence]] = None
-    between_node: Optional[Node] = None  # Set when both bounds compact to a BETWEEN node
+    required: List[PredicateOccurrence] = field(default_factory=list)
+    replacements: List[Node] = field(default_factory=list)
+
+
+_RANGE_OPS = frozenset({"Gt", "GtEq", "Lt", "LtEq"})
+_POINT_OPS = frozenset({"Eq", "InList"})
+_NULL_TESTS = frozenset({"IsNull", "IsNotNull"})
+
+
+def _literal_kind(value) -> Optional[str]:
+    """The comparison family a literal belongs to, or None if it is not orderable."""
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float, Decimal)):
+        return "number"
+    if isinstance(value, bytes):
+        return "bytes"
+    if isinstance(value, str):
+        return "str"
+    return None
+
+
+def _within(value, value_range: ValueRange) -> bool:
+    """Is `value` inside the (possibly half-open) range?"""
+    lower, upper = value_range.lower, value_range.upper
+    if lower is not None:
+        if value < lower.value or (value == lower.value and not lower.inclusive):
+            return False
+    if upper is not None:
+        if value > upper.value or (value == upper.value and not upper.inclusive):
+            return False
+    return True
+
+
+def _retype_literal(literal: Node, column_type, value) -> None:
+    """Stamp a literal with a new value AND matching type — `.type` and
+    `schema_column` are read by different consumers (row-group pruner vs the
+    bytecode compiler), so both must agree or the node is half-bound."""
+    literal.value = value
+    literal.type = column_type
+    literal.schema_column = ConstantColumn(name=literal.name or "", column_type=column_type, value=value)
 
 
 class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
@@ -254,11 +320,19 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         #
         # This prevents predicates from different plan branches (e.g. the two sides
         # of an EXCEPT or UNION) being grouped together and incorrectly compacted.
-        filter_chain_roots: Dict[str, str] = state["filter_chain_roots"]
+        # The root carries the EDGE LABEL as well as the parent: on the second run
+        # (after pushdown) the two legs of a join both hang Filter chains off the
+        # same parent node, and a bare parent nid would put both legs in one chain.
+        filter_chain_roots: Dict[str, Any] = state["filter_chain_roots"]
         if context.parent_nid in filter_chain_roots:
             chain_root = filter_chain_roots[context.parent_nid]
         else:
-            chain_root = context.parent_nid
+            relationship = (
+                context.pre_optimized_tree.relationship(context.node_id, context.parent_nid)
+                if context.parent_nid
+                else None
+            )
+            chain_root = (context.parent_nid, relationship)
         filter_chain_roots[context.node_id] = chain_root
 
         predicates = self._extract_and_predicates(node.condition)
@@ -311,7 +385,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
 
         drop_keys: Set[Tuple[str, int]] = set()
         filters_to_false: Set[str] = set()
-        between_replacements: Dict[str, List[Node]] = {}
+        replacements: Dict[str, List[Node]] = {}
 
         for occurrences in column_occurrences.values():
             analysis = self._analyze_column_predicates(occurrences)
@@ -323,17 +397,7 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 self.telemetry.optimization_predicate_compaction_range_simplified += 1
                 continue
 
-            if status == "between" and analysis.between_node:
-                # Drop every predicate for this column — they're all replaced by BETWEEN.
-                filter_nid = occurrences[0].filter_nid
-                for occ in occurrences:
-                    drop_keys.add((occ.filter_nid, id(occ.predicate)))
-                between_replacements.setdefault(filter_nid, []).append(analysis.between_node)
-                self.telemetry.optimization_predicate_compaction += 1
-                self.telemetry.optimization_predicate_compaction_range_simplified += 1
-                continue
-
-            if status != "compacted" or not analysis.required:
+            if status != "rewritten":
                 continue
 
             required_keys = {(occ.filter_nid, id(occ.predicate)) for occ in analysis.required}
@@ -341,11 +405,17 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                 key = (occ.filter_nid, id(occ.predicate))
                 if key not in required_keys:
                     drop_keys.add(key)
+            # Replacement nodes land in the first occurrence's filter — the one
+            # nearest the top of the chain, so they filter no later than the
+            # predicates they stand in for did.
+            if analysis.replacements:
+                replacements.setdefault(occurrences[0].filter_nid, []).extend(
+                    analysis.replacements
+                )
 
-            if len(analysis.required) < len(occurrences):
-                removed = len(occurrences) - len(analysis.required)
-                self.telemetry.optimization_predicate_compaction += removed
-                self.telemetry.optimization_predicate_compaction_range_simplified += 1
+            removed = len(occurrences) - len(analysis.required)
+            self.telemetry.optimization_predicate_compaction += removed
+            self.telemetry.optimization_predicate_compaction_range_simplified += 1
 
         for filter_nid, filter_info in filters_state.items():
             if filter_nid not in optimized_plan:
@@ -367,9 +437,9 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
                     continue
                 new_predicates.append(predicate.copy())
 
-            # Append BETWEEN nodes that replaced compacted range predicate pairs.
-            for between_node in between_replacements.get(filter_nid, []):
-                new_predicates.append(between_node)
+            # Append the nodes that replaced compacted predicates (BETWEEN / IN / NOT IN).
+            for replacement in replacements.get(filter_nid, []):
+                new_predicates.append(replacement)
 
             if not new_predicates:
                 optimized_plan.remove_node(filter_nid, heal=True)
@@ -402,7 +472,19 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
     def _analyze_column_predicates(
         self, occurrences: List[PredicateOccurrence]
     ) -> ColumnAnalysisResult:
-        """Determine the minimal set of predicates required for a column."""
+        """Determine the minimal set of predicates required for a column.
+
+        The column's predicates are sorted into five families — null tests,
+        point tests (`=`, `IN`), range bounds, `!=` exclusions and nothing
+        else — and reduced together:
+
+          IS NULL      with anything else on the column  -> contradiction
+          IS NOT NULL  with any valued predicate         -> dropped (implied)
+          points       intersected across Eq/IN, then pruned by the range and
+                       the exclusions; empty -> contradiction, else ONE Eq/IN
+          range        tightest lower/upper (a BETWEEN when both exist)
+          !=           values outside the range dropped; 2+ survivors -> NOT IN
+        """
         if len(occurrences) <= 1:
             return ColumnAnalysisResult(status="unchanged")
 
@@ -416,91 +498,172 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         if len({occ.domain for occ in occurrences}) > 1:
             return ColumnAnalysisResult(status="unsupported")
 
+        is_null = [occ for occ in occurrences if occ.operator == "IsNull"]
+        is_not_null = [occ for occ in occurrences if occ.operator == "IsNotNull"]
+        points = [occ for occ in occurrences if occ.operator in _POINT_OPS]
+        ranges = [occ for occ in occurrences if occ.operator in _RANGE_OPS]
+        exclusions = [occ for occ in occurrences if occ.operator == "NotEq"]
+        valued = points + ranges + exclusions
+        if len(is_null) + len(is_not_null) + len(valued) != len(occurrences):
+            return ColumnAnalysisResult(status="unsupported")
+
+        # `col = NULL` (or any bound against a NULL literal) is not orderable —
+        # three-valued SQL semantics mean a NULL never participates in range logic.
+        # Nor is a pool of literals from different families; the binder may have
+        # pre-baked an IN-list into a non-iterable set, which reads as unsupported.
+        literal_pool: list = []
+        for occ in valued:
+            if occ.operator == "InList":
+                if not isinstance(occ.value, (list, tuple, set, frozenset)):
+                    return ColumnAnalysisResult(status="unsupported")
+                literal_pool.extend(occ.value)
+            else:
+                literal_pool.append(occ.value)
+        kinds = {_literal_kind(value) for value in literal_pool}
+        if None in kinds or len(kinds) > 1:
+            return ColumnAnalysisResult(status="unsupported")
+
+        if is_null:
+            if valued or is_not_null:
+                return ColumnAnalysisResult(status="contradiction")
+            # only IS NULL tests: one is enough
+            return ColumnAnalysisResult(status="rewritten", required=[is_null[0]])
+
+        # IS NOT NULL is implied by any valued predicate (all evaluate UNKNOWN on
+        # NULL, and WHERE discards UNKNOWN); on its own, one copy is enough.
+        surviving_not_null = [] if valued else is_not_null[:1]
+
         value_range = ValueRange()
         best_lower: Optional[BoundCandidate] = None
         best_upper: Optional[BoundCandidate] = None
-        equality_occurrences: List[PredicateOccurrence] = []
-
-        for occurrence in occurrences:
+        for occurrence in ranges:
             mapped = self._map_operator(occurrence.operator)
-            if mapped is None:
-                return ColumnAnalysisResult(status="unsupported")
-
-            # `col = NULL` is not orderable (three-valued semantics) — bail before
-            # building a BoundCandidate from it, since `_is_better_lower`/
-            # `_is_better_upper` compare `.value` with a bare `>`/`<` and would
-            # otherwise see a `None`. ValueRange.update_with_predicate has the same
-            # guard for the OR-branch path (`_branch_range`), which never
-            # pre-computes bound candidates.
-            if occurrence.value is None:
-                return ColumnAnalysisResult(status="unsupported")
-
-            if mapped == "=":
-                equality_occurrences.append(occurrence)
-
-            if mapped in ("=", ">", ">="):
-                candidate = BoundCandidate(
-                    value=occurrence.value,
-                    inclusive=mapped in ("=", ">="),
-                    occurrence=occurrence,
-                )
-                if self._is_better_lower(candidate, best_lower):
-                    best_lower = candidate
-
-            if mapped in ("=", "<", "<="):
-                candidate = BoundCandidate(
-                    value=occurrence.value,
-                    inclusive=mapped in ("=", "<="),
-                    occurrence=occurrence,
-                )
-                if self._is_better_upper(candidate, best_upper):
-                    best_upper = candidate
-
+            candidate = BoundCandidate(
+                value=occurrence.value,
+                inclusive=mapped in (">=", "<="),
+                occurrence=occurrence,
+            )
+            if mapped in (">", ">=") and self._is_better_lower(candidate, best_lower):
+                best_lower = candidate
+            if mapped in ("<", "<=") and self._is_better_upper(candidate, best_upper):
+                best_upper = candidate
             if not value_range.update_with_predicate(mapped, occurrence.value):
                 return ColumnAnalysisResult(status="contradiction")
-
-            if value_range.untrackable:
-                return ColumnAnalysisResult(status="unsupported")
-
         if not value_range:
             return ColumnAnalysisResult(status="contradiction")
 
-        if equality_occurrences:
-            equality_value = equality_occurrences[0].value
-            matching = [occ for occ in equality_occurrences if occ.value == equality_value]
-            if len(matching) == 0:
+        excluded_values = {occ.value for occ in exclusions}
+
+        if points:
+            point_set: Optional[Set] = None
+            for occ in points:
+                values = {occ.value} if occ.operator == "Eq" else set(occ.value)
+                point_set = values if point_set is None else point_set & values
+            surviving = {
+                value
+                for value in point_set
+                if _within(value, value_range) and value not in excluded_values
+            }
+            if not surviving:
                 return ColumnAnalysisResult(status="contradiction")
-            required = [matching[0]]
-            status = "compacted" if len(occurrences) > len(required) else "unchanged"
-            return ColumnAnalysisResult(status=status, required=required)
+            # Everything else on the column is implied by the surviving points:
+            # the range and the exclusions have been folded into the set, and
+            # IS NOT NULL is implied by any point test.
+            if len(points) == 1 and surviving == (
+                {points[0].value} if points[0].operator == "Eq" else set(points[0].value)
+            ):
+                return ColumnAnalysisResult(status="rewritten", required=[points[0]])
+            replacement = self._build_points_node(points, surviving)
+            if replacement is None:
+                return ColumnAnalysisResult(status="unsupported")
+            return ColumnAnalysisResult(status="rewritten", replacements=[replacement])
 
         required: List[PredicateOccurrence] = []
-        if best_lower:
+        replacements: List[Node] = []
+
+        if best_lower and best_upper:
+            # Both bounds: ONE BETWEEN stands in for every range predicate on the
+            # column, even when the two were already the tightest (a fused range
+            # is one comparison pass, not two).
+            column_node = best_lower.occurrence.predicate.left
+            replacements.append(
+                Node(
+                    NodeType.BETWEEN,
+                    left=column_node.copy(),
+                    right=best_lower.occurrence.predicate.right.copy(),
+                    centre=best_upper.occurrence.predicate.right.copy(),
+                    # value encodes bound inclusivity: (lower_inclusive, upper_inclusive)
+                    value=(best_lower.inclusive, best_upper.inclusive),
+                )
+            )
+        elif best_lower:
             required.append(best_lower.occurrence)
-        if best_upper and (not required or best_upper.occurrence not in required):
+        elif best_upper:
             required.append(best_upper.occurrence)
 
-        # When both a lower and upper bound exist, compact all predicates for this
-        # column into a single BETWEEN node regardless of whether individual predicates
-        # were already the most restrictive (i.e. even the "unchanged" 2-predicate case).
-        if best_lower and best_upper:
-            column_node = best_lower.occurrence.predicate.left
-            lower_node = best_lower.occurrence.predicate.right
-            upper_node = best_upper.occurrence.predicate.right
-            between = Node(
-                NodeType.BETWEEN,
-                left=column_node.copy(),
-                right=lower_node.copy(),
-                centre=upper_node.copy(),
-                # value encodes bound inclusivity: (lower_inclusive, upper_inclusive)
-                value=(best_lower.inclusive, best_upper.inclusive),
-            )
-            return ColumnAnalysisResult(status="between", required=required, between_node=between)
+        # An exclusion outside the range excludes nothing the range keeps.
+        surviving_exclusions: List[PredicateOccurrence] = []
+        seen_exclusions: Set = set()
+        for occ in exclusions:
+            if occ.value in seen_exclusions or not _within(occ.value, value_range):
+                continue
+            seen_exclusions.add(occ.value)
+            surviving_exclusions.append(occ)
+        if len(surviving_exclusions) >= 2:
+            replacement = self._build_not_in_list_node(surviving_exclusions)
+            if replacement is None:
+                return ColumnAnalysisResult(status="unsupported")
+            replacements.append(replacement)
+        else:
+            required.extend(surviving_exclusions)
 
-        if not required or len(required) == len(occurrences):
-            return ColumnAnalysisResult(status="unchanged", required=required or None)
+        required.extend(surviving_not_null)
 
-        return ColumnAnalysisResult(status="compacted", required=required)
+        if not replacements and len(required) == len(occurrences):
+            return ColumnAnalysisResult(status="unchanged")
+        return ColumnAnalysisResult(status="rewritten", required=required, replacements=replacements)
+
+    @staticmethod
+    def _point_element_type(points: List[PredicateOccurrence]):
+        """The ColumnType of one member of the column's point tests, from
+        whichever occurrence carries it (an Eq literal's own type, or an
+        IN-list literal's element type). None if no occurrence is typed."""
+        for occ in points:
+            literal_type = occ.predicate.right.type
+            if not isinstance(literal_type, _lt.ColumnType):
+                continue
+            if occ.operator == "Eq":
+                return literal_type
+            if literal_type.element is not None:
+                return literal_type.element
+        return None
+
+    def _build_points_node(self, points: List[PredicateOccurrence], surviving: Set) -> Optional[Node]:
+        """`col = v` for one surviving point, `col IN (..)` for several."""
+        element_type = self._point_element_type(points)
+        if element_type is None:
+            return None
+        node = points[0].predicate.copy()
+        ordered = sorted(surviving, key=str)
+        if len(ordered) == 1:
+            node.value = "Eq"
+            _retype_literal(node.right, element_type, ordered[0])
+        else:
+            node.value = "InList"
+            _retype_literal(node.right, _lt.ARRAY(element_type), ordered)
+        return node
+
+    def _build_not_in_list_node(self, exclusions: List[PredicateOccurrence]) -> Optional[Node]:
+        """`col NOT IN (..)` standing in for a chain of `col != v` conjuncts."""
+        element_type = exclusions[0].predicate.right.type
+        if not isinstance(element_type, _lt.ColumnType):
+            return None
+        node = exclusions[0].predicate.copy()
+        node.value = "NotInList"
+        _retype_literal(
+            node.right, _lt.ARRAY(element_type), sorted((occ.value for occ in exclusions), key=str)
+        )
+        return node
 
     @staticmethod
     def _is_better_lower(candidate: BoundCandidate, current: Optional[BoundCandidate]) -> bool:
@@ -554,14 +717,27 @@ class PredicateCompactionStrategy(OptimizationStrategy):  # pragma: no cover
         Returns:
             (column_id, operator, value) tuple or None if not a simple comparison
         """
+        if node.node_type == NodeType.UNARY_OPERATOR and node.value in _NULL_TESTS:
+            centre = node.centre
+            if (
+                centre is None
+                or centre.node_type != NodeType.IDENTIFIER
+                or centre.schema_column is None
+            ):
+                return None
+            return (centre.schema_column.identity, node.value, None, None)
+
         if node.node_type != NodeType.COMPARISON_OPERATOR:
             return None
 
         # Must be simple: column OP literal
-        if node.left.node_type != NodeType.IDENTIFIER:
+        if node.left is None or node.left.node_type != NodeType.IDENTIFIER:
             return None
 
-        if node.right.node_type != NodeType.LITERAL:
+        if node.right is None or node.right.node_type != NodeType.LITERAL:
+            return None
+
+        if node.left.schema_column is None:
             return None
 
         col_id = node.left.schema_column.identity

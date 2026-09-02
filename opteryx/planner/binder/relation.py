@@ -525,18 +525,25 @@ def visit_alter_materialized_view_owner(
     directly. `visit_insert` enforces that against the caller on every
     registration.
 
-    Execution-time: a TRIGGERED refresh runs as the pinned `runs-as` principal,
-    judged on that principal's own grants and inheriting nothing from its
-    author - a refresh that borrowed its author's authority would be a deputy
-    acting beyond its own. That identity belongs to the trigger and is not
-    consulted here: a `REFRESH MATERIALIZED VIEW` statement may be submitted by
-    anyone and is assessed on the submitting identity's own merits, so nothing
-    in this engine reads `runs-as`. It only writes it, and this is what writes
-    it.
+    Execution-time: a TRIGGERED refresh runs as the `runs-as` pinned on the
+    TRIGGER that fired it, judged on that principal's own grants and inheriting
+    nothing from the view's author - a refresh that borrowed its author's
+    authority would be a deputy acting beyond its own. The view itself carries
+    no identity: it is stored SQL, like a task, and a `REFRESH MATERIALIZED
+    VIEW` statement submitted by a person runs as that person and is assessed
+    on their own merits. So nothing in this engine reads `runs-as`; it only
+    writes it, and this is what writes it.
+
+    Where it writes it: on EVERY refresh trigger of the view, at once. A view
+    with N sources has N triggers, and this statement is the convenience that
+    keeps them agreeing - the connector repoints all of them in one batch, so
+    the view never refreshes as two identities depending on which source was
+    written to last. `ALTER TRIGGER ... OWNER TO` moves one of them and stays
+    available; this is N of those under one gate.
 
     So this statement asks three things. The incoming owner must be an identity
     this deployment is willing to pin work on at all - a platform identity is
-    not an account and is billed to nobody, so a view pinned to one refreshes
+    not an account and is billed to nobody, so a trigger pinned to one refreshes
     for free forever, which no reading check would ever catch. AND the caller
     must hold workspace owner,
     deliberately stricter than the view itself: a workspace owner can already
@@ -561,9 +568,10 @@ def visit_alter_materialized_view_owner(
             f"connector for {node.relation_name} does not support ALTER MATERIALIZED VIEW"
         )
 
-    # AUTOMATE, on the workspace: the owner is the identity every unattended
-    # refresh runs as, so moving it re-pins what the view's automation may do -
-    # the same act as ALTER TRIGGER ... OWNER TO, and gated at the same tier.
+    # AUTOMATE, on the workspace: the owner is the identity every refresh
+    # trigger of the view runs as, so moving it re-pins what the view's
+    # automation may do - the same act as ALTER TRIGGER ... OWNER TO on each of
+    # them, and gated at the same tier.
     workspace = node.relation_name.split(".", 1)[0]
     if not can_perform_workspace_action(context.execution_context, workspace, action="AUTOMATE"):
         raise PermissionError(
@@ -585,7 +593,7 @@ def visit_alter_materialized_view_owner(
     # This is not a reading question and the source loop below cannot stand in
     # for it: the identities refused here can typically read a great deal. What
     # they cannot do is pay. They are the platform's own automation - identities
-    # rather than accounts, with no billing account behind them - so a view
+    # rather than accounts, with no billing account behind them - so a trigger
     # pinned to one refreshes on a schedule forever and lands on nobody's bill.
     # Users and service accounts are both costed (a service account cannot exist
     # without a billing account seat), which is why they are not refused here.
@@ -593,8 +601,8 @@ def visit_alter_materialized_view_owner(
         raise PermissionError(
             f"{owner} cannot be made the owner of {node.relation_name}. It is a platform "
             "identity rather than an account, so work it performs is billed to nobody - "
-            "and a materialized view's refreshes run as its owner. Transfer the view to a "
-            "user or to a service account, both of which carry a billing account."
+            "and a materialized view's refresh triggers run as their owner. Transfer the "
+            "view to a user or to a service account, both of which carry a billing account."
         )
 
     sources = node.connector.materialized_view_sources(node.relation_name)
@@ -620,8 +628,8 @@ def visit_alter_materialized_view_owner(
         if not permitted:
             raise PermissionError(
                 f"{owner} does not have permission to read {source}, a source of "
-                f"{node.relation_name} (read required). A triggered refresh runs as the "
-                "view's owner and inherits nothing from whoever transferred it, so an "
+                f"{node.relation_name} (read required). A triggered refresh runs as its "
+                "trigger's owner and inherits nothing from whoever transferred it, so an "
                 "owner that cannot read a source is a view that can never refresh itself."
             )
 
@@ -852,6 +860,11 @@ def visit_alter_trigger_owner(
 
     Asked of the RESOLVED owner, so CURRENT_USER is judged as the principal it
     names rather than exempted for having been spelled differently.
+
+    `table_name` is the trigger's HOLDER: the dataset for a commit trigger, the
+    task itself for a schedule or signal trigger. A task shares its namespace
+    with tables, so the same AUTOMATE grant governs either, and the trigger is
+    read back off whichever the connector says the name is.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -957,30 +970,138 @@ def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
     return node, context
 
 
+def _bind_task_subscription(node: Node, context: BindingContext, statement: str) -> Node:
+    """Shared binding for LISTEN TO and UNLISTEN.
+
+    **LISTEN is a READ activity** (architect ruling 2026-09-02). The gate is
+    whether the caller can see the table the task AFFECTS - not AUTOMATE on the
+    task. A subscription reports that a dataset was refreshed or failed to be;
+    that is a fact about the dataset, so the people entitled to it are the
+    people who can read the dataset. Gating on AUTOMATE instead would mean the
+    only people who can be told a table is stale are the people who own the
+    automation, and so already knew where to look.
+
+    The table is the task's `writes`, derived from its own AST at registration
+    and never declared, so it cannot disagree with what the task actually does.
+    Every relation named there is required, not any: a notification about a task
+    writing A and B is a fact about both.
+
+    Checked HERE and once. The ruling is "at point of creation", so the grant is
+    not re-evaluated at delivery - a user whose READ is later revoked keeps
+    receiving notifications until they UNLISTEN or the task is dropped. Bounded
+    by the payload being status only, and recorded in
+    docs/LISTEN_SQL_DESIGN.md §6; REVOKE does not sweep subscriptions.
+
+    The refusal deliberately does NOT distinguish "no such task" from "you
+    cannot see what it writes". Distinguishing them makes LISTEN a probe: a
+    caller with no grants could enumerate which task names exist by reading
+    which refusal came back.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.task_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.task_name} does not support {statement}"
+        )
+
+    # One refusal for every way this can fail to be a task the caller may
+    # subscribe to. Built once and raised from several places, so the branches
+    # cannot drift apart into a distinguishable pair.
+    def _refuse():
+        return PermissionError(
+            f"No task {node.task_name} that you can subscribe to. **{statement}** "
+            "needs read access to what the task writes - a subscription reports "
+            "that a dataset was refreshed or failed to be, which is a fact about "
+            "that dataset."
+        )
+
+    if not node.connector.is_task(node.task_name):
+        raise _refuse()
+
+    writes = node.connector.task_writes(node.task_name)
+    if not writes:
+        # Nothing to gate on, so no grant admits a subscriber and the statement
+        # cannot be allowed. The specific reason is given only to someone who
+        # already knows the task exists - an owner - because saying "this task
+        # records no writes" to anyone else confirms the name, which is the leak
+        # `_refuse` exists to close.
+        if can_perform_action(context.execution_context, node.task_name, action="AUTOMATE"):
+            raise PermissionError(
+                f"Task {node.task_name} records no relations that it writes, so "
+                f"there is no read grant that admits a subscriber and **{statement}** "
+                "cannot be authorized. A task registered before writes were "
+                "recorded answers this way; **CREATE OR REPLACE TASK** re-derives "
+                "it from the statement."
+            )
+        raise _refuse()
+
+    for written in writes:
+        if not can_perform_action(context.execution_context, written, action="READ"):
+            raise _refuse()
+
+    # The subscriber is the session user and can be nobody else - there is no
+    # syntax that names a principal. Stashed for the operator, which runs where
+    # there is no BindingContext to read it from.
+    node.execution_context = context.execution_context
+    node.columns = []
+    return node
+
+
+def visit_listen(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind LISTEN TO <task> [FOR ...]. READ-gated on what the task writes."""
+    return _bind_task_subscription(node, context, "LISTEN TO"), context
+
+
+def visit_unlisten(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind UNLISTEN <task>.
+
+    Identically gated to LISTEN. Not weakened to "anyone may stop listening":
+    an ungated UNLISTEN answers whether a task exists, by refusing differently
+    for a name that does and one that does not - the same probe the shared
+    refusal closes. Someone who can no longer read what the task writes and
+    wants to stop being notified is the one case this costs, and DROP TASK and
+    the notification itself both still reach them.
+    """
+    return _bind_task_subscription(node, context, "UNLISTEN"), context
+
+
 def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind CREATE TRIGGER.
 
-    Two gates. AUTOMATE on the TABLE the trigger hangs off - symmetric with
-    `visit_drop_trigger`. Not WRITE: an INSERT is over when it finishes, while
-    a trigger is a standing commitment that fires on every commit, unattended,
-    as a pinned identity, on the owner's compute, and can write elsewhere and
-    fire further triggers. That decides what the table DOES to the world, not
-    what is in it, which puts it with GRANT rather than with INSERT. And the
-    author must be a principal who can be BILLED, because the trigger's
-    unattended runs execute as its owner and the owner pins to the author here.
-    This is where authority is actually conferred - a task is just stored SQL,
-    and a person running EXECUTE answers for themselves - so this is where the
-    gate lives.
+    Two gates. AUTOMATE on the HOLDER the trigger hangs off - the table whose
+    commits fire it, or the task itself for a schedule or signal trigger -
+    symmetric with `visit_drop_trigger`. Not WRITE: an INSERT is over when it
+    finishes, while a trigger is a standing commitment that fires on every
+    commit (or tick, or signal), unattended, as a pinned identity, on the
+    owner's compute, and can write elsewhere and fire further triggers. That
+    decides what the holder DOES to the world, not what is in it, which puts it
+    with GRANT rather than with INSERT. And the author must be a principal who
+    can be BILLED, because the trigger's unattended runs execute as its owner
+    and the owner pins to the author here. This is where authority is actually
+    conferred - a task is just stored SQL, and a person running EXECUTE answers
+    for themselves - so this is where the gate lives.
 
     What the task may do is NOT re-checked: its statement is gated by the binder
     at execution, against the owner, every time it fires. A creation-time copy
     of that check would go stale the moment the owner's grants changed.
+
+    A schedule or signal trigger takes two more, in `_bind_task_held_trigger`:
+    its `OVER` table, if any, must exist in the task's own workspace; and
+    without one the task must be windowless, because a clock has no commit to
+    bind `:parent_version` and `:current_version` from.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
     from opteryx.managers.permissions import can_perform_action
     from opteryx.managers.permissions import can_principal_own_materialized_view
+
+    event_kind = getattr(node, "event_kind", None) or "commit"
+    holder_noun = "table" if event_kind == "commit" else "task"
 
     node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
     if not isinstance(node.connector, Writable):
@@ -990,8 +1111,8 @@ def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Nod
 
     if not can_perform_action(context.execution_context, node.table_name, action="AUTOMATE"):
         raise PermissionError(
-            f"User does not have permission to create a trigger on table {node.table_name} "
-            "(owner required)"
+            f"User does not have permission to create a trigger on {holder_noun} "
+            f"{node.table_name} (owner required)"
         )
 
     author = context.execution_context.user
@@ -1002,14 +1123,116 @@ def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Nod
             "nobody - and a trigger runs its task as its owner."
         )
 
+    if event_kind != "commit":
+        _bind_task_held_trigger(node, event_kind)
+
     node.columns = []
     return node, context
+
+
+def _bind_task_held_trigger(node: Node, event_kind: str) -> None:
+    """The checks a schedule or signal trigger takes beyond a commit trigger's.
+
+    The holder is the task (`node.table_name` and `node.task_name` are the same
+    name), so it must BE a task. The window is the decision: a commit-fired run
+    binds `:parent_version` and `:current_version` from the commit, and a clock
+    or a signal has no commit.
+
+    - With `OVER <table>`, the run is windowed over that dataset's head at fire
+      time. The dataset must exist, and in the task's own workspace: the window
+      is read from the catalog the trigger lives in, and a task may not read
+      across workspaces unattended any more than an MV may.
+    - Without it, the task's statement may not consume a window at all. Checked
+      here, at arming, against the recorded statement - so nothing is stored
+      that could only ever fail - and again at fire time by the dispatcher,
+      because the statement can be replaced after the trigger is armed.
+    """
+    from opteryx.exceptions import DatasetNotFoundError
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.planner.logical_planner.logical_planner import WINDOW_PARAMETERS
+    from opteryx.planner.logical_planner.logical_planner import _placeholder_sites
+    from opteryx.third_party import sqloxide
+
+    spelled = "ON SCHEDULE" if event_kind == "schedule" else "ON SIGNAL"
+    task = node.table_name
+
+    if not node.connector.is_task(task):
+        raise UnsupportedSyntaxError(
+            f"{task} is not a task. A trigger **{spelled}** fires a task and lives "
+            "under it, so **EXECUTE** must name one."
+        )
+
+    window_source = getattr(node, "window_source", None)
+    if window_source:
+        task_workspace = task.partition(".")[0]
+        source_workspace = window_source.partition(".")[0]
+        if source_workspace != task_workspace:
+            raise UnsupportedSyntaxError(
+                f"**OVER** {window_source} is in workspace {source_workspace}, and "
+                f"task {task} is in {task_workspace}. The window a trigger binds is "
+                "read from a dataset in the task's own workspace; a run may not be "
+                "windowed over another workspace's data."
+            )
+        if not node.connector.relation_exists(window_source):
+            raise DatasetNotFoundError(connector=node.connector, dataset=window_source)
+        return
+
+    # THE WINDOWLESS CHECK. The same reading `plan_execute` makes of a hand-run
+    # with no USING: the statement's own placeholders say whether it wants a
+    # window, and which names. Parsed rather than planned, because a statement
+    # with placeholders only binds at EXECUTE and planning would refuse it.
+    try:
+        task_sql = node.connector.task_definition(task)
+    except ValueError as exc:
+        raise UnsupportedSyntaxError(str(exc)) from exc
+    parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
+    used = _placeholder_sites(parsed[0]) if parsed else {}
+    wanted = [name for name in WINDOW_PARAMETERS if name in used]
+    if wanted:
+        raise UnsupportedSyntaxError(
+            f"task {task} consumes a window ("
+            + ", ".join(f"`:{name}`" for name in wanted)
+            + f"), and a trigger **{spelled}** with no **OVER** has no commit to "
+            "bind one from. Either name the dataset the run is windowed over - "
+            f"**OVER** <table> - or remove "
+            + " and ".join(f"`:{name}`" for name in wanted)
+            + " from the task's statement."
+        )
 
 
 def visit_alter_trigger_suspended(
     self, node: Node, context: BindingContext
 ) -> Tuple[Node, BindingContext]:
-    """Bind ALTER TRIGGER ... SUSPEND|RESUME. Same tier as creating one: AUTOMATE."""
+    """Bind ALTER TRIGGER ... SUSPEND|RESUME. Same tier as creating one: AUTOMATE
+    on the holder - the table for a commit trigger, the task for a schedule or
+    signal trigger, which share a namespace and so a grant."""
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.table_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.table_name} does not support ALTER TRIGGER"
+        )
+
+    if not can_perform_action(context.execution_context, node.table_name, action="AUTOMATE"):
+        raise PermissionError(
+            f"User does not have permission to alter a trigger on table {node.table_name} "
+            "(owner required)"
+        )
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_trigger_minimum_interval(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """Bind ALTER TRIGGER ... SET MINIMUM INTERVAL TO. Same tier as suspending
+    one: AUTOMATE on the table, because how often unattended work may run is a
+    decision about what the table does to the world, not about what is in it."""
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
@@ -1034,7 +1257,8 @@ def visit_alter_trigger_suspended(
 def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the DROP TRIGGER node to determine which connector should handle
-    removing the trigger.
+    removing the trigger. `table_name` is the holder: a table for a commit
+    trigger, the task itself for a schedule or signal trigger.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -1047,9 +1271,10 @@ def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node,
             f"connector for {node.table_name} does not support DROP TRIGGER"
         )
 
-    # AUTOMATE on the table the trigger hangs off - symmetric with creation, and
-    # checked on the source table rather than the trigger's target view because
-    # that is where the trigger lives and whose commits it answers to.
+    # AUTOMATE on the holder the trigger hangs off - symmetric with creation, and
+    # checked on the source table (or the task) rather than the trigger's target
+    # because that is where the trigger lives and whose event it answers to. A
+    # task shares the namespace with tables, so the same grant governs either.
     if not can_perform_action(context.execution_context, node.table_name, action="AUTOMATE"):
         raise PermissionError(
             f"User does not have permission to drop a trigger on table {node.table_name} "

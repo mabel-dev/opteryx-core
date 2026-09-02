@@ -98,6 +98,21 @@ _SYNTHESIZED_STATEMENTS = {
     # gated identically rather than more loosely.
     "ShowGrantsOn": (False, False, "owner"),
     "ShowEffectiveGrantsOn": (False, False, "owner"),
+    # A subscription to a task's run outcomes. Reader-tier, because LISTEN is a
+    # read activity: it reports that a dataset was refreshed or failed to be,
+    # which is a fact about that dataset.
+    #
+    # Deliberately absent from `_SYNTHESIZED_TARGETS`, so neither reports a
+    # relation. The permission target is not the task - it is what the task
+    # WRITES, read from the task's catalog record at bind time, and this is a
+    # static walk of the AST with no catalog to read. Naming the task here
+    # instead would check the wrong object: a grant covering a task's output
+    # table does not cover the task's own name, so a legitimate subscriber
+    # would be refused before the binder ever saw the statement. A caller
+    # pre-flighting these gets the classification and no relation, which is the
+    # honest answer; the binder holds the real gate.
+    "Listen": (False, False, "reader"),
+    "Unlisten": (False, False, "reader"),
 }
 
 

@@ -6,10 +6,12 @@
 """ALTER MATERIALIZED VIEW <name> OWNER TO <principal>.
 
 A view refreshes as a pinned identity rather than as whoever's commit fired it.
-That identity is set when the view is created and deliberately survives being
-edited - so fixing someone's view does not make you responsible for it, nor
-hand your authority to whoever edits next. This statement is the only thing
-that moves it.
+The identity lives on each of the view's REFRESH TRIGGERS - the view itself
+carries none, exactly as a task carries none - and is pinned when a trigger is
+first landed. It deliberately survives the view being edited, so fixing
+someone's view does not make you responsible for it, nor hand your authority
+to whoever edits next. This statement repoints every refresh trigger of the
+view at once; `ALTER TRIGGER ... OWNER TO` moves one.
 """
 
 import json
@@ -41,10 +43,21 @@ def _record(tmp_path):
         return json.load(f)
 
 
-def test_runs_as_is_pinned_to_the_creator(tmp_path):
+def _runs_as(tmp_path, source="src"):
+    """The `runs-as` of the view's refresh trigger on `source` - where the
+    identity lives. The trigger sits beside the SOURCE table, not the view."""
+    with open(os.path.join(str(tmp_path), "ws", source, "triggers.json")) as f:
+        triggers = json.load(f)
+    [trigger] = [t for t in triggers if t.get("target-view") == "ws.mv"]
+    return trigger.get("runs-as")
+
+
+def test_runs_as_is_pinned_to_the_creator_on_the_refresh_trigger(tmp_path):
     session = _setup(tmp_path)
     _seed_view(session)
-    assert _record(tmp_path)["runs-as"] == "alice"
+    assert _runs_as(tmp_path) == "alice"
+    # And nowhere on the view: it carries no identity of its own.
+    assert "runs-as" not in _record(tmp_path)
 
 
 def test_alter_owner_moves_it(tmp_path):
@@ -53,11 +66,33 @@ def test_alter_owner_moves_it(tmp_path):
 
     list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO svc_etl"))
 
+    assert _runs_as(tmp_path) == "svc_etl"
     record = _record(tmp_path)
-    assert record["runs-as"] == "svc_etl"
     # A transfer is not an edit - the definition is untouched.
     assert record["sql"].strip().upper().startswith("SELECT")
     assert record["source_tables"] == ["ws.src"]
+    assert "runs-as" not in record
+
+
+def test_alter_owner_moves_every_refresh_trigger_of_the_view(tmp_path):
+    """The reason the statement names the VIEW: a view over two tables has two
+    refresh triggers, and a view whose triggers ran as two identities would
+    refresh as whichever one's source was written to last."""
+    session = _setup(tmp_path)
+    _seed_view(session)
+    list(session.execute_to_morsels("CREATE TABLE ws.other (b BIGINT)"))
+    list(session.execute_to_morsels("INSERT INTO ws.other VALUES (1)"))
+    list(
+        session.execute_to_morsels(
+            "CREATE OR REPLACE MATERIALIZED VIEW ws.mv AS "
+            "SELECT a FROM ws.src UNION ALL SELECT b FROM ws.other"
+        )
+    )
+    assert (_runs_as(tmp_path, "src"), _runs_as(tmp_path, "other")) == ("alice", "alice")
+
+    list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO svc_etl"))
+
+    assert (_runs_as(tmp_path, "src"), _runs_as(tmp_path, "other")) == ("svc_etl", "svc_etl")
 
 
 def test_editing_a_view_does_not_transfer_it(tmp_path):
@@ -73,9 +108,29 @@ def test_editing_a_view_does_not_transfer_it(tmp_path):
         )
     )
 
-    record = _record(tmp_path)
-    assert record["runs-as"] == "alice"  # unchanged by bob's edit
-    assert record["author"] == "bob"  # but bob is on the record
+    assert _runs_as(tmp_path) == "alice"  # unchanged by bob's edit
+    assert _record(tmp_path)["author"] == "bob"  # but bob is on the record
+
+
+def test_editing_a_view_pins_only_the_trigger_on_a_newly_read_source(tmp_path):
+    """The one place an edit does pin: a source the view did not read before
+    has no trigger yet, so the trigger landed for it is the editor's. The
+    trigger the view already had keeps its identity."""
+    session = _setup(tmp_path)
+    _seed_view(session)
+    list(session.execute_to_morsels("CREATE TABLE ws.other (b BIGINT)"))
+    list(session.execute_to_morsels("INSERT INTO ws.other VALUES (1)"))
+
+    bob = opteryx.session(user="bob", access_policies=_OWNER_POLICY)
+    list(
+        bob.execute_to_morsels(
+            "CREATE OR REPLACE MATERIALIZED VIEW ws.mv AS "
+            "SELECT a FROM ws.src UNION ALL SELECT b FROM ws.other"
+        )
+    )
+
+    assert _runs_as(tmp_path, "src") == "alice"
+    assert _runs_as(tmp_path, "other") == "bob"
 
 
 def test_alter_owner_accepts_a_quoted_principal(tmp_path):
@@ -85,7 +140,7 @@ def test_alter_owner_accepts_a_quoted_principal(tmp_path):
     _seed_view(session)
 
     list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO 'someone@example.com'"))
-    assert _record(tmp_path)["runs-as"] == "someone@example.com"
+    assert _runs_as(tmp_path) == "someone@example.com"
 
 
 def test_only_ownership_is_alterable(tmp_path):
@@ -123,11 +178,11 @@ def test_owner_to_current_user_assigns_the_caller(tmp_path):
     person running it, so no authority can be borrowed."""
     session = _setup(tmp_path)
     _seed_view(session)
-    assert _record(tmp_path)["runs-as"] == "alice"
+    assert _runs_as(tmp_path) == "alice"
 
     bob = opteryx.session(user="bob", access_policies=_OWNER_POLICY)
     list(bob.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO CURRENT_USER"))
-    assert _record(tmp_path)["runs-as"] == "bob"
+    assert _runs_as(tmp_path) == "bob"
 
 
 def test_quoted_current_user_is_a_literal_principal(tmp_path):
@@ -137,7 +192,7 @@ def test_quoted_current_user_is_a_literal_principal(tmp_path):
     _seed_view(session)
 
     list(session.execute_to_morsels("ALTER MATERIALIZED VIEW ws.mv OWNER TO 'CURRENT_USER'"))
-    assert _record(tmp_path)["runs-as"] == "CURRENT_USER"
+    assert _runs_as(tmp_path) == "CURRENT_USER"
 
 
 def test_suspend_and_resume(tmp_path):

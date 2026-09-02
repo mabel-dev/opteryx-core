@@ -30,6 +30,34 @@ from opteryx.models import QueryProperties
 # BasePlanNode/JoinNode in scope via _operators.pyx include.
 
 
+def _trigger_holder_exists(connector, holder: str) -> bool:
+    """Whether `holder` names something a trigger can hang off.
+
+    A commit trigger lives under a dataset; a schedule or signal trigger lives
+    under the task it fires. ALTER and DROP name the holder without saying
+    which, so either kind answers. `is_task` is on the Writable capability
+    with a False default, so a store with no tasks answers rather than raises.
+    """
+    return connector.relation_exists(holder) or connector.is_task(holder)
+
+
+def _trigger_event(node) -> str:
+    """The event half of a CREATE TRIGGER, as EXPLAIN shows it: `<table>`,
+    `schedule '<cron>' [at time zone '<zone>'] [over <table>]` or
+    `signal [over <table>]`."""
+    if node.event_kind == "schedule":
+        event = f"schedule '{node.schedule}'"
+        if node.time_zone:
+            event += f" at time zone '{node.time_zone}'"
+    elif node.event_kind == "signal":
+        event = "signal"
+    else:
+        return node.table_name
+    if node.window_source:
+        event += f" over {node.window_source}"
+    return event
+
+
 class RelationManagementNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -86,9 +114,18 @@ class RelationManagementNode(BasePlanNode):
         # and the connector is what holds the catalog.
         self.version_spec: Optional[str] = parameters.get("version_spec")
 
-        # DROP TRIGGER
+        # CREATE / ALTER / DROP TRIGGER. `table_name` is the HOLDER the trigger
+        # hangs off: the dataset whose commits fire it, or - for a schedule or
+        # signal trigger, which has no source dataset - the task it fires.
         self.trigger_name: Optional[str] = parameters.get("trigger_name")
         self.table_name: Optional[str] = parameters.get("table_name")
+        # CREATE TRIGGER's event: "commit" | "schedule" | "signal", and the
+        # clauses that describe a clock or a signal. All None for a commit
+        # trigger, whose event is the commit itself.
+        self.event_kind: str = parameters.get("event_kind") or "commit"
+        self.schedule: Optional[str] = parameters.get("schedule")
+        self.time_zone: Optional[str] = parameters.get("time_zone")
+        self.window_source: Optional[str] = parameters.get("window_source")
 
         # CREATE TASK / DROP TASK. `statement` carries the task's SQL with its
         # `:name` placeholders intact - they are bound when it is EXECUTEd, not
@@ -109,10 +146,16 @@ class RelationManagementNode(BasePlanNode):
         # empty for a task that reads and writes nothing back.
         self.target_tables: list = parameters.get("target_tables") or []
 
+        # LISTEN TO / UNLISTEN. The subscriber is never carried: it is always
+        # the session user, taken from the execution context below, because
+        # there is no syntax that names a principal.
+        self.outcome: Optional[str] = parameters.get("outcome")
+
         # ALTER MATERIALIZED VIEW ... OWNER TO
         self.new_owner: Optional[str] = parameters.get("new_owner")
         self.owner_is_current_user: bool = parameters.get("owner_is_current_user", False)
         self.suspended = parameters.get("suspended")
+        self.minimum_interval_seconds = parameters.get("minimum_interval_seconds")
 
         # ALTER WORKSPACE ... SET
         self.workspace_name: Optional[str] = parameters.get("workspace_name")
@@ -204,11 +247,17 @@ class RelationManagementNode(BasePlanNode):
             on = f" on {self.on_table}" if self.on_table else ""
             return f"create task {self.task_name}{on}"
         if self.action == "create_trigger":
-            return f"create trigger {self.trigger_name} on {self.table_name} execute {self.task_name}"
+            return f"create trigger {self.trigger_name} on {_trigger_event(self)} execute {self.task_name}"
         if self.action == "alter_trigger_suspended":
             return f"alter trigger {self.trigger_name} on {self.table_name} {'suspend' if self.suspended else 'resume'}"
+        if self.action == "alter_trigger_minimum_interval":
+            return f"alter trigger {self.trigger_name} on {self.table_name} set minimum interval to {self.minimum_interval_seconds} seconds"
         if self.action == "drop_task":
             return f"drop task {self.task_name}"
+        if self.action == "listen":
+            return f"listen to {self.task_name} for {self.outcome.lower()}"
+        if self.action == "unlisten":
+            return f"unlisten {self.task_name}"
         if self.action == "alter_trigger_owner":
             return f"alter trigger {self.trigger_name} on {self.table_name} owner to {'CURRENT_USER' if self.owner_is_current_user else self.new_owner}"
         if self.action == "alter_materialized_view_suspended":
@@ -236,6 +285,23 @@ class RelationManagementNode(BasePlanNode):
         from opteryx.variables import resolve
 
         return resolve("external_user", self.properties.variables, None) or None
+
+    @property
+    def _subscriber(self):
+        """The session user a subscription belongs to.
+
+        A subscription must belong to a person, so an unauthenticated session
+        cannot hold one - refused here rather than recorded against a null
+        identity, which would be a subscription nobody could ever see or
+        remove.
+        """
+        user = self.execution_context.user if self.execution_context else None
+        if not user:
+            raise PermissionError(
+                "**LISTEN** and **UNLISTEN** need an authenticated user: a "
+                "subscription belongs to a person, and this session has none."
+            )
+        return user
 
     def __call__(self, morsel=None, **kwargs) -> NonTabularResult:
         if self.action == "create_relation":
@@ -470,19 +536,40 @@ class RelationManagementNode(BasePlanNode):
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "create_trigger":
-            if not self.connector.relation_exists(self.table_name):
-                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
-            self.connector.create_trigger(
-                self.table_name,
-                self.trigger_name,
-                self.task_name,
-                author=self._author,
-                or_replace=self.or_replace,
-            )
+            if self.event_kind == "commit":
+                if not self.connector.relation_exists(self.table_name):
+                    raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+                # The call a commit trigger has always made, with no event
+                # keywords: a connector (or a catalog behind one) that predates
+                # the other two events keeps working unchanged.
+                self.connector.create_trigger(
+                    self.table_name,
+                    self.trigger_name,
+                    self.task_name,
+                    author=self._author,
+                    or_replace=self.or_replace,
+                )
+            else:
+                # A clock or a signal has no source dataset: the holder is the
+                # task, so it is the task whose existence is checked - a dataset
+                # of that name would be the wrong kind of thing to hang it off.
+                if not self.connector.is_task(self.table_name):
+                    raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+                self.connector.create_trigger(
+                    self.table_name,
+                    self.trigger_name,
+                    self.task_name,
+                    author=self._author,
+                    or_replace=self.or_replace,
+                    event_kind=self.event_kind,
+                    schedule=self.schedule,
+                    time_zone=self.time_zone,
+                    window_source=self.window_source,
+                )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "alter_trigger_suspended":
-            if not self.connector.relation_exists(self.table_name):
+            if not _trigger_holder_exists(self.connector, self.table_name):
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
             self.connector.set_trigger_suspended(
                 self.table_name,
@@ -492,10 +579,23 @@ class RelationManagementNode(BasePlanNode):
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
+        elif self.action == "alter_trigger_minimum_interval":
+            # Pre-parse reduced the value to whole seconds; the store records
+            # it and the catalog enforces it at fire time.
+            if not self.connector.relation_exists(self.table_name):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
+            self.connector.set_trigger_minimum_interval(
+                self.table_name,
+                self.trigger_name,
+                self.minimum_interval_seconds,
+                author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
         elif self.action == "alter_trigger_owner":
             # The binder resolved CURRENT_USER to the session identity and proved
             # that principal can be billed; this records the transfer.
-            if not self.connector.relation_exists(self.table_name):
+            if not _trigger_holder_exists(self.connector, self.table_name):
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
             self.connector.set_trigger_owner(
                 self.table_name, self.trigger_name, self.resolved_owner, author=self._author
@@ -510,10 +610,27 @@ class RelationManagementNode(BasePlanNode):
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
+        elif self.action == "listen":
+            # The subscriber is the session user and can be nobody else. Read
+            # from the execution context rather than `_author`, which answers
+            # "who is this write attributed to" - a different question that
+            # happens to have the same answer, and one whose None means
+            # "unattributed" rather than "nobody to subscribe".
+            self.connector.add_listener(
+                self.task_name,
+                user=self._subscriber,
+                outcome=self.outcome,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "unlisten":
+            self.connector.drop_listener(self.task_name, user=self._subscriber)
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
         elif self.action == "drop_trigger":
-            # The table must exist regardless of IF EXISTS - that modifier
-            # speaks about the trigger, not the table it hangs off.
-            if not self.connector.relation_exists(self.table_name):
+            # The holder must exist regardless of IF EXISTS - that modifier
+            # speaks about the trigger, not the table or task it hangs off.
+            if not _trigger_holder_exists(self.connector, self.table_name):
                 raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
             self.connector.drop_trigger(
                 self.table_name,

@@ -580,18 +580,110 @@ def test_suspend_and_resume_a_trigger(tmp_path):
         assert json.load(f)[0]["suspended-at-ms"] is None
 
 
-def test_undispatchable_event_kinds_are_refused(tmp_path):
-    """A trigger nothing fires is worse than none: the table it maintains stops
-    updating while the trigger record says it is fine."""
+def _trigger_field(tmp_path, field):
+    with open(tmp_path / "ws" / "src" / "triggers.json") as f:
+        return json.load(f)[0][field]
+
+
+def test_a_new_trigger_carries_the_default_firing_floor(tmp_path):
+    """Written onto the record at creation, as the catalog does, so a sidecar
+    and a catalog record read the same for the same statement."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TASK ws.t ON ws.src AS SELECT a FROM ws.src"))
+
+    assert _trigger_field(tmp_path, "minimum-interval-seconds") == 120
+
+
+@pytest.mark.parametrize(
+    "clause, seconds",
+    [
+        ("30", 30),
+        ("30 SECONDS", 30),
+        ("1 SECOND", 1),
+        ("2 MINUTES", 120),
+        ("1 minute", 60),
+        ("0", 0),
+    ],
+)
+def test_set_minimum_interval_records_seconds(tmp_path, clause, seconds):
+    """SECONDS is the unit the record holds; MINUTES is converted before the
+    planner sees it, and 0 removes the floor rather than deleting the field."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TASK ws.t ON ws.src AS SELECT a FROM ws.src"))
+
+    list(
+        owner.execute_to_morsels(
+            f"ALTER TRIGGER task__ws__t ON ws.src SET MINIMUM INTERVAL TO {clause}"
+        )
+    )
+    assert _trigger_field(tmp_path, "minimum-interval-seconds") == seconds
+
+
+def test_the_floor_survives_re_registration(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TASK ws.t ON ws.src AS SELECT a FROM ws.src"))
+    list(owner.execute_to_morsels("ALTER TRIGGER task__ws__t ON ws.src SET MINIMUM INTERVAL TO 7"))
+
+    list(owner.execute_to_morsels("CREATE OR REPLACE TASK ws.t ON ws.src AS SELECT a FROM ws.src"))
+    assert _trigger_field(tmp_path, "minimum-interval-seconds") == 7
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "SET MIN INTERVAL TO 120",  # MIN reads as minutes next to a unit of time
+        "SET MINIMUM INTERVAL TO -5",
+        "SET MINIMUM INTERVAL TO 1.5 MINUTES",
+        "SET MINIMUM INTERVAL TO 120 HOURS",
+        "SET MINIMUM INTERVAL 120",
+        "SET MINIMUM INTERVAL TO :n",
+    ],
+)
+def test_malformed_minimum_interval_is_rejected_by_name(tmp_path, clause):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(UnsupportedSyntaxError, match="SET MINIMUM INTERVAL TO"):
+        list(owner.execute_to_morsels(f"ALTER TRIGGER task__ws__t ON ws.src {clause}"))
+
+
+def test_set_minimum_interval_on_a_missing_trigger_is_refused(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+
+    with pytest.raises(ValueError, match="trigger not found"):
+        list(owner.execute_to_morsels("ALTER TRIGGER nope ON ws.src SET MINIMUM INTERVAL TO 5"))
+
+
+def test_words_that_are_not_events_are_refused_by_name(tmp_path):
+    """ON EVERY and ON EVENT are not forms. They are refused by name, and the
+    refusal says what the forms are - a commit, a schedule or a signal - rather
+    than that the word is unknown."""
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
 
     for sql in (
-        "CREATE TRIGGER t ON SCHEDULE '1 minute' EXECUTE ws.t",
+        "CREATE TRIGGER t ON EVERY 1 MINUTE EXECUTE ws.t",
         "CREATE TRIGGER t ON EVENT something EXECUTE ws.t",
     ):
-        with pytest.raises(UnsupportedSyntaxError, match="not dispatched yet"):
+        with pytest.raises(UnsupportedSyntaxError, match="is not a trigger event"):
             list(owner.execute_to_morsels(sql))
+
+
+def test_a_schedule_must_be_a_cron_expression(tmp_path):
+    """Five fields, checked for shape here; the catalog parses it properly."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(UnsupportedSyntaxError, match="not a cron expression"):
+        list(owner.execute_to_morsels("CREATE TRIGGER t ON SCHEDULE '1 minute' EXECUTE ws.t"))
 
 
 # --- ALTER TASK

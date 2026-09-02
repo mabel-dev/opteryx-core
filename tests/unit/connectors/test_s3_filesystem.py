@@ -30,7 +30,9 @@ from opteryx.connectors.io_systems.s3_filesystem import split_path
 from opteryx.exceptions import DatasetReadError
 from opteryx.operators._operators import resolve_scan_filesystem
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
 SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
@@ -184,9 +186,7 @@ def test_region_defaults_when_unset(monkeypatch):
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", SECRET_KEY)
     monkeypatch.delenv("AWS_REGION", raising=False)
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-    monkeypatch.setattr(
-        s3_module, "_resolve_region", lambda: s3_module._DEFAULT_REGION
-    )
+    monkeypatch.setattr(s3_module, "_resolve_region", lambda: s3_module._DEFAULT_REGION)
     assert OpteryxS3FileSystem().region == "us-east-1"
 
 
@@ -393,9 +393,7 @@ def test_list_files_wraps_transport_errors(fs):
 
 
 def _future(seconds=3600):
-    return (
-        datetime.now(timezone.utc) + timedelta(seconds=seconds)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_chain_prefers_the_environment(aws_env):
@@ -496,7 +494,7 @@ def test_chain_exchanges_a_web_identity_token(clean_env, tmp_path):
         posted["method"] = method
         posted["body"] = data.decode("utf-8")
         return (
-            '<AssumeRoleWithWebIdentityResponse '
+            "<AssumeRoleWithWebIdentityResponse "
             'xmlns="https://sts.amazonaws.com/doc/2011-06-15/">'
             "<AssumeRoleWithWebIdentityResult><Credentials>"
             f"<AccessKeyId>{ACCESS_KEY}</AccessKeyId>"
@@ -628,3 +626,21 @@ def test_router_prefers_a_connector_supplied_filesystem(aws_env):
 def test_router_rejects_an_unknown_scheme():
     with pytest.raises(ValueError, match="Unsupported storage protocol"):
         resolve_scan_filesystem(None, ["azure://container/a.parquet"])
+
+
+@pytest.mark.parametrize(
+    "url", ["file:///etc/passwd", "data:text/plain,creds", "169.254.170.2/creds"]
+)
+def test_credential_http_rejects_non_http_schemes(url):
+    # A misconfigured endpoint must not reach urlopen, which would happily open
+    # file:/ or data: and hand the result back as a credential document.
+    with pytest.raises(ValueError, match="must use http or https"):
+        s3_module._http(url)
+
+
+def test_container_endpoint_with_bad_scheme_is_not_swallowed(clean_env, monkeypatch):
+    # The chain turns absent sources into None; a misconfigured source is an
+    # error and must surface, not fall through to the next source.
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "file:///tmp/creds.json")
+    with pytest.raises(ValueError, match="must use http or https"):
+        s3_module._from_container()

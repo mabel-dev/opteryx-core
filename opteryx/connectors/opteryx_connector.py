@@ -1888,6 +1888,94 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         catalog.drop_task(relative_id, author=author)
 
+    def task_writes(self, relation_name: str) -> List[str]:
+        """The relations the task's statement writes, from its catalog record."""
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        from opteryx_catalog.exceptions import TaskError
+        from opteryx_catalog.exceptions import TaskNotFound
+
+        try:
+            record = catalog.get_task(relative_id)
+        except (TaskNotFound, TaskError) as exc:
+            raise ValueError(f"{relation_name} is not a task") from exc
+
+        # Returned exactly as recorded. These are the names `plan_create_task`
+        # derived from the statement's AST and `visit_create_task` checked WRITE
+        # on, in that spelling - so checking READ on the same strings asks the
+        # capability the same question it already answered once.
+        return list(record.get("writes") or [])
+
+    def add_listener(self, relation_name: str, user: str, outcome: str) -> None:
+        """Record a subscription to a task's run outcomes."""
+        from opteryx_catalog.exceptions import ListenerAlreadyExists
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.add_listener(relative_id, user=user, outcome=outcome)
+        except ListenerAlreadyExists as exc:
+            # Rendered as the SQL that changes it. The statement knows both
+            # halves - the task and the outcome just asked for - so it hands the
+            # caller the pair to run rather than describing them.
+            raise ValueError(
+                f"You already listen to **{relation_name}**. A task has one "
+                f"subscription per user; change it with: **UNLISTEN** "
+                f"{relation_name}; **LISTEN TO** {relation_name} **FOR "
+                f"{outcome}**"
+            ) from exc
+
+    def drop_listener(self, relation_name: str, user: str) -> None:
+        """Remove a subscription to a task's run outcomes."""
+        from opteryx_catalog.exceptions import ListenerNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.drop_listener(relative_id, user=user)
+        except ListenerNotFound as exc:
+            raise ValueError(
+                f"You do not listen to **{relation_name}**, so there is nothing "
+                "to unlisten. **SHOW LISTENERS** lists what you do listen to."
+            ) from exc
+
+    def list_listeners_for_user(self, user: str) -> List[dict]:
+        """The caller's own subscriptions in this connector's workspace."""
+        catalog = self._get_catalog(self.workspace)
+
+        # A catalog that predates listeners has none - the same skew tolerance
+        # `is_task` applies to the task API itself.
+        lister = getattr(catalog, "list_listeners_for_user", None)
+        if lister is None:
+            return []
+
+        return [
+            {
+                "task_catalog": row.get("workspace"),
+                "task_collection": row.get("collection"),
+                "task_name": row.get("task"),
+                "outcome": row.get("outcome"),
+                "created_at": row.get("created-at-ms"),
+            }
+            for row in lister(user)
+        ]
+
+    def _holder_kwargs(self, relation_name: str) -> dict:
+        """`{"holder_kind": "task"}` when `relation_name` is a task, else `{}`.
+
+        The catalog keys a trigger on what HOLDS it: the dataset whose commits
+        fire a commit trigger, or the task a schedule or signal trigger fires.
+        Its trigger methods take `holder_kind` to say which, defaulting to a
+        dataset - so the keyword is passed only when the holder is a task, and
+        a dataset call keeps exactly the shape it had. That is what lets this
+        connector sit in front of an older catalog, or a test double, that has
+        never heard of task-held triggers.
+        """
+        return {"holder_kind": "task"} if self.is_task(relation_name) else {}
+
     def create_trigger(
         self,
         relation_name: str,
@@ -1895,18 +1983,48 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         task_name: str,
         author: Optional[str] = None,
         or_replace: bool = False,
+        event_kind: str = "commit",
+        schedule: Optional[str] = None,
+        time_zone: Optional[str] = None,
+        window_source: Optional[str] = None,
     ) -> None:
-        """Attach a task trigger to the dataset whose commits should fire it."""
+        """Attach a task trigger to its holder: the dataset whose commits fire
+        it, or - for a schedule or signal trigger - the task itself."""
         from opteryx_catalog.exceptions import MaterializedViewError
 
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
 
+        holder = {}
+        event = {}
+        if event_kind != "commit":
+            # No source dataset: the trigger lives under the task it fires. The
+            # event keywords go only on this path, so a commit trigger's call is
+            # byte-for-byte what it was before the other two events existed.
+            holder = {"holder_kind": "task"}
+            source = None
+            if window_source:
+                source_workspace, source = self._parse_identifier(window_source)
+                if source_workspace != workspace:
+                    # The binder refuses this first; kept here so the connector
+                    # never lands a window it could not bind at fire time.
+                    raise ValueError(
+                        f"trigger {trigger_name} on {relation_name} cannot be windowed "
+                        f"over {window_source}, which is in workspace {source_workspace}; "
+                        "the window is read from a dataset in the task's own workspace"
+                    )
+            event = {
+                "event_kind": event_kind,
+                "schedule": schedule,
+                "time_zone": time_zone,
+                "window_source": source,
+            }
+
         if or_replace:
             # `create_trigger` refuses to repoint an existing trigger, which is
             # right for the implicit MV path but is exactly what OR REPLACE asks
             # for. Drop first so the guard has nothing to refuse.
-            catalog.drop_trigger(relative_id, trigger_name, author=author, missing_ok=True)
+            catalog.drop_trigger(relative_id, trigger_name, author=author, missing_ok=True, **holder)
 
         try:
             catalog.create_trigger(
@@ -1915,10 +2033,13 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 target_task=task_name,
                 kind="task",
                 author=author,
+                **holder,
+                **event,
             )
         except MaterializedViewError as exc:
-            # The repoint guard. Surfaced as ValueError so the statement reads as
-            # a caller error rather than an MV failure, which it is not.
+            # The repoint guard, and the one-trigger rule. Surfaced as ValueError
+            # so the statement reads as a caller error rather than an MV failure,
+            # which it is not.
             raise ValueError(str(exc)) from exc
 
     def set_trigger_owner(
@@ -1935,7 +2056,13 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
 
         try:
-            catalog.set_trigger_owner(relative_id, trigger_name, new_owner, author=author)
+            catalog.set_trigger_owner(
+                relative_id,
+                trigger_name,
+                new_owner,
+                author=author,
+                **self._holder_kwargs(relation_name),
+            )
         except TriggerNotFound as exc:
             raise ValueError(
                 f"trigger {trigger_name} does not exist on {relation_name}"
@@ -1955,7 +2082,33 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
 
         try:
-            catalog.set_trigger_suspended(relative_id, trigger_name, suspended, author=author)
+            catalog.set_trigger_suspended(
+                relative_id,
+                trigger_name,
+                suspended,
+                author=author,
+                **self._holder_kwargs(relation_name),
+            )
+        except TriggerNotFound as exc:
+            raise ValueError(
+                f"trigger {trigger_name} does not exist on {relation_name}"
+            ) from exc
+
+    def set_trigger_minimum_interval(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        seconds: int,
+        author: Optional[str] = None,
+    ) -> None:
+        """Set the floor between two firings of a trigger in the catalog; 0 removes it."""
+        from opteryx_catalog.exceptions import TriggerNotFound
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.set_trigger_minimum_interval(relative_id, trigger_name, seconds, author=author)
         except TriggerNotFound as exc:
             raise ValueError(
                 f"trigger {trigger_name} does not exist on {relation_name}"
@@ -2048,7 +2201,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     def set_materialized_view_owner(
         self, relation_name: str, new_owner: str, author: str = None
     ) -> None:
-        """Repoint the view's `runs-as` identity in the catalog."""
+        """Repoint `runs-as` on every refresh trigger of the view, in one catalog batch."""
         from opteryx_catalog.exceptions import MaterializedViewError
 
         workspace, relative_id = self._parse_identifier(relation_name)
@@ -2153,10 +2306,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         author: Optional[str] = None,
         missing_ok: bool = False,
     ) -> None:
-        """Remove a trigger from the dataset that carries it, delegating to the
-        catalog. A missing trigger is translated into a clear ValueError unless
-        missing_ok (IF EXISTS) - the catalog's own drop_trigger honours
-        missing_ok, so that branch never raises."""
+        """Remove a trigger from the holder that carries it - a dataset, or a
+        task for a schedule or signal trigger - delegating to the catalog. A
+        missing trigger is translated into a clear ValueError unless missing_ok
+        (IF EXISTS) - the catalog's own drop_trigger honours missing_ok, so that
+        branch never raises."""
         try:
             from opteryx_catalog.exceptions import TriggerNotFound
         except ImportError:
@@ -2170,7 +2324,13 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
 
         try:
-            catalog.drop_trigger(relative_id, trigger_name, author=author, missing_ok=missing_ok)
+            catalog.drop_trigger(
+                relative_id,
+                trigger_name,
+                author=author,
+                missing_ok=missing_ok,
+                **self._holder_kwargs(relation_name),
+            )
         except TriggerNotFound as exc:
             raise ValueError(
                 f"trigger {trigger_name} does not exist on {relation_name} "
@@ -2505,10 +2665,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         return catalog.list_tags(relative_id)
 
     def list_triggers(self, relation_name: str) -> list:
-        """The triggers attached to a dataset, as the catalog's plain dicts."""
+        """The triggers a holder carries - a dataset's, or a task's for a
+        schedule or signal trigger - as the catalog's plain dicts."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        return catalog.list_triggers(relative_id)
+        return catalog.list_triggers(relative_id, **self._holder_kwargs(relation_name))
 
     # View operations (Eidetic capability)
     def get_view(self, view_name: str):

@@ -32,12 +32,40 @@ HALF_INVERSIONS: dict = {
     "RLike": "NotRLike",
     "InStr": "NotInStr",
     "IInStr": "NotIInStr",
+    # NOT (x IN (...)) is ONE NotInList probe — the native kernel the connectors
+    # push (PUSHABLE_OPS) — not an unbounded chain of `!=` conjuncts. It used to
+    # be expanded to N NotEq terms "for pushability", which gave `NOT (x IN (...))`
+    # N filter passes while the equivalent `x NOT IN (...)` kept one.
+    "InList": "NotInList",
+    # Unary tests. These are UNARY_OPERATOR nodes whose `value` is the test name;
+    # the same lookup inverts them. Without these `NOT (x IS NULL)` kept a NOT
+    # root, which no pushdown gate admits, so it was stranded above every join.
+    "IsNull": "IsNotNull",
+    "IsTrue": "IsNotTrue",
+    "IsFalse": "IsNotFalse",
+    "IsEmpty": "IsNotEmpty",
     # Any to All conversions (De Morgan's laws)
     "AnyOpEq": "AllOpNotEq",  # NOT(ANY x = y) → ALL x != y
     "AnyOpGtEq": "AllOpLt",  # NOT(ANY x >= y) → ALL x < y
 }
 
 INVERSIONS = {**HALF_INVERSIONS, **{v: k for k, v in HALF_INVERSIONS.items()}}
+
+# Node types whose `value` is an operator name INVERSIONS can look up. A LITERAL's
+# value may be an unhashable list and a BETWEEN's is a tuple of flags — neither is
+# an operator, so the lookup is gated on the node type, not just on the value.
+_INVERTIBLE_NODE_TYPES = (NodeType.COMPARISON_OPERATOR, NodeType.UNARY_OPERATOR)
+
+
+def _directly_invertible(node: LogicalPlanNode) -> bool:
+    """True when `NOT node` collapses to a single node with no NOT left behind."""
+    while node is not None and node.node_type == NodeType.NESTED:
+        node = node.centre
+    if node is None:
+        return False
+    if node.node_type == NodeType.NOT:
+        return True
+    return node.node_type in _INVERTIBLE_NODE_TYPES and node.value in INVERSIONS
 
 
 class BooleanSimplificationStrategy(OptimizationStrategy):  # pragma: no cover
@@ -58,13 +86,17 @@ class BooleanSimplificationStrategy(OptimizationStrategy):  # pragma: no cover
             not (A or B or C ...) = (not A) and (not B) and (not C) ...
             Creates multiple AND conditions for better predicate pushdown
 
-        De Morgan's for IN Lists
-            not (col IN (a, b, c)) = col != a and col != b and col != c
-            Expands IN predicates to multiple AND-ed conditions
+        De Morgan's Laws (AND)
+            not (A and B) = (not A) or (not B)
+            Applied only when every conjunct inverts cleanly (a comparison or a
+            unary test), so the result is an OR of plain predicates — the shape
+            the parser already emits for NOT BETWEEN — rather than an OR of NOTs.
 
         Negative Reduction:
             not (A = B) = A != B
             not (A != B) = A = B
+            not (x IN (...)) = x NOT IN (...)
+            not (x IS NULL) = x IS NOT NULL   (and IS TRUE / IS FALSE / IS EMPTY)
             not (not (A)) = A
 
         Constant Folding:
@@ -289,39 +321,27 @@ def update_expression_tree(node: LogicalPlanNode, telemetry: QueryTelemetry):
 
                 return update_expression_tree(result, telemetry)
 
-        # NOT(A = B) => A != B
-        if centre_node.value in INVERSIONS:
+        # De Morgan's for AND: NOT (A AND B) => (NOT A) OR (NOT B), only when every
+        # conjunct inverts to a plain predicate. The OR that results is a single-
+        # relation shape pushdown can carry to a leg (an OR root is admitted; a NOT
+        # root is not), and the same shape the parser emits for NOT BETWEEN, so
+        # `NOT (x BETWEEN a AND b)` and `x NOT BETWEEN a AND b` now plan alike.
+        if centre_node.node_type == NodeType.AND:
+            and_conditions = _flatten_and_chain(centre_node, telemetry)
+            if len(and_conditions) >= 2 and all(
+                _directly_invertible(condition) for condition in and_conditions
+            ):
+                not_conditions = [
+                    Node(NodeType.NOT, centre=condition) for condition in and_conditions
+                ]
+                telemetry.optimization_boolean_rewrite_demorgan_and += 1
+                return update_expression_tree(_rebuild_or_chain(not_conditions), telemetry)
+
+        # NOT(A = B) => A != B, NOT(x IN (..)) => x NOT IN (..), NOT(x IS NULL) => x IS NOT NULL
+        if centre_node.node_type in _INVERTIBLE_NODE_TYPES and centre_node.value in INVERSIONS:
             centre_node.value = INVERSIONS[centre_node.value]
             telemetry.optimization_boolean_rewrite_inversion += 1
             return update_expression_tree(centre_node, telemetry)
-
-        # De Morgan's for NOT IN: NOT(col IN (a,b,c)) => col != a AND col != b AND col != c
-        # This expands a single predicate into multiple AND-ed conditions for better pushdown
-        if centre_node.node_type == NodeType.COMPARISON_OPERATOR and centre_node.value == "InList":
-            in_list_values = centre_node.right.value  # Should be tuple/list
-
-            # Only expand if we have 2+ values (1 value is better as NOT EQ)
-            if isinstance(in_list_values, (tuple, list)) and len(in_list_values) > 1:
-                col = centre_node.left
-
-                # Create != (NOT EQ) predicates for each value
-                ne_predicates = []
-                for value in in_list_values:
-                    ne_pred = Node(
-                        NodeType.COMPARISON_OPERATOR,
-                        value="NotEq",
-                        left=col,
-                        right=Node(NodeType.LITERAL, value=value),
-                    )
-                    ne_predicates.append(ne_pred)
-
-                # Rebuild as AND chain
-                result = ne_predicates[0]
-                for pred in ne_predicates[1:]:
-                    result = Node(NodeType.AND, left=result, right=pred)
-
-                telemetry.optimization_boolean_rewrite_demorgan_in_expansion += 1
-                return update_expression_tree(result, telemetry)
 
         # NOT(NOT(A)) => A
         if centre_node.node_type == NodeType.NOT:

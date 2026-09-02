@@ -729,21 +729,38 @@ class Writable:
         task_name: str,
         author: Optional[str] = None,
         or_replace: bool = False,
+        event_kind: str = "commit",
+        schedule: Optional[str] = None,
+        time_zone: Optional[str] = None,
+        window_source: Optional[str] = None,
     ) -> None:
-        """Attach a trigger to `relation_name` that runs `task_name` on commit.
+        """Attach a trigger to `relation_name` that runs `task_name`.
 
-        The binder has established the caller may write `relation_name`; a
+        A trigger is an EVENT plus the identity its unattended runs carry. The
+        event decides what `relation_name` is: for a commit trigger (the
+        default) it is the dataset whose user-created commits fire the trigger;
+        for a schedule or signal trigger, which has no source dataset, it is the
+        TASK itself - the trigger lives under what it fires, and `task_name` is
+        the same name. A task holds at most one trigger of any kind.
+
+        The binder has established the caller may automate `relation_name`; a
         trigger confers no authority of its own, so nothing here re-checks what
         the task may do - that was settled against the task's author when it was
         created.
 
         Args:
-            relation_name: dataset whose user-created commits fire the trigger
-            trigger_name: name, unique per dataset
+            relation_name: the holder - the dataset whose commits fire the
+                trigger, or the task for a schedule or signal trigger
+            trigger_name: name, unique per holder
             task_name: the task to run
             author: session user this is attributed to
             or_replace: repoint an existing trigger of this name rather than
                 refusing
+            event_kind: "commit" | "schedule" | "signal"
+            schedule: five-field cron expression; schedule triggers only
+            time_zone: IANA zone the schedule is read in; None means UTC
+            window_source: dataset a schedule or signal run is windowed over,
+                or None for a run with no window
         """
         raise NotImplementedError(f"{self.__class__.__name__} does not support **CREATE TRIGGER**")
 
@@ -777,6 +794,23 @@ class Writable:
         visible where an operator looks for why a table stopped updating.
         """
         raise NotImplementedError(f"{self.__class__.__name__} does not support **ALTER TRIGGER**")
+
+    def set_trigger_minimum_interval(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        seconds: int,
+        author: Optional[str] = None,
+    ) -> None:
+        """Set the floor between two firings of a trigger; 0 removes it.
+
+        The catalog enforces the floor at fire time with a transactional claim
+        on the trigger's record, so two commits milliseconds apart cannot both
+        fire. A store implementing this records the number; it does not fire.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support **ALTER TRIGGER ... SET MINIMUM INTERVAL**"
+        )
 
     def create_task(
         self,
@@ -849,6 +883,73 @@ class Writable:
         """
         raise NotImplementedError(f"{self.__class__.__name__} does not support **EXECUTE**")
 
+    def task_writes(self, relation_name: str) -> List[str]:
+        """The relations a task's statement writes, as recorded at registration.
+
+        Derived from the task's own AST when it was created, never declared, so
+        it cannot disagree with what the task will actually do. This is the gate
+        LISTEN is decided on: a subscription reports that a dataset was
+        refreshed or failed to, which is a fact about the dataset, so the people
+        entitled to it are the people who can READ the dataset.
+
+        Empty for a task that writes no relation contents, and for one
+        registered before the field existed - a record that was never asked the
+        question answers "nothing". The caller must treat empty as "no grant can
+        admit a subscriber", never as "no grant is needed".
+
+        Args:
+            relation_name: Fully-qualified name of the task
+
+        Raises:
+            ValueError: If the relation is not a task.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **LISTEN**")
+
+    def add_listener(self, relation_name: str, user: str, outcome: str) -> None:
+        """Subscribe `user` to a task's run outcomes.
+
+        A task holds ONE subscription per user. A second one is refused rather
+        than merged - the caller is told what they already have, and given the
+        UNLISTEN/LISTEN pair that changes it.
+
+        Args:
+            relation_name: Fully-qualified name of the task
+            user: the subscriber, who is always the session user
+            outcome: "ERROR", "SUCCESS" or "EVERYTHING"
+
+        Raises:
+            ValueError: If the user already listens to this task.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **LISTEN**")
+
+    def drop_listener(self, relation_name: str, user: str) -> None:
+        """Remove `user`'s subscription to a task.
+
+        Raises when there is no subscription rather than deleting nothing: a
+        delete that succeeds on zero rows tells someone they have unsubscribed
+        from notifications they were never receiving.
+
+        Args:
+            relation_name: Fully-qualified name of the task
+            user: the subscriber, who is always the session user
+
+        Raises:
+            ValueError: If the user does not listen to this task.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support **UNLISTEN**")
+
+    def list_listeners_for_user(self, user: str) -> "List[dict]":
+        """Every subscription `user` holds - the rows behind SHOW LISTENERS.
+
+        Self-scoped by construction: there is no form that lists another user's
+        subscriptions, and no form that lists a task's subscribers, which would
+        tell whoever asked who else is watching it.
+
+        Defaults to an empty list rather than raising, so a store with no tasks
+        answers the question: "you listen to nothing here" is a complete answer.
+        """
+        return []
+
     def materialized_view_sources(self, relation_name: str) -> List[str]:
         """The catalog tables a materialized view reads, as recorded at registration.
 
@@ -874,16 +975,19 @@ class Writable:
     def set_materialized_view_owner(
         self, relation_name: str, new_owner: str, author: str = None
     ) -> None:
-        """Repoint the identity a materialized view's refresh runs as.
+        """Repoint the `runs-as` of every refresh trigger of a materialized view.
 
-        The only thing that moves a view's pinned owner - redefining a view
-        records a new statement author but deliberately leaves this alone, so
-        that editing someone's view does not silently make you responsible for
-        it (nor hand your authority to whoever edits next).
+        A view carries no identity of its own: each of its refresh triggers
+        does, exactly as a task's trigger carries the identity of the run it
+        starts. This moves all of them at once, so the view never refreshes as
+        two identities; `set_trigger_owner` moves one. Redefining a view
+        records a new statement author but leaves the triggers it already had
+        alone, so editing someone's view does not silently make you
+        responsible for it (nor hand your authority to whoever edits next).
 
         Args:
             relation_name: Fully-qualified name of the materialized view
-            new_owner: The principal refreshes should run as
+            new_owner: The principal its refresh triggers should run as
             author: session user this change is attributed to
         """
         raise NotImplementedError(

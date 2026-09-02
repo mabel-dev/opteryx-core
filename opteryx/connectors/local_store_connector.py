@@ -51,6 +51,13 @@ def _ts_for_filename(iso: str) -> str:
 # as False defaults, so a mixin listed after it is shadowed by MRO and its capability is
 # silently OFF. That is what disabled views on this connector — CREATE VIEW wrote a
 # view.json that could never be read back. See tests/unit/connectors/test_capability_flags.py.
+# The floor between two firings of one trigger, in seconds, for a trigger
+# registered without one. Mirrors `opteryx_catalog.DEFAULT_MINIMUM_INTERVAL_SECONDS`
+# so a sidecar and a catalog record read the same for the same statement; the
+# local store records it and does not fire, so nothing here enforces it.
+DEFAULT_MINIMUM_INTERVAL_SECONDS = 120
+
+
 class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     """Local file-based storage connector.
 
@@ -355,9 +362,31 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         task_name: str,
         author: Optional[str] = None,
         or_replace: bool = False,
+        event_kind: str = "commit",
+        schedule: Optional[str] = None,
+        time_zone: Optional[str] = None,
+        window_source: Optional[str] = None,
     ) -> None:
+        # `relation_name` is the HOLDER. For a commit trigger that is the dataset
+        # whose commits fire it; for a schedule or signal trigger it is the task
+        # itself, and the sidecar lands in the task's directory - the same
+        # `triggers.json` shape, next to task.json instead of dataset.json. A
+        # table, a view and a task share one directory per name, so nothing
+        # here needs to know which kind of holder it was handed.
         triggers = self.list_triggers(relation_name)
         existing = next((t for t in triggers if t.get("name") == trigger_name), None)
+        if event_kind != "commit":
+            # THE ONE-TRIGGER RULE, as the catalog states it: a task has at most
+            # one trigger, because its window is one sequence. A second trigger
+            # under a task is refused whatever its name; the same name is a
+            # repoint, judged below as a commit trigger's would be.
+            held = next((t for t in triggers if t.get("name") != trigger_name), None)
+            if held is not None:
+                raise ValueError(
+                    f"task {relation_name} is already fired by {held.get('name')} ON "
+                    f"{relation_name}; a task has one trigger - its window is one "
+                    "sequence."
+                )
         if existing is not None:
             claimed = existing.get("target-task") or existing.get("target-view")
             if not or_replace and claimed != task_name:
@@ -374,10 +403,26 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 "kind": "task",
                 "target-task": task_name,
                 "created-by": author,
+                "created-at-ms": int(time.time() * 1000),
                 # The identity an UNATTENDED run carries. Pinned to the author on
                 # creation; moved only by ALTER TRIGGER ... OWNER TO.
                 "runs-as": (existing or {}).get("runs-as") or author,
                 "suspended-at-ms": (existing or {}).get("suspended-at-ms"),
+                # The firing floor, with the catalog's default for a NEW trigger
+                # and kept across re-registration, as the catalog keeps it.
+                "minimum-interval-seconds": (existing or {}).get(
+                    "minimum-interval-seconds", DEFAULT_MINIMUM_INTERVAL_SECONDS
+                ),
+                # The event. `kind` above keeps meaning what the trigger RUNS;
+                # this is the separate axis of what fires it. A schedule is read
+                # in UTC unless told otherwise, as the catalog defaults it.
+                "event-kind": event_kind,
+                "schedule": schedule if event_kind == "schedule" else None,
+                "time-zone": (time_zone or "UTC") if event_kind == "schedule" else None,
+                "window-source": window_source if event_kind != "commit" else None,
+                # This store has no clock and nothing ever fires from it, so
+                # the next occurrence is not computed - the catalog owns that.
+                "next-due-at-ms": None,
             }
         )
         self._write_triggers(relation_name, triggers)
@@ -409,6 +454,22 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             raise ValueError(f"trigger not found: {trigger_name} on {relation_name}")
         target["suspended-at-ms"] = int(time.time() * 1000) if suspended else None
         target["suspended-by"] = author if suspended else None
+        self._write_triggers(relation_name, triggers)
+
+    def set_trigger_minimum_interval(
+        self,
+        relation_name: str,
+        trigger_name: str,
+        seconds: int,
+        author: Optional[str] = None,
+    ) -> None:
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 0:
+            raise ValueError(f"minimum interval must be a non-negative number of seconds: {seconds!r}")
+        triggers = self.list_triggers(relation_name)
+        target = next((t for t in triggers if t.get("name") == trigger_name), None)
+        if target is None:
+            raise ValueError(f"trigger not found: {trigger_name} on {relation_name}")
+        target["minimum-interval-seconds"] = seconds
         self._write_triggers(relation_name, triggers)
 
     def create_task(
@@ -459,6 +520,11 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 return
             raise ValueError(f"task not found: {relation_name}")
         os.remove(task_path)
+        # Subscriptions go with the task: they are a property of it, and the
+        # task is gone, so there is nothing left to notify about.
+        listeners_path = self._listeners_path(relation_name)
+        if os.path.isfile(listeners_path):
+            os.remove(listeners_path)
 
     def task_definition(self, relation_name: str) -> str:
         task_path = self._task_path(relation_name)
@@ -472,6 +538,82 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 f"task {relation_name} has no statement recorded; it cannot be executed."
             )
         return sql
+
+    def task_writes(self, relation_name: str) -> List[str]:
+        """The relations the task's statement writes, as recorded at creation."""
+        task_path = self._task_path(relation_name)
+        if not os.path.isfile(task_path):
+            raise ValueError(f"{relation_name} is not a task")
+        with open(task_path) as f:
+            record = json.load(f)
+        return list(record.get("writes") or [])
+
+    def _listeners_path(self, relation_name: str) -> str:
+        # Beside task.json in the task's own directory, so DROP TASK removing
+        # the task removes its subscriptions with it - the same containment the
+        # catalog gets from a subcollection under the task document.
+        return os.path.join(self._relation_dir(relation_name), "listeners.json")
+
+    def _read_listeners(self, relation_name: str) -> dict:
+        path = self._listeners_path(relation_name)
+        if not os.path.isfile(path):
+            return {}
+        with open(path) as f:
+            return json.load(f)
+
+    def add_listener(self, relation_name: str, user: str, outcome: str) -> None:
+        listeners = self._read_listeners(relation_name)
+        if user in listeners:
+            raise ValueError(
+                f"You already listen to **{relation_name}**. A task has one "
+                f"subscription per user; change it with: **UNLISTEN** "
+                f"{relation_name}; **LISTEN TO** {relation_name} **FOR {outcome}**"
+            )
+        listeners[user] = {"outcome": outcome, "created-at-ms": int(time.time() * 1000)}
+        with open(self._listeners_path(relation_name), "w") as f:
+            json.dump(listeners, f)
+
+    def drop_listener(self, relation_name: str, user: str) -> None:
+        listeners = self._read_listeners(relation_name)
+        if user not in listeners:
+            raise ValueError(
+                f"You do not listen to **{relation_name}**, so there is nothing "
+                "to unlisten. **SHOW LISTENERS** lists what you do listen to."
+            )
+        del listeners[user]
+        with open(self._listeners_path(relation_name), "w") as f:
+            json.dump(listeners, f)
+
+    def list_listeners_for_user(self, user: str) -> List[dict]:
+        """Every subscription `user` holds under this store's root.
+
+        A walk, where the catalog uses one collection-group query: there is no
+        index here to ask, and a local store is a development and test target
+        rather than something serving a workspace of any size.
+        """
+        rows = []
+        for directory, _dirs, files in os.walk(self.store_root):
+            if "listeners.json" not in files:
+                continue
+            with open(os.path.join(directory, "listeners.json")) as f:
+                listeners = json.load(f)
+            record = listeners.get(user)
+            if record is None:
+                continue
+            # The relation name is the path under the store root, so the first
+            # part is the workspace and the last is the task; anything between
+            # them is the collection, which is empty for `ws.<task>`.
+            relative = os.path.relpath(directory, self.store_root).split(os.sep)
+            rows.append(
+                {
+                    "workspace": relative[0],
+                    "collection": ".".join(relative[1:-1]),
+                    "task": relative[-1],
+                    "outcome": record.get("outcome"),
+                    "created-at-ms": record.get("created-at-ms"),
+                }
+            )
+        return rows
 
     def _read_mv_record(self, relation_name: str) -> Optional[dict]:
         mv_path = self._mv_path(relation_name)
@@ -502,13 +644,30 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     def set_materialized_view_owner(
         self, relation_name: str, new_owner: str, author: str = None
     ) -> None:
-        """Repoint the sidecar's `runs-as`, mirroring the catalog's field."""
+        """Repoint `runs-as` on every refresh trigger of the view, mirroring the
+        catalog: the view carries no identity, its refresh triggers do, and
+        this is the convenience that moves all of them together."""
         record = self._read_mv_record(relation_name)
         if record is None:
             raise ValueError(f"{relation_name} is not a materialized view")
-        record["runs-as"] = new_owner
-        with open(self._mv_path(relation_name), "w") as f:
-            json.dump(record, f)
+        moved = 0
+        for source in record.get("source_tables") or []:
+            triggers = self.list_triggers(source)
+            for trigger in triggers:
+                if (
+                    trigger.get("kind") == "materialized_view_refresh"
+                    and trigger.get("target-view") == relation_name
+                ):
+                    trigger["runs-as"] = new_owner
+                    moved += 1
+            if triggers:
+                self._write_triggers(source, triggers)
+        if not moved:
+            raise ValueError(
+                f"materialized view {relation_name} has no refresh trigger on any of its "
+                "sources, so there is nothing to repoint; re-register it with "
+                "CREATE OR REPLACE MATERIALIZED VIEW first"
+            )
 
     def set_materialized_view_suspended(
         self, relation_name: str, suspended: bool, author: str = None
@@ -538,9 +697,11 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
     # Trigger records mirror the catalog's: one refresh trigger per (source,
     # MV) pair, held in a `triggers.json` sidecar next to the SOURCE table's
     # dataset.json - the trigger hangs off the table whose commits would fire
-    # it, not off the MV. Nothing in this store ever fires them; they exist so
-    # DROP TRIGGER / SHOW TRIGGERS surfaces are fully exercisable without a
-    # remote catalog.
+    # it, not off the MV. A schedule or signal trigger has no such table and
+    # hangs off the TASK it fires, so its sidecar sits next to task.json; the
+    # path is the same function of the holder's name either way. Nothing in
+    # this store ever fires them; they exist so the trigger statement surface
+    # is fully exercisable without a remote catalog.
     def _triggers_path(self, relation_name: str) -> str:
         return os.path.join(self._relation_dir(relation_name), "triggers.json")
 
@@ -769,7 +930,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         """Upsert this MV's refresh trigger on one source table, with the same
         field names (kebab-case) the catalog stores."""
         name = self._mv_trigger_name(mv_relation_name)
-        triggers = [t for t in self.list_triggers(source) if t.get("name") != name]
+        held = self.list_triggers(source)
+        existing = next((t for t in held if t.get("name") == name), None)
+        triggers = [t for t in held if t.get("name") != name]
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         triggers.append(
             {
@@ -778,9 +941,19 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 "target-view": mv_relation_name,
                 "statement-id": None,
                 "created-by": author,
+                # The identity an UNATTENDED refresh carries - the trigger's, as
+                # a task trigger's is; the view has none. Pinned to the author
+                # when the trigger is first landed and kept across
+                # re-registration, so editing a view moves nothing. Moved by
+                # ALTER MATERIALIZED VIEW ... OWNER TO (every refresh trigger
+                # of the view) or ALTER TRIGGER ... OWNER TO (this one).
+                "runs-as": (existing or {}).get("runs-as") or author,
                 "created-at-ms": now_ms,
                 "last-fired-at-ms": None,
                 "last-fired-status": None,
+                "minimum-interval-seconds": (existing or {}).get(
+                    "minimum-interval-seconds", DEFAULT_MINIMUM_INTERVAL_SECONDS
+                ),
             }
         )
         self._write_triggers(source, triggers)
@@ -804,10 +977,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             "sql": sql,
             "source_tables": list(source_tables),
             "author": author,
-            # Pinned exactly as the catalog pins it: an existing owner survives
-            # re-registration, so editing a view never transfers whose
-            # authority refreshes it.
-            "runs-as": previous.get("runs-as") or author,
+            # No `runs-as`: exactly as the catalog, the view carries no
+            # identity - each refresh trigger landed below does.
             "registered_at": _now_utc_iso(),
         }
         mv_path = self._mv_path(relation_name)
