@@ -883,9 +883,12 @@ class EgressRestrictedError(SecurityError):
     Deliberately not a `PermissionsError`: the user may hold every permission
     the statement needs. What is refused is the *destination* - the data may
     not leave its workspace by this route - so reporting it as a missing grant
-    would send people to fix the wrong thing. Clearing it is an
-    `ALTER WORKSPACE <source> SET egress_protection TO OFF` by that workspace's
-    owner, and the message says so.
+    would send people to fix the wrong thing. Clearing it is the source
+    workspace owner's decision, and the message names both ways to make it:
+    `ALTER WORKSPACE <source> SET egress_protection TO OFF`, which unlocks every
+    copy out of the workspace, or `ALTER WORKSPACE <source> SET SECURE <object>
+    TO <destination>`, which sanctions the one task or materialized view that
+    was refused and leaves the lock on for everything else.
     """
 
 

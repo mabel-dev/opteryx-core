@@ -756,6 +756,87 @@ def test_alter_workspace_not_implemented_on_local_store(tmp_path):
         list(session.execute_to_morsels("ALTER WORKSPACE ws SET deletion_protection TO OFF"))
 
 
+# --- ALTER WORKSPACE ... SET|DROP SECURE
+#
+# The object-level exemption from egress protection. Planned from pre-parse (the
+# rewriter leaves these two forms alone), bound through the same workspace-ALTER
+# gate as the property form, and recorded on the SOURCE workspace. The local
+# store has no catalog entry to record it in, so reaching its NotImplementedError
+# is what shows a statement planned and bound. The gate itself is exercised in
+# test_permissions_capability.py, where a capability that can refuse is installed
+# - core's built-in one permits every workspace action.
+
+
+def test_alter_workspace_set_secure_plans_and_binds(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
+
+    with pytest.raises(NotImplementedError):
+        list(
+            session.execute_to_morsels(
+                "ALTER WORKSPACE ws SET SECURE platform.ops.ingest TO platform, other"
+            )
+        )
+
+
+def test_alter_workspace_drop_secure_plans_and_binds(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
+
+    with pytest.raises(NotImplementedError):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws DROP SECURE platform.ops.ingest"))
+
+
+def test_alter_workspace_secure_object_must_be_qualified(tmp_path):
+    """The object usually lives in another workspace, so a short name has no
+    safe completion - refused rather than guessed against the source."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
+
+    with pytest.raises(UnsupportedSyntaxError, match="fully-qualified object"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET SECURE ops.ingest TO platform"))
+
+
+def test_alter_workspace_secure_source_cannot_be_its_own_destination(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
+
+    with pytest.raises(UnsupportedSyntaxError, match="cannot be a \\*\\*SECURE\\*\\* destination"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET SECURE platform.ops.ingest TO ws"))
+
+
+def test_alter_workspace_secure_malformed_is_refused_by_name(tmp_path):
+    """Refused here, naming the statement it isn't - not by the parser, which
+    knows no WORKSPACE and would blame a token several words away."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(UnsupportedSyntaxError, match="SET SECURE"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET SECURE platform.ops.ingest"))
+
+
+def test_alter_workspace_secure_is_classed_as_owner_ddl():
+    """analyze_query pre-flights a statement without planning it; a caller
+    checking permissions before queueing has to see this as what it is."""
+    analysis = opteryx.analyze_query(
+        "ALTER WORKSPACE ws SET SECURE platform.ops.ingest TO platform"
+    )
+
+    assert analysis["query_type"] == "AlterWorkspaceSecure"
+    assert analysis["is_ddl"] is True
+    assert analysis["permission_required"] == "owner"
+
+
+def test_the_property_form_still_takes_the_rewriter_route(tmp_path):
+    """The SECURE lookahead in the rewriter must not catch the property form,
+    which still needs its ALTER FUNCTION disguise to parse."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session(access_policies=[{"pattern": "ws", "role": "owner"}])
+
+    with pytest.raises(NotImplementedError):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws SET egress_protection TO OFF"))
+
+
 def test_create_view_basic(tmp_path):
     """CREATE VIEW stores the view definition."""
     _setup_workspace(tmp_path)

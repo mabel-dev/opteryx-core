@@ -928,7 +928,10 @@ class Writable:
         raise NotImplementedError
 
     def egress_verdict(
-        self, target_relation: str, source_relations: "List[str]"
+        self,
+        target_relation: str,
+        source_relations: "List[str]",
+        secured: "Optional[str]" = None,
     ) -> "List[EgressRefusal]":
         """Every workspace that refuses this write, without refusing it here.
 
@@ -960,8 +963,41 @@ class Writable:
             target_relation: Fully-qualified relation being written
             source_relations: Fully-qualified names of the catalog relations the
                 statement reads, non-catalog sources already filtered out.
+            secured: The fully-qualified object performing the copy, when the
+                statement is one - the task an EXECUTE expanded. A source
+                workspace that has marked that object SECURE for this
+                destination does not refuse. None for a statement typed by hand,
+                which names nothing a source could have sanctioned.
         """
         return []
+
+    def mark_workspace_secure(
+        self,
+        workspace_name: str,
+        object_identifier: str,
+        destinations: "List[str]",
+        author: Optional[str] = None,
+    ) -> None:
+        """Sanction one object to copy `workspace_name`'s data into `destinations`.
+
+        `workspace_name` is the SOURCE - the workspace whose egress protection
+        this relaxes, for this one object only. The binder has already required
+        the caller to own that workspace (`visit_alter_workspace_secure`); the
+        connector records what it is given, as every other write here does.
+
+        Args:
+            workspace_name: the source workspace, whose data the object copies out
+            object_identifier: fully-qualified task or materialized view
+            destinations: workspace names the object may copy into; non-empty
+            author: session user this change is attributed to
+        """
+        raise NotImplementedError
+
+    def clear_workspace_secure(
+        self, workspace_name: str, object_identifier: str, author: Optional[str] = None
+    ) -> None:
+        """Withdraw a sanction recorded by `mark_workspace_secure`."""
+        raise NotImplementedError
 
     def relation_column_names(self, relation_name: str) -> "List[str]":
         """Return the relation's current column names only (not full type

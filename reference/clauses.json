@@ -63,11 +63,13 @@
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "ALTER WORKSPACE workspace SET property TO value"
+            "ALTER WORKSPACE workspace SET property TO value",
+            "ALTER WORKSPACE source SET SECURE object TO workspace [, workspace ...]",
+            "ALTER WORKSPACE source DROP SECURE object"
         ],
-        "summary": "Set a protection property on a workspace itself.",
-        "documentation": "Sets one of the properties in WORKSPACE_PROPERTIES on the workspace's catalog entry. Both are protections and both default to ON: deletion_protection refuses deletion of the workspace, egress_protection refuses automated copies of its data into another workspace. Values are ON/OFF (TRUE/FALSE accepted).",
-        "notes": "Names a workspace, never a relation within one; a qualified name is rejected. An unrecognised property name is rejected at plan time. Requires a connector with a catalog to store the property in."
+        "summary": "Set a protection property on a workspace itself, or sanction one object's copy out of it.",
+        "documentation": "Sets one of the properties in WORKSPACE_PROPERTIES on the workspace's catalog entry. Both are protections and both default to ON: deletion_protection refuses deletion of the workspace, egress_protection refuses automated copies of its data into another workspace. Values are ON/OFF (TRUE/FALSE accepted). SET SECURE is the narrow exemption from egress_protection: it sanctions ONE fully-qualified task or materialized view to copy the source workspace's data into the named destination workspaces, leaving the lock on for everything else; DROP SECURE withdraws it. Both SECURE forms are synthesized by pre-parse rather than rewritten to ALTER FUNCTION, and the record lives on the SOURCE workspace.",
+        "notes": "Names a workspace, never a relation within one; a qualified name is rejected. An unrecognised property name is rejected at plan time. Requires a connector with a catalog to store the property in. SECURE: the object must be fully qualified, destinations are workspace names, the source cannot be its own destination, and the sanction applies only to the object named - a hand-typed copy names no object and is never exempt."
     },
     "analyze_table": {
         "canonical_name": "ANALYZE TABLE",

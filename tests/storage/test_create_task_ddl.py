@@ -76,6 +76,9 @@ class ScriptedCapability:
     def effective_grants_on(self, execution_context, pattern):
         raise AssertionError("effective_grants_on should not be reached by these tests")
 
+    def effective_grants_in(self, execution_context, workspace, objects):
+        raise AssertionError("effective_grants_in should not be reached by these tests")
+
 
 _OWNER_POLICY = [{"pattern": "*", "role": "owner"}]
 _READER_POLICY = [{"pattern": "*", "role": "reader"}]
@@ -234,7 +237,7 @@ def test_creating_a_task_is_bounded_by_its_authors_own_grants(tmp_path, install)
     _seed(owner, "ws.secret")
 
     # May write the task name; holds NOTHING on what the statement reads.
-    install(ScriptedCapability(allow={("ws.leak", "WRITE")}))
+    install(ScriptedCapability(allow={("ws.leak", "AUTOMATE")}))
     mallory = opteryx.session(user="mallory")
 
     with pytest.raises(PermissionError, match="permission to read ws.secret"):
@@ -247,7 +250,7 @@ def test_an_author_who_can_read_the_source_may_create_the_task(tmp_path, install
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
     _seed(owner, "ws.secret")
 
-    install(ScriptedCapability(allow={("ws.ok", "WRITE"), ("ws.secret", "READ")}))
+    install(ScriptedCapability(allow={("ws.ok", "AUTOMATE"), ("ws.secret", "READ")}))
     rhea = opteryx.session(user="rhea")
 
     list(rhea.execute_to_morsels("CREATE TASK ws.ok AS SELECT a FROM ws.secret"))
@@ -260,7 +263,7 @@ def test_replacing_a_task_is_bounded_the_same_way(tmp_path, install):
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
     _seed(owner, "ws.secret")
 
-    install(ScriptedCapability(allow={("ws.t", "WRITE"), ("ws.src", "READ")}))
+    install(ScriptedCapability(allow={("ws.t", "AUTOMATE"), ("ws.src", "READ")}))
     mallory = opteryx.session(user="mallory")
 
     list(mallory.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
@@ -379,7 +382,7 @@ def test_the_authoring_bound_covers_every_write_form(tmp_path, install, statemen
 
     install(
         ScriptedCapability(
-            allow={("ws.t", "WRITE"), ("ws.src", "READ"), ("ws.sink", "READ")}
+            allow={("ws.t", "AUTOMATE"), ("ws.src", "READ"), ("ws.sink", "READ")}
         )
     )
     mallory = opteryx.session(user="mallory")
@@ -397,7 +400,7 @@ def test_an_author_who_can_write_the_target_may_create_the_task(tmp_path, instal
 
     install(
         ScriptedCapability(
-            allow={("ws.t", "WRITE"), ("ws.src", "READ"), ("ws.sink", "WRITE")}
+            allow={("ws.t", "AUTOMATE"), ("ws.src", "READ"), ("ws.sink", "WRITE")}
         )
     )
     rhea = opteryx.session(user="rhea")
@@ -407,12 +410,14 @@ def test_an_author_who_can_write_the_target_may_create_the_task(tmp_path, instal
     assert _writes(tmp_path, "t") == ["ws.sink"]
 
 
-def test_creating_a_task_still_needs_write_on_its_name(tmp_path, install):
+def test_creating_a_task_needs_automate_on_its_name(tmp_path, install):
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
     _seed(owner)
 
-    install(ScriptedCapability(allow={("ws.src", "READ")}))
+    # WRITE on the name is a writer's grant, and a writer may not register
+    # something the platform runs on its own.
+    install(ScriptedCapability(allow={("ws.src", "READ"), ("ws.t", "WRITE")}))
     rhea = opteryx.session(user="rhea")
 
     with pytest.raises(PermissionError, match="create task"):
@@ -431,7 +436,7 @@ def test_a_platform_identity_cannot_own_a_trigger(tmp_path, install):
 
     install(
         ScriptedCapability(
-            allow={("ws.src", "WRITE"), ("ws.t", "WRITE"), ("ws.t2", "WRITE")},
+            allow={("ws.src", "AUTOMATE"), ("ws.t", "AUTOMATE"), ("ws.t2", "AUTOMATE")},
             refuse_ownership={"federator"},
         )
     )
@@ -632,7 +637,7 @@ def test_a_platform_identity_cannot_be_given_a_trigger(tmp_path, install):
     _seed(owner)
     list(owner.execute_to_morsels("CREATE TASK ws.t ON ws.src AS SELECT a FROM ws.src"))
 
-    install(ScriptedCapability(allow={("ws.src", "WRITE")}, refuse_ownership={"federator"}))
+    install(ScriptedCapability(allow={("ws.src", "AUTOMATE")}, refuse_ownership={"federator"}))
     session = opteryx.session(user="olive")
 
     with pytest.raises(PermissionError, match="billed to nobody"):
@@ -643,13 +648,13 @@ def test_a_platform_identity_cannot_be_given_a_trigger(tmp_path, install):
         )
 
 
-def test_altering_a_trigger_needs_write_on_its_table(tmp_path, install):
+def test_altering_a_trigger_needs_automate_on_its_table(tmp_path, install):
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
     _seed(owner)
     list(owner.execute_to_morsels("CREATE TASK ws.t ON ws.src AS SELECT a FROM ws.src"))
 
-    install(ScriptedCapability(allow={("ws.src", "READ")}))
+    install(ScriptedCapability(allow={("ws.src", "READ"), ("ws.src", "WRITE")}))
     rhea = opteryx.session(user="rhea")
 
     with pytest.raises(PermissionError, match="alter a trigger"):

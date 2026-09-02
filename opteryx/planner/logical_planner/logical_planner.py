@@ -117,6 +117,7 @@ class LogicalPlanStepType(int, Enum):
     CreateCollection = auto()
     DropCollection = auto()
     AlterWorkspace = auto()
+    AlterWorkspaceSecure = auto()
     DropWorkspace = auto()
 
     DropTrigger = auto()
@@ -5100,6 +5101,58 @@ def plan_alter_workspace(statement, **kwargs):
     return plan
 
 
+def plan_alter_workspace_secure(statement, **kwargs) -> LogicalPlan:
+    """ALTER WORKSPACE <source> SET SECURE <object> TO <ws>[, ...] | DROP SECURE <object>.
+
+    Synthesized by pre-parse. The SECURE flag sanctions ONE object - a task, a
+    materialized view - to copy this workspace's data into the named destination
+    workspaces despite `egress_protection`. It is a statement on the SOURCE
+    workspace, gated on owning it, because the source is whose data leaves and
+    the property being relaxed is the source's.
+
+    Validated here, before anything is bound: an unqualified object would be
+    completed against SOME workspace, and the only candidate - the source - is
+    the wrong one (the object typically lives elsewhere), so it is refused rather
+    than guessed. Destinations are workspace names; the source naming itself is
+    refused because a copy that stays inside one workspace is never egress.
+    """
+    root = "AlterWorkspaceSecure"
+    body = statement[root]
+
+    workspace_name = body["workspace"]
+    secure_object = body["object"]
+    destinations = body["destinations"]
+
+    if secure_object.count(".") < 2:
+        raise UnsupportedSyntaxError(
+            f"**SECURE** names a fully-qualified object, as <workspace>.<collection>.<name>; "
+            f"got '{secure_object}'. The object usually lives in a different workspace "
+            f"from '{workspace_name}', so a short name cannot be completed safely."
+        )
+
+    if destinations is not None:
+        unique = []
+        for destination in destinations:
+            if destination.lower() == workspace_name.lower():
+                raise UnsupportedSyntaxError(
+                    f"'{workspace_name}' cannot be a **SECURE** destination for its own data: "
+                    "a copy that stays inside one workspace is not egress and is never refused."
+                )
+            if destination not in unique:
+                unique.append(destination)
+        destinations = unique
+
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterWorkspaceSecure)
+    node.workspace_name = workspace_name
+    node.secure_object = secure_object
+    # None means DROP SECURE - withdraw the sanction.
+    node.secure_destinations = destinations
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
 def plan_create_collection(statement, **kwargs):
     """
     Create a logical plan for CREATE COLLECTION statement.
@@ -5644,7 +5697,18 @@ def plan_execute(statement, **kwargs):
             f"task {relation_name} is recorded as a **{inner_root.upper()}** "
             "statement, which cannot be executed."
         )
-    return builder(bound)
+    plan = builder(bound)
+
+    # The write this task expands to carries the task's identity, so the egress
+    # gate can ask whether a source workspace has marked THIS task SECURE. The
+    # expanded statement is otherwise indistinguishable from the same INSERT
+    # typed by hand - and a hand-typed copy names no object a source could have
+    # sanctioned, which is exactly why the exemption is object-level and why it
+    # rides on EXECUTE rather than on the statement text.
+    for _, node in plan.nodes(True):
+        if node.node_type == LogicalPlanStepType.Insert:
+            node.executing_task = relation_name
+    return plan
 
 
 def plan_refresh_materialized_view(statement, **kwargs):
@@ -6725,6 +6789,9 @@ QUERY_BUILDERS = {
     "AlterView": plan_alter_view,
     "AlterTable": plan_alter_table,
     "AlterFunction": plan_alter_workspace,  # ALTER WORKSPACE, rewritten by the SQL rewriter
+    # ALTER WORKSPACE ... SET|DROP SECURE - synthesized pre-parse; the rewriter
+    # leaves these two forms alone because they have no ALTER FUNCTION shape.
+    "AlterWorkspaceSecure": plan_alter_workspace_secure,
     "DropFunction": plan_drop_workspace,  # DROP WORKSPACE, rewritten by the SQL rewriter
     "Drop": plan_drop,  # handles DROP VIEW and DROP TABLE
     "CreateTable": plan_create_table,

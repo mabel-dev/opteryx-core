@@ -118,6 +118,9 @@ class ScriptedCapability:
     def effective_grants_on(self, execution_context, pattern):
         raise AssertionError("effective_grants_on should not be reached by these tests")
 
+    def effective_grants_in(self, execution_context, workspace, objects):
+        raise AssertionError("effective_grants_in should not be reached by these tests")
+
 
 @pytest.fixture(autouse=True)
 def permissions_state():
@@ -343,11 +346,16 @@ def test_internal_relations_are_asked_about_too(tmp_path, install):
         ("SELECT * FROM ws.t", ("ws.t", "READ")),
         ("CREATE TABLE ws.new (id BIGINT)", ("ws.new", "CREATE")),
         ("DROP TABLE ws.t", ("ws.t", "DROP")),
-        ("DROP VIEW ws.v", ("ws.v", "DROP")),
+        ("DROP VIEW ws.v", ("ws.v", "WRITE")),
         ("TRUNCATE TABLE ws.t", ("ws.t", "DELETE")),
         ("INSERT INTO ws.t (id) VALUES (1)", ("ws.t", "WRITE")),
         ("CREATE VIEW ws.v2 AS SELECT * FROM ws.t", ("ws.v2", "WRITE")),
-        ("SHOW CREATE VIEW ws.v", ("ws.v", "READ")),
+        ("SHOW CREATE VIEW ws.v", ("ws.v", "WRITE")),
+        ("SHOW CREATE TABLE ws.t", ("ws.t", "READ")),
+        ("CREATE TASK ws.task AS SELECT * FROM ws.t", ("ws.task", "AUTOMATE")),
+        ("CREATE TRIGGER trg ON ws.t EXECUTE ws.task", ("ws.t", "AUTOMATE")),
+        ("DROP TRIGGER trg ON ws.t", ("ws.t", "AUTOMATE")),
+        ("ALTER TRIGGER trg ON ws.t SUSPEND", ("ws.t", "AUTOMATE")),
         ("SHOW SNAPSHOTS FOR ws.t", ("ws.t", "READ")),
         ("COMMENT ON TABLE ws.t IS 'hello'", ("ws.t", "WRITE")),
     ],
@@ -361,6 +369,67 @@ def test_each_statement_asks_for_its_own_action(tmp_path, install, statement, ex
         list(session.execute_to_morsels(statement))
 
     assert expected in capability.asked, (statement, capability.asked)
+
+
+def test_a_writer_may_drop_a_view_but_not_a_table(tmp_path, install):
+    """A view is text and comes back from CREATE VIEW; a table's history does
+    not come back from anything. That is the difference between the two tiers."""
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow={("ws.v", "WRITE"), ("ws.t", "WRITE")}))
+    session = opteryx.session(user="olive")
+
+    list(session.execute_to_morsels("DROP VIEW ws.v"))
+    with pytest.raises(PermissionError):
+        list(session.execute_to_morsels("DROP TABLE ws.t"))
+
+    assert ("ws.v", "WRITE") in capability.asked
+    assert ("ws.t", "DROP") in capability.asked
+
+
+def test_write_on_a_table_does_not_let_a_trigger_be_put_on_it(tmp_path, install):
+    """The whole point of AUTOMATE: a writer may fill ws.t, and may not decide
+    that something runs every time anyone does."""
+    _seed(tmp_path, install)
+    capability = install(
+        ScriptedCapability(allow={("ws.t", "WRITE"), ("ws.t", "READ"), ("ws.task", "AUTOMATE")})
+    )
+    session = opteryx.session(user="olive")
+    list(session.execute_to_morsels("CREATE TASK ws.task AS SELECT * FROM ws.t"))
+
+    with pytest.raises(PermissionError, match="owner required"):
+        list(session.execute_to_morsels("CREATE TRIGGER trg ON ws.t EXECUTE ws.task"))
+
+    assert ("ws.t", "AUTOMATE") in capability.asked
+    assert not (tmp_path / "ws" / "t" / "triggers.json").exists()
+
+
+def test_show_create_asks_the_tier_of_whoever_authors_the_object(tmp_path, install):
+    """The definition text is gated where information_schema gates it, so the
+    statement is not a side door around the listing."""
+    _seed(tmp_path, install)
+    capability = install(
+        ScriptedCapability(allow={("ws.t", "READ"), ("ws.v", "WRITE"), ("ws.task", "AUTOMATE")})
+    )
+    session = opteryx.session(user="olive")
+    list(session.execute_to_morsels("CREATE TASK ws.task AS SELECT * FROM ws.t"))
+
+    list(session.execute_to_morsels("SHOW CREATE TABLE ws.t"))
+    list(session.execute_to_morsels("SHOW CREATE VIEW ws.v"))
+    list(session.execute_to_morsels("SHOW CREATE TASK ws.task"))
+
+    assert ("ws.t", "READ") in capability.asked
+    assert ("ws.v", "WRITE") in capability.asked
+    assert ("ws.task", "AUTOMATE") in capability.asked
+
+
+def test_read_on_a_view_does_not_show_its_definition(tmp_path, install):
+    _seed(tmp_path, install)
+    install(ScriptedCapability(allow={("ws.v", "READ"), ("ws.t", "READ")}))
+    session = opteryx.session(user="olive")
+
+    list(session.execute_to_morsels("SELECT * FROM ws.v"))
+    with pytest.raises(PermissionError, match="write required"):
+        list(session.execute_to_morsels("SHOW CREATE VIEW ws.v"))
 
 
 def test_show_manifest_asks_for_manifest_on_top_of_read(tmp_path, install):
@@ -517,6 +586,47 @@ def test_workspace_action_is_allowed_when_the_capability_permits_it(tmp_path, in
     assert ("ws", "ALTER") in capability.asked_workspace
 
 
+def test_secure_is_gated_on_owning_the_source_workspace(tmp_path, install):
+    """SET SECURE relaxes the SOURCE workspace's egress protection for one
+    object, so it is the source's owner who decides - the same principal
+    `SET egress_protection TO OFF` demands. Anything less (writer on the object,
+    owner of the destination) would let the party the protection protects
+    against sanction themselves."""
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow_workspace=set()))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError, match="alter workspace ws"):
+        list(
+            session.execute_to_morsels(
+                "ALTER WORKSPACE ws SET SECURE platform.ops.ingest TO platform"
+            )
+        )
+    with pytest.raises(PermissionError, match="alter workspace ws"):
+        list(session.execute_to_morsels("ALTER WORKSPACE ws DROP SECURE platform.ops.ingest"))
+
+    assert ("ws", "ALTER") in capability.asked_workspace
+    # Never the relation gate: the object named is not what is being authorized.
+    assert not [r for r, _ in capability.asked if r == "platform.ops.ingest"]
+
+
+def test_secure_is_allowed_when_the_source_owner_asks(tmp_path, install):
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    session = opteryx.session(user="olive")
+
+    # The local store cannot record it, but the gate cleared - a refusal here
+    # would be a PermissionError, not this.
+    with pytest.raises(NotImplementedError):
+        list(
+            session.execute_to_morsels(
+                "ALTER WORKSPACE ws SET SECURE platform.ops.ingest TO platform"
+            )
+        )
+
+    assert ("ws", "ALTER") in capability.asked_workspace
+
+
 # --- SHOW GRANTS is answered by the capability, not by the engine
 
 
@@ -640,7 +750,7 @@ def test_the_same_statements_run_when_every_relation_is_permitted(tmp_path, inst
 def test_creating_a_materialized_view_asks_read_on_each_source(tmp_path, install):
     _two_tables(tmp_path, install)
     capability = install(
-        ScriptedCapability(allow={("ws.mv", "WRITE"), ("ws.mv", "CREATE"), ("ws.b", "READ")})
+        ScriptedCapability(allow={("ws.mv", "AUTOMATE"), ("ws.b", "READ")})
     )
     session = opteryx.session(user="olive")
 
@@ -649,10 +759,28 @@ def test_creating_a_materialized_view_asks_read_on_each_source(tmp_path, install
     assert ("ws.b", "READ") in capability.asked
 
 
+def test_a_writer_cannot_create_a_materialized_view(tmp_path, install):
+    """Everything a writer holds on the target - WRITE and CREATE - and READ on
+    the source: still refused. Registering a materialized view lands a refresh
+    trigger on every source and the view then rebuilds itself unattended; that
+    is automation, and AUTOMATE is what is asked."""
+    _two_tables(tmp_path, install)
+    capability = install(
+        ScriptedCapability(allow={("ws.mv", "WRITE"), ("ws.mv", "CREATE"), ("ws.b", "READ")})
+    )
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError, match="owner required"):
+        list(session.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.b"))
+
+    assert ("ws.mv", "AUTOMATE") in capability.asked
+    assert not (tmp_path / "ws" / "mv").exists()
+
+
 def test_a_materialized_view_cannot_copy_out_a_source_the_caller_cannot_read(tmp_path, install):
     """Full authority over the target, none over the source: refused."""
     _two_tables(tmp_path, install)
-    capability = install(ScriptedCapability(allow={("ws.mv", "WRITE"), ("ws.mv", "CREATE")}))
+    capability = install(ScriptedCapability(allow={("ws.mv", "AUTOMATE")}))
     session = opteryx.session(user="olive")
 
     with pytest.raises(PermissionError):
@@ -688,7 +816,7 @@ def _materialized_view(tmp_path, install):
     """A view over ws.b, created with everything it needs permitted."""
     _two_tables(tmp_path, install)
     install(
-        ScriptedCapability(allow={("ws.mv", "WRITE"), ("ws.mv", "CREATE"), ("ws.b", "READ")})
+        ScriptedCapability(allow={("ws.mv", "AUTOMATE"), ("ws.b", "READ")})
     )
     session = opteryx.session(user="olive")
     list(session.execute_to_morsels("CREATE MATERIALIZED VIEW ws.mv AS SELECT * FROM ws.b"))
@@ -703,7 +831,7 @@ def test_alter_owner_asks_whether_the_new_owner_can_read_the_sources(tmp_path, i
     _materialized_view(tmp_path, install)
     capability = install(
         ScriptedCapability(
-            allow_workspace={("ws", "ALTER")},
+            allow_workspace={("ws", "AUTOMATE")},
             allow_principal={("ginny", "ws.b", "READ")},
         )
     )
@@ -720,7 +848,7 @@ def test_alter_owner_refuses_an_owner_who_cannot_read_the_sources(tmp_path, inst
     what it reads is not a view that fails at its next refresh, it is a
     definition that was never valid."""
     _materialized_view(tmp_path, install)
-    capability = install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    capability = install(ScriptedCapability(allow_workspace={("ws", "AUTOMATE")}))
     session = opteryx.session(user="olive")
 
     with pytest.raises(PermissionError, match="ginny"):
@@ -737,7 +865,7 @@ def test_the_callers_own_authority_does_not_carry_to_the_new_owner(tmp_path, ins
     install(
         ScriptedCapability(
             allow={("ws.b", "READ")},
-            allow_workspace={("ws", "ALTER")},
+            allow_workspace={("ws", "AUTOMATE")},
         )
     )
     session = opteryx.session(user="olive")
@@ -751,7 +879,7 @@ def test_owner_to_current_user_is_judged_on_the_session(tmp_path, install):
     exactly - and the principal it resolves to is not known until execution."""
     _materialized_view(tmp_path, install)
     capability = install(
-        ScriptedCapability(allow={("ws.b", "READ")}, allow_workspace={("ws", "ALTER")})
+        ScriptedCapability(allow={("ws.b", "READ")}, allow_workspace={("ws", "AUTOMATE")})
     )
     session = opteryx.session(user="mallory")
 
@@ -772,7 +900,7 @@ def test_alter_owner_refuses_a_principal_the_deployment_will_not_pin_work_on(
     _materialized_view(tmp_path, install)
     capability = install(
         ScriptedCapability(
-            allow_workspace={("ws", "ALTER")},
+            allow_workspace={("ws", "AUTOMATE")},
             allow_principal={("federator", "ws.b", "READ")},
             refuse_ownership={"federator"},
         )
@@ -794,7 +922,7 @@ def test_the_refusal_does_not_depend_on_how_the_owner_was_spelled(tmp_path, inst
     capability = install(
         ScriptedCapability(
             allow={("ws.b", "READ")},
-            allow_workspace={("ws", "ALTER")},
+            allow_workspace={("ws", "AUTOMATE")},
             refuse_ownership={"federator"},
         )
     )
@@ -813,7 +941,7 @@ def test_an_ordinary_principal_is_asked_about_and_permitted(tmp_path, install):
     _materialized_view(tmp_path, install)
     capability = install(
         ScriptedCapability(
-            allow_workspace={("ws", "ALTER")},
+            allow_workspace={("ws", "AUTOMATE")},
             allow_principal={("ginny", "ws.b", "READ")},
             refuse_ownership={"federator"},
         )
@@ -832,7 +960,7 @@ def test_every_source_is_checked_not_just_the_first(tmp_path, install):
     _two_tables(tmp_path, install)
     install(
         ScriptedCapability(
-            allow={("ws.mv", "WRITE"), ("ws.mv", "CREATE"), ("ws.a", "READ"), ("ws.b", "READ")}
+            allow={("ws.mv", "AUTOMATE"), ("ws.a", "READ"), ("ws.b", "READ")}
         )
     )
     session = opteryx.session(user="olive")
@@ -845,7 +973,7 @@ def test_every_source_is_checked_not_just_the_first(tmp_path, install):
 
     capability = install(
         ScriptedCapability(
-            allow_workspace={("ws", "ALTER")},
+            allow_workspace={("ws", "AUTOMATE")},
             allow_principal={("ginny", "ws.a", "READ")},  # ws.a yes, ws.b never
         )
     )
@@ -870,7 +998,7 @@ def test_a_view_with_no_recorded_sources_is_not_transferable(tmp_path, install):
     record["source_tables"] = []
     sidecar.write_text(json.dumps(record))
 
-    install(ScriptedCapability(allow_workspace={("ws", "ALTER")}))
+    install(ScriptedCapability(allow_workspace={("ws", "AUTOMATE")}))
     session = opteryx.session(user="olive")
 
     with pytest.raises(InvalidInternalStateError, match="no source tables recorded"):
@@ -896,7 +1024,7 @@ def test_a_capability_that_cannot_answer_raises_rather_than_denying(tmp_path, in
         def can_principal_perform_action(self, principal, resource, action):
             raise PolicyStoreUnreachable("policy store unreachable")
 
-    install(Unreachable(allow_workspace={("ws", "ALTER")}))
+    install(Unreachable(allow_workspace={("ws", "AUTOMATE")}))
     session = opteryx.session(user="olive")
 
     with pytest.raises(PolicyStoreUnreachable):
@@ -912,7 +1040,7 @@ def test_a_quoted_principal_reaches_the_capability_verbatim(tmp_path, install):
     _materialized_view(tmp_path, install)
     capability = install(
         ScriptedCapability(
-            allow_workspace={("ws", "ALTER")},
+            allow_workspace={("ws", "AUTOMATE")},
             allow_principal={("someone@example.com", "ws.b", "READ")},
         )
     )
@@ -1054,3 +1182,89 @@ def test_columns_are_filtered_by_the_same_gate(catalog, install):
     install(ScriptedCapability(allow=set()))
 
     assert _rows("SELECT table_name FROM cat.information_schema.columns") == []
+
+
+# ---------------------------------------------------------------------------
+# information_schema shows a row at the tier of whoever could act on what it
+# describes, and SHOW CREATE is held to the same tiers - so the listing and
+# the statement cannot disagree about who may see a definition.
+# ---------------------------------------------------------------------------
+
+
+class _View:
+    class metadata:
+        author = "olive"
+        timestamp_ms = 1754000000000
+
+    definition = "SELECT * FROM coll1.secret"
+
+
+class DefinitionsCatalog(MetadataCatalog):
+    """MetadataCatalog plus one view in coll1 and one trigger on coll1.src."""
+
+    def list_views(self, collection):
+        return ["v"] if collection == "coll1" else []
+
+    def load_view(self, identifier):
+        return _View()
+
+    def list_triggers(self, identifier):
+        if identifier != "coll1.src":
+            return []
+        return [
+            {
+                "name": "refresh__coll1__mv",
+                "kind": "materialized_view_refresh",
+                "target-view": "coll1.mv",
+                "runs-as": "olive",
+                "created-by": "olive",
+            }
+        ]
+
+
+@pytest.fixture
+def definitions_catalog():
+    register_workspace("dcat", OpteryxConnector, catalog=DefinitionsCatalog)
+
+
+def test_a_reader_sees_a_view_row_with_no_definition(definitions_catalog, install):
+    """The row is at READ; the SQL is at WRITE. A reader learns the view exists
+    and not what it reads - the shape Postgres gives a non-owner."""
+    install(ScriptedCapability(allow={("dcat.coll1.v", "READ")}))
+
+    rows = _rows("SELECT table_name, view_definition FROM dcat.information_schema.views")
+
+    assert rows == [("v", None)]
+
+
+def test_a_writer_sees_the_view_definition(definitions_catalog, install):
+    install(ScriptedCapability(allow={("dcat.coll1.v", "READ"), ("dcat.coll1.v", "WRITE")}))
+
+    rows = _rows("SELECT table_name, view_definition FROM dcat.information_schema.views")
+
+    assert rows == [("v", "SELECT * FROM coll1.secret")]
+
+
+def test_write_without_read_on_a_view_shows_no_row(definitions_catalog, install):
+    """The definition gate sits inside the row gate, not beside it."""
+    install(ScriptedCapability(allow={("dcat.coll1.v", "WRITE")}))
+
+    assert _rows("SELECT table_name FROM dcat.information_schema.views") == []
+
+
+def test_a_trigger_row_needs_automate_on_its_source_table(definitions_catalog, install):
+    """READ and WRITE on the table a trigger hangs off show nothing: a trigger
+    row names the identity unattended runs carry and what they fire, which is
+    an owner's arrangement to see."""
+    install(ScriptedCapability(allow={("dcat.coll1.src", "READ"), ("dcat.coll1.src", "WRITE")}))
+
+    assert _rows("SELECT trigger_name FROM dcat.information_schema.triggers") == []
+
+
+def test_an_owner_sees_the_trigger_row(definitions_catalog, install):
+    capability = install(ScriptedCapability(allow={("dcat.coll1.src", "AUTOMATE")}))
+
+    rows = _rows("SELECT trigger_name, runs_as FROM dcat.information_schema.triggers")
+
+    assert rows == [("refresh__coll1__mv", "olive")]
+    assert ("dcat.coll1.src", "AUTOMATE") in capability.asked

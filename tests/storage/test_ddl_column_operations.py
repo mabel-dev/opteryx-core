@@ -790,6 +790,9 @@ class _RecordingCapability:
     def effective_grants_on(self, execution_context, pattern):
         raise AssertionError("effective_grants_on should not be reached by these tests")
 
+    def effective_grants_in(self, execution_context, workspace, objects):
+        raise AssertionError("effective_grants_in should not be reached by these tests")
+
 
 @pytest.fixture
 def install_capability():

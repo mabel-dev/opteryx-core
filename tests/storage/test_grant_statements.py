@@ -75,6 +75,9 @@ class RecordingAdminCapability:
         self.applied.append(("effective_grants_on", pattern, execution_context.user))
         return self.effective_rows
 
+    def effective_grants_in(self, execution_context, workspace, objects):
+        raise AssertionError("effective_grants_in should not be reached by these tests")
+
 
 @pytest.fixture(autouse=True)
 def permissions_state():

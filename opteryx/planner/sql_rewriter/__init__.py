@@ -240,7 +240,15 @@ _QUERY_BODY = re.compile(rf"(?P<quoted>{_QUOTED_SPAN})|\b(?:SELECT|WITH)\b", re.
 
 _CREATE_COLLECTION = re.compile(r"^(\s*CREATE\s+)COLLECTION\b", re.IGNORECASE)
 _DROP_COLLECTION = re.compile(r"^(\s*DROP\s+)COLLECTION\b", re.IGNORECASE)
-_ALTER_WORKSPACE = re.compile(r"^(\s*ALTER\s+)WORKSPACE\b", re.IGNORECASE)
+# `ALTER WORKSPACE <ws> SET|DROP SECURE ...` is NOT rewritten: it has no ALTER
+# FUNCTION shape to borrow (an object identifier and a destination list are not
+# `<property> TO <value>`), so pre-parse synthesises it from the reader's own
+# spelling instead - see pre_parse._intercept_alter_workspace_secure. The
+# lookahead is what lets that interceptor see WORKSPACE rather than FUNCTION.
+_ALTER_WORKSPACE = re.compile(
+    r"^(\s*ALTER\s+)WORKSPACE\b(?!\s+[A-Za-z_][\w$]*\s+(?:SET|DROP)\s+SECURE\b)",
+    re.IGNORECASE,
+)
 _DROP_WORKSPACE = re.compile(r"^(\s*DROP\s+)WORKSPACE\b", re.IGNORECASE)
 
 # VERSION AS OF PREVIOUS -> VERSION AS OF 0. The parser's grammar for VERSION AS OF

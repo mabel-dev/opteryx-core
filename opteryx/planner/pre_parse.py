@@ -522,6 +522,85 @@ _DROP_TASK_RE = re.compile(
 _ALTER_TASK_LEAD = re.compile(r"^\s*ALTER\s+TASK\b", re.IGNORECASE)
 
 
+# ALTER WORKSPACE <source> SET SECURE <object> TO <workspace>[, <workspace>...]
+# ALTER WORKSPACE <source> DROP SECURE <object>
+#
+# The SECURE flag: a sanctioned exemption from the source workspace's egress
+# protection for ONE named object (a task, a materialized view) copying into
+# named destination workspaces. It is an ALTER WORKSPACE statement - run against
+# the SOURCE, gated on owning the source - because that is whose data leaves,
+# and the property it relaxes belongs to that workspace. The alternative it
+# replaces, `SET egress_protection TO OFF`, unlocks every copy out for everyone.
+#
+# Not rewritten to ALTER FUNCTION like the property form (the SQL rewriter's
+# `_ALTER_WORKSPACE` looks ahead and leaves these alone): an object identifier
+# and a list of workspaces are not `<property> TO <value>`, so it is synthesised
+# here from the reader's own spelling. The object slot is an IDENTIFIER and admits
+# no placeholder, as every relation-shaped slot in this module does not.
+_ALTER_WORKSPACE_SECURE_LEAD = re.compile(
+    r"^\s*ALTER\s+WORKSPACE\s+[A-Za-z_][\w$]*\s+(?:SET|DROP)\s+SECURE\b", re.IGNORECASE
+)
+_WORKSPACE_SLOT = r"[A-Za-z_][\w$]*"
+_ALTER_WORKSPACE_SET_SECURE_RE = re.compile(
+    r"^\s*ALTER\s+WORKSPACE\s+(?P<workspace>" + _WORKSPACE_SLOT + r")\s+SET\s+SECURE\s+"
+    r"(?P<object>[A-Za-z_][\w.$]*)\s+TO\s+"
+    r"(?P<destinations>" + _WORKSPACE_SLOT + r"(?:\s*,\s*" + _WORKSPACE_SLOT + r")*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_ALTER_WORKSPACE_DROP_SECURE_RE = re.compile(
+    r"^\s*ALTER\s+WORKSPACE\s+(?P<workspace>" + _WORKSPACE_SLOT + r")\s+DROP\s+SECURE\s+"
+    r"(?P<object>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _intercept_alter_workspace_secure(clean_sql: str):
+    """Recognize the two SECURE forms of ALTER WORKSPACE before the parser.
+
+    Returns a synthesized single-statement AST list, or None when the statement
+    is not one. A statement that opens as one but does not match is refused BY
+    NAME here: the parser knows no WORKSPACE and would blame a token several
+    words from the one at fault.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _ALTER_WORKSPACE_SECURE_LEAD.match(clean_sql):
+        return None
+
+    match = _ALTER_WORKSPACE_SET_SECURE_RE.match(clean_sql)
+    if match is not None:
+        destinations = [part.strip() for part in match.group("destinations").split(",")]
+        return [
+            {
+                "AlterWorkspaceSecure": {
+                    "workspace": match.group("workspace"),
+                    "object": match.group("object"),
+                    "destinations": destinations,
+                }
+            }
+        ]
+
+    match = _ALTER_WORKSPACE_DROP_SECURE_RE.match(clean_sql)
+    if match is not None:
+        return [
+            {
+                "AlterWorkspaceSecure": {
+                    "workspace": match.group("workspace"),
+                    "object": match.group("object"),
+                    "destinations": None,
+                }
+            }
+        ]
+
+    raise UnsupportedSyntaxError(
+        "Expected: **ALTER WORKSPACE** <source> **SET SECURE** <object> **TO** "
+        "<workspace>[, <workspace>...], or **ALTER WORKSPACE** <source> **DROP SECURE** "
+        "<object>. <source> is the workspace whose data the object copies out; <object> "
+        "is the fully-qualified task or materialized view doing the copying; the "
+        "destinations are workspace names, not relations."
+    )
+
+
 def _intercept_alter_task(clean_sql: str):
     """Refuse ALTER TASK, naming the statement that does what was meant."""
     from opteryx.exceptions import UnsupportedSyntaxError
@@ -774,6 +853,7 @@ _INTERCEPTORS = (
     _intercept_trigger_statements,
     _intercept_task_statements,
     _intercept_alter_task,
+    _intercept_alter_workspace_secure,
     _intercept_refresh_statements,
     _intercept_save_results,
     _intercept_alter_materialized_view,

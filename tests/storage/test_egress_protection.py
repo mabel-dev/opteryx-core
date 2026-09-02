@@ -11,6 +11,9 @@ half: turning relation names into workspaces, asking only when a boundary is
 actually crossed, and failing closed rather than open when it cannot ask.
 """
 
+import importlib.util
+import os
+
 import pytest
 
 from opteryx.connectors import connector_factory
@@ -31,20 +34,34 @@ class _FakeRefusal:
     it quietly drifting away from the thing it stands in for.
     """
 
-    def __init__(self, workspace, destination, operation):
+    def __init__(self, workspace, destination, operation, secured=None):
         self.workspace = workspace
         self.destination = destination
         self.operation = operation
+        self.secured = secured
 
     @property
     def remediation(self):
-        return f"ALTER WORKSPACE {self.workspace} SET egress_protection TO OFF."
+        if self.secured:
+            narrow = (
+                f"ALTER WORKSPACE {self.workspace} SET SECURE {self.secured} "
+                f"TO {self.destination}"
+            )
+        else:
+            narrow = (
+                f"ALTER WORKSPACE {self.workspace} SET SECURE <object> TO {self.destination} "
+                "(for a task or materialized view)"
+            )
+        return (
+            f"{narrow}, or clear it for every copy with "
+            f"ALTER WORKSPACE {self.workspace} SET egress_protection TO OFF."
+        )
 
     def __str__(self):
         return (
             f"Cannot {self.operation}: it would copy data out of workspace "
             f"'{self.workspace}' into '{self.destination}', and "
-            f"'{self.workspace}' restricts egress. Clear it with {self.remediation}"
+            f"'{self.workspace}' restricts egress. Sanction it with {self.remediation}"
         )
 
 
@@ -57,19 +74,30 @@ class _FakeCatalog:
     def __init__(self, workspace=None, **kwargs):
         pass
 
-    def egress_verdict(self, source_workspaces, destination_workspace, operation):
+    secure_calls = []
+
+    def egress_verdict(self, source_workspaces, destination_workspace, operation, secured=None):
         source_workspaces = list(source_workspaces)
-        _FakeCatalog.calls.append((source_workspaces, destination_workspace, operation))
+        _FakeCatalog.calls.append((source_workspaces, destination_workspace, operation, secured))
         return [
-            _FakeRefusal(source, destination_workspace, operation)
+            _FakeRefusal(source, destination_workspace, operation, secured)
             for source in source_workspaces
             if source in _FakeCatalog.restricted_workspaces
         ]
+
+    def mark_secure(self, identifier, destinations, author=None):
+        _FakeCatalog.secure_calls.append(("mark", identifier, list(destinations), author))
+
+    def clear_secure(self, identifier, author=None, missing_ok=False):
+        if identifier == "never.marked.anything":
+            raise KeyError(identifier)
+        _FakeCatalog.secure_calls.append(("clear", identifier, author))
 
 
 @pytest.fixture
 def connector():
     _FakeCatalog.calls = []
+    _FakeCatalog.secure_calls = []
     _FakeCatalog.restricted_workspaces = set()
     register_workspace("mine", OpteryxConnector, catalog=_FakeCatalog)
     register_workspace("landing", OpteryxConnector, catalog=_FakeCatalog)
@@ -103,7 +131,7 @@ def test_cross_workspace_source_is_refused_when_protected(connector):
 def test_cross_workspace_source_is_allowed_when_not_protected(connector):
     assert connector.egress_verdict("mine.mart.copy", ["landing.events.raw"]) == []
 
-    assert _FakeCatalog.calls == [(["landing"], "mine", "write mine.mart.copy")]
+    assert _FakeCatalog.calls == [(["landing"], "mine", "write mine.mart.copy", None)]
 
 
 def test_only_the_crossing_sources_are_asked_about(connector):
@@ -114,7 +142,7 @@ def test_only_the_crossing_sources_are_asked_about(connector):
         ["mine.src.a", "landing.events.raw", "landing.events.other", "mine.src.b"],
     )
 
-    assert _FakeCatalog.calls == [(["landing"], "mine", "write mine.mart.copy")]
+    assert _FakeCatalog.calls == [(["landing"], "mine", "write mine.mart.copy", None)]
 
 
 def test_every_refusing_workspace_is_reported(connector):
@@ -129,7 +157,7 @@ def test_every_refusing_workspace_is_reported(connector):
     )
 
     assert [refusal.workspace for refusal in refusals] == ["landing", "other"]
-    assert refusals[1].remediation == "ALTER WORKSPACE other SET egress_protection TO OFF."
+    assert "ALTER WORKSPACE other SET egress_protection TO OFF." in refusals[1].remediation
 
 
 def test_a_catalog_too_old_to_answer_fails_closed(connector):
@@ -168,16 +196,52 @@ def test_the_fake_has_the_real_types_surface():
     already refuses cross-workspace writes against such a catalog, so a loud
     failure here says the same thing the engine would say at runtime.
     """
-    from opteryx_catalog.opteryx_catalog import EgressRefusal as CatalogRefusal
+    CatalogRefusal = _sibling_catalog_refusal_type()
 
-    real = CatalogRefusal(
-        workspace="landing", destination="mine", operation="write mine.mart.copy"
+    for secured in (None, "mine.ops.ingest"):
+        real = CatalogRefusal(
+            workspace="landing",
+            destination="mine",
+            operation="write mine.mart.copy",
+            secured=secured,
+        )
+        fake = _FakeRefusal("landing", "mine", "write mine.mart.copy", secured)
+
+        assert real.workspace == fake.workspace
+        assert real.remediation == fake.remediation
+        assert str(real) == str(fake)
+
+
+def _sibling_catalog_refusal_type():
+    """`EgressRefusal` from the sibling ../opteryx-catalog checkout, by path.
+
+    Loaded under its own module name rather than imported, because whatever
+    `opteryx_catalog` is already in sys.modules may be a stale site-packages
+    wheel - and this test exists to compare against the type the engine will
+    actually ship beside, which is the sibling repo (release order is catalog,
+    then core). Importing by name would compare the fake against last month's
+    wording and report drift that is not there, or miss drift that is.
+    """
+    repo = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "opteryx-catalog")
     )
-    fake = _FakeRefusal("landing", "mine", "write mine.mart.copy")
+    package_dir = os.path.join(repo, "opteryx_catalog")
+    if not os.path.isdir(package_dir):
+        raise AssertionError(
+            f"sibling opteryx-catalog checkout not found at {repo}; this test compares "
+            "against the catalog source, not an installed wheel"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "_sibling_opteryx_catalog",
+        os.path.join(package_dir, "__init__.py"),
+        submodule_search_locations=[package_dir],
+    )
+    package = importlib.util.module_from_spec(spec)
+    import sys
 
-    assert real.workspace == fake.workspace
-    assert real.remediation == fake.remediation
-    assert str(real) == str(fake)
+    sys.modules[spec.name] = package
+    spec.loader.exec_module(package)
+    return importlib.import_module(f"{spec.name}.opteryx_catalog").EgressRefusal
 
 
 def test_the_refusal_is_the_engines_own_type(connector):
@@ -206,8 +270,8 @@ def recording_workspaces(tmp_path, monkeypatch):
 
     calls = []
 
-    def record(self, target_relation, source_relations):
-        calls.append((target_relation, list(source_relations)))
+    def record(self, target_relation, source_relations, secured=None):
+        calls.append((target_relation, list(source_relations), secured))
         return []
 
     monkeypatch.setattr(LocalStoreConnector, "egress_verdict", record)
@@ -225,7 +289,7 @@ def test_ctas_consults_the_egress_hook(recording_workspaces):
     session, calls = recording_workspaces
     list(session.execute_to_morsels("CREATE TABLE dst_ws.dst AS SELECT a FROM src_ws.src"))
 
-    assert calls == [("dst_ws.dst", ["src_ws.src"])]
+    assert calls == [("dst_ws.dst", ["src_ws.src"], None)]
 
 
 def test_insert_select_consults_the_egress_hook(recording_workspaces):
@@ -237,7 +301,7 @@ def test_insert_select_consults_the_egress_hook(recording_workspaces):
 
     list(session.execute_to_morsels("INSERT INTO dst_ws.dst SELECT a FROM src_ws.src"))
 
-    assert calls == [("dst_ws.dst", ["src_ws.src"])]
+    assert calls == [("dst_ws.dst", ["src_ws.src"], None)]
 
 
 def test_refresh_materialized_view_consults_the_egress_hook(recording_workspaces):
@@ -253,7 +317,7 @@ def test_refresh_materialized_view_consults_the_egress_hook(recording_workspaces
 
     list(session.execute_to_morsels("REFRESH MATERIALIZED VIEW src_ws.mv"))
 
-    assert calls == [("src_ws.mv", ["src_ws.src"])]
+    assert calls == [("src_ws.mv", ["src_ws.src"], None)]
 
 
 def test_a_refusal_from_the_hook_aborts_the_write(recording_workspaces, monkeypatch):
@@ -264,7 +328,7 @@ def test_a_refusal_from_the_hook_aborts_the_write(recording_workspaces, monkeypa
 
     session, _calls = recording_workspaces
 
-    def refuse(self, target_relation, source_relations):
+    def refuse(self, target_relation, source_relations, secured=None):
         return [
             EgressRefusal(
                 workspace="src_ws",
@@ -288,7 +352,7 @@ def test_a_single_refusal_is_reported_as_the_catalog_worded_it(monkeypatch, reco
 
     session, _calls = recording_workspaces
 
-    def refuse(self, target_relation, source_relations):
+    def refuse(self, target_relation, source_relations, secured=None):
         return [EgressRefusal(workspace="src_ws", remediation="clear it", message="ONLY THIS")]
 
     monkeypatch.setattr(LocalStoreConnector, "egress_verdict", refuse)
@@ -304,7 +368,7 @@ def test_several_refusals_are_reported_together(monkeypatch, recording_workspace
 
     session, _calls = recording_workspaces
 
-    def refuse(self, target_relation, source_relations):
+    def refuse(self, target_relation, source_relations, secured=None):
         return [
             EgressRefusal(workspace="alpha", remediation="ALTER WORKSPACE alpha ...", message="a"),
             EgressRefusal(workspace="beta", remediation="ALTER WORKSPACE beta ...", message="b"),
@@ -338,3 +402,137 @@ def test_insert_values_never_reaches_the_hook(recording_workspaces):
     list(session.execute_to_morsels("INSERT INTO dst_ws.dst VALUES (5)"))
 
     assert calls == []
+
+
+# --- SECURE: the object-level exemption -----------------------------------
+#
+# The catalog decides whether a source has sanctioned an object. The engine's
+# half is naming that object: a task EXECUTE expands carries its identifier onto
+# the write, and nothing else does - a statement typed by hand names no object a
+# source could have sanctioned.
+
+
+def test_the_object_is_handed_to_the_catalog(connector):
+    connector.egress_verdict(
+        "mine.mart.copy", ["landing.events.raw"], secured="mine.ops.ingest"
+    )
+
+    assert _FakeCatalog.calls == [
+        (["landing"], "mine", "write mine.mart.copy", "mine.ops.ingest")
+    ]
+
+
+def test_a_refusal_names_the_exact_secure_statement(connector):
+    """The advice is the narrow key first, the whole-building key second."""
+    _FakeCatalog.restricted_workspaces = {"landing"}
+
+    (refusal,) = connector.egress_verdict(
+        "mine.mart.copy", ["landing.events.raw"], secured="mine.ops.ingest"
+    )
+
+    assert "ALTER WORKSPACE landing SET SECURE mine.ops.ingest TO mine" in refusal.remediation
+    assert "ALTER WORKSPACE landing SET egress_protection TO OFF" in refusal.remediation
+    assert refusal.remediation.index("SET SECURE") < refusal.remediation.index(
+        "egress_protection"
+    )
+
+
+def test_an_anonymous_copy_gets_the_template(connector):
+    _FakeCatalog.restricted_workspaces = {"landing"}
+
+    (refusal,) = connector.egress_verdict("mine.mart.copy", ["landing.events.raw"])
+
+    assert "SET SECURE <object> TO mine" in refusal.remediation
+
+
+def test_a_hand_typed_insert_names_no_object(recording_workspaces):
+    session, calls = recording_workspaces
+    list(session.execute_to_morsels("CREATE TABLE dst_ws.dst (a BIGINT)"))
+    calls.clear()
+
+    list(session.execute_to_morsels("INSERT INTO dst_ws.dst SELECT a FROM src_ws.src"))
+
+    assert calls == [("dst_ws.dst", ["src_ws.src"], None)]
+
+
+def test_an_executed_task_names_itself(recording_workspaces):
+    """The statement the task expands to is, textually, the INSERT above. What
+    distinguishes it is that a task ran it - and that is what a source can have
+    marked SECURE, so that is what reaches the gate."""
+    session, calls = recording_workspaces
+    list(session.execute_to_morsels("CREATE TABLE dst_ws.dst (a BIGINT)"))
+    list(
+        session.execute_to_morsels(
+            "CREATE TASK src_ws.copier AS INSERT INTO dst_ws.dst SELECT a FROM src_ws.src"
+        )
+    )
+    calls.clear()
+
+    list(session.execute_to_morsels("EXECUTE src_ws.copier"))
+
+    assert calls == [("dst_ws.dst", ["src_ws.src"], "src_ws.copier")]
+
+
+def test_registering_a_task_names_no_object(recording_workspaces):
+    """CREATE TASK stores SQL and copies nothing; only running it does. If the
+    registration consulted the gate at all it would do so anonymously."""
+    session, calls = recording_workspaces
+    list(session.execute_to_morsels("CREATE TABLE dst_ws.dst (a BIGINT)"))
+    calls.clear()
+
+    list(
+        session.execute_to_morsels(
+            "CREATE TASK src_ws.copier AS INSERT INTO dst_ws.dst SELECT a FROM src_ws.src"
+        )
+    )
+
+    assert all(secured is None for _, _, secured in calls)
+
+
+# --- SECURE: recording the sanction ----------------------------------------
+
+
+def test_marking_secure_writes_the_source_workspaces_record(connector):
+    """The handle used is the SOURCE's. That is the whole enforcement of "only
+    the source may sanction": the catalog writes its own workspace's entry."""
+    source = connector_factory("landing.events.raw", telemetry=None)
+
+    source.mark_workspace_secure(
+        "landing", "mine.ops.ingest", ["mine", "other"], author="landing-owner"
+    )
+
+    assert _FakeCatalog.secure_calls == [
+        ("mark", "mine.ops.ingest", ["mine", "other"], "landing-owner")
+    ]
+
+
+def test_clearing_secure_withdraws_it(connector):
+    source = connector_factory("landing.events.raw", telemetry=None)
+
+    source.clear_workspace_secure("landing", "mine.ops.ingest", author="landing-owner")
+
+    assert _FakeCatalog.secure_calls == [("clear", "mine.ops.ingest", "landing-owner")]
+
+
+def test_clearing_something_never_marked_is_a_caller_error(connector):
+    source = connector_factory("landing.events.raw", telemetry=None)
+
+    with pytest.raises(ValueError, match="not marked SECURE"):
+        source.clear_workspace_secure("landing", "never.marked.anything")
+
+
+def test_a_catalog_too_old_to_hold_secure_refuses_to_pretend(connector):
+    """A statement that reported success while recording nothing would leave
+    the operator believing the pipeline was unblocked."""
+
+    class _OldCatalog:
+        def __init__(self, workspace=None, **kwargs):
+            pass
+
+    register_workspace("old", OpteryxConnector, catalog=_OldCatalog)
+    old = connector_factory("old.mart.copy", telemetry=None)
+
+    with pytest.raises(NotImplementedError, match="too old to hold SECURE"):
+        old.mark_workspace_secure("old", "mine.ops.ingest", ["mine"])
+    with pytest.raises(NotImplementedError, match="too old to hold SECURE"):
+        old.clear_workspace_secure("old", "mine.ops.ingest")

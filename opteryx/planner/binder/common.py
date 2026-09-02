@@ -40,6 +40,7 @@ from opteryx.planner.binder.relation import (
     visit_alter_materialized_view_suspended,
     visit_alter_relation,
     visit_alter_workspace,
+    visit_alter_workspace_secure,
     visit_analyze,
     visit_create_collection,
     visit_create_relation,
@@ -392,6 +393,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_alter_workspace(self, node, context)
+
+    def visit_alter_workspace_secure(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_workspace_secure(self, node, context)
 
     def visit_drop_workspace(
         self, node: Node, context: BindingContext

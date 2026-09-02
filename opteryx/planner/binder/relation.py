@@ -561,8 +561,11 @@ def visit_alter_materialized_view_owner(
             f"connector for {node.relation_name} does not support ALTER MATERIALIZED VIEW"
         )
 
+    # AUTOMATE, on the workspace: the owner is the identity every unattended
+    # refresh runs as, so moving it re-pins what the view's automation may do -
+    # the same act as ALTER TRIGGER ... OWNER TO, and gated at the same tier.
     workspace = node.relation_name.split(".", 1)[0]
-    if not can_perform_workspace_action(context.execution_context, workspace, action="ALTER"):
+    if not can_perform_workspace_action(context.execution_context, workspace, action="AUTOMATE"):
         raise PermissionError(
             f"User does not have permission to change the owner of {node.relation_name} "
             f"(owner of workspace {workspace} required)"
@@ -631,10 +634,11 @@ def visit_alter_materialized_view_suspended(
 ) -> Tuple[Node, BindingContext]:
     """Bind ALTER MATERIALIZED VIEW ... SUSPEND | RESUME.
 
-    WRITE on the view, not the workspace-owner tier ALTER ... OWNER TO needs.
-    Suspending borrows nobody's authority - it only stops the view refreshing, and
-    anyone who may replace its contents may certainly stop them being replaced
-    automatically.
+    AUTOMATE on the view. Suspending borrows nobody's authority, but whether a
+    relation acts on its own is the owner's decision in both directions: RESUME
+    turns automation back on, and the tier that may switch it on is the tier
+    that may switch it off. A writer may replace the view's contents by hand;
+    deciding whether it refreshes itself is not the same question.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -647,10 +651,10 @@ def visit_alter_materialized_view_suspended(
             f"connector for {node.relation_name} does not support ALTER MATERIALIZED VIEW"
         )
 
-    if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
+    if not can_perform_action(context.execution_context, node.relation_name, action="AUTOMATE"):
         raise PermissionError(
             f"User does not have permission to suspend or resume {node.relation_name} "
-            "(write required)"
+            "(owner required)"
         )
 
     node.columns = []
@@ -700,9 +704,14 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
             f"connector for {node.task_name} does not support CREATE TASK"
         )
 
-    if not can_perform_action(context.execution_context, node.task_name, action="WRITE"):
+    # AUTOMATE on the task's name, not WRITE: a task is a statement the platform
+    # runs on its own, unattended, as a pinned identity, on the owner's compute.
+    # That is a decision about what the workspace DOES by itself, which is the
+    # owner's to make - a writer fills relations; a writer does not decide what
+    # runs without them.
+    if not can_perform_action(context.execution_context, node.task_name, action="AUTOMATE"):
         raise PermissionError(
-            f"User does not have permission to create task {node.task_name}"
+            f"User does not have permission to create task {node.task_name} (owner required)"
         )
 
     # THE AUTHORING BOUND. `plan_create_task` reads these off the task's AST for
@@ -743,10 +752,10 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
 
     # `ON <table>` lands a trigger on that dataset, whose unattended runs will
     # carry THIS author's identity - so it takes both of CREATE TRIGGER's gates:
-    # WRITE on the table, and an author who can be billed. One statement must
+    # AUTOMATE on the table, and an author who can be billed. One statement must
     # not do by implication what the explicit statement would refuse.
     if getattr(node, "on_table", None):
-        if not can_perform_action(context.execution_context, node.on_table, action="WRITE"):
+        if not can_perform_action(context.execution_context, node.on_table, action="AUTOMATE"):
             raise PermissionError(
                 f"User does not have permission to create a trigger on table "
                 f"{node.on_table}, which would fire {node.task_name}"
@@ -857,9 +866,10 @@ def visit_alter_trigger_owner(
             f"connector for {node.table_name} does not support ALTER TRIGGER"
         )
 
-    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+    if not can_perform_action(context.execution_context, node.table_name, action="AUTOMATE"):
         raise PermissionError(
-            f"User does not have permission to alter a trigger on table {node.table_name}"
+            f"User does not have permission to alter a trigger on table {node.table_name} "
+            "(owner required)"
         )
 
     owner = context.execution_context.user if node.owner_is_current_user else node.new_owner
@@ -922,10 +932,10 @@ def visit_alter_trigger_owner(
 def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind DROP TASK.
 
-    Gated at WRITE on the task itself, symmetric with creation. A task owns no
-    storage, so this is not the DROP tier a table's would be - there is nothing
-    to reclaim and nothing unrecoverable about it, since the statement can be
-    registered again.
+    Gated at AUTOMATE on the task itself, symmetric with creation. Not the DROP
+    tier a table's would be - a task owns no storage and can be registered again
+    - but not WRITE either: what runs on its own in a workspace is the owner's
+    to decide, on the way out as on the way in.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -938,8 +948,10 @@ def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
             f"connector for {node.task_name} does not support DROP TASK"
         )
 
-    if not can_perform_action(context.execution_context, node.task_name, action="WRITE"):
-        raise PermissionError(f"User does not have permission to drop task {node.task_name}")
+    if not can_perform_action(context.execution_context, node.task_name, action="AUTOMATE"):
+        raise PermissionError(
+            f"User does not have permission to drop task {node.task_name} (owner required)"
+        )
 
     node.columns = []
     return node, context
@@ -948,9 +960,13 @@ def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
 def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind CREATE TRIGGER.
 
-    Two gates. WRITE on the TABLE the trigger hangs off - symmetric with
-    `visit_drop_trigger`, landing a trigger is an update to that dataset. And
-    the author must be a principal who can be BILLED, because the trigger's
+    Two gates. AUTOMATE on the TABLE the trigger hangs off - symmetric with
+    `visit_drop_trigger`. Not WRITE: an INSERT is over when it finishes, while
+    a trigger is a standing commitment that fires on every commit, unattended,
+    as a pinned identity, on the owner's compute, and can write elsewhere and
+    fire further triggers. That decides what the table DOES to the world, not
+    what is in it, which puts it with GRANT rather than with INSERT. And the
+    author must be a principal who can be BILLED, because the trigger's
     unattended runs execute as its owner and the owner pins to the author here.
     This is where authority is actually conferred - a task is just stored SQL,
     and a person running EXECUTE answers for themselves - so this is where the
@@ -972,9 +988,10 @@ def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Nod
             f"connector for {node.table_name} does not support CREATE TRIGGER"
         )
 
-    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+    if not can_perform_action(context.execution_context, node.table_name, action="AUTOMATE"):
         raise PermissionError(
-            f"User does not have permission to create a trigger on table {node.table_name}"
+            f"User does not have permission to create a trigger on table {node.table_name} "
+            "(owner required)"
         )
 
     author = context.execution_context.user
@@ -992,7 +1009,7 @@ def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Nod
 def visit_alter_trigger_suspended(
     self, node: Node, context: BindingContext
 ) -> Tuple[Node, BindingContext]:
-    """Bind ALTER TRIGGER ... SUSPEND|RESUME. Same tier as creating one."""
+    """Bind ALTER TRIGGER ... SUSPEND|RESUME. Same tier as creating one: AUTOMATE."""
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
@@ -1004,9 +1021,10 @@ def visit_alter_trigger_suspended(
             f"connector for {node.table_name} does not support ALTER TRIGGER"
         )
 
-    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+    if not can_perform_action(context.execution_context, node.table_name, action="AUTOMATE"):
         raise PermissionError(
-            f"User does not have permission to alter a trigger on table {node.table_name}"
+            f"User does not have permission to alter a trigger on table {node.table_name} "
+            "(owner required)"
         )
 
     node.columns = []
@@ -1029,13 +1047,13 @@ def visit_drop_trigger(self, node: Node, context: BindingContext) -> Tuple[Node,
             f"connector for {node.table_name} does not support DROP TRIGGER"
         )
 
-    # WRITE on the table the trigger hangs off — symmetric with creation:
-    # landing a refresh trigger on a source table is gated at WRITE by
-    # visit_insert's MV branch, so removing one is an update to that same
-    # table, not to the trigger's target view.
-    if not can_perform_action(context.execution_context, node.table_name, action="WRITE"):
+    # AUTOMATE on the table the trigger hangs off - symmetric with creation, and
+    # checked on the source table rather than the trigger's target view because
+    # that is where the trigger lives and whose commits it answers to.
+    if not can_perform_action(context.execution_context, node.table_name, action="AUTOMATE"):
         raise PermissionError(
-            f"User does not have permission to drop a trigger on table {node.table_name}"
+            f"User does not have permission to drop a trigger on table {node.table_name} "
+            "(owner required)"
         )
 
     node.columns = []
@@ -1121,6 +1139,45 @@ def visit_alter_workspace(self, node: Node, context: BindingContext) -> Tuple[No
     # Owner of the whole workspace - a grant covering only part of it is not
     # enough, since these properties govern the workspace entire (see
     # can_perform_workspace_action for why this is not can_perform_action).
+    if not can_perform_workspace_action(
+        context.execution_context, node.workspace_name, action="ALTER"
+    ):
+        raise PermissionError(
+            f"User does not have permission to alter workspace {node.workspace_name}"
+        )
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_workspace_secure(
+    self, node: Node, context: BindingContext
+) -> Tuple[Node, BindingContext]:
+    """
+    Bind ALTER WORKSPACE <source> SET SECURE ... | DROP SECURE ...
+
+    The same gate as the property form, and deliberately so: SECURE relaxes the
+    SOURCE workspace's egress protection for one object, so it is the source's
+    owner who decides - exactly the principal `SET egress_protection TO OFF`
+    demands. A gate on anything less (writer on the object, owner of the
+    destination) would let the party the protection protects against grant
+    themselves the exemption, and the rule would become advisory.
+    """
+    from opteryx.connectors import workspace_settings_connector
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_workspace_action
+
+    # The SETTINGS connector: the sanction lives beside egress_protection in the
+    # opteryx catalog entry, whatever the workspace's data is bound to.
+    node.connector = workspace_settings_connector(
+        node.workspace_name, telemetry=context.telemetry
+    )
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(
+            f"connector for {node.workspace_name} does not support ALTER WORKSPACE"
+        )
+
     if not can_perform_workspace_action(
         context.execution_context, node.workspace_name, action="ALTER"
     ):
@@ -1458,7 +1515,13 @@ def _enforce_egress(visitor, node, context) -> None:
     if not sources:
         return
 
-    refusals = node.connector.egress_verdict(node.relation_name, sources)
+    # The object doing the copying, when the statement IS one: a task expanded by
+    # EXECUTE stamps its own identifier on the write (plan_execute), and that is
+    # what a source workspace can have marked SECURE. A statement typed by hand
+    # names nothing, so None - the exemption is object-level on purpose.
+    refusals = node.connector.egress_verdict(
+        node.relation_name, sources, secured=getattr(node, "executing_task", None)
+    )
     if not refusals:
         return
 
@@ -1520,16 +1583,18 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
     node.write_coalesce_rows = context.execution_context.variables["write_coalesce_rows"]
 
     if is_materialized_view:
-        # The MV target: writer tier. Creating a view is authoring derived data
-        # in a place you may already write - it does nothing you could not do by
-        # hand with a CTAS, so it needs no more authority than that. Note this
-        # makes CREATE OR REPLACE MATERIALIZED VIEW writer-tier where CREATE OR
-        # REPLACE TABLE stays owner-tier; a view's contents are rebuildable from
-        # its definition, so the blast radius genuinely is lower.
-        if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
+        # The MV target: AUTOMATE, the owner tier. A materialized view is
+        # automation in disguise - registering one lands a refresh trigger on
+        # every source it reads, and from then on it rebuilds itself,
+        # unattended, as a pinned identity, on the owner's compute. A writer who
+        # wants derived data creates a plain view or a CTAS by hand; turning
+        # that into something that refreshes itself is exactly the moment an
+        # owner should be asked. (REFRESH of an existing view stays writer-tier:
+        # the decision to have it was taken, and authorized, here.)
+        if not can_perform_action(context.execution_context, node.relation_name, action="AUTOMATE"):
             raise PermissionError(
                 f"User does not have permission to create materialized view "
-                f"{node.relation_name} (write required)"
+                f"{node.relation_name} (owner required)"
             )
 
         # Source-table extraction: the bound SELECT subtree already knows every
@@ -1607,11 +1672,12 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
             # that tier rather than inventing a new one.
             #
             # Materialized views are the exception, because their contents are
-            # derived and rebuildable rather than authored. Both statements that
-            # legitimately replace one land at a lower tier: CREATE OR REPLACE
-            # MATERIALIZED VIEW was already authorized at WRITE by the
-            # `is_materialized_view` branch above, and REFRESH MATERIALIZED VIEW
-            # arrives here carrying `is_refresh` and takes the REFRESH tier.
+            # derived and rebuildable rather than authored. CREATE OR REPLACE
+            # MATERIALIZED VIEW was already authorized at AUTOMATE by the
+            # `is_materialized_view` branch above (owner tier, like DROP, so
+            # nothing is lost by not asking DROP as well), and REFRESH
+            # MATERIALIZED VIEW arrives here carrying `is_refresh` and takes the
+            # lower REFRESH tier.
             if getattr(node, "is_refresh", False):
                 if not can_perform_action(
                     context.execution_context, node.relation_name, action="REFRESH"
@@ -1628,11 +1694,16 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
                 )
             node.is_replace = True
             existing_column_names = node.connector.relation_column_names(node.relation_name)
-        else:
-            if not can_perform_action(context.execution_context, node.relation_name, action="CREATE"):
-                raise PermissionError(
-                    f"User does not have permission to create table {node.relation_name}"
-                )
+        elif not is_materialized_view and not can_perform_action(
+            context.execution_context, node.relation_name, action="CREATE"
+        ):
+            # A materialized view was authorized at AUTOMATE above - the owner
+            # tier, which CREATE is within - so it is not asked again here, the
+            # same way the replace branch does not ask DROP for one. One gate
+            # per statement for the MV target, on both paths.
+            raise PermissionError(
+                f"User does not have permission to create table {node.relation_name}"
+            )
 
         # After the target's permission check, before any schema work: the
         # source workspaces have to agree to the copy as well as the caller

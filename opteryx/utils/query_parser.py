@@ -82,6 +82,10 @@ _SYNTHESIZED_STATEMENTS = {
     "DropTrigger": (False, True, "writer"),
     # Ownership is a workspace-level change; the binder gates it at ALTER.
     "AlterMaterializedViewOwner": (False, True, "owner"),
+    # SET|DROP SECURE relaxes the SOURCE workspace's egress protection for one
+    # object; the binder gates it at workspace ALTER, exactly as the property
+    # form of ALTER WORKSPACE is.
+    "AlterWorkspaceSecure": (False, True, "owner"),
     # Grant administration is owner-tier on the object, per ACTION_ROLES'
     # GRANT/REVOKE rows. Policy documents change, data does not: DDL, not
     # mutation.

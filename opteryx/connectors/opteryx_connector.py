@@ -1354,7 +1354,10 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         self._catalog_cache.pop(workspace_name, None)
 
     def egress_verdict(
-        self, target_relation: str, source_relations: "List[str]"
+        self,
+        target_relation: str,
+        source_relations: "List[str]",
+        secured: Optional[str] = None,
     ) -> "List[EgressRefusal]":
         """Which workspaces refuse to let this write copy their data out.
 
@@ -1414,8 +1417,54 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 source_workspaces,
                 target_workspace,
                 f"write {target_relation}",
+                secured=secured,
             )
         ]
+
+    def mark_workspace_secure(
+        self,
+        workspace_name: str,
+        object_identifier: str,
+        destinations: "List[str]",
+        author: Optional[str] = None,
+    ) -> None:
+        """Record a SECURE sanction on the SOURCE workspace's catalog entry.
+
+        The handle is the source's, and the catalog only ever writes its own
+        workspace's properties - which is what makes "only the source can
+        sanction this" a fact about where the record lives rather than a check.
+        """
+        catalog = self._get_catalog(workspace_name)
+        # Same skew posture as egress_verdict: a catalog without the SECURE API
+        # cannot record the sanction, and a statement that reported success
+        # while writing nothing would be the worst available outcome.
+        mark = getattr(catalog, "mark_secure", None)
+        if mark is None:
+            raise NotImplementedError(
+                f"Cannot mark {object_identifier} SECURE in {workspace_name}: this "
+                "deployment's opteryx-catalog is too old to hold SECURE exemptions. "
+                "Upgrade opteryx-catalog."
+            )
+        mark(object_identifier, destinations, author=author)
+
+    def clear_workspace_secure(
+        self, workspace_name: str, object_identifier: str, author: Optional[str] = None
+    ) -> None:
+        """Withdraw a SECURE sanction from the SOURCE workspace's catalog entry."""
+        catalog = self._get_catalog(workspace_name)
+        clear = getattr(catalog, "clear_secure", None)
+        if clear is None:
+            raise NotImplementedError(
+                f"Cannot clear SECURE on {object_identifier} in {workspace_name}: this "
+                "deployment's opteryx-catalog is too old to hold SECURE exemptions. "
+                "Upgrade opteryx-catalog."
+            )
+        try:
+            clear(object_identifier, author=author)
+        except KeyError as exc:
+            raise ValueError(
+                f"{object_identifier} is not marked SECURE in workspace {workspace_name}"
+            ) from exc
 
     def relation_exists(self, relation_name: str) -> bool:
         """Check whether a dataset exists in the catalog."""

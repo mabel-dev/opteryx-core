@@ -30,6 +30,7 @@ from typing import Optional
 
 from opteryx.exceptions import QueryParseError
 from opteryx.exceptions import SourcePosition
+from opteryx.expression.intervals import INTERVAL_UNITS
 from opteryx.planner.sql_rewriter import RewrittenStatement
 from opteryx.utils.sql import offset_of
 
@@ -127,6 +128,28 @@ def _word_before(sql: str, line: Optional[int], column: Optional[int]):
     return found.group(1), found.start(1) + 1
 
 
+# The word starting at a position - the token the parser stopped ON, read out of the
+# statement rather than out of the parser's message.
+_WORD_AT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _word_at(sql: str, line: Optional[int], column: Optional[int]) -> Optional[str]:
+    """The word beginning at the reported position, or None.
+
+    A companion to `_word_before`, for the failures sqlparser reports WITHOUT a
+    `found:` clause. Those messages name what the grammar wanted and never quote what
+    the reader actually wrote, so the token has to be read back out of the statement
+    if the error is going to say which word is wrong.
+    """
+    if not sql or not line or not column or line < 1 or column < 1:
+        return None
+    lines = sql.split("\n")
+    if line > len(lines):
+        return None
+    found = _WORD_AT.match(lines[line - 1][column - 1 :])
+    return found.group(1) if found else None
+
+
 def _keyword_suggestion(token: Optional[str]) -> Optional[str]:
     """A keyword this token was probably a misspelling of, or None.
 
@@ -150,13 +173,36 @@ def _keyword_suggestion(token: Optional[str]) -> Optional[str]:
     return candidate
 
 
-def _guess(cause: str, found: Optional[str]) -> Optional[str]:
+def _guess(cause: str, found: Optional[str], at_token: Optional[str] = None) -> Optional[str]:
     """A likely cause, when the shape of the failure implies one.
 
     Returns a sentence, or None when nothing here fits - in which case the caller
     falls back to generic advice rather than inventing a diagnosis.
+
+    `at_token` is the word at the reported position, for the failures whose message
+    does not quote what the reader wrote.
     """
     lowered = cause.lower()
+
+    # An INTERVAL unit fails in one of TWO places, and a reader cannot tell them apart:
+    # a unit sqlparser knows but the engine does not implement (CENTURY, DOY) reaches
+    # the planner and is rejected there by name, while a unit sqlparser does not know at
+    # all (`MOMENTS`, `FORTNIGHT`, `QUARTERS`) dies in the grammar with a message that
+    # never quotes the offending word - "INTERVAL requires a unit after the literal
+    # value" and a bare column number. Same mistake, so the same answer: name the unit,
+    # and quote the same list the planner would have quoted.
+    if "interval requires a unit" in lowered:
+        units = ", ".join(unit.upper() for unit in INTERVAL_UNITS)
+        # Only when the reader actually OFFERED a unit. With none at all
+        # (`INTERVAL '7' AS x`) the token at the position is the next keyword, and
+        # naming it reports `AS` as a bad unit - a diagnosis of a word the reader used
+        # correctly, which is worse than the generic message it replaced.
+        if at_token and at_token.upper() not in _keywords():
+            return f"`{at_token.upper()}` is not a supported INTERVAL unit - valid units are {units}"
+        return (
+            f"An INTERVAL needs a unit after its value, as in `INTERVAL '7' DAY` - "
+            f"valid units are {units}"
+        )
 
     if "unterminated string literal" in lowered:
         return (
@@ -239,6 +285,17 @@ def raise_parse_error(sql, error: BaseException) -> None:
     # and the thing it marks agree.
     point_at = column
     marked = found
+    at_token = _word_at(sql, line, column)
+    # sqlparser names no token for this failure, so `found` is None and the caret would
+    # collapse to a zero-width mark. The offending unit IS in the statement at the
+    # reported position - mark it, so the message and what it underlines agree.
+    if (
+        marked is None
+        and "interval requires a unit" in raw.lower()
+        and at_token
+        and at_token.upper() not in _keywords()
+    ):
+        marked = at_token
     preceding = _word_before(sql, line, column)
     suggestion = _keyword_suggestion(preceding[0]) if preceding else None
     if suggestion:
@@ -252,6 +309,6 @@ def raise_parse_error(sql, error: BaseException) -> None:
         column=point_at,
         cause=raw or None,
         suggestion=suggestion,
-        hint=None if suggestion else _guess(raw, found),
+        hint=None if suggestion else _guess(raw, found, at_token),
         position=_position(sql, line, point_at, marked),
     ) from error

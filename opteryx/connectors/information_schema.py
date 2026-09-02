@@ -10,7 +10,7 @@ information_schema
 Minimum information_schema surface. Backed by the real Opteryx catalog
 (opteryx_catalog) via list_collections()/list_datasets()/list_views() -
 NOT a static/generated snapshot. Currently implements `tables`, `columns`,
-`views`, `schemata`, `triggers`, `tasks`, and `column_relationships`.
+`views`, `schemata`, `triggers`, `tasks`, `column_relationships`, and `grants`.
 
 information_schema is a reserved nested schema inside a catalog workspace,
 addressed as `<workspace>.information_schema.<table>` - e.g.
@@ -65,11 +65,33 @@ rows after the fact. Every other predicate shape is declined and left as an
 ordinary Filter node downstream.
 
 Row-level permissions: listing the catalog is not itself a bypass of
-per-table READ policy. Every (collection, name) pair is checked with
-can_perform_action(execution_context, "<workspace>.<collection>.<name>",
-action="READ") before it is emitted - a user only sees tables/columns/views
-they could otherwise SELECT FROM. A missing execution_context denies
-everything (secure by default) rather than falling back to showing all rows.
+per-table policy. Every row is checked with can_perform_action(
+execution_context, "<workspace>.<collection>.<name>", action=...) before it is
+emitted, and the ACTION is the tier of whoever could act on what the row
+describes - never a per-table gate, because roles are held per pattern and one
+caller is owner of some datasets and reader of others in the same workspace:
+
+  tables, columns, schemata      READ      existence and shape are what a
+                                           reader needs to write a query
+  column_relationships           READ      on BOTH ends - see the class
+  views                          READ      for the row; `view_definition` is
+                                           NULL unless WRITE holds, because the
+                                           SQL names relations the reader may
+                                           hold no grant on, and a writer is
+                                           who authors it
+  triggers, tasks                AUTOMATE  automation: only an owner could have
+                                           made one or can act on it
+
+`SHOW CREATE` gates its text at the same tiers (see the binder's `visit_show`),
+so nothing withheld here is one statement away. A missing execution_context
+denies everything (secure by default) rather than falling back to showing all
+rows.
+
+`grants` is the exception to the READ rule, because it is not about data: a
+row there is gated on the authority to ADMINISTER the object it describes -
+owner authority covering it, the gate `SHOW GRANTS ON` holds - decided by the
+registered permissions capability, which also owns the covering test. See
+`InformationSchemaGrantsTable`.
 """
 
 import datetime
@@ -87,6 +109,7 @@ from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.expression import NodeType
 from opteryx.managers.permissions import can_perform_action
+from opteryx.managers.permissions import effective_grants_in
 from opteryx.models.sort_order import _resolve_name
 from opteryx.models.sort_order import normalize_sort_order
 from opteryx.types import logical_type as _lt
@@ -114,11 +137,28 @@ def build_information_schema_table(
     )
 
 
-def _readable(execution_context, workspace: str, collection: str, name: str) -> bool:
-    """Secure-by-default READ check for one (collection, name) catalog entry."""
+def _permitted(execution_context, workspace: str, collection: str, name: str, action: str) -> bool:
+    """Secure-by-default check of `action` for one (collection, name) catalog entry."""
     if execution_context is None:
         return False
-    return can_perform_action(execution_context, f"{workspace}.{collection}.{name}", action="READ")
+    return can_perform_action(
+        execution_context, f"{workspace}.{collection}.{name}", action=action
+    )
+
+
+def _readable(execution_context, workspace: str, collection: str, name: str) -> bool:
+    """READ on one catalog entry - the gate for existence and shape."""
+    return _permitted(execution_context, workspace, collection, name, "READ")
+
+
+def _automatable(execution_context, workspace: str, collection: str, name: str) -> bool:
+    """AUTOMATE on one catalog entry - the gate for a task or trigger row."""
+    return _permitted(execution_context, workspace, collection, name, "AUTOMATE")
+
+
+def _writable(execution_context, workspace: str, collection: str, name: str) -> bool:
+    """WRITE on one catalog entry - the gate for a view's definition text."""
+    return _permitted(execution_context, workspace, collection, name, "WRITE")
 
 
 def _collection_has_readable_entry(catalog, execution_context, workspace: str, collection: str) -> bool:
@@ -601,6 +641,13 @@ class InformationSchemaViewsTable(BaseTable, _KeyColumnPredicatePushable):
     Unlike `tables` (which lists a view's name/type from `list_views()` alone),
     this opens every view's document via `load_view()` to surface its SQL text
     and metadata - one catalog round trip per view found.
+
+    The ROW is at READ, the DEFINITION at WRITE. `view_definition` is the one
+    column here that is not about the view but about what it reads: its SQL
+    names relations the caller may hold no grant on, and the binder will refuse
+    to run the view for them if so. A reader gets the row with the definition
+    NULL - the shape Postgres and the SQL standard give a non-owner - and a
+    writer, who may replace the definition, gets the text.
     """
 
     __mode__ = "Internal"
@@ -678,7 +725,12 @@ class InformationSchemaViewsTable(BaseTable, _KeyColumnPredicatePushable):
                     table_catalog.append(self.workspace)
                     table_schema.append(collection)
                     table_name.append(name)
-                    view_definition.append(getattr(view, "definition", None) or getattr(view, "sql", None))
+                    if _writable(self.execution_context, self.workspace, collection, name):
+                        view_definition.append(
+                            getattr(view, "definition", None) or getattr(view, "sql", None)
+                        )
+                    else:
+                        view_definition.append(None)
                     view_owner.append(getattr(metadata, "author", None))
                     view_updated_at.append(_ms_to_datetime(getattr(metadata, "timestamp_ms", None)))
 
@@ -699,9 +751,12 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
     one round trip per dataset.
 
     A trigger hangs off the dataset whose commits fire it (the SOURCE table),
-    not off its target view, so the per-row READ check is on that source table
-    - matching DROP TRIGGER's WRITE gate, which is also on the source. An MV
-    whose refresh trigger has been dropped simply has no row here.
+    not off its target view, so the per-row check is on that source table -
+    and it is AUTOMATE, matching CREATE/DROP/ALTER TRIGGER's gate, which is
+    also on the source. A row here names the identity unattended runs carry
+    and what they fire; only an owner could have made that arrangement or can
+    change it, so only an owner sees it. An MV whose refresh trigger has been
+    dropped simply has no row here.
 
     A SUSPENDED trigger is a row, and says so: `suspended_at`/`suspended_by`.
     That is the difference between a trigger somebody paused and one that was
@@ -711,7 +766,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
 
     __mode__ = "Internal"
     interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
-    self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
+    self_governs_permissions = True  # read_dataset() filters rows by AUTOMATE access itself - see module docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
     supports_predicate_pushdown = True
@@ -829,7 +884,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
                     source_table = f"{collection}.{name}"
                     if not _key_predicates_allow(compiled, {"event_object_table": source_table}):
                         continue
-                    if not _readable(self.execution_context, self.workspace, collection, name):
+                    if not _automatable(self.execution_context, self.workspace, collection, name):
                         continue
                     for trigger in self.catalog.list_triggers(source_table):
                         name_value = trigger.get("name")
@@ -889,14 +944,17 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
     statement document). This collapses N client requests into one query; it
     does not collapse the N catalog reads behind them.
 
-    READ is checked on the task's own name. A task shares one namespace with
+    AUTOMATE is checked on the task's own name. A task shares one namespace with
     tables and views - a name identifies exactly one of them - so the grant that
-    governs the name governs the row.
+    governs the name governs the row; and the action is AUTOMATE, not READ,
+    because nobody SELECTs from a task. Its row is its statement, what that
+    statement writes, and who runs it - automation, which only an owner may
+    create, drop, or alter, and so only an owner may list.
     """
 
     __mode__ = "Internal"
     interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
-    self_governs_permissions = True  # read_dataset() filters rows by READ access itself
+    self_governs_permissions = True  # read_dataset() filters rows by AUTOMATE access itself
     supports_predicate_pushdown = True
 
     _COLUMNS = (
@@ -1006,8 +1064,8 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
                     if not _key_predicates_allow(compiled, {"task_name": name}):
                         continue
                     # Checked BEFORE `get_task`, so a task the caller may not
-                    # read costs no round trip and discloses nothing.
-                    if not _readable(self.execution_context, self.workspace, collection, name):
+                    # see costs no round trip and discloses nothing.
+                    if not _automatable(self.execution_context, self.workspace, collection, name):
                         continue
                     record = self.catalog.get_task(f"{collection}.{name}")
                     task_catalog.append(self.workspace)
@@ -1329,6 +1387,253 @@ class InformationSchemaSchemataTable(BaseTable, _KeyColumnPredicatePushable):
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
 
+
+_GRANT_OBJECT_WORKSPACE = "workspace"
+_GRANT_OBJECT_COLLECTION = "collection"
+_GRANT_OBJECT_DATASET = "dataset"
+
+_GRANT_ORIGIN_EXPLICIT = "explicit"
+_GRANT_ORIGIN_INHERITED = "inherited"
+
+
+def _grant_object_pattern(kind: str, name: str) -> str:
+    """The pattern the grant statements issue for an object - the planner's
+    own mapping: `WORKSPACE w` -> `w.*`, `COLLECTION w.c` -> `w.c.*`,
+    `DATASET w.c.d` -> `w.c.d`."""
+    if kind == _GRANT_OBJECT_DATASET:
+        return name
+    return f"{name}.*"
+
+
+def _grant_object_from_pattern(workspace: str, pattern: str):
+    """The (collection, kind, name) a pattern addresses - the inverse of
+    `_grant_object_pattern`, for the patterns the capability reports that the
+    engine did not ask about (a stored policy on something the catalog no
+    longer holds). Also reads a bare object name (`w`, `w.c`, `w.c.d`) the
+    way the statements do. None for a pattern that names no single object: a
+    wildcard mid-pattern, or a subtree below a dataset.
+
+    A dataset name may contain dots - the catalog splits `a.b.c` as dataset
+    `b.c` in collection `a` - so three or more literal segments are a dataset,
+    not an error.
+    """
+    if not pattern:
+        return None
+    segments = pattern.split(".")
+    if segments[0] != workspace or any(not segment for segment in segments):
+        return None
+    if len(segments) == 1 or (len(segments) == 2 and segments[1] == "*"):
+        return (None, _GRANT_OBJECT_WORKSPACE, workspace)
+    if "*" in segments[1:-1] or segments[1] == "*":
+        return None
+    collection = segments[1]
+    if segments[-1] == "*":
+        if len(segments) == 3:
+            return (collection, _GRANT_OBJECT_COLLECTION, f"{workspace}.{collection}")
+        return None
+    if len(segments) == 2:
+        return (collection, _GRANT_OBJECT_COLLECTION, f"{workspace}.{collection}")
+    return (collection, _GRANT_OBJECT_DATASET, pattern)
+
+
+class InformationSchemaGrantsTable(BaseTable, _KeyColumnPredicatePushable):
+    """Reads `information_schema.grants`: for every object in the workspace,
+    every stored policy that reaches it, and whether that policy is stored AT
+    the object or covers it from above.
+
+    `SHOW GRANTS ON` and `SHOW EFFECTIVE GRANTS ON` answer one object at a
+    time; this is both answers for the whole workspace, as a relation, so an
+    interface can read access live through a filtered SELECT instead of
+    queueing a statement per object. One row per (object, covering policy) -
+    the statements' one-row-per-policy shape, and for the same reason: which
+    policy grants the access is what an administrator has to act on, so a
+    collapse to one role per user would hide the thing to change.
+
+    `origin` is the column the table exists for. `explicit` means the policy's
+    pattern IS the object - what a GRANT or REVOKE there acts on, the rows
+    `SHOW GRANTS ON` reports. `inherited` means it covers the object from the
+    collection or workspace above - the rows `SHOW EFFECTIVE GRANTS ON` adds.
+    Every stored policy appears as `explicit` at its own pattern exactly once,
+    whether or not the catalog still holds what it names, so a grant on a
+    dropped dataset is listed rather than lost. That makes `WHERE origin =
+    'explicit'` the workspace's stored policies and `WHERE object_name = ...`
+    an object's effective ones - the two screens, one table.
+
+    Objects are the three things the grant statements can name, named the way
+    the statements name them: the workspace (`w`), each collection (`w.c`) and
+    each table and view (`w.c.d`). The workspace row lists the policies that
+    cover the workspace AS AN OBJECT (`w.*`), not every policy in it - the
+    latter is the `explicit` rows.
+
+    The catalog is walked once and the policy store read once, however many
+    objects there are (`effective_grants_in`). Coverage, the explicit test
+    and the gate all belong to the registered permissions capability: the
+    matcher is the one that decides real queries, and the gate is the one the
+    statements hold - owner authority covering the object. An object the
+    caller may not administer has no rows, as every table here shows only
+    what the caller may see; nothing is refused. A missing execution context
+    shows nothing.
+    """
+
+    __mode__ = "Internal"
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    self_governs_permissions = True  # the capability gates every row on administer authority - see class docstring
+    # BaseTable also declares this (False); it comes first in the MRO, so it
+    # would otherwise shadow _KeyColumnPredicatePushable's True.
+    supports_predicate_pushdown = True
+
+    _COLUMNS = (
+        "grant_catalog",
+        # The object's collection; NULL on the workspace row. The enumeration
+        # key, as `trigger_collection` is for triggers.
+        "grant_collection",
+        # workspace | collection | dataset - the grant statements' own kinds.
+        "object_kind",
+        # Fully qualified (`w`, `w.c`, `w.c.d`), so it reads beside `pattern`
+        # and is what `GRANT ... ON <kind> <object_name>` takes verbatim.
+        "object_name",
+        "grantee",
+        "role",
+        # The covering policy, as the statements report it: its pattern and
+        # the level that pattern addresses.
+        "pattern",
+        "level",
+        # explicit | inherited - see the class docstring.
+        "origin",
+    )
+
+    # All four are known before the policy store is read. grant_catalog
+    # decides whether there is anything to say at all; grant_collection and
+    # object_kind skip catalog listings; object_name pinned by equality skips
+    # the catalog entirely and asks about that one object. grantee, pattern,
+    # level and origin are known only once the store has answered, so pushing
+    # them would skip nothing and they stay ordinary Filters downstream.
+    _pushable_columns = frozenset(
+        {"grant_catalog", "grant_collection", "object_kind", "object_name"}
+    )
+
+    def __init__(self, *, dataset, catalog, workspace, telemetry, execution_context=None, **kwargs):
+        BaseTable.__init__(self, dataset=dataset, telemetry=telemetry, **kwargs)
+        PredicatePushable.__init__(self, **kwargs)
+        self.catalog = catalog
+        self.workspace = workspace
+        self.execution_context = execution_context
+
+    def get_dataset_schema(self) -> RelationSchema:
+        self.schema = RelationSchema(
+            name="information_schema.grants",
+            columns=[
+                SchemaColumn(
+                    name=column_name,
+                    column_type=_lt.VARCHAR,
+                    identity=mint_column_identity("information_schema.grants", column_name),
+                )
+                for column_name in self._COLUMNS
+            ],
+        )
+        return self.schema
+
+    def _objects(self, compiled):
+        """(collection, kind, name) for every object to ask about, in row order.
+
+        A pinned `object_name` is the dataset page's read: no catalog round
+        trip at all, one object, one policy read. The statements do not check
+        the object exists either - the answer is about the name.
+        """
+        pinned = _pinned_equality(compiled, "object_name")
+        if pinned is not None:
+            described = _grant_object_from_pattern(self.workspace, pinned)
+            return [described] if described else []
+
+        objects = []
+        if _key_predicates_allow(
+            compiled,
+            {
+                "grant_collection": None,
+                "object_kind": _GRANT_OBJECT_WORKSPACE,
+                "object_name": self.workspace,
+            },
+        ):
+            objects.append((None, _GRANT_OBJECT_WORKSPACE, self.workspace))
+
+        for collection in self.catalog.list_collections():
+            if not _key_predicates_allow(compiled, {"grant_collection": collection}):
+                continue
+            collection_name = f"{self.workspace}.{collection}"
+            if _key_predicates_allow(
+                compiled,
+                {"object_kind": _GRANT_OBJECT_COLLECTION, "object_name": collection_name},
+            ):
+                objects.append((collection, _GRANT_OBJECT_COLLECTION, collection_name))
+            if not _key_predicates_allow(compiled, {"object_kind": _GRANT_OBJECT_DATASET}):
+                continue
+            # Tables and views alike: both are `DATASET` to the grant
+            # statements, and `tables` lists both.
+            for name in [
+                *self.catalog.list_datasets(collection),
+                *self.catalog.list_views(collection),
+            ]:
+                dataset_name = f"{collection_name}.{name}"
+                if _key_predicates_allow(compiled, {"object_name": dataset_name}):
+                    objects.append((collection, _GRANT_OBJECT_DATASET, dataset_name))
+        return objects
+
+    def read_dataset(self, predicates=None, **kwargs) -> Iterable[Morsel]:
+        compiled = _compile_key_predicates(predicates, self._pushable_columns)
+
+        rows = {column_name: [] for column_name in self._COLUMNS}
+
+        # See InformationSchemaTablesTable.read_dataset - grant_catalog is
+        # constant per reader, so an excluding predicate skips everything.
+        # No execution context means no caller to hold authority: nothing.
+        if self.execution_context is not None and _key_predicates_allow(
+            compiled, {"grant_catalog": self.workspace}
+        ):
+            by_pattern = {}
+            for collection, kind, name in self._objects(compiled):
+                by_pattern[_grant_object_pattern(kind, name)] = (collection, kind, name)
+
+            reported = effective_grants_in(
+                self.execution_context, self.workspace, list(by_pattern)
+            )
+
+            for row in reported:
+                object_pattern = row.get("object")
+                # What was asked maps straight back; a pattern the capability
+                # added (a stored policy the catalog has no object for) is
+                # read the way the statements read an object name.
+                described = by_pattern.get(object_pattern) or _grant_object_from_pattern(
+                    self.workspace, object_pattern
+                )
+                if described is None:
+                    continue
+                collection, kind, name = described
+                # Asked objects already passed these; the capability's extras
+                # have not, and a pushed predicate is a promise to the planner.
+                if not _key_predicates_allow(
+                    compiled,
+                    {"grant_collection": collection, "object_kind": kind, "object_name": name},
+                ):
+                    continue
+                rows["grant_catalog"].append(self.workspace)
+                rows["grant_collection"].append(collection)
+                rows["object_kind"].append(kind)
+                rows["object_name"].append(name)
+                rows["grantee"].append(row.get("user"))
+                rows["role"].append(row.get("role"))
+                rows["pattern"].append(row.get("pattern"))
+                rows["level"].append(row.get("level"))
+                rows["origin"].append(
+                    _GRANT_ORIGIN_EXPLICIT if row.get("explicit") else _GRANT_ORIGIN_INHERITED
+                )
+
+        vectors = [
+            vector_from_sequence(rows[column_name], dtype=DrakenType.VARCHAR)
+            for column_name in self._COLUMNS
+        ]
+        yield Morsel.from_vectors(list(self._COLUMNS), vectors)
+
+
 _TABLE_CLASSES = {
     "tables": InformationSchemaTablesTable,
     "columns": InformationSchemaColumnsTable,
@@ -1337,4 +1642,5 @@ _TABLE_CLASSES = {
     "triggers": InformationSchemaTriggersTable,
     "tasks": InformationSchemaTasksTable,
     "column_relationships": InformationSchemaColumnRelationshipsTable,
+    "grants": InformationSchemaGrantsTable,
 }

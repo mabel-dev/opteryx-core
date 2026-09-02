@@ -108,18 +108,33 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
+# What SHOW CREATE asks for, per object type - see `visit_show`. TABLE is
+# absent deliberately and falls through to READ.
+_SHOW_CREATE_ACTIONS = {
+    "VIEW": "WRITE",
+    "MATERIALIZED VIEW": "WRITE",
+    "TASK": "AUTOMATE",
+}
+
+
 def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind SHOW CREATE.
 
-    Gated at READ for all four object types, which is the same tier as reading
-    the object itself and is the right one for each of them:
+    Gated per object type, at the tier of whoever authors that kind of thing -
+    the same tiers `information_schema` shows the same text at, so there is no
+    side door where a definition the listing withholds is one statement away:
 
-      VIEW, MATERIALIZED VIEW, TASK - the definition IS a query over relations,
-        so showing it discloses the shape of a read the caller may already make.
-      TABLE - the DDL is the column list, the declared relationships and the
-        clustering, all of which information_schema already answers at READ. It
-        is NOT the manifest: no file path or storage layout is disclosed here,
-        which is what puts SHOW MANIFEST at owner instead.
+      TABLE - READ. The DDL is the column list, the declared relationships and
+        the clustering, all of which information_schema already answers at
+        READ. It is NOT the manifest: no file path or storage layout is
+        disclosed here, which is what puts SHOW MANIFEST at owner instead.
+      VIEW, MATERIALIZED VIEW - WRITE. The definition is SQL that names the
+        relations it reads, which the caller may hold no grant on: the binder
+        refuses to RUN such a view for them, so the text is not "a read they
+        may already make". A writer may replace the definition, so a writer
+        may see it.
+      TASK - AUTOMATE. A task is automation; only an owner may create, drop or
+        alter one, and only an owner may read what it runs.
 
     Without this the statement reached its operator with no authorization at
     all, because a node type with no visitor was silently passed through (see
@@ -128,10 +143,11 @@ def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     from opteryx.connectors import connector_factory
     from opteryx.managers.permissions import can_perform_action
 
-    if not can_perform_action(context.execution_context, node.object_name, action="READ"):
+    action = _SHOW_CREATE_ACTIONS.get(node.object_type, "READ")
+    if not can_perform_action(context.execution_context, node.object_name, action=action):
         raise PermissionError(
-            f"User does not have permission to read {node.object_type.lower()} "
-            f"{node.object_name}"
+            f"User does not have permission to show the definition of "
+            f"{node.object_type.lower()} {node.object_name} ({action.lower()} required)"
         )
 
     node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
@@ -221,9 +237,14 @@ def visit_drop_view(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
         # Get connector gateway (cached by prefix)
         connector = connector_factory(view_name, telemetry=context.telemetry)
 
-        # Ensure this user can drop the view - DROP is owner-only, a writer cannot
-        if not can_perform_action(context.execution_context, view_name, action="DROP"):
-            raise PermissionError(f"User does not have permission to drop view {view_name}")
+        # WRITE, matching CREATE VIEW and ALTER VIEW: a view is text, and dropping
+        # one destroys nothing that cannot be recreated from it, which is the
+        # reason DROP is owner-only for tables and not a reason here. A writer
+        # who may replace a view's definition may remove it.
+        if not can_perform_action(context.execution_context, view_name, action="WRITE"):
+            raise PermissionError(
+                f"User does not have permission to drop view {view_name} (write required)"
+            )
 
         if "variables" in dir(connector):
             connector.variables = context.execution_context.variables

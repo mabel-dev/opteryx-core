@@ -118,6 +118,10 @@ class RelationManagementNode(BasePlanNode):
         self.workspace_name: Optional[str] = parameters.get("workspace_name")
         self.property_name: Optional[str] = parameters.get("property_name")
         self.property_value = parameters.get("property_value")
+        # ALTER WORKSPACE ... SET SECURE <object> TO <ws>[, ...] | DROP SECURE <object>.
+        # `secure_destinations` is None for DROP - the sanction is withdrawn.
+        self.secure_object: Optional[str] = parameters.get("secure_object")
+        self.secure_destinations = parameters.get("secure_destinations")
 
         # GRANT / REVOKE
         self.pattern: Optional[str] = parameters.get("pattern")
@@ -182,6 +186,10 @@ class RelationManagementNode(BasePlanNode):
             return f"optimize {self.relation_name}"
         if self.action == "alter_workspace":
             return f"alter workspace {self.workspace_name} set {self.property_name} = {self.property_value}"
+        if self.action == "alter_workspace_secure":
+            if self.secure_destinations is None:
+                return f"alter workspace {self.workspace_name} drop secure {self.secure_object}"
+            return f"alter workspace {self.workspace_name} set secure {self.secure_object} to {', '.join(self.secure_destinations)}"
         if self.action == "drop_workspace":
             return f"drop workspace {self.workspace_name}"
         if self.action == "create_tag":
@@ -569,6 +577,23 @@ class RelationManagementNode(BasePlanNode):
                 self.property_value,
                 author=self._author,
             )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "alter_workspace_secure":
+            # The SOURCE workspace's record. The binder required ownership of it,
+            # and the connector writes only that workspace's own entry - so the
+            # destination cannot sanction a copy into itself from here or anywhere.
+            if self.secure_destinations is None:
+                self.connector.clear_workspace_secure(
+                    self.workspace_name, self.secure_object, author=self._author
+                )
+            else:
+                self.connector.mark_workspace_secure(
+                    self.workspace_name,
+                    self.secure_object,
+                    list(self.secure_destinations),
+                    author=self._author,
+                )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "drop_workspace":

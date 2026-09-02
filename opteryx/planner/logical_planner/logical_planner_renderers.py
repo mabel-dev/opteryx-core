@@ -349,6 +349,14 @@ def render_alter_workspace(node: LogicalPlanNode) -> str:
     return f"ALTER WORKSPACE ({node.workspace_name}) SET {node.property_name} = {node.property_value}"
 
 
+@register_render(LogicalPlanStepType.AlterWorkspaceSecure)
+def render_alter_workspace_secure(node: LogicalPlanNode) -> str:
+    if node.secure_destinations is None:
+        return f"ALTER WORKSPACE ({node.workspace_name}) DROP SECURE {node.secure_object}"
+    destinations = ", ".join(node.secure_destinations)
+    return f"ALTER WORKSPACE ({node.workspace_name}) SET SECURE {node.secure_object} TO {destinations}"
+
+
 @register_render(LogicalPlanStepType.DropWorkspace)
 def render_drop_workspace(node: LogicalPlanNode) -> str:
     if_exists = "IF EXISTS " if node.if_exists else ""

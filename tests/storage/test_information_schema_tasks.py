@@ -117,16 +117,21 @@ class _FakeCatalog:
 
 
 class _ScriptedCapability:
-    """Permits READ on exactly the resources it is told to."""
+    """Permits READ on the resources it is told to, and AUTOMATE on a
+    separate set - a task row is gated on AUTOMATE, so the two have to be
+    distinguishable for the gate to be testable."""
 
     name = "scripted"
 
-    def __init__(self, readable):
+    def __init__(self, readable, automatable=()):
         self.readable = set(readable)
+        self.automatable = set(automatable)
 
     def can_perform_action(self, execution_context, resource, action):
         if "." not in resource:
             return action == "READ"
+        if action == "AUTOMATE":
+            return resource in self.automatable
         return resource in self.readable
 
     def can_perform_workspace_action(self, execution_context, workspace, action):
@@ -153,6 +158,9 @@ class _ScriptedCapability:
     def effective_grants_on(self, execution_context, pattern):
         raise AssertionError("not reached")
 
+    def effective_grants_in(self, execution_context, workspace, objects):
+        raise AssertionError("not reached")
+
 
 @pytest.fixture
 def permissions_state():
@@ -166,11 +174,11 @@ def permissions_state():
     module._active, module._consulted = saved_active, saved_consulted
 
 
-def _install(module, readable):
+def _install(module, readable, automatable=()):
     from opteryx.managers.permissions import register_permissions_capability
 
     module._active, module._consulted = module._CORE, False
-    register_permissions_capability(_ScriptedCapability(readable))
+    register_permissions_capability(_ScriptedCapability(readable, automatable))
 
 
 @pytest.fixture
@@ -221,20 +229,29 @@ def test_writes_carries_the_edge_out_of_the_task(catalog_workspace):
     assert rows["audit"] == ""
 
 
-def test_a_task_the_caller_cannot_read_is_not_listed(catalog_workspace, permissions_state):
-    """READ is checked on the task's own name - a task shares one namespace with
-    tables and views, so the grant on the name governs the row."""
-    _install(permissions_state, {"cat.pipelines.curate"})
+def test_a_task_the_caller_may_not_automate_is_not_listed(catalog_workspace, permissions_state):
+    """AUTOMATE is checked on the task's own name - a task shares one namespace
+    with tables and views, so the grant on the name governs the row."""
+    _install(permissions_state, readable=(), automatable={"cat.pipelines.curate"})
 
     rows = _read()
 
     assert [row["task_name"] for row in rows] == ["curate"]
 
 
-def test_an_unreadable_task_costs_no_round_trip(catalog_workspace, permissions_state):
+def test_read_on_a_task_name_shows_no_row(catalog_workspace, permissions_state):
+    """A reader holds nothing over automation: a task's statement, what it
+    writes and who runs it are an owner's to see, however many names the
+    reader may SELECT from."""
+    _install(permissions_state, readable={"cat.pipelines.curate", "cat.pipelines.audit"})
+
+    assert _read() == []
+
+
+def test_an_unlistable_task_costs_no_round_trip(catalog_workspace, permissions_state):
     """Checked BEFORE `get_task`, so a task the caller may not see is never
     fetched and its statement is never read."""
-    _install(permissions_state, {"cat.pipelines.curate"})
+    _install(permissions_state, readable=(), automatable={"cat.pipelines.curate"})
 
     _read()
 

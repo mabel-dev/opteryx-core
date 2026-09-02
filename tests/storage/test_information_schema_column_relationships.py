@@ -143,6 +143,9 @@ class _ScriptedCapability:
     def effective_grants_on(self, execution_context, pattern):
         raise AssertionError("not reached")
 
+    def effective_grants_in(self, execution_context, workspace, objects):
+        raise AssertionError("not reached")
+
 
 @pytest.fixture
 def permissions_state():

@@ -33,10 +33,13 @@ from opteryx.expression.evaluator.arithmetic import resolve_binary_op
 from opteryx.expression.functions import functions as _list_functions
 from opteryx.expression.functions import is_function as _is_function
 from opteryx.expression.intervals import (
+    INTERVAL_UNITS,
     MICROSECONDS_PER_DAY,
     MICROSECONDS_PER_HOUR,
+    MICROSECONDS_PER_MILLISECOND,
     MICROSECONDS_PER_MINUTE,
     MICROSECONDS_PER_SECOND,
+    MICROSECONDS_PER_WEEK,
 )
 from opteryx.expression.operator_catalog import get_operator_for_sql_symbol
 from opteryx.expression.operator_catalog import get_operator_node_type
@@ -2555,7 +2558,18 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
         INTERVAL '1' YEAR
         INTERVAL '1 3' YEAR TO MONTH
     """
-    parts = ("Year", "Month", "Day", "Hour", "Minute", "Second")
+    # Descending ladder: a multi-value interval (`INTERVAL '1 3' YEAR TO MONTH`) walks
+    # consecutive entries starting from the leading unit. Shared with the parse-error
+    # path so a rejected unit and an unimplemented one quote the same valid list.
+    parts = INTERVAL_UNITS
+    # The parser hands the unit back as written — singular or plural, and for some units
+    # as a single-key mapping (`WEEK` arrives as {"Week": None}) — so every accepted
+    # spelling is resolved here. Anything the engine does not implement must raise
+    # SqlError: `parts.index` on an unknown unit leaked a bare
+    # `ValueError: tuple.index(x): x not in tuple` carrying no query context at all.
+    units = {part.lower(): part for part in parts}
+    units.update({part.lower() + "s": part for part in parts})
+    valid_units = ", ".join(part.upper() for part in parts)
 
     if "Value" not in branch["value"]:
         raise SqlError("Invalid INTERVAL, expected format `INTERVAL '1' MONTH`")
@@ -2566,20 +2580,40 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
     values = values.split(" ")
     leading_unit = branch["leading_field"]
 
-    if leading_unit is None:
-        raise SqlError(f"Invalid INTERVAL, valid units are {', '.join(p.upper() for p in parts)}")
+    if isinstance(leading_unit, dict) and len(leading_unit) == 1:
+        leading_unit = next(iter(leading_unit))
 
-    unit_index = parts.index(leading_unit)
+    if leading_unit is None or not isinstance(leading_unit, str):
+        raise SqlError(f"Invalid INTERVAL, valid units are {valid_units}")
+
+    if leading_unit.lower() not in units:
+        raise SqlError(
+            f"Invalid INTERVAL, `{leading_unit.upper()}` is not a supported unit. Valid units are {valid_units}."
+        )
+
+    unit_index = parts.index(units[leading_unit.lower()])
+
+    if unit_index + len(values) > len(parts):
+        raise SqlError(
+            f"Invalid INTERVAL, `{leading_unit.upper()}` is followed by only "
+            f"{len(parts) - unit_index} unit(s) but {len(values)} values were given."
+        )
 
     month, microseconds = (0, 0)
 
     for index, value in enumerate(values):
+        if not value.lstrip("+-").isdigit():
+            raise SqlError(
+                f"Invalid INTERVAL, `{value}` is not a whole number. Values must look like `INTERVAL '1' MONTH` or `INTERVAL '1 3' YEAR TO MONTH`."
+            )
         value = int(value)
         unit = parts[unit_index + index]
         if unit == "Year":
             month += 12 * value
         if unit == "Month":
             month += value
+        if unit == "Week":
+            microseconds += value * MICROSECONDS_PER_WEEK
         if unit == "Day":
             microseconds += value * MICROSECONDS_PER_DAY
         if unit == "Hour":
@@ -2588,6 +2622,10 @@ def literal_interval(branch, alias: Optional[List[str]] = None, key=None):
             microseconds += value * MICROSECONDS_PER_MINUTE
         if unit == "Second":
             microseconds += value * MICROSECONDS_PER_SECOND
+        if unit == "Millisecond":
+            microseconds += value * MICROSECONDS_PER_MILLISECOND
+        if unit == "Microsecond":
+            microseconds += value
 
     interval = (month, microseconds)
 
