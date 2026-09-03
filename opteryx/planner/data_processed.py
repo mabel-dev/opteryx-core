@@ -57,7 +57,7 @@ NOT COUNTED, and deliberately:
     in-process, nothing enters from storage. Bills zero. This is a change:
     these operators used to add their materialised in-memory size to the same
     counter, mixing a second quantity into it.
-  * `$no_table` — the one-row stand-in the planner substitutes for a statement
+  * `$one_row` — the one-row stand-in the planner substitutes for a statement
     with no FROM clause (`SELECT 1`) and for a statistics-only answer
     (`SELECT COUNT(*)` served from the manifest). It is a planner artifact, not
     a relation the user named, and nothing is read to produce it.
@@ -81,14 +81,14 @@ __all__ = ["iter_scan_nodes", "measure_data_processed", "plan_relations"]
 
 # The planner's one-row stand-in for a statement with no FROM clause, and for a
 # statistics-only answer. Not a relation, and nothing is read to produce it.
-_NO_TABLE = "$no_table"
+_ONE_ROW = "$one_row"
 
 
 def _scan_bytes(node, base_stats_cache: Optional[dict]) -> int:
     """Dense logical bytes read by one Scan node."""
     from opteryx.planner.optimizer.statistics_refresh import scan_base_statistics
 
-    if node.relation == _NO_TABLE:
+    if node.relation == _ONE_ROW:
         return 0
 
     stats = scan_base_statistics(node, base_stats_cache)
@@ -166,12 +166,12 @@ def _scan_relation(node) -> Optional[str]:
     whatever the user named. Their `dataset` attribute is a filesystem path by
     then, not an identifier, so it is deliberately not used.
 
-    `$no_table` yields None. It is the planner's one-row stand-in for a
+    `$one_row` yields None. It is the planner's one-row stand-in for a
     statement with no FROM clause, not a relation anyone named — the same
     reason the meter bills it zero.
     """
     relation = getattr(node, "relation", None)
-    if not relation or relation == _NO_TABLE:
+    if not relation or relation == _ONE_ROW:
         return None
 
     connector = getattr(node, "connector", None)

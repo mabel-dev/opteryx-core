@@ -12,7 +12,7 @@ of the package itself cheap.
 
 _MODULES = {
     "derived": "opteryx.managers.virtual_datasets.derived_data",
-    "no_table": "opteryx.managers.virtual_datasets.no_table_data",
+    "one_row": "opteryx.managers.virtual_datasets.one_row_data",
     "planets": "opteryx.managers.virtual_datasets.planet_data",
     "variables": "opteryx.managers.virtual_datasets.variables_data",
     "user": "opteryx.managers.virtual_datasets.user",

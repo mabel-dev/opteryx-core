@@ -4,7 +4,7 @@ parquet scan (residual reason `zero_projection` / R1).
 Background: a bare `SELECT COUNT(*) FROM t` (NO predicate) never reaches a scan at
 all — `StatisticsOnlyResponseStrategy` (opteryx/planner/optimizer/strategies/
 statistics_only_response.py) rewrites it to a literal manifest-count projection over
-the virtual `$no_table` relation at the optimizer level. The only SQL-reachable
+the virtual `$one_row` relation at the optimizer level. The only SQL-reachable
 `zero_projection` residual is `SELECT COUNT(*) FROM t WHERE <predicate>`: the
 Aggregate has an empty projection but the predicate still needs its input column(s)
 read and filtered.

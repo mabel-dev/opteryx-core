@@ -103,7 +103,7 @@ def test_a_union_records_both_arms():
 
 
 def test_a_statement_with_no_from_clause_records_nothing():
-    """`$no_table` is a planner artifact, not a relation anyone named."""
+    """`$one_row` is a planner artifact, not a relation anyone named."""
     assert _relations("SELECT 1 + 1") == []
 
 

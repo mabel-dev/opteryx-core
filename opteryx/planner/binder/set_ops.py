@@ -275,7 +275,7 @@ def _columns_for_side(
 
     Normally each side's relation names are registered in `context.schemas`.
     When a branch has no FROM clause (e.g. `SELECT 1`), the project step pops
-    the synthetic `$no_table` source because none of its columns are projected,
+    the synthetic `$one_row` source because none of its columns are projected,
     and the projected literals end up under a shared `$project` key that gets
     merged across branches. In that case fall back to walking the plan to find
     the branch's direct Project child of the set-op node and use its columns.

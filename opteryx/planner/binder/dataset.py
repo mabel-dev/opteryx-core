@@ -1129,6 +1129,21 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     original_relation = node.relation
     node.relation = node.relation.lower()
 
+    # Resolve a well-known dataset's alias to its canonical name here, before any
+    # connector, catalog or telemetry work — so the rest of the engine only ever
+    # sees one name for one relation. Today that is `$no_table` -> `$one_row`.
+    from opteryx.connectors.virtual_data_connector import canonical_dataset_name
+
+    canonical = canonical_dataset_name(node.relation)
+    if canonical != node.relation:
+        # An unaliased `FROM $no_table` carries the typed name as its alias too,
+        # which would print as "$one_row AS $no_table" and leak the old name into
+        # the plan anyway. The alias is only rewritten when it IS the old name —
+        # an alias the user actually chose is theirs and is left alone.
+        if node.alias == node.relation:
+            node.alias = canonical
+        node.relation = canonical
+
     # Internal-only relations back a dedicated SQL surface and must not be
     # addressable by name. `internal_relation` is set by the planner that owns the
     # surface (e.g. plan_show_variables) and is never set from user SQL, so this

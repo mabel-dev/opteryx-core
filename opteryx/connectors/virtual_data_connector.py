@@ -7,7 +7,8 @@
 The 'sample' connector provides readers for the internal sample datasets,
 $planets.
 
-- $no_table is used in queries where there is no relation specified 'SELECT 1'
+- $one_row is used in queries where there is no relation specified 'SELECT 1'
+  (it was named $no_table until Sep 2026; that name still resolves)
 - $derived is used as a schema to align virtual columns to
 """
 
@@ -31,7 +32,7 @@ from opteryx.types.schema import RelationSchema
 # so that each has a SINGLE surface rather than two that can drift.
 #
 # The flag in WELL_KNOWN_DATASETS below is `suggestable`, which only governs
-# "did you mean?" hints — it does NOT gate access (`$no_table` is suggestable=False
+# "did you mean?" hints — it does NOT gate access (`$one_row` is suggestable=False
 # and freely queryable). Enforcement lives in binder.visit_scan.
 #
 # Keyed by the surface that replaces the typed name, so the binder can name it in
@@ -51,10 +52,27 @@ WELL_KNOWN_DATASETS = {
     "$planets": ("opteryx.managers.virtual_datasets.planet_data", True),
     "$variables": ("opteryx.managers.virtual_datasets.variables_data", False),
     "$derived": ("opteryx.managers.virtual_datasets.derived_data", False),
-    "$no_table": ("opteryx.managers.virtual_datasets.no_table_data", False),
+    "$one_row": ("opteryx.managers.virtual_datasets.one_row_data", False),
     "$user": ("opteryx.managers.virtual_datasets.user", False),
     "$grants": ("opteryx.managers.virtual_datasets.grants", False),
 }
+
+
+# Names that resolve to another well-known dataset. `$no_table` was the original
+# name for the one-row stand-in behind a FROM-less statement; it says what the
+# statement lacks rather than what the relation emits, so `$one_row` replaced it.
+# The old name keeps resolving because it is reachable from user SQL
+# (`SELECT * FROM $no_table`) and queries written against it are still out there.
+# Resolution happens once, in binder.visit_scan, so everything downstream — the
+# plan, telemetry, billing — only ever sees the canonical name.
+DATASET_ALIASES = {
+    "$no_table": "$one_row",
+}
+
+
+def canonical_dataset_name(name: str) -> str:
+    """The canonical name for a well-known dataset, resolving any alias."""
+    return DATASET_ALIASES.get(name, name)
 
 
 def _load_provider(name: str) -> Tuple[object, bool]:

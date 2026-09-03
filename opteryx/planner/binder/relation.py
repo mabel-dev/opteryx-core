@@ -970,32 +970,45 @@ def visit_drop_task(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
     return node, context
 
 
-def _bind_task_subscription(node: Node, context: BindingContext, statement: str) -> Node:
+def _bind_subscription(node: Node, context: BindingContext, statement: str) -> Node:
     """Shared binding for LISTEN TO and UNLISTEN.
 
     **LISTEN is a READ activity** (architect ruling 2026-09-02). The gate is
-    whether the caller can see the table the task AFFECTS - not AUTOMATE on the
-    task. A subscription reports that a dataset was refreshed or failed to be;
-    that is a fact about the dataset, so the people entitled to it are the
-    people who can read the dataset. Gating on AUTOMATE instead would mean the
-    only people who can be told a table is stale are the people who own the
-    automation, and so already knew where to look.
+    whether the caller can see the relation the subscribed object AFFECTS - not
+    AUTOMATE over it. A subscription reports that a dataset was refreshed or
+    failed to be; that is a fact about the dataset, so the people entitled to it
+    are the people who can read the dataset. Gating on AUTOMATE instead would
+    mean the only people who can be told a table is stale are the people who own
+    the automation, and so already knew where to look.
 
-    The table is the task's `writes`, derived from its own AST at registration
-    and never declared, so it cannot disagree with what the task actually does.
-    Every relation named there is required, not any: a notification about a task
-    writing A and B is a fact about both.
+    **The object is whatever a TRIGGER TARGETS** - a task it runs with EXECUTE,
+    or a materialized view it refreshes. The two fire paths share the suspension
+    check, the egress enforcement, the required `runs-as` and the dispatch
+    contract, differing only in the statement they build, so they share one
+    subscription concept. Which kind a name is never has to be written down: a
+    table, a view and a task share one namespace, so the name identifies exactly
+    one of them.
+
+    What each affects differs, and the view is the easier half:
+
+    - a TASK affects its recorded `writes`, derived from its own AST at
+      registration and never declared, so it cannot disagree with what the task
+      does. Every relation named there is required, not any: a notification
+      about a task writing A and B is a fact about both. An empty `writes` is
+      refused - there is nothing to gate on, so no grant admits a subscriber.
+    - a MATERIALIZED VIEW *is* what it writes, so the gate is READ on the view
+      and there is nothing to look up.
 
     Checked HERE and once. The ruling is "at point of creation", so the grant is
     not re-evaluated at delivery - a user whose READ is later revoked keeps
-    receiving notifications until they UNLISTEN or the task is dropped. Bounded
-    by the payload being status only, and recorded in
+    receiving notifications until they UNLISTEN or the object is dropped.
+    Bounded by the payload being status only, and recorded in
     docs/LISTEN_SQL_DESIGN.md §6; REVOKE does not sweep subscriptions.
 
-    The refusal deliberately does NOT distinguish "no such task" from "you
+    The refusal deliberately does NOT distinguish "no such object" from "you
     cannot see what it writes". Distinguishing them makes LISTEN a probe: a
-    caller with no grants could enumerate which task names exist by reading
-    which refusal came back.
+    caller with no grants could enumerate which names exist by reading which
+    refusal came back.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -1008,39 +1021,46 @@ def _bind_task_subscription(node: Node, context: BindingContext, statement: str)
             f"connector for {node.task_name} does not support {statement}"
         )
 
-    # One refusal for every way this can fail to be a task the caller may
+    # One refusal for every way this can fail to be something the caller may
     # subscribe to. Built once and raised from several places, so the branches
     # cannot drift apart into a distinguishable pair.
     def _refuse():
         return PermissionError(
-            f"No task {node.task_name} that you can subscribe to. **{statement}** "
-            "needs read access to what the task writes - a subscription reports "
-            "that a dataset was refreshed or failed to be, which is a fact about "
-            "that dataset."
+            f"Nothing named {node.task_name} that you can subscribe to. "
+            f"**{statement}** takes a task or a materialized view, and needs read "
+            "access to what it writes - a subscription reports that a dataset was "
+            "refreshed or failed to be, which is a fact about that dataset."
         )
 
-    if not node.connector.is_task(node.task_name):
+    if node.connector.is_task(node.task_name):
+        node.object_kind = "task"
+        written = node.connector.task_writes(node.task_name)
+        if not written:
+            # Nothing to gate on, so no grant admits a subscriber. The specific
+            # reason is given only to someone who already knows the task exists
+            # - an owner - because saying "this task records no writes" to
+            # anyone else confirms the name, which is the leak `_refuse` closes.
+            if can_perform_action(context.execution_context, node.task_name, action="AUTOMATE"):
+                raise PermissionError(
+                    f"Task {node.task_name} records no relations that it writes, so "
+                    f"there is no read grant that admits a subscriber and **{statement}** "
+                    "cannot be authorized. A task registered before writes were "
+                    "recorded answers this way; **CREATE OR REPLACE TASK** re-derives "
+                    "it from the statement."
+                )
+            raise _refuse()
+    elif node.connector.is_materialized_view(node.task_name):
+        # A view IS what it writes. No `writes` record to read, and the
+        # empty-writes case above cannot arise.
+        node.object_kind = "materialized_view"
+        written = [node.task_name]
+    else:
+        # A table, a plain view, or nothing at all. Nothing fires any of them, so
+        # a subscription could never be delivered.
         raise _refuse()
 
-    writes = node.connector.task_writes(node.task_name)
-    if not writes:
-        # Nothing to gate on, so no grant admits a subscriber and the statement
-        # cannot be allowed. The specific reason is given only to someone who
-        # already knows the task exists - an owner - because saying "this task
-        # records no writes" to anyone else confirms the name, which is the leak
-        # `_refuse` exists to close.
-        if can_perform_action(context.execution_context, node.task_name, action="AUTOMATE"):
-            raise PermissionError(
-                f"Task {node.task_name} records no relations that it writes, so "
-                f"there is no read grant that admits a subscriber and **{statement}** "
-                "cannot be authorized. A task registered before writes were "
-                "recorded answers this way; **CREATE OR REPLACE TASK** re-derives "
-                "it from the statement."
-            )
-        raise _refuse()
-
-    for written in writes:
-        if not can_perform_action(context.execution_context, written, action="READ"):
+    for relation in written:
+        if not can_perform_action(context.execution_context, relation, action="READ"):
             raise _refuse()
 
     # The subscriber is the session user and can be nobody else - there is no
@@ -1052,8 +1072,8 @@ def _bind_task_subscription(node: Node, context: BindingContext, statement: str)
 
 
 def visit_listen(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    """Bind LISTEN TO <task> [FOR ...]. READ-gated on what the task writes."""
-    return _bind_task_subscription(node, context, "LISTEN TO"), context
+    """Bind LISTEN TO <object> [FOR ...]. READ-gated on what the object writes."""
+    return _bind_subscription(node, context, "LISTEN TO"), context
 
 
 def visit_unlisten(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
@@ -1066,7 +1086,7 @@ def visit_unlisten(self, node: Node, context: BindingContext) -> Tuple[Node, Bin
     wants to stop being notified is the one case this costs, and DROP TASK and
     the notification itself both still reach them.
     """
-    return _bind_task_subscription(node, context, "UNLISTEN"), context
+    return _bind_subscription(node, context, "UNLISTEN"), context
 
 
 def visit_create_trigger(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:

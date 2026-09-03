@@ -94,13 +94,13 @@ def _scan_relations(plan):
 
 def test_count_star_answered_from_statistics():
     # COUNT(*) with no filter/group/join is answered from manifest record counts:
-    # the real Scan is rewritten to the virtual `$no_table` and the aggregate is
+    # the real Scan is rewritten to the virtual `$one_row` and the aggregate is
     # replaced by a literal projection — zero data is read.
     plan = _optimized_plan("SELECT COUNT(*) FROM testdata.tpch_001.lineitem")
     counts = _step_counts(plan)
     assert counts.get(LogicalPlanStepType.Join, 0) == 0
     assert counts.get(LogicalPlanStepType.Filter, 0) == 0
-    assert "$no_table" in _scan_relations(plan), _scan_relations(plan)
+    assert "$one_row" in _scan_relations(plan), _scan_relations(plan)
 
 
 # ---------------------------------------------------------------------------

@@ -468,7 +468,7 @@ def _create_scan_node(logical_node, query_properties, registry):
             node_config = _skene_scan_config(node_config)
         return registry.create(reader_name, query_properties, **node_config)
     elif connector and getattr(connector, "interal_only", False):
-        # Internal virtual datasets (for example $no_table) do not use file manifests.
+        # Internal virtual datasets (for example $one_row) do not use file manifests.
         return registry.create("Reader", query_properties, **node_config)
     else:
         raise UnsupportedSyntaxError(

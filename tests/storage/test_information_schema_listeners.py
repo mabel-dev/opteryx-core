@@ -44,7 +44,8 @@ _LISTENERS = {
         {
             "workspace": "cat",
             "collection": "pipelines",
-            "task": "curate",
+            "object": "curate",
+            "kind": "task",
             "outcome": "ERROR",
             "created-at-ms": _NOW_MS,
         }
@@ -53,7 +54,8 @@ _LISTENERS = {
         {
             "workspace": "cat",
             "collection": "pipelines",
-            "task": "audit",
+            "object": "audit",
+            "kind": "task",
             "outcome": "EVERYTHING",
             "created-at-ms": _NOW_MS,
         }
@@ -157,9 +159,10 @@ def test_listeners_reports_the_callers_own_subscriptions(catalog_workspace):
     rows = _read("information_schema.listeners", "alice")
 
     assert len(rows) == 1
-    assert rows[0]["task_catalog"] == "cat"
-    assert rows[0]["task_collection"] == "pipelines"
-    assert rows[0]["task_name"] == "curate"
+    assert rows[0]["object_catalog"] == "cat"
+    assert rows[0]["object_collection"] == "pipelines"
+    assert rows[0]["object_name"] == "curate"
+    assert rows[0]["kind"] == "task"
     assert rows[0]["outcome"] == "ERROR"
     assert rows[0]["created_at"] is not None
 
@@ -169,7 +172,29 @@ def test_another_users_subscriptions_are_not_visible(catalog_workspace):
     lists a task's subscribers."""
     rows = _read("information_schema.listeners", "rhea")
 
-    assert [row["task_name"] for row in rows] == ["audit"]
+    assert [row["object_name"] for row in rows] == ["audit"]
+
+
+def test_a_materialized_view_subscription_reads_back_with_its_kind(catalog_workspace):
+    """One table for both kinds - the subscribable object is whatever a trigger
+    targets, and `kind` is the answer the caller never had to write down."""
+    _LISTENERS["vic"] = [
+        {
+            "workspace": "cat",
+            "collection": "security",
+            "object": "vulnerabilities_per_week",
+            "kind": "materialized_view",
+            "outcome": "ERROR",
+            "created-at-ms": _NOW_MS,
+        }
+    ]
+    try:
+        rows = _read("information_schema.listeners", "vic")
+    finally:
+        del _LISTENERS["vic"]
+
+    assert rows[0]["object_name"] == "vulnerabilities_per_week"
+    assert rows[0]["kind"] == "materialized_view"
 
 
 def test_a_user_with_no_subscriptions_gets_no_rows(catalog_workspace):

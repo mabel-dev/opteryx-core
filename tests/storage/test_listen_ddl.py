@@ -297,6 +297,90 @@ def test_create_or_replace_task_keeps_the_subscriptions(tmp_path, install):
     assert _listeners(tmp_path, "ws.loader")["olive"]["outcome"] == "ERROR"
 
 
+# --- materialized views, on the same terms
+#
+# A trigger either EXECUTEs a task or REFRESHes a view, and the two paths differ
+# only in the statement they build - so the subscribable object is whatever a
+# trigger targets. The caller never says which kind: a table, a view and a task
+# share one namespace, so the name identifies exactly one of them.
+
+
+def _seed_mv(session, view="ws.daily"):
+    list(session.execute_to_morsels("CREATE TABLE ws.src (a BIGINT)"))
+    # A view materializes on creation, and the writer refuses an empty morsel -
+    # so the source needs rows before there is a view to subscribe to.
+    list(session.execute_to_morsels("INSERT INTO ws.src VALUES (1), (2)"))
+    list(
+        session.execute_to_morsels(
+            f"CREATE MATERIALIZED VIEW {view} AS SELECT a FROM ws.src"
+        )
+    )
+
+
+def test_a_materialized_view_can_be_listened_to(tmp_path, install):
+    _setup_workspace(tmp_path)
+    install(ScriptedCapability(allow_all=True))
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed_mv(session)
+
+    list(session.execute_to_morsels("LISTEN TO ws.daily FOR ERROR"))
+
+    assert _listeners(tmp_path, "ws.daily")["olive"]["outcome"] == "ERROR"
+
+
+def test_a_view_is_gated_on_reading_the_view_itself(tmp_path, install):
+    """A view IS what it writes, so the task's `writes` lookup - and its
+    empty-writes refusal - cannot arise."""
+    _setup_workspace(tmp_path)
+    install(ScriptedCapability(allow_all=True))
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed_mv(owner)
+
+    install(ScriptedCapability(allow={("ws.daily", "READ")}))
+    reader = opteryx.session(user="rhea", access_policies=_OWNER_POLICY)
+    list(reader.execute_to_morsels("LISTEN TO ws.daily"))
+
+    assert "rhea" in _listeners(tmp_path, "ws.daily")
+
+
+def test_without_read_on_the_view_there_is_no_subscription(tmp_path, install):
+    _setup_workspace(tmp_path)
+    install(ScriptedCapability(allow_all=True))
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed_mv(owner)
+
+    install(ScriptedCapability(allow=set()))
+    stranger = opteryx.session(user="mallory", access_policies=_OWNER_POLICY)
+    with pytest.raises(PermissionError):
+        list(stranger.execute_to_morsels("LISTEN TO ws.daily"))
+
+    assert _listeners(tmp_path, "ws.daily") == {}
+
+
+def test_a_plain_table_cannot_be_listened_to(tmp_path, install):
+    """Nothing fires a table, so the subscription could never be delivered -
+    and the refusal is the same one an unreadable object gets."""
+    _setup_workspace(tmp_path)
+    install(ScriptedCapability(allow_all=True))
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    list(session.execute_to_morsels("CREATE TABLE ws.plain (a BIGINT)"))
+
+    with pytest.raises(PermissionError):
+        list(session.execute_to_morsels("LISTEN TO ws.plain"))
+
+
+def test_dropping_the_view_takes_its_subscriptions(tmp_path, install):
+    _setup_workspace(tmp_path)
+    install(ScriptedCapability(allow_all=True))
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed_mv(session)
+    list(session.execute_to_morsels("LISTEN TO ws.daily"))
+
+    list(session.execute_to_morsels("DROP MATERIALIZED VIEW ws.daily"))
+
+    assert _listeners(tmp_path, "ws.daily") == {}
+
+
 # --- the READ gate
 
 

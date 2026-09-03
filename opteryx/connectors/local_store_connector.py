@@ -549,9 +549,11 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         return list(record.get("writes") or [])
 
     def _listeners_path(self, relation_name: str) -> str:
-        # Beside task.json in the task's own directory, so DROP TASK removing
-        # the task removes its subscriptions with it - the same containment the
-        # catalog gets from a subcollection under the task document.
+        # In the object's own directory, beside task.json or mv.json, so the
+        # object's drop removes its subscriptions with it - the same containment
+        # the catalog gets from a subcollection under the object's document. One
+        # path for both kinds, because a task and a materialized view share the
+        # one directory-per-name layout.
         return os.path.join(self._relation_dir(relation_name), "listeners.json")
 
     def _read_listeners(self, relation_name: str) -> dict:
@@ -585,7 +587,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             json.dump(listeners, f)
 
     def list_listeners_for_user(self, user: str) -> List[dict]:
-        """Every subscription `user` holds under this store's root.
+        """Every subscription `user` holds under this store's root, of either kind.
 
         A walk, where the catalog uses one collection-group query: there is no
         index here to ask, and a local store is a development and test target
@@ -608,7 +610,15 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 {
                     "workspace": relative[0],
                     "collection": ".".join(relative[1:-1]),
-                    "task": relative[-1],
+                    "object": relative[-1],
+                    # Read back from the directory rather than stored, which the
+                    # catalog does store: here the sentinel files ARE the record
+                    # of what the name holds, and they are already open.
+                    "kind": (
+                        "task"
+                        if "task.json" in files
+                        else "materialized_view"
+                    ),
                     "outcome": record.get("outcome"),
                     "created-at-ms": record.get("created-at-ms"),
                 }
@@ -1008,6 +1018,11 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                 f"{relation_name} is not a materialized view; "
                 "use DROP TABLE or DROP VIEW"
             )
+        # Subscriptions go with the object: it is gone, so there is nothing left
+        # to notify about.
+        listeners_path = self._listeners_path(relation_name)
+        if os.path.isfile(listeners_path):
+            os.remove(listeners_path)
         # A dropped MV takes its refresh triggers with it - they live on the
         # source tables, so remove them before the MV's own directory goes.
         record = self._read_mv_record(relation_name) or {}

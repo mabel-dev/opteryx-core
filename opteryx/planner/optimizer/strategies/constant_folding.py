@@ -24,7 +24,7 @@ from draken.draken_native import vector_attach_logical_type
 from opteryx.compiled.expression.compiled_expression import build_bytecode, lower
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.expression.evaluator import execute_bytecode
-from opteryx.managers.virtual_datasets import no_table_data
+from opteryx.managers.virtual_datasets import one_row_data
 from opteryx.models import Node, QueryTelemetry
 from opteryx.planner import build_literal_node
 from opteryx.planner.logical_planner import LogicalPlan, LogicalPlanNode, LogicalPlanStepType
@@ -513,7 +513,7 @@ def fold_constants(root: Node, telemetry: QueryTelemetry) -> Node:
         if rewritten is not root:
             return fold_constants(rewritten, telemetry)
 
-        table = no_table_data.read()
+        table = one_row_data.read()
         bc = build_bytecode(lower(root))
         result_vector = execute_bytecode(bc, table)
         # execute_bytecode returns a Vector for native kernels, but a BARE LIST for

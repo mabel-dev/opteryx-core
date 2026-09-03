@@ -1,6 +1,8 @@
-# LISTEN / UNLISTEN — Task Notification Subscription Surface
+# LISTEN / UNLISTEN — Notification Subscription Surface
 
-**Status:** DELIVERED 2026-09-02, except `SHOW LISTENERS` (§4) — both sides
+**Status:** DELIVERED 2026-09-02, unified across tasks and materialized views
+2026-09-03, and delivering into the platform notification feed. Except
+`SHOW LISTENERS` (§4) — both sides
 implemented. opteryx-catalog: `listeners` subcollection, `add_listener` /
 `drop_listener` / `list_listeners` / `list_listeners_for_user`,
 `ListenerAlreadyExists` / `ListenerNotFound`, `drop_task` sweep. opteryx-core:
@@ -12,7 +14,26 @@ and EXPLAIN renderers, the READ gate (`binder/relation.py`
 on `information_schema.tasks`, `query_parser` preflight entries. Tests:
 `tests/storage/test_listen_ddl.py` (22),
 `tests/storage/test_information_schema_listeners.py` (8) in the engine;
-`tests/test_listeners.py` (13) in the catalog.
+`tests/test_listeners.py` (17) and `tests/test_task_notifications.py` in the
+catalog.
+
+**Delivery** (added 2026-09-03): `opteryx_catalog/task_notifications.py` fans
+out to control.opteryx's `POST /v1/internal/notifications` via a Cloud Tasks
+queue, one request per recipient because that route resolves no audiences. Two
+emit points for tasks - `trigger_firing._dispatch` for fires that never started,
+worker.opteryx's `_stamp_fired_task` for runs that did - and ONE for views,
+`mark_materialized_view_refreshed`, which both outcomes and a manual REFRESH all
+funnel through. Failures are severity `action` and carry the statement that
+fixes them; success is `info`. Needs `CONTROL_URL`, `CONTROL_ADMIN_TOKEN` and
+`OPTERYX_NOTIFICATIONS_QUEUE`; with any unset nothing is sent.
+
+**Known gap:** the producer sends no idempotency key, and control.opteryx
+generates the document id server-side, so a Cloud Tasks retry of a request whose
+response was lost writes a second notification. `new_notification_doc` already
+has a `dedupe_key` field; closing this needs `NotificationCreate` to accept a
+caller-supplied id and use it as the document id. Two tests in
+`tests/test_task_notifications.py` assert the producer half and fail until both
+halves land.
 
 **`SHOW LISTENERS` is recognized and refused** — it names no object, and
 `information_schema` in this engine is always workspace-qualified with no
@@ -20,7 +41,14 @@ session current-workspace to fall back on. See §4.
 
 **Architect rulings (2026-09-02):**
 
-- The subscribable object is the **TASK**, not the trigger.
+- The subscribable object is what a **TRIGGER TARGETS**, not the trigger: a
+  TASK it runs with EXECUTE, or a MATERIALIZED VIEW it refreshes (unified
+  2026-09-03). The two fire paths share the suspension check, the egress
+  enforcement, the required `runs-as` and the dispatch contract, and differ only
+  in the statement they build - so they share one subscription concept.
+- The caller never says which kind. A table, a view and a task share one
+  namespace, so the name identifies exactly one object; `kind` is recorded as
+  the answer.
 - Default filter is **every outcome**; `FOR ERROR` / `FOR SUCCESS` /
   `FOR EVERYTHING` narrows it.
 - **One subscription per user per task.** A second `LISTEN` is refused, and the
@@ -293,7 +321,8 @@ New catalog API: `add_listener`, `drop_listener`, `list_listeners_for_user`,
 
 - Endpoint selection (`VIA <endpoint>`). One delivery path today.
 - `UNLISTEN *`.
-- Subscribing to anything other than a task — a dataset, a workspace, a trigger.
+- Subscribing to a plain table, a workspace, or a trigger. Nothing fires a
+  table, so the subscription could never be delivered.
 - `SUCCESS`-only firehose protection. A task firing per-commit with
   `FOR EVERYTHING` will notify per commit; that is what was asked for.
 - Any `NOTIFY` statement. Nothing in SQL raises a notification by hand.

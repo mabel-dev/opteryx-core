@@ -4,7 +4,7 @@
 """Unit tests for StatisticsOnlyResponseStrategy
 
 These tests verify the strategy rewrites a simple COUNT(*) logical plan into a
-projection of a literal count over the `$no_table` virtual relation, and that
+projection of a literal count over the `$one_row` virtual relation, and that
 it leaves non-eligible plans unchanged.
 """
 
@@ -120,9 +120,9 @@ def test_strategy_rewrites_count_star_plan():
     assert getattr(literal, "value", None) == 9
     assert getattr(literal, "alias", None) == "total_count"
 
-    # The scan node should now point to $no_table and use the virtual connector
+    # The scan node should now point to $one_row and use the virtual connector
     scan_node = next(n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Scan)
-    assert scan_node.relation == "$no_table"
+    assert scan_node.relation == "$one_row"
     # If the strategy could replace the connector, it should be the virtual one.
     conn_type = getattr(scan_node, 'connector', None) and getattr(scan_node.connector, '__type__', None)
     if conn_type is not None:
@@ -130,7 +130,7 @@ def test_strategy_rewrites_count_star_plan():
     # Schema may or may not be present in synthetic unit tests; accept either
     # the virtual schema or None (integration tests will validate end-to-end)
     schema_name = getattr(scan_node.schema, "name", None)
-    assert schema_name in (None, "$no_table")
+    assert schema_name in (None, "$one_row")
 
     # The exit node should reference the same literal column
     exit_node = next(n for nid, n in plan.nodes(data=True) if n.node_type == LogicalPlanStepType.Exit)
@@ -161,11 +161,11 @@ def test_strategy_prunes_manifest():
 
     strategy.complete(plan, None)
 
-    # After the rewrite the scan is repointed at the `$no_table` virtual relation and
+    # After the rewrite the scan is repointed at the `$one_row` virtual relation and
     # its manifest is dropped entirely — the strategy clears it so a file-based reader
     # can't supply a file list for a plan that must read nothing.
     assert getattr(scan_node, "manifest", None) is None
-    assert scan_node.relation == "$no_table"
+    assert scan_node.relation == "$one_row"
 
 
 def test_strategy_no_manifest_leaves_plan_unchanged():

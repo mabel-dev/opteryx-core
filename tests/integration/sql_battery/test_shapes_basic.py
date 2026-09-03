@@ -64,6 +64,8 @@ STATEMENTS = [
         ("SELECT * FROM testdata.satellites", 177, 8, None),
         ("SELECT * FROM $planets", 9, 20, None),
         ("SELECT * FROM testdata.astronauts", 357, 19, None),
+        ("SELECT * FROM $one_row", 1, 1, None),
+        # `$no_table` is the pre-Sep-2026 name for `$one_row`; still resolves.
         ("SELECT * FROM $no_table", 1, 1, None),
         # `SHOW VARIABLES` is the SINGLE surface for session variables. The
         # `$variables` relation backing it is internal-only and must not be
@@ -433,7 +435,7 @@ STATEMENTS = [
         ("SELECT id AS n FROM $planets UNION ALL SELECT id > 3 AS n FROM $planets", 18, 1, None),
         # Chained UNION with a trailing ORDER BY / LIMIT.
         ("SELECT name FROM $planets WHERE id = 1 UNION SELECT name FROM $planets WHERE id = 2 UNION SELECT name FROM $planets WHERE id = 3 ORDER BY name LIMIT 2", 2, 1, None),
-        # FROM-less chained UNION (legs collapse $no_table into $project): distinct + ALL.
+        # FROM-less chained UNION (legs collapse $one_row into $project): distinct + ALL.
         ("SELECT 1 UNION SELECT 2 UNION SELECT 3", 3, 1, None),
         ("SELECT 1 UNION SELECT 1 UNION SELECT 2", 2, 1, None),
         ("SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2", 3, 1, None),

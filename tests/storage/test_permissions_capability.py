@@ -1271,3 +1271,50 @@ def test_an_owner_sees_the_trigger_row(definitions_catalog, install):
 
     assert rows == [("refresh__coll1__mv", "olive")]
     assert ("dcat.coll1.src", "AUTOMATE") in capability.asked
+
+
+# --- SHOW GRANTS hands the session's entitlement names to the capability
+
+
+class RecordingGrantsCapability(ScriptedCapability):
+    """A capability whose `grants` takes the session's entitlement names."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def grants(self, identity, policies, entitlements=None):
+        self.calls.append((identity, list(policies), entitlements))
+        return []
+
+
+class TwoArgumentGrantsCapability(ScriptedCapability):
+    """A capability written before entitlements existed."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def grants(self, identity, policies):
+        self.calls.append((identity, list(policies)))
+        return []
+
+
+def test_show_grants_passes_entitlement_names_to_a_capability_that_takes_them(install):
+    capability = install(RecordingGrantsCapability())
+    session = opteryx.session(
+        user="olive",
+        access_policies=[{"pattern": "ws.*", "role": "reader"}],
+        entitlements=["platform_admin", "automation_admin::public"],
+    )
+    list(session.execute_to_morsels("SHOW GRANTS"))
+    assert capability.calls == [
+        ("olive", [{"pattern": "ws.*", "role": "reader"}], ["platform_admin", "automation_admin::public"])
+    ]
+
+
+def test_show_grants_still_works_for_a_capability_that_takes_two_arguments(install):
+    capability = install(TwoArgumentGrantsCapability())
+    session = opteryx.session(user="olive", entitlements=["automation_admin::public"])
+    list(session.execute_to_morsels("SHOW GRANTS"))
+    assert capability.calls and capability.calls[0][0] == "olive"

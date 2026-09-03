@@ -370,7 +370,7 @@ class InformationSchemaTablesTable(BaseTable, _KeyColumnPredicatePushable):
     """Reads `information_schema.tables` from the catalog's collection/dataset/view listings."""
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
@@ -528,7 +528,7 @@ class InformationSchemaColumnsTable(BaseTable, _KeyColumnPredicatePushable):
     """Reads `information_schema.columns` by fetching each dataset's schema from the catalog."""
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
@@ -652,7 +652,7 @@ class InformationSchemaViewsTable(BaseTable, _KeyColumnPredicatePushable):
     """
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
@@ -768,7 +768,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
     """
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # read_dataset() filters rows by AUTOMATE access itself - see module docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
@@ -825,6 +825,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         # predates the field - which fires on every commit - and 0 for one
         # whose floor was removed; the two read differently on purpose.
         "minimum_interval_seconds",
+        "signal_token_rotated_at",
     )
 
     # trigger_catalog/trigger_collection/trigger_holder are known before the
@@ -876,6 +877,10 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             "suspended_at": _lt.TIMESTAMP(),
             "suspended_by": _lt.VARCHAR,
             "minimum_interval_seconds": _lt.INT64,
+            # When a signal trigger's signal token (the one behind signed invoke
+            # URLs) was last rotated; null when it has none. The token itself is
+            # never reported.
+            "signal_token_rotated_at": _lt.TIMESTAMP(),
         }
         self.schema = RelationSchema(
             name="information_schema.triggers",
@@ -917,6 +922,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
         suspended_at = []
         suspended_by = []
         minimum_interval_seconds = []
+        signal_token_rotated_at = []
 
         def emit(collection: str, holder: str, window_from, trigger: dict) -> None:
             """One row, from a trigger record and the holder it was read off."""
@@ -944,6 +950,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             suspended_at.append(_ms_to_datetime(trigger.get("suspended-at-ms")))
             suspended_by.append(trigger.get("suspended-by"))
             minimum_interval_seconds.append(trigger.get("minimum-interval-seconds"))
+            signal_token_rotated_at.append(_ms_to_datetime(trigger.get("signal-token-rotated-at-ms")))
 
         # See InformationSchemaTablesTable.read_dataset - trigger_catalog is
         # constant per reader, so an excluding predicate skips enumeration
@@ -1007,6 +1014,7 @@ class InformationSchemaTriggersTable(BaseTable, _KeyColumnPredicatePushable):
             vector_from_sequence(suspended_at, dtype=DrakenType.TIMESTAMP64),
             vector_from_sequence(suspended_by, dtype=DrakenType.VARCHAR),
             vector_from_sequence(minimum_interval_seconds, dtype=DrakenType.INT64),
+            vector_from_sequence(signal_token_rotated_at, dtype=DrakenType.TIMESTAMP64),
         ]
         yield Morsel.from_vectors(list(self._COLUMNS), vectors)
 
@@ -1039,7 +1047,7 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
     """
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # read_dataset() filters rows by AUTOMATE access itself
     supports_predicate_pushdown = True
 
@@ -1156,7 +1164,7 @@ class InformationSchemaTasksTable(BaseTable, _KeyColumnPredicatePushable):
         subscriptions = {}
         if user and lister is not None:
             subscriptions = {
-                (row.get("collection"), row.get("task")): row.get("outcome")
+                (row.get("collection"), row.get("object")): row.get("outcome")
                 for row in lister(user)
             }
 
@@ -1243,7 +1251,7 @@ class InformationSchemaColumnRelationshipsTable(BaseTable, _KeyColumnPredicatePu
     """
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
@@ -1440,7 +1448,7 @@ class InformationSchemaSchemataTable(BaseTable, _KeyColumnPredicatePushable):
     """
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # read_dataset() filters rows by READ access itself - see module docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
@@ -1587,7 +1595,7 @@ class InformationSchemaGrantsTable(BaseTable, _KeyColumnPredicatePushable):
     """
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # the capability gates every row on administer authority - see class docstring
     # BaseTable also declares this (False); it comes first in the MRO, so it
     # would otherwise shadow _KeyColumnPredicatePushable's True.
@@ -1746,13 +1754,18 @@ class InformationSchemaGrantsTable(BaseTable, _KeyColumnPredicatePushable):
 
 
 class InformationSchemaListenersTable(BaseTable):
-    """Reads `information_schema.listeners` - the tasks the CALLER listens to.
+    """Reads `information_schema.listeners` - what the CALLER listens to.
 
     Self-scoped, and that is the whole of its authority model. It returns the
     session user's own subscriptions and nobody else's: there is no form that
     lists another user's, and none that lists a task's subscribers, which would
     tell whoever asked who else is watching it - the same leak that keeps
     listeners out of SHOW CREATE TASK.
+
+    A row is a TASK or a MATERIALIZED VIEW - whatever a trigger targets - and
+    `kind` says which. The caller never wrote it down: a table, a view and a
+    task share one namespace, so the name they subscribed to identified exactly
+    one object, and this is that answer recorded at subscription time.
 
     So it needs no permission check. Every row it can return was authorized by
     the LISTEN that wrote it, against what the task writes, at the moment it was
@@ -1771,13 +1784,17 @@ class InformationSchemaListenersTable(BaseTable):
     """
 
     __mode__ = "Internal"
-    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$no_table
+    interal_only = True  # routes through the generic "Reader" physical node, like $planets/$one_row
     self_governs_permissions = True  # rows are the caller's own; there is nothing else to filter
 
     _COLUMNS = (
-        "task_catalog",
-        "task_collection",
-        "task_name",
+        "object_catalog",
+        "object_collection",
+        "object_name",
+        # "task" | "materialized_view". Recorded at subscription time rather
+        # than re-derived here, which would cost a lookup per row to answer a
+        # question whose answer cannot change.
+        "kind",
         # "ERROR" | "SUCCESS" | "EVERYTHING" - which outcomes this subscription
         # asked to hear about. Never null: a LISTEN with no FOR clause is
         # recorded as EVERYTHING rather than as an absence.
@@ -1793,9 +1810,10 @@ class InformationSchemaListenersTable(BaseTable):
 
     def get_dataset_schema(self) -> RelationSchema:
         column_types = {
-            "task_catalog": _lt.VARCHAR,
-            "task_collection": _lt.VARCHAR,
-            "task_name": _lt.VARCHAR,
+            "object_catalog": _lt.VARCHAR,
+            "object_collection": _lt.VARCHAR,
+            "object_name": _lt.VARCHAR,
+            "kind": _lt.VARCHAR,
             "outcome": _lt.VARCHAR,
             "created_at": _lt.TIMESTAMP(),
         }
@@ -1819,9 +1837,10 @@ class InformationSchemaListenersTable(BaseTable):
 
         user = self.execution_context.user if self.execution_context else None
 
-        task_catalog = []
-        task_collection = []
-        task_name = []
+        object_catalog = []
+        object_collection = []
+        object_name = []
+        kind = []
         outcome = []
         created_at = []
 
@@ -1833,16 +1852,18 @@ class InformationSchemaListenersTable(BaseTable):
             # tolerance `InformationSchemaTriggersTable` applies to `list_tasks`.
             lister = getattr(self.catalog, "list_listeners_for_user", None)
             for row in lister(user) if lister is not None else []:
-                task_catalog.append(row.get("workspace"))
-                task_collection.append(row.get("collection"))
-                task_name.append(row.get("task"))
+                object_catalog.append(row.get("workspace"))
+                object_collection.append(row.get("collection"))
+                object_name.append(row.get("object"))
+                kind.append(row.get("kind"))
                 outcome.append(row.get("outcome"))
                 created_at.append(_ms_to_datetime(row.get("created-at-ms")))
 
         vectors = [
-            vector_from_sequence(task_catalog, dtype=DrakenType.VARCHAR),
-            vector_from_sequence(task_collection, dtype=DrakenType.VARCHAR),
-            vector_from_sequence(task_name, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(object_catalog, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(object_collection, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(object_name, dtype=DrakenType.VARCHAR),
+            vector_from_sequence(kind, dtype=DrakenType.VARCHAR),
             vector_from_sequence(outcome, dtype=DrakenType.VARCHAR),
             vector_from_sequence(created_at, dtype=DrakenType.TIMESTAMP64),
         ]

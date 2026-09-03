@@ -906,9 +906,13 @@ class Writable:
         raise NotImplementedError(f"{self.__class__.__name__} does not support **LISTEN**")
 
     def add_listener(self, relation_name: str, user: str, outcome: str) -> None:
-        """Subscribe `user` to a task's run outcomes.
+        """Subscribe `user` to an object's run outcomes.
 
-        A task holds ONE subscription per user. A second one is refused rather
+        `relation_name` is whatever a trigger targets - a task or a materialized
+        view. The store resolves which, because a table, a view and a task share
+        one namespace and the name identifies exactly one of them.
+
+        An object holds ONE subscription per user. A second one is refused rather
         than merged - the caller is told what they already have, and given the
         UNLISTEN/LISTEN pair that changes it.
 

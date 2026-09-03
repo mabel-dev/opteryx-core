@@ -62,9 +62,9 @@ def _run(sql, limit):
 def test_virtual_datasets_declare_row_counts():
     # Without these, every estimate touching virtual data is fabricated.
     assert planet_data.schema().row_count_metric == 9
-    from opteryx.managers.virtual_datasets import no_table_data, user, variables_data
+    from opteryx.managers.virtual_datasets import one_row_data, user, variables_data
 
-    assert no_table_data.schema().row_count_metric == 1
+    assert one_row_data.schema().row_count_metric == 1
     assert user.schema().row_count_estimate > 0
     assert variables_data.schema().row_count_estimate > 0
 

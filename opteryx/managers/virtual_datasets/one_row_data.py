@@ -4,12 +4,16 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-no table
----------
+one row
+--------
 
-This is used to prepresent no table.
+The stand-in source for a statement with no FROM clause ("SELECT 1"), and for
+an answer served from statistics rather than a read.
 
-It actually is a table, with one row and one column.
+It actually is a table, with one row and one column. Named for what it emits
+rather than for what the statement lacks — the same reasoning behind Spark's
+OneRowRelation and PostgreSQL's Result node. `$no_table` is still accepted in
+SQL as an alias (see virtual_data_connector.DATASET_ALIASES).
 """
 
 from draken.draken_native import DrakenType
@@ -33,5 +37,5 @@ def schema():
     # fmt:off
     from opteryx.types.schema import mint_column_identity
     # EXACT: this relation exists to give `SELECT 1` a single row to project from.
-    return RelationSchema(name="$no_table", columns=[SchemaColumn(name="$column", column_type=_lt.INT64, identity=mint_column_identity("$no_table", "$column"))], row_count_metric=1)
+    return RelationSchema(name="$one_row", columns=[SchemaColumn(name="$column", column_type=_lt.INT64, identity=mint_column_identity("$one_row", "$column"))], row_count_metric=1)
     # fmt:on

@@ -49,11 +49,11 @@ same class of fix.
 alone):
 - `opteryx/connectors/base/base_connector.py`
 - `opteryx/types/_null_handling.py`
-- `opteryx/managers/virtual_datasets/{user,planet_data,variables_data,no_table_data}.py`
+- `opteryx/managers/virtual_datasets/{user,planet_data,variables_data,one_row_data}.py`
 - `opteryx/expression/functions/implementations/utility.pyx`
 
 Plus ~25 test files. The first non-trivial one in the import chain when
-running `SELECT 1` is `managers/virtual_datasets/no_table_data.py`, reached
+running `SELECT 1` is `managers/virtual_datasets/one_row_data.py`, reached
 via `planner/optimizer/strategies/constant_folding.py`. Any query that hits
 the planner triggers it.
 

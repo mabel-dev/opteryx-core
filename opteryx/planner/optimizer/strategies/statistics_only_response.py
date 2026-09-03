@@ -249,7 +249,7 @@ def is_statistics_only_query(logical_plan) -> bool:
             # the answer to COUNT(*) over an unnest is the SUM OF THE ARRAY LENGTHS,
             # which no manifest statistic records — the scan's row count is a
             # different number entirely. The rewrite replaced the scan with a
-            # $no_table manifest count, which left the unnest with no source column
+            # $one_row manifest count, which left the unnest with no source column
             # and the query died as "a CROSS JOIN UNNEST source array the engine
             # could not resolve here". The refusal was luck: the same rewrite over a
             # plan that still resolved would have returned the PARENT row count as
@@ -568,7 +568,7 @@ def get_min_max_from_manifest(manifest, column_name: str, operation: str):
 
 class StatisticsOnlyResponseStrategy(OptimizationStrategy):
     """Optimizer strategy that rewrites trivial COUNT(*) aggregates into a
-    simple projection of a literal count over the `$no_table` virtual dataset.
+    simple projection of a literal count over the `$one_row` virtual dataset.
 
     This strategy strictly follows the plan->plan pattern used by other
     strategies: it accepts a logical plan, mutates it when appropriate, and
@@ -698,11 +698,11 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
 
             literals.append(literal)
 
-        # Point the source(s) to $no_table BEFORE we mutate the aggregate node.
+        # Point the source(s) to $one_row BEFORE we mutate the aggregate node.
         # Doing this early avoids potential iterator/side-effect issues when
         # modifying the plan structure.
-        scan_node.relation = "$no_table"
-        scan_node.alias = "$no_table"
+        scan_node.relation = "$one_row"
+        scan_node.alias = "$one_row"
         # Prune 100% of files in the manifest so optimizer/executor treat
         # this as having no data to read while preserving connector/schema.
         # Copy-on-write (Manifest.subset): manifests attached to plan nodes
@@ -801,23 +801,23 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
         aggregate_node.groups = None
         aggregate_node.projection = None
 
-        # Point the source(s) to $no_table so physical planner / executor treat
+        # Point the source(s) to $one_row so physical planner / executor treat
         # this as a projection-only plan (no table scanning required). We apply
         # the change to all Scan nodes found to be conservative.
         # We located the relevant scan node earlier; set it directly. This
         # avoids potential iterator-side-effects and is consistent with the
         # conservative single-scan expectation in `is_statistics_only_query`.
-        scan_node.relation = "$no_table"
-        scan_node.alias = "$no_table"
+        scan_node.relation = "$one_row"
+        scan_node.alias = "$one_row"
 
-        # Replace the connector with the virtual `$no_table` table engine so
-        # the ReaderNode will produce the one-row $no_table morsel. This
+        # Replace the connector with the virtual `$one_row` table engine so
+        # the ReaderNode will produce the one-row $one_row morsel. This
         # avoids relying on the original connector's behavior after we
         # rewrote the plan to a projection-only query.
         from opteryx.connectors import connector_factory
 
-        virt_gateway = connector_factory("$no_table", telemetry=self.telemetry)
-        scan_node.connector = virt_gateway.table_engine("$no_table", telemetry=self.telemetry)
+        virt_gateway = connector_factory("$one_row", telemetry=self.telemetry)
+        scan_node.connector = virt_gateway.table_engine("$one_row", telemetry=self.telemetry)
 
         # Ensure schema is the virtual dataset schema so ReaderNode
         # normalization succeeds and downstream nodes see the
@@ -829,8 +829,8 @@ class StatisticsOnlyResponseStrategy(OptimizationStrategy):
 
         # The scan's `.columns` describes the scan's OWN schema (the binder seeds it
         # that way -- see binder/dataset.py::visit_scan), so re-pointing the scan at
-        # `$no_table` has to re-seed them too. Left stale, they still name the real
-        # table's columns while the reader now emits `$no_table`'s single column, and
+        # `$one_row` has to re-seed them too. Left stale, they still name the real
+        # table's columns while the reader now emits `$one_row`'s single column, and
         # the native compiler rejects the plan with "a virtual dataset missing plan
         # columns". Projection pushdown hid this by overwriting `.columns` from the
         # NEW schema afterwards -- but only when it runs; with its kill-switch set the

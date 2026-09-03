@@ -2039,13 +2039,13 @@ def inner_query_planner(ast_branch: dict) -> LogicalPlan:
                 # Update step_id for next iteration
                 step_id = join_step_id
 
-    # If there's no relations, use $no_table
+    # If there's no relations, use $one_row
     if len(_relations) == 0:
         step_id, sub_plan = create_node_relation(
             {
                 "relation": {
                     "Table": {
-                        "name": [{"Identifier": {"value": "$no_table"}}],
+                        "name": [{"Identifier": {"value": "$one_row"}}],
                         "args": None,
                         "alias": None,
                         "with_hints": [],

@@ -1889,7 +1889,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog.drop_task(relative_id, author=author)
 
     def task_writes(self, relation_name: str) -> List[str]:
-        """The relations the task's statement writes, from its catalog record."""
+        """The relations the task's statement writes, from its catalog record.
+
+        Tasks only. A materialized view IS what it writes, so the binder never
+        asks this of one - see `_bind_subscription`.
+        """
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
 
@@ -1954,9 +1958,10 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         return [
             {
-                "task_catalog": row.get("workspace"),
-                "task_collection": row.get("collection"),
-                "task_name": row.get("task"),
+                "object_catalog": row.get("workspace"),
+                "object_collection": row.get("collection"),
+                "object_name": row.get("object"),
+                "kind": row.get("kind"),
                 "outcome": row.get("outcome"),
                 "created_at": row.get("created-at-ms"),
             }

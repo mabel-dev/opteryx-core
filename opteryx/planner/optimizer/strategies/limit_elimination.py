@@ -29,7 +29,7 @@ LIMIT with an OFFSET is never eliminated here):
    underneath it, no matter what runs below (filters, unnests, joins). One
    row is <= any LIMIT >= 1.
 
-2. `$no_table` scan — the synthetic single-row source behind a FROM-less
+2. `$one_row` scan — the synthetic single-row source behind a FROM-less
    `SELECT <expr>` (e.g. `SELECT 1 LIMIT 1`). Always exactly one row.
 
 3. Manifest-bounded scan — the Scan's manifest record count is the exact,
@@ -139,11 +139,11 @@ class LimitEliminationStrategy(OptimizationStrategy):
             n.node_type in _ROW_COUNT_SAFE_TYPES for _, n in plan.nodes(data=True)
         )
 
-        no_table_scan = False
+        one_row_scan = False
         manifest_row_count = None
         if row_count_bound_to_scan:
             scan_node = scan_nodes[0][1]
-            no_table_scan = getattr(scan_node, "relation", None) == "$no_table"
+            one_row_scan = getattr(scan_node, "relation", None) == "$one_row"
             manifest = getattr(scan_node, "manifest", None)
             manifest_row_count = manifest.get_record_count() if manifest is not None else None
 
@@ -157,7 +157,7 @@ class LimitEliminationStrategy(OptimizationStrategy):
 
             eliminable = (
                 _limit_sees_only_aggregate_row(plan, nid)
-                or no_table_scan
+                or one_row_scan
                 or (manifest_row_count is not None and manifest_row_count <= limit_node.limit)
             )
             if not eliminable:

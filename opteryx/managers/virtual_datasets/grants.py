@@ -48,7 +48,19 @@ def read(at_date=None, variables=None):
         policies = policies.to_pylist()
 
     username = _get_variable(variables, "external_user", "")
-    rows = active_permissions_capability().grants(username, list(policies or []))
+
+    # The session's entitlement names, so a capability that reports them (opteryx-access
+    # lists them ahead of the role rows) can. Passed as a third argument only when the
+    # capability takes one: PermitAll and older capabilities take two, and a listing
+    # must not fail because the deployment has not upgraded its capability in step.
+    entitlements = _get_variable(variables, "user_entitlements", [])
+    if callable(getattr(entitlements, "to_pylist", None)):
+        entitlements = entitlements.to_pylist()
+    capability = active_permissions_capability()
+    try:
+        rows = capability.grants(username, list(policies or []), list(entitlements or []))
+    except TypeError:
+        rows = capability.grants(username, list(policies or []))
 
     patterns = []
     levels = []

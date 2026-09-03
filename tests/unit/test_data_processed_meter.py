@@ -102,8 +102,8 @@ def test_explain_bills_nothing():
     assert _run("EXPLAIN SELECT * FROM testdata.astronauts").billing_bytes == 0
 
 
-def test_no_table_bills_nothing():
-    """`$no_table` is the planner's stand-in for a statement with no FROM, and
+def test_one_row_bills_nothing():
+    """`$one_row` is the planner's stand-in for a statement with no FROM, and
     for a statistics-only answer. It is not a relation the user named."""
     assert _run("SELECT 1").billing_bytes == 0
     assert _run("SELECT COUNT(*) FROM testdata.astronauts").billing_bytes == 0
