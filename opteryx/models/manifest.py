@@ -1989,6 +1989,49 @@ class Manifest:
         self._column_bounds_cache[column] = result
         return result
 
+    def file_key_ranges(self, column: str) -> List[Tuple[FileEntry, Any, Any]]:
+        """Per-file ``(entry, min, max)`` on one column, for files that have them.
+
+        Compaction planning reasons about whether files OVERLAP on the sort key
+        — which ones cover the same range and so need declustering, and which
+        are already disjoint and can simply be packed. That is a per-file
+        question, unlike ``get_column_bounds``, which reduces the same statistic
+        to one range for the whole relation.
+
+        Files with no usable bound for the column are omitted rather than given
+        a default: a fabricated range would put a file in or out of an
+        overlapping group on no evidence. Callers see a shorter list, which is
+        the honest answer — nothing is known about those files' key extents.
+
+        Resolution goes through ``_resolve_field_id``, which prefers a real
+        field id and falls back to the LOAD-TIME schema position. That fallback
+        matters here: bounds built from a parquet manifest's positional
+        min/max lists are keyed by position, and reading them against the live
+        (projection-pruned) schema would silently return another column's
+        stats.
+
+        ⛔ ``_is_real_bound`` is not optional. A file with no bound carries
+        ``_NO_BOUND_SENTINEL`` (INT64_MIN) rather than None, and admitting it
+        makes that file appear to start below every real value — it would win
+        every overlap comparison and anchor a group it has no claim to.
+        """
+        field_id = self._resolve_field_id(column)
+        if field_id is None:
+            return []
+
+        ranges: List[Tuple[FileEntry, Any, Any]] = []
+        for file_entry in self.files:
+            if not file_entry.lower_bounds or not file_entry.upper_bounds:
+                continue
+            low = file_entry.lower_bounds.get(field_id)
+            high = file_entry.upper_bounds.get(field_id)
+            if low is None or high is None:
+                continue
+            if not _is_real_bound(low, high):
+                continue
+            ranges.append((file_entry, low, high))
+        return ranges
+
     def get_column_stats(self, column: str) -> Dict[str, Any]:
         """
         Get comprehensive statistics for a column.

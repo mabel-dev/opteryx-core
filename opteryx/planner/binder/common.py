@@ -60,7 +60,7 @@ from opteryx.planner.binder.relation import (
     visit_unlisten,
     visit_alter_trigger_owner,
     visit_drop_workspace,
-    visit_optimize_relation,
+    visit_compaction_commit,
     visit_rename_column,
     visit_rename_relation,
     visit_truncate_relation,
@@ -398,10 +398,10 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_alter_column_type(self, node, context)
 
-    def visit_optimize_relation(
+    def visit_compaction_commit(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
-        return visit_optimize_relation(self, node, context)
+        return visit_compaction_commit(self, node, context)
 
     def visit_alter_workspace(
         self, node: Node, context: BindingContext

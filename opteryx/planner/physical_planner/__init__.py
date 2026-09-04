@@ -601,10 +601,6 @@ def _create_drop_relationship_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_relationship", **logical_node.properties)
 
 
-def _create_optimize_relation_node(logical_node, query_properties, registry):
-    return registry.create("Relation Management", query_properties, action="optimize_relation", **logical_node.properties)
-
-
 def _create_alter_workspace_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="alter_workspace", **logical_node.properties)
 
@@ -619,6 +615,10 @@ def _create_drop_workspace_node(logical_node, query_properties, registry):
 
 def _create_insert_node(logical_node, query_properties, registry):
     return registry.create("Insert", query_properties, **logical_node.properties)
+
+
+def _create_compaction_commit_node(logical_node, query_properties, registry):
+    return registry.create("Compaction Commit", query_properties, **logical_node.properties)
 
 
 def _create_merge_node(logical_node, query_properties, registry):
@@ -738,12 +738,12 @@ _DISPATCH = {
     LogicalPlanStepType.AlterColumnType:  _create_alter_column_type_node,
     LogicalPlanStepType.AddRelationship:  _create_add_relationship_node,
     LogicalPlanStepType.DropRelationship: _create_drop_relationship_node,
-    LogicalPlanStepType.OptimizeRelation: _create_optimize_relation_node,
     LogicalPlanStepType.AlterWorkspace:   _create_alter_workspace_node,
     LogicalPlanStepType.AlterWorkspaceSecure: _create_alter_workspace_secure_node,
     LogicalPlanStepType.DropWorkspace:    _create_drop_workspace_node,
     LogicalPlanStepType.Insert:           _create_insert_node,
     LogicalPlanStepType.Merge:            _create_merge_node,
+    LogicalPlanStepType.CompactionCommit: _create_compaction_commit_node,
     LogicalPlanStepType.DropTrigger:      _create_drop_trigger_node,
     LogicalPlanStepType.CreateTrigger:    _create_create_trigger_node,
     LogicalPlanStepType.AlterTriggerSuspended: _create_alter_trigger_suspended_node,

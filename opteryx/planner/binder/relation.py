@@ -1497,10 +1497,12 @@ def visit_truncate_relation(self, node: Node, context: BindingContext) -> Tuple[
     return node, context
 
 
-def visit_optimize_relation(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    """
-    Bind the OPTIMIZE node to determine which connector should handle
-    compacting the relation's data files.
+def visit_compaction_commit(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind the compaction sink.
+
+    The read half - which relation, what schema, which files - was desugared
+    into an ordinary `SELECT *` by `plan_optimize_table` and binds like any
+    other scan. This binds only the SINK: who may rewrite the relation's files.
     """
     from opteryx.connectors import connector_factory
     from opteryx.connectors.capabilities import Writable
@@ -1513,6 +1515,16 @@ def visit_optimize_relation(self, node: Node, context: BindingContext) -> Tuple[
             f"connector for {node.relation_name} does not support OPTIMIZE"
         )
 
+    # Overriding `compaction_commit` is how a connector declares it can compact.
+    # Checked HERE so a connector with no catalog refuses before the scan runs,
+    # rather than after a full read and sort have been paid for. Identity
+    # comparison against the base rather than `hasattr`: every Writable has the
+    # attribute, and what matters is whether this one replaced it.
+    if type(node.connector).compaction_commit is Writable.compaction_commit:
+        raise NotImplementedError(
+            f"{type(node.connector).__name__} does not support OPTIMIZE"
+        )
+
     # OPTIMIZE rewrites files losslessly and declares no new structure - same
     # trust tier as INSERT/UPDATE, not the owner-only tier ALTER TABLE uses.
     if not can_perform_action(context.execution_context, node.relation_name, action="WRITE"):
@@ -1523,10 +1535,7 @@ def visit_optimize_relation(self, node: Node, context: BindingContext) -> Tuple[
     # NOT refused for a materialized view, unlike every other table modifier.
     # OPTIMIZE compacts the files a relation's rows already live in; it is
     # lossless and declares no new structure, so the view still holds exactly
-    # what its SELECT produced. It is physical maintenance, not a write - the
-    # thing `_reject_materialized_view_target` exists to stop is a statement
-    # whose effect the next REFRESH would discard, and compaction has no such
-    # effect to discard.
+    # what its SELECT produced. Physical maintenance, not a write.
 
     node.columns = []
     return node, context
@@ -1662,7 +1671,7 @@ def _reject_materialized_view_target(node, statement: str) -> None:
                                  relation_management)
       OPTIMIZE                   it compacts files losslessly and changes no
                                  contents, so there is nothing a REFRESH could
-                                 discard (see visit_optimize_relation)
+                                 discard (see visit_compaction_commit)
 
     Everything else - DDL and mutation alike, including MERGE, UPDATE and
     DELETE - is refused. A statement added here that mutates a relation and is

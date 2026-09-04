@@ -38,6 +38,7 @@ from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.optimizer.plan_validator import validate_plan
 from opteryx.planner.optimizer.strategies import (
     BooleanSimplificationStrategy,
+    CompactionPlanningStrategy,
     ConstantFoldingStrategy,
     CorrelatedFiltersStrategy,
     SemiJoinPushdownStrategy,
@@ -96,6 +97,7 @@ __all__ = ["do_optimizer"]
 # too is harmless (same flag, checked twice) and keeps this the complete registry.
 _STRATEGY_DISABLE_FLAGS = {
     "BooleanSimplificationStrategy": "disable_boolean_simplification",
+    "CompactionPlanningStrategy": "disable_compaction_planning",
     "ConstantFoldingStrategy": "disable_constant_folding",
     "CorrelatedFiltersStrategy": "disable_correlated_filters",
     "SemiJoinPushdownStrategy": "disable_semi_join_pushdown",
@@ -138,6 +140,34 @@ _STRATEGY_DISABLE_FLAGS = {
     "WindowTopKFusionStrategy": "disable_window_topk_fusion",
 }
 
+
+
+# ⛔ Strategies that MUST NOT run on an OPTIMIZE plan (D-10).
+#
+# A compaction plan is scan, sort, commit. It carries no user projection and no
+# user predicate, so none of these has anything legitimate to do — and one of
+# them, projection pushdown, is a DATA-LOSS bug here: compaction rewrites whole
+# rows, so a scan narrowed to the sort column silently drops every other column
+# from the rewritten files, and the row-count invariant does not catch it
+# because the counts still match.
+#
+# Declining wholesale rather than carving an exemption into each strategy: a
+# strategy that never runs cannot narrow anything by accident. Listed centrally
+# rather than as N separate `should_i_run` edits so the set is auditable in one
+# place, the way _STRATEGY_DISABLE_FLAGS is.
+_STRATEGIES_SKIPPED_ON_COMPACTION = frozenset(
+    {
+        "ProjectionPushdownStrategy",
+        "PredicatePushdownStrategy",
+        "ManifestPruningStrategy",
+        "LimitFilesPruningStrategy",
+        "LimitPushdownStrategy",
+        "TopNScanPushdownStrategy",
+        "TopNManifestPruningStrategy",
+        "DistinctPushdownStrategy",
+        "StatisticsOnlyResponseStrategy",
+    }
+)
 
 def _validate_strategy_order(strategies) -> None:
     """Assert the declared ordering contract between strategies (WP-2).
@@ -190,6 +220,11 @@ class OptimizerVisitor:
             # before any strategy that reasons about joins or pushes predicates,
             # since it introduces a join and moves a predicate across it.
             DecorrelateSubqueryStrategy(telemetry),
+            # Selects the files an OPTIMIZE rewrites, from manifest statistics.
+            # Depends on no other strategy and provides nothing to any (D-11):
+            # it constructs from the manifest rather than rewriting what others
+            # produced, so its position here is arbitrary.
+            CompactionPlanningStrategy(telemetry),
             # Moves an INNER join's single-leg ON conjuncts into a Filter above
             # the join, so every expression rewrite below (which visit Filter
             # nodes only) sees them exactly as it sees a WHERE predicate.
@@ -361,9 +396,17 @@ class OptimizerVisitor:
         # result-size guard's refresh shares it. See _scan_stats.
         if scan_stats_cache is None:
             scan_stats_cache = {}
+        from opteryx.planner.optimizer.strategies.compaction_planning import (
+            plan_has_compaction,
+        )
+
+        is_compaction = plan_has_compaction(current_plan)
         for strategy in self.strategies:
-            flag_name = _STRATEGY_DISABLE_FLAGS.get(type(strategy).__name__)
+            strategy_name = type(strategy).__name__
+            flag_name = _STRATEGY_DISABLE_FLAGS.get(strategy_name)
             if flag_name is not None and getattr(config.features, flag_name):
+                continue
+            if is_compaction and strategy_name in _STRATEGIES_SKIPPED_ON_COMPACTION:
                 continue
             if strategy.should_i_run(current_plan):
                 if (

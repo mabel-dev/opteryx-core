@@ -294,17 +294,25 @@ def test_optimize_is_not_refused_for_being_a_view(tmp_path):
     one - it names a missing capability rather than the target's type - and
     proving compaction actually runs needs a catalog-backed view, which is the
     compactor's own test, not this file's.
+
+    The refusal is raised at PLAN time now that OPTIMIZE is a plan rather than a
+    single DDL node: overriding `Writable.compaction_commit` is what declares a
+    connector able to compact, and the binder checks it before the scan runs
+    instead of after a full read and sort have been paid for. So it arrives
+    wrapped as a planning error. The message - which connector, and that it is a
+    missing capability rather than the target being a view - is what this pins,
+    and that is unchanged.
     """
     session = _setup(tmp_path)
     _seed_view(session)
 
-    with pytest.raises(NotImplementedError, match="does not support OPTIMIZE"):
+    with pytest.raises(Exception, match="does not support OPTIMIZE"):
         list(session.execute_to_morsels("OPTIMIZE TABLE ws.mv"))
 
     # The same statement against a plain table stops at exactly the same place,
     # which is what makes the refusal about the connector and not the view.
     list(session.execute_to_morsels("CREATE TABLE ws.plain2 (a BIGINT)"))
-    with pytest.raises(NotImplementedError, match="does not support OPTIMIZE"):
+    with pytest.raises(Exception, match="does not support OPTIMIZE"):
         list(session.execute_to_morsels("OPTIMIZE TABLE ws.plain2"))
 
     assert len(_rows(session.execute_to_morsels("SELECT * FROM ws.mv"))) == 2

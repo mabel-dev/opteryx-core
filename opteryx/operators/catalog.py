@@ -179,6 +179,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.asof_join import AsofJoinNode
     from opteryx.operators.band_join import BandJoinNode
     from opteryx.operators.cross_join import CrossJoinNode
+    from opteryx.operators.compaction_commit import CompactionCommitNode
     from opteryx.operators.cte_ref import CteRefNode
     from opteryx.operators.csv_read import CsvReadNode
     from opteryx.operators.distinct import DistinctNode
@@ -526,6 +527,12 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         MergeNode,
         name="Merge",
+        category=OperatorCategory.IO,
+        is_not_explained=True,
+    )
+    r.register(
+        CompactionCommitNode,
+        name="Compaction Commit",
         category=OperatorCategory.IO,
         is_not_explained=True,
     )

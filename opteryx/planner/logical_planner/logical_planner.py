@@ -110,7 +110,7 @@ class LogicalPlanStepType(int, Enum):
     AlterColumnType = auto()
     AddRelationship = auto()
     DropRelationship = auto()
-    OptimizeRelation = auto()
+    CompactionCommit = auto()
     Insert = auto()
     Merge = auto()
 
@@ -6025,12 +6025,69 @@ def plan_optimize_table(statement, **kwargs):
     if isinstance(relation_name, list):
         relation_name = ".".join(relation_name)
 
-    plan = LogicalPlan()
-    node = LogicalPlanNode(node_type=LogicalPlanStepType.OptimizeRelation)
-    node.relation_name = relation_name
+    # OPTIMIZE desugars to `SELECT * FROM <relation>` with a compaction sink on
+    # top - the shape DELETE and UPDATE already use (merge_desugar._attach_sink).
+    #
+    # WHY DESUGAR RATHER THAN SYNTHESIZE THE SCAN IN THE OPTIMIZER: the scan has
+    # to be FULLY bound - schema, manifest, connector, commit timestamp, origin
+    # stamping - and the binder is the only thing that does all of that. Emitting
+    # the shape here means the binder binds this scan through exactly the path it
+    # binds every other one. An optimizer building a Scan itself would be
+    # reproducing that list from memory, and a half-bound node does not fail at
+    # the optimizer - it fails, or silently mis-types, much later.
+    #
+    # WHICH FILES the scan reads is still the optimizer's decision:
+    # CompactionPlanningStrategy narrows this scan's manifest to the selected
+    # ones. The wildcard is load-bearing - compaction rewrites whole rows, so
+    # every column must be read.
+    from opteryx.planner.logical_planner.merge_desugar import _attach_sink
+    from opteryx.planner.logical_planner.merge_desugar import _select_over
+    from opteryx.planner.logical_planner.merge_desugar import _writable_target
 
-    plan.add_node(random_string(), node)
-    return plan
+    table_factor = {
+        "Table": {
+            "name": [{"Identifier": {"value": part}} for part in relation_name.split(".")],
+            "alias": None,
+            "args": None,
+            "with_hints": [],
+        }
+    }
+
+    query = _select_over([{"Wildcard": {}}], table_factor, None, None)
+
+    # ORDER BY the relation's clustering columns, when it has any. Emitted here,
+    # in SQL, so the binder resolves it exactly as it resolves any other ORDER BY
+    # - the alternative is an optimizer synthesizing a bound sort expression,
+    # which is the half-bound-node trap.
+    #
+    # Emitted UNCONDITIONALLY and removed later when it turns out not to be
+    # needed: whether a pass sorts depends on which rule selection picks, and
+    # that is not known until the optimizer has read the manifest. Removing a
+    # node is safe and routine; adding a correctly-bound one is not.
+    # CompactionPlanningStrategy drops it for a brute plan, which never sorts.
+    _sort_columns = _writable_target(
+        relation_name, "OPTIMIZE", kwargs.get("telemetry")
+    ).cluster_by_columns(relation_name)
+    if _sort_columns:
+        query["Query"]["order_by"] = {
+            "kind": {
+                "Expressions": [
+                    {
+                        "expr": {"Identifier": {"value": column}},
+                        "options": {"asc": None, "nulls_first": None},
+                        "with_fill": None,
+                    }
+                    for column in _sort_columns
+                ]
+            },
+            "interpolate": None,
+        }
+
+    plan = plan_query(query)
+
+    sink = LogicalPlanNode(node_type=LogicalPlanStepType.CompactionCommit)
+    sink.relation_name = relation_name
+    return _attach_sink(plan, sink)
 
 
 def plan_insert(statement, **kwargs):

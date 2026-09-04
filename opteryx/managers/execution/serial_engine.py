@@ -49,6 +49,7 @@ def _special_op_types():
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
     from opteryx.operators.merge import MergeNode
+    from opteryx.operators.compaction_commit import CompactionCommitNode
 
     return (
         ExplainNode,
@@ -64,6 +65,7 @@ def _special_op_types():
         RelationManagementNode,
         InsertNode,
         MergeNode,
+        CompactionCommitNode,
     )
 
 
@@ -91,6 +93,7 @@ def execute(
     from opteryx.operators.relation_management import RelationManagementNode
     from opteryx.operators.insert import InsertNode
     from opteryx.operators.merge import MergeNode
+    from opteryx.operators.compaction_commit import CompactionCommitNode
 
     head_nodes = list(set(plan.get_exit_points()))
     if len(head_nodes) != 1:
@@ -111,18 +114,25 @@ def execute(
         return head_node(None), ResultType.NON_TABULAR
     if isinstance(head_node, (ViewManagementNode, TableManagementNode, RelationManagementNode)):
         return head_node(None), ResultType.NON_TABULAR
-    if isinstance(head_node, MergeNode):
+    if isinstance(head_node, (MergeNode, CompactionCommitNode)):
         # MERGE's whole body — the join, the action chain and the blended
         # columns — is an ordinary Exit-headed SELECT built by plan_merge, so it
         # runs natively like any other. Python drives only the sink, exactly as
         # the INSERT path below does: interim debt per CLAUDE.md §2, shared with
         # that path rather than duplicated so there stays ONE loop to move.
+        #
+        # OPTIMIZE has the same shape for the same reason: `plan_optimize_table`
+        # desugars it to `SELECT * FROM x [ORDER BY ...]` under a compaction
+        # sink, so the read, the sort and the split all run natively and only the
+        # write-and-commit is driven from here. It shares this branch rather than
+        # adding a third copy of the loop, so there is still ONE to move.
         subplan = plan.copy()
         subplan.remove_node(head_nodes[0], heal=True)
         new_head = subplan[subplan.get_exit_points()[0]]
         if type(new_head).__name__ != "ExitNode":
             raise InvalidInternalStateError(
-                "MERGE sub-plan is not Exit-headed; it cannot run on the native engine"
+                f"{type(head_node).__name__} sub-plan is not Exit-headed; it cannot "
+                "run on the native engine"
             )
         from opteryx.managers.execution.compiler import execute_native
 
@@ -131,7 +141,9 @@ def execute(
             head_node._push_impl(morsel)
         head_node._push_impl(EOS)
         if head_node.result is None:
-            raise InvalidInternalStateError("MergeNode did not produce a result")
+            raise InvalidInternalStateError(
+                f"{type(head_node).__name__} did not produce a result"
+            )
         return head_node.result, ResultType.NON_TABULAR
     if isinstance(head_node, InsertNode):
         # INSERT ... SELECT: plan_insert keeps the sub-query's ExitNode instead

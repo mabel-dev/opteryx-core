@@ -577,6 +577,7 @@ class Features:
     # until a specific one is set. See OptimizerVisitor._STRATEGY_DISABLE_FLAGS for the
     # strategy-class -> flag mapping this wires into.
     disable_boolean_simplification = get_bool("FEATURE_DISABLE_BOOLEAN_SIMPLIFICATION", False)
+    disable_compaction_planning = get_bool("FEATURE_DISABLE_COMPACTION_PLANNING", False)
     disable_constant_folding = get_bool("FEATURE_DISABLE_CONSTANT_FOLDING", False)
     disable_correlated_filters = get_bool("FEATURE_DISABLE_CORRELATED_FILTERS", False)
     disable_decorrelate_subquery = get_bool("FEATURE_DISABLE_DECORRELATE_SUBQUERY", False)

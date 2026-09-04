@@ -641,20 +641,33 @@ class Writable:
         """
         return []
 
-    def optimize_relation(self, relation_name: str, author: Optional[str] = None) -> bool:
-        """Compact a relation's small data files into fewer, larger ones.
+    def compaction_commit(
+        self,
+        relation_name: str,
+        file_entries,
+        retired_files,
+        author: Optional[str] = None,
+        baseline_snapshot_id: Optional[int] = None,
+        commit_message: Optional[str] = None,
+    ) -> None:
+        """Retire whole data files and add their replacements as ONE snapshot.
 
-        Strategy (bin-pack vs. sort-aware) is auto-detected from whatever
-        clustering the relation already declares (see set_cluster_by) - this
-        call carries no strategy of its own.
+        The commit half of OPTIMIZE. `file_entries` are outputs the caller has
+        already written; `retired_files` are the manifest paths they replace.
+
+        Overriding this is what DECLARES a connector able to compact — the
+        binder refuses OPTIMIZE for any connector still carrying this base
+        implementation, so the refusal lands before a scan runs rather than
+        after one has been paid for.
 
         Args:
             relation_name: Fully-qualified relation name
-            author: session user this compaction is attributed to (see create_relation)
-
-        Returns:
-            True if a new snapshot was committed, False if compaction declined
-            (nothing cleared the size/count thresholds - not an error).
+            file_entries: FileEntry objects for the files just written
+            retired_files: manifest paths the new files replace
+            author: session user this compaction is attributed to
+            baseline_snapshot_id: snapshot the pass was planned against; the
+                store refuses the commit if the relation has moved since
+            commit_message: overrides the store's default message
         """
         # Reachable for the same reason as set_cluster_by: a connector with no
         # catalog has no file layout to compact.

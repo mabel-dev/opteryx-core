@@ -1193,6 +1193,17 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             file_size_in_bytes=len(pdata),
         )
 
+    def delete_data_file(self, relation_name: str, file_path: str) -> None:
+        """Remove one data file this session wrote, through the catalog's FileIO.
+
+        For a writer cleaning up after a refused commit: the file is referenced
+        by nothing, so leaving it is pure orphaned storage. Deliberately NOT a
+        general delete — it takes a path the caller just wrote and removes it,
+        which is the only case any operator has.
+        """
+        workspace, _ = self._parse_identifier(relation_name)
+        self._get_catalog(workspace).io.delete(file_path)
+
     def create_relation(self, relation_name: str, schema, author: Optional[str] = None) -> None:
         """Create a new dataset in the catalog."""
         workspace, relative_id = self._parse_identifier(relation_name)
@@ -1281,22 +1292,6 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         catalog.update_dataset_sort_order(relative_id, columns, author=author)
-
-    def optimize_relation(self, relation_name: str, author: Optional[str] = None) -> bool:
-        """Compact a dataset's small data files, via the catalog's compactor.
-
-        Strategy is auto-detected by DatasetCompactor from the dataset's
-        stored sort order (see set_cluster_by) - "brute" bin-packing with no
-        sort order set, "performance" sort-aware compaction with one.
-        """
-        from opteryx_catalog.catalog import DatasetCompactor
-
-        workspace, relative_id = self._parse_identifier(relation_name)
-        catalog = self._get_catalog(workspace)
-        dataset = catalog.load_dataset(relative_id)
-        compactor = DatasetCompactor(dataset, strategy=None, author=author, agent="opteryx-sql")
-        snapshot = compactor.compact(dry_run=False)
-        return snapshot is not None
 
     def rename_relation(
         self, relation_name: str, new_relation_name: str, author: Optional[str] = None
@@ -1549,6 +1544,40 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 author=author,
                 commit_message=commit_message,
                 operation=operation,
+            ),
+        )
+
+    def compaction_commit(
+        self,
+        relation_name: str,
+        file_entries,
+        retired_files,
+        author: Optional[str] = None,
+        baseline_snapshot_id: Optional[int] = None,
+        commit_message: Optional[str] = None,
+    ) -> None:
+        """Retire whole data files and add their replacements as ONE snapshot.
+
+        The commit half of OPTIMIZE. `file_entries` are the outputs the sink
+        already wrote; `retired_files` are the manifest paths they replace.
+
+        Whole-file retirement rather than `merge_commit`'s row ordinals: a
+        compaction pass replaces files wholesale, and expressing that as
+        ordinals would mean naming every row. The catalog enforces the
+        row-count invariant and raises rather than returning, so the caller
+        can remove its outputs — see `Dataset.compaction_commit`.
+        """
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+        file_paths = [fe.file_path for fe in file_entries]
+        self._commit(
+            relation_name,
+            lambda: catalog.load_dataset(relative_id).compaction_commit(
+                file_paths,
+                retired_files,
+                author=author,
+                baseline_snapshot_id=baseline_snapshot_id,
+                commit_message=commit_message,
             ),
         )
 
