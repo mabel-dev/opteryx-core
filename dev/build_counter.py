@@ -30,7 +30,7 @@ class VersionStatus(Enum):
 
 __major_version__ = 0
 __minor_version__ = 9
-__revision_version__ = 98
+__revision_version__ = 99
 __author__ = "@joocer"
 __status__ = VersionStatus.RELEASE
 
