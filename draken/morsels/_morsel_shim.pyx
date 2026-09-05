@@ -1284,7 +1284,13 @@ cdef class Morsel:
                 (<Vector>(<Morsel>morsels[mi])._cxx_column(names[col_idx]))._nb
                 for mi in range(nmorsels)
             ]
-            out_vecs.append(_nb_concat(col_parts))
+            # The column name goes with the parts: a type mismatch here is only
+            # actionable if the error says WHICH column disagreed.
+            col_name = names[col_idx]
+            out_vecs.append(_nb_concat(
+                col_parts,
+                col_name.decode("utf-8", "replace") if isinstance(col_name, bytes) else col_name,
+            ))
         if first._cxx is not None:
             return cls.from_cxx_vectors(names, out_vecs)
         cdef Morsel result = _make_morsel()

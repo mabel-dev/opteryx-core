@@ -125,5 +125,48 @@ def test_a_per_dataset_threshold_override_is_honoured():
     assert result.plan is None or "delete-debt" not in (result.plan.reason or "")
 
 
+def test_a_clean_single_file_dataset_is_rejected():
+    """A one-file manifest has nothing to merge with, so OPTIMIZE declines it -
+    rules A and B both need a partner."""
+    from opteryx.planner.compaction import SelectionOutcome
+    from opteryx.planner.compaction import select_compaction_plan
+
+    entries = [_entry("mem://data/f1.parquet", 10, 0)]
+
+    result = select_compaction_plan(entries, sort_column="id")
+
+    assert result.outcome is SelectionOutcome.SINGLE_FILE
+    assert result.plan is None
+
+
+def test_a_single_file_with_delete_debt_is_still_planned():
+    """Rule C is the one rewrite that needs no partner, so it survives the
+    single-file guard - with or without a sort column."""
+    from opteryx.planner.compaction import SelectionOutcome
+    from opteryx.planner.compaction import select_compaction_plan
+
+    entries = [_entry("mem://data/f1.parquet", 10, 8)]  # 80% debt
+
+    for sort_column in ("id", None):
+        result = select_compaction_plan(entries, sort_column=sort_column)
+
+        assert result.outcome is SelectionOutcome.PLANNED, sort_column
+        assert [f.file_path for f in result.plan.files] == ["mem://data/f1.parquet"]
+        assert result.plan.mode == "brute"
+        assert "delete-debt" in result.plan.reason
+
+
+def test_a_single_file_below_the_debt_threshold_is_rejected():
+    """1% debt is not worth a pass, and there is nothing else to do with it."""
+    from opteryx.planner.compaction import SelectionOutcome
+    from opteryx.planner.compaction import select_compaction_plan
+
+    entries = [_entry("mem://data/f1.parquet", 100, 1)]
+
+    result = select_compaction_plan(entries, sort_column="id")
+
+    assert result.outcome is SelectionOutcome.SINGLE_FILE
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

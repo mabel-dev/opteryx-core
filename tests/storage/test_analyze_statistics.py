@@ -659,10 +659,13 @@ def test_histogram_bin_count_is_read_back_not_assumed():
         _clean()
 
 
-def test_histogram_bin_count_mismatch_fails_loud():
-    """A stored bin count that disagrees with the counts actually present is a
-    mis-binned histogram — every boundary in the wrong place. It must raise,
-    never be silently coerced to the default width."""
+def test_stale_row_bin_count_does_not_block_the_fold():
+    """The counts are the truth; the row-level `histogram_bins` scalar is not.
+
+    Widths legitimately vary per column within one file (an exact two-bin
+    boolean histogram beside 32-bin numerics), so a single row-level number
+    cannot describe them all — the reader takes each column's own slice length
+    and ignores the scalar rather than rejecting a well-formed histogram."""
     _clean()
     try:
         import dataclasses
@@ -671,8 +674,8 @@ def test_histogram_bin_count_mismatch_fails_loud():
 
         _run("ANALYZE TABLE testdata.satellites FOR COLUMNS id")
         schema, manifest = _metadata()
-        # Claim a width the stored counts do not have. A COPY of the file entry,
-        # not the live one: get_dataset_metadata caches the FileEntry objects
+        # A width the stored counts do not have. A COPY of the file entry, not
+        # the live one: get_dataset_metadata caches the FileEntry objects
         # themselves, so mutating one would poison every later reader.
         patched = dataclasses.replace(manifest.files[0], histogram_bins=17)
         probe = Manifest(
@@ -683,12 +686,7 @@ def test_histogram_bin_count_mismatch_fails_loud():
             char_class_vector=manifest._char_class_vector,
             bounds_are_ordinal=manifest.bounds_are_ordinal,
         )
-        failed = False
-        try:
-            probe.get_distogram("id")
-        except ValueError:
-            failed = True
-        assert failed, "a mis-binned histogram was read as if it were well-formed"
+        assert probe.get_distogram("id") is not None
     finally:
         _clean()
 
@@ -702,24 +700,18 @@ def test_manifest_writer_stamps_the_real_bin_count():
     assert _histogram_bins_of(entry, [[], []]) == 0
     assert _histogram_bins_of(entry, [[0] * 8, []]) == 8
 
+    # The width is derived from the counts in hand, never copied from a stored
+    # scalar that producers stamp unconditionally.
     entry.histogram_bins = 8
     assert _histogram_bins_of(entry, [[0] * 8]) == 8
-
     entry.histogram_bins = 32
-    failed = False
-    try:
-        _histogram_bins_of(entry, [[0] * 8])
-    except ValueError:
-        failed = True
-    assert failed, "a bin count that contradicts the counts was written anyway"
+    assert _histogram_bins_of(entry, [[0] * 8]) == 8
 
+    # Per-column widths in one file are legal — a boolean's exact two bins
+    # beside 32-bin numerics. No single number describes them, so the row says
+    # 0 ("no single width") and readers fall back to each column's own length.
     entry.histogram_bins = None
-    failed = False
-    try:
-        _histogram_bins_of(entry, [[0] * 8, [0] * 16])
-    except ValueError:
-        failed = True
-    assert failed, "two histogram widths cannot share one manifest row"
+    assert _histogram_bins_of(entry, [[0] * 2, [0] * 32]) == 0
 
 
 def test_analyze_records_uncompressed_sizes():

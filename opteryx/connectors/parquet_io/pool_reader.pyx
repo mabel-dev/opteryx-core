@@ -2198,6 +2198,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     decimal_columns=None,
     array_columns=None,
     logical_coerce=None,
+    widen_types=None,
     hash_key_columns=None,
     length_only_columns=None,
     pool=None,
@@ -2279,6 +2280,14 @@ cpdef NativeScanPlan open_native_scan_plan(
     else:
         for _sti in range(len(column_names)):
             plan.logical_coerce.push_back(0)
+    # Per-column declared numeric width (0 = no widening planned for it). Default
+    # all-zero, so a caller that does not supply one decodes exactly as before.
+    if widen_types is not None:
+        for _sti in range(len(column_names)):
+            plan.widen_types.push_back(<int>widen_types[_sti])
+    else:
+        for _sti in range(len(column_names)):
+            plan.widen_types.push_back(0)
     # R6: per-column ARRAY (parquet LIST) flag. Defaults to all-zero so every
     # pre-R6 caller keeps the exact fail-loud behaviour on an unflagged DK_POOL.
     if array_columns is not None:

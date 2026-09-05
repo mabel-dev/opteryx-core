@@ -30,8 +30,7 @@ Key benefits:
 - Catalog-aware (leverages Iceberg/PyIceberg statistics)
 """
 
-from opteryx.expression import NodeType, binary_operands
-from opteryx.models import Node
+from opteryx.expression import NodeType
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner import LogicalPlanStepType
@@ -152,37 +151,6 @@ class ManifestPruningStrategy(OptimizationStrategy):
                     collected.append(condition)
             current_id = parents[0]
         return collected
-
-    def _is_prunable_predicate(self, condition: Node) -> bool:
-        """
-        Check if a predicate can be used for file pruning.
-
-        Prunable predicates:
-        - Simple comparisons on columns (=, <, >, <=, >=, !=)
-        - AND/OR combinations of prunable predicates
-
-        Not prunable:
-        - Aggregations (MAX, MIN, etc.)
-        - Subqueries
-        - Complex expressions that can't be evaluated per-file
-        """
-        if condition.node_type == NodeType.COMPARISON_OPERATOR:
-            # Simple comparison: column op literal
-            left, right = binary_operands(condition)
-            has_column = (
-                left.node_type == NodeType.IDENTIFIER or right.node_type == NodeType.IDENTIFIER
-            )
-            has_literal = left.node_type == NodeType.LITERAL or right.node_type == NodeType.LITERAL
-            return has_column and has_literal
-
-        elif condition.node_type in (NodeType.AND, NodeType.OR):
-            # Logical combination: recurse on both sides
-            left, right = binary_operands(condition)
-            left_ok = self._is_prunable_predicate(left)
-            right_ok = self._is_prunable_predicate(right)
-            return left_ok and right_ok
-
-        return False
 
     def complete(self, plan: LogicalPlan, context: OptimizerContext) -> LogicalPlan:
         context.collected_limits.clear()

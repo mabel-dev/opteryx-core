@@ -110,6 +110,9 @@
 #include "native_decimal_pool_decode.hpp"  // build_pool_decimal_column
 #include "native_varchar_pool_decode.hpp"  // build_pool_varchar_dict_column
 #include "native_array_pool_decode.hpp"    // build_pool_array_column (R6)
+#include "ops/kernels/cast_kernels.h"      // ladder-widening casts (declared-width coercion)
+#include "ops/kernels/error_handling.h"    // draken_error_sentinel
+#include "core/draken_bridge.h"            // draken_vecresult_child_owner_new_c
 #include "logical_type.h"                  // LogicalType / logical_type_intern (WP-11 descriptors)
 #include "core/alloc.h"                    // draken_malloc / draken_free (WP-11 temporal narrow)
 
@@ -192,6 +195,16 @@ struct NativeScanColumnBuilder {
     // projected DATE/TIMESTAMP/TIME/int64-DECIMAL column is retagged natively,
     // byte-identically to the trampoline scan's `_coerce_vectors`.
     const std::vector<int>* logical_coerce = nullptr;
+    // Per-projected-column DECLARED numeric width (parallel to column_names), 0 =
+    // no widening for this column. A file may store a column NARROWER than the
+    // relation's schema declares -- a legal schema evolution, and what ALTER
+    // COLUMN ... TYPE leaves behind since it rewrites no data. Left as decoded,
+    // those files' vectors reach the engine at the stored width and the first
+    // operation that puts two files' columns together fails ("concat: all inputs
+    // must share one type"). The plan decides WHICH pairs are legal (opteryx's
+    // `is_legal_widen`, the same predicate ALTER is checked against) and sends
+    // only the declared target here; this file widens, it does not have a policy.
+    const std::vector<int>* widen_types = nullptr;
     // E37: per-projected-column flag (parallel to column_names) — 1 iff this column
     // is consumed as a GROUP BY / JOIN / DISTINCT key downstream, so the scan should
     // carry its hash SEED (VectorOwner::keyhash_buf) for hash-once reuse. Default
@@ -230,6 +243,52 @@ struct NativeScanColumnBuilder {
     // Declared string DrakenType for projected column i, defaulting to DRAKEN_VARCHAR
     // when no per-column type was threaded (agg/join callers) — matches the historic
     // hardcoded tag those paths relied on.
+    // Declared numeric width for projected column i, 0 when none is planned.
+    DrakenType widen_for(size_t i) const {
+        if (widen_types == nullptr || i >= widen_types->size()) return static_cast<DrakenType>(0);
+        return static_cast<DrakenType>((*widen_types)[i]);
+    }
+
+    // Strictly up one ladder (signed int / unsigned int / float). Re-checked here
+    // rather than trusted from the plan: a narrowing can lose a value, and must be
+    // impossible by construction on this path, not merely unplanned.
+    static bool is_ladder_widening(DrakenType from, DrakenType to) {
+        auto pos = [](DrakenType t, int& ladder, int& rank) {
+            switch (t) {
+                case DRAKEN_INT8:    ladder = 0; rank = 0; return true;
+                case DRAKEN_INT16:   ladder = 0; rank = 1; return true;
+                case DRAKEN_INT32:   ladder = 0; rank = 2; return true;
+                case DRAKEN_INT64:   ladder = 0; rank = 3; return true;
+                case DRAKEN_UINT8:   ladder = 1; rank = 0; return true;
+                case DRAKEN_UINT16:  ladder = 1; rank = 1; return true;
+                case DRAKEN_UINT32:  ladder = 1; rank = 2; return true;
+                case DRAKEN_UINT64:  ladder = 1; rank = 3; return true;
+                case DRAKEN_FLOAT32: ladder = 2; rank = 0; return true;
+                case DRAKEN_FLOAT64: ladder = 2; rank = 1; return true;
+                default: return false;
+            }
+        };
+        int fl = 0, fr = 0, tl = 0, tr = 0;
+        return pos(from, fl, fr) && pos(to, tl, tr) && fl == tl && tr > fr;
+    }
+
+    // The cast kernels are shape-preserving (kernel_preserve_shape): they convert
+    // data_length values and carry the input's selection through, so a dict-shaped
+    // column widens to a dict-shaped column with widened dictionary values -- the
+    // uniform access pattern is unchanged.
+    static VecResult widen_kernel(DrakenType to, const DrakenVector* v) {
+        switch (to) {
+            case DRAKEN_INT16:   return draken_cast_integer_to_int16(nullptr, v);
+            case DRAKEN_INT32:   return draken_cast_integer_to_int32(nullptr, v);
+            case DRAKEN_INT64:   return draken_cast_integer_to_int64(nullptr, v);
+            case DRAKEN_UINT16:  return draken_cast_uint_to_uint16(nullptr, v);
+            case DRAKEN_UINT32:  return draken_cast_uint_to_uint32(nullptr, v);
+            case DRAKEN_UINT64:  return draken_cast_uint_to_uint64(nullptr, v);
+            case DRAKEN_FLOAT64: return draken_cast_float_to_float64(nullptr, v);
+            default:             return draken_error_sentinel("widen: no kernel for target");
+        }
+    }
+
     DrakenType string_type_for(size_t i) const {
         if (string_types != nullptr && i < string_types->size() && (*string_types)[i] != 0)
             return static_cast<DrakenType>((*string_types)[i]);
@@ -564,6 +623,27 @@ struct NativeScanColumnBuilder {
                        (result.columns[i].row_sorted_descending ? DRAKEN_ROW_SORTED_DESC : 0);
         out.own = std::make_shared<VectorOwner>(v, std::move(data_buf), std::move(val_buf),
                                                  std::move(codes_buf));
+        // Widen to the declared width when this file stored the column narrower.
+        // Placed after the owner is built so the decoded buffers are already under
+        // RAII: the kernel reads from them and the owner frees them when it is
+        // replaced. A planned target that is NOT a legal widening of what actually
+        // decoded is left exactly as decoded -- same posture as the IPv4 arm below.
+        // Neither DECIMAL128 nor IPV4 can reach a widening: both carry a logical
+        // descriptor, which the plan-side policy excludes outright.
+        const DrakenType want = widen_for(i);
+        if (want != static_cast<DrakenType>(0) && want != dtype &&
+            is_ladder_widening(dtype, want)) {
+            VecResult wr = widen_kernel(want, &out.own->vec);
+            if (wr.data == nullptr) {
+                err.code = 1;
+                err.msg = wr.error_msg != nullptr
+                              ? wr.error_msg
+                              : "NativeParquetScanSource: widening cast failed";
+                return false;
+            }
+            out.own = std::shared_ptr<VectorOwner>(draken_vecresult_child_owner_new_c(wr));
+            dtype = want;
+        }
         if (dk == rugo::DK_DECIMAL128) {
             // WP-11: DECIMAL128 carries its precision/scale on the footer (rugo's
             // parse_decimal_ps fills ColumnOut.dec_*); attach it so a projected
@@ -702,6 +782,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
                             const std::vector<int>* logical_coerce_ = nullptr,
                             const std::vector<uint8_t>* hash_key_columns_ = nullptr,
                             const std::vector<uint8_t>* array_columns_ = nullptr,
+                            const std::vector<int>* widen_types_ = nullptr,
                             int64_t row_limit_ = -1)
         : pipeline(pipeline_), footer_map(footer_map_), work_items(work_items_),
           column_names(column_names_), in_flight_limit(in_flight_limit_),
@@ -713,6 +794,7 @@ struct NativeParquetScanSource : Source, NativeScanColumnBuilder {
         logical_coerce = logical_coerce_;
         hash_key_columns = hash_key_columns_;
         array_columns = array_columns_;
+        widen_types = widen_types_;
     }
 
     // R2: how many row groups, taken in work-item order, are enough to satisfy

@@ -543,6 +543,13 @@ _LC_ARRAY_TIMESTAMP = 5
 # requires the descriptor — refuses it. See logical_type.h on why IPV4 is
 # nonetheless carried rather than treated as droppable.
 _LC_IPV4 = 6
+# Members of the three widening ladders (signed int / unsigned int / float). A
+# declared type outside these is never a widening target — see `_widen_target`.
+_WIDENABLE_PHYSICAL = frozenset((
+    DrakenType.INT8, DrakenType.INT16, DrakenType.INT32, DrakenType.INT64,
+    DrakenType.UINT8, DrakenType.UINT16, DrakenType.UINT32, DrakenType.UINT64,
+    DrakenType.FLOAT32, DrakenType.FLOAT64,
+))
 # TimestampUnit enum-name → draken unit code (matches logical_type.h TimestampUnit).
 _TS_UNIT_TO_INT = {"SECONDS": 0, "MILLISECONDS": 1, "MICROSECONDS": 2, "NANOSECONDS": 3}
 
@@ -561,6 +568,35 @@ def _ipv4_coerce(sc, pt):
     if lg is None or lg.kind != LogicalKind.IPV4:
         return 0
     return _LC_IPV4
+
+
+def _widen_target(sc, pt):
+    """The declared numeric width the native Source should widen this column to
+    (0 = no widening for it).
+
+    A file may store a column NARROWER than the relation's schema declares — a
+    legal schema evolution, and exactly what `ALTER COLUMN ... TYPE` leaves
+    behind, since it rewrites no data. Uncoerced, those files' vectors reach the
+    engine at the stored width and the first operation that has to put two files'
+    columns together fails ("concat: all inputs must share one type").
+
+    Only the TARGET is sent. Whether a given (stored, declared) pair is a legal
+    widening is re-decided in the Source against the width that actually decoded
+    — the plan cannot know it, since it varies per file. The policy both sides
+    implement is `is_legal_widen`, the same predicate `ALTER COLUMN ... TYPE` is
+    checked against: strictly up one ladder (signed int / unsigned int / float).
+
+    0 for a column carrying a logical descriptor (DECIMAL, temporal, IPv4): the
+    descriptor does not survive a width cast, which is why `is_legal_widen`
+    refuses those too, and it is the same reasoning as the IPv4 decode guard."""
+    if pt is None:
+        return 0
+    ct = sc.column_type
+    if ct is None or ct.logical is not None:
+        return 0
+    if pt not in _WIDENABLE_PHYSICAL:
+        return 0
+    return pt.value
 
 
 def _wp11_unit(sc):
@@ -2807,9 +2843,9 @@ class _Compiler:
     def _classify_scan_columns(self, read_scs):
         """Per-column native-decode classification for a scan read-set.
 
-        Returns ``(kinds, string_types, decimal_columns, logical_coerce, bad_type)``,
-        the four plan-time arrays the native Source needs (all parallel to
-        ``read_scs``) plus, on refusal, the offending DrakenType's NAME (or "NONE"
+        Returns ``(kinds, string_types, decimal_columns, logical_coerce,
+        widen_types, bad_type)``, the five plan-time arrays the native Source
+        needs (all parallel to ``read_scs``) plus, on refusal, the offending DrakenType's NAME (or "NONE"
         when the column carries no physical tag at all) so the caller can record a
         `non_admissible_kind:<T>` residual. ``bad_type`` is None on success.
 
@@ -2824,6 +2860,14 @@ class _Compiler:
         # packs the DATE/TIMESTAMP/TIME/DECIMAL retag kind + unit / precision-scale
         # (LC_* packing mirrored from native_parquet_scan_source.hpp). 0 = none.
         decimal_columns = []
+        # The DECLARED numeric width, for a column whose type is a plain integer or
+        # float width (0 = no widening). A file may store the column narrower — a
+        # legal schema evolution, and what ALTER COLUMN ... TYPE leaves behind since
+        # it rewrites nothing — and the native Source coerces those to this width so
+        # every file in the relation presents one type. A column carrying a logical
+        # descriptor (DECIMAL, temporal, IPv4) gets 0: the descriptor does not
+        # survive a width cast, which is why `is_legal_widen` refuses those too.
+        widen_types = []
         logical_coerce = []
         for sc in read_scs:
             pt = _physical_type(sc)
@@ -2843,16 +2887,19 @@ class _Compiler:
                 kinds.append("int")
                 string_types.append(0)
                 decimal_columns.append(0)
+                widen_types.append(_widen_target(sc, pt))
                 logical_coerce.append(_ipv4_coerce(sc, pt))
             elif pt == DrakenType.FLOAT32:
                 kinds.append("float32")
                 string_types.append(0)
                 decimal_columns.append(0)
+                widen_types.append(_widen_target(sc, pt))
                 logical_coerce.append(0)
             elif pt == DrakenType.FLOAT64:
                 kinds.append("float64")
                 string_types.append(0)
                 decimal_columns.append(0)
+                widen_types.append(_widen_target(sc, pt))
                 logical_coerce.append(0)
             elif pt in (DrakenType.VARCHAR, DrakenType.NVARCHAR, DrakenType.VARBINARY):
                 # WP-01: string columns decode natively (DK_VARCHAR / DK_VARCHAR_DICT
@@ -2860,12 +2907,14 @@ class _Compiler:
                 # Source tags each vector byte-identically to the trampoline path.
                 kinds.append("varchar")
                 string_types.append(pt.value)
+                widen_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(0)
             elif pt == DrakenType.BOOL:
                 # WP-11: BOOLEAN → DK_BOOL dense, self-describing (no descriptor).
                 kinds.append("bool")
                 string_types.append(0)
+                widen_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(0)
             elif pt == DrakenType.ARRAY:
@@ -2878,6 +2927,7 @@ class _Compiler:
                 # int64 leaf needs the unit-carrying retag the trampoline applies.
                 kinds.append("array")
                 string_types.append(0)
+                widen_types.append(0)
                 decimal_columns.append(0)
                 logical_coerce.append(_r6_array_element_coerce(sc))
             elif coerce is not None:
@@ -2887,6 +2937,7 @@ class _Compiler:
                 kind_str, is_int64_decimal, packed = coerce
                 kinds.append(kind_str)
                 string_types.append(0)
+                widen_types.append(0)
                 decimal_columns.append(1 if is_int64_decimal else 0)
                 logical_coerce.append(packed)
             else:
@@ -2902,9 +2953,9 @@ class _Compiler:
                 # STRUCT/MAP (`json`-annotated), a DECIMAL or temporal column whose
                 # logical descriptor is missing/out of range (`_wp11_logical_coerce`
                 # returning None), and anything else with no native decode.
-                return kinds, string_types, decimal_columns, logical_coerce, (
+                return kinds, string_types, decimal_columns, logical_coerce, widen_types, (
                     pt.name if pt is not None else "NONE")
-        return kinds, string_types, decimal_columns, logical_coerce, None
+        return kinds, string_types, decimal_columns, logical_coerce, widen_types, None
 
     def _skene_scan_plan(self, scan):
         """Plan-time setup for the zero-Python skene Source.
@@ -3456,7 +3507,7 @@ class _Compiler:
                         seen.add(sc.identity)
                         read_scs.append(sc)
 
-        kinds, string_types, decimal_columns, logical_coerce, bad_type = (
+        kinds, string_types, decimal_columns, logical_coerce, widen_types, bad_type = (
             self._classify_scan_columns(read_scs))
         if bad_type is not None:
             self.scan_residual_reasons[scan.identity] = "non_admissible_kind:" + bad_type
@@ -3530,6 +3581,7 @@ class _Compiler:
             decimal_columns=decimal_columns,
             array_columns=array_columns,
             logical_coerce=logical_coerce,
+            widen_types=widen_types,
             hash_key_columns=hash_key_columns,
             length_only_columns=length_only_columns,
             # Gap #3 Phase 2b Step 2: the query's exec pool is SHARED with this scan's
@@ -3683,12 +3735,12 @@ class _Compiler:
         if not bytecode_is_all_c_native(filter_bc):
             return None
 
-        p1_kinds, p1_string_types, p1_decimals, p1_coerce, bad = (
+        p1_kinds, p1_string_types, p1_decimals, p1_coerce, _p1_widen, bad = (
             self._classify_scan_columns(p1_scs))
         if bad is not None:
             self.scan_residual_reasons[scan.identity] = "non_admissible_kind:" + bad
             return None
-        p2_kinds, p2_string_types, p2_decimals, p2_coerce, bad = (
+        p2_kinds, p2_string_types, p2_decimals, p2_coerce, _p2_widen, bad = (
             self._classify_scan_columns(p2_scs))
         if bad is not None:
             self.scan_residual_reasons[scan.identity] = "non_admissible_kind:" + bad

@@ -17,7 +17,6 @@ execution follows those decisions deterministically.
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from opteryx.exceptions import md_code
 from opteryx.models.file_entry import FileEntry
 from opteryx.third_party.maki_nage.distogram import Distogram, merge
 from opteryx.types.logical_type import LogicalCategory
@@ -606,6 +605,9 @@ class Manifest:
             The Manifest describing the surviving file set.
         """
         from opteryx.expression import NodeType
+        from opteryx.planner.optimizer.strategies.split_conjunctive_predicates import (
+            _inner_split,
+        )
 
         # Define handlers for each comparison operator
         # Returns True if file can be pruned (skipped)
@@ -618,6 +620,36 @@ class Manifest:
             "LtEq": lambda v, min_, max_: min_ > v,
         }
 
+        # `predicates` is a list of separately-pushed conjuncts, but any one of
+        # them can itself be an AND tree, a NESTED wrapper or a DNF node (this
+        # engine's n-ary AND). Split them here for the same reason
+        # `_extract_zone_terms` does, with the same splitter — the loop below
+        # matches only `column <op> literal` and BETWEEN, so an unsplit AND
+        # matches nothing and the whole predicate silently prunes zero files.
+        #
+        # Splitting is sound BECAUSE it is a conjunction and ONLY for one: every
+        # conjunct must hold, so a file that provably fails any single conjunct
+        # cannot satisfy the whole predicate. `_inner_split` never descends
+        # through OR, which is what keeps that reasoning honest — a file only
+        # has to satisfy ONE disjunct, so eliminating it on the strength of one
+        # arm would drop rows the query must return. An OR therefore arrives
+        # here whole, matches neither shape, and prunes nothing.
+        #
+        # A conjunct this cannot evaluate (`IS NOT NULL`, a function call) is
+        # NOT evidence against a file: it matches neither shape below, so it
+        # contributes nothing and the file survives on its other conjuncts
+        # alone. "No information", never "false".
+        #
+        # Until now this was masked by SplitConjunctivePredicatesStrategy giving
+        # each conjunct its own Filter node upstream. That strategy has a kill
+        # switch and does not run on filters synthesized after it, so pruning
+        # was silently conditional on it; splitting here makes prune_files
+        # correct on the predicate it is actually handed.
+        conjuncts: List = []
+        for predicate in predicates or []:
+            if predicate is not None:
+                conjuncts.extend(_inner_split(predicate))
+
         # Whether a literal is order-comparable with a column's raw stored bounds
         # depends only on the two TYPES, so it is settled once per predicate here
         # rather than re-derived for every file below. A predicate that fails the
@@ -625,7 +657,7 @@ class Manifest:
         # it must not reach `_membership_keep_masks` either, which eliminates
         # files on raw integer equality and would drop them on the same
         # cross-domain compare.
-        predicates = [p for p in (predicates or []) if not self._predicate_domain_mismatch(p)]
+        predicates = [p for p in conjuncts if not self._predicate_domain_mismatch(p)]
 
         if not predicates:
             # No predicates (or none left that can be safely compared) = no pruning
@@ -1357,18 +1389,15 @@ class Manifest:
                 continue
             if col_min is None or col_max is None:
                 continue
-            # The bins the producer says it wrote must be the bins that are
-            # here. load_counts_i64 spaces the bin centres across
-            # (col_min, col_max) by the slice length, so reading N counts as if
-            # they were M puts every boundary in the wrong place — a wrong
-            # selectivity, not a missing one. Fail loud rather than coerce.
-            stored_bins = file_entry.histogram_bins
-            if stored_bins is not None and stored_bins != (end - start):
-                raise ValueError(
-                    f"Histogram bin count mismatch for {md_code(file_entry.file_path)}: the "
-                    f"manifest records {stored_bins} bins but the histogram holds "
-                    f"{end - start}."
-                )
+            # The slice length IS this column's bin count, and load_counts_i64
+            # spaces the bin centres across (col_min, col_max) by that same
+            # length — so the fold is self-consistent whatever the width.
+            # FileEntry.histogram_bins is deliberately NOT consulted: widths
+            # legitimately vary per column within one file (an exact two-bin
+            # boolean histogram beside 32-bin numerics — see
+            # manifest_io._histogram_bins_of), so a row-level scalar cannot
+            # describe them and validating against it would reject
+            # well-formed histograms.
             dgram = load_counts_i64(counts[start:end], float(col_min), float(col_max))
             combined = dgram if combined is None else merge(combined, dgram)
         return combined

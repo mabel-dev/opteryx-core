@@ -128,25 +128,37 @@ def _aliased(expr: dict, alias: str) -> dict:
 def _relation_alias(table_factor: dict, role: str) -> str:
     """The alias a MERGE side was given, or a refusal naming what to add.
 
-    v1 requires both sides to be aliased. Deriving one would mean rewriting
-    every reference in the ON condition and the arms to match, and a
-    fully-qualified reference to an un-aliased dotted relation
-    (`ws.col.ds.column`) has no spelling the binder resolves anyway. Refusing
-    with the fix in the message beats silently binding to the wrong thing.
+    Both a named relation and a derived table (a sub-query, a VALUES list) are
+    read here; they carry their alias in different places, and that is the only
+    difference this function cares about. Nothing else in the desugar asks the
+    SOURCE what it is called - `plan_merge` hands the factor straight to the
+    join, where ordinary relation planning takes it - so the alias is the whole
+    of what a sub-query source needed.
+
+    Both sides must be aliased. Deriving one would mean rewriting every
+    reference in the ON condition and the arms to match, and a fully-qualified
+    reference to an un-aliased dotted relation (`ws.col.ds.column`) has no
+    spelling the binder resolves anyway. For a derived table the rule is not a
+    convenience at all: there is no relation name to fall back on. Refusing with
+    the fix in the message beats silently binding to the wrong thing.
     """
     table = table_factor.get("Table")
-    if table is None:
+    derived = table_factor.get("Derived")
+    if table is not None:
+        alias = table.get("alias")
+        written = ".".join(p["Identifier"]["value"] for p in table["name"])
+    elif derived is not None:
+        alias = derived.get("alias")
+        written = "(<sub-query>)"
+    else:
         raise UnsupportedSyntaxError(
-            f"**MERGE INTO** requires a table as its {role}. A sub-query source is "
-            "not supported yet; write it to a table first."
+            f"**MERGE INTO** requires a table or a sub-query as its {role}."
         )
-    alias = table.get("alias")
     if not alias or not alias.get("name", {}).get("value"):
-        name = ".".join(p["Identifier"]["value"] for p in table["name"])
         example = "n" if role == "target" else "s"
         raise UnsupportedSyntaxError(
             f"**MERGE INTO** requires an alias on its {role}. Write "
-            f"`{name} AS {example}` and qualify the {role}'s columns with it."
+            f"`{written} AS {example}` and qualify the {role}'s columns with it."
         )
     return alias["name"]["value"]
 
@@ -354,7 +366,10 @@ def plan_merge(statement, **kwargs):
 
     merge = statement["Merge"]
 
-    target_factor = merge["table"]
+    # The target must name a relation: MERGE addresses target rows by file and
+    # ordinal, and a derived table has no rows to address. The SOURCE is under
+    # no such rule — it is only read.
+    target_factor = _target_table_factor(merge["table"], "MERGE INTO")
     source_factor = merge["source"]
     target_alias = _relation_alias(target_factor, "target")
     source_alias = _relation_alias(source_factor, "source")
@@ -439,6 +454,15 @@ def plan_merge(statement, **kwargs):
     projection.append(_aliased(_ident(target_alias, ROW_IDENTITY_FILE), MERGE_FILE_COLUMN))
     projection.append(_aliased(_ident(target_alias, ROW_IDENTITY_ORDINAL), MERGE_ORDINAL_COLUMN))
 
+    # Held as a local because `create_node_relation` stamps the id of the Scan it
+    # builds back onto this dict, and that id is how the target scan is found
+    # again below.
+    target_join = {
+        "relation": target_factor,
+        "global": False,
+        "join_operator": {"LeftOuter": {"On": on_expr}},
+    }
+
     select = {
         "Select": {
             "distinct": None,
@@ -447,18 +471,7 @@ def plan_merge(statement, **kwargs):
             "projection": projection,
             "exclude": None,
             "into": None,
-            "from": [
-                {
-                    "relation": source_factor,
-                    "joins": [
-                        {
-                            "relation": target_factor,
-                            "global": False,
-                            "join_operator": {"LeftOuter": {"On": on_expr}},
-                        }
-                    ],
-                }
-            ],
+            "from": [{"relation": source_factor, "joins": [target_join]}],
             "lateral_views": [],
             "prewhere": None,
             # No WHERE: MergeNode drops the NOOP rows. Repeating the action
@@ -501,21 +514,27 @@ def plan_merge(statement, **kwargs):
     # Ask the TARGET scan for row identity. Only that scan: the source's rows
     # are never addressed, and a second scan emitting `$ordinal` would force
     # single-pass on a side that has no use for it.
-    stamped = False
-    for _nid, node in plan.nodes(data=True):
-        if node.node_type == LogicalPlanStepType.Scan and node.alias == target_alias:
-            node.emit_row_identity = True
-            # What the statement is CALLED, carried so a refusal to address rows
-            # names the statement the reader wrote. UPDATE and DELETE desugar
-            # through this same sink, so "MERGE" is not a safe assumption there.
-            node.row_identity_statement = "MERGE INTO"
-            stamped = True
-    if not stamped:  # pragma: no cover - the join above always plans a target Scan
+    #
+    # Found by the id `create_node_relation` stamped back onto the join entry,
+    # not by searching the plan for a scan wearing the target's alias. A source
+    # is an arbitrary relation expression, so the plan can hold scans this
+    # module never wrote — including one reading the target itself under the
+    # target's own alias — and a search would stamp rows that are not the ones
+    # being written.
+    target_scan = plan[target_join.get("step_id")]
+    if (
+        target_scan is None or target_scan.node_type != LogicalPlanStepType.Scan
+    ):  # pragma: no cover - the join above always plans a target Scan
         from opteryx.exceptions import InvalidInternalStateError
 
         raise InvalidInternalStateError(
-            f"plan_merge: no Scan for target alias {target_alias} to address rows through"
+            f"plan_merge: no Scan for target {target_name} to address rows through"
         )
+    target_scan.emit_row_identity = True
+    # What the statement is CALLED, carried so a refusal to address rows names
+    # the statement the reader wrote. UPDATE and DELETE desugar through this
+    # same sink, so "MERGE" is not a safe assumption there.
+    target_scan.row_identity_statement = "MERGE INTO"
 
     merge_step = LogicalPlanNode(node_type=LogicalPlanStepType.Merge)
     merge_step.relation_name = target_name

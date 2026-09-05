@@ -5624,7 +5624,8 @@ static VectorOwner concat_string(const std::vector<const VectorOwner*>& parts,
 // Forward declaration — concat_array delegates to concat_owners to vertically
 // concatenate the gathered child vectors, and concat_owners routes ARRAY parts
 // back into concat_array (mutual recursion handles array-of-array).
-static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts);
+static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts,
+                                 const char* context = nullptr);
 
 // CONCAT — DRAKEN_ARRAY (offsets + child, recursive RAII).
 //
@@ -5717,14 +5718,24 @@ static VectorOwner concat_array(const std::vector<const VectorOwner*>& parts) {
     return owner;
 }
 
-static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
+// `context` names what is being concatenated (a column name, say) and appears in
+// every error below. A concat mismatch is only ever diagnosed by "which column,
+// which types" -- a message carrying neither forces the reader back to the data.
+static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts,
+                                 const char* context) {
+    const std::string where = (context && *context)
+                                  ? std::string(" for '") + context + "'"
+                                  : std::string();
     if (parts.empty())
-        throw std::invalid_argument("concat: empty input");
+        throw std::invalid_argument("concat: empty input" + where);
     const DrakenType type = parts[0]->vec.type;
     const LogicalType* lt = parts[0]->logical_type;
-    for (const VectorOwner* p : parts)
-        if (p->vec.type != type)
-            throw std::invalid_argument("concat: all inputs must share one type");
+    for (size_t i = 0u; i < parts.size(); ++i)
+        if (parts[i]->vec.type != type)
+            throw std::invalid_argument(
+                "concat: all inputs must share one type" + where + " - input 0 is " +
+                type_display_name(type, lt) + ", input " + std::to_string(i) + " is " +
+                type_display_name(parts[i]->vec.type, parts[i]->logical_type));
 
     // TIMESTAMP64/DECIMAL/DECIMAL128 carry a required out-of-band logical-type
     // descriptor (unit, or precision/scale) that lives on VectorOwner, not on
@@ -5738,19 +5749,19 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts) {
         for (const VectorOwner* p : parts)
             if (!p->logical_type)
                 throw std::invalid_argument(
-                    "concat: TIMESTAMP/DECIMAL part missing logical-type descriptor");
+                    "concat: TIMESTAMP/DECIMAL part missing logical-type descriptor" + where);
         if (type == DRAKEN_TIMESTAMP64) {
             for (const VectorOwner* p : parts)
                 if (p->logical_type->unit != lt->unit ||
                     p->logical_type->offset_minutes != lt->offset_minutes)
                     throw std::invalid_argument(
-                        "concat: TIMESTAMP parts have mismatched unit/offset_minutes");
+                        "concat: TIMESTAMP parts have mismatched unit/offset_minutes" + where);
         } else {
             for (const VectorOwner* p : parts)
                 if (p->logical_type->precision != lt->precision ||
                     p->logical_type->scale != lt->scale)
                     throw std::invalid_argument(
-                        "concat: DECIMAL parts have mismatched precision/scale");
+                        "concat: DECIMAL parts have mismatched precision/scale" + where);
         }
     }
 
@@ -6953,6 +6964,73 @@ extern "C" PyObject* cxx_morsel_to_handle(const CxxMorsel* m) {
 // ---------------------------------------------------------------------------
 // nanobind module
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Ladder widening — the scan-side coercion of a file's stored width to the width
+// the relation's schema declares.
+//
+// The POLICY (which pairs are a legal widening) is opteryx's `is_legal_widen`,
+// the same table `ALTER COLUMN ... TYPE` is checked against; there is exactly one
+// such table and it is not this file. What lives here is the MECHANISM, plus a
+// re-check of the pair so a caller cannot smuggle a narrowing past it: the cast
+// kernels range-check and would raise, but a silent narrowing must be impossible
+// by construction, not by a kernel's second opinion.
+//
+// Ladders are signed int / unsigned int / float, and widening is strictly up one
+// ladder. A source carrying a logical-type descriptor is refused outright: DECIMAL
+// scale, a TIMESTAMP unit and IPv4-ness all live beside the physical tag, and a
+// width cast would drop them -- which is why is_legal_widen refuses those too.
+static bool ladder_position(DrakenType t, int& ladder, int& rank) noexcept {
+    switch (t) {
+        case DRAKEN_INT8:    ladder = 0; rank = 0; return true;
+        case DRAKEN_INT16:   ladder = 0; rank = 1; return true;
+        case DRAKEN_INT32:   ladder = 0; rank = 2; return true;
+        case DRAKEN_INT64:   ladder = 0; rank = 3; return true;
+        case DRAKEN_UINT8:   ladder = 1; rank = 0; return true;
+        case DRAKEN_UINT16:  ladder = 1; rank = 1; return true;
+        case DRAKEN_UINT32:  ladder = 1; rank = 2; return true;
+        case DRAKEN_UINT64:  ladder = 1; rank = 3; return true;
+        case DRAKEN_FLOAT32: ladder = 2; rank = 0; return true;
+        case DRAKEN_FLOAT64: ladder = 2; rank = 1; return true;
+        default: return false;
+    }
+}
+
+static VectorOwner widen_owner(const VectorOwner& src, DrakenType target) {
+    const DrakenType s = src.vec.type;
+    if (src.logical_type != nullptr)
+        throw std::invalid_argument(
+            std::string("vector_widen: source carries a logical-type descriptor (") +
+            type_display_name(s, src.logical_type) + "); widening would drop it");
+    int s_ladder = 0, s_rank = 0, t_ladder = 0, t_rank = 0;
+    if (!ladder_position(s, s_ladder, s_rank) || !ladder_position(target, t_ladder, t_rank) ||
+        s_ladder != t_ladder || t_rank <= s_rank)
+        throw std::invalid_argument(
+            std::string("vector_widen: ") + type_display_name(s, nullptr) + " -> " +
+            type_display_name(target, nullptr) + " is not a widening");
+
+    VecResult r;
+    switch (target) {
+        case DRAKEN_INT16:   r = draken_cast_integer_to_int16(nullptr, &src.vec); break;
+        case DRAKEN_INT32:   r = draken_cast_integer_to_int32(nullptr, &src.vec); break;
+        case DRAKEN_INT64:   r = draken_cast_integer_to_int64(nullptr, &src.vec); break;
+        case DRAKEN_UINT16:  r = draken_cast_uint_to_uint16(nullptr, &src.vec); break;
+        case DRAKEN_UINT32:  r = draken_cast_uint_to_uint32(nullptr, &src.vec); break;
+        case DRAKEN_UINT64:  r = draken_cast_uint_to_uint64(nullptr, &src.vec); break;
+        case DRAKEN_FLOAT64: r = draken_cast_float_to_float64(nullptr, &src.vec); break;
+        // Unreachable: every ladder target above rank 0 is listed, and the guard
+        // already rejected rank 0 as a target. Left as a throw, not an assert --
+        // a new ladder member added without an arm must not fall through silently.
+        default:
+            throw std::invalid_argument(
+                std::string("vector_widen: no kernel for target ") +
+                type_display_name(target, nullptr));
+    }
+    if (r.data == nullptr)
+        throw std::runtime_error(r.error_msg != nullptr ? r.error_msg
+                                                        : "vector_widen: cast kernel error");
+    return vecresult_to_owner(r);
+}
 
 NB_MODULE(draken_native, m) {
     m.doc() = "Draken C++-first vector library — nanobind binding (Milestone B.1)";
@@ -9442,7 +9520,7 @@ NB_MODULE(draken_native, m) {
        "`zero_col_rows` supplies the row count when there are no columns.");
 
     m.def("vector_concat",
-        [](nb::list vectors) -> VectorOwner {
+        [](nb::list vectors, const std::string& context) -> VectorOwner {
             const size_t n = vectors.size();
             if (n == 0u)
                 throw std::invalid_argument("vector_concat: empty list");
@@ -9450,12 +9528,26 @@ NB_MODULE(draken_native, m) {
             parts.reserve(n);
             for (size_t i = 0u; i < n; ++i)
                 parts.push_back(&nb::cast<const VectorOwner&>(vectors[i]));
-            return concat_owners(parts);
+            return concat_owners(parts, context.empty() ? nullptr : context.c_str());
         },
-        nb::arg("vectors"),
+        nb::arg("vectors"), nb::arg("context") = std::string(),
         "Vertically concatenate N same-type Vectors into one dense Vector.\n"
         "Buffer-level: no Python objects, no decode. Result type and logical_type\n"
-        "are taken from the first input. All inputs must share one type.");
+        "are taken from the first input. All inputs must share one type.\n"
+        "`context` names the thing being concatenated (a column name) and is\n"
+        "quoted in any error raised here.");
+
+    m.def("vector_widen",
+        [](nb::object vector, DrakenType target) -> VectorOwner {
+            return widen_owner(nb::cast<const VectorOwner&>(vector), target);
+        },
+        nb::arg("vector"), nb::arg("target"),
+        "Widen a Vector to `target` within its own type ladder (signed int,\n"
+        "unsigned int, or float). Shape-preserving: the cast kernels convert\n"
+        "data_length values and carry the input's selection through.\n"
+        "Raises if the pair is not a strict widening, or if the source carries a\n"
+        "logical-type descriptor. The policy for WHICH pairs are legal is\n"
+        "opteryx's is_legal_widen; this is the mechanism it drives.");
 
     // D.3 — dict-encoded string ingestion.
     m.def("vector_from_string_dict_sequence",

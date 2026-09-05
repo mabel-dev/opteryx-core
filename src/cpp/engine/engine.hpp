@@ -900,6 +900,7 @@ public:
                                 const std::vector<int>* logical_coerce = nullptr,
                                 const std::vector<uint8_t>* hash_key_columns = nullptr,
                                 const std::vector<uint8_t>* array_columns = nullptr,
+                                const std::vector<int>* widen_types = nullptr,
                                 int64_t row_limit = -1) {
         // docs/EXECUTION_TRACING_DESIGN.md: tag the rugo pipeline's trace spans
         // (TC_QUEUE_WAIT/TC_IO_REQUEST/TC_DECODE — currently node_id=0/untagged,
@@ -912,7 +913,7 @@ public:
         uint32_t node_id = set_source_(p, std::make_unique<NativeParquetScanSource>(
             pipeline, footer_map, work_items, column_names, in_flight_limit,
             pool, decimal_columns, /*varchar_columns=*/nullptr, string_types, logical_coerce,
-            hash_key_columns, array_columns, row_limit));
+            hash_key_columns, array_columns, widen_types, row_limit));
         if (pipeline != nullptr) pipeline->set_trace_node_id(node_id);
     }
     // R3 (`fused_topn`): the two-pass late-materialization scan Source. Everything the

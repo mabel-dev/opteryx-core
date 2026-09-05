@@ -201,36 +201,38 @@ def _file_entry_bounds_as_values(file_entry: FileEntry, schema) -> Tuple[List, L
 
 
 def _histogram_bins_of(file_entry: FileEntry, histogram: Optional[List]) -> int:
-    """The bin count to stamp on this row: the width the counts ACTUALLY have.
+    """The row-level bin count to stamp, or 0 when the columns do not share one.
 
     `histogram` is this file's per-column bin lists; a column with no histogram
-    contributes an empty list and no width. Widths must agree across columns —
-    one manifest row carries one `histogram_bins`, so two widths in one row
-    cannot both be described and the row would lie about one of them.
+    contributes an empty list and no width. Widths legitimately DIFFER between
+    columns of one file: the catalog writer gives a BOOLEAN column an exact
+    two-bin true/false histogram (opteryx_catalog/catalog/manifest.py's
+    `histogram_bucket(0, 1, 2)`) while everything else gets HISTOGRAM_BINS, and
+    any low-cardinality column is entitled to the same treatment — a
+    HIGH/MEDIUM/LOW column wants three exact bins, not 32 mostly-empty ones.
 
-    Whatever the file entry already claims must agree too. A rewrite that
-    re-stamps a stored width with a different one (the old unconditional
-    `HISTOGRAM_BINS`) hands the next reader bin boundaries that do not match the
-    counts — a silently mis-binned histogram, worse than no histogram at all.
+    A row carries ONE `histogram_bins`, so it can only describe such a file by
+    describing none of it: 0 — the "no single width" marker readers already
+    normalize to None (see FileEntry's manifest branch) before falling back to
+    each column's own slice length, which is the real width in every case. The
+    counts are the truth; this scalar is a cross-check that only applies when
+    the file happens to be uniform.
+
+    The width is always DERIVED from the counts in hand, never copied from
+    `file_entry.histogram_bins`: producers stamp that field unconditionally
+    (the catalog writer stamps HISTOGRAM_BINS on every row, boolean columns
+    included), so a stored width can already contradict the counts beside it.
+    Deriving it means the number written here describes the histogram written
+    here, whatever the row it came from claimed.
     """
     if not histogram:
         return 0
     widths = {len(bins) for bins in histogram if bins}
-    if len(widths) > 1:
-        raise ValueError(
-            f"Manifest row for {md_code(file_entry.file_path)} carries histograms of "
-            f"differing widths {sorted(widths)}; one row records one bin count."
-        )
-    if not widths:
+    if len(widths) != 1:
+        # Either nothing to describe, or per-column widths that no single
+        # number can describe. Both read back as "don't validate against me".
         return 0
-    actual = widths.pop()
-    stored = file_entry.histogram_bins
-    if stored is not None and stored != actual:
-        raise ValueError(
-            f"Histogram bin count mismatch for {md_code(file_entry.file_path)}: the file "
-            f"entry records {stored} bins but its histogram holds {actual}."
-        )
-    return actual
+    return widths.pop()
 
 
 def _file_entry_to_manifest_dict(

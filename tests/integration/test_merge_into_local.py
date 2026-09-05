@@ -351,6 +351,114 @@ def test_repeated_merge_is_idempotent(merge_env):
 DUP_SOURCE = f"{WORKSPACE}.col.dup"
 
 
+# ── a sub-query source ──────────────────────────────────────────────────────
+#
+# `USING (SELECT ...) AS s` is ordinary SQL: the USING clause takes a table
+# reference and a derived table is one. It works here because `plan_merge` hands
+# the source factor straight to the join it builds and asks it nothing but its
+# alias - so relation planning handles it exactly as it handles a derived table
+# anywhere else in the language. These tests hold that seam open.
+
+
+def test_subquery_source_upserts(merge_env):
+    """The shape an incremental rollup wants: aggregate the delta in the USING
+    clause rather than landing it in a staging table first."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING (SELECT cve, MAX(details) AS details FROM {SOURCE} GROUP BY cve) AS t
+       ON n.cve = t.cve
+     WHEN MATCHED AND n.details <> t.details
+          THEN UPDATE SET details = t.details, revision = n.revision + 1
+     WHEN NOT MATCHED
+          THEN INSERT (cve, details, revision) VALUES (t.cve, t.details, 1)
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 99, 2), (4, 40, 1)]
+
+
+def test_subquery_source_may_join_two_relations(merge_env):
+    """A source is a relation expression, not a relation: it may read more than
+    one. The GROUP BY is load-bearing - `col.dup` names cve 2 twice, and without
+    it this is a cardinality violation rather than a merge."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING (SELECT s.cve AS cve, SUM(d.details) AS details
+             FROM {SOURCE} AS s INNER JOIN {DUP_SOURCE} AS d ON s.cve = d.cve
+            GROUP BY s.cve) AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN UPDATE SET details = t.details
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    # cve 2 is the only row both sides name: 77 + 88.
+    assert _target_rows() == [(1, 10, 1), (2, 165, 1), (3, 30, 1)]
+
+
+def test_subquery_source_carries_time_travel(merge_env):
+    """A version clause inside the sub-query must survive into the join. The
+    source factor is passed through verbatim, which is exactly what makes this
+    work - nothing here re-renders or rebuilds it."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING (SELECT cve, details FROM {SOURCE} VERSION AS OF 1000) AS t
+       ON n.cve = t.cve
+     WHEN MATCHED AND n.details <> t.details THEN UPDATE SET details = t.details
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 99, 1)]
+
+
+def test_subquery_source_without_an_alias_is_refused(merge_env):
+    """The alias rule binds a sub-query harder than a table: there is no
+    relation name to fall back on, so an un-aliased one has no spelling the ON
+    condition or the arms could reference."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING (SELECT cve, details FROM {SOURCE})
+       ON n.cve = t.cve
+     WHEN MATCHED THEN DELETE
+    """
+    with pytest.raises(UnsupportedSyntaxError, match="requires an alias on its source"):
+        list(opteryx.session(user="tester").execute_to_morsels(sql))
+
+
+def test_subquery_target_is_still_refused(merge_env):
+    """The source may be derived; the target may not. MERGE addresses target
+    rows by file and ordinal, and a derived table has no rows to address."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    sql = f"""
+    MERGE INTO (SELECT * FROM {TARGET}) AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN MATCHED THEN DELETE
+    """
+    with pytest.raises(UnsupportedSyntaxError, match="requires a table as its target"):
+        list(opteryx.session(user="tester").execute_to_morsels(sql))
+
+
+def test_a_scan_inside_the_source_never_gets_the_target_s_row_identity(merge_env):
+    """Only the join's own target scan is asked for row identity.
+
+    A sub-query source can put scans in the plan this module never wrote, and one
+    of them may wear the target's alias. Finding the target by searching for that
+    alias stamped this one too - and because `$planets` has no manifest, the
+    statement was refused with `$planets` named as the thing that cannot address
+    rows. The scan is found by its plan node id instead.
+    """
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING (SELECT n.id AS cve, n.id AS details FROM $planets AS n WHERE n.id < 3) AS t
+       ON n.cve = t.cve
+     WHEN MATCHED AND n.details <> t.details THEN UPDATE SET details = t.details
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 1, 1), (2, 2, 1), (3, 30, 1)]
+
+
+
+
 def test_cardinality_violation_is_refused(merge_env):
     """A target row matched by two source rows must raise, not be acted on twice.
 

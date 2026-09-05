@@ -171,6 +171,12 @@ cdef class NativeScanPlan:
     # no direct kind — so this flag is what routes the pool blob to the native
     # TAG_ARRAY decoder rather than the decimal / varchar ones.
     cdef vector[uint8_t] array_columns
+    # Parallel to column_names. The DECLARED numeric width for a column the
+    # relation's schema types wider than some file stores it (0 = no widening).
+    # The native Source coerces those files' vectors to it so every file in a
+    # relation presents one type — see `widen_types` in
+    # native_parquet_scan_source.hpp for why an uncoerced one breaks concat.
+    cdef vector[int] widen_types
     # E37: parallel to column_names. 1 = this column is a GROUP BY/JOIN/DISTINCT key
     # downstream, so the native Source carries its hash seed (keyhash_buf). All-zero
     # (the default) → no sidecar built — the pay-for-use gate.
@@ -217,6 +223,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     decimal_columns=*,
     array_columns=*,
     logical_coerce=*,
+    widen_types=*,
     hash_key_columns=*,
     length_only_columns=*,
     pool=*,

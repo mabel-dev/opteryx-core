@@ -115,6 +115,22 @@ _array_child_to_timestamp = _draken_native_parquet.vector_retag_array_child_as_t
 # tag is already correct, only the descriptor is missing.
 _uint32_to_ipv4 = _draken_native_parquet.vector_retag_uint32_as_ipv4
 
+# Ladder widening (signed int / unsigned int / float). A file may store a column
+# NARROWER than the relation's schema declares — a legal schema evolution, and
+# exactly what ALTER COLUMN ... TYPE produces on an existing relation, which
+# rewrites nothing. Left uncoerced, those files' vectors reach the engine at
+# their stored width and the first operation that has to put two files' columns
+# together fails ("concat: all inputs must share one type"), which is how a
+# gdelt_events OPTIMIZE died on 2026-09-05.
+_widen_vector = _draken_native_parquet.vector_widen
+_WIDEN_LADDERS = (
+    (_draken_native_parquet.INT8, _draken_native_parquet.INT16,
+     _draken_native_parquet.INT32, _draken_native_parquet.INT64),
+    (_draken_native_parquet.UINT8, _draken_native_parquet.UINT16,
+     _draken_native_parquet.UINT32, _draken_native_parquet.UINT64),
+    (_draken_native_parquet.FLOAT32, _draken_native_parquet.FLOAT64),
+)
+
 # TimestampUnit enum name -> the unit string vector_reinterpret_as_timestamp64
 # expects. Used to retag int64-stored timestamp columns with the schema's unit
 # (previously this path forced "us"; a stale-unit latent bug).
@@ -173,6 +189,38 @@ def _string_type_for(column_type):
     if name == "VARBINARY":
         return DRAKEN_VARBINARY
     return DRAKEN_VARCHAR
+
+def _widen_target_for(column_type):
+    """Return ``(declared_physical, {source physicals that legally widen to it})``
+    for a column whose declared type is a plain integer/float width, else None.
+
+    The legality is `is_legal_widen` — the SAME predicate `ALTER COLUMN ... TYPE`
+    is checked against, called here over every ladder member so the answer for a
+    given declared type is precomputed once per scan instead of per row group.
+    There is one widening policy in this engine and it is not restated here: a
+    pair this function admits is a pair ALTER would have admitted.
+
+    None means "no widening applies to this column" — a string, a temporal, a
+    DECIMAL, an IPv4, or a declared type at the bottom of its ladder. A column
+    carrying a logical descriptor is excluded by `is_legal_widen` itself, which
+    is the point: the descriptor (scale, unit, IPv4-ness) does not survive a
+    width cast, so those must surface their real type rather than be coerced.
+    """
+    if column_type is None:
+        return None
+    from opteryx.types.logical_type import ColumnType as _CT
+    from opteryx.types.logical_type import is_legal_widen as _is_legal_widen
+
+    sources = frozenset(
+        member
+        for ladder in _WIDEN_LADDERS
+        for member in ladder
+        if _is_legal_widen(_CT(physical=member), column_type)
+    )
+    if not sources:
+        return None
+    return (column_type.physical, sources)
+
 
 # Predicate evaluation is the bytecode VM only — no alternative paths. The
 # compiler lowers the predicate AST to a typed CompiledBytecode at bind time;
@@ -342,6 +390,7 @@ cdef inline void _coerce_logical_types(
     dict timestamp_unit_map,
     set ipv4_col_set,
     dict array_ts_unit_map,
+    dict widen_map,
 ):
     """Coerce Integer64Vector physical columns to their logical types (DATE/TIMESTAMP/DECIMAL).
 
@@ -408,6 +457,17 @@ cdef inline void _coerce_logical_types(
             # addresses. Leaving it untouched surfaces the real type instead.
             if v_nb.type == _draken_native_parquet.UINT32:
                 row_group[col_name] = _uint32_to_ipv4(v_nb)
+    if widen_map:
+        # Ladder widening — the name-keyed twin of `_coerce_vectors`' kind 6.
+        for col_name, plan in widen_map.items():
+            v = row_group.get(col_name)
+            if v is None:
+                continue
+            v_nb = (<_DrakenShimVector>v)._nb if isinstance(v, _DrakenShimVector) else v
+            # Anything outside the legal-source set is left as decoded, for the
+            # reason the IPV4 guard above gives.
+            if v_nb.type in plan[1]:
+                row_group[col_name] = _widen_vector(v_nb, plan[0])
 
 
 cdef inline tuple _topn_rank(object v):
@@ -498,6 +558,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     dict timestamp_unit_map,
     set ipv4_col_set,
     dict array_ts_unit_map,
+    dict widen_map,
     list pass1_column_names,
     bytes precomputed_mask=None,
 ):
@@ -519,7 +580,7 @@ cdef _Pass1Result _evaluate_pass1_row_group(
     result.rows_before_filter = 0
 
     _coerce_logical_types(row_group, decimal_col_map, date_col_set, timestamp_col_set,
-                          timestamp_unit_map, ipv4_col_set, array_ts_unit_map)
+                          timestamp_unit_map, ipv4_col_set, array_ts_unit_map, widen_map)
 
     # Positional pairing: column order in the data dict matches pass1_column_names order.
     # C++ preserves column order; dict keys (bytes) are not used for identity lookup.
@@ -671,6 +732,8 @@ cdef class ParquetReadNode(ReaderNode):
     cdef dict _sp_pass2_name_to_identity
     cdef dict _sp_null_filler_by_name     # schema-evolution typed NULL-fill, by physical column name
     cdef dict _sp_string_type_by_name     # declared DrakenType (VARCHAR/NVARCHAR/VARBINARY), by physical column name
+    cdef dict _sp_widen_by_name           # (declared physical, legal source widths) for ladder widening, by physical column name
+    cdef dict _sp_widen_col_map           # same, bytes-keyed and None-free, for the dict-keyed pass-1 path
     cdef bint _sp_topn_active
     cdef bint _sp_two_pass_eligible
     # Snapshot of _lm_pass1_src.pruned_row_group_count taken by _run_pass1 /
@@ -1277,6 +1340,20 @@ cdef class ParquetReadNode(ReaderNode):
         self._sp_string_type_by_name = {
             col.name: _string_type_for(col.column_type) for col in base_schema.columns
         }
+        # Per-column ladder-widening plan, keyed by physical name — same union
+        # schema. A file storing the column narrower than the schema declares is
+        # widened to the declared width on the way out of the scan, so every file
+        # in a relation presents one type whatever width it happens to hold.
+        self._sp_widen_by_name = {
+            col.name: _widen_target_for(col.column_type) for col in base_schema.columns
+        }
+        # Bytes-keyed, None entries dropped: the row-group dicts the pass-1 path
+        # walks are keyed by encoded name, and an empty map skips the loop.
+        self._sp_widen_col_map = {
+            col.name.encode('utf-8'): self._sp_widen_by_name[col.name]
+            for col in base_schema.columns
+            if self._sp_widen_by_name[col.name] is not None
+        }
 
         if self._planner_name_to_identity_cached is None:
             self._planner_name_to_identity_cached = {
@@ -1585,6 +1662,12 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_coerce_ops.append((4, self._sp_array_ts_unit_map[col_b]))
             elif col_b in self._sp_ipv4_col_set:
                 self._sp_coerce_ops.append((5, None))
+            elif self._sp_widen_by_name.get(col) is not None:
+                # kind 6 — ladder widening. Mutually exclusive with every arm
+                # above by construction: `_widen_target_for` returns None for any
+                # column carrying a logical descriptor, which is what all five of
+                # them are.
+                self._sp_coerce_ops.append((6, self._sp_widen_by_name[col]))
             else:
                 self._sp_coerce_ops.append((0, None))
         self._sp_needs_coerce = any(op[0] != 0 for op in self._sp_coerce_ops)
@@ -1733,6 +1816,16 @@ cdef class ParquetReadNode(ReaderNode):
                 # unrelated bytes as addresses.
                 if v_nb.type == _draken_native_parquet.UINT32:
                     vectors[i] = _uint32_to_ipv4(v_nb)
+                continue
+            if kind == 6:
+                # Widen to the declared width when the file stored it narrower.
+                # A type OUTSIDE the precomputed legal-source set is left exactly
+                # as decoded — same posture as the IPV4 guard above: a file whose
+                # column is not a legal widening of what the schema declares is a
+                # real mismatch, and surfacing the stored type is what makes it
+                # visible instead of reinterpreting bytes.
+                if v_nb.type in op[1][1]:
+                    vectors[i] = _widen_vector(v_nb, op[1][0])
                 continue
             # DATE is physical int32 and now decodes at that width (E33 exact-width
             # integers), so kind==2 accepts INT32; DECIMAL/TIMESTAMP stay INT64-only.
@@ -2072,6 +2165,7 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_timestamp_unit_map,
                 self._sp_ipv4_col_set,
                 self._sp_array_ts_unit_map,
+                self._sp_widen_col_map,
                 self._sp_pass1_column_names,
                 <bytes>pulled[6] if pulled[6] is not None else None,
             )
@@ -2130,7 +2224,7 @@ cdef class ParquetReadNode(ReaderNode):
             row_group, self._sp_decimal_col_map,
             self._sp_date_col_set, self._sp_timestamp_col_set,
             self._sp_timestamp_unit_map, self._sp_ipv4_col_set,
-            self._sp_array_ts_unit_map,
+            self._sp_array_ts_unit_map, self._sp_widen_col_map,
         )
 
         p1_filtered, p1_identity_names = p1_cache.pop((path, rg_idx))
@@ -2293,6 +2387,7 @@ cdef class ParquetReadNode(ReaderNode):
                 self._sp_timestamp_unit_map,
                 self._sp_ipv4_col_set,
                 self._sp_array_ts_unit_map,
+                self._sp_widen_col_map,
                 self._sp_pass1_column_names,
                 <bytes>pulled[6] if pulled[6] is not None else None,
             )

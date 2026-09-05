@@ -18,8 +18,12 @@ Three rule families, tried in the order ``compact()`` used:
   B  sort-aware       files above the floor, either declustered out of an
                       overlapping group or bin-packed along the key order.
   C  delete debt      one file rewritten purely to shed merge-on-read deletes.
-                      The case A and B never reach: a lone at-target file that
-                      is heavily deleted.
+                      The case A and B never reach: an at-target file that is
+                      heavily deleted.
+
+A dataset whose manifest holds a SINGLE file is rejected unless rule C fires:
+there is nothing to merge it with, so only a rewrite-in-place to shed delete
+debt is worth a pass.
 """
 
 import random
@@ -49,6 +53,7 @@ class SelectionOutcome(Enum):
     PLANNED = "planned"
     NOTHING_TO_DO = "nothing-to-do"
     NO_SNAPSHOT = "no-snapshot"
+    SINGLE_FILE = "single-file"
 
 
 @dataclass
@@ -427,6 +432,21 @@ def select_compaction_plan(
     """
     if not entries:
         return SelectionResult(SelectionOutcome.NO_SNAPSHOT, detail="manifest is empty")
+
+    if len(entries) == 1:
+        # A one-file dataset has nothing to merge with, so rules A and B — which
+        # both need a partner — cannot make progress and are skipped.
+        #
+        # Rule C is the exception, and the ONLY reason a single file is ever
+        # rewritten: shedding merge-on-read delete debt is a rewrite in place,
+        # so it does not need a partner. A lone file with no debt is declined.
+        plan = _select_delete_debt(entries, sort_column, threshold=delete_debt_threshold)
+        if plan is None:
+            return SelectionResult(
+                SelectionOutcome.SINGLE_FILE,
+                detail="manifest holds a single file with no delete debt: nothing to compact",
+            )
+        return SelectionResult(SelectionOutcome.PLANNED, plan=plan, detail=plan.reason)
 
     plan: Optional[CompactionPlan] = None
 

@@ -329,6 +329,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
                                     const cppvector[int]* logical_coerce,
                                     const cppvector[uint8_t]* hash_key_columns,
                                     const cppvector[uint8_t]* array_columns,
+                                    const cppvector[int]* widen_types,
                                     int64_t row_limit)
         void set_latmat_scan_source(size_t p, ParquetIOPipeline* p1_pipeline,
                                     const unordered_map[string, FileStats]* footer_map,
@@ -2837,6 +2838,7 @@ cdef class NativePlan:
                                        pool_ptr, &splan.string_types,
                                        &splan.decimal_columns, &splan.logical_coerce,
                                        &splan.hash_key_columns, &splan.array_columns,
+                                       &splan.widen_types,
                                        c_row_limit)
 
     def set_latmat_scan_source(self, size_t p, NativeScanPlan p1_plan,
