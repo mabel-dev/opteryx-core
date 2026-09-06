@@ -73,17 +73,16 @@ class InsertNode(BasePlanNode):
         self.result: Optional[NonTabularResult] = None
 
         # Coalescing buffer: collects references to arriving morsels (no data
-        # movement) until the next one would push the pending row count past
-        # the ceiling, then merges the WHOLE pending list in one bulk concat
-        # pass (Morsel.combine) and writes that as a single file. Never concats
-        # a morsel into a live accumulator on arrival - that re-copies the
-        # growing buffer every time (O(n^2) over its lifetime).
+        # movement) and merges a whole batch in one bulk concat pass, written
+        # as a single file. The batcher owns BOTH ceilings - rows (so a file
+        # never spans more than one row group, which is what keeps FileEntry
+        # bounds populated) and projected string-arena bytes (so the concat
+        # itself cannot overflow the arena's uint32 offset).
         self.coalesce_rows = min(
             int(parameters.get("write_coalesce_rows", _MAX_ROWS_PER_ROW_GROUP)),
             _MAX_ROWS_PER_ROW_GROUP,
         )
-        self._pending = []
-        self._pending_rows = 0
+        self._batcher = MorselBatcher(self.coalesce_rows)
 
     @property
     def name(self):
@@ -193,28 +192,17 @@ class InsertNode(BasePlanNode):
         if self.column_mapping is not None and self.target_column_names is not None:
             morsel = self._align_morsel(morsel)
 
-        cdef Py_ssize_t n = len(morsel)
-        if self._pending and self._pending_rows + n > self.coalesce_rows:
-            self._flush_pending()
-        self._pending.append(morsel)
-        self._pending_rows += n
-        self._total_rows += n
+        self._total_rows += len(morsel)
+        for batch in self._batcher.push(morsel):
+            self._write_batch(batch)
 
     def _flush_pending(self):
-        """Merge and write whatever morsels have been collected since the last
-        flush, as a single file.
+        """Write whatever the batcher still holds, as one file per batch."""
+        for batch in self._batcher.finish():
+            self._write_batch(batch)
 
-        The pending list holds references only - this is the ONE bulk concat
-        pass over the whole list (Morsel.combine), not an incremental concat
-        per arrival.
-        """
-        if not self._pending:
-            return
-        merged = Morsel.combine(self._pending)
-        file_entry = self.connector.write_morsel(self.relation_name, merged)
-        self._file_entries.append(file_entry)
-        self._pending = []
-        self._pending_rows = 0
+    def _write_batch(self, batch):
+        self._file_entries.append(self.connector.write_morsel(self.relation_name, batch))
 
     def _align_morsel(self, morsel):
         """Reorder columns to target-schema order and rename to target names.

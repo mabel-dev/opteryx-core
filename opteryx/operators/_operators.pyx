@@ -16,6 +16,9 @@
 
 from libcpp.memory cimport shared_ptr
 from draken.morsels.morsel cimport Morsel, morsel_to_cxx, cxx_to_morsel
+# Batching policy for the write sinks (rows AND arena bytes) — a cdef class,
+# so a runtime import rather than a cimport; it is constructed once per node.
+from draken.morsels.morsel import MorselBatcher
 
 from draken.morsels.morsel cimport cxx_morsel_from_vectors_sp, cxx_select_sp
 from draken.morsels.cxx_morsel cimport CxxMorsel, MorselState, ErrCtx, cxx_morsel_new_eos, cxx_morsel_delete

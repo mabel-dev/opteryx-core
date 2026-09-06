@@ -394,6 +394,50 @@ static inline size_t draken_vector_nbytes(const DrakenVector* v) {
     return bytes;
 }
 
+// EXACT arena bytes this vector would contribute to a concat: the sum of the
+// long-form (> STR_INLINE_MAX) payload lengths of its VALID, REFERENCED rows.
+// Zero for every non-string-storage type — the 4 GB ceiling that makes this
+// number interesting is the string arena's uint32 offset, and nothing else
+// allocates against it.
+//
+// This is deliberately NOT draken_vector_nbytes. That reports OWNED payload,
+// which is the right answer for memory pressure and the WRONG answer for
+// "how much will concat copy": a slice is a view, so a one-row slice of a
+// 1 GB morsel owns ~1 GB while contributing a few bytes. Budgeting a write
+// coalescer on owned bytes therefore flushes after nearly every filtered or
+// sliced morsel and produces exactly the small-file storm the coalescer
+// exists to prevent.
+//
+// The walk mirrors concat_string's first counting pass in draken_native.cpp
+// byte for byte (same validity test, same inline test, same elided-payload
+// skip) — the two MUST agree, or a batcher sized by this function will hand
+// concat a batch that concat then refuses. Inline slots carry their bytes in
+// the slot itself and cost the arena nothing; an elided payload has no bytes
+// to copy.
+//
+// O(rows) for a string column, O(1) otherwise. Callers that need a cheap,
+// conservative bound should accumulate draken_vector_nbytes and only fall
+// back to this when that bound says the budget is at risk.
+static inline uint64_t draken_vector_projected_arena_bytes(const DrakenVector* v) {
+    if (v == NULL) return 0u;
+    if (!draken_type_is_string_storage(v->type)) return 0u;
+    const DrakenStringArena* sa = (const DrakenStringArena*)v->data;
+    if (sa == NULL) return 0u;
+    uint64_t total = 0u;
+    const uint32_t n = v->length;
+    const uint8_t* validity = v->validity;
+    const uint32_t* sel = v->selection;
+    uint32_t i;
+    for (i = 0u; i < n; ++i) {
+        if (validity != NULL && !((validity[i >> 3] >> (i & 7u)) & 1u)) continue;
+        const DrakenStringSlot* s = &sa->slots[sel[i]];
+        if (str_is_inline(s)) continue;
+        if (s->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) continue;
+        total += (uint64_t)s->ext.length;
+    }
+    return total;
+}
+
 // =============================================================================
 // ABI guard — frozen layout (CLAUDE.md §11, 09_delivery.md risk #1).
 // sizeof alone won't catch a field reorder, and a renumbered enum is as fatal

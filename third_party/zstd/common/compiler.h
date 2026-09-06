@@ -406,6 +406,13 @@ unsigned char* ZSTD_maybeNullPtrAdd(unsigned char* ptr, ptrdiff_t add)
 #define ZSTD_DEPS_NEED_STDINT
 #include "zstd_deps.h"  /* intptr_t */
 
+/* opteryx: this tree is vendored as .cpp and compiled as C++, so these
+ * hand-written declarations would mangle and fail to resolve against the
+ * sanitizer runtime's C symbols. Upstream never sees this because it
+ * builds as C. */
+#ifdef __cplusplus
+extern "C" {
+#endif
 /* Make memory region fully initialized (without changing its contents). */
 void __msan_unpoison(const volatile void *a, size_t size);
 
@@ -421,6 +428,9 @@ intptr_t __msan_test_shadow(const volatile void *x, size_t size);
 /* Print shadow and origin for the memory range to stderr in a human-readable
    format. */
 void __msan_print_shadow(const volatile void *x, size_t size);
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 #if ZSTD_ADDRESS_SANITIZER && !defined(ZSTD_ASAN_DONT_POISON_WORKSPACE)
@@ -429,6 +439,13 @@ void __msan_print_shadow(const volatile void *x, size_t size);
  * include the header file... */
 #include <stddef.h>  /* size_t */
 
+/* opteryx: this tree is vendored as .cpp and compiled as C++, so these
+ * hand-written declarations would mangle and fail to resolve against the
+ * sanitizer runtime's C symbols. Upstream never sees this because it
+ * builds as C. */
+#ifdef __cplusplus
+extern "C" {
+#endif
 /**
  * Marks a memory region (<c>[addr, addr+size)</c>) as unaddressable.
  *
@@ -459,6 +476,9 @@ void __asan_poison_memory_region(void const volatile *addr, size_t size);
  * \param addr Start of memory region.
  * \param size Size of memory region. */
 void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 #endif /* ZSTD_COMPILER_H */

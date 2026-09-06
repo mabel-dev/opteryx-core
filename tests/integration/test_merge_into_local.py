@@ -485,6 +485,223 @@ def test_cardinality_violation_is_refused(merge_env):
     assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
 
 
+# ── WHEN NOT MATCHED BY SOURCE ──────────────────────────────────────────────
+#
+# The arm acts on target rows the source never mentioned, so the join widens to
+# FULL OUTER and every target row is read and classified. `n.$file` is what tells
+# a target row that matched nothing from a source row that matched nothing —
+# see the module docstring, and the same test in the sink.
+
+
+_SYNC = f"""
+MERGE INTO {TARGET} AS n
+USING {SOURCE} AS t
+   ON n.cve = t.cve
+ WHEN MATCHED AND n.details <> t.details THEN UPDATE SET details = t.details
+ WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (t.cve, t.details, 1)
+ WHEN NOT MATCHED BY SOURCE THEN DELETE
+"""
+
+
+def test_not_matched_by_source_completes_a_full_sync(merge_env):
+    """All three populations in one statement — the target ends up as the source.
+
+    cve 1 is in the target and not the source: only this arm can act on it, and
+    only because the widened join reads it at all.
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(_SYNC))
+    assert _target_rows() == [(2, 20, 1), (3, 99, 1), (4, 40, 1)]
+
+
+def test_not_matched_by_source_can_update(merge_env):
+    """The arm's rows have a target row behind them exactly as a MATCHED row
+    does, so the old row's values are readable and are the fallback."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED BY SOURCE THEN UPDATE SET revision = n.revision + 100
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    # Only cve 1 is unmentioned; details carried through untouched.
+    assert _target_rows() == [(1, 10, 101), (2, 20, 1), (3, 30, 1)]
+
+
+def test_not_matched_by_source_arm_may_be_guarded(merge_env):
+    """A guard that no row satisfies must leave the target alone, not act on it."""
+    target = merge_env["col.tgt"]
+    before = target.metadata.current_snapshot_id
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED BY SOURCE AND n.details > 99 THEN DELETE
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 10, 1), (2, 20, 1), (3, 30, 1)]
+    assert target.metadata.current_snapshot_id == before
+
+
+def test_arm_order_holds_within_not_matched_by_source(merge_env):
+    """Within a population the first arm whose condition holds wins. cve 1
+    satisfies both arms; the DELETE must not reach it."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED BY SOURCE AND n.cve = 1 THEN UPDATE SET details = 111
+     WHEN NOT MATCHED BY SOURCE THEN DELETE
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(1, 111, 1), (2, 20, 1), (3, 30, 1)]
+
+
+def test_not_matched_by_source_cannot_read_the_source(merge_env):
+    """Every source column is NULL on these rows. A predicate reading one is
+    never true and an assignment reading one writes NULL over real data - both
+    silent, so both are refused."""
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    assignment = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED BY SOURCE THEN UPDATE SET details = t.details
+    """
+    with pytest.raises(UnsupportedSyntaxError, match="cannot read `t`"):
+        list(opteryx.session(user="tester").execute_to_morsels(assignment))
+
+    predicate = f"""
+    MERGE INTO {TARGET} AS n
+    USING {SOURCE} AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED BY SOURCE AND t.details > 0 THEN DELETE
+    """
+    with pytest.raises(UnsupportedSyntaxError, match="cannot read `t`"):
+        list(opteryx.session(user="tester").execute_to_morsels(predicate))
+
+
+def test_not_matched_by_source_takes_a_subquery_source(merge_env):
+    """The two features compose: the source is still just a relation expression
+    handed to the join."""
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING (SELECT cve, details FROM {SOURCE} WHERE cve > 3) AS t
+       ON n.cve = t.cve
+     WHEN NOT MATCHED BY SOURCE THEN DELETE
+     WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (t.cve, t.details, 1)
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    assert _target_rows() == [(4, 40, 1)]
+
+
+def test_not_matched_by_source_takes_an_aggregating_subquery_source(merge_env):
+    """The incremental-rollup shape: aggregate the delta in the USING clause and
+    let the BY SOURCE arm retire whatever the delta no longer names.
+
+    This combination was blocked until the FULL OUTER null-pad typing was fixed —
+    MERGE puts the source on the LEFT and the arm forces FULL OUTER, which is
+    every condition of that defect at once. See
+    tests/sql/test_full_outer_null_pad_types.py.
+    """
+    sql = f"""
+    MERGE INTO {TARGET} AS n
+    USING (SELECT cve, MAX(details) AS details FROM {SOURCE} WHERE cve > 2 GROUP BY cve) AS t
+       ON n.cve = t.cve
+     WHEN MATCHED AND n.details <> t.details THEN UPDATE SET details = t.details
+     WHEN NOT MATCHED THEN INSERT (cve, details, revision) VALUES (t.cve, t.details, 1)
+     WHEN NOT MATCHED BY SOURCE THEN DELETE
+    """
+    list(opteryx.session(user="tester").execute_to_morsels(sql))
+    # The delta names cve 3 (changed) and 4 (new); 1 and 2 are no longer named.
+    assert _target_rows() == [(3, 99, 1), (4, 40, 1)]
+
+
+def test_the_join_only_widens_when_the_arm_asks_for_it(merge_env):
+    """The cost property, pinned. Reading every target row is what the arm MEANS,
+    so a statement carrying one pays for it - and a statement without one must
+    not, which is the half a plan can silently regress."""
+    without = " ".join(str(r[0]) for r in _rows("EXPLAIN " + _UPSERT)).lower()
+    assert "left_outer" in without
+    assert "full_outer" not in without
+
+    with_arm = " ".join(str(r[0]) for r in _rows("EXPLAIN " + _SYNC)).lower()
+    assert "full_outer" in with_arm
+
+
+def test_a_null_join_key_lands_in_the_right_population(tmp_path):
+    """The case the source-on-the-left design could not express.
+
+    A target row with a NULL join key and a source row with a NULL join key both
+    match nothing and both fail `(<on>) IS TRUE`, and no column of either side
+    tells them apart. `n.$file` does: it is synthesized by the scan, so it is
+    non-NULL for a real target row and NULL for one the join invented. The target
+    row must be DELETEd by the BY SOURCE arm and the source row INSERTed by the
+    NOT MATCHED arm - opposite treatment, from one discriminator.
+    """
+    from opteryx_catalog.catalog.manifest import clear_parsed_manifest_cache
+
+    import opteryx.connectors as connectors
+
+    clear_parsed_manifest_cache()
+    disk_io = _LocalDiskIO()
+    target = _build_dataset(
+        str(tmp_path / "tgt"),
+        "col.tgt",
+        ["cve", "details", "revision"],
+        [(1, 10, 1), (None, 55, 1)],
+        disk_io,
+    )
+    source = _build_dataset(
+        str(tmp_path / "src"),
+        "col.src",
+        ["cve", "details"],
+        [(1, 10), (None, 66)],
+        disk_io,
+    )
+    datasets = {"col.tgt": target, "col.src": source}
+
+    class _FakeCatalog:
+        def __init__(self, workspace=None, **kwargs):
+            self.workspace = workspace
+            self.io = disk_io
+
+        def dataset_exists(self, identifier):
+            return identifier in datasets
+
+        def load_dataset(self, identifier):
+            return datasets[identifier]
+
+        def get_relation(self, identifier):
+            if identifier in datasets:
+                return "dataset", datasets[identifier]
+            return None, None
+
+    saved_default = connectors._default_connector
+    saved_prefixes = dict(connectors._storage_prefixes)
+    saved_cache = dict(connectors._connector_cache)
+    connectors._storage_prefixes.pop(WORKSPACE, None)
+    connectors._connector_cache.clear()
+    opteryx.set_default_connector(OpteryxConnector, catalog=_FakeCatalog)
+    try:
+        list(opteryx.session(user="tester").execute_to_morsels(_SYNC))
+        # `_target_rows` sorts, and a NULL key cannot be ordered against an int.
+        clear_parsed_manifest_cache()
+        rows = _rows(f"SELECT cve, details, revision FROM {TARGET}")
+        # cve 1 matched and was unchanged; the NULL-key TARGET row was dropped by
+        # the BY SOURCE arm; the NULL-key SOURCE row was inserted.
+        assert sorted(rows, key=lambda r: (r[0] is not None, r[1])) == [
+            (None, 66, 1),
+            (1, 10, 1),
+        ]
+    finally:
+        connectors._default_connector = saved_default
+        connectors._storage_prefixes.clear()
+        connectors._storage_prefixes.update(saved_prefixes)
+        connectors._connector_cache.clear()
+        connectors._connector_cache.update(saved_cache)
+
+
 def test_merge_scales_past_the_removed_row_cap(tmp_path):
     """A merge an order of magnitude past MERGE's original 2^20 row cap.
 

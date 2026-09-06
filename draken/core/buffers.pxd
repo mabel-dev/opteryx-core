@@ -146,6 +146,14 @@ cdef extern from "core/buffers.h":
     # reads, no allocation.
     size_t draken_vector_nbytes(const DrakenVector* v) noexcept nogil
 
+    # EXACT arena bytes this vector contributes to a concat: long-form payload
+    # of its valid, referenced rows only. 0 for non-string types. Unlike
+    # draken_vector_nbytes (OWNED payload) this is view-aware — a slice is
+    # charged what it references, not what its parent owns. Mirrors
+    # concat_string's counting pass; the two must agree. O(rows) for a string
+    # column, O(1) otherwise.
+    uint64_t draken_vector_projected_arena_bytes(const DrakenVector* v) noexcept nogil
+
     # Fixed byte-width per element, or 0 for the families that have no flat
     # per-element width (bool is bit-packed; string/variant use an arena;
     # array/fp16/null have no scalar width). THE canonical width — callers must

@@ -2017,6 +2017,16 @@ class _Compiler:
                   "VAR_SAMP": "VarSamp",
                   "MEDIAN": "Median", "ANY_VALUE": "AnyValue"}[func]
             specs.append((sc.identity, fn, idx))
+        # Each aggregate's OUTPUT identity and its bind-time result type, folded
+        # into the same identity -> (physical type, ColumnType) tracking every
+        # other branch uses - the window branch and GROUPING() already do this.
+        # An aggregate node carries no `columns`, so without this its outputs are
+        # known NOWHERE in the compiler's type maps, and every consumer that
+        # cannot learn the type from data has to guess. `_payload_types` guessed
+        # VARCHAR, which the FULL OUTER tail then used to type its NULL pad.
+        # Placed after the loop: it reads `schema_column` unguarded, and the loop
+        # is what proved every aggregate has one.
+        self._remember_types(aggs)
         return specs
 
     # ---- node dispatch --------------------------------------------------------------

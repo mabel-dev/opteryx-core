@@ -695,6 +695,7 @@ class Session(DataFrame):
     ):
         """The generator behind `execute_to_morsels` - see it for the contract."""
         from draken.morsels.morsel import Morsel
+        from draken.morsels.morsel import MorselBatcher
 
         from opteryx.types.logical_type import column_type_from_vector
 
@@ -760,25 +761,12 @@ class Session(DataFrame):
                 raise ResultTooLargeError(rows=delivered_rows, limit=row_budget)
             yield morsel
 
-        def _flush_buffer(buffered):
-            if not buffered:
-                return
-            if len(buffered) == 1:
-                yield from _yield_morsel(buffered[0])
-            else:
-                yield from _yield_morsel(Morsel.combine(buffered))
+        # Batching policy lives in ONE place (draken MorselBatcher): merge small
+        # morsels up to `max_size`, split oversized ones, and bound the combined
+        # string arena so the concat cannot overflow its uint32 offsets. This
+        # loop used to hand-roll the row half of that and had no byte half.
+        batcher = MorselBatcher(max_size)
 
-        def _split_morsel(morsel: Morsel):
-            # Split a large morsel into <= max_size pieces using slice().
-            offset = 0
-            total = morsel.num_rows
-            while offset < total:
-                chunk = morsel.slice(offset, min(max_size, total - offset))
-                yield chunk
-                offset += chunk.num_rows
-
-        pending = []
-        pending_rows = 0
         last_empty_morsel = None
         saw_nonzero_rows = False
 
@@ -802,26 +790,13 @@ class Session(DataFrame):
                     last_empty_morsel = morsel
                     continue
                 saw_nonzero_rows = True
-                for chunk in _split_morsel(morsel):
-                    if pending_rows + chunk.num_rows <= max_size:
-                        pending.append(chunk)
-                        pending_rows += chunk.num_rows
-                    else:
-                        # Fill up the current buffer, flush, then start new buffer
-                        if pending:
-                            yield from _flush_buffer(pending)
-                            pending = []
-                            pending_rows = 0
-                        # If chunk itself is larger than max_size, split it further
-                        if chunk.num_rows > max_size:
-                            for sub in _split_morsel(chunk):
-                                yield from _flush_buffer([sub])
-                        else:
-                            pending.append(chunk)
-                            pending_rows = chunk.num_rows
+                for batch in batcher.push(morsel):
+                    yield from _yield_morsel(batch)
 
-        if pending:
-            yield from _flush_buffer(pending)
+        tail = batcher.finish()
+        if tail:
+            for batch in tail:
+                yield from _yield_morsel(batch)
         elif not saw_nonzero_rows and last_empty_morsel is not None:
             yield from _yield_morsel(last_empty_morsel)
 

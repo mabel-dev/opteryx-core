@@ -110,8 +110,11 @@ class MergeNode(BasePlanNode):
             int(parameters.get("write_coalesce_rows", _MAX_ROWS_PER_ROW_GROUP)),
             _MAX_ROWS_PER_ROW_GROUP,
         )
-        self._pending = []
-        self._pending_rows = 0
+        # Rows AND projected arena bytes — see MorselBatcher. The row ceiling
+        # keeps every written file inside one row group (FileEntry bounds are
+        # only populated for single-row-group files); the byte ceiling keeps
+        # the batch's concat inside the string arena's uint32 offset.
+        self._batcher = MorselBatcher(self.coalesce_rows)
 
     @property
     def name(self):
@@ -204,10 +207,8 @@ class MergeNode(BasePlanNode):
         # substrate; `select` narrows to the target's own columns, dropping the
         # three control columns the sink has now consumed.
         rows = morsel.take(indices).select(morsel.column_names[:n_target])
-        self._pending.append(rows)
-        self._pending_rows += written
-        if self._pending_rows >= self.coalesce_rows:
-            self._flush_pending()
+        for batch in self._batcher.push(rows):
+            self._write_batch(batch)
 
     def _raise_split_error(self, int status):
         from opteryx.exceptions import InvalidInternalStateError
@@ -265,16 +266,14 @@ class MergeNode(BasePlanNode):
         return out
 
     def _flush_pending(self):
-        """Write whatever rows have been collected since the last flush as one file.
+        """Write whatever the batcher still holds, as one file per batch.
 
-        The pending list holds references only - one bulk concat over the whole
-        list, never an incremental concat per arrival (which re-copies the
-        growing buffer every time).
+        References only until emit - one bulk concat per batch, never an
+        incremental concat per arrival (which re-copies the growing buffer
+        every time).
         """
-        if not self._pending:
-            return
-        merged = Morsel.combine(self._pending)
-        file_entry = self.connector.write_morsel(self.relation_name, merged)
-        self._file_entries.append(file_entry)
-        self._pending = []
-        self._pending_rows = 0
+        for batch in self._batcher.finish():
+            self._write_batch(batch)
+
+    def _write_batch(self, batch):
+        self._file_entries.append(self.connector.write_morsel(self.relation_name, batch))

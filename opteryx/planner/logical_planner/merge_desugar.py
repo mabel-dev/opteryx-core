@@ -16,24 +16,46 @@ the row it replaces.
       WHEN MATCHED AND p THEN UPDATE SET c = ...      n.$file, n.$ordinal
       WHEN NOT MATCHED THEN INSERT ...        →     FROM src t LEFT JOIN tgt n ON <on>
 
-**Source on the LEFT.** That single choice is what makes classification
-unambiguous. The left row is always present, so `(<on>) IS TRUE` means matched,
-and no presence-marker column is needed. Written the other way round — target
-left, or FULL OUTER — a target row with a NULL join key and a source row with a
-NULL join key are indistinguishable and need opposite treatment, and the marker
-that would tell them apart cannot be built (the dialect refuses
-`SELECT *, TRUE AS m FROM …`, and a general USING source has no knowable column
-list).
+**Source on the LEFT.** The left row is always present, so `(<on>) IS TRUE`
+means matched and the two populations need nothing else to tell them apart.
+
+**`n.$file` is the presence marker.** The target's row address is NULL exactly
+when the outer join invented the target row, so `n.$file IS NOT NULL` says "a
+real target row is here" — and it says it without knowing one column name of
+either side. That is what makes `WHEN NOT MATCHED BY SOURCE` expressible: a
+target row with a NULL join key and a source row with a NULL join key are
+otherwise indistinguishable and need opposite treatment, and no marker built out
+of the data could tell them apart (the dialect refuses `SELECT *, TRUE AS m
+FROM …`, and a general USING source has no knowable column list). The address
+column is not data — the scan synthesizes it — so it is immune to that. The sink
+already discriminates on exactly this (native_merge_sink.hpp).
+
+    WHEN NOT MATCHED BY SOURCE  →  FROM src t FULL OUTER JOIN tgt n ON <on>
+
+**Three populations, three guards**, mutually exclusive by construction:
+
+    matched                  (<on>) IS TRUE
+    not matched              NOT ((<on>) IS TRUE) AND n.$file IS NULL
+    not matched by source    NOT ((<on>) IS TRUE) AND n.$file IS NOT NULL
+
+The join only widens to FULL OUTER when a NOT MATCHED BY SOURCE arm is present;
+without one there are no target-only rows to classify, and both the join and the
+CASE chains are exactly what they were before the arm existed.
+
+⚠️ **A NOT MATCHED BY SOURCE arm gives up the cost property below.** It acts on
+target rows the source never mentioned, so every target row must be read and
+classified — that is inherent to what the arm MEANS, not an implementation
+choice. Without such an arm:
 
 Untouched target rows never enter the plan at all: they are not emitted, not
 read past the join, and not rewritten. That is what merge-on-read means, and it
 is why a feed that republishes mostly-unchanged rows costs almost nothing.
 
 **Arm order is semantics.** Within a population, the first arm whose condition
-holds wins, so the CASE chain must preserve declaration order exactly. The two
-populations (matched / not matched) may be emitted in either block order because
-no row satisfies both guards — every not-matched branch is guarded by
-`NOT ((<on>) IS TRUE)` and a matched row fails that guard.
+holds wins, so the CASE chain must preserve declaration order exactly. The
+populations may be emitted in any block order because no row satisfies two
+guards, and each population's block ends in a catch-all — so by the time the
+chain reaches the last block, every row still falling through belongs to it.
 
 The action codes below are read by MergeNode, which is the only consumer.
 
@@ -71,6 +93,13 @@ MERGE_ACTION_COLUMN = "$merge_action"
 MERGE_FILE_COLUMN = "$merge_file"
 MERGE_ORDINAL_COLUMN = "$merge_ordinal"
 
+# Which of the join's three populations a WHEN clause acts on. Not the SQL
+# keyword and not an index into anything - a row belongs to exactly one, and the
+# guard that selects it is built once per population rather than per arm.
+POP_NOT_MATCHED = 0            # a source row no target row matched
+POP_NOT_MATCHED_BY_SOURCE = 1  # a target row no source row mentioned
+POP_MATCHED = 2                # a source row and the target row it matched
+
 
 # ── AST constructors ────────────────────────────────────────────────────────
 # The Merge AST's own sub-expressions (the ON condition, each arm's predicate,
@@ -106,6 +135,14 @@ def _and(left: dict, right: dict) -> dict:
 
 def _is_true(expr: dict) -> dict:
     return {"IsTrue": _nested(expr)}
+
+
+def _is_null(expr: dict) -> dict:
+    return {"IsNull": expr}
+
+
+def _is_not_null(expr: dict) -> dict:
+    return {"IsNotNull": expr}
 
 
 def _case(conditions: List[Tuple[dict, dict]], else_result: dict) -> dict:
@@ -268,50 +305,69 @@ def _resolve_assignments(
 class _Arm:
     """One WHEN clause, reduced to what the chains need."""
 
-    __slots__ = ("matched", "predicate", "action_code", "assignments")
+    __slots__ = ("population", "predicate", "action_code", "assignments")
 
-    def __init__(self, matched: bool, predicate: Optional[dict], action_code: int, assignments):
-        self.matched = matched
+    def __init__(self, population: int, predicate: Optional[dict], action_code: int, assignments):
+        self.population = population
         self.predicate = predicate
         self.action_code = action_code
         self.assignments = assignments  # {column: expr}, empty for DELETE
+
+    @property
+    def has_target_row(self) -> bool:
+        """Whether a row this arm acts on has a target row behind it.
+
+        Both MATCHED and NOT MATCHED BY SOURCE do: the difference between them is
+        whether a SOURCE row is also present, which changes which arms may READ
+        the source, not where the blended values come from. So the two behave
+        identically everywhere the old row's values are the fallback.
+        """
+        return self.population != POP_NOT_MATCHED
+
+
+_CLAUSE_POPULATION = {
+    "Matched": POP_MATCHED,
+    "NotMatched": POP_NOT_MATCHED,
+    "NotMatchedBySource": POP_NOT_MATCHED_BY_SOURCE,
+}
 
 
 def _read_arms(clauses: List[dict]) -> List[_Arm]:
     arms: List[_Arm] = []
     for clause in clauses:
         kind = clause.get("clause_kind")
-        if kind == "NotMatchedBySource":
-            raise UnsupportedSyntaxError(
-                "**MERGE INTO** does not support **WHEN NOT MATCHED BY SOURCE**. "
-                "It acts on target rows the source never mentioned, which this "
-                "implementation does not read."
-            )
-        if kind not in ("Matched", "NotMatched"):
+        population = _CLAUSE_POPULATION.get(kind)
+        if population is None:
             raise UnsupportedSyntaxError(f"Unsupported **MERGE** clause: {kind}")
-        matched = kind == "Matched"
         action = clause["action"]
         if "Insert" in action:
-            if matched:
+            if population == POP_MATCHED:
                 raise UnsupportedSyntaxError(
                     "**MERGE INTO**'s **WHEN MATCHED** arm cannot **INSERT** — the "
                     "row already exists. Use **UPDATE** or **DELETE**."
                 )
-            arms.append(_Arm(False, clause.get("predicate"), MERGE_INSERT, _insert_assignments(action)))
+            # NOT MATCHED BY SOURCE + INSERT needs no arm here: the grammar
+            # refuses it outright ("INSERT is not allowed in a NOT MATCHED BY
+            # SOURCE merge clause"), so a second check would be unreachable.
+            arms.append(
+                _Arm(population, clause.get("predicate"), MERGE_INSERT, _insert_assignments(action))
+            )
         elif "Update" in action:
-            if not matched:
+            if population == POP_NOT_MATCHED:
                 raise UnsupportedSyntaxError(
                     "**MERGE INTO**'s **WHEN NOT MATCHED** arm cannot **UPDATE** — "
                     "there is no row to update. Use **INSERT**."
                 )
-            arms.append(_Arm(True, clause.get("predicate"), MERGE_UPDATE, _update_assignments(action)))
+            arms.append(
+                _Arm(population, clause.get("predicate"), MERGE_UPDATE, _update_assignments(action))
+            )
         elif "Delete" in action:
-            if not matched:
+            if population == POP_NOT_MATCHED:
                 raise UnsupportedSyntaxError(
                     "**MERGE INTO**'s **WHEN NOT MATCHED** arm cannot **DELETE** — "
                     "there is no row to delete."
                 )
-            arms.append(_Arm(True, clause.get("predicate"), MERGE_DELETE, {}))
+            arms.append(_Arm(population, clause.get("predicate"), MERGE_DELETE, {}))
         else:
             raise UnsupportedSyntaxError(f"Unsupported **MERGE** action: {sorted(action)}")
     if not arms:
@@ -322,32 +378,100 @@ def _read_arms(clauses: List[dict]) -> List[_Arm]:
 # ── Chain building ──────────────────────────────────────────────────────────
 
 
-def _chain(arms, unmatched_guard, per_arm_result, unmatched_default, matched_default):
+def _references_relation(expr, alias: str) -> bool:
+    """Whether `expr` qualifies any column with `alias`.
+
+    Walks the raw AST rather than the built expression: this runs before
+    anything is bound, and a qualified reference is a `CompoundIdentifier` whose
+    first part is the relation. Column and relation names are not case sensitive
+    anywhere else in the engine, so the comparison is folded.
+
+    Qualified references ONLY. An unqualified name is resolved by the binder
+    against both sides, and reproducing that resolution here — without the
+    source's column list, which a sub-query source does not have until it is
+    planned — would be guessing. So this proves a reference IS to the named
+    relation; it never proves one is not.
+    """
+    folded = alias.lower()
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            parts = node.get("CompoundIdentifier")
+            if isinstance(parts, list) and len(parts) > 1:
+                head = parts[0].get("value")
+                if isinstance(head, str) and head.lower() == folded:
+                    return True
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return False
+
+
+def _reject_source_references(arms: List[_Arm], source_alias: str) -> None:
+    """A NOT MATCHED BY SOURCE arm may not read the source.
+
+    Its rows are target rows no source row mentioned, so every source column on
+    them is NULL — a predicate reading one is never true and an assignment
+    reading one writes NULL over real data. Both are silent; refusing is not.
+    """
+    for arm in arms:
+        if arm.population != POP_NOT_MATCHED_BY_SOURCE:
+            continue
+        expressions = list(arm.assignments.values())
+        if arm.predicate is not None:
+            expressions.append(arm.predicate)
+        for expression in expressions:
+            if _references_relation(expression, source_alias):
+                raise UnsupportedSyntaxError(
+                    "**MERGE INTO**'s **WHEN NOT MATCHED BY SOURCE** arm cannot read "
+                    f"`{source_alias}`. It acts on target rows the source never "
+                    "mentioned, so every column of the source is NULL there."
+                )
+
+
+def _chain(arms, groups, per_arm_result):
     """The one CASE chain shape both the action code and every blended column use.
 
-    Not-matched arms first, each guarded; then a catch-all for an unmatched row
-    no arm claimed; then the matched arms in declaration order, which need no
-    guard because every unmatched row has already been caught above; then the
-    matched catch-all as ELSE.
+    `groups` is `[(population, guard, default)]` in emission order. Each block
+    emits that population's arms in declaration order — each `AND`ed with the
+    population's guard — and then the guard alone as a catch-all for a row of
+    that population no arm claimed. Because every block ends in a catch-all, a
+    row still falling through has been excluded from every population emitted so
+    far; the LAST group therefore needs no guard at all and supplies the ELSE.
+
+    Passing `guard=None` marks that last group. It must be last, and there must
+    be exactly one — a guarded final group would leave rows with no branch, which
+    a CASE answers with NULL rather than an error.
     """
     conditions = []
-    for arm in arms:
-        if arm.matched:
-            continue
-        guard = unmatched_guard
-        if arm.predicate is not None:
-            guard = _and(unmatched_guard, _nested(arm.predicate))
-        conditions.append((guard, per_arm_result(arm)))
-    conditions.append((unmatched_guard, unmatched_default))
-    for arm in arms:
-        if not arm.matched:
-            continue
-        if arm.predicate is None:
-            # An unconditional matched arm ends the chain: nothing after it can
-            # ever be reached, and emitting the rest would be dead branches.
-            return _case(conditions, per_arm_result(arm))
-        conditions.append((_nested(arm.predicate), per_arm_result(arm)))
-    return _case(conditions, matched_default)
+    for index, (population, guard, default) in enumerate(groups):
+        last = index == len(groups) - 1
+        if last != (guard is None):  # pragma: no cover - caller-built, fixed shapes
+            from opteryx.exceptions import InvalidInternalStateError
+
+            raise InvalidInternalStateError(
+                "merge chain: exactly the last population block is the unguarded ELSE"
+            )
+        for arm in arms:
+            if arm.population != population:
+                continue
+            if guard is None:
+                if arm.predicate is None:
+                    # An unconditional arm in the ELSE block ends the chain:
+                    # nothing after it can ever be reached, and emitting the rest
+                    # would be dead branches.
+                    return _case(conditions, per_arm_result(arm))
+                conditions.append((_nested(arm.predicate), per_arm_result(arm)))
+                continue
+            test = guard if arm.predicate is None else _and(guard, _nested(arm.predicate))
+            conditions.append((test, per_arm_result(arm)))
+        if guard is None:
+            return _case(conditions, default)
+        conditions.append((guard, default))
+    from opteryx.exceptions import InvalidInternalStateError  # pragma: no cover
+
+    raise InvalidInternalStateError("merge chain: no population blocks")  # pragma: no cover
 
 
 def plan_merge(statement, **kwargs):
@@ -409,15 +533,41 @@ def plan_merge(statement, **kwargs):
             arm.assignments, target_columns, target_name, owner
         )
 
+    # ── the population guards ────────────────────────────────────────────────
+    # Without a NOT MATCHED BY SOURCE arm there are no target-only rows to tell
+    # apart, so the guards, the chains and the join are exactly what they were
+    # before the arm existed - `$file` is not read and the join stays LEFT OUTER.
+    by_source = any(arm.population == POP_NOT_MATCHED_BY_SOURCE for arm in arms)
     unmatched = _not(_is_true(on_expr))
+    not_matched_guard = unmatched
+    by_source_guard = None
+    if by_source:
+        _reject_source_references(arms, source_alias)
+        # `$file` is NULL exactly when the outer join invented the target row.
+        # It is what separates a source row that matched nothing from a target
+        # row that matched nothing, and it needs no column name from either side
+        # - see the module docstring, and the same test in the sink.
+        not_matched_guard = _and(unmatched, _is_null(_ident(target_alias, ROW_IDENTITY_FILE)))
+        by_source_guard = _and(unmatched, _is_not_null(_ident(target_alias, ROW_IDENTITY_FILE)))
+
+    def _groups(not_matched_default, by_source_default, matched_default):
+        """The population blocks in emission order, MATCHED last.
+
+        MATCHED is last because it is the population every other guard excludes,
+        so it can be emitted unguarded as the ELSE. The BY SOURCE block is absent
+        entirely when no arm declared one, rather than present and dead.
+        """
+        blocks = [(POP_NOT_MATCHED, not_matched_guard, not_matched_default)]
+        if by_source:
+            blocks.append((POP_NOT_MATCHED_BY_SOURCE, by_source_guard, by_source_default))
+        blocks.append((POP_MATCHED, None, matched_default))
+        return blocks
 
     # ── the action code ──────────────────────────────────────────────────────
     action_expr = _chain(
         arms,
-        unmatched_guard=unmatched,
-        per_arm_result=lambda arm: _int(arm.action_code),
-        unmatched_default=_int(MERGE_NOOP),
-        matched_default=_int(MERGE_NOOP),
+        _groups(_int(MERGE_NOOP), _int(MERGE_NOOP), _int(MERGE_NOOP)),
+        lambda arm: _int(arm.action_code),
     )
 
     # ── one blended column per target column ─────────────────────────────────
@@ -430,7 +580,10 @@ def plan_merge(statement, **kwargs):
         old_value = _ident(target_alias, column)
 
         def result_for(arm, _column=column, _old=old_value):
-            if arm.matched:
+            # A NOT MATCHED BY SOURCE row has a target row behind it exactly as a
+            # MATCHED row does, so the old value is the fallback for both. Only a
+            # NOT MATCHED row has none.
+            if arm.has_target_row:
                 return arm.assignments.get(_column, _old)
             return arm.assignments.get(_column, _null())
 
@@ -438,13 +591,13 @@ def plan_merge(statement, **kwargs):
             _aliased(
                 _chain(
                     arms,
-                    unmatched_guard=unmatched,
-                    per_arm_result=result_for,
-                    # An unmatched row no arm claimed is dropped by the sink, so
-                    # its values are never read; NULL says that honestly rather
-                    # than reaching for the target row, which does not exist.
-                    unmatched_default=_null(),
-                    matched_default=old_value,
+                    # A row no arm claimed is dropped by the sink, so its values
+                    # are never read. For a NOT MATCHED row NULL says that
+                    # honestly rather than reaching for a target row that does
+                    # not exist; for a NOT MATCHED BY SOURCE row the target row
+                    # is right there, so the old value is what is honest.
+                    _groups(_null(), old_value, old_value),
+                    result_for,
                 ),
                 column,
             )
@@ -457,10 +610,16 @@ def plan_merge(statement, **kwargs):
     # Held as a local because `create_node_relation` stamps the id of the Scan it
     # builds back onto this dict, and that id is how the target scan is found
     # again below.
+    # FULL OUTER only when a NOT MATCHED BY SOURCE arm asked for the target rows
+    # the source never mentioned. That widening is what costs the merge-on-read
+    # property (see the module docstring); a statement without such an arm does
+    # not pay it.
     target_join = {
         "relation": target_factor,
         "global": False,
-        "join_operator": {"LeftOuter": {"On": on_expr}},
+        "join_operator": (
+            {"FullOuter": {"On": on_expr}} if by_source else {"LeftOuter": {"On": on_expr}}
+        ),
     }
 
     select = {

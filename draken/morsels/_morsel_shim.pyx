@@ -28,6 +28,7 @@ from array import array as _ArrayType
 from draken.vectors.vector cimport Vector, from_decoded
 from draken.core.buffers cimport DrakenVector, DrakenType, DRAKEN_ARRAY, DRAKEN_INT64
 from draken.core.buffers cimport draken_vector_nbytes
+from draken.core.buffers cimport draken_vector_projected_arena_bytes
 
 # C-level Py_DECREF: Cython 3 made cpython.ref.Py_DECREF take `object`, which
 # would re-INCREF; we need the raw PyObject* form for the C++ column store.
@@ -1403,3 +1404,198 @@ cpdef Morsel align_tables(Morsel left_morsel, Morsel right_morsel,
     for j in range(len(out_vecs)):
         result._append_column(<Vector>out_vecs[j])
     return result
+
+
+# =============================================================================
+# MorselBatcher — the ONE place morsel batching policy lives.
+# =============================================================================
+# Every write sink and the cursor used to hand-roll this: hold a pending list,
+# sum rows, flush at a threshold. Five copies, all of them row-only, and the
+# byte axis missing from every one — which is how an OPTIMIZE pass over wide
+# string rows piled 262144 rows into one Morsel.combine and got
+# `concat: total arena bytes exceed 4 GB` out of concat_string. The row
+# threshold cannot see payload width, so no value of it is safe.
+#
+# Two axes, both enforced here:
+#
+#   rows  — no emitted morsel exceeds `max_rows`. Oversized input is SPLIT
+#           (slice), and batches are packed tight, so the single-row-group
+#           guarantee the write path's bounds pruning depends on actually
+#           holds. The sinks did not hold it before: they checked the
+#           threshold BEFORE appending, so one oversized morsel went straight
+#           through and produced a multi-row-group file with no bounds.
+#
+#   bytes — no COMBINED batch exceeds `max_arena_bytes` of projected string
+#           arena in any single column. A lone morsel over the budget is
+#           emitted as-is and that is provably safe: its arena already exists
+#           with uint32 offsets, so it is under 4 GB by construction, and
+#           Morsel.combine short-circuits a single-element list to the morsel
+#           itself with no concat at all. Concat can only overflow when it
+#           merges two or more, which is exactly what this budget bounds.
+#
+# Byte accounting is EXACT — per column, view-aware, matching concat_string's
+# own counting pass byte for byte (see draken_vector_projected_arena_bytes).
+#
+# The cheap measure was tried first and is UNSAFE. Morsel.nbytes reports OWNED
+# payload, sized by data_length; concat materializes every LOGICAL row, so a
+# dict or constant string column is copied at its row count, not its unique
+# count. Measured: a 5000-row dict column over 50 distinct 1 KB values owns
+# 46 KB and hands concat 5 MB — a 100x UNDER-count, and dict-encoded strings
+# are what the parquet scan produces by default. A budget built on that number
+# admits a batch concat then refuses, which is the exact failure this class
+# exists to prevent. Owned bytes are the right answer for memory pressure and
+# the wrong answer for "how much will concat copy"; they are not a conservative
+# bound in either direction.
+#
+# The exact walk is O(rows) per STRING column (zero for every other type) and
+# runs once per pushed morsel — the same pass concat itself does, against a
+# batch that is about to be encoded to parquet.
+#
+# Per column, not summed across columns: the 4 GB ceiling is per arena, and a
+# summed budget over-splits a wide table by roughly its column count.
+
+# The arena ceiling. FIXED, not tunable: DrakenStringSlot.ext.arena_offset is a
+# uint32, so 4 GB is a hard property of the format, not a workload preference.
+# 1 GiB leaves the slot table, validity and per-column headroom inside that,
+# and keeps a flushed file a sane size. Changing this is a format-level
+# decision, not configuration.
+MORSEL_MAX_ARENA_BYTES = 1 << 30
+
+
+cdef class MorselBatcher:
+    """Coalesce and split a morsel stream into batches bounded by rows AND bytes.
+
+    Streaming, not list-in/list-out: a batcher that takes the whole stream up
+    front forces every caller to hold it in memory first, which is the failure
+    this class exists to prevent. `push` returns the batches that became ready
+    (usually none), `finish` returns the tail. Morsels are held by REFERENCE
+    until emit; exactly one Morsel.combine runs per emitted batch, never an
+    incremental concat per arrival (that re-copies the growing buffer every
+    time and is quadratic in morsel count).
+
+    Zero-row morsels are dropped. A caller that needs the engine's courtesy
+    empty-schema morsel (the cursor does) must handle it outside the batcher:
+    that is result semantics, not batching.
+    """
+
+    cdef Py_ssize_t max_rows
+    cdef uint64_t max_arena_bytes
+    cdef list _pending
+    cdef Py_ssize_t _pending_rows
+    # Per-column projected arena bytes of everything in `_pending`. Per column,
+    # not summed: the 4 GB ceiling is per arena, and a summed budget over-splits
+    # a wide table by roughly its column count.
+    cdef vector[uint64_t] _pending_bytes
+
+    def __init__(self, Py_ssize_t max_rows, max_arena_bytes=None):
+        if max_rows <= 0:
+            raise ValueError("MorselBatcher: max_rows must be positive")
+        cdef uint64_t budget = (
+            MORSEL_MAX_ARENA_BYTES if max_arena_bytes is None else <uint64_t>max_arena_bytes
+        )
+        if budget == 0 or budget > <uint64_t>MORSEL_MAX_ARENA_BYTES:
+            raise ValueError(
+                "MorselBatcher: max_arena_bytes must be in (0, "
+                f"{MORSEL_MAX_ARENA_BYTES}] — the ceiling is the uint32 arena offset"
+            )
+        self.max_rows = max_rows
+        self.max_arena_bytes = budget
+        self._pending = []
+        self._pending_rows = 0
+
+    @property
+    def pending_rows(self):
+        return self._pending_rows
+
+    def push(self, morsel):
+        """Accept one morsel; return the list of batches that became ready."""
+        cdef list ready = []
+        cdef Py_ssize_t n, offset, space, take
+        if morsel is None:
+            return ready
+        n = morsel.num_rows
+        if n == 0:
+            return ready
+        offset = 0
+        while offset < n:
+            space = self.max_rows - self._pending_rows
+            take = n - offset
+            if take > space:
+                take = space
+            if offset == 0 and take == n:
+                self._append(morsel, take, ready)
+            else:
+                self._append(morsel.slice(offset, take), take, ready)
+            offset += take
+        return ready
+
+    def finish(self):
+        """Emit whatever is buffered. Returns a list (empty if nothing pending)."""
+        if not self._pending:
+            return []
+        return [self._emit()]
+
+    @classmethod
+    def defrag(cls, morsels, Py_ssize_t max_rows, max_arena_bytes=None):
+        """One-shot form: a list of morsels in, a list of bounded batches out."""
+        cdef MorselBatcher batcher = cls(max_rows, max_arena_bytes)
+        cdef list out = []
+        for morsel in morsels:
+            out.extend(batcher.push(morsel))
+        out.extend(batcher.finish())
+        return out
+
+    # ---- internals ----------------------------------------------------------
+
+    cdef _append(self, object piece, Py_ssize_t rows, list ready):
+        cdef vector[uint64_t] piece_bytes = self._measure(piece)
+        if self._pending != [] and self._exceeds(piece_bytes):
+            # Flush what we have; `piece` starts the next batch. It is never
+            # split on the byte axis — see the class docstring.
+            ready.append(self._emit())
+        self._pending.append(piece)
+        self._pending_rows += rows
+        self._add(piece_bytes)
+        if self._pending_rows >= self.max_rows:
+            ready.append(self._emit())
+
+    cdef object _emit(self):
+        cdef object merged = Morsel.combine(self._pending)
+        self._pending = []
+        self._pending_rows = 0
+        self._pending_bytes.clear()
+        return merged
+
+    cdef vector[uint64_t] _measure(self, object piece) except *:
+        """Exact projected arena bytes, one entry per column."""
+        cdef vector[uint64_t] out
+        cdef list names = list(piece.column_names)
+        cdef Py_ssize_t ncols = len(names)
+        cdef Py_ssize_t i
+        cdef Vector col
+        out.reserve(ncols)
+        for i in range(ncols):
+            col = <Vector>(<Morsel>piece)._cxx_column(names[i])
+            out.push_back(draken_vector_projected_arena_bytes(col._dv))
+        return out
+
+    cdef bint _exceeds(self, vector[uint64_t]& piece_bytes) except -1:
+        cdef Py_ssize_t i
+        if piece_bytes.size() != self._pending_bytes.size():
+            # Schema disagreement — Morsel.combine is the one that must report
+            # it, with the column names in the message.
+            return False
+        for i in range(<Py_ssize_t>piece_bytes.size()):
+            if self._pending_bytes[i] + piece_bytes[i] > self.max_arena_bytes:
+                return True
+        return False
+
+    cdef void _add(self, vector[uint64_t]& piece_bytes) except *:
+        cdef Py_ssize_t i
+        if self._pending_bytes.size() == 0:
+            self._pending_bytes = piece_bytes
+            return
+        if piece_bytes.size() != self._pending_bytes.size():
+            return
+        for i in range(<Py_ssize_t>piece_bytes.size()):
+            self._pending_bytes[i] = self._pending_bytes[i] + piece_bytes[i]

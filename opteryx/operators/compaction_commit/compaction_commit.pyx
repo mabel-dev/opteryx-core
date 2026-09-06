@@ -45,14 +45,18 @@ class CompactionCommitNode(BasePlanNode):
         self.baseline_snapshot_id = parameters.get("baseline_snapshot_id")
 
         self._file_entries = []
-        self._pending = []
-        self._pending_rows = 0
         self.result: Optional[NonTabularResult] = None
 
         self.coalesce_rows = min(
             int(parameters.get("write_coalesce_rows", _MAX_ROWS_PER_ROW_GROUP)),
             _MAX_ROWS_PER_ROW_GROUP,
         )
+        # Rows AND projected arena bytes - see MorselBatcher. Rows alone is
+        # what failed here in production: a pass over wide string rows filled
+        # 262144 rows into one Morsel.combine and the concat refused with
+        # `total arena bytes exceed 4 GB`. No row threshold can see payload
+        # width, so no value of it was ever safe.
+        self._batcher = MorselBatcher(self.coalesce_rows)
 
     @property
     def name(self):  # pragma: no cover
@@ -105,28 +109,22 @@ class CompactionCommitNode(BasePlanNode):
         self._consume(morsel)
 
     def _consume(self, morsel):
-        """Buffer a morsel by REFERENCE, flushing a whole batch at a time.
+        """Buffer a morsel by REFERENCE, writing a whole batch at a time.
 
         References only, never an incremental concat per arrival: concatenating
         into a live accumulator re-copies the growing buffer on every morsel,
         which is quadratic in the number of morsels.
         """
-        if morsel is None or morsel.num_rows == 0:
-            return
-        self._pending.append(morsel)
-        self._pending_rows += morsel.num_rows
-        if self._pending_rows >= self.coalesce_rows:
-            self._flush_pending()
+        for batch in self._batcher.push(morsel):
+            self._write_batch(batch)
 
     def _flush_pending(self):
-        """Write the buffered rows as one data file."""
-        if not self._pending:
-            return
-        merged = Morsel.combine(self._pending)
-        file_entry = self.connector.write_morsel(self.relation_name, merged)
-        self._file_entries.append(file_entry)
-        self._pending = []
-        self._pending_rows = 0
+        """Write whatever the batcher still holds, as one data file per batch."""
+        for batch in self._batcher.finish():
+            self._write_batch(batch)
+
+    def _write_batch(self, batch):
+        self._file_entries.append(self.connector.write_morsel(self.relation_name, batch))
 
     def _delete_written_files(self):
         """Best-effort removal of this pass's outputs after a refused commit.
