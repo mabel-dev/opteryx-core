@@ -83,7 +83,8 @@ PARQUET_INC  := -I$(ROOT)/rugo/src -I$(ROOT)/rugo/src/parquet $(DRAKEN_INC) \
                 -I$(ZSTD_DIR) -I$(ROOT)/third_party/bshoshany \
                 -I$(ROOT)/third_party/snappy -I$(ROOT)/third_party/lz4 \
                 -I$(ROOT)/third_party/miniz
-PARQUET_SRCS := $(wildcard $(ROOT)/rugo/src/parquet/*.cpp) \
+# %_test.cpp carries its own main() and would collide with replay_main.cpp's.
+PARQUET_SRCS := $(filter-out %_test.cpp,$(wildcard $(ROOT)/rugo/src/parquet/*.cpp)) \
                 $(ROOT)/third_party/snappy/snappy.cc \
                 $(ROOT)/third_party/snappy/snappy-sinksource.cc \
                 $(ROOT)/third_party/snappy/snappy-stubs-internal.cc \

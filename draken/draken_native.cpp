@@ -5730,12 +5730,36 @@ static VectorOwner concat_owners(const std::vector<const VectorOwner*>& parts,
         throw std::invalid_argument("concat: empty input" + where);
     const DrakenType type = parts[0]->vec.type;
     const LogicalType* lt = parts[0]->logical_type;
-    for (size_t i = 0u; i < parts.size(); ++i)
-        if (parts[i]->vec.type != type)
-            throw std::invalid_argument(
-                "concat: all inputs must share one type" + where + " - input 0 is " +
-                type_display_name(type, lt) + ", input " + std::to_string(i) + " is " +
-                type_display_name(parts[i]->vec.type, parts[i]->logical_type));
+    bool one_type = true;
+    for (size_t i = 1u; i < parts.size(); ++i)
+        if (parts[i]->vec.type != type) { one_type = false; break; }
+    if (!one_type) {
+        // Report WHICH types are present and how many parts carry each -- never a
+        // part's index. The parts are morsels, and morsel boundaries follow thread
+        // scheduling, so an index is a position in a list the reader never sees AND
+        // is not stable between runs of the same query: the identical query would
+        // name "input 5" and "input 7" on alternate runs. Counts are stable, are
+        // order-independent, and say more (a third disagreeing type shows up as a
+        // third entry instead of never being mentioned).
+        std::vector<std::string> names;
+        std::vector<size_t> counts;
+        for (const VectorOwner* p : parts) {
+            std::string name = type_display_name(p->vec.type, p->logical_type);
+            size_t k = 0u;
+            for (; k < names.size(); ++k)
+                if (names[k] == name) break;
+            if (k == names.size()) { names.push_back(std::move(name)); counts.push_back(1u); }
+            else ++counts[k];
+        }
+        std::string found;
+        for (size_t k = 0u; k < names.size(); ++k) {
+            if (k) found += ", ";
+            found += names[k] + " (" + std::to_string(counts[k]) +
+                     (counts[k] == 1u ? " part)" : " parts)");
+        }
+        throw std::invalid_argument(
+            "concat: all inputs must share one type" + where + " - found " + found);
+    }
 
     // TIMESTAMP64/DECIMAL/DECIMAL128 carry a required out-of-band logical-type
     // descriptor (unit, or precision/scale) that lives on VectorOwner, not on
@@ -6484,14 +6508,102 @@ static CxxMorsel cxx_mask(const CxxMorsel& m, const DrakenVector& mask) {
     return out;
 }
 
+// Clone a scalar literal's single value into a freshly OWNED constant vector of
+// `length` rows.
+//
+// A const-broadcast column must own its value like every other column: the morsel
+// owns its vectors and the vectors own their memory. The predicate program's
+// literal buffers do not outlive the kernel call (see ExprFilterFn's out-param
+// contract in src/cpp/engine/native_expression.hpp), so a column that merely
+// POINTED at `scalar->data` dangled as soon as the stream advanced — reading a
+// filtered morsel after the next pull segfaulted, for any equality predicate
+// (`WHERE name = 'Earth'`). It went unnoticed because the cursor sliced every
+// morsel before buffering it, and slicing copies.
+//
+// Returns false when the value cannot be cloned here — a null-carrying literal
+// (the broadcast contract is a never-null literal, and a 1-row validity bitmap
+// has no meaning spread over n rows) or a type with no flat width. The caller
+// then gathers that column the ordinary way: always correct, only slower.
+static bool clone_scalar_constant(const DrakenVector& scalar, uint32_t length,
+                                  std::shared_ptr<VectorOwner>& out) {
+    if (scalar.validity != nullptr || scalar.data == nullptr) return false;
+    const uint32_t src_idx = (scalar.selection != nullptr) ? scalar.selection[0] : 0u;
+
+    if (draken_type_is_string_storage(scalar.type)) {
+        const DrakenStringArena* src_sa =
+            static_cast<const DrakenStringArena*>(scalar.data);
+        if (src_sa->slots == nullptr) return false;
+        const DrakenStringSlot* src_slot = &src_sa->slots[src_idx];
+        const bool inln = str_is_inline(src_slot) != 0;
+        if (!inln && src_slot->ext.arena_offset == STR_ELIDED_PAYLOAD_OFFSET) return false;
+        const size_t arena_ext = inln ? 0u : static_cast<size_t>(src_slot->ext.length);
+        // Same single-block layout make_string_constant builds:
+        // [DrakenStringArena | DrakenStringSlot[1] | payload]
+        constexpr size_t kSlotAlign = alignof(DrakenStringSlot);
+        const size_t struct_end =
+            (sizeof(DrakenStringArena) + kSlotAlign - 1u) & ~(kSlotAlign - 1u);
+        const size_t arena_start = struct_end + sizeof(DrakenStringSlot);
+        const size_t total = arena_start + arena_ext;
+        uint8_t* block = static_cast<uint8_t*>(draken_malloc(total));
+        if (block == nullptr) return false;
+        std::memset(block, 0, total);
+        OwnedBuffer<void> data_buf(block);
+        DrakenStringArena* sa   = reinterpret_cast<DrakenStringArena*>(block);
+        DrakenStringSlot*  slot = reinterpret_cast<DrakenStringSlot*>(block + struct_end);
+        uint8_t*           arena = (arena_ext > 0u) ? (block + arena_start) : nullptr;
+        sa->slots           = slot;
+        sa->arena           = arena;
+        sa->length          = 1u;
+        sa->arena_used      = arena_ext;
+        sa->arena_cap       = arena_ext;
+        sa->null_bitmap     = nullptr;
+        sa->owns_buffers    = 0;
+        sa->payloads_elided = 0;
+        sa->type            = scalar.type;
+        if (arena_ext > 0u) {
+            if (src_sa->arena == nullptr) return false;
+            std::memcpy(arena, src_sa->arena + src_slot->ext.arena_offset, arena_ext);
+        }
+        // Verbatim slot copy, rebased to offset 0 (our arena holds this one value).
+        str_clone_with_offset(slot, src_slot, 0u);
+        DrakenVector v = draken_vector_from_constant(sa, length, scalar.type, nullptr);
+        out = std::make_shared<VectorOwner>(v, std::move(data_buf),
+                                            OwnedBuffer<uint8_t>(nullptr));
+        return true;
+    }
+
+    if (scalar.type == DRAKEN_BOOL) {
+        // Bit-packed: the single value is one bit; the clone holds it at bit 0.
+        uint8_t* b = static_cast<uint8_t*>(draken_malloc(1u));
+        if (b == nullptr) return false;
+        const uint8_t* src = static_cast<const uint8_t*>(scalar.data);
+        b[0] = static_cast<uint8_t>((src[src_idx >> 3] >> (src_idx & 7u)) & 1u);
+        DrakenVector v = draken_vector_from_constant(b, length, scalar.type, nullptr);
+        out = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(b),
+                                            OwnedBuffer<uint8_t>(nullptr));
+        return true;
+    }
+
+    const size_t width = draken_type_fixed_itemsize(scalar.type);
+    if (width == 0u) return false;   // array/fp16/null — gather instead
+    uint8_t* buf = static_cast<uint8_t*>(draken_malloc(width));
+    if (buf == nullptr) return false;
+    std::memcpy(buf, static_cast<const uint8_t*>(scalar.data) +
+                     static_cast<size_t>(src_idx) * width, width);
+    DrakenVector v = draken_vector_from_constant(buf, length, scalar.type, nullptr);
+    out = std::make_shared<VectorOwner>(v, OwnedBuffer<void>(buf),
+                                        OwnedBuffer<uint8_t>(nullptr));
+    return true;
+}
+
 // S1 twin: like cxx_mask, but columns listed in const_col_idx are known (by the
 // caller's static analysis of the predicate, e.g. `WHERE col = 7`) to be a single
 // literal value on every surviving row. Those columns are broadcast in O(1) from a
-// pre-resolved, caller-owned scalar DrakenVector* (data_length == 1, validity ==
-// nullptr — a never-null literal) via draken_vector_from_constant, instead of being
-// gathered via vector_take_impl and then thrown away. const_scalar_dv[k]'s `data`
-// buffer is NOT copied here — draken_vector_from_constant borrows it, so the
-// caller must keep it alive for as long as any morsel built from it is in use.
+// pre-resolved scalar DrakenVector* (data_length == 1, validity == nullptr — a
+// never-null literal) instead of being gathered via vector_take_impl and then
+// thrown away. The scalar's ONE value is CLONED into the output column's own
+// buffer (clone_scalar_constant) — the caller's literal is not kept alive by the
+// result, and a column that cannot be cloned falls back to the gather path.
 static CxxMorsel cxx_mask_with_consts(const CxxMorsel& m, const DrakenVector& mask,
                                        const int32_t* const_col_idx,
                                        const DrakenVector* const* const_scalar_dv,
@@ -6508,11 +6620,9 @@ static CxxMorsel cxx_mask_with_consts(const CxxMorsel& m, const DrakenVector& ma
             if (static_cast<uint32_t>(const_col_idx[k]) == ci) { scalar = const_scalar_dv[k]; break; }
         }
         CxxColumn nc;
-        if (scalar != nullptr) {
-            DrakenVector v = draken_vector_from_constant(
-                scalar->data, n, scalar->type, scalar->validity);
-            nc.own = std::make_shared<VectorOwner>(
-                v, OwnedBuffer<void>(nullptr), OwnedBuffer<uint8_t>(nullptr));
+        std::shared_ptr<VectorOwner> cloned;
+        if (scalar != nullptr && clone_scalar_constant(*scalar, n, cloned)) {
+            nc.own = std::move(cloned);
         } else {
             nc.own = std::make_shared<VectorOwner>(
                 vector_take_impl(*m.columns[ci].own, idx_vec.data(), n));
