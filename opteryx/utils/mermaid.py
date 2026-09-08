@@ -562,7 +562,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
             #   records_in ← parquet_rows_before_filter (post row-group-pruning,
             #     pre reader-side-filter row count — 0/absent when nothing was
             #     pushed, i.e. in genuinely equals out)
-            #   bytes_in   ← billing_bytes_by_scan[node.identity] (the SAME
+            #   bytes_in   ← billing_bytes_by_scan[node.uuid] (the SAME
             #     dense-logical bytes the DATA_PROCESSED_BYTES meter bills for
             #     this scan, plan-time — not the generic rows*columns*8
             #     estimate every other operator's bytes_in/out use)
@@ -575,7 +575,7 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 node_stat.pop("rows_read", None)
             _billing_bytes_by_scan = node.telemetry._reading.get("billing_bytes_by_scan")
             _scan_billing_bytes = (
-                _billing_bytes_by_scan.get(node.identity) if _billing_bytes_by_scan else None
+                _billing_bytes_by_scan.get(node.uuid) if _billing_bytes_by_scan else None
             )
             if _scan_billing_bytes is not None:
                 node_stat["bytes_in"] = _scan_billing_bytes

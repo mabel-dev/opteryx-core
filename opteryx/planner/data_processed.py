@@ -220,16 +220,28 @@ def data_processed_by_scan(
     """Dense logical bytes this plan will read, per Scan node.
 
     Same walk and same per-scan figure `measure_data_processed` sums into the
-    DATA_PROCESSED_BYTES meter — keyed by `node.identity`, the identity the
-    physical planner carries onto the compiled operator (see
-    `compiler.py`'s `set_current_identity(node.identity)` and
-    `scan_facts[scan.identity]`). That shared identity is what lets a
-    consumer keyed by the physical/EXPLAIN plan (e.g. `mermaid.py`) look up
-    the SAME number the bill was computed from, rather than a second,
-    disagreeing estimate.
+    DATA_PROCESSED_BYTES meter — keyed by `node.uuid`, which
+    `create_physical_plan` copies from the logical node onto the compiled
+    operator. That shared key is what lets a consumer keyed by the
+    physical/EXPLAIN plan (e.g. `mermaid.py`) look up the SAME number the bill
+    was computed from, rather than a second, disagreeing estimate.
+
+    NOT `node.identity`: an identity is minted by the OPERATOR's constructor,
+    so a logical node has none, and this walk runs on the final LOGICAL plan —
+    before physical planning. Keyed by identity every scan in every query
+    landed under the single key `None`: the per-scan breakdown collapsed to one
+    entry, the EXPLAIN lookup (by the operator's minted identity) could never
+    hit it, and a `None` map key is rejected outright by consumers that write
+    the telemetry to a document store. `uuid` is the identity's opposite: it is
+    minted with the logical node and carried forward, so it exists at both ends
+    of the join.
+
+    One entry per Scan NODE, so two scans of the same relation (the legs of a
+    self-UNION) keep their own entries — each is a separate node, and each is
+    what EXPLAIN draws.
     """
     return {
-        node.identity: _scan_bytes(node, base_stats_cache)
+        node.uuid: _scan_bytes(node, base_stats_cache)
         for node in iter_scan_nodes(plan, shared_ctes)
     }
 

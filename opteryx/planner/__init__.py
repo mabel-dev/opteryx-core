@@ -581,13 +581,13 @@ def query_planner(
         "billing_bytes",
         measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
     )
-    # Per-scan breakdown of that same figure, keyed by the identity the
-    # physical planner carries onto the compiled scan node — EXPLAIN
-    # (mermaid.py) reads this so a TABLE SCAN's displayed bytes are the SAME
-    # number the bill was computed from, not a second, disagreeing estimate.
-    # Dict-keyed, so two Scan nodes sharing one identity (a self-UNION leg)
-    # collapse to one entry here — correct for per-node display (they read
-    # the same bytes) even though `billing_bytes` above counts both.
+    # Per-scan breakdown of that same figure, keyed by the `uuid` the physical
+    # planner carries from the logical node onto the compiled scan node —
+    # EXPLAIN (mermaid.py) reads this so a TABLE SCAN's displayed bytes are the
+    # SAME number the bill was computed from, not a second, disagreeing
+    # estimate. One entry per Scan node, so a self-UNION's two legs are two
+    # entries, matching the two nodes EXPLAIN draws and the two `billing_bytes`
+    # above counts.
     telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(
         optimized_plan, scan_stats_cache, shared_ctes
     )
