@@ -95,6 +95,9 @@ class MergeNode(BasePlanNode):
         # held, so the index is exact and free where a per-row string would be
         # dragged through the join for no information gain.
         self.file_paths = parameters.get("file_paths")
+        # The provenance receipt and its producer - see InsertNode.
+        self.read_sources = parameters.get("read_sources")
+        self.produced_by = parameters.get("produced_by")
 
         self._file_entries = []
         # Every acted-on address lives in NATIVE state for the whole statement
@@ -159,6 +162,8 @@ class MergeNode(BasePlanNode):
                 delete_positions,
                 author=self._author,
                 operation=self.operation,
+                read_sources=self.read_sources,
+                produced_by=self.produced_by,
             )
             self.result = NonTabularResult(
                 record_count=self._acted_row_count(),

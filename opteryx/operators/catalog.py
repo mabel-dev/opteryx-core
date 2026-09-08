@@ -211,6 +211,8 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.show_grants import ShowGrantsNode
     from opteryx.operators.show_manifest import ShowManifestNode
     from opteryx.operators.show_snapshots import ShowSnapshotsNode
+    from opteryx.operators.show_lineage import ShowLineageNode
+    from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.sort import SortNode
@@ -485,6 +487,18 @@ def _build_registry() -> OperatorRegistry:
     r.register(
         ShowSnapshotsNode,
         name="Show Snapshots",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowLineageNode,
+        name="Show Lineage",
+        category=OperatorCategory.DDL,
+        is_not_explained=True,
+    )
+    r.register(
+        ShowSourcesNode,
+        name="Show Sources",
         category=OperatorCategory.DDL,
         is_not_explained=True,
     )

@@ -124,6 +124,8 @@ class Writable:
         file_entries: "List[FileEntry]",
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        read_sources: Optional[List[dict]] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Commit pre-written data files into a new snapshot, appending to
         whatever the relation already contains.
@@ -143,6 +145,19 @@ class Writable:
                 mechanism, and the store describes it however it describes any
                 append.
 
+            read_sources: THE PROVENANCE RECEIPT - every catalog relation the
+                statement read, as `{dataset, snapshot-id, resolved-by}` with
+                the dataset fully qualified, or `[]` for a statement that read
+                no catalog relation (INSERT ... VALUES). The binder derives it
+                from the bound Scan nodes; nothing at commit time can. `None`
+                means "not reported" and the catalog treats it as a defect
+                (alerted, audited, swept), so a Writable that reaches a catalog
+                passes what it was given, never a default of its own.
+            produced_by: `task:<name>` for a statement an EXECUTE expanded,
+                `view:<name>` for a materialized view's population or refresh,
+                None for a hand-run statement. Names the definition the
+                commit's receipt should be checked against.
+
         Raises:
             ValueError: If relation doesn't exist
             ConcurrentModificationError: If relation was modified concurrently
@@ -157,6 +172,8 @@ class Writable:
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         operation: str = "merge",
+        read_sources: Optional[List[dict]] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Commit pre-written data files AND row-level deletes as ONE snapshot.
 
@@ -204,6 +221,8 @@ class Writable:
         file_entries: "List[FileEntry]",
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        read_sources: Optional[List[dict]] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Atomically replace all of a relation's data with the given files,
         as a single new snapshot (CREATE OR REPLACE ... AS SELECT).
@@ -832,6 +851,7 @@ class Writable:
         author: Optional[str] = None,
         or_replace: bool = False,
         writes: Optional[List[str]] = None,
+        reads: Optional[List[str]] = None,
     ) -> None:
         """Register a task: a statement the platform runs on its own.
 
@@ -855,6 +875,11 @@ class Writable:
                 EVERY registration, never carried from the previous one: it is
                 a property of the statement, so a replaced statement must not
                 leave the old answer standing.
+            reads: the relations `statement` reads, derived by the same AST
+                pass. The plan-level "what feeds the thing this task writes",
+                answerable before it has ever run; what a run actually read is
+                the receipt on the snapshot it committed. Same rule as
+                `writes`: written on every registration, never carried.
 
         Raises:
             ValueError: If the task exists and `or_replace` is False

@@ -70,7 +70,7 @@ class _NoFilesystemConnector(BaseConnector, Writable):
             file_size_in_bytes=0,
         )
 
-    def insert(self, relation_name, file_entries, author=None):
+    def insert(self, relation_name, file_entries, author=None, **kwargs):
         self._relations[relation_name][1] += sum(fe.record_count for fe in file_entries)
 
 

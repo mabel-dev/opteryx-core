@@ -108,12 +108,101 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
+def _can_read_for(context: BindingContext):
+    """The S4.4 elision predicate for this session: may the caller READ the
+    named object? Asked of the permissions capability exactly as visit_scan
+    asks it for the relation being scanned, so a name is visible here if and
+    only if a SELECT against it would bind. `information_schema` and `$grants`
+    are named nowhere in a receipt, so the self-governing exception those take
+    does not arise."""
+    from opteryx.managers.permissions import can_perform_action
+
+    return lambda name: can_perform_action(context.execution_context, name, action="READ")
+
+
+def visit_show_lineage(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind SHOW LINEAGE FOR: consume the receipts the Scan below already
+    fetched (visit_scan populates context.snapshots for a `for_snapshots_only`
+    Scan whose `history_view` is "lineage", gated at READ on the relation) and
+    fix the output to the lineage shape.
+
+    This is where S4.4 is applied. The connector returns every name the
+    receipts hold - it has no session to ask about - and the binder, which
+    does, nulls each name the caller cannot READ and keeps the row. The gate
+    on the relation itself is READ and nothing stricter: knowing that a table
+    has upstreams is part of reading it; knowing WHICH is gated per name.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.models.lineage_history import elide_lineage, lineage_output_schema
+
+    if context.schema_only:
+        # The shape is fixed and knowable without reading anything; only the
+        # rows are unknowable in a schema-only bind - as for SHOW SNAPSHOTS.
+        node.schema = lineage_output_schema(node.relation)
+    else:
+        rows = context.snapshots.get(node.relation)
+        if rows is None:
+            raise UnsupportedSyntaxError(
+                f"'{node.relation}' has no lineage (its connector does not keep a "
+                "commit log)."
+            )
+        node.lineage = elide_lineage(rows, _can_read_for(context))
+        node.schema = lineage_output_schema(node.relation)
+        node.schema.row_count_estimate = len(rows)
+    node.columns = []
+    for schema_column in node.schema.columns:
+        column_reference = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=schema_column.name,
+            source=node.relation,
+            schema_column=schema_column,
+        )
+        node.columns.append(column_reference)
+    return node, context
+
+
+def visit_show_sources(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind SHOW SOURCES FOR: consume the standing source list the Scan below
+    already read off the dataset (visit_scan, `history_view` "sources") and
+    fix the output to the source-list shape. Elision as for SHOW LINEAGE.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.models.source_list import elide_sources, sources_output_schema
+
+    if context.schema_only:
+        node.schema = sources_output_schema(node.relation)
+    else:
+        rows = context.snapshots.get(node.relation)
+        if rows is None:
+            raise UnsupportedSyntaxError(
+                f"'{node.relation}' has no source list (its connector does not "
+                "keep a commit log)."
+            )
+        node.sources = elide_sources(rows, _can_read_for(context))
+        node.schema = sources_output_schema(node.relation)
+        node.schema.row_count_estimate = len(rows)
+    node.columns = []
+    for schema_column in node.schema.columns:
+        column_reference = LogicalColumn(
+            node_type=NodeType.IDENTIFIER,
+            source_column=schema_column.name,
+            source=node.relation,
+            schema_column=schema_column,
+        )
+        node.columns.append(column_reference)
+    return node, context
+
+
 # What SHOW CREATE asks for, per object type - see `visit_show`. TABLE is
 # absent deliberately and falls through to READ.
 _SHOW_CREATE_ACTIONS = {
     "VIEW": "WRITE",
     "MATERIALIZED VIEW": "WRITE",
     "TASK": "AUTOMATE",
+    # Same tier as TASK: a trigger's definition includes the identity its
+    # unattended runs carry, which is exactly what makes a task's definition
+    # AUTOMATE-gated.
+    "TRIGGER": "AUTOMATE",
 }
 
 
@@ -135,6 +224,8 @@ def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
         may see it.
       TASK - AUTOMATE. A task is automation; only an owner may create, drop or
         alter one, and only an owner may read what it runs.
+      TRIGGER - AUTOMATE. A trigger's definition names the identity its
+        unattended runs carry, same sensitivity as a task's.
 
     Without this the statement reached its operator with no authorization at
     all, because a node type with no visitor was silently passed through (see

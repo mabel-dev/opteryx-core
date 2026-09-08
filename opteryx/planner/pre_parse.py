@@ -173,13 +173,15 @@ _CREATE_TRIGGER_LEAD = re.compile(r"^\s*CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b", r
 # the reason given at the top of this module.
 _CREATE_TRIGGER_RE = re.compile(
     r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TRIGGER\s+"
-    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+(?P<table>[A-Za-z_][\w.$]*)\s+"
+    r"(?P<if_not_exists>IF\s+NOT\s+EXISTS\s+)?(?P<name>[A-Za-z_][\w$]*)\s+"
+    r"ON\s+(?P<table>[A-Za-z_][\w.$]*)\s+"
     r"EXECUTE\s+(?P<task>[A-Za-z_][\w.$]*)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _CREATE_TRIGGER_SCHEDULE_RE = re.compile(
     r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TRIGGER\s+"
-    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+SCHEDULE\s+'(?P<schedule>(?:[^']|'')*)'"
+    r"(?P<if_not_exists>IF\s+NOT\s+EXISTS\s+)?(?P<name>[A-Za-z_][\w$]*)\s+"
+    r"ON\s+SCHEDULE\s+'(?P<schedule>(?:[^']|'')*)'"
     r"(?:\s+AT\s+TIME\s+ZONE\s+'(?P<zone>(?:[^']|'')*)')?"
     r"(?:\s+OVER\s+(?P<over>[A-Za-z_][\w.$]*))?"
     r"\s+EXECUTE\s+(?P<task>[A-Za-z_][\w.$]*)\s*;?\s*$",
@@ -187,7 +189,8 @@ _CREATE_TRIGGER_SCHEDULE_RE = re.compile(
 )
 _CREATE_TRIGGER_SIGNAL_RE = re.compile(
     r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TRIGGER\s+"
-    r"(?P<name>[A-Za-z_][\w$]*)\s+ON\s+SIGNAL\b"
+    r"(?P<if_not_exists>IF\s+NOT\s+EXISTS\s+)?(?P<name>[A-Za-z_][\w$]*)\s+"
+    r"ON\s+SIGNAL\b"
     r"(?:\s+OVER\s+(?P<over>[A-Za-z_][\w.$]*))?"
     r"\s+EXECUTE\s+(?P<task>[A-Za-z_][\w.$]*)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -196,7 +199,8 @@ _CREATE_TRIGGER_SIGNAL_RE = re.compile(
 # malformed schedule form is refused as a schedule form, with that grammar in
 # the message, rather than as a commit form missing its table.
 _TRIGGER_EVENT_LEAD = re.compile(
-    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+[A-Za-z_][\w$]*\s+ON\s+"
+    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?[A-Za-z_][\w$]*\s+ON\s+"
     r"(?P<kind>SCHEDULE|SIGNAL|EVERY|EVENT)\b",
     re.IGNORECASE,
 )
@@ -204,7 +208,8 @@ _TRIGGER_EVENT_LEAD = re.compile(
 # commit itself) and happens in no time zone. Matched so they are refused by
 # name rather than as a generic syntax error.
 _CREATE_TRIGGER_COMMIT_MODIFIER_RE = re.compile(
-    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+[A-Za-z_][\w$]*\s+ON\s+"
+    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?[A-Za-z_][\w$]*\s+ON\s+"
     r"(?!SCHEDULE\b|SIGNAL\b|EVERY\b|EVENT\b)[A-Za-z_][\w.$]*\s+"
     r"(?:.*\s)?(?P<modifier>OVER|AT\s+TIME\s+ZONE)\b",
     re.IGNORECASE | re.DOTALL,
@@ -444,6 +449,19 @@ def _intercept_alter_materialized_view(clean_sql: str):
     )
 
 
+def _reject_create_trigger_or_replace_and_if_not_exists(match) -> None:
+    """OR REPLACE and IF NOT EXISTS are alternatives, not a combinable pair:
+    one always redefines, the other only ever no-ops. Matches how CREATE
+    TABLE treats the two options."""
+    if match.group("or_replace") is not None and match.group("if_not_exists") is not None:
+        from opteryx.exceptions import UnsupportedSyntaxError
+
+        raise UnsupportedSyntaxError(
+            "**CREATE TRIGGER** cannot combine **OR REPLACE** and **IF NOT EXISTS** - "
+            "the first always redefines, the second only ever no-ops."
+        )
+
+
 def _intercept_create_trigger(clean_sql: str):
     """The three CREATE TRIGGER forms, told apart by the event after `ON`.
 
@@ -474,7 +492,7 @@ def _intercept_create_trigger(clean_sql: str):
         match = _CREATE_TRIGGER_SCHEDULE_RE.match(clean_sql)
         if match is None:
             raise UnsupportedSyntaxError(
-                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON SCHEDULE** "
+                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** [**IF NOT EXISTS**] <name> **ON SCHEDULE** "
                 "'<cron>' [**AT TIME ZONE** '<zone>'] [**OVER** <table>] **EXECUTE** "
                 "<task>. The cron expression has five fields (minute, hour, day of "
                 "month, month, day of week); the table, if given, is the dataset the "
@@ -488,6 +506,7 @@ def _intercept_create_trigger(clean_sql: str):
                 f"of month, month, day of week), e.g. '0 * * * *' for every hour."
             )
         zone = match.group("zone")
+        _reject_create_trigger_or_replace_and_if_not_exists(match)
         return [
             {
                 "CreateTrigger": {
@@ -495,6 +514,7 @@ def _intercept_create_trigger(clean_sql: str):
                     "table_name": match.group("task"),
                     "task_name": match.group("task"),
                     "or_replace": match.group("or_replace") is not None,
+                    "if_not_exists": match.group("if_not_exists") is not None,
                     "event_kind": "schedule",
                     "schedule": schedule,
                     "time_zone": zone.replace("''", "'") if zone is not None else None,
@@ -507,11 +527,12 @@ def _intercept_create_trigger(clean_sql: str):
         match = _CREATE_TRIGGER_SIGNAL_RE.match(clean_sql)
         if match is None:
             raise UnsupportedSyntaxError(
-                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON SIGNAL** "
+                "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** [**IF NOT EXISTS**] <name> **ON SIGNAL** "
                 "[**OVER** <table>] **EXECUTE** <task>. A signal carries no schedule "
                 "and no time zone; the table, if given, is the dataset the run is "
                 "windowed over."
             )
+        _reject_create_trigger_or_replace_and_if_not_exists(match)
         return [
             {
                 "CreateTrigger": {
@@ -519,6 +540,7 @@ def _intercept_create_trigger(clean_sql: str):
                     "table_name": match.group("task"),
                     "task_name": match.group("task"),
                     "or_replace": match.group("or_replace") is not None,
+                    "if_not_exists": match.group("if_not_exists") is not None,
                     "event_kind": "signal",
                     "schedule": None,
                     "time_zone": None,
@@ -539,11 +561,12 @@ def _intercept_create_trigger(clean_sql: str):
     match = _CREATE_TRIGGER_RE.match(clean_sql)
     if match is None:
         raise UnsupportedSyntaxError(
-            "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** <name> **ON** "
+            "Expected: **CREATE** [**OR REPLACE**] **TRIGGER** [**IF NOT EXISTS**] <name> **ON** "
             "<table> **EXECUTE** <task>, or **ON SCHEDULE** '<cron>' [**AT TIME ZONE** "
             "'<zone>'] [**OVER** <table>], or **ON SIGNAL** [**OVER** <table>]. The "
             "table is the dataset whose commits fire it; the task is what it runs."
         )
+    _reject_create_trigger_or_replace_and_if_not_exists(match)
     return [
         {
             "CreateTrigger": {
@@ -551,6 +574,7 @@ def _intercept_create_trigger(clean_sql: str):
                 "table_name": match.group("table"),
                 "task_name": match.group("task"),
                 "or_replace": match.group("or_replace") is not None,
+                "if_not_exists": match.group("if_not_exists") is not None,
                 "event_kind": "commit",
                 "schedule": None,
                 "time_zone": None,
@@ -671,7 +695,8 @@ _CREATE_TASK_LEAD = re.compile(r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TASK\b", re.IG
 # way to say so.
 _CREATE_TASK_RE = re.compile(
     r"^\s*CREATE\s+(?P<or_replace>OR\s+REPLACE\s+)?TASK\s+"
-    r"(?P<name>[A-Za-z_][\w.$]*)\s+(?:ON\s+(?P<on>[A-Za-z_][\w.$]*)\s+)?"
+    r"(?P<if_not_exists>IF\s+NOT\s+EXISTS\s+)?(?P<name>[A-Za-z_][\w.$]*)\s+"
+    r"(?:ON\s+(?P<on>[A-Za-z_][\w.$]*)\s+)?"
     r"AS\s+(?P<statement>.+?)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
@@ -683,12 +708,27 @@ _DROP_TASK_RE = re.compile(
 )
 
 
-# ALTER TASK has no forms. A task is a statement and nothing else: what it runs
-# is changed by redefining it, and the two things one might expect to alter -
-# who it runs as, and whether it runs - belong to the TRIGGER, which is what
-# fires unattended. Refused here by name so the reader is told that, rather than
-# meeting a parser error pointing at the word TASK.
+# ALTER TASK <name> AS <statement>
+#
+# One narrow form: a SQL-body-only redefinition. Who a task runs as, and
+# whether it runs, still belong to the TRIGGER, which is what fires
+# unattended - this statement carries no `ON <table>` and cannot touch either.
+# That is not merely a smaller CREATE OR REPLACE TASK: a schedule trigger's
+# next-due instant is recomputed on EVERY registration a full CREATE OR
+# REPLACE TASK makes (see opteryx-catalog's create_task), including one whose
+# schedule did not change, because the due instant is a function of the
+# schedule and now. A statement that structurally cannot repoint or touch the
+# trigger cannot reset a clock it never sees - which is the whole reason this
+# form exists rather than telling every SQL-only edit to use CREATE OR
+# REPLACE TASK.
+#
+# Unlike CREATE OR REPLACE TASK, this must NOT silently create: redefining a
+# name that is not yet a task is refused at bind time (see visit_alter_task).
 _ALTER_TASK_LEAD = re.compile(r"^\s*ALTER\s+TASK\b", re.IGNORECASE)
+_ALTER_TASK_RE = re.compile(
+    r"^\s*ALTER\s+TASK\s+(?P<name>[A-Za-z_][\w.$]*)\s+AS\s+(?P<statement>.+?)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 # ALTER WORKSPACE <source> SET SECURE <object> TO <workspace>[, <workspace>...]
@@ -771,17 +811,34 @@ def _intercept_alter_workspace_secure(clean_sql: str):
 
 
 def _intercept_alter_task(clean_sql: str):
-    """Refuse ALTER TASK, naming the statement that does what was meant."""
+    """Recognize `ALTER TASK <name> AS <statement>` before the parser.
+
+    Returns a synthesized single-statement AST list, or None when the
+    statement is not ALTER TASK. Anything beginning ALTER TASK but not
+    matching the one form is rejected BY NAME here.
+    """
     from opteryx.exceptions import UnsupportedSyntaxError
 
     if not _ALTER_TASK_LEAD.match(clean_sql):
         return None
-    raise UnsupportedSyntaxError(
-        "**ALTER TASK** has no forms. Change what a task runs with **CREATE OR "
-        "REPLACE TASK**. Who it runs as, and whether it runs, belong to the trigger "
-        "that fires it: **ALTER TRIGGER** <name> **ON** <table> **OWNER TO** "
-        "<principal>, or **... SUSPEND**|**RESUME**."
-    )
+    match = _ALTER_TASK_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **ALTER TASK** <name> **AS** <statement>. This redefines what "
+            "the task runs and nothing else - it takes no **ON** <table>. Who a task "
+            "runs as, and whether it runs, belong to the trigger that fires it: "
+            "**ALTER TRIGGER** <name> **ON** <table> **OWNER TO** <principal>, or "
+            "**... SUSPEND**|**RESUME**. To repoint or create the trigger too, use "
+            "**CREATE OR REPLACE TASK** <name> **ON** <table> **AS** <statement>."
+        )
+    return [
+        {
+            "AlterTask": {
+                "name": match.group("name"),
+                "statement": match.group("statement"),
+            }
+        }
+    ]
 
 
 def _intercept_task_statements(clean_sql: str):
@@ -798,9 +855,14 @@ def _intercept_task_statements(clean_sql: str):
         match = _CREATE_TASK_RE.match(clean_sql)
         if match is None:
             raise UnsupportedSyntaxError(
-                "Expected: **CREATE** [**OR REPLACE**] **TASK** <name> [**ON** <table>] "
-                "**AS** <statement>. A task is a statement the platform runs for you; "
-                "the statement is what it runs."
+                "Expected: **CREATE** [**OR REPLACE**] **TASK** [**IF NOT EXISTS**] "
+                "<name> [**ON** <table>] **AS** <statement>. A task is a statement "
+                "the platform runs for you; the statement is what it runs."
+            )
+        if match.group("or_replace") is not None and match.group("if_not_exists") is not None:
+            raise UnsupportedSyntaxError(
+                "**CREATE TASK** cannot combine **OR REPLACE** and **IF NOT EXISTS** - "
+                "the first always redefines, the second only ever no-ops."
             )
         return [
             {
@@ -808,6 +870,7 @@ def _intercept_task_statements(clean_sql: str):
                     "name": match.group("name"),
                     "statement": match.group("statement"),
                     "or_replace": match.group("or_replace") is not None,
+                    "if_not_exists": match.group("if_not_exists") is not None,
                     "on_table": match.group("on"),
                 }
             }
@@ -940,6 +1003,51 @@ _SHOW_CREATE_RE = re.compile(
     r"(?P<name>[A-Za-z_][\w.$]*)\s*;?\s*$",
     re.IGNORECASE,
 )
+
+# SHOW CREATE TRIGGER <name> ON <table>
+#
+# A trigger name is only unique per HOLDER (see DROP/ALTER TRIGGER), so this
+# needs a second identifier the single-name SHOW CREATE grammar above cannot
+# express - a separate lead and pattern, even though sqlparser's
+# ShowCreateObject enum does list TRIGGER (it has no per-object ON <table>
+# clause to go with it, and rejects the suffix - see _intercept_show_create_trigger).
+_SHOW_CREATE_TRIGGER_LEAD = re.compile(r"^\s*SHOW\s+CREATE\s+TRIGGER\b", re.IGNORECASE)
+_SHOW_CREATE_TRIGGER_RE = re.compile(
+    r"^\s*SHOW\s+CREATE\s+TRIGGER\s+(?P<name>[A-Za-z_][\w$]*)\s+ON\s+"
+    r"(?P<table>[A-Za-z_][\w.$]*)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _intercept_show_create_trigger(clean_sql: str):
+    """Recognize `SHOW CREATE TRIGGER <name> ON <table>` before the parser.
+
+    `obj_name` carries the HOLDER (the table for connector resolution, same
+    convention ALTER/DROP TRIGGER use); `trigger_name` carries the trigger
+    itself.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+
+    if not _SHOW_CREATE_TRIGGER_LEAD.match(clean_sql):
+        return None
+    match = _SHOW_CREATE_TRIGGER_RE.match(clean_sql)
+    if match is None:
+        raise UnsupportedSyntaxError(
+            "Expected: **SHOW CREATE TRIGGER** <name> **ON** <table>. A trigger name "
+            "is only unique per table, so the table must be named."
+        )
+    return [
+        {
+            "ShowCreate": {
+                "obj_type": "Trigger",
+                "obj_name": [
+                    {"Identifier": {"value": part, "quote_style": None}}
+                    for part in match.group("table").split(".")
+                ],
+                "trigger_name": match.group("name"),
+            }
+        }
+    ]
 
 
 def _intercept_show_create(clean_sql: str):
@@ -1120,6 +1228,7 @@ _INTERCEPTORS = (
     _intercept_grant_statements,
     _intercept_show_grants_on,
     _intercept_show_create,
+    _intercept_show_create_trigger,
 )
 
 

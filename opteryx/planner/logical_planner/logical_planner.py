@@ -64,6 +64,8 @@ class LogicalPlanStepType(int, Enum):
     ShowColumns = auto()  # SHOW COLUMNS
     ShowManifest = auto()  # SHOW MANIFEST FOR <table>
     ShowSnapshots = auto()  # SHOW SNAPSHOTS FOR <table>
+    ShowLineage = auto()  # SHOW LINEAGE FOR <table> - the receipts (provenance)
+    ShowSources = auto()  # SHOW SOURCES FOR <table> - the standing source list
     Set = auto()  # set a variable
     Limit = auto()  # limit and offset
     Order = auto()  # order by
@@ -127,6 +129,7 @@ class LogicalPlanStepType(int, Enum):
     AlterTriggerMinimumInterval = auto()
     CreateTask = auto()
     DropTask = auto()
+    AlterTask = auto()
     AlterTriggerOwner = auto()
     AlterMaterializedViewOwner = auto()
     AlterMaterializedViewSuspended = auto()
@@ -3959,20 +3962,40 @@ def _plan_show_manifest(table_name: str) -> LogicalPlan:
     return plan
 
 
-def _plan_show_snapshots(table_name: str) -> LogicalPlan:
-    """`SHOW SNAPSHOTS FOR <table>` — Scan (bound for the commit history only,
-    never read) -> ShowSnapshots.
+# The three statements answered from a relation's commit history rather than
+# its rows: `SHOW <word> FOR <table>` -> (the Show node above the Scan, the
+# view of the history the Scan is asked to load - see `history_view` below).
+_HISTORY_STATEMENTS = {
+    "SNAPSHOTS": (LogicalPlanStepType.ShowSnapshots, "snapshots"),
+    # The receipts: what each commit read, and at which version
+    # (opteryx-catalog PROVENANCE_DESIGN.md S6.1).
+    "LINEAGE": (LogicalPlanStepType.ShowLineage, "lineage"),
+    # The standing list: what the current content is built from. Not a
+    # history at all - it is a field on the dataset document - but it is
+    # answered through the same Scan shape because that shape is what binds a
+    # relation for its metadata without reading its rows.
+    "SOURCES": (LogicalPlanStepType.ShowSources, "sources"),
+}
+
+
+def _plan_show_history(table_name: str, word: str) -> LogicalPlan:
+    """`SHOW SNAPSHOTS|LINEAGE|SOURCES FOR <table>` — Scan (bound for the
+    commit history only, never read) -> ShowSnapshots / ShowLineage /
+    ShowSources.
 
     Same plan shape and the same no-Exit-node reasoning as _plan_show_manifest
     above: a special op answered from what the binder attached, kept off the
-    native compiler, which has no operator for ShowSnapshotsNode.
+    native compiler, which has no operator for any of the three Show nodes.
 
     It differs from SHOW MANIFEST in what the Scan below is asked for. The
     Manifest is already loaded by an ordinary bind, so that statement consumes
     state the Scan would have produced anyway; a relation's snapshot history is
     NOT, and `for_snapshots_only` makes the connector fetch it (a second catalog
     round trip) while skipping the manifest read the Scan would otherwise do.
+    `history_view` says WHICH reading of it the statement wants, so the Scan
+    loads that one and the Show node above consumes exactly that.
     """
+    node_type, history_view = _HISTORY_STATEMENTS[word]
     plan = LogicalPlan()
 
     from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
@@ -3983,12 +4006,16 @@ def _plan_show_snapshots(table_name: str) -> LogicalPlan:
     # Manifest and (b) never compile a real file scan for this Scan — the history
     # IS the answer. Unlike for_manifest_only it adds no permission beyond READ:
     # a snapshot row is commit metadata about a relation the caller can already
-    # read, and exposes no file paths or storage layout.
+    # read, and exposes no file paths or storage layout. The receipts and the
+    # source list are held to the same bar for the same reason, with the names
+    # they carry elided per name where the caller cannot READ them (S4.4) -
+    # that is done where the rows are consumed, not by a stricter gate here.
     from_step.for_snapshots_only = True
+    from_step.history_view = history_view
     step_id = random_string()
     plan.add_node(step_id, from_step)
 
-    show_step = LogicalPlanNode(node_type=LogicalPlanStepType.ShowSnapshots)
+    show_step = LogicalPlanNode(node_type=node_type)
     show_step.relation = table_name
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, show_step)
@@ -4104,19 +4131,19 @@ def plan_show_variables(statement, **kwargs):
         # `words` list; catalog/schema/table names are case-sensitive.
         table_name = ".".join(part["value"] for part in parts[2:])
         return _plan_show_manifest(table_name)
-    if words[0] == "SNAPSHOTS":
+    if words[0] in _HISTORY_STATEMENTS:
         if len(words) < 3 or words[1] != "FOR":
-            # Bare SHOW SNAPSHOTS has nothing to enumerate for the same reason
-            # bare SHOW TRIGGERS does not: a commit history belongs to one
-            # relation, and the planner has no session default workspace to
-            # sweep for relations to list one for.
+            # Bare SHOW SNAPSHOTS / LINEAGE / SOURCES has nothing to enumerate
+            # for the same reason bare SHOW TRIGGERS does not: a commit history
+            # belongs to one relation, and the planner has no session default
+            # workspace to sweep for relations to list one for.
             raise UnsupportedSyntaxError(
-                "`SHOW SNAPSHOTS FOR <table>` requires a table name, e.g. "
-                "`SHOW SNAPSHOTS FOR opteryx.test.pypi`."
+                f"`SHOW {words[0]} FOR <table>` requires a table name, e.g. "
+                f"`SHOW {words[0]} FOR opteryx.test.pypi`."
             )
         # Original case preserved, as for SHOW MANIFEST FOR above.
         table_name = ".".join(part["value"] for part in parts[2:])
-        return _plan_show_snapshots(table_name)
+        return _plan_show_history(table_name, words[0])
     if words[0] == "TRIGGERS":
         if len(words) < 3 or words[1] != "FOR":
             # Bare SHOW TRIGGERS cannot be answered: triggers live in a
@@ -4134,8 +4161,9 @@ def plan_show_variables(statement, **kwargs):
     raise UnsupportedSyntaxError(
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
         "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, "
-        "`SHOW TRIGGERS FOR <table>`, `SHOW MANIFEST FOR <table>`, and "
-        "`SHOW SNAPSHOTS FOR <table>`."
+        "`SHOW TRIGGERS FOR <table>`, `SHOW MANIFEST FOR <table>`, "
+        "`SHOW SNAPSHOTS FOR <table>`, `SHOW LINEAGE FOR <table>`, and "
+        "`SHOW SOURCES FOR <table>`."
     )
 
 
@@ -4151,21 +4179,24 @@ def plan_show_create_query(statement, **kwargs):
         "VIEW": "VIEW",
         "MATERIALIZEDVIEW": "MATERIALIZED VIEW",
         "TASK": "TASK",
+        "TRIGGER": "TRIGGER",
     }
     obj_type = statement[root_node]["obj_type"].upper()
     if obj_type not in _OBJECT_TYPES:
         # Rejected here, by name, rather than at execution time. sqlparser also
-        # parses TRIGGER, FUNCTION, PROCEDURE and EVENT; Opteryx has none of the
-        # four as an object with a definition to show.
+        # parses FUNCTION, PROCEDURE and EVENT; Opteryx has none of the three as
+        # an object with a definition to show.
         raise UnsupportedSyntaxError(
             f"Opteryx does not support '**SHOW CREATE** {obj_type}'; the object types "
-            "with a definition to show are **TABLE**, **VIEW**, **MATERIALIZED VIEW** "
-            "and **TASK**."
+            "with a definition to show are **TABLE**, **VIEW**, **MATERIALIZED VIEW**, "
+            "**TASK** and **TRIGGER**."
         )
     show_step.object_type = _OBJECT_TYPES[obj_type]
     show_step.object_name = extract_variable(statement[root_node]["obj_name"])
     if isinstance(show_step.object_name, list):
         show_step.object_name = ".".join(show_step.object_name)
+    if obj_type == "TRIGGER":
+        show_step.trigger_name = statement[root_node].get("trigger_name")
     plan.add_node(random_string(), show_step)
     return plan
 
@@ -4192,6 +4223,16 @@ def plan_create_view(statement, **kwargs):
 
     # Extract OR REPLACE flag
     create_view_node.or_replace = statement[root_node].get("or_replace", False)
+    # Extract IF NOT EXISTS flag (materialized views reject this below, plain
+    # views honor it as an idempotent no-op when the view already exists)
+    create_view_node.if_not_exists = statement[root_node].get("if_not_exists", False)
+    if create_view_node.or_replace and create_view_node.if_not_exists:
+        # Alternatives, not a combinable pair: OR REPLACE always redefines, IF
+        # NOT EXISTS only ever no-ops. Matches CREATE TABLE/TASK/TRIGGER.
+        raise UnsupportedSyntaxError(
+            "**CREATE VIEW** cannot combine **OR REPLACE** and **IF NOT EXISTS** - "
+            "the first always redefines, the second only ever no-ops."
+        )
 
     # CREATE MATERIALIZED VIEW is not a view at all: it is CTAS plus
     # registration. The SELECT executes now and its result is written as a
@@ -5716,7 +5757,10 @@ def plan_execute(statement, **kwargs):
     # sanctioned, which is exactly why the exemption is object-level and why it
     # rides on EXECUTE rather than on the statement text.
     for _, node in plan.nodes(True):
-        if node.node_type == LogicalPlanStepType.Insert:
+        if node.node_type in (LogicalPlanStepType.Insert, LogicalPlanStepType.Merge):
+            # Merge as well as Insert: a task recorded as MERGE, UPDATE or DELETE
+            # lands through the merge sink, and its snapshot's `produced-by`
+            # must name the task the same way an INSERT task's does.
             node.executing_task = relation_name
     return plan
 
@@ -6280,6 +6324,7 @@ def plan_create_task(statement, **kwargs) -> LogicalPlan:
     node.task_name = statement[root]["name"]
     node.statement = task_sql
     node.or_replace = statement[root].get("or_replace", False)
+    node.if_not_exists = statement[root].get("if_not_exists", False)
     # The dataset whose commits fire this task, if one was named. The trigger is
     # created alongside the task, the way a view's are - see the note on
     # `_CREATE_TASK_RE` for why it is declared rather than derived.
@@ -6321,6 +6366,62 @@ def plan_drop_task(statement, **kwargs) -> LogicalPlan:
     return plan
 
 
+def plan_alter_task(statement, **kwargs) -> LogicalPlan:
+    """ALTER TASK <name> AS <statement> — synthesized by pre-parse.
+
+    The narrow form: it redefines what a task runs and nothing else. Unlike
+    CREATE OR REPLACE TASK it may not carry `ON <table>` - it cannot repoint
+    or create the trigger that fires the task, and cannot silently create the
+    task either (see visit_alter_task). That is deliberate: a schedule
+    trigger's next-due instant is recomputed on every registration a full
+    CREATE OR REPLACE TASK makes (see opteryx-catalog's create_task), because
+    the due instant is a function of the schedule and now - but this
+    statement never touches the trigger at all, so a SQL-body-only edit
+    cannot reset a clock it structurally cannot see.
+
+    Parsed and bounded exactly as plan_create_task parses and bounds a fresh
+    definition - see that docstring for why.
+    """
+    from opteryx.exceptions import UnsupportedSyntaxError
+    from opteryx.third_party import sqloxide
+    from opteryx.utils.query_parser import _extract_tables_from_ast
+    from opteryx.utils.query_parser import extract_write_targets
+
+    root = "AlterTask"
+    task_sql = statement[root]["statement"]
+
+    parsed = sqloxide.parse_sql(task_sql, _dialect="opteryx")
+    if len(parsed) != 1:
+        raise UnsupportedSyntaxError(
+            f"A task runs ONE statement; this redefines it with {len(parsed)}. "
+            "Alter a task per statement."
+        )
+
+    inner = parsed[0]
+    inner_root = next(iter(inner))
+    if inner_root in ("CreateTask", "DropTask", "Execute"):
+        raise UnsupportedSyntaxError(
+            f"A task cannot be defined as a **{inner_root.upper()}** statement; a "
+            "task may not create, drop or run another task."
+        )
+    if inner_root not in QUERY_BUILDERS:
+        raise UnsupportedSyntaxError(
+            f"A task cannot be defined as a **{inner_root.upper()}** statement."
+        )
+
+    node = LogicalPlanNode(node_type=LogicalPlanStepType.AlterTask)
+    node.task_name = statement[root]["name"]
+    node.statement = task_sql
+
+    targets = extract_write_targets(inner)
+    node.target_tables = targets
+    node.source_tables = [r for r in _extract_tables_from_ast(inner) if r not in targets]
+
+    plan = LogicalPlan()
+    plan.add_node(random_string(), node)
+    return plan
+
+
 def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
     """CREATE [OR REPLACE] TRIGGER <name> ON <table> EXECUTE <task>, and the
     ON SCHEDULE / ON SIGNAL forms — synthesized by pre-parse.
@@ -6345,6 +6446,7 @@ def plan_create_trigger(statement, **kwargs) -> LogicalPlan:
     node.table_name = statement[root]["table_name"]
     node.task_name = statement[root]["task_name"]
     node.or_replace = statement[root].get("or_replace", False)
+    node.if_not_exists = statement[root].get("if_not_exists", False)
     node.event_kind = statement[root].get("event_kind") or "commit"
     node.schedule = statement[root].get("schedule")
     node.time_zone = statement[root].get("time_zone")
@@ -6939,6 +7041,7 @@ QUERY_BUILDERS = {
     "AlterTriggerMinimumInterval": plan_alter_trigger_minimum_interval,
     "CreateTask": plan_create_task,
     "DropTask": plan_drop_task,
+    "AlterTask": plan_alter_task,
     # LISTEN/UNLISTEN/SHOW LISTENERS — synthesized pre-parse. sqlparser HAS a
     # LISTEN grammar and it is deliberately unused; see pre_parse for why.
     "Listen": plan_listen,

@@ -226,7 +226,13 @@ def test_show_create_refuses_a_name_of_the_wrong_kind(tmp_path):
 
 
 def test_show_create_rejects_object_types_with_no_definition(tmp_path):
-    """sqlparser also parses TRIGGER, FUNCTION, PROCEDURE and EVENT."""
+    """sqlparser also parses FUNCTION, PROCEDURE and EVENT.
+
+    TRIGGER is not in this list: SHOW CREATE TRIGGER <name> ON <table> is a
+    real statement now (see test_show_create_trigger_* below). Naming a
+    trigger the OLD way - without ON <table> - is still refused, but as a
+    malformed TRIGGER statement, not as an unsupported object type.
+    """
     session = _setup(tmp_path)
     _seed(session)
 
@@ -237,6 +243,45 @@ def test_show_create_rejects_object_types_with_no_definition(tmp_path):
     ):
         with pytest.raises(UnsupportedSyntaxError):
             _run(session, sql)
+
+
+def test_show_create_trigger_renders_commit_trigger(tmp_path):
+    """A commit trigger's CREATE, with no trailing ALTERs for defaults."""
+    session = _setup(tmp_path)
+    _seed(session)
+    _run(session, "CREATE TASK ws.k AS SELECT 1 AS a")
+    _run(session, "CREATE TRIGGER trg1 ON ws.events EXECUTE ws.k")
+
+    statement = _statement(session, "SHOW CREATE TRIGGER trg1 ON ws.events")
+
+    assert statement == "CREATE TRIGGER trg1 ON ws.events EXECUTE ws.k;"
+
+
+def test_show_create_trigger_renders_trailing_alters(tmp_path):
+    """Owner, suspend state and minimum interval have no CREATE clause of
+    their own, so a redefinition away from defaults renders as trailing
+    ALTER TRIGGER lines."""
+    session = _setup(tmp_path)
+    _seed(session)
+    _run(session, "CREATE TASK ws.k AS SELECT 1 AS a")
+    _run(session, "CREATE TRIGGER trg1 ON ws.events EXECUTE ws.k")
+    _run(session, "ALTER TRIGGER trg1 ON ws.events SUSPEND")
+    _run(session, "ALTER TRIGGER trg1 ON ws.events SET MINIMUM INTERVAL TO 900 SECONDS")
+
+    statement = _statement(session, "SHOW CREATE TRIGGER trg1 ON ws.events")
+
+    assert "CREATE TRIGGER trg1 ON ws.events EXECUTE ws.k;" in statement
+    assert "ALTER TRIGGER trg1 ON ws.events SUSPEND;" in statement
+    assert "ALTER TRIGGER trg1 ON ws.events SET MINIMUM INTERVAL TO 900 SECONDS;" in statement
+
+
+def test_show_create_trigger_not_found(tmp_path):
+    """A trigger name that does not exist on the named holder is not found."""
+    session = _setup(tmp_path)
+    _seed(session)
+
+    with pytest.raises(DatasetNotFoundError):
+        _run(session, "SHOW CREATE TRIGGER nope ON ws.events")
 
 
 def test_show_create_names_the_object_it_cannot_parse(tmp_path):

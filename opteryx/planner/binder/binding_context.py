@@ -31,10 +31,14 @@ class BindingContext:
         snapshots: Dict[str, Any]
             Bound commit histories, keyed by relation alias — populated by
             visit_scan ONLY for a Scan the planner marked `for_snapshots_only`
-            (SHOW SNAPSHOTS FOR) and consumed by visit_show_snapshots. Unlike
-            `manifests`, an ordinary Scan leaves nothing here: a relation's
-            history is a second catalog round trip that no other statement
-            reads, so it is fetched where it is the answer and nowhere else.
+            (SHOW SNAPSHOTS / LINEAGE / SOURCES FOR) and consumed by the
+            matching visit_show_* visitor. Which READING of the history is held
+            - the snapshots, the receipts, or the standing source list - is the
+            Scan's `history_view`; one statement has one Scan, so the alias
+            never holds two. Unlike `manifests`, an ordinary Scan leaves
+            nothing here: a relation's history is a second catalog round trip
+            that no other statement reads, so it is fetched where it is the
+            answer and nowhere else.
         query_id: str
             Query ID.
         connection: ExecutionContext

@@ -3,6 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+from typing import Optional
 from typing import Tuple
 
 from opteryx.exceptions import ColumnNotFoundError
@@ -774,6 +775,60 @@ def visit_create_task(self, node: Node, context: BindingContext) -> Tuple[Node, 
                 f"{author} cannot own the trigger this statement creates. It is a "
                 "platform identity rather than an account, so work it performs is "
                 "billed to nobody - and a trigger runs its task as its owner."
+            )
+
+    node.columns = []
+    return node, context
+
+
+def visit_alter_task(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
+    """Bind ALTER TASK <name> AS <statement>.
+
+    Same authoring bound as CREATE TASK (see visit_create_task) - an author
+    may only do what they could do at the moment they redefine the task -
+    but with no `ON <table>` arm: this form cannot touch a trigger, so there
+    is nothing here for CREATE TASK's trigger-adjacent AUTOMATE-on-the-table
+    check to gate.
+
+    Unlike CREATE OR REPLACE TASK, this must NOT silently create: a name
+    that is not yet a task is refused here, by name, rather than quietly
+    becoming one - `ALTER` redefines something that exists.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.connectors.capabilities import Writable
+    from opteryx.exceptions import DatasetNotFoundError
+    from opteryx.exceptions import ReadOnlyConnectorError
+    from opteryx.managers.permissions import can_perform_action
+
+    node.connector = connector_factory(node.task_name, telemetry=context.telemetry)
+    if not isinstance(node.connector, Writable):
+        raise ReadOnlyConnectorError(f"connector for {node.task_name} does not support ALTER TASK")
+
+    if not node.connector.is_task(node.task_name):
+        raise DatasetNotFoundError(connector=node.connector, dataset=node.task_name)
+
+    if not can_perform_action(context.execution_context, node.task_name, action="AUTOMATE"):
+        raise PermissionError(
+            f"User does not have permission to alter task {node.task_name} (owner required)"
+        )
+
+    for source in node.source_tables or []:
+        if source.startswith("$") or "information_schema" in source.split("."):
+            continue
+        if not can_perform_action(context.execution_context, source, action="READ"):
+            raise PermissionError(
+                f"User does not have permission to read {source}, a source of task "
+                f"{node.task_name} (read required). A task may only do what its "
+                "author could do: an unattended run carries the trigger's owner, so "
+                "authoring one that reads what you cannot would borrow their authority."
+            )
+
+    for target in node.target_tables or []:
+        if not can_perform_action(context.execution_context, target, action="WRITE"):
+            raise PermissionError(
+                f"User does not have permission to write {target}, a target "
+                f"of task {node.task_name} (write required). A task may only do what its "
+                "author could do."
             )
 
     node.columns = []
@@ -1728,6 +1783,89 @@ def _scanned_relations(visitor, context) -> list:
     return relations
 
 
+# How a scan's snapshot was chosen, as the receipt spells it (opteryx_catalog's
+# `RESOLVED_BY`). One name per branch of `OpteryxTable._resolve_snapshot`, read
+# off the same attributes that branch read - so the receipt cannot say
+# `version` about a read the connector resolved as the head.
+def _resolved_by(table) -> str:
+    version_tag = getattr(table, "version_tag", None)
+    if version_tag is not None:
+        return "current" if str(version_tag).lower() == "current" else "tag"
+    version = getattr(table, "version", None)
+    if version is not None:
+        return "previous" if version == 0 else "version"
+    if getattr(table, "at_date", None) is not None:
+        return "date"
+    return "current"
+
+
+def _read_sources(visitor, context) -> list:
+    """THE RECEIPT (opteryx-catalog PROVENANCE_DESIGN.md S3): every catalog
+    relation the statement's bound subtree reads, with the snapshot it resolved
+    to and how.
+
+    The same walk as `_scanned_relations`, over the same Scan nodes, reading
+    what binding already settled: `OpteryxTable._resolve_snapshot` pinned
+    `snapshot_id` per relation and the scan reads exactly that id, so this is a
+    by-product of binding and costs no lookup. The name comes from the table
+    (`workspace` + `dataset`), never from `node.relation`, which is the name as
+    written and may be unqualified.
+
+    A Scan whose connector is not a catalog table - `$planets`,
+    `information_schema`, Mabel, the filesystem and local stores, a CTE
+    reference - is not a catalog relation and produces no entry. So a statement
+    that reads none returns `[]`, which is the assertion "this read no catalog
+    relation", and only this walk may make it.
+
+    A relation with a schema and no commits has `snapshot_id` None; it is still
+    recorded, with a null version, because the statement did read it.
+    """
+    from opteryx.connectors.opteryx_connector import OpteryxTable
+    from opteryx.planner.logical_planner import LogicalPlanStepType
+    from opteryx.planner.relation_resolver import _expression_subqueries
+
+    entries: list = []
+    seen: set = set()
+
+    def _collect(graph) -> None:
+        if graph is None:
+            return
+        for _, plan_node in graph.nodes(True):
+            if plan_node.node_type == LogicalPlanStepType.Scan:
+                table = getattr(plan_node, "connector", None)
+                if isinstance(table, OpteryxTable):
+                    name = f"{table.workspace}.{table.dataset}"
+                    key = (name, table.snapshot_id)
+                    if key not in seen:
+                        seen.add(key)
+                        entries.append(
+                            {
+                                "dataset": name,
+                                "snapshot-id": table.snapshot_id,
+                                "resolved-by": _resolved_by(table),
+                            }
+                        )
+            for subquery in _expression_subqueries(plan_node):
+                _collect(subquery.value)
+
+    _collect(getattr(visitor, "graph", None))
+    return entries
+
+
+def _produced_by(node) -> Optional[str]:
+    """What made this commit, for the snapshot's `produced-by`: the task an
+    EXECUTE expanded (stamped by `plan_execute`), or the view a CREATE
+    MATERIALIZED VIEW / REFRESH is populating. None for a hand-run statement -
+    the one provenance field where absent is a state, not a bug. The connector
+    qualifies the name; the binder only knows it as written."""
+    task = getattr(node, "executing_task", None)
+    if task:
+        return f"task:{task}"
+    if getattr(node, "is_refresh", False) or getattr(node, "is_materialized_view", False):
+        return f"view:{node.relation_name}"
+    return None
+
+
 def _enforce_egress(visitor, node, context) -> None:
     """Refuse a write that would copy a protected workspace's data elsewhere.
 
@@ -1825,6 +1963,13 @@ def visit_insert(self, node: Node, context: BindingContext) -> Tuple[Node, Bindi
         raise ReadOnlyConnectorError(
             f"connector for {node.relation_name} does not support INSERT"
         )
+
+    # The receipt and its producer, for EVERY write - INSERT ... VALUES lands
+    # `[]`, a CTAS over $planets lands `[]`, a task run lands its task. Taken
+    # here, once the SELECT subtree below is bound and before the target's own
+    # checks, so no early return past this point commits without one.
+    node.read_sources = _read_sources(self, context)
+    node.produced_by = _produced_by(node)
 
     create_target = getattr(node, "create_target", False)
     if_not_exists = getattr(node, "if_not_exists", False)
@@ -2195,6 +2340,12 @@ def visit_merge(self, node: Node, context: BindingContext) -> Tuple[Node, Bindin
         raise ReadOnlyConnectorError(
             f"connector for {node.relation_name} does not support MERGE"
         )
+
+    # The receipt, as for INSERT. The target is a Scan in the desugared SELECT,
+    # so it records itself at the version that was matched against - which is
+    # exactly what re-deriving a MERGE needs.
+    node.read_sources = _read_sources(self, context)
+    node.produced_by = _produced_by(node)
 
     # MERGE both deletes and appends, so it needs the same authority as any
     # other write to the relation - no more, and no less.

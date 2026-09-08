@@ -573,12 +573,23 @@ def query_planner(
     # `increase`, not assign: a semicolon-separated batch plans each statement
     # through here and bills the sum, matching the one DATA_PROCESSED_BYTES event
     # per execute() call that the session emits.
+    from opteryx.planner.data_processed import data_processed_by_scan
     from opteryx.planner.data_processed import measure_data_processed
     from opteryx.planner.data_processed import plan_relations
 
     telemetry.increase(
         "billing_bytes",
         measure_data_processed(optimized_plan, scan_stats_cache, shared_ctes),
+    )
+    # Per-scan breakdown of that same figure, keyed by the identity the
+    # physical planner carries onto the compiled scan node — EXPLAIN
+    # (mermaid.py) reads this so a TABLE SCAN's displayed bytes are the SAME
+    # number the bill was computed from, not a second, disagreeing estimate.
+    # Dict-keyed, so two Scan nodes sharing one identity (a self-UNION leg)
+    # collapse to one entry here — correct for per-node display (they read
+    # the same bytes) even though `billing_bytes` above counts both.
+    telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(
+        optimized_plan, scan_stats_cache, shared_ctes
     )
     # The relations that figure was measured over, recorded from the SAME plan
     # and the same scan walk. Downstream this is what attributes a query to the
@@ -681,10 +692,12 @@ def execute_logical_plan(
     # answering without setting the meter is exactly how "what is reported
     # differs based on what is answering". Externally-supplied plans carry no
     # shared CTEs (a CTE only exists in SQL text).
+    from opteryx.planner.data_processed import data_processed_by_scan
     from opteryx.planner.data_processed import measure_data_processed
     from opteryx.planner.data_processed import plan_relations
 
     telemetry.increase("billing_bytes", measure_data_processed(optimized_plan))
+    telemetry._reading["billing_bytes_by_scan"] = data_processed_by_scan(optimized_plan)
     telemetry.add_relations(plan_relations(optimized_plan))
 
     # Default: build physical plan

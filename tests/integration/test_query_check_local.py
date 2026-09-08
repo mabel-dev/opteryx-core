@@ -48,6 +48,11 @@ def _check(sql):
         "WHEN MATCHED THEN UPDATE SET details = n.details",
         f"SHOW MANIFEST FOR {TARGET}",
         f"SHOW SNAPSHOTS FOR {TARGET}",
+        # The two provenance reads bind through the same history-only Scan as
+        # SHOW SNAPSHOTS, and their shape is fixed the same way - so a check
+        # that does not read the history still has a schema to report.
+        f"SHOW LINEAGE FOR {TARGET}",
+        f"SHOW SOURCES FOR {TARGET}",
     ],
 )
 def test_a_statement_that_runs_checks_clean(merge_env, sql):

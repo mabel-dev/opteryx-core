@@ -419,6 +419,41 @@ def test_or_replace_rewrites_the_schedule_and_keeps_the_owner(tmp_path):
     assert triggers[0]["runs-as"] == "rhea"
 
 
+def test_create_trigger_if_not_exists_is_idempotent(tmp_path):
+    """CREATE TRIGGER IF NOT EXISTS no-ops when the trigger already exists -
+    a second call with a DIFFERENT schedule must not take effect."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed_source(owner)
+    _create_task(owner)
+    list(owner.execute_to_morsels("CREATE TRIGGER tick ON SCHEDULE '0 * * * *' EXECUTE ws.t"))
+
+    result = list(
+        owner.execute_to_morsels(
+            "CREATE TRIGGER IF NOT EXISTS tick ON SCHEDULE '*/5 * * * *' EXECUTE ws.t"
+        )
+    )
+    assert result is not None
+
+    triggers = _source_triggers(tmp_path, "ws.t")
+    assert len(triggers) == 1
+    assert triggers[0]["schedule"] == "0 * * * *"
+
+
+def test_create_trigger_or_replace_and_if_not_exists_is_rejected(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed_source(owner)
+    _create_task(owner)
+
+    with pytest.raises(UnsupportedSyntaxError, match="OR REPLACE.*IF NOT EXISTS"):
+        list(
+            owner.execute_to_morsels(
+                "CREATE OR REPLACE TRIGGER IF NOT EXISTS tick ON SCHEDULE '0 * * * *' EXECUTE ws.t"
+            )
+        )
+
+
 def test_alter_and_drop_against_a_task_holder(tmp_path):
     """ON <holder> in ALTER and DROP names the task the way it names a table;
     the grammar does not change and the engine works out which it was."""

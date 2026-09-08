@@ -42,6 +42,8 @@ def _special_op_types():
     from opteryx.operators.show_grants import ShowGrantsNode
     from opteryx.operators.show_manifest import ShowManifestNode
     from opteryx.operators.show_snapshots import ShowSnapshotsNode
+    from opteryx.operators.show_lineage import ShowLineageNode
+    from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
@@ -58,6 +60,8 @@ def _special_op_types():
         ShowGrantsNode,
         ShowManifestNode,
         ShowSnapshotsNode,
+        ShowLineageNode,
+        ShowSourcesNode,
         ShowCreateNode,
         ShowValueNode,
         TableManagementNode,
@@ -86,6 +90,8 @@ def execute(
     from opteryx.operators.show_grants import ShowGrantsNode
     from opteryx.operators.show_manifest import ShowManifestNode
     from opteryx.operators.show_snapshots import ShowSnapshotsNode
+    from opteryx.operators.show_lineage import ShowLineageNode
+    from opteryx.operators.show_sources import ShowSourcesNode
     from opteryx.operators.show_create import ShowCreateNode
     from opteryx.operators.show_value import ShowValueNode
     from opteryx.operators.table_management import TableManagementNode
@@ -174,9 +180,10 @@ def execute(
         if head_node.result is None:
             raise InvalidInternalStateError("InsertNode did not produce a result")
         return head_node.result, ResultType.NON_TABULAR
-    # SHOW COLUMNS/MANIFEST/SNAPSHOTS are answered entirely from what the binder
-    # already attached (binder/view.py's visit_show_columns/visit_show_manifest/
-    # visit_show_snapshots) — the Scan below any of them in the plan is never
+    # SHOW COLUMNS/MANIFEST/SNAPSHOTS/LINEAGE/SOURCES are answered entirely from
+    # what the binder already attached (binder/view.py's visit_show_columns/
+    # visit_show_manifest/visit_show_snapshots/visit_show_lineage/
+    # visit_show_sources) — the Scan below any of them in the plan is never
     # read. No pipeline, no native engine.
     # SHOW GRANTS ON is answered from the permissions capability (stashed
     # execution context), not from a Scan — same no-pipeline shape.
@@ -189,6 +196,8 @@ def execute(
             ShowGrantsNode,
             ShowManifestNode,
             ShowSnapshotsNode,
+            ShowLineageNode,
+            ShowSourcesNode,
         ),
     ):
         return head_node(None), ResultType.TABULAR

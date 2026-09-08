@@ -30,6 +30,8 @@ from opteryx.planner.binder.view import (
     visit_show_columns,
     visit_show_manifest,
     visit_show_snapshots,
+    visit_show_lineage,
+    visit_show_sources,
 )
 from opteryx.planner.binder.relation import (
     visit_add_column,
@@ -52,6 +54,7 @@ from opteryx.planner.binder.relation import (
     visit_rollback_relation,
     visit_drop_trigger,
     visit_create_task,
+    visit_alter_task,
     visit_create_trigger,
     visit_alter_trigger_suspended,
     visit_alter_trigger_minimum_interval,
@@ -232,6 +235,16 @@ class BinderVisitor:
     ) -> Tuple[Node, BindingContext]:
         return visit_show_snapshots(self, node, context)
 
+    def visit_show_lineage(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_show_lineage(self, node, context)
+
+    def visit_show_sources(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_show_sources(self, node, context)
+
     def visit_create_view(
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
@@ -291,6 +304,11 @@ class BinderVisitor:
         self, node: Node, context: BindingContext
     ) -> Tuple[Node, BindingContext]:
         return visit_create_task(self, node, context)
+
+    def visit_alter_task(
+        self, node: Node, context: BindingContext
+    ) -> Tuple[Node, BindingContext]:
+        return visit_alter_task(self, node, context)
 
     def visit_alter_trigger_owner(
         self, node: Node, context: BindingContext

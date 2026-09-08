@@ -145,6 +145,7 @@ class RelationManagementNode(BasePlanNode):
         # task rather than ending at it. A list because TRUNCATE names several;
         # empty for a task that reads and writes nothing back.
         self.target_tables: list = parameters.get("target_tables") or []
+        self.source_tables: list = parameters.get("source_tables") or []
 
         # LISTEN TO / UNLISTEN. The subscriber is never carried: it is always
         # the session user, taken from the execution context below, because
@@ -252,6 +253,8 @@ class RelationManagementNode(BasePlanNode):
             return f"alter trigger {self.trigger_name} on {self.table_name} set minimum interval to {self.minimum_interval_seconds} seconds"
         if self.action == "drop_task":
             return f"drop task {self.task_name}"
+        if self.action == "alter_task":
+            return f"alter task {self.task_name} (redefine statement)"
         if self.action == "listen":
             return f"listen to {self.task_name} for {self.outcome.lower()}"
         if self.action == "unlisten":
@@ -499,12 +502,18 @@ class RelationManagementNode(BasePlanNode):
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "create_task":
+            if self.if_not_exists and self.connector.is_task(self.task_name):
+                # The whole statement, including its ON <table> trigger arm, is
+                # a no-op: a task that already exists keeps its existing trigger
+                # too, matching CREATE VIEW IF NOT EXISTS.
+                return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
             self.connector.create_task(
                 self.task_name,
                 self.statement,
                 author=self._author,
                 or_replace=self.or_replace,
                 writes=self.target_tables,
+                reads=self.source_tables,
             )
             if self.on_table:
                 # Derived, not authored: the statement declared the dependency,
@@ -524,6 +533,11 @@ class RelationManagementNode(BasePlanNode):
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 
         elif self.action == "create_trigger":
+            if self.if_not_exists and any(
+                t.get("name") == self.trigger_name
+                for t in self.connector.list_triggers(self.table_name)
+            ):
+                return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
             if self.event_kind == "commit":
                 if not self.connector.relation_exists(self.table_name):
                     raise DatasetNotFoundError(connector=self.connector, dataset=self.table_name)
@@ -595,6 +609,21 @@ class RelationManagementNode(BasePlanNode):
                 self.task_name,
                 if_exists=self.if_exists,
                 author=self._author,
+            )
+            return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
+
+        elif self.action == "alter_task":
+            # Defense in depth: the binder already checked. Redefines the
+            # statement (and what it reads/writes) only - never the trigger,
+            # never the schedule.
+            if not self.connector.is_task(self.task_name):
+                raise DatasetNotFoundError(connector=self.connector, dataset=self.task_name)
+            self.connector.alter_task_statement(
+                self.task_name,
+                self.statement,
+                author=self._author,
+                writes=self.target_tables,
+                reads=self.source_tables,
             )
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)
 

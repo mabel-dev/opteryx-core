@@ -147,6 +147,7 @@ class _UncommittedConnector(BaseConnector, Writable):
         author=None,
         commit_message=None,
         operation="merge",
+        **kwargs,
     ):
         _UncommittedConnector.commits.append(
             {

@@ -308,6 +308,16 @@ def render_show_snapshots(node: LogicalPlanNode) -> str:
     return f"SHOW SNAPSHOTS FOR ({node.relation})"
 
 
+@register_render(LogicalPlanStepType.ShowLineage)
+def render_show_lineage(node: LogicalPlanNode) -> str:
+    return f"SHOW LINEAGE FOR ({node.relation})"
+
+
+@register_render(LogicalPlanStepType.ShowSources)
+def render_show_sources(node: LogicalPlanNode) -> str:
+    return f"SHOW SOURCES FOR ({node.relation})"
+
+
 @register_render(LogicalPlanStepType.Subquery)
 def render_subquery(node: LogicalPlanNode) -> str:
     return f"SUBQUERY{' AS ' + node.alias if node.alias else ''}"

@@ -91,9 +91,10 @@ _KEYWORDS: List[str] = [
     # Named by the clause, join and operator catalogs but not by the grammar
     # keywords above. Sorted, because none of them is the more common reading of
     # any near-miss - the ordering rule only decides ties.
-    "ANTI", "EFFECTIVE", "GRANT", "MATERIALIZED", "NATURAL", "OPTIMIZE", "OWNER",
-    "QUALIFY", "REFRESH", "MERGE", "RESUME", "REVOKE", "SEMI", "SNAPSHOTS",
-    "SUSPEND", "TOP", "TRIGGERS", "VERSION", "WINDOW",
+    "ANTI", "EFFECTIVE", "GRANT", "LINEAGE", "MATERIALIZED", "MINIMUM", "NATURAL",
+    "OPTIMIZE", "OWNER", "QUALIFY", "REFRESH", "MERGE", "RESUME", "REVOKE", "SEMI",
+    "SIGNAL", "SNAPSHOTS", "SOURCES", "SUSPEND", "TASK", "TOP", "TRIGGERS", "VERSION",
+    "WINDOW",
 ]
 
 

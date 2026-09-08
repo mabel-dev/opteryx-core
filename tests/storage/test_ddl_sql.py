@@ -885,6 +885,54 @@ def test_create_or_replace_view(tmp_path):
     assert "name" in view_info["statement"]
 
 
+def test_create_view_if_not_exists_is_idempotent(tmp_path):
+    """CREATE VIEW IF NOT EXISTS no-ops when the view already exists.
+
+    A second call with a DIFFERENT body must not take effect - IF NOT EXISTS
+    means "make it so if it isn't already", not "make it so".
+    """
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT id FROM ws.events"))
+    result = list(
+        session.execute_to_morsels(
+            "CREATE VIEW IF NOT EXISTS ws.events_view AS SELECT id, name FROM ws.events"
+        )
+    )
+    assert result is not None
+
+    view_path = tmp_path / "ws" / "events_view" / "view.json"
+    with open(view_path) as f:
+        view_info = json.load(f)
+    assert "name" not in view_info["statement"]
+
+
+def test_create_view_or_replace_and_if_not_exists_is_rejected(tmp_path):
+    """OR REPLACE and IF NOT EXISTS are alternatives, never combined - the
+    first always redefines, the second only ever no-ops."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT id FROM ws.events"))
+
+    with pytest.raises(UnsupportedSyntaxError, match="OR REPLACE.*IF NOT EXISTS"):
+        list(
+            session.execute_to_morsels(
+                "CREATE OR REPLACE VIEW IF NOT EXISTS ws.events_view AS SELECT id, name FROM ws.events"
+            )
+        )
+
+    # And the "OR REPLACE silently no-ops instead of redefining" failure mode
+    # this guards against: the original body must still be intact.
+    view_path = tmp_path / "ws" / "events_view" / "view.json"
+    with open(view_path) as f:
+        view_info = json.load(f)
+    assert "name" not in view_info["statement"]
+
+
 def test_show_create_view(tmp_path):
     """SHOW CREATE VIEW returns the stored view statement."""
     _setup_workspace(tmp_path)
@@ -1093,15 +1141,15 @@ def test_drop_restrict_rejected(tmp_path):
 def test_show_create_rejects_an_object_type_with_no_definition(tmp_path):
     """Rejected by name, rather than as 'Invalid SHOW statement' at execution.
 
-    TABLE, VIEW, MATERIALIZED VIEW and TASK are answered (see
+    TABLE, VIEW, MATERIALIZED VIEW, TASK and TRIGGER are answered (see
     tests/storage/test_show_create.py); the other object types sqlparser
     parses are not objects Opteryx has.
     """
     _seed_relations(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
 
-    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*SHOW CREATE\*\* TRIGGER"):
-        list(owner.execute_to_morsels("SHOW CREATE TRIGGER ws.t"))
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*SHOW CREATE\*\* FUNCTION"):
+        list(owner.execute_to_morsels("SHOW CREATE FUNCTION ws.t"))
 
 
 def test_comment_on_column_rejected(tmp_path):

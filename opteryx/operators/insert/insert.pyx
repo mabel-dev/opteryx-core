@@ -68,6 +68,14 @@ class InsertNode(BasePlanNode):
         # it had never run.
         self.is_refresh = parameters.get("is_refresh", False)
 
+        # The provenance receipt and its producer, settled by the binder off
+        # the bound Scan nodes (see `_read_sources` there). Passed to the
+        # connector beside `author`; the connector decides what the store
+        # accepts. `[]` here is an assertion the statement read no catalog
+        # relation, and only the binder's walk may make it.
+        self.read_sources = parameters.get("read_sources")
+        self.produced_by = parameters.get("produced_by")
+
         self._file_entries = []
         self._total_rows = 0
         self.result: Optional[NonTabularResult] = None
@@ -148,6 +156,8 @@ class InsertNode(BasePlanNode):
                     self.relation_name, self.target_schema, self._file_entries,
                     author=self._author,
                     commit_message=self._commit_message,
+                    read_sources=self.read_sources,
+                    produced_by=self.produced_by,
                 )
             elif self.create_target:
                 self.connector.create_relation(
@@ -156,10 +166,14 @@ class InsertNode(BasePlanNode):
                 self.connector.insert(
                     self.relation_name, self._file_entries, author=self._author,
                     commit_message=self._commit_message,
+                    read_sources=self.read_sources,
+                    produced_by=self.produced_by,
                 )
             else:
                 self.connector.insert(
-                    self.relation_name, self._file_entries, author=self._author
+                    self.relation_name, self._file_entries, author=self._author,
+                    read_sources=self.read_sources,
+                    produced_by=self.produced_by,
                 )
             if self.is_materialized_view:
                 # Registration happens after the data commit, in the same

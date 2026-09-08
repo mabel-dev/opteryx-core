@@ -76,7 +76,12 @@ from typing import Optional
 from opteryx.planner.logical_planner import LogicalPlan
 from opteryx.planner.logical_planner import LogicalPlanStepType
 
-__all__ = ["iter_scan_nodes", "measure_data_processed", "plan_relations"]
+__all__ = [
+    "data_processed_by_scan",
+    "iter_scan_nodes",
+    "measure_data_processed",
+    "plan_relations",
+]
 
 
 # The planner's one-row stand-in for a statement with no FROM clause, and for a
@@ -207,6 +212,28 @@ def plan_relations(plan: LogicalPlan, shared_ctes: Optional[dict] = None) -> lis
     )
 
 
+def data_processed_by_scan(
+    plan: LogicalPlan,
+    base_stats_cache: Optional[dict] = None,
+    shared_ctes: Optional[dict] = None,
+) -> dict:
+    """Dense logical bytes this plan will read, per Scan node.
+
+    Same walk and same per-scan figure `measure_data_processed` sums into the
+    DATA_PROCESSED_BYTES meter — keyed by `node.identity`, the identity the
+    physical planner carries onto the compiled operator (see
+    `compiler.py`'s `set_current_identity(node.identity)` and
+    `scan_facts[scan.identity]`). That shared identity is what lets a
+    consumer keyed by the physical/EXPLAIN plan (e.g. `mermaid.py`) look up
+    the SAME number the bill was computed from, rather than a second,
+    disagreeing estimate.
+    """
+    return {
+        node.identity: _scan_bytes(node, base_stats_cache)
+        for node in iter_scan_nodes(plan, shared_ctes)
+    }
+
+
 def measure_data_processed(
     plan: LogicalPlan,
     base_stats_cache: Optional[dict] = None,
@@ -221,6 +248,12 @@ def measure_data_processed(
     `base_stats_cache` is the query's scan-statistics memo (threaded from
     `plan_query`); passing it makes this walk effectively free when the
     optimizer has already costed the same scans.
+
+    Summed over every Scan node `iter_scan_nodes` yields, NOT over
+    `data_processed_by_scan`'s dict — two Scan nodes can legitimately share
+    one `identity` (e.g. each leg of `UNION ALL SELECT ... FROM t UNION ALL
+    SELECT ... FROM t` reads the same relation twice and must be billed
+    twice), and a dict keyed by identity collapses that pair into one entry.
     """
     return int(
         sum(

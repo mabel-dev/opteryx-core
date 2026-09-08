@@ -128,7 +128,7 @@ class _UncommittedConnector(BaseConnector, Writable):
             file_size_in_bytes=len(data),
         )
 
-    def insert(self, relation_name, file_entries, author=None, commit_message=None):
+    def insert(self, relation_name, file_entries, author=None, commit_message=None, **kwargs):
         self.committed = [entry.file_path for entry in file_entries]
 
 

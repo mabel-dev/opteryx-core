@@ -167,6 +167,14 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         # Resolved up front by the catalog resolution step, if available, so we
         # can skip the per-table catalog round trip below.
         prefetched_table = kwargs.pop("prefetched_table", None)
+        # `workspace name -> catalog`, handed in by OpteryxConnector.table_engine
+        # (its `_get_catalog`). A receipt names sources across workspace
+        # boundaries (PROVENANCE_DESIGN.md S4.4), and `self.catalog` can only
+        # answer for this table's own workspace; SHOW LINEAGE needs the others
+        # to say whether a source snapshot still exists. Optional, because this
+        # class is also constructed directly over one catalog, and then a
+        # foreign source's existence is simply unknown rather than an error.
+        catalog_resolver = kwargs.pop("catalog_resolver", None)
 
         Diachronic.__init__(self, **kwargs)
         PredicatePushable.__init__(self, **kwargs)
@@ -175,6 +183,11 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         self.catalog = catalog
         self.workspace = workspace
         self.telemetry = kwargs.get("telemetry")
+        self._catalog_resolver = catalog_resolver
+        # (dataset, snapshot_id) -> bool | None, for one statement: this object
+        # is built per Scan per statement, so a cache on it lives exactly as
+        # long as the SHOW LINEAGE that fills it. See `_source_snapshot_exists`.
+        self._source_exists_cache: dict = {}
 
         # Initialize state
         self.snapshot_id = None
@@ -463,6 +476,118 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             )
             for snapshot in ordered
         ]
+
+    def get_lineage(self) -> list:
+        """The relation's receipts, newest snapshot first, for `SHOW LINEAGE FOR`.
+
+        Rows are the `opteryx.models.lineage_history` shape, normalized here
+        for the reason `get_snapshots` normalizes: that module must not import
+        opteryx_catalog. The same `load_history=True` reload, paid on this path
+        only - the receipt is a field of each snapshot document, so listing
+        them is the history load and nothing cheaper.
+
+        Names are returned WHOLE. Elision is the binder's (visit_show_lineage):
+        it has the session, this class does not, and a connector that decided
+        what a caller may see would be a second permissions implementation.
+
+        `source_exists` is resolved here, though, because it is a catalog
+        question: does the snapshot the receipt names still exist in the
+        workspace it names? Every distinct (dataset, snapshot) pair costs one
+        lookup, once - see `_source_snapshot_exists`.
+        """
+        from opteryx.models.lineage_history import normalize_lineage
+
+        dataset = self.catalog.load_dataset(self.dataset, load_history=True)
+        snapshots = dataset.snapshots()
+        if not snapshots:
+            return []
+
+        current_snapshot_id = dataset.metadata.current_snapshot_id
+        # The same order as SHOW SNAPSHOTS, decided by the same key, so the two
+        # statements list a history identically.
+        ordered = sorted(
+            snapshots, key=lambda s: (s.timestamp_ms, s.snapshot_id), reverse=True
+        )
+
+        rows = []
+        for snapshot in ordered:
+            rows.extend(normalize_lineage(snapshot, current_snapshot_id))
+        for row in rows:
+            if row["source_dataset"] is not None:
+                row["source_exists"] = self._source_snapshot_exists(
+                    row["source_dataset"], row["source_snapshot_id"]
+                )
+        return rows
+
+    def _source_snapshot_exists(self, source: str, snapshot_id) -> Optional[bool]:
+        """Whether `snapshot_id` of the fully-qualified `source` can still be
+        read - True, False, or None for "could not look".
+
+        None is an answer of its own and never a failure of the statement: the
+        receipt is the history, and a source workspace that is unreachable, or
+        one this connector cannot resolve a catalog for, must not take the
+        history down with it. A source with no snapshot id was read before its
+        first commit; there is no snapshot to look for, and None is the honest
+        answer rather than False, which would say a version had expired.
+
+        A source dataset that no longer exists is False, not None: the snapshot
+        certainly cannot be read, and that is the fact the column reports.
+
+        Cached per (dataset, snapshot) on this object. A receipt that names
+        the same upstream at the same version across fifty commits - which is
+        what a scheduled append against a slow-moving source looks like - is
+        one catalog read, not fifty.
+        """
+        if snapshot_id is None:
+            return None
+        key = (source, snapshot_id)
+        if key in self._source_exists_cache:
+            return self._source_exists_cache[key]
+
+        from opteryx_catalog.exceptions import DatasetNotFound
+
+        workspace, _, relative = str(source).partition(".")
+        verdict: Optional[bool]
+        try:
+            if workspace == self.workspace:
+                catalog = self.catalog
+            elif self._catalog_resolver is not None:
+                catalog = self._catalog_resolver(workspace)
+            else:
+                catalog = None
+            if catalog is None or not relative:
+                verdict = None
+            else:
+                verdict = catalog.load_dataset(relative).snapshot(snapshot_id) is not None
+        except DatasetNotFound:
+            verdict = False
+        except Exception:  # noqa: BLE001 - see docstring: unknown, never fatal
+            verdict = None
+        self._source_exists_cache[key] = verdict
+        return verdict
+
+    def get_sources(self) -> list:
+        """The relation's standing source list, for `SHOW SOURCES FOR`.
+
+        Rows are the `opteryx.models.source_list` shape. Read off the dataset
+        this object already loaded - `sources` is maintained ON the dataset
+        document precisely so that answering this costs one document read
+        (PROVENANCE_DESIGN.md S2.2), so unlike the two history statements this
+        one performs no reload.
+
+        A dataset object with no `sources` attribute at all is one from a
+        catalog older than the field. That is reported as an empty list with
+        `complete` unknown (None), which is what it is: the catalog did not
+        say, and a fabricated `false` would claim it had.
+
+        Names are returned whole; elision is the binder's, as for lineage.
+        """
+        from opteryx.models.source_list import normalize_sources
+
+        metadata = self.table.metadata
+        names = getattr(metadata, "sources", None)
+        complete = getattr(metadata, "sources_complete", None)
+        return normalize_sources(list(names or []), complete)
 
     def _resolve_snapshot(self) -> None:
         """Settle which snapshot this read sees, honouring time travel.
@@ -1095,8 +1220,17 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         # Merge stored kwargs with provided kwargs (provided takes precedence)
         merged_kwargs = {**self.kwargs, **kwargs}
+        # The table gets a way to reach OTHER workspaces' catalogs, for the one
+        # question that crosses a boundary: whether a source a receipt names
+        # still exists (SHOW LINEAGE). The resolver is this connector's own
+        # `_get_catalog`, so those lookups share its cache and its liveness
+        # re-check rather than constructing a second catalog handle.
         return OpteryxTable(
-            dataset=relative_id, catalog=catalog, workspace=workspace, **merged_kwargs
+            dataset=relative_id,
+            catalog=catalog,
+            workspace=workspace,
+            catalog_resolver=self._get_catalog,
+            **merged_kwargs,
         )
 
     def view_engine(self, name: str):
@@ -1467,12 +1601,53 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         catalog = self._get_catalog(workspace)
         return catalog.dataset_exists(relative_id)
 
+
+    # ── provenance ──────────────────────────────────────────────────────────
+
+    def _provenance_kwargs(self, method, read_sources, produced_by) -> dict:
+        """The receipt kwargs, or nothing, by what the catalog accepts.
+
+        Engine and catalog deploy separately. A catalog older than the receipt
+        has commit methods without these parameters, and a `TypeError` from a
+        commit is a write that reported failure after its files landed - the
+        worst available outcome. So the kwargs are passed only when the bound
+        method takes them; otherwise they are dropped, the receipt is absent,
+        and the CATALOG (once upgraded) is what reports the gap. Same posture
+        as `mark_secure` above, decided per method rather than per module.
+        """
+        import inspect
+
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return {}
+        kwargs = {}
+        if "read_sources" in parameters:
+            kwargs["read_sources"] = None if read_sources is None else list(read_sources)
+        if "produced_by" in parameters:
+            kwargs["produced_by"] = self._qualified_producer(produced_by)
+        return kwargs
+
+    def _qualified_producer(self, produced_by: Optional[str]) -> Optional[str]:
+        """`task:<name>` / `view:<name>` with the name fully qualified. The
+        binder sees the name as it was written, which may omit the workspace;
+        the connector is where a workspace is known for certain."""
+        if not produced_by:
+            return None
+        kind, _, name = produced_by.partition(":")
+        if not name:
+            return produced_by
+        workspace, relative = self._parse_identifier(name)
+        return f"{kind}:{workspace}.{relative}"
+
     def insert(
         self,
         relation_name: str,
         file_entries,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        read_sources: Optional[list] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Commit pre-written parquet files into the catalog as a new snapshot,
         appended to whatever the dataset already contains.
@@ -1483,12 +1658,17 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
-        self._commit(
-            relation_name,
-            lambda: catalog.load_dataset(relative_id).add_files(
-                file_paths, author=author, commit_message=commit_message
-            ),
-        )
+
+        def _commit_add_files():
+            dataset = catalog.load_dataset(relative_id)
+            return dataset.add_files(
+                file_paths,
+                author=author,
+                commit_message=commit_message,
+                **self._provenance_kwargs(dataset.add_files, read_sources, produced_by),
+            )
+
+        self._commit(relation_name, _commit_add_files)
 
     def _commit(self, relation_name: str, commit):
         """Run one catalog commit, translating a lost race into the engine's own error.
@@ -1519,6 +1699,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
         operation: str = "merge",
+        read_sources: Optional[list] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Commit pre-written parquet files and row-level deletes as ONE snapshot.
 
@@ -1536,16 +1718,19 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
-        self._commit(
-            relation_name,
-            lambda: catalog.load_dataset(relative_id).merge_commit(
+
+        def _commit_merge():
+            dataset = catalog.load_dataset(relative_id)
+            return dataset.merge_commit(
                 file_paths,
                 delete_positions,
                 author=author,
                 commit_message=commit_message,
                 operation=operation,
-            ),
-        )
+                **self._provenance_kwargs(dataset.merge_commit, read_sources, produced_by),
+            )
+
+        self._commit(relation_name, _commit_merge)
 
     def compaction_commit(
         self,
@@ -1588,6 +1773,8 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         file_entries,
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        read_sources: Optional[list] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Atomically replace a dataset's entire contents with the given files,
         as a single new snapshot (CREATE OR REPLACE ... AS SELECT). Schema is
@@ -1599,12 +1786,19 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
         file_paths = [fe.file_path for fe in file_entries]
-        self._commit(
-            relation_name,
-            lambda: catalog.load_dataset(relative_id).truncate_and_add_files(
-                file_paths, author=author, commit_message=commit_message
-            ),
-        )
+
+        def _commit_replace():
+            dataset = catalog.load_dataset(relative_id)
+            return dataset.truncate_and_add_files(
+                file_paths,
+                author=author,
+                commit_message=commit_message,
+                **self._provenance_kwargs(
+                    dataset.truncate_and_add_files, read_sources, produced_by
+                ),
+            )
+
+        self._commit(relation_name, _commit_replace)
 
     def relation_column_names(self, relation_name: str):
         """Return the dataset's current column names only (not full type fidelity)."""
@@ -1846,6 +2040,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         author: Optional[str] = None,
         or_replace: bool = False,
         writes: Optional[List[str]] = None,
+        reads: Optional[List[str]] = None,
     ) -> None:
         """Register a task in the catalog.
 
@@ -1871,6 +2066,18 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
 
+        # `reads` is passed only to a catalog that takes it: it is the newer of
+        # the two declarations, and a registration that failed on it would
+        # refuse the task for the sake of a field the sweep can backfill.
+        import inspect
+
+        extra = {}
+        try:
+            if "reads" in inspect.signature(catalog.create_task).parameters:
+                extra["reads"] = list(reads or [])
+        except (TypeError, ValueError):
+            pass
+
         try:
             catalog.create_task(
                 relative_id,
@@ -1882,12 +2089,50 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 # it raises here rather than recording a task whose outputs are
                 # silently invisible to the workflow graph.
                 writes=list(writes or []),
+                **extra,
             )
         except TaskAlreadyExists as exc:
             raise ValueError(
                 f"task {relation_name} already exists "
                 "(use CREATE OR REPLACE TASK to redefine it)"
             ) from exc
+
+    def alter_task_statement(
+        self,
+        relation_name: str,
+        statement: str,
+        author: Optional[str] = None,
+        writes: Optional[List[str]] = None,
+        reads: Optional[List[str]] = None,
+    ) -> None:
+        """ALTER TASK <name> AS <statement>: redefine the SQL body only.
+
+        Routes to the catalog's own `alter_task_statement`, a method
+        dedicated to this narrow edit rather than `create_task` called with
+        a flag - see that method's docstring for why. A catalog that
+        predates it (this connector installed against an older wheel) has
+        no fallback: ALTER TASK is simply unavailable rather than degrading
+        to a full CREATE OR REPLACE TASK, which would reset the trigger's
+        due instant this statement exists to avoid resetting.
+        """
+        try:
+            from opteryx_catalog.exceptions import TaskNotFound
+        except ImportError:
+            TaskNotFound = KeyError
+
+        workspace, relative_id = self._parse_identifier(relation_name)
+        catalog = self._get_catalog(workspace)
+
+        try:
+            catalog.alter_task_statement(
+                relative_id,
+                sql=statement,
+                author=author,
+                writes=list(writes or []),
+                reads=list(reads or []),
+            )
+        except TaskNotFound as exc:
+            raise ValueError(f"task {relation_name} does not exist") from exc
 
     def drop_task(
         self, relation_name: str, if_exists: bool = False, author: Optional[str] = None

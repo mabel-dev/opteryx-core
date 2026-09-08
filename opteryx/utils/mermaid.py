@@ -547,13 +547,38 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
             # survivor — backfilling it from the deprecated field when the survivor
             # is unset (a scan is a source: records_in/bytes_in are 0, so they take
             # the scanned rows/bytes) — then drop the deprecated names.
-            #   rows_read       → records_in
-            #   bytes_processed → bytes_in
+            #   rows_read       → records_in   (unless parquet_rows_before_filter says better)
+            #   bytes_processed → bytes_in     (unless billing_bytes_by_scan says better)
             #   files_read      → blobs_read
+            #
+            # A scan node's "in" side is a SOURCE — it has no upstream — so
+            # `records_out`/`bytes_out` are the only real readings the engine
+            # produces for it, and both the native and trampoline paths derive
+            # `rows_read`/`bytes_processed` from those same output counters
+            # above. Left alone, that makes "in" a bare copy of "out": never
+            # the actual post-pruning, pre-filter count a reader would expect
+            # on the left of a TABLE SCAN. Two better numbers already exist and
+            # are preferred here when present:
+            #   records_in ← parquet_rows_before_filter (post row-group-pruning,
+            #     pre reader-side-filter row count — 0/absent when nothing was
+            #     pushed, i.e. in genuinely equals out)
+            #   bytes_in   ← billing_bytes_by_scan[node.identity] (the SAME
+            #     dense-logical bytes the DATA_PROCESSED_BYTES meter bills for
+            #     this scan, plan-time — not the generic rows*columns*8
+            #     estimate every other operator's bytes_in/out use)
+            _pre_filter_rows = node_stat.get("parquet_rows_before_filter")
+            if _pre_filter_rows:
+                node_stat["records_in"] = _pre_filter_rows
             if "rows_read" in node_stat:
                 if not node_stat.get("records_in"):
                     node_stat["records_in"] = node_stat["rows_read"]
                 node_stat.pop("rows_read", None)
+            _billing_bytes_by_scan = node.telemetry._reading.get("billing_bytes_by_scan")
+            _scan_billing_bytes = (
+                _billing_bytes_by_scan.get(node.identity) if _billing_bytes_by_scan else None
+            )
+            if _scan_billing_bytes is not None:
+                node_stat["bytes_in"] = _scan_billing_bytes
             if "bytes_processed" in node_stat:
                 if not node_stat.get("bytes_in"):
                     node_stat["bytes_in"] = node_stat["bytes_processed"]

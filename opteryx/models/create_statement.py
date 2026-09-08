@@ -154,3 +154,64 @@ def render_create_task(task_name: str, statement: str) -> str:
     have no single answer to give.
     """
     return f"CREATE TASK {quote_qualified_name(task_name)} AS\n{statement.strip().rstrip(';')};"
+
+
+def render_create_trigger(
+    trigger_name: str,
+    table_name: str,
+    target_task: str,
+    event_kind: str,
+    schedule: Optional[str] = None,
+    time_zone: Optional[str] = None,
+    window_source: Optional[str] = None,
+    created_by: Optional[str] = None,
+    runs_as: Optional[str] = None,
+    suspended: bool = False,
+    minimum_interval_seconds: Optional[int] = None,
+) -> str:
+    """The DDL that recreates a trigger, as a CREATE plus trailing ALTERs.
+
+    Owner, suspend state and the minimum-firing-interval have no CREATE
+    TRIGGER clause of their own - they are exclusively ALTER TRIGGER forms
+    (see pre_parse's ALTER TRIGGER grammar) - so, mirroring how
+    render_create_table emits a trailing ALTER for CLUSTER BY where CREATE
+    TABLE has no clause for it, each is emitted as a trailing ALTER TRIGGER
+    line, and only when it differs from what a fresh registration would set:
+    owner defaults to the creator, suspend defaults to unsuspended, and the
+    interval defaults to DEFAULT_MINIMUM_INTERVAL_SECONDS.
+    """
+    from opteryx.connectors.local_store_connector import DEFAULT_MINIMUM_INTERVAL_SECONDS
+
+    name = quote_identifier(trigger_name)
+    holder = quote_qualified_name(table_name)
+    task = quote_qualified_name(target_task)
+
+    if event_kind == "schedule":
+        head = f"CREATE TRIGGER {name} ON SCHEDULE '{schedule}'"
+        if time_zone:
+            head += f" AT TIME ZONE '{time_zone}'"
+        if window_source:
+            head += f" OVER {quote_qualified_name(window_source)}"
+    elif event_kind == "signal":
+        head = f"CREATE TRIGGER {name} ON SIGNAL"
+        if window_source:
+            head += f" OVER {quote_qualified_name(window_source)}"
+    else:
+        head = f"CREATE TRIGGER {name} ON {holder}"
+
+    statements = [f"{head} EXECUTE {task}"]
+
+    if runs_as and runs_as != created_by:
+        statements.append(f"ALTER TRIGGER {name} ON {holder} OWNER TO {quote_identifier(runs_as)}")
+    if suspended:
+        statements.append(f"ALTER TRIGGER {name} ON {holder} SUSPEND")
+    if (
+        minimum_interval_seconds is not None
+        and minimum_interval_seconds != DEFAULT_MINIMUM_INTERVAL_SECONDS
+    ):
+        statements.append(
+            f"ALTER TRIGGER {name} ON {holder} SET MINIMUM INTERVAL TO "
+            f"{minimum_interval_seconds} SECONDS"
+        )
+
+    return ";\n\n".join(statements) + ";"

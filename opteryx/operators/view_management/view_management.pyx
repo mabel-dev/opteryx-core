@@ -40,6 +40,7 @@ class ViewManagementNode(BasePlanNode):
         self.view_name: Optional[str] = parameters.get("view_name")
         self.query = parameters.get("query")
         self.or_replace = parameters.get("or_replace", False)
+        self.if_not_exists = parameters.get("if_not_exists", False)
 
         # DROP
         self.view_names = parameters.get("view_names")
@@ -95,6 +96,11 @@ class ViewManagementNode(BasePlanNode):
                 from opteryx.connectors import connector_factory
 
                 self.connector = connector_factory(self.view_name, telemetry=self.telemetry)
+
+            if self.action == "create_view" and self.if_not_exists:
+                existing_type, _ = self.connector.locate_object(self.view_name)
+                if existing_type == TableType.View:
+                    return NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
 
             # The session user, not a fixed literal - attributing every view to
             # "opteryx" made the stored owner useless for telling authors apart.

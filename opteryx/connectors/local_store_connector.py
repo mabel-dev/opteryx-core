@@ -479,6 +479,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         author: Optional[str] = None,
         or_replace: bool = False,
         writes: Optional[List[str]] = None,
+        reads: Optional[List[str]] = None,
     ) -> None:
         self.assert_name_free(relation_name, "task")
         task_path = self._task_path(relation_name)
@@ -497,8 +498,16 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             # than carried from `existing`: it describes THIS statement, so a
             # replacement that no longer writes must not inherit a target it no
             # longer has.
+            # `reads` follows the same rule as `writes`: it describes THIS
+            # statement, so it is never carried from `existing` either.
             json.dump(
-                {"sql": statement, "author": author, "writes": list(writes or [])}, f
+                {
+                    "sql": statement,
+                    "author": author,
+                    "writes": list(writes or []),
+                    "reads": sorted(set(reads or [])),
+                },
+                f,
             )
 
     def _rewrite_task(self, relation_name: str, **fields) -> None:
@@ -510,6 +519,30 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         record.update(fields)
         with open(task_path, "w") as f:
             json.dump(record, f)
+
+    def alter_task_statement(
+        self,
+        relation_name: str,
+        statement: str,
+        author: Optional[str] = None,
+        writes: Optional[List[str]] = None,
+        reads: Optional[List[str]] = None,
+    ) -> None:
+        """ALTER TASK <name> AS <statement>: the SQL body only, via
+        `_rewrite_task` - which raises if the task does not exist, since
+        ALTER redefines something that exists rather than creating it.
+
+        `author` is not written as the task's `author` field: unlike
+        `create_task`, a redefinition should not read as a fresh creation.
+        `writes`/`reads` follow `create_task`'s own rule - they describe THIS
+        statement and are never carried from the prior one.
+        """
+        self._rewrite_task(
+            relation_name,
+            sql=statement,
+            writes=list(writes or []),
+            reads=sorted(set(reads or [])),
+        )
 
     def drop_task(
         self, relation_name: str, if_exists: bool = False, author: Optional[str] = None
@@ -1061,8 +1094,14 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         file_entries: List[FileEntry],
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        read_sources: Optional[list] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Commit pre-written data files into a new snapshot.
+
+        `read_sources` and `produced_by` are accepted and not stored: this
+        store's snapshot records carry no author or message either (see
+        `_commit`), and a receipt nobody can read back is not a receipt.
 
         Args:
             relation_name: Fully-qualified relation name
@@ -1097,6 +1136,8 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         file_entries: List[FileEntry],
         author: Optional[str] = None,
         commit_message: Optional[str] = None,
+        read_sources: Optional[list] = None,
+        produced_by: Optional[str] = None,
     ) -> None:
         """Atomically replace a relation's entire contents with the given files,
         as a single new snapshot (CREATE OR REPLACE ... AS SELECT).

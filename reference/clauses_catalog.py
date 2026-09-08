@@ -148,6 +148,30 @@ CLAUSE_DEFINITIONS = {
         ),
         "notes": "Synthesized by the planner's pre-parse interception (no native sqlparser grammar).",
     },
+    "alter_task": {
+        "canonical_name": "ALTER TASK ... AS",
+        "planner_entry": "plan_alter_task",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["ALTER TASK task_name AS statement"],
+        "summary": "Redefine what a task runs, and nothing else.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception (no native sqlparser "
+            "grammar). Narrow by design: it redefines the task's statement only, and takes "
+            "no ON table clause - it cannot repoint or create the trigger that fires the "
+            "task. CREATE OR REPLACE TASK resets a schedule trigger's next-due instant on "
+            "every registration, even one that only changes the SQL body; a statement that "
+            "cannot see the trigger at all cannot reset a clock it never touches, which is "
+            "the reason this form exists rather than sending every SQL-only edit through "
+            "CREATE OR REPLACE TASK."
+        ),
+        "notes": (
+            "Unlike CREATE OR REPLACE TASK, this does not create: a name that is not "
+            "already a task is refused, not silently registered. Who a task runs as, and "
+            "whether it runs, still belong to the trigger: ALTER TRIGGER ... OWNER TO, "
+            "... SUSPEND/RESUME, ... SET MINIMUM INTERVAL TO."
+        ),
+    },
     "alter_trigger_minimum_interval": {
         "canonical_name": "ALTER TRIGGER ... SET MINIMUM INTERVAL TO",
         "planner_entry": "plan_alter_trigger_minimum_interval",
@@ -169,6 +193,43 @@ CLAUSE_DEFINITIONS = {
             "default unit; MINUTES is converted to seconds. Spelled MINIMUM in full. "
             "Requires AUTOMATE on the table, as SUSPEND does."
         ),
+    },
+    "alter_trigger_owner": {
+        "canonical_name": "ALTER TRIGGER ... OWNER TO",
+        "planner_entry": "plan_alter_trigger_owner",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "ALTER TRIGGER trigger_name ON table_name OWNER TO principal",
+            "ALTER TRIGGER trigger_name ON table_name OWNER TO CURRENT_USER",
+        ],
+        "summary": "Change the identity a trigger's unattended runs carry.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception (no native sqlparser "
+            "grammar). A trigger pins the identity an unattended run carries on creation "
+            "and keeps it across a CREATE OR REPLACE; this is the only way to move it. "
+            "Requires AUTOMATE on the table (the same tier trigger creation takes) and that "
+            "the new owner can be billed for the work it authorizes."
+        ),
+        "notes": "CURRENT_USER resolves to the session identity at bind time.",
+    },
+    "alter_trigger_suspended": {
+        "canonical_name": "ALTER TRIGGER ... SUSPEND / RESUME",
+        "planner_entry": "plan_alter_trigger_suspended",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "ALTER TRIGGER trigger_name ON table_name SUSPEND",
+            "ALTER TRIGGER trigger_name ON table_name RESUME",
+        ],
+        "summary": "Pause or resume a trigger's unattended firing.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception (no native sqlparser "
+            "grammar). Suspends firing without removing the trigger, which is what makes "
+            "'deliberately off' distinguishable from 'quietly broken' - the same reasoning "
+            "as ALTER MATERIALIZED VIEW SUSPEND, on the trigger rather than the view."
+        ),
+        "notes": "Requires AUTOMATE on the table.",
     },
     "refresh_materialized_view": {
         "canonical_name": "REFRESH MATERIALIZED VIEW",
@@ -289,15 +350,73 @@ CLAUSE_DEFINITIONS = {
             "CLUSTER BY."
         ),
     },
+    "create_task": {
+        "canonical_name": "CREATE TASK",
+        "planner_entry": "plan_create_task",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "CREATE [OR REPLACE] TASK [IF NOT EXISTS] task_name [ON table_name] AS statement"
+        ],
+        "summary": "Register a statement the platform runs on its own.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception - sqlparser has no TASK "
+            "object type at all. A task is stored SQL and carries no identity of its own: "
+            "EXECUTE runs it as the invoker, and an unattended run carries the trigger's "
+            "pinned owner. ON table_name additionally creates a commit trigger on that "
+            "table in the same statement, the way CREATE MATERIALIZED VIEW does; omit it "
+            "and the task is defined but nothing fires it, which is what a backfill or a "
+            "replay is - EXECUTE by hand, on purpose."
+        ),
+        "notes": (
+            "OR REPLACE and IF NOT EXISTS are alternatives, never combined - the first "
+            "always redefines, the second only ever no-ops. The statement is parsed but "
+            "not planned at creation time (its :name placeholders bind only at EXECUTE), "
+            "so a task that is not valid SQL is refused now, but one that reads or writes "
+            "the author does not have grants for is checked on every registration - see "
+            "ALTER TASK for redefining the statement without touching the trigger."
+        ),
+    },
+    "create_trigger": {
+        "canonical_name": "CREATE TRIGGER",
+        "planner_entry": "plan_create_trigger",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": [
+            "CREATE [OR REPLACE] TRIGGER [IF NOT EXISTS] trigger_name ON table_name EXECUTE task_name",
+            "CREATE [OR REPLACE] TRIGGER [IF NOT EXISTS] trigger_name ON SCHEDULE 'cron' [AT TIME ZONE 'zone'] [OVER table_name] EXECUTE task_name",
+            "CREATE [OR REPLACE] TRIGGER [IF NOT EXISTS] trigger_name ON SIGNAL [OVER table_name] EXECUTE task_name",
+        ],
+        "summary": "Attach a firing condition to a task, or a table's commits.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception - the dialect has no "
+            "native sqlparser grammar for trigger statements. A trigger is an event plus "
+            "the identity its unattended runs carry. ON table_name fires on a commit to "
+            "that table, and the trigger lives under it. ON SCHEDULE and ON SIGNAL have no "
+            "source table, so the trigger lives under the TASK it fires instead; OVER "
+            "table_name supplies the window such a run has no commit to provide. A task "
+            "holds at most one trigger, whatever its kind."
+        ),
+        "notes": (
+            "OR REPLACE and IF NOT EXISTS are alternatives, never combined. OVER and AT "
+            "TIME ZONE are rejected on the commit form - a commit supplies its own window "
+            "and happens in no time zone. The cron expression takes five whitespace-"
+            "separated fields; a malformed one is refused at plan time."
+        ),
+    },
     "create_view": {
         "canonical_name": "CREATE VIEW",
         "planner_entry": "plan_create_view",
         "scope": "statement",
         "status": "supported",
-        "syntax_forms": ["CREATE [OR REPLACE] VIEW view_name AS query"],
+        "syntax_forms": ["CREATE [OR REPLACE] VIEW [IF NOT EXISTS] view_name AS query"],
         "summary": "Create a view.",
         "documentation": "The query body is stored for later planning when the view is referenced.",
-        "notes": "Supports OR REPLACE and optional column lists.",
+        "notes": (
+            "Supports OR REPLACE and optional column lists. IF NOT EXISTS is a true "
+            "idempotent no-op when the view already exists, leaving its stored definition "
+            "untouched; OR REPLACE and IF NOT EXISTS are alternatives, never combined."
+        ),
     },
     "delete": {
         "canonical_name": "DELETE",
@@ -396,6 +515,25 @@ CLAUSE_DEFINITIONS = {
         "documentation": "Supports dropping one or more tables with optional IF EXISTS.",
         "notes": (
             "CASCADE, RESTRICT and PURGE are rejected rather than accepted and ignored."
+        ),
+    },
+    "drop_task": {
+        "canonical_name": "DROP TASK",
+        "planner_entry": "plan_drop_task",
+        "scope": "statement",
+        "status": "supported",
+        "syntax_forms": ["DROP TASK [IF EXISTS] task_name"],
+        "summary": "Remove a task.",
+        "documentation": (
+            "Synthesized by the planner's pre-parse interception (no native sqlparser "
+            "grammar). A task owns no storage, so dropping one reclaims nothing and there "
+            "is nothing for CASCADE or RESTRICT to decide."
+        ),
+        "notes": (
+            "Triggers that fire the task are left alone deliberately: they live on the "
+            "datasets that fire them, not on the task, and sweeping other datasets' "
+            "records from this statement is how a partial failure leaves a trigger "
+            "nobody can see."
         ),
     },
     "drop_trigger": {
@@ -780,6 +918,7 @@ CLAUSE_DEFINITIONS = {
             "SHOW CREATE VIEW object_name",
             "SHOW CREATE MATERIALIZED VIEW object_name",
             "SHOW CREATE TASK object_name",
+            "SHOW CREATE TRIGGER trigger_name ON table_name",
         ],
         "summary": "Show the DDL that creates an object.",
         "documentation": (
@@ -793,9 +932,13 @@ CLAUSE_DEFINITIONS = {
             "typed: a table created by CTAS renders as an explicit-column CREATE TABLE, "
             "because the defining query was never kept. Column types are rendered in the "
             "canonical spelling a CAST target parses from, so precision, timestamp unit and "
-            "array element survive the round trip. Gated at READ for every object type - "
-            "the same tier as reading the object, and no file path or storage layout is "
-            "disclosed, which is what puts SHOW MANIFEST at owner instead."
+            "array element survive the round trip. A TRIGGER kept only its own fields - "
+            "target, event and schedule - and none of owner, suspend state or minimum "
+            "interval has a CREATE TRIGGER clause of its own (they are exclusively ALTER "
+            "TRIGGER forms), so a trigger whose owner or suspend state or interval differs "
+            "from what a fresh registration would set renders as the CREATE plus trailing "
+            "ALTER TRIGGER statements for each, the way a clustered table's does for "
+            "CLUSTER BY."
         ),
         "notes": (
             "A clustered table returns TWO statements - a CREATE TABLE followed by an "
@@ -804,11 +947,14 @@ CLAUSE_DEFINITIONS = {
             "DEFAULT is never rendered, because none is stored - ADD COLUMN ... DEFAULT is "
             "a backfill value, not state a later INSERT consults. A task's ON clause is not "
             "rendered either: it creates a trigger rather than belonging to the task, and "
-            "SHOW TRIGGERS FOR shows those. MATERIALIZED VIEW and TASK are recognised "
-            "before the parser - sqlparser's ShowCreateObject has neither and no dialect "
-            "hook to add them - and naming an object of the wrong kind is not found rather "
-            "than answered from whatever holds the name. TRIGGER, FUNCTION, PROCEDURE and "
-            "EVENT parse and are refused: Opteryx has no such object to define."
+            "SHOW CREATE TRIGGER / SHOW TRIGGERS FOR show those. MATERIALIZED VIEW, TASK "
+            "and TRIGGER are recognised before the parser - sqlparser's ShowCreateObject "
+            "has no per-object hook for MATERIALIZED VIEW or TASK at all, and while it does "
+            "list a TRIGGER variant, it has no ON table_name clause to go with Opteryx's "
+            "per-table trigger scoping, so that form is intercepted too. Naming an object "
+            "of the wrong kind is not found rather than answered from whatever holds the "
+            "name. FUNCTION, PROCEDURE and EVENT parse and are refused: Opteryx has no such "
+            "object to define."
         ),
     },
     "show_grants": {

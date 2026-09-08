@@ -32,6 +32,10 @@ class ShowCreateNode(BasePlanNode):
 
         self.object_type = parameters.get("object_type")
         self.object_name = parameters.get("object_name")
+        # SHOW CREATE TRIGGER only: object_name is the HOLDER (the table), and
+        # trigger_name is the trigger itself - a trigger name is only unique
+        # per holder.
+        self.trigger_name = parameters.get("trigger_name")
         # Bound by visit_show, which authorizes the read first. Never derived
         # here - deriving it locally is what let this run unauthorized.
         self.connector = parameters.get("connector")
@@ -98,20 +102,58 @@ class ShowCreateNode(BasePlanNode):
             self.object_name, self.connector.task_definition(self.object_name)
         )
 
+    def _trigger_statement(self):
+        from opteryx.models.create_statement import render_create_trigger
+
+        trigger = next(
+            (
+                t
+                for t in self.connector.list_triggers(self.object_name)
+                if t.get("name") == self.trigger_name
+            ),
+            None,
+        )
+        if trigger is None:
+            raise DatasetNotFoundError(dataset=self.trigger_name, connector="TRIGGER")
+
+        return render_create_trigger(
+            self.trigger_name,
+            self.object_name,
+            trigger.get("target-task") or trigger.get("target-view"),
+            trigger.get("event-kind") or "commit",
+            schedule=trigger.get("schedule"),
+            time_zone=trigger.get("time-zone"),
+            window_source=trigger.get("window-source"),
+            created_by=trigger.get("created-by"),
+            runs_as=trigger.get("runs-as"),
+            suspended=trigger.get("suspended-at-ms") is not None,
+            minimum_interval_seconds=trigger.get("minimum-interval-seconds"),
+        )
+
     def execute(self, morsel):
         # Static dispatch on an object type the planner has already reduced to
-        # one of four spellings - an unknown one cannot reach here.
+        # one of five spellings - an unknown one cannot reach here.
         _STATEMENT_BUILDERS = {
             "TABLE": self._table_statement,
             "VIEW": self._view_statement,
             "MATERIALIZED VIEW": self._materialized_view_statement,
             "TASK": self._task_statement,
+            "TRIGGER": self._trigger_statement,
         }
         create_statement = _STATEMENT_BUILDERS[self.object_type]()
 
+        # TABLE/VIEW/MATERIALIZED VIEW/TASK are named by object_name alone; a
+        # trigger is named per holder, so the label is "<trigger> ON <holder>",
+        # the same way DROP/ALTER TRIGGER name it in SQL.
+        label = (
+            f"{self.trigger_name} ON {self.object_name}"
+            if self.object_type == "TRIGGER"
+            else self.object_name
+        )
+
         vectors = [
-            vector_from_sequence([self.object_name], dtype=_draken_native.DrakenType.VARCHAR),
+            vector_from_sequence([label], dtype=_draken_native.DrakenType.VARCHAR),
             vector_from_sequence([create_statement], dtype=_draken_native.DrakenType.VARCHAR),
         ]
-        morsel = Morsel.from_vectors([self.object_name, "create_statement"], vectors)
+        morsel = Morsel.from_vectors([label, "create_statement"], vectors)
         yield morsel

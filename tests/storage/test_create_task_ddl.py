@@ -25,6 +25,7 @@ import opteryx
 from opteryx import managers
 from opteryx.connectors import register_workspace
 from opteryx.connectors.local_store_connector import LocalStoreConnector
+from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.managers.permissions import register_permissions_capability
 
@@ -191,6 +192,110 @@ def test_creating_twice_without_or_replace_is_refused(tmp_path):
         list(owner.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
 
 
+def test_create_task_if_not_exists_is_idempotent(tmp_path):
+    """CREATE TASK IF NOT EXISTS no-ops when the task already exists - a
+    second call with a DIFFERENT statement must not take effect."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
+
+    result = list(
+        owner.execute_to_morsels(
+            "CREATE TASK IF NOT EXISTS ws.t AS SELECT a FROM ws.src WHERE a > 1"
+        )
+    )
+    assert result is not None
+    assert "WHERE" not in _task_record(tmp_path / "ws", "t")["sql"]
+
+
+def test_create_task_or_replace_and_if_not_exists_is_rejected(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+
+    with pytest.raises(UnsupportedSyntaxError, match="OR REPLACE.*IF NOT EXISTS"):
+        list(
+            owner.execute_to_morsels(
+                "CREATE OR REPLACE TASK IF NOT EXISTS ws.t AS SELECT a FROM ws.src"
+            )
+        )
+
+
+# --- ALTER TASK <name> AS <statement>: the SQL body only, no ON <table>
+
+
+def test_alter_task_redefines_the_statement(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
+
+    list(owner.execute_to_morsels("ALTER TASK ws.t AS SELECT a FROM ws.src WHERE a > 1"))
+
+    assert "WHERE" in _task_record(tmp_path / "ws", "t")["sql"]
+
+
+def test_alter_task_does_not_reset_the_schedule_trigger(tmp_path):
+    """The whole reason this form exists: a full CREATE OR REPLACE TASK
+    resets a schedule trigger's due instant on every registration, even one
+    that only redefines the SQL body. ALTER TASK cannot see the trigger at
+    all, so it cannot reset it."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
+    list(owner.execute_to_morsels("CREATE TRIGGER tick ON SCHEDULE '0 * * * *' EXECUTE ws.t"))
+    list(owner.execute_to_morsels("ALTER TRIGGER tick ON ws.t OWNER TO rhea"))
+
+    triggers_path = tmp_path / "ws" / "t" / "triggers.json"
+    before = json.load(open(triggers_path))
+
+    list(owner.execute_to_morsels("ALTER TASK ws.t AS SELECT a FROM ws.src WHERE a > 1"))
+
+    after = json.load(open(triggers_path))
+    assert after == before
+    assert after[0]["runs-as"] == "rhea"
+
+
+def test_alter_task_does_not_create(tmp_path):
+    """ALTER redefines something that exists; a name that is not yet a task
+    is refused, not silently created."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+
+    with pytest.raises(DatasetNotFoundError):
+        list(owner.execute_to_morsels("ALTER TASK ws.nope AS SELECT 1"))
+
+
+def test_alter_task_takes_no_on_clause(tmp_path):
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner)
+    list(owner.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
+
+    with pytest.raises(UnsupportedSyntaxError, match=r"\*\*ALTER TASK\*\*"):
+        list(owner.execute_to_morsels("ALTER TASK ws.t ON ws.src AS SELECT 1"))
+
+
+def test_alter_task_is_bounded_by_its_authors_own_grants(tmp_path, install):
+    """Same authoring bound as CREATE OR REPLACE TASK: redefining a task to
+    read something the author cannot read is refused, even though the task
+    already exists and the author may write its name."""
+    _setup_workspace(tmp_path)
+    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(owner, "ws.secret")
+
+    install(ScriptedCapability(allow={("ws.t", "AUTOMATE"), ("ws.src", "READ")}))
+    mallory = opteryx.session(user="mallory")
+
+    list(mallory.execute_to_morsels("CREATE TASK ws.t AS SELECT a FROM ws.src"))
+
+    with pytest.raises(PermissionError, match="permission to read ws.secret"):
+        list(mallory.execute_to_morsels("ALTER TASK ws.t AS SELECT a FROM ws.secret"))
+
+
 # --- the statement must be valid, and must be a statement a task may run
 
 
@@ -294,6 +399,10 @@ def _writes(tmp_path, task):
         "DELETE FROM ws.sink WHERE a = 1",
         "MERGE INTO ws.sink t USING ws.src s ON t.a = s.a WHEN MATCHED THEN UPDATE SET t.a = s.a",
         "TRUNCATE TABLE ws.sink",
+        "WITH x AS (SELECT a FROM ws.src) INSERT INTO ws.sink SELECT a FROM x",
+        "WITH x AS (SELECT a FROM ws.src) UPDATE ws.sink SET a = (SELECT a FROM x LIMIT 1)",
+        "WITH x AS (SELECT a FROM ws.src) DELETE FROM ws.sink WHERE a IN (SELECT a FROM x)",
+        "WITH x AS (SELECT a FROM ws.src) MERGE INTO ws.sink t USING x s ON t.a = s.a WHEN MATCHED THEN UPDATE SET t.a = s.a",
     ],
 )
 def test_every_write_form_records_what_it_writes(tmp_path, statement):
@@ -302,6 +411,10 @@ def test_every_write_form_records_what_it_writes(tmp_path, statement):
     Every form is here because the derivation used to read INSERT's target
     only: a task doing anything else recorded no output, and its target fell
     through into the SOURCE list where it was checked at READ.
+
+    The WITH-prefixed forms are here for the same reason: a leading CTE wraps
+    the statement in a `Query` node, and the target fell through into the
+    SOURCE list exactly as it did before INSERT's target was read at all.
     """
     _setup_workspace(tmp_path)
     owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
@@ -765,14 +878,9 @@ def test_a_task_has_no_owner_or_suspension_of_its_own(tmp_path):
         list(owner.execute_to_morsels("ALTER TASK ws.t OWNER TO rhea"))
 
 
-def test_what_a_task_runs_cannot_be_altered_in_place(tmp_path):
-    """Changed with CREATE OR REPLACE, so the statement history records it as a
-    new version rather than an in-place edit nothing remembers."""
-    _setup_workspace(tmp_path)
-    owner = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
-
-    with pytest.raises(UnsupportedSyntaxError, match="CREATE OR REPLACE TASK"):
-        list(owner.execute_to_morsels("ALTER TASK ws.t AS SELECT 1"))
+# ALTER TASK <name> AS <statement> now exists - see test_alter_task_* above,
+# including test_alter_task_does_not_create for the "name is not a task"
+# case this used to cover when ALTER TASK had no forms at all.
 
 
 # --- one namespace
@@ -818,3 +926,53 @@ def test_replacing_a_task_is_not_a_collision(tmp_path):
     list(owner.execute_to_morsels("CREATE OR REPLACE TASK ws.thing AS SELECT 2"))
 
     assert "SELECT 2" in _task_record(tmp_path / "ws", "thing")["sql"]
+
+
+# --- what a task reads (opteryx-catalog PROVENANCE_DESIGN.md S2.3)
+
+
+def _reads(tmp_path, task):
+    return _task_record(tmp_path / "ws", task)["reads"]
+
+
+def test_a_task_records_what_it_reads(tmp_path):
+    """The counterpart of `writes`, from the same AST pass: the plan-level
+    "what feeds the thing this task writes", answerable before it has run."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(session, "ws.src")
+    _seed(session, "ws.dim")
+    _seed(session, "ws.sink")
+
+    list(
+        session.execute_to_morsels(
+            "CREATE TASK ws.t AS INSERT INTO ws.sink "
+            "SELECT s.a FROM ws.src s JOIN ws.dim d ON s.a = d.a"
+        )
+    )
+
+    assert _reads(tmp_path, "t") == ["ws.dim", "ws.src"]
+    assert _writes(tmp_path, "t") == ["ws.sink"]
+
+
+def test_a_task_that_reads_nothing_records_an_empty_list(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(session, "ws.sink")
+
+    list(session.execute_to_morsels("CREATE TASK ws.t AS INSERT INTO ws.sink VALUES (1)"))
+
+    assert _reads(tmp_path, "t") == []
+
+
+def test_replacing_a_task_re_derives_what_it_reads(tmp_path):
+    _setup_workspace(tmp_path)
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+    _seed(session, "ws.src")
+    _seed(session, "ws.sink")
+
+    list(session.execute_to_morsels("CREATE TASK ws.t AS INSERT INTO ws.sink SELECT a FROM ws.src"))
+    assert _reads(tmp_path, "t") == ["ws.src"]
+
+    list(session.execute_to_morsels("CREATE OR REPLACE TASK ws.t AS INSERT INTO ws.sink VALUES (1)"))
+    assert _reads(tmp_path, "t") == []

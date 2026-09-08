@@ -441,10 +441,10 @@ def _create_scan_node(logical_node, query_properties, registry):
         # Scan marked for empty result (contradictory predicates)
         return registry.create("Null Reader", query_properties, **node_config)
     elif node_config.get("for_snapshots_only"):
-        # SHOW SNAPSHOTS FOR: this Scan exists so the relation is BOUND — the
-        # permission gate, the connector, and the commit history the statement
-        # answers from — and is never read. serial_engine answers from the
-        # ShowSnapshots node above it and never drives the pipeline.
+        # SHOW SNAPSHOTS / LINEAGE / SOURCES FOR: this Scan exists so the
+        # relation is BOUND — the permission gate, the connector, and the commit
+        # history the statement answers from — and is never read. serial_engine
+        # answers from the Show node above it and never drives the pipeline.
         #
         # It carries no manifest by design: the history is the result, and
         # building one would pay binding's expensive half to produce a file list
@@ -490,7 +490,7 @@ def _create_show_node(logical_node, query_properties, registry):
 
     if object_type == "VARIABLE":
         return registry.create("Show Value", query_properties, kind=node_config["items"][1], value=node_config["items"][1], **node_config)
-    elif object_type in ("TABLE", "VIEW", "MATERIALIZED VIEW", "TASK"):
+    elif object_type in ("TABLE", "VIEW", "MATERIALIZED VIEW", "TASK", "TRIGGER"):
         return registry.create("Show Create", query_properties, **node_config)
     else:
         raise UnsupportedSyntaxError(f"Unsupported SHOW type '{object_type}'")
@@ -518,6 +518,14 @@ def _create_show_manifest_node(logical_node, query_properties, registry):
 
 def _create_show_snapshots_node(logical_node, query_properties, registry):
     return registry.create("Show Snapshots", query_properties, **logical_node.properties)
+
+
+def _create_show_lineage_node(logical_node, query_properties, registry):
+    return registry.create("Show Lineage", query_properties, **logical_node.properties)
+
+
+def _create_show_sources_node(logical_node, query_properties, registry):
+    return registry.create("Show Sources", query_properties, **logical_node.properties)
 
 
 def _create_union_node(logical_node, query_properties, registry):
@@ -653,6 +661,10 @@ def _create_drop_task_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="drop_task", **logical_node.properties)
 
 
+def _create_alter_task_node(logical_node, query_properties, registry):
+    return registry.create("Relation Management", query_properties, action="alter_task", **logical_node.properties)
+
+
 def _create_listen_node(logical_node, query_properties, registry):
     return registry.create("Relation Management", query_properties, action="listen", **logical_node.properties)
 
@@ -716,6 +728,8 @@ _DISPATCH = {
     LogicalPlanStepType.ShowColumns:      _create_show_columns_node,
     LogicalPlanStepType.ShowManifest:     _create_show_manifest_node,
     LogicalPlanStepType.ShowSnapshots:    _create_show_snapshots_node,
+    LogicalPlanStepType.ShowLineage:      _create_show_lineage_node,
+    LogicalPlanStepType.ShowSources:      _create_show_sources_node,
     LogicalPlanStepType.Union:            _create_union_node,
     LogicalPlanStepType.Window:           _create_window_node,
     LogicalPlanStepType.FramedWindow:     _create_framed_window_node,
@@ -750,6 +764,7 @@ _DISPATCH = {
     LogicalPlanStepType.AlterTriggerMinimumInterval: _create_alter_trigger_minimum_interval_node,
     LogicalPlanStepType.CreateTask:       _create_create_task_node,
     LogicalPlanStepType.DropTask:         _create_drop_task_node,
+    LogicalPlanStepType.AlterTask:        _create_alter_task_node,
     LogicalPlanStepType.Listen:           _create_listen_node,
     LogicalPlanStepType.Unlisten:         _create_unlisten_node,
     LogicalPlanStepType.AlterTriggerOwner: _create_alter_trigger_owner_node,

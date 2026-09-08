@@ -321,6 +321,23 @@ def extract_write_targets(ast: Dict[str, Any]) -> List[str]:
     if not isinstance(body, dict):
         return []
 
+    # A leading `WITH` wraps its INSERT/UPDATE/DELETE/MERGE in a `Query` node -
+    # `with` beside a `body` that is itself one statement dict, doubly-nested
+    # the same way sqloxide nests every statement (`{"Insert": {"Insert":
+    # {...}}}`). Unwrap it and re-derive from the wrapped statement rather than
+    # adding a parallel set of paths: without this, the target fell through
+    # into `_extract_tables_from_ast`'s source set, so CREATE TASK recorded a
+    # WITH-prefixed statement's target under `reads` and nothing under
+    # `writes`.
+    if statement_type == "Query":
+        inner_body = body.get("body")
+        if isinstance(inner_body, dict) and len(inner_body) == 1:
+            inner_type = next(iter(inner_body))
+            wrapped_statement = inner_body[inner_type]
+            if isinstance(wrapped_statement, dict) and list(wrapped_statement) == [inner_type]:
+                return extract_write_targets(wrapped_statement)
+        return []
+
     targets: Set[str] = set()
 
     if statement_type == "Truncate":
