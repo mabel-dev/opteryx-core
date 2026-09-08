@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple
 
 from opteryx.exceptions import (
     InvalidInternalStateError,
+    PermissionsError,
     SqlError,
     UnnamedColumnError,
     UnsupportedSyntaxError,
@@ -7037,6 +7038,22 @@ def _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry) ->
         telemetry.visibility_filters_condition_added += 1
 
 
+def _compaction_is_filtered(relation: str) -> PermissionsError:
+    """The error a row-filtered OPTIMIZE is refused with.
+
+    Returned rather than raised so the two call sites read as `raise` and the
+    message lives in one place. See `apply_visibility_filters` for why this
+    refuses instead of exempting.
+    """
+    return PermissionsError(
+        f"**OPTIMIZE** is not permitted on {md_code(relation)}: row-level "
+        "visibility filters apply to it for this caller, and compaction rewrites "
+        "every row it reads. Running it filtered would rewrite the relation with "
+        "only the visible rows and retire the files holding the rest. A caller "
+        "with the entitlement that lifts row-level filtering can compact it."
+    )
+
+
 def apply_visibility_filters(
     logical_plan: LogicalPlan, visibility_filters: dict, telemetry
 ) -> LogicalPlan:
@@ -7059,12 +7076,44 @@ def apply_visibility_filters(
 
     Matching is case-sensitive (`fnmatchcase`, not `fnmatch`, whose case folding is
     platform-dependent) because relation names are.
+
+    ⛔ A FILTERED COMPACTION PLAN IS REFUSED, not filtered. `OPTIMIZE TABLE x`
+    desugars to `SELECT * FROM x` under a CompactionCommit sink, so without this
+    it looks like an ordinary read and picks up the caller's filters - but its
+    rows are not served to anyone, they are REWRITTEN BACK, while the sink
+    retires the whole input files. A filter here does not hide rows, it DELETES
+    them: every row the caller may not see is dropped from the rewritten file and
+    the file that held it is retired in the same snapshot. Observed on
+    `platform.billing.*`, the one namespace carrying a filter - an OPTIMIZE
+    billed to the house account read only `billing_account = 'opteryx'` and would
+    have rewritten 57,469 rows as 44,377. The catalog's row-count invariant
+    refused all three commits; nothing else stood between the filter and
+    rewritten billing history.
+
+    REFUSED RATHER THAN EXEMPTED, deliberately. Exempting would silently hand
+    every OPTIMIZE caller a full-table read of a relation they are only allowed
+    part of, and make row-level security depend on which statement you wrapped
+    the scan in. Refusing fails closed: a caller who may not see the whole
+    relation may not rewrite it either. A caller who MAY see all of it arrives
+    here with no filters at all - `data_admin` lifts them at the front door - so
+    the exempt path needs no special case, and the only statement this rejects is
+    one that would have destroyed data.
+
+    Same category as the optimizer's `_STRATEGIES_SKIPPED_ON_COMPACTION` (D-10) -
+    a compaction scan must not be narrowed, by column OR by row - and stated
+    here, once, rather than at the binder's two call sites, so a third caller
+    cannot miss it.
     """
     pattern_keys = [
         key
         for key in visibility_filters
         if any(character in key for character in VISIBILITY_PATTERN_CHARACTERS)
     ]
+
+    is_compaction = any(
+        node.node_type == LogicalPlanStepType.CompactionCommit
+        for _, node in logical_plan.nodes(True)
+    )
 
     for nid, node in list(logical_plan.nodes(True)):
         if node.node_type == LogicalPlanStepType.Scan:
@@ -7073,6 +7122,8 @@ def apply_visibility_filters(
             # the deny-all - so this cannot be a truthiness test.
             filter_dnf = visibility_filters.get(node.relation)
             if filter_dnf is not None:
+                if is_compaction:
+                    raise _compaction_is_filtered(node.relation)
                 _insert_visibility_filter(logical_plan, nid, node, filter_dnf, telemetry)
 
             # A scan with no relation name (a subquery, a function scan) has nothing
@@ -7085,6 +7136,8 @@ def apply_visibility_filters(
                 if key != node.relation and fnmatch.fnmatchcase(node.relation, key):
                     pattern_dnf = visibility_filters[key]
                     if pattern_dnf is not None:
+                        if is_compaction:
+                            raise _compaction_is_filtered(node.relation)
                         _insert_visibility_filter(
                             logical_plan, nid, node, pattern_dnf, telemetry
                         )
