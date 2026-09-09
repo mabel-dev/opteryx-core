@@ -210,17 +210,18 @@ def test_show_sources_does_not_load_the_history(catalog_workspace):
 # --- elision (S4.4)
 
 
-def test_a_name_the_caller_cannot_read_is_nulled_and_keeps_its_position(
-    catalog_workspace, install
-):
+def test_a_name_the_caller_cannot_read_is_still_named(catalog_workspace, install):
+    """Every source is named (decision 2026-09-09); see the same test in
+    test_show_lineage.py for why. The gate is READ on the relation asked
+    about, and no name is checked against the caller at all."""
     capability = install(_ScriptedCapability(readable={"cat.coll1.src", _A}))
     rows = _rows("SHOW SOURCES FOR cat.coll1.src", access_policies=None)
 
     assert [(row["source_dataset"], row["position"], row["complete"]) for row in rows] == [
         (_A, 0, True),
-        (None, 1, True),
+        (_B, 1, True),
     ]
-    assert (_B, "READ") in capability.asked
+    assert (_B, "READ") not in capability.asked
 
 
 def test_show_sources_is_gated_at_read_on_the_relation(catalog_workspace, install):

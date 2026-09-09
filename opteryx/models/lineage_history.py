@@ -28,13 +28,21 @@ the receipt exists to prevent (S2.4).
 
 As with `snapshot_history`, the connector normalizes the catalog's `Snapshot`
 into these dicts (see OpteryxConnector.get_lineage), so this module depends
-only on draken and never imports opteryx_catalog. Elision (S4.4) is applied
-here too, by `elide_lineage`, but against a predicate the binder supplies:
-what a name means to the caller is the permissions capability's business, and
-this module only knows which columns carry a name.
+only on draken and never imports opteryx_catalog.
+
+EVERY SOURCE IS NAMED, including one in a workspace the caller holds no grant
+on (decision 2026-09-09; this reverses the elision the design first called
+for). Lineage is a CITATION: knowing that this table was built from
+`ops.raw.events` is not being able to read `ops.raw.events`, which still
+needs a grant of its own. Blanking the name does not protect the upstream, it
+just moves the work to a human who has to go and find out anyway - and it
+makes impact analysis useless, since "something you cannot see depends on
+this" is not an answer anybody can act on. Where a name is itself the
+sensitive thing, the fix is upstream of here: do not publish data under a
+name that leaks what it is.
 """
 
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from opteryx.models.snapshot_history import _ms_to_datetime
 
@@ -49,10 +57,11 @@ _LINEAGE_COLUMNS = {
     "is_current": "BOOLEAN",
     # `task:<name>` / `view:<name>` for a commit made by a task run or a
     # materialized-view refresh; null for a hand-run statement, where absent is
-    # the true answer (S2.5). Elided whole when the caller cannot READ the named
-    # object - a task's name is as much a name as a dataset's.
+    # the true answer (S2.5). Named whatever the caller may read, as every
+    # name here is.
     "produced_by": "VARCHAR",
-    # Null when elided, and null on the marker row of the two empty states.
+    # Null only on the marker row of the two empty states - a receipt that
+    # was never reported, and one that read no catalog relation.
     "source_dataset": "VARCHAR",
     # Null for a source that had a schema and no commits when it was read: the
     # statement did read it, and read nothing, which is a fact about the commit
@@ -62,9 +71,8 @@ _LINEAGE_COLUMNS = {
     "resolved_by": "VARCHAR",
     # Whether the named source snapshot can still be read. A receipt does not
     # pin what it names (S2.1), so this is what tells a reader that the version
-    # a table was built from has since expired. Null when the source is elided
-    # - existence must not leak what the name did not - and null when the
-    # connector could not look.
+    # a table was built from has since expired. Null when the connector could
+    # not look, which is not the same as False.
     "source_exists": "BOOLEAN",
     # False on the one marker row of a snapshot with no receipt. True on every
     # other row, INCLUDING the null-sourced row of a snapshot that read nothing:
@@ -176,49 +184,6 @@ def normalize_lineage(
         }
         for entry in sorted(read_sources, key=_entry_key)
     ]
-
-
-def elide_lineage(
-    rows: List[Dict[str, object]], can_read: Callable[[str], bool]
-) -> List[Dict[str, object]]:
-    """Apply S4.4 to normalized rows, in place: null every NAME the caller may
-    not READ and keep the row.
-
-    The row stays because the existence of an upstream is not the secret - its
-    name is - and "built from something you cannot see" is an answer the
-    reader is owed. `source_exists` goes with the name: whether a snapshot of
-    a dataset the caller cannot name still exists is a fact about that dataset,
-    and would leak through a column that looks like a boolean about the row.
-    `source_snapshot_id` and `resolved_by` stay, for the same reason the row
-    does - they describe the read, not the relation.
-
-    `produced_by` carries a name too, after its `task:`/`view:` prefix, and the
-    whole value goes when that name is refused: the prefix alone says which
-    kind of automation wrote the commit, and knowing there IS a task is the
-    half of the fact the design keeps.
-
-    `can_read` is asked once per distinct name. A hundred rows naming the same
-    upstream are one question, and the capability behind the predicate may be
-    a network call.
-    """
-    verdicts: Dict[str, bool] = {}
-
-    def _visible(name: str) -> bool:
-        if name not in verdicts:
-            verdicts[name] = bool(can_read(name))
-        return verdicts[name]
-
-    for row in rows:
-        source = row.get("source_dataset")
-        if source is not None and not _visible(source):
-            row["source_dataset"] = None
-            row["source_exists"] = None
-        producer = row.get("produced_by")
-        if producer:
-            _, _, name = str(producer).partition(":")
-            if name and not _visible(name):
-                row["produced_by"] = None
-    return rows
 
 
 def lineage_to_morsel(rows: List[Dict[str, object]]):

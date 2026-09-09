@@ -108,32 +108,22 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
     return node, context
 
 
-def _can_read_for(context: BindingContext):
-    """The S4.4 elision predicate for this session: may the caller READ the
-    named object? Asked of the permissions capability exactly as visit_scan
-    asks it for the relation being scanned, so a name is visible here if and
-    only if a SELECT against it would bind. `information_schema` and `$grants`
-    are named nowhere in a receipt, so the self-governing exception those take
-    does not arise."""
-    from opteryx.managers.permissions import can_perform_action
-
-    return lambda name: can_perform_action(context.execution_context, name, action="READ")
-
-
 def visit_show_lineage(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind SHOW LINEAGE FOR: consume the receipts the Scan below already
     fetched (visit_scan populates context.snapshots for a `for_snapshots_only`
     Scan whose `history_view` is "lineage", gated at READ on the relation) and
     fix the output to the lineage shape.
 
-    This is where S4.4 is applied. The connector returns every name the
-    receipts hold - it has no session to ask about - and the binder, which
-    does, nulls each name the caller cannot READ and keeps the row. The gate
-    on the relation itself is READ and nothing stricter: knowing that a table
-    has upstreams is part of reading it; knowing WHICH is gated per name.
+    EVERY SOURCE IS NAMED (decision 2026-09-09). The gate is READ on the
+    relation being asked about, and nothing further: a name in a receipt is a
+    citation, not access, and the caller still needs a grant of their own to
+    read anything it names. The binder used to null each name the caller could
+    not READ; it no longer asks, because an answer that will not say what a
+    table was built from does not answer the question, and the same names are
+    what make impact analysis worth having.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
-    from opteryx.models.lineage_history import elide_lineage, lineage_output_schema
+    from opteryx.models.lineage_history import lineage_output_schema
 
     if context.schema_only:
         # The shape is fixed and knowable without reading anything; only the
@@ -146,7 +136,7 @@ def visit_show_lineage(self, node: Node, context: BindingContext) -> Tuple[Node,
                 f"'{node.relation}' has no lineage (its connector does not keep a "
                 "commit log)."
             )
-        node.lineage = elide_lineage(rows, _can_read_for(context))
+        node.lineage = rows
         node.schema = lineage_output_schema(node.relation)
         node.schema.row_count_estimate = len(rows)
     node.columns = []
@@ -164,10 +154,11 @@ def visit_show_lineage(self, node: Node, context: BindingContext) -> Tuple[Node,
 def visit_show_sources(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """Bind SHOW SOURCES FOR: consume the standing source list the Scan below
     already read off the dataset (visit_scan, `history_view` "sources") and
-    fix the output to the source-list shape. Elision as for SHOW LINEAGE.
+    fix the output to the source-list shape. Every source is named, as for
+    SHOW LINEAGE.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
-    from opteryx.models.source_list import elide_sources, sources_output_schema
+    from opteryx.models.source_list import sources_output_schema
 
     if context.schema_only:
         node.schema = sources_output_schema(node.relation)
@@ -178,7 +169,7 @@ def visit_show_sources(self, node: Node, context: BindingContext) -> Tuple[Node,
                 f"'{node.relation}' has no source list (its connector does not "
                 "keep a commit log)."
             )
-        node.sources = elide_sources(rows, _can_read_for(context))
+        node.sources = rows
         node.schema = sources_output_schema(node.relation)
         node.schema.row_count_estimate = len(rows)
     node.columns = []

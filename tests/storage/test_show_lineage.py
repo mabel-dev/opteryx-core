@@ -440,50 +440,52 @@ def test_a_source_named_by_many_snapshots_is_looked_up_once(catalog_workspace):
 # --- elision (S4.4)
 
 
-def test_a_source_the_caller_cannot_read_is_nulled_and_the_row_stays(
-    catalog_workspace, install
-):
-    """The name is the secret, not the existence of an upstream. `source_exists`
-    goes with the name - whether a snapshot of a dataset you cannot name still
-    exists is a fact about that dataset. The version and how it was resolved
-    stay: they describe the read, not the relation."""
-    capability = install(
+def test_a_source_the_caller_cannot_read_is_still_named(catalog_workspace, install):
+    """Lineage is a CITATION, not access (decision 2026-09-09). A caller who
+    can read this table is told everything it was built from, including a
+    dataset in a workspace they hold no grant on - reading THAT still needs a
+    grant of its own. Blanking the name protects nothing and makes an impact
+    answer useless: "built from something you cannot see" is not actionable.
+    Where the name itself is the sensitive thing, that is fixed upstream by
+    not publishing under a name that leaks what it is."""
+    install(
         _ScriptedCapability(readable={"cat.coll1.src", _A, "cat.coll1.new", "cat.coll1.ingest"})
     )
     rows = _rows("SHOW LINEAGE FOR cat.coll1.src", access_policies=None)
 
     assert len(rows) == 5
-    hidden = rows[2]
-    assert hidden["source_dataset"] is None
-    assert hidden["source_exists"] is None
-    assert hidden["source_snapshot_id"] == _B_SNAPSHOT
-    assert hidden["resolved_by"] == "version"
-    assert hidden["recorded"] is True
-    # The visible neighbour is untouched.
+    unreadable = rows[2]
+    assert unreadable["source_dataset"] == _B
+    assert unreadable["source_snapshot_id"] == _B_SNAPSHOT
+    assert unreadable["resolved_by"] == "version"
+    assert unreadable["recorded"] is True
+    # `source_exists` is a fact about the named version and is reported too;
+    # it is null only when the connector could not look.
+    assert unreadable["source_exists"] is not None
     assert rows[0]["source_dataset"] == _A
-    assert rows[0]["source_exists"] is True
-    assert (_B, "READ") in capability.asked
 
 
-def test_a_producer_the_caller_cannot_read_is_nulled_whole(catalog_workspace, install):
-    """The prefix alone would still say "a task wrote this", which is the half
-    of the fact the design keeps; but the value is name-shaped, so the whole
-    value goes rather than a `task:` stub that looks like a broken name."""
-    capability = install(_ScriptedCapability(readable={"cat.coll1.src", _A, _B, "cat.coll1.new"}))
+def test_a_producer_the_caller_cannot_read_is_still_named(catalog_workspace, install):
+    """The task that wrote a commit is named on the same terms as a source:
+    it is what makes a receipt checkable against the declaration."""
+    install(_ScriptedCapability(readable={"cat.coll1.src", _A, _B, "cat.coll1.new"}))
     rows = _rows("SHOW LINEAGE FOR cat.coll1.src", access_policies=None)
 
-    assert all(row["produced_by"] is None for row in rows)
-    assert rows[0]["source_dataset"] == _A
-    assert ("cat.coll1.ingest", "READ") in capability.asked
+    assert any(row["produced_by"] == "task:cat.coll1.ingest" for row in rows)
 
 
-def test_elision_asks_once_per_name(catalog_workspace, install):
+def test_no_permission_question_is_asked_about_a_name(catalog_workspace, install):
+    """Not an optimisation - the binder does not consult the capability about
+    a name at all any more. Asking would imply an answer that could change
+    what is reported, and nothing about a name changes it."""
     capability = install(_ScriptedCapability(readable={"cat.coll1.src"}))
     _rows("SHOW LINEAGE FOR cat.coll1.src", access_policies=None)
 
     asked = [resource for resource, action in capability.asked if action == "READ"]
     for name in (_A, _B, "cat.coll1.new", "cat.coll1.ingest"):
-        assert asked.count(name) == 1
+        assert name not in asked
+    # The relation being asked about is still gated, and that is the only gate.
+    assert "cat.coll1.src" in asked
 
 
 def test_show_lineage_is_gated_at_read_on_the_relation(catalog_workspace, install):

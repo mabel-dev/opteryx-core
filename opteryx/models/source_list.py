@@ -24,19 +24,18 @@ which is not the same as "built from nothing".
 
 As with `snapshot_history`, the connector produces these dicts (see
 OpteryxConnector.get_sources), so this module never imports opteryx_catalog.
-Elision (S4.4) is `elide_sources`, against a predicate the binder supplies.
+Every source is named, whatever the caller may read - see `lineage_history`
+for why that is a citation rather than a leak.
 """
 
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 # Column order IS the output column order. Values are the dtype tag handed to
 # `vector_from_sequence`.
 _SOURCE_LIST_COLUMNS = {
-    # Null when elided, and null on the single row of an empty list.
+    # Null only on the single row of an empty list.
     "source_dataset": "VARCHAR",
-    # 0 = most recent. Kept when the name is elided: where an upstream sits in
-    # the recency order is a fact about THIS relation's history, not a fact
-    # about the upstream.
+    # 0 = most recent.
     "position": "INTEGER",
     "complete": "BOOLEAN",
 }
@@ -92,28 +91,6 @@ def normalize_sources(
         {"source_dataset": name, "position": position, "complete": complete}
         for position, name in enumerate(names)
     ]
-
-
-def elide_sources(
-    rows: List[Dict[str, object]], can_read: Callable[[str], bool]
-) -> List[Dict[str, object]]:
-    """Apply S4.4 to normalized rows, in place: null the name the caller may
-    not READ, keep the row and its position.
-
-    Asked once per distinct name, as in `elide_lineage`; a name cannot appear
-    twice in a standing list, but the predicate is a capability call and the
-    cost of remembering is nothing.
-    """
-    verdicts: Dict[str, bool] = {}
-    for row in rows:
-        name = row.get("source_dataset")
-        if name is None:
-            continue
-        if name not in verdicts:
-            verdicts[name] = bool(can_read(name))
-        if not verdicts[name]:
-            row["source_dataset"] = None
-    return rows
 
 
 def sources_to_morsel(rows: List[Dict[str, object]]):
