@@ -60,6 +60,13 @@ _LINEAGE_COLUMNS = {
     # the true answer (S2.5). Named whatever the caller may read, as every
     # name here is.
     "produced_by": "VARCHAR",
+    # ONE PHRASE for "how did this version come about", composed from the two
+    # fields that answer it between them - `operation-type` (what happened to
+    # the data) and `produced_by` (what made it happen). Derived here rather
+    # than stored: a third field restating the other two is a third field that
+    # can contradict them, and the reason for a column at all is that reading
+    # the answer should not require joining two of them in your head.
+    "how": "VARCHAR",
     # Null only on the marker row of the two empty states - a receipt that
     # was never reported, and one that read no catalog relation.
     "source_dataset": "VARCHAR",
@@ -93,6 +100,7 @@ def _lineage_column_types():
         "committed_at": _lt.TIMESTAMP(),
         "is_current": _lt.BOOLEAN,
         "produced_by": _lt.VARCHAR,
+        "how": _lt.VARCHAR,
         "source_dataset": _lt.VARCHAR,
         "source_snapshot_id": _lt.INT64,
         "resolved_by": _lt.VARCHAR,
@@ -125,6 +133,57 @@ def lineage_output_schema(relation_name: str = "$lineage"):
     )
 
 
+# What `operation-type` means in a sentence. The catalog's own vocabulary
+# (opteryx_catalog.catalog.dataset), mapped once so the phrasing does not have
+# to be reinvented at each surface. An operation absent from this map is shown
+# as itself: the vocabulary can grow, and a word we have not met yet is more
+# useful than "unknown".
+_OPERATION_VERB = {
+    "append": "appended",
+    "add-files": "appended",
+    "overwrite": "overwritten",
+    "truncate-and-add-files": "replaced",
+    "truncate": "truncated",
+    "merge": "merged",
+    "update": "updated",
+    "delete": "rows deleted",
+    "delete-files": "rows deleted",
+    "compact": "compacted",
+    "statistics-refresh": "statistics refreshed",
+}
+
+# Maintenance the catalog performs on itself. These carry no producer because
+# nothing registered made them and nobody ran them, so they get the verb alone
+# - saying "by hand" of a compaction would be a plain lie about who did it.
+_MAINTENANCE = frozenset({"compact", "statistics-refresh", "expire"})
+
+
+def describe_how(operation_type: Optional[str], produced_by: Optional[str]) -> str:
+    """The `how` column: one phrase from the operation and its producer.
+
+    The two are genuinely different facts and both are wanted - "merged" does
+    not say who, and "task X" does not say what it did to the data - so this
+    reads them together and neither is stored twice.
+
+    A producer's kind decides how its second half reads: `task` and `view`
+    name a catalog object, `upload` names the channel data arrived through.
+    Absent means nobody registered made it, which is what a statement someone
+    ran by hand looks like, and is said plainly rather than left blank.
+    """
+    verb = _OPERATION_VERB.get(operation_type or "", operation_type or "committed")
+    if operation_type in _MAINTENANCE:
+        return verb
+    if not produced_by:
+        return f"{verb}, by hand"
+    kind, _, name = str(produced_by).partition(":")
+    if kind == "upload":
+        # The channel, not an object - there is no catalog name to give.
+        return f"{verb}, uploaded via {name}" if name else f"{verb}, uploaded"
+    if kind and name:
+        return f"{verb}, by {kind} {name}"
+    return f"{verb}, by {produced_by}"
+
+
 def normalize_lineage(
     snapshot,
     current_snapshot_id: Optional[int] = None,
@@ -155,6 +214,10 @@ def normalize_lineage(
             and snapshot.snapshot_id == current_snapshot_id
         ),
         "produced_by": getattr(snapshot, "produced_by", None),
+        "how": describe_how(
+            getattr(snapshot, "operation_type", None),
+            getattr(snapshot, "produced_by", None),
+        ),
     }
     read_sources = getattr(snapshot, "read_sources", None)
 

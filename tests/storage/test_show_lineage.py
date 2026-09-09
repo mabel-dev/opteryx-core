@@ -262,6 +262,7 @@ def test_show_lineage_returns_the_column_set_in_order(catalog_workspace):
         "committed_at",
         "is_current",
         "produced_by",
+        "how",
         "source_dataset",
         "source_snapshot_id",
         "resolved_by",
@@ -528,3 +529,56 @@ def test_show_lineage_from_is_not_the_spelling(catalog_workspace):
 
     with pytest.raises(UnsupportedSyntaxError):
         list(session.execute_to_morsels("SHOW LINEAGE FROM cat.coll1.src"))
+
+
+# --- the composed `how` column
+
+
+def test_how_composes_the_operation_and_its_producer():
+    """Two different facts, read together: "merged" does not say who, and
+    "task X" does not say what it did. Derived, never stored - a third field
+    restating the other two is a third field that can contradict them."""
+    from opteryx.models.lineage_history import describe_how
+
+    assert describe_how("merge", "task:ws.ops.ingest") == "merged, by task ws.ops.ingest"
+    assert describe_how("truncate-and-add-files", "view:ws.mart.daily") == (
+        "replaced, by view ws.mart.daily"
+    )
+
+
+def test_how_reads_an_upload_channel_as_a_channel():
+    """The segment after `upload:` is not a catalog object and must not read
+    as one."""
+    from opteryx.models.lineage_history import describe_how
+
+    assert describe_how("add-files", "upload:web") == "appended, uploaded via web"
+    assert describe_how("add-files", "upload") == "appended, uploaded"
+
+
+def test_how_says_by_hand_when_nothing_registered_made_it():
+    from opteryx.models.lineage_history import describe_how
+
+    assert describe_how("overwrite", None) == "overwritten, by hand"
+
+
+def test_how_does_not_call_maintenance_hand_run():
+    """Nobody ran a compaction, so "by hand" would be a plain lie about who
+    did it. Maintenance gets the verb alone."""
+    from opteryx.models.lineage_history import describe_how
+
+    assert describe_how("compact", None) == "compacted"
+    assert describe_how("statistics-refresh", None) == "statistics refreshed"
+
+
+def test_an_unknown_operation_is_shown_as_itself():
+    """The catalog's vocabulary can grow, and a word we have not met is more
+    useful to a reader than "unknown"."""
+    from opteryx.models.lineage_history import describe_how
+
+    assert describe_how("rewind", "task:ws.a.b") == "rewind, by task ws.a.b"
+
+
+def test_how_is_on_every_row_including_the_marker_rows(catalog_workspace):
+    rows = _rows("SHOW LINEAGE FOR cat.coll1.src")
+
+    assert all(row["how"] for row in rows)
