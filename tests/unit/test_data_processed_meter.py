@@ -97,6 +97,27 @@ def test_a_filter_only_column_is_billed():
     assert plus_predicate > projection_only
 
 
+def test_a_zero_projection_scan_bills_its_predicate_column_only():
+    """`COUNT(*)` with a pushed predicate reads ONE column, not the schema.
+
+    Projection pushdown empties the scan's column list for a `COUNT(*)`, and
+    the referenced-column set used to bail on that empty projection before it
+    read the predicates — so the read set could not be established and every
+    column in the schema was costed. A filtered `COUNT(*)` billed exactly what
+    `SELECT *` billed, for a read of one column.
+    """
+    whole = _run("SELECT * FROM testdata.astronauts").billing_bytes
+    one_column = _run("SELECT name FROM testdata.astronauts").billing_bytes
+    count_star = _run(
+        "SELECT COUNT(*) FROM testdata.astronauts WHERE name = 'x'"
+    ).billing_bytes
+
+    assert count_star == one_column, (
+        f"filtered COUNT(*) billed {count_star:,}; the one column its predicate "
+        f"reads is {one_column:,} and the whole 19-column relation is {whole:,}"
+    )
+
+
 def test_explain_bills_nothing():
     """EXPLAIN plans the query and describes it. Nothing is read."""
     assert _run("EXPLAIN SELECT * FROM testdata.astronauts").billing_bytes == 0

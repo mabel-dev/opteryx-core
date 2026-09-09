@@ -321,15 +321,20 @@ def _referenced_scan_identities(node: LogicalPlanNode):
     never references cannot influence an estimate, so its manifest walk is
     pure waste (a 105-column ClickBench scan touching 2 columns paid for 105).
 
-    Returns None when the referenced set cannot be established (no seeded
-    columns) — the caller then computes statistics for every schema column.
+    A zero-projection scan is NOT a scan of everything: `SELECT COUNT(*) ...
+    WHERE x = 1` has projection pushdown empty `node.columns`, and the only
+    column read is the one the pushed predicate names. Bailing on the empty
+    projection before reading the predicates costed — and BILLED — every
+    column in the schema for a read of one.
+
+    Returns None only when NOTHING is referenced: no projection and no pushed
+    predicate, so the read set cannot be established from the node at all —
+    the caller then computes statistics for every schema column.
     """
     from opteryx.expression import NodeType
     from opteryx.expression import get_all_nodes_of_type
 
-    columns = node.columns
-    if not columns:
-        return None
+    columns = node.columns or []
     wanted = set()
     for col in columns:
         schema_column = col.schema_column

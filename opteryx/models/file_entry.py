@@ -247,8 +247,22 @@ class FileEntry:
             def _key_by_field_id(values):
                 """Key a positional per-column stat list by `field_ids`, or by
                 position when there are no field_ids at all. None when the two
-                cannot be lined up - see the ⛔ note above."""
-                if not values or not isinstance(values, list):
+                cannot be lined up - see the ⛔ note above.
+
+                ⛔ The accepted type is (list, tuple), NOT list alone. The live
+                catalog path hands these stats over as TUPLES - the bulk-scan
+                reader (opteryx_catalog `ArrowManifestRow`) indexes into
+                already-materialized columns whose ARRAY cells box as tuples -
+                so a `list`-only test silently returned None for min_values,
+                max_values, min_lengths, max_lengths AND null_counts on every
+                catalog-backed file. That is not a missed edge case: with no
+                bounds, `Manifest.prune_files` has nothing to compare, so file
+                pruning was a NO-OP for every catalog-backed table in
+                production (measured on opteryx.test.pypi: 327 files in, 327
+                out for `project = 'opteryx'`, 388GB read where one file
+                answers it).
+                """
+                if not values or not isinstance(values, (list, tuple)):
                     return None
                 if field_ids is None:
                     return {i: val for i, val in enumerate(values) if val is not None}

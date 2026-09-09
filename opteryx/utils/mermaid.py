@@ -399,10 +399,30 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                 for _k in ("rows_read", "blobs_read", "columns_read"):
                     if not node_stat.get(_k):
                         node_stat[_k] = getattr(node.telemetry, _k, 0)
-                # columns_read has no ScanReadings field — default to the projected
-                # column count (native scans override it from scan_facts below).
-                if not node_stat.get("columns_read") and getattr(node, "columns", None):
-                    node_stat["columns_read"] = len(node.columns)
+                # columns_read has no ScanReadings field — default to the READ
+                # SET: the projection PLUS any column only a pushed predicate
+                # names (native scans override it from scan_facts below, and
+                # that is the same set they report). The projection alone is
+                # not the read set — `SELECT COUNT(*) ... WHERE x = 1` projects
+                # nothing and still decodes `x`, which reported as "0 columns
+                # read" for a scan that read one.
+                if not node_stat.get("columns_read"):
+                    from opteryx.expression import NodeType
+                    from opteryx.expression import get_all_nodes_of_type
+
+                    read_set = {
+                        col.schema_column.identity
+                        for col in (getattr(node, "columns", None) or [])
+                        if col.schema_column is not None
+                    }
+                    for predicate in _node_predicates(node):
+                        for ident in get_all_nodes_of_type(
+                            predicate, (NodeType.IDENTIFIER,)
+                        ):
+                            if ident.schema_column is not None:
+                                read_set.add(ident.schema_column.identity)
+                    if read_set:
+                        node_stat["columns_read"] = len(read_set)
 
                 # Native scan path: the Cython ScanReadings above are all zero — the
                 # C++ engine scanned, not the Cython node. Overlay the real values:
