@@ -35,8 +35,12 @@ fi
 # link. ARCHFLAGS pins the compile/link to arm64; _PYTHON_HOST_PLATFORM pins the
 # wheel tag to macosx_*_arm64 (not universal2) so the tag matches the binary.
 export ARCHFLAGS="-arch arm64"
-export _PYTHON_HOST_PLATFORM="macosx-${MACOSX_DEPLOYMENT_TARGET:-11.0}-arm64"
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+# The fallback floor is 14.0, matching release.yaml: this wheel links OpenSSL
+# directly (the native Postgres client) and delocate bundles Homebrew's
+# openssl@3 dylibs, whose own minimum target is 14.0. A lower floor here just
+# produces a wheel delocate refuses to tag.
+export _PYTHON_HOST_PLATFORM="macosx-${MACOSX_DEPLOYMENT_TARGET:-14.0}-arm64"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 
 NPROC=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
 python setup.py build_ext --parallel "$NPROC" bdist_wheel

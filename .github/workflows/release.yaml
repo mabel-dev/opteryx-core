@@ -465,7 +465,14 @@ jobs:
 
       - name: Build wheel (macos-14, py 3.14)
         env:
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          # 14.0, not 11.0: the native Postgres client links OpenSSL directly
+          # (setup.py resolve_openssl), which on a macOS runner is Homebrew's
+          # openssl@3 — an arm64 bottle whose own minimum target is 14.0. A
+          # wheel tagged macosx_11_0 that bundles those dylibs cannot run on
+          # 11.0, and delocate hard-fails rather than publish that claim.
+          # Holding an 11.0 floor would mean vendoring an OpenSSL built for
+          # 11.0; we deliberately take the higher floor instead.
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
           OPTERYX_ENABLE_LTO: "1"
         run: ./dev/build-wheels-macos.sh
 
