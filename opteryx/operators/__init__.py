@@ -23,6 +23,7 @@ from ._operators import (
     PipelineContext,
 )
 from .read import ReaderNode
+from .postgres_read import PostgresReadNode
 
 __all__ = [
     "BasePlanNode",
@@ -35,4 +36,5 @@ __all__ = [
     "ParallelStrategy",
     "get_registry",
     "ReaderNode",
+    "PostgresReadNode",
 ]

@@ -141,6 +141,16 @@ class BaseTable:
     # plan and the reader disagree about a column's type.
     supports_int64_timestamp_retag = False
 
+    # For a reader with NO file manifest (a remote database, where the rows come
+    # over a socket rather than from files the engine reads itself): the
+    # operator-registry name of the physical scan node that serves it. The
+    # physical planner dispatches manifest-backed scans on the dataset's file
+    # format; this is the explicit route for everything else. None (the default)
+    # means the reader is manifest-backed or internal, and the planner's other
+    # branches apply. Naming a reader here is a promise that the plan compiler
+    # has a native Source for it — see _compile_scan.
+    scan_reader = None
+
     @property
     def __mode__(self):  # pragma: no cover
         raise NotImplementedError("__mode__ not defined")

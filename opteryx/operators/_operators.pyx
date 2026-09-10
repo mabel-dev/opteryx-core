@@ -221,6 +221,47 @@ cdef extern from "core/trace_bridge_c.h" nogil:
     DrakenFileSymbolC* draken_trace_drain_file_symbols(size_t* out_count)
     const char* draken_trace_host_info()
 
+from libcpp.optional cimport optional
+
+# Native PostgreSQL client (src/cpp/pg). The plan-time calls (describe, the
+# small metadata queries) and the execution Source share ONE client and ONE
+# pool inside this shared object.
+cdef extern from "pg/pg_client.hpp" namespace "opteryx::pg":
+    cdef cppclass PgConfig:
+        string host
+        int port
+        string dbname
+        string user
+        string password
+        string sslmode
+        int timeout_s
+    cdef cppclass PgField:
+        string name
+        uint32_t oid
+        int32_t typmod
+    int pg_oid_to_draken(uint32_t oid)
+    string pg_oid_name(uint32_t oid)
+    cppvector[PgField] pg_describe(const PgConfig& config, const string& sql) except + nogil
+    cppvector[cppvector[optional[string]]] pg_query_text(const PgConfig& config,
+                                                         const string& sql,
+                                                         const cppvector[string]& params) except + nogil
+
+cdef extern from "pg/pg_scan_spec.hpp" namespace "opteryx::pg" nogil:
+    cdef cppclass PgScanSpec:
+        PgConfig config
+        string sql
+        cppvector[string] params
+        cppvector[uint8_t] param_is_null
+        cppvector[string] out_identities
+        cppvector[uint32_t] expected_oids
+        cppvector[int] column_types
+        cppvector[int] decimal_precision
+        cppvector[int] decimal_scale
+        uint32_t batch_rows
+        int64_t row_limit
+        bint zero_columns
+        int64_t rows_read
+
 cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
     cdef cppclass OpReading "opteryx::engine::Engine::OpReading":
         string identity
@@ -300,6 +341,7 @@ cdef extern from "engine/engine.hpp" namespace "opteryx::engine" nogil:
         void add_skene_runtime_bound(size_t p, size_t bound_idx, string column)
         void add_parquet_runtime_bound(size_t p, size_t bound_idx, string column,
                                        int64_t* pruned_slot)
+        void set_native_postgres_scan_source(size_t p, const PgScanSpec* spec)
         void set_skene_latmat_scan_source(size_t p,
                                           const cppvector[string]* files,
                                           const cppvector[string]* p1_column_names,
@@ -2475,6 +2517,75 @@ cdef void _fill_payload_types(list types, object logical, object element,
         ec.push_back(chain)
 
 
+cdef void _pg_config_from_dict(PgConfig* cfg, dict config) except *:
+    """Copy the connector's connection config into the C++ PgConfig. Every key
+    is required except sslmode/timeout_s, which carry the client's defaults."""
+    cfg.host = (<str>config["host"]).encode("utf-8")
+    cfg.port = <int>config["port"]
+    cfg.dbname = (<str>config["dbname"]).encode("utf-8")
+    cfg.user = (<str>config["user"]).encode("utf-8")
+    cfg.password = (<str>config["password"]).encode("utf-8")
+    cfg.sslmode = (<str>config.get("sslmode", "require")).encode("utf-8")
+    cfg.timeout_s = <int>config.get("timeout_s", 30)
+
+
+cdef class PostgresScanPlan:
+    """Owns the C++ PgScanSpec NativePostgresScanSource borrows for one scan.
+
+    A plain holder, not a planner: the compiler already built the statement
+    (projection, pushed predicates as $n parameters, pushed LIMIT), the
+    identities to emit the columns under, each column's bound Draken type and
+    the OID the binder saw for it. This pins them in C++ storage that outlives
+    the driver — the Source holds a raw pointer to the spec and NativePlan holds
+    this object.
+    """
+
+    cdef PgScanSpec spec
+    cdef public object scan_identity
+
+    def __init__(self, dict config, str sql, list params, list out_identities,
+                 list expected_oids, list column_types, list decimal_precision,
+                 list decimal_scale, int batch_rows, object row_limit, bint zero_columns):
+        if not (len(out_identities) == len(expected_oids) == len(column_types)
+                == len(decimal_precision) == len(decimal_scale)):
+            raise ValueError("PostgresScanPlan: column vectors must be parallel")
+        if batch_rows <= 0:
+            raise ValueError("PostgresScanPlan: batch_rows must be positive")
+        _pg_config_from_dict(&self.spec.config, config)
+        self.spec.sql = sql.encode("utf-8")
+        for value in params:
+            if value is None:
+                self.spec.params.push_back(b"")
+                self.spec.param_is_null.push_back(1)
+            else:
+                self.spec.params.push_back((<str>value).encode("utf-8"))
+                self.spec.param_is_null.push_back(0)
+        for identity in out_identities:
+            self.spec.out_identities.push_back(<bytes>identity)
+        for oid in expected_oids:
+            self.spec.expected_oids.push_back(<uint32_t>oid)
+        for dtype in column_types:
+            self.spec.column_types.push_back(<int>dtype)
+        for precision in decimal_precision:
+            self.spec.decimal_precision.push_back(<int>precision)
+        for scale in decimal_scale:
+            self.spec.decimal_scale.push_back(<int>scale)
+        self.spec.batch_rows = <uint32_t>batch_rows
+        self.spec.row_limit = -1 if row_limit is None else <int64_t>row_limit
+        self.spec.zero_columns = zero_columns
+        self.spec.rows_read = -1
+        self.scan_identity = None
+
+    @property
+    def sql(self):
+        return self.spec.sql.decode("utf-8")
+
+    @property
+    def rows_read(self):
+        """Rows the server sent; -1 until the scan has run."""
+        return self.spec.rows_read
+
+
 cdef class NativePlan:
     """The compiled-native execution plan: owns the C++ ``Engine`` pipeline graph plus
     the Python references (scan plan nodes, compiled expression programs) whose
@@ -2487,6 +2598,7 @@ cdef class NativePlan:
     cdef public list scan_plans  # NativeScanPlan objects NativeParquetScanSource borrows
     # SkeneScanPlan / SkeneLatmatScanPlan objects the skene Sources borrow
     cdef public list skene_scan_plans
+    cdef public list postgres_scan_plans  # PostgresScanPlan objects the Postgres Source borrows
 
     def __cinit__(self):
         self._e = new Engine()
@@ -2494,6 +2606,7 @@ cdef class NativePlan:
         self.held = []
         self.scan_plans = []
         self.skene_scan_plans = []
+        self.postgres_scan_plans = []
         # Spill root for this plan's MorselBuffers (docs/MORSEL_SPILL_DESIGN.md).
         # KVSTORE_LOCATION is the per-query spill store the config has always
         # documented; the native SpillStore is its first-party caller. Only a
@@ -2685,6 +2798,14 @@ cdef class NativePlan:
         self.scans.append(scan)
         self._e.set_scan_source(p, <void*><PyObject*>scan, _scan_pull_trampoline,
                                 serialize_pull)
+
+    def set_native_postgres_scan_source(self, size_t p, PostgresScanPlan plan):
+        """Source = the native PostgreSQL scan (NativePostgresScanSource): one
+        server session streams binary rows that a worker decodes into morsels —
+        no GIL trampoline, no compile-time materialization. The Source borrows
+        ``plan``'s spec; this plan holds it alive for the driver's lifetime."""
+        self.postgres_scan_plans.append(plan)
+        self._e.set_native_postgres_scan_source(p, &plan.spec)
 
     def set_native_skene_scan_source(self, size_t p, SkeneScanPlan splan,
                                      CompiledBytecode filter_bc=None,
@@ -4044,6 +4165,7 @@ include "function_dataset/function_dataset.pyx"
 include "heap_sort/heap_sort.pyx"
 include "jsonl_read/jsonl_read.pyx"
 include "skene_read/skene_read.pyx"
+include "postgres_read/postgres_read.pyx"
 include "limit/limit.pyx"
 include "scalar_guard/scalar_guard.pyx"
 include "window/window_node.pyx"

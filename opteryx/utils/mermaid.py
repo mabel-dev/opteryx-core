@@ -250,6 +250,7 @@ _OPERATOR_LABELS = {
     "CsvReadNode": "CSV SCAN",
     "JsonlReadNode": "JSONL SCAN",
     "SkeneReadNode": "SKENE SCAN",
+    "PostgresReadNode": "POSTGRES SCAN",
     "FunctionDatasetNode": "FUNCTION SCAN",
     # A multiply-referenced CTE is materialized once and read back by one of
     # these per reference (see cte_ref.pyx). It is registered in the SCAN

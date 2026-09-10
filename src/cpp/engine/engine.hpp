@@ -37,6 +37,7 @@
 #include "native_latmat_scan_source.hpp"   // LatmatScanSource (R3 two-pass late-mat)
 #include "native_skene_scan_source.hpp"    // NativeSkeneScanSource (zero-Python skene)
 #include "native_skene_latmat_scan_source.hpp"  // NativeSkeneLatmatScanSource (two-pass skene)
+#include "native_postgres_scan_source.hpp"    // NativePostgresScanSource (zero-Python Postgres)
 #include "native_sort.hpp"          // SortSink, TopNSink, SortKeySpec, gather_rows
 #include "native_unnest.hpp"        // UnnestOperator — CROSS JOIN UNNEST
 #include "native_window_frame.hpp"  // FramedWindowSink — SUM/COUNT/AVG/MIN/MAX OVER (... ROWS/RANGE ...)
@@ -854,6 +855,14 @@ public:
     // sweeps every row group, so an excluded one is never opened by EITHER pass —
     // pass 2 only revisits row groups pass 1 kept.
     // Every pointer is borrowed from the NativePlan, which holds the owners alive.
+    // Source = a native PostgreSQL scan (NativePostgresScanSource): one server
+    // session streams binary rows that a worker decodes into morsels. The spec
+    // is BORROWED: the Cython PostgresScanPlan owns it and NativePlan holds that
+    // object for the driver's lifetime.
+    void set_native_postgres_scan_source(size_t p, const opteryx::pg::PgScanSpec* spec) {
+        set_source_(p, std::make_unique<NativePostgresScanSource>(spec));
+    }
+
     void set_skene_latmat_scan_source(size_t p,
                                       const std::vector<std::string>* files,
                                       const std::vector<std::string>* p1_column_names,

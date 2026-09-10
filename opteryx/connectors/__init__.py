@@ -14,7 +14,8 @@ Architecture:
 Connectors abstract different data sources behind a common interface (BaseConnector),
 allowing the query engine to work with any data source transparently. Each connector
 is responsible for:
-- Reading data and converting it to PyArrow format
+- Producing Draken morsels: file-backed datasets through the native file readers,
+  a remote database through its native engine Source (no PyArrow anywhere)
 - Providing schema information
 - Supporting predicate pushdown when possible
 - Handling authentication and connection management
@@ -178,6 +179,7 @@ __all__ = (
     "OpteryxTable",
     "FileSystemConnector",
     "MabelConnector",
+    "PostgresConnector",
     # Factory functions for filesystem connectors
     "create_local_connector",
     "create_gcs_connector",
@@ -591,6 +593,10 @@ def __getattr__(connector_name: str):
         from opteryx.connectors.mabel_connector import MabelConnector
 
         return MabelConnector
+    if connector_name == "PostgresConnector":
+        from opteryx.connectors.postgres_connector import PostgresConnector
+
+        return PostgresConnector
     if connector_name == "create_local_mabel_connector":
         from opteryx.connectors.mabel_connector import create_local_mabel_connector
 

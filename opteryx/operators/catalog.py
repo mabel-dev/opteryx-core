@@ -196,6 +196,7 @@ def _build_registry() -> OperatorRegistry:
     from opteryx.operators.heap_sort import HeapSortNode
     from opteryx.operators.jsonl_read import JsonlReadNode
     from opteryx.operators.skene_read import SkeneReadNode
+    from opteryx.operators.postgres_read import PostgresReadNode
     from opteryx.operators.limit import LimitNode
     from opteryx.operators.scalar_guard import ScalarGuardNode
     from opteryx.operators.window import FramedWindowNode
@@ -271,6 +272,16 @@ def _build_registry() -> OperatorRegistry:
         category=OperatorCategory.SCAN,
         parallelism=OperatorParallelism.STATELESS,
         parallel_strategy=ParallelStrategy.MULTI_THREAD,
+        is_scan=True,
+    )
+    # One server session per scan: the Source serialises get_morsel on its
+    # global state, so extra workers add nothing. SINGLE_THREAD says so.
+    r.register(
+        PostgresReadNode,
+        name="Postgres Reader",
+        category=OperatorCategory.SCAN,
+        parallelism=OperatorParallelism.STATELESS,
+        parallel_strategy=ParallelStrategy.SINGLE_THREAD,
         is_scan=True,
     )
     r.register(

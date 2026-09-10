@@ -294,6 +294,51 @@ def assert_openssl_thread_safe(*, fail_when_unknown):
     print(f"OpenSSL {'.'.join(map(str, version))} (>= {'.'.join(map(str, _MIN_OPENSSL))}) OK")
 
 
+def resolve_openssl():
+    """Return (include_dirs, link_args) for OpenSSL.
+
+    The native PostgreSQL client (src/cpp/pg/pg_client.cpp, compiled into
+    opteryx.operators._operators) calls OpenSSL DIRECTLY for TLS and for the
+    SCRAM-SHA-256 primitives (PBKDF2 / HMAC / SHA-256), unlike http_client.cpp
+    which only ever sees libcurl. So _operators needs the headers and -lssl
+    -lcrypto in its own right, not transitively through the vendored-curl path
+    (which the system-libcurl path never supplies).
+
+    Resolution: pkg-config when it is present and knows OpenSSL (Homebrew and
+    most distros), otherwise the compiler's default search paths, which is
+    where a manylinux container's openssl-devel puts the headers. Hard-fails
+    only when neither yields <openssl/ssl.h>: a build without it would produce
+    an engine whose Postgres scan cannot link, which is worse than a build that
+    says why.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("pkg-config"):
+        cflags = subprocess.run(
+            ["pkg-config", "--cflags-only-I", "openssl"], capture_output=True, text=True
+        )
+        libs = subprocess.run(["pkg-config", "--libs", "openssl"], capture_output=True, text=True)
+        if cflags.returncode == 0 and libs.returncode == 0:
+            include_dirs = [flag[2:] for flag in cflags.stdout.split() if flag.startswith("-I")]
+            link_args = libs.stdout.split()
+            print(f"Using OpenSSL (pkg-config) for the native Postgres client: {' '.join(link_args)}")
+            return include_dirs, link_args
+
+    for prefix in ("/usr/include", "/usr/local/include", "/usr/local/opt/openssl/include"):
+        if os.path.exists(os.path.join(prefix, "openssl", "ssl.h")):
+            print(f"Using OpenSSL (default paths, headers at {prefix}) for the native Postgres client")
+            return [], ["-lssl", "-lcrypto"]
+
+    raise RuntimeError(
+        "OpenSSL development files not found (no pkg-config entry and no <openssl/ssl.h> on "
+        "the default include paths); the native Postgres client (src/cpp/pg) needs them.\n"
+        "  - macOS:           brew install openssl pkg-config\n"
+        "  - Ubuntu/Debian:   apt-get install libssl-dev pkg-config\n"
+        "  - RHEL/Fedora:     yum install openssl-devel pkgconf-pkg-config"
+    )
+
+
 def resolve_libcurl():
     """Return (include_dirs, link_args) for libcurl, preferring system over vendored.
 
@@ -370,8 +415,11 @@ _skip_build = not any(
 )
 _curl_include_dirs: list[str] = []
 _curl_link_args: list[str] = []
+_openssl_include_dirs: list[str] = []
+_openssl_link_args: list[str] = []
 if not _skip_build and not _DRAKEN_BUILD:
     _curl_include_dirs, _curl_link_args = resolve_libcurl()
+    _openssl_include_dirs, _openssl_link_args = resolve_openssl()
 
 
 # Define all extensions
@@ -817,6 +865,11 @@ extensions = [
             # — and RUGO_ENABLE_HTTP must therefore MATCH pool_reader's, for two
             # independent reasons (see define_macros below).
             "src/cpp/http_client.cpp",
+        # Native PostgreSQL wire-protocol client behind NativePostgresScanSource
+        # (src/cpp/engine/native_postgres_scan_source.hpp) and the plan-time
+        # describe/metadata calls the PostgresConnector makes through Cython.
+        # Links OpenSSL directly (TLS + SCRAM primitives) — see resolve_openssl.
+        "src/cpp/pg/pg_client.cpp",
         ]
         # skene's kZstd section codec, both halves. Same argument as lz4.c above,
         # and it is NOT optional: skene/src/encoding.cpp calls ZSTD_compress /
@@ -842,7 +895,8 @@ extensions = [
             "third_party/zstd/compress",
             "third_party/lz4",           # lz4.h
         ]
-        + _curl_include_dirs,
+        + _curl_include_dirs
+        + _openssl_include_dirs,
         # RUGO_ENABLE_HTTP must match opteryx.connectors.parquet_io.pool_reader.
         # This is the "differing feature macro" ABI hazard already called out in the
         # sources comment above, and it bit for real:
@@ -870,6 +924,7 @@ extensions = [
         extra_compile_args=CPP_FLAGS,
         extra_link_args=LD_EXTRA
         + _curl_link_args
+        + _openssl_link_args
         + (["-undefined", "dynamic_lookup"] if is_mac() else ["-Wl,--allow-shlib-undefined"]),
         depends=[
             "third_party/mabel/parvi/parvi.hpp",

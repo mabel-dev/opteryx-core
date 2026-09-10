@@ -467,6 +467,11 @@ def _create_scan_node(logical_node, query_properties, registry):
         elif reader_name == "Skene Reader":
             node_config = _skene_scan_config(node_config)
         return registry.create(reader_name, query_properties, **node_config)
+    elif connector and getattr(connector, "scan_reader", None):
+        # A reader with no file manifest that names its own physical scan node
+        # (BaseTable.scan_reader) — today the PostgreSQL connector, whose rows
+        # arrive over a server session and are decoded by a native Source.
+        return registry.create(connector.scan_reader, query_properties, **node_config)
     elif connector and getattr(connector, "interal_only", False):
         # Internal virtual datasets (for example $one_row) do not use file manifests.
         return registry.create("Reader", query_properties, **node_config)

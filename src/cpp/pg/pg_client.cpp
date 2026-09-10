@@ -1,0 +1,771 @@
+// src/cpp/pg/pg_client.cpp — see pg_client.hpp.
+
+#include "pg/pg_client.hpp"
+
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
+#include <openssl/ssl.h>
+
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
+
+namespace opteryx::pg {
+
+// ---------------------------------------------------------------------------
+// Config / errors
+// ---------------------------------------------------------------------------
+
+std::string PgConfig::key() const {
+    return host + "\x1f" + std::to_string(port) + "\x1f" + dbname + "\x1f" + user + "\x1f" +
+           password + "\x1f" + sslmode;
+}
+
+[[noreturn]] static void fail(const std::string& what) { throw PgError(what); }
+
+static std::string ssl_err_text() {
+    char buf[256];
+    unsigned long e = ERR_get_error();
+    if (e == 0) return "unknown OpenSSL error";
+    ERR_error_string_n(e, buf, sizeof buf);
+    return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Type map — the single source of truth for OID -> Draken
+// ---------------------------------------------------------------------------
+
+DrakenType pg_oid_to_draken(uint32_t oid) {
+    switch (oid) {
+        case 16:   return DRAKEN_BOOL;
+        case 21:   return DRAKEN_INT16;
+        case 23:   return DRAKEN_INT32;
+        case 20:   return DRAKEN_INT64;
+        case 26:   return DRAKEN_UINT32;      // oid
+        case 700:  return DRAKEN_FLOAT32;
+        case 701:  return DRAKEN_FLOAT64;
+        case 1082: return DRAKEN_DATE32;
+        case 1114: case 1184: return DRAKEN_TIMESTAMP64;   // timestamp, timestamptz
+        case 1700: return DRAKEN_DECIMAL128; // numeric; the plan narrows to DECIMAL when p <= 18
+        case 17:   return DRAKEN_VARBINARY;  // bytea
+        case 114: case 3802: return DRAKEN_VARIANT;   // json, jsonb
+        case 18: case 19: case 25: case 1042: case 1043: case 2950:
+                   return DRAKEN_VARCHAR;    // "char", name, text, bpchar, varchar, uuid
+        default:   return DRAKEN_NULL;
+    }
+}
+
+std::string pg_oid_name(uint32_t oid) {
+    switch (oid) {
+        case 1186: return "interval";
+        case 1083: return "time";
+        case 1266: return "timetz";
+        case 790:  return "money";
+        case 869:  return "inet";
+        case 650:  return "cidr";
+        case 829:  return "macaddr";
+        case 142:  return "xml";
+        case 1560: return "bit";
+        case 1562: return "varbit";
+        case 600:  return "point";
+        case 3904: return "int4range";
+        case 3926: return "int8range";
+        case 3908: return "tsrange";
+        case 3910: return "tstzrange";
+        case 3912: return "daterange";
+        case 1000: return "bool[]";
+        case 1005: return "int2[]";
+        case 1007: return "int4[]";
+        case 1016: return "int8[]";
+        case 1009: return "text[]";
+        case 1015: return "varchar[]";
+        case 1021: return "float4[]";
+        case 1022: return "float8[]";
+        case 1231: return "numeric[]";
+        case 1182: return "date[]";
+        case 1115: return "timestamp[]";
+        case 1185: return "timestamptz[]";
+        case 2951: return "uuid[]";
+        case 199:  return "json[]";
+        case 3807: return "jsonb[]";
+        default:   return "oid " + std::to_string(oid);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Byte helpers
+// ---------------------------------------------------------------------------
+
+static inline uint32_t be32(const uint8_t* p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+static inline uint16_t be16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
+
+struct Out {
+    std::vector<uint8_t> b;
+    void u8(uint8_t v) { b.push_back(v); }
+    void i16(int16_t v) { b.push_back((uint8_t)(v >> 8)); b.push_back((uint8_t)v); }
+    void i32(int32_t v) {
+        b.push_back((uint8_t)(v >> 24)); b.push_back((uint8_t)(v >> 16));
+        b.push_back((uint8_t)(v >> 8));  b.push_back((uint8_t)v);
+    }
+    void cstr(const std::string& s) { b.insert(b.end(), s.begin(), s.end()); b.push_back(0); }
+    void bytes(const std::string& s) { b.insert(b.end(), s.begin(), s.end()); }
+};
+
+static std::vector<uint8_t> frame(char type, const Out& body) {
+    Out o;
+    o.u8((uint8_t)type);
+    o.i32((int32_t)(body.b.size() + 4));
+    o.b.insert(o.b.end(), body.b.begin(), body.b.end());
+    return o.b;
+}
+
+struct PgConnection::Msg {
+    char type = 0;
+    std::vector<uint8_t> payload;
+};
+
+struct Reader {
+    const uint8_t* p;
+    size_t n, pos = 0;
+    explicit Reader(const std::vector<uint8_t>& v) : p(v.data()), n(v.size()) {}
+    void need(size_t k) const { if (pos + k > n) fail("postgres protocol: truncated message"); }
+    uint8_t u8() { need(1); return p[pos++]; }
+    int16_t i16() { need(2); int16_t v = (int16_t)be16(p + pos); pos += 2; return v; }
+    int32_t i32() { need(4); int32_t v = (int32_t)be32(p + pos); pos += 4; return v; }
+    std::string cstr() {
+        size_t start = pos;
+        while (pos < n && p[pos] != 0) pos++;
+        if (pos >= n) fail("postgres protocol: unterminated string");
+        std::string s((const char*)p + start, pos - start);
+        pos++;
+        return s;
+    }
+    const uint8_t* bytes(size_t k) { need(k); const uint8_t* q = p + pos; pos += k; return q; }
+    bool done() const { return pos >= n; }
+};
+
+// ---------------------------------------------------------------------------
+// base64 (SCRAM)
+// ---------------------------------------------------------------------------
+
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static std::string b64_encode(const uint8_t* d, size_t n) {
+    std::string out;
+    out.reserve((n + 2) / 3 * 4);
+    size_t i = 0;
+    for (; i + 2 < n; i += 3) {
+        uint32_t v = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+        out += B64[(v >> 18) & 63]; out += B64[(v >> 12) & 63];
+        out += B64[(v >> 6) & 63];  out += B64[v & 63];
+    }
+    if (i < n) {
+        uint32_t v = d[i] << 16;
+        if (i + 1 < n) v |= d[i + 1] << 8;
+        out += B64[(v >> 18) & 63]; out += B64[(v >> 12) & 63];
+        out += (i + 1 < n) ? B64[(v >> 6) & 63] : '=';
+        out += '=';
+    }
+    return out;
+}
+
+static std::vector<uint8_t> b64_decode(const std::string& s) {
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::vector<uint8_t> out;
+    uint32_t acc = 0; int bits = 0;
+    for (char c : s) {
+        if (c == '=') break;
+        int v = val(c);
+        if (v < 0) fail("postgres scram: malformed base64 from server");
+        acc = (acc << 6) | (uint32_t)v; bits += 6;
+        if (bits >= 8) { bits -= 8; out.push_back((uint8_t)((acc >> bits) & 0xFF)); }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Transport
+// ---------------------------------------------------------------------------
+
+class Transport {
+public:
+    ~Transport() { close(); }
+
+    void close() {
+        if (ssl_) { SSL_shutdown(ssl_); SSL_free(ssl_); ssl_ = nullptr; }
+        if (ctx_) { SSL_CTX_free(ctx_); ctx_ = nullptr; }
+        if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+    }
+
+    void connect_tcp(const std::string& host, int port, int timeout_s) {
+        addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
+        addrinfo* res = nullptr;
+        const std::string port_s = std::to_string(port);
+        int rc = getaddrinfo(host.c_str(), port_s.c_str(), &hints, &res);
+        if (rc != 0) fail("postgres: cannot resolve host '" + host + "': " + gai_strerror(rc));
+        int last_errno = 0;
+        for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+            int s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (s < 0) { last_errno = errno; continue; }
+            timeval tv{}; tv.tv_sec = timeout_s;
+            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+            int one = 1;
+            setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+            setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+            if (::connect(s, ai->ai_addr, ai->ai_addrlen) == 0) { fd_ = s; break; }
+            last_errno = errno;
+            ::close(s);
+        }
+        freeaddrinfo(res);
+        if (fd_ < 0)
+            fail("postgres: cannot connect to " + host + ":" + port_s + ": " + strerror(last_errno));
+    }
+
+    void start_tls(const std::string& host, bool verify) {
+        static const uint8_t req[8] = {0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f};  // SSLRequest
+        write_all(req, 8);
+        uint8_t reply;
+        read_exact(&reply, 1);
+        if (reply != 'S') fail("postgres: server refused TLS but sslmode requires it");
+        ctx_ = SSL_CTX_new(TLS_client_method());
+        if (!ctx_) fail("postgres TLS: SSL_CTX_new: " + ssl_err_text());
+        SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
+        if (verify) {
+            SSL_CTX_set_default_verify_paths(ctx_);
+            SSL_CTX_set_verify(ctx_, SSL_VERIFY_PEER, nullptr);
+        }
+        ssl_ = SSL_new(ctx_);
+        if (!ssl_) fail("postgres TLS: SSL_new: " + ssl_err_text());
+        SSL_set_tlsext_host_name(ssl_, host.c_str());
+        if (verify) SSL_set1_host(ssl_, host.c_str());
+        SSL_set_fd(ssl_, fd_);
+        if (SSL_connect(ssl_) != 1) fail("postgres TLS handshake failed: " + ssl_err_text());
+    }
+
+    void write_all(const uint8_t* p, size_t n) {
+        while (n > 0) {
+            ssize_t w = ssl_ ? (ssize_t)SSL_write(ssl_, p, (int)n) : ::send(fd_, p, n, 0);
+            if (w <= 0)
+                fail(ssl_ ? "postgres TLS write failed: " + ssl_err_text()
+                          : std::string("postgres write failed: ") + strerror(errno));
+            p += w; n -= (size_t)w;
+        }
+    }
+
+    void read_exact(uint8_t* p, size_t n) {
+        while (n > 0) {
+            ssize_t r = ssl_ ? (ssize_t)SSL_read(ssl_, p, (int)n) : ::recv(fd_, p, n, 0);
+            if (r <= 0)
+                fail(ssl_ ? "postgres TLS read failed: " + ssl_err_text()
+                          : std::string("postgres read failed: ") +
+                                (r == 0 ? "connection closed by server" : strerror(errno)));
+            p += r; n -= (size_t)r;
+        }
+    }
+
+    void send(const std::vector<uint8_t>& b) { write_all(b.data(), b.size()); }
+
+private:
+    int fd_ = -1;
+    SSL_CTX* ctx_ = nullptr;
+    SSL* ssl_ = nullptr;
+};
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+
+PgConnection::Msg PgConnection::read_msg() {
+    uint8_t hdr[5];
+    t_->read_exact(hdr, 5);
+    int32_t len = (int32_t)be32(hdr + 1);
+    if (len < 4) fail("postgres protocol: bad message length");
+    Msg m;
+    m.type = (char)hdr[0];
+    m.payload.resize((size_t)len - 4);
+    if (!m.payload.empty()) t_->read_exact(m.payload.data(), m.payload.size());
+    return m;
+}
+
+static void parse_error_fields(const std::vector<uint8_t>& payload, std::string& severity,
+                               std::string& code, std::string& message, std::string& detail,
+                               std::string& position) {
+    Reader r(payload);
+    while (!r.done()) {
+        uint8_t f = r.u8();
+        if (f == 0) break;
+        std::string v = r.cstr();
+        switch (f) {
+            case 'S': severity = v; break;
+            case 'C': code = v; break;
+            case 'M': message = v; break;
+            case 'D': detail = v; break;
+            case 'P': position = v; break;
+            default: break;
+        }
+    }
+}
+
+void PgConnection::raise_server_error(const Msg& m) {
+    std::string severity, code, message, detail, position;
+    parse_error_fields(m.payload, severity, code, message, detail, position);
+    std::string text = "postgres " + severity + " [" + code + "]: " + message;
+    if (!detail.empty()) text += " (" + detail + ")";
+    if (!position.empty()) text += " at position " + position;
+    throw PgError(text, code);
+}
+
+// ---------------------------------------------------------------------------
+// Connection / auth
+// ---------------------------------------------------------------------------
+
+PgConnection::PgConnection(const PgConfig& config) : t_(std::make_unique<Transport>()) {
+    if (config.host.empty()) fail("postgres: host is required");
+    if (config.dbname.empty()) fail("postgres: dbname is required");
+    if (config.user.empty()) fail("postgres: user is required");
+    t_->connect_tcp(config.host, config.port, config.timeout_s);
+    if (config.sslmode == "require") t_->start_tls(config.host, false);
+    else if (config.sslmode == "verify-full") t_->start_tls(config.host, true);
+    else if (config.sslmode != "disable")
+        fail("postgres: sslmode must be disable, require or verify-full (got '" + config.sslmode + "')");
+    startup(config);
+}
+
+PgConnection::~PgConnection() {
+    if (t_ && healthy_) {
+        try {
+            Out o;
+            t_->send(frame('X', o));  // Terminate
+        } catch (...) {
+        }
+    }
+}
+
+void PgConnection::send_password(const std::string& pw) {
+    Out o; o.cstr(pw);
+    t_->send(frame('p', o));
+}
+
+static std::string hex(const uint8_t* p, size_t n) {
+    static const char* h = "0123456789abcdef";
+    std::string s; s.reserve(2 * n);
+    for (size_t i = 0; i < n; i++) { s += h[p[i] >> 4]; s += h[p[i] & 15]; }
+    return s;
+}
+
+static std::string md5_hex(const std::string& s) {
+    uint8_t d[16]; unsigned int n = 16;
+    EVP_Digest(s.data(), s.size(), d, &n, EVP_md5(), nullptr);
+    return hex(d, 16);
+}
+
+void PgConnection::scram_sha256(const Msg& first, const PgConfig& config) {
+    Reader r(first.payload);
+    r.i32();  // auth code 10
+    bool have = false;
+    while (!r.done()) { std::string m = r.cstr(); if (m.empty()) break; if (m == "SCRAM-SHA-256") have = true; }
+    if (!have) fail("postgres auth: server offers SASL but not SCRAM-SHA-256");
+
+    uint8_t nonce_raw[18];
+    if (RAND_bytes(nonce_raw, sizeof nonce_raw) != 1) fail("postgres auth: RAND_bytes failed");
+    const std::string cnonce = b64_encode(nonce_raw, sizeof nonce_raw);
+    const std::string bare = "n=,r=" + cnonce;
+    const std::string client_first = "n,," + bare;
+
+    Out o; o.cstr("SCRAM-SHA-256"); o.i32((int32_t)client_first.size()); o.bytes(client_first);
+    t_->send(frame('p', o));
+
+    Msg m = read_msg();
+    if (m.type == 'E') raise_server_error(m);
+    if (m.type != 'R') fail("postgres auth: unexpected message during SASL exchange");
+    Reader r2(m.payload);
+    if (r2.i32() != 11) fail("postgres auth: expected SASLContinue");
+    const std::string server_first((const char*)m.payload.data() + 4, m.payload.size() - 4);
+
+    std::string snonce, salt_b64; int iters = 0;
+    size_t pos = 0;
+    while (pos < server_first.size()) {
+        size_t comma = server_first.find(',', pos);
+        std::string attr = server_first.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (attr.rfind("r=", 0) == 0) snonce = attr.substr(2);
+        else if (attr.rfind("s=", 0) == 0) salt_b64 = attr.substr(2);
+        else if (attr.rfind("i=", 0) == 0) iters = std::stoi(attr.substr(2));
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    if (snonce.rfind(cnonce, 0) != 0) fail("postgres auth: server nonce does not extend the client nonce");
+    if (iters <= 0) fail("postgres auth: bad SCRAM iteration count");
+    const std::vector<uint8_t> salt = b64_decode(salt_b64);
+
+    uint8_t salted[32];
+    if (PKCS5_PBKDF2_HMAC(config.password.data(), (int)config.password.size(), salt.data(),
+                          (int)salt.size(), iters, EVP_sha256(), 32, salted) != 1)
+        fail("postgres auth: PBKDF2 failed");
+
+    uint8_t client_key[32], stored_key[32], client_sig[32], server_key[32], server_sig[32];
+    unsigned int len = 32;
+    HMAC(EVP_sha256(), salted, 32, (const uint8_t*)"Client Key", 10, client_key, &len);
+    SHA256(client_key, 32, stored_key);
+
+    const std::string client_final_bare = "c=biws,r=" + snonce;
+    const std::string auth_message = bare + "," + server_first + "," + client_final_bare;
+    HMAC(EVP_sha256(), stored_key, 32, (const uint8_t*)auth_message.data(), auth_message.size(), client_sig, &len);
+    uint8_t proof[32];
+    for (int i = 0; i < 32; i++) proof[i] = client_key[i] ^ client_sig[i];
+    const std::string client_final = client_final_bare + ",p=" + b64_encode(proof, 32);
+
+    Out o2; o2.bytes(client_final);
+    t_->send(frame('p', o2));
+
+    Msg f = read_msg();
+    if (f.type == 'E') raise_server_error(f);
+    if (f.type != 'R') fail("postgres auth: unexpected message awaiting SASLFinal");
+    Reader r3(f.payload);
+    if (r3.i32() != 12) fail("postgres auth: expected SASLFinal");
+    const std::string server_final((const char*)f.payload.data() + 4, f.payload.size() - 4);
+    if (server_final.rfind("v=", 0) != 0) fail("postgres auth: SASLFinal carries no server verifier");
+    const std::vector<uint8_t> v = b64_decode(server_final.substr(2));
+    HMAC(EVP_sha256(), salted, 32, (const uint8_t*)"Server Key", 10, server_key, &len);
+    HMAC(EVP_sha256(), server_key, 32, (const uint8_t*)auth_message.data(), auth_message.size(), server_sig, &len);
+    if (v.size() != 32 || memcmp(v.data(), server_sig, 32) != 0)
+        fail("postgres auth: server signature mismatch (possible impersonation)");
+}
+
+void PgConnection::startup(const PgConfig& config) {
+    Out o;
+    o.i32(196608);  // protocol 3.0
+    o.cstr("user"); o.cstr(config.user);
+    o.cstr("database"); o.cstr(config.dbname);
+    o.cstr("client_encoding"); o.cstr("UTF8");
+    o.cstr("application_name"); o.cstr("opteryx");
+    // The engine's timestamps are UTC. Pinning the session zone makes a pushed
+    // timestamp literal (sent as text) mean the same instant the engine meant,
+    // and keeps timestamptz binary output (always UTC micros) consistent with
+    // how the server parsed our parameters.
+    o.cstr("TimeZone"); o.cstr("UTC");
+    o.cstr("DateStyle"); o.cstr("ISO, YMD");
+    o.u8(0);
+    Out framed;
+    framed.i32((int32_t)(o.b.size() + 4));
+    framed.b.insert(framed.b.end(), o.b.begin(), o.b.end());
+    t_->send(framed.b);
+
+    for (;;) {
+        Msg m = read_msg();
+        switch (m.type) {
+            case 'R': {
+                Reader r(m.payload);
+                const int32_t code = r.i32();
+                switch (code) {
+                    case 0: break;                                    // AuthenticationOk
+                    case 3: send_password(config.password); break;    // cleartext
+                    case 5: {                                         // md5
+                        const uint8_t* salt = r.bytes(4);
+                        const std::string inner = md5_hex(config.password + config.user);
+                        const std::string outer = md5_hex(inner + std::string((const char*)salt, 4));
+                        send_password("md5" + outer);
+                        break;
+                    }
+                    case 10: scram_sha256(m, config); break;          // SASL
+                    default:
+                        fail("postgres auth: unsupported authentication method (code " +
+                             std::to_string(code) + "); supported: cleartext, md5, SCRAM-SHA-256");
+                }
+                break;
+            }
+            case 'E': raise_server_error(m);
+            case 'S': { Reader r(m.payload); std::string k = r.cstr(); params_[k] = r.cstr(); break; }
+            case 'K': break;   // BackendKeyData (cancel is not implemented)
+            case 'N': break;   // NoticeResponse
+            case 'Z': {
+                auto it = params_.find("server_version");
+                if (it != params_.end()) server_version_ = it->second;
+                return;
+            }
+            default:
+                fail(std::string("postgres protocol: unexpected message '") + m.type + "' during startup");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended query
+// ---------------------------------------------------------------------------
+
+void PgConnection::send_extended(const std::string& sql,
+                                 const std::vector<std::optional<std::string>>& params,
+                                 bool binary_results, bool describe_portal) {
+    if (params.size() > 32767) fail("postgres: too many bind parameters");
+    Out parse; parse.cstr(""); parse.cstr(sql); parse.i16(0);
+    Out bind;
+    bind.cstr(""); bind.cstr("");
+    bind.i16(0);                                     // parameter format codes: all text
+    bind.i16((int16_t)params.size());
+    for (const auto& p : params) {
+        if (!p.has_value()) { bind.i32(-1); continue; }
+        bind.i32((int32_t)p->size());
+        bind.bytes(*p);
+    }
+    bind.i16(1); bind.i16(binary_results ? 1 : 0);   // one result format code for all columns
+    Out desc; desc.u8(describe_portal ? 'P' : 'S'); desc.cstr("");
+    Out exec; exec.cstr(""); exec.i32(0);
+    Out sync;
+
+    std::vector<uint8_t> wire;
+    auto add = [&](char t, const Out& body) { auto f = frame(t, body); wire.insert(wire.end(), f.begin(), f.end()); };
+    add('P', parse);
+    if (describe_portal) {
+        add('B', bind);
+        add('D', desc);
+        add('E', exec);
+    } else {
+        add('D', desc);  // Describe(statement): no bind, no execute
+    }
+    add('S', sync);
+    t_->send(wire);
+}
+
+std::vector<PgField> PgConnection::parse_row_description(const Msg& m) {
+    Reader r(m.payload);
+    const int16_t n = r.i16();
+    std::vector<PgField> fields;
+    fields.reserve((size_t)n);
+    for (int16_t i = 0; i < n; i++) {
+        PgField f;
+        f.name = r.cstr();
+        r.i32(); r.i16();                 // table oid, attnum
+        f.oid = (uint32_t)r.i32();
+        r.i16();                          // typlen
+        f.typmod = r.i32();
+        r.i16();                          // format code (0 for a statement Describe)
+        fields.push_back(std::move(f));
+    }
+    return fields;
+}
+
+std::vector<PgField> PgConnection::describe(const std::string& sql) {
+    if (streaming_) fail("postgres: describe() called while a result stream is open");
+    healthy_ = false;  // until we see ReadyForQuery again
+    send_extended(sql, {}, false, false);
+    std::vector<PgField> fields;
+    Msg pending_error;
+    bool have_error = false;
+    for (;;) {
+        Msg m = read_msg();
+        switch (m.type) {
+            case '1': case 't': case 'n': case 'N': break;   // ParseComplete, ParameterDescription, NoData, Notice
+            case 'T': fields = parse_row_description(m); break;
+            case 'E': pending_error = std::move(m); have_error = true; break;
+            case 'Z':
+                healthy_ = true;
+                if (have_error) raise_server_error(pending_error);
+                return fields;
+            default:
+                fail(std::string("postgres protocol: unexpected message '") + m.type + "' in describe");
+        }
+    }
+}
+
+std::vector<std::vector<std::optional<std::string>>> PgConnection::query_text(
+    const std::string& sql, const std::vector<std::string>& params) {
+    if (streaming_) fail("postgres: query_text() called while a result stream is open");
+    std::vector<std::optional<std::string>> ps;
+    ps.reserve(params.size());
+    for (const auto& p : params) ps.emplace_back(p);
+    healthy_ = false;
+    send_extended(sql, ps, false, true);
+    std::vector<std::vector<std::optional<std::string>>> rows;
+    Msg pending_error;
+    bool have_error = false;
+    for (;;) {
+        Msg m = read_msg();
+        switch (m.type) {
+            case '1': case '2': case 'n': case 'N': case 'T': break;
+            case 'D': {
+                Reader r(m.payload);
+                const int16_t n = r.i16();
+                std::vector<std::optional<std::string>> row;
+                row.reserve((size_t)n);
+                for (int16_t i = 0; i < n; i++) {
+                    const int32_t len = r.i32();
+                    if (len < 0) row.emplace_back(std::nullopt);
+                    else { const uint8_t* b = r.bytes((size_t)len); row.emplace_back(std::string((const char*)b, (size_t)len)); }
+                }
+                rows.push_back(std::move(row));
+                break;
+            }
+            case 'C': { Reader r(m.payload); command_tag_ = r.cstr(); break; }
+            case 'E': pending_error = std::move(m); have_error = true; break;
+            case 'Z':
+                healthy_ = true;
+                if (have_error) raise_server_error(pending_error);
+                return rows;
+            default:
+                fail(std::string("postgres protocol: unexpected message '") + m.type + "' in query");
+        }
+    }
+}
+
+std::vector<PgField> PgConnection::begin(const std::string& sql,
+                                         const std::vector<std::optional<std::string>>& params) {
+    if (streaming_) fail("postgres: begin() called while a result stream is open");
+    healthy_ = false;
+    streaming_ = true;
+    command_tag_.clear();
+    send_extended(sql, params, true, true);
+    // Read up to the RowDescription (or NoData). A server error before the first
+    // row is raised here after draining to ReadyForQuery.
+    for (;;) {
+        Msg m = read_msg();
+        switch (m.type) {
+            case '1': case '2': case 'N': break;
+            case 'T': {
+                auto fields = parse_row_description(m);
+                Reader r(m.payload);
+                const int16_t n = r.i16();
+                for (int16_t i = 0; i < n; i++) {
+                    r.cstr(); r.i32(); r.i16(); r.i32(); r.i16(); r.i32();
+                    if (r.i16() != 1) {
+                        finish();
+                        fail("postgres protocol: server did not honour binary result format for column '" +
+                             fields[(size_t)i].name + "'");
+                    }
+                }
+                return fields;
+            }
+            case 'n': return {};                        // NoData: no result columns
+            case 'E': {
+                Msg err = std::move(m);
+                finish();                               // drain to ReadyForQuery
+                raise_server_error(err);
+            }
+            default:
+                streaming_ = false;
+                fail(std::string("postgres protocol: unexpected message '") + m.type + "' starting a stream");
+        }
+    }
+}
+
+bool PgConnection::next_row(const uint8_t** payload, size_t* length) {
+    if (!streaming_) return false;
+    for (;;) {
+        Msg m = read_msg();
+        switch (m.type) {
+            case 'D':
+                row_buf_ = std::move(m.payload);
+                *payload = row_buf_.data();
+                *length = row_buf_.size();
+                return true;
+            case 'N': break;
+            case 'C': { Reader r(m.payload); command_tag_ = r.cstr(); break; }
+            case 's': break;                            // PortalSuspended (not used: no row cap)
+            case 'E': {
+                Msg err = std::move(m);
+                finish();
+                raise_server_error(err);
+            }
+            case 'Z':
+                streaming_ = false;
+                healthy_ = true;
+                return false;
+            default:
+                streaming_ = false;
+                fail(std::string("postgres protocol: unexpected message '") + m.type + "' in a result stream");
+        }
+    }
+}
+
+void PgConnection::finish() {
+    if (!streaming_) return;
+    // The portal keeps producing until the server finishes the statement; there
+    // is no cancel here, so an early abandon drains the rest. Row-limited scans
+    // put the LIMIT in the SQL, so this is short in practice.
+    try {
+        for (;;) {
+            Msg m = read_msg();
+            if (m.type == 'Z') { streaming_ = false; healthy_ = true; return; }
+        }
+    } catch (...) {
+        streaming_ = false;
+        healthy_ = false;
+        throw;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pool
+// ---------------------------------------------------------------------------
+
+PgPool& PgPool::instance() {
+    static PgPool* pool = new PgPool();  // never destroyed: outlives every worker thread
+    return *pool;
+}
+
+std::unique_ptr<PgConnection> PgPool::acquire(const PgConfig& config) {
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        auto it = idle_.find(config.key());
+        if (it != idle_.end() && !it->second.empty()) {
+            std::unique_ptr<PgConnection> c = std::move(it->second.back());
+            it->second.pop_back();
+            return c;
+        }
+    }
+    return std::make_unique<PgConnection>(config);
+}
+
+void PgPool::release(const PgConfig& config, std::unique_ptr<PgConnection> conn) {
+    if (!conn || !conn->healthy()) return;  // dropped: destructor sends Terminate if it can
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto& bucket = idle_[config.key()];
+    if (bucket.size() >= kMaxIdlePerKey) return;
+    bucket.push_back(std::move(conn));
+}
+
+// A server-side error (bad relation name, permission) leaves the session usable —
+// the client drained to ReadyForQuery before raising — so the connection goes
+// back to the pool on that path too; release() itself drops an unhealthy one.
+std::vector<PgField> pg_describe(const PgConfig& config, const std::string& sql) {
+    auto conn = PgPool::instance().acquire(config);
+    try {
+        std::vector<PgField> out = conn->describe(sql);
+        PgPool::instance().release(config, std::move(conn));
+        return out;
+    } catch (...) {
+        PgPool::instance().release(config, std::move(conn));
+        throw;
+    }
+}
+
+std::vector<std::vector<std::optional<std::string>>> pg_query_text(
+    const PgConfig& config, const std::string& sql, const std::vector<std::string>& params) {
+    auto conn = PgPool::instance().acquire(config);
+    try {
+        auto out = conn->query_text(sql, params);
+        PgPool::instance().release(config, std::move(conn));
+        return out;
+    } catch (...) {
+        PgPool::instance().release(config, std::move(conn));
+        throw;
+    }
+}
+
+}  // namespace opteryx::pg

@@ -7,7 +7,9 @@ set -ex
 # not be available on the base image and we compile vendor sources directly).
 # curl-devel is installed here purely to provide system headers as a fallback;
 # the actual libcurl.a used at link time is still the vendored static build.
-yum install -y openssl-devel curl-devel || dnf install -y openssl-devel libcurl-devel
+# pkg-config lets setup.py's resolve_openssl() find OpenSSL for the native
+# Postgres client; it falls back to default paths without it, but be explicit.
+yum install -y openssl-devel curl-devel pkgconfig || dnf install -y openssl-devel libcurl-devel pkgconf-pkg-config
 
 # Install Rust 1.83.0 (pinned version to avoid GLIBC_2.18 symbols from newer compilers)
 #

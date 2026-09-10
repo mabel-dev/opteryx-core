@@ -4007,6 +4007,8 @@ class _Compiler:
             # declines fall through to the materialized path below, which
             # handles the zero-column morsel shape.
             return self._compile_materialized_source(scan)
+        if kind == "PostgresReadNode":
+            return self._compile_postgres_scan(scan)
         if kind in ("FunctionDatasetNode", "NullReaderNode", "ReaderNode", "JsonlReadNode", "CsvReadNode"):
             return self._compile_materialized_source(scan)
         if kind != "ParquetReadNode":
@@ -5263,6 +5265,50 @@ class _Compiler:
         # Build payload first, then probe payload — the same emit order every
         # Join2ProbeOperator uses. The synthetic bound columns are in neither.
         return pp, list(blayout) + list(playout)
+
+    def _compile_postgres_scan(self, scan):
+        """A PostgreSQL-bound relation: build the scan statement from what the
+        planner decided (projection, pushed predicates, pushed LIMIT), pin it in
+        a PostgresScanPlan and give the pipeline a NativePostgresScanSource. The
+        Source streams the server's binary rows into morsels on a worker thread;
+        nothing here runs during execution."""
+        from opteryx.connectors.postgres_connector import POSTGRES_SCAN_BATCH_ROWS
+        from opteryx.connectors.postgres_connector import build_scan_statement
+        from opteryx.operators._operators import PostgresScanPlan
+
+        table = scan.connector
+        columns = list(scan.columns or [])
+        statement = build_scan_statement(table, columns, scan.predicates, scan.limit)
+        identities = [column.schema_column.identity for column in columns]
+        plan = PostgresScanPlan(
+            table.connection_config,
+            statement.sql,
+            statement.params,
+            identities,
+            [table.column_oid(column.schema_column) for column in columns],
+            [column.schema_column.column_type.physical.value for column in columns],
+            [table.column_decimal_precision(column.schema_column) for column in columns],
+            [table.column_decimal_scale(column.schema_column) for column in columns],
+            POSTGRES_SCAN_BATCH_ROWS,
+            scan.limit,
+            statement.zero_columns,
+        )
+        plan.scan_identity = scan.identity
+        scan.scan_plan = plan
+        self.scan_sources[scan.identity] = "NativePostgresScanSource"
+        # The scan_facts shape is the parquet/skene one so the post-run fold
+        # reads it uniformly; a server stream has no files or row groups.
+        self.scan_facts[scan.identity] = {
+            "files_read": 0,
+            "row_groups_read": 0,
+            "row_groups_pruned": 0,
+            "parquet_rows_before_filter": 0,
+            "columns_read": len(columns),
+        }
+        p = self.nplan.new_pipeline()
+        self.nplan.set_native_postgres_scan_source(p, plan)
+        self._remember_types(scan.columns)
+        return p, identities
 
     def _compile_materialized_source(self, node):
         """Virtual datasets ($planets, VALUES, GENERATE_SERIES, contradiction-empty

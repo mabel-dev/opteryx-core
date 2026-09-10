@@ -69,6 +69,13 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
             if limit_value is None or limit_value <= 0:
                 return context
 
+            # A limit-pushable reader with no file manifest (the PostgreSQL
+            # connector: the LIMIT went into the statement) has no files to
+            # prune. Reading `node.manifest.files` here would be an
+            # AttributeError, not a no-op.
+            if node.manifest is None:
+                return context
+
             # Sort file POSITIONS by row count descending — positions, not the
             # FileEntry objects, so the surviving set can be handed to
             # Manifest.subset, which keeps the sketch-vector row mapping
