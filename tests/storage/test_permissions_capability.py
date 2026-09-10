@@ -468,6 +468,28 @@ def test_show_snapshots_asks_for_read_and_nothing_more(tmp_path, install):
     assert ("ws.t", "MANIFEST") not in capability.asked
 
 
+def test_show_all_snapshots_asks_for_manifest_on_top_of_read(tmp_path, install):
+    """The ALL form adds the tombstones - what this relation is still holding in
+    the restore window, and how long is left to act on it. That is a question
+    about the storage rather than about data the caller can already read, so it
+    is held to the owner-tier gate SHOW MANIFEST FOR uses, while the plain
+    history above stays at READ.
+
+    It reuses the MANIFEST action deliberately: the action vocabulary is closed,
+    and a capability maps a name it does not know to no roles at all - so an
+    action invented here would refuse owners too, on every deployment whose
+    capability had not shipped it yet.
+    """
+    _seed(tmp_path, install)
+    capability = install(ScriptedCapability(allow={("ws.t", "READ")}))
+    session = opteryx.session(user="olive")
+
+    with pytest.raises(PermissionError, match="expired snapshots"):
+        list(session.execute_to_morsels("SHOW ALL SNAPSHOTS FOR ws.t"))
+
+    assert ("ws.t", "MANIFEST") in capability.asked
+
+
 def test_a_grant_for_the_wrong_action_does_not_clear_the_gate(tmp_path, install):
     """The other half of the matrix: permitting WRITE on a relation must not
     let a DROP through. This is what would break if a gate named the wrong

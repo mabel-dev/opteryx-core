@@ -42,9 +42,11 @@ def _snapshot(
     sequence_number=None,
     commit_message=None,
     summary=None,
+    expired_at_ms=None,
 ):
     return SimpleNamespace(
         snapshot_id=snapshot_id,
+        expired_at_ms=expired_at_ms,
         timestamp_ms=timestamp_ms,
         author=author,
         user_created=user_created,
@@ -98,15 +100,32 @@ _HISTORY = [
 ]
 
 
+# Retired by expiration, tombstoned but not yet purged: OLDER than every live
+# commit above, so its position also proves the two lists are merged and sorted
+# together rather than appended. `expired_at_ms` is what the tombstone carries.
+_EXPIRED = [
+    _snapshot(
+        7283001155,
+        _T0 - 86_400_000,
+        parent=None,
+        operation="append",
+        sequence_number=4467,
+        commit_message="hourly load",
+        expired_at_ms=_T2,
+    )
+]
+
+
 class _FakeDataset:
     """One catalog dataset. `snapshots()` is empty unless the loader was asked
     for history, mirroring the real loader - a connector that forgets
     `load_history=True` must not quietly see a truncated history."""
 
-    def __init__(self, history, with_history, previous_id=None):
+    def __init__(self, history, with_history, previous_id=None, expired=()):
         self._history = history
         self._with_history = with_history
         self._previous_id = previous_id
+        self._expired = list(expired)
         self.metadata = SimpleNamespace(
             current_snapshot_id=7284091337 if history else None
         )
@@ -133,6 +152,12 @@ class _FakeDataset:
     def snapshots(self):
         return list(self._history) if self._with_history else []
 
+    def expired_snapshots(self):
+        """Tombstones, and only when the loader was asked for them - the real
+        loader leaves this empty on every other path, so a connector that
+        forgot to ask must see nothing rather than a short history."""
+        return list(self._expired)
+
     def schema(self, schema_id=None):
         return SimpleNamespace(
             columns=[{"name": "id", "type": "INTEGER", "id": 1}], name="src"
@@ -147,6 +172,7 @@ class _FakeCatalog:
     # One tag, on the MIDDLE snapshot: a tag on the current snapshot would pass
     # a grouping that ignored `snapshot-id` and put every tag on row one.
     tags = [{"name": "month_end", "snapshot-id": 7283774102}]
+    expired = _EXPIRED
     # The previous VERSION OF THE DATA - the oldest commit here, which is the
     # only `user_created` one. The two maintenance commits above it changed no
     # rows, so `previous` naming either of them would answer a time-travel read
@@ -156,13 +182,19 @@ class _FakeCatalog:
     def __init__(self, workspace=None, **kwargs):
         pass
 
-    def load_dataset(self, identifier, load_history=False):
+    def load_dataset(self, identifier, load_history=False, include_expired=False):
         _FakeCatalog.loads.append((identifier, load_history))
         history = _FakeCatalog.history if identifier == "coll1.src" else []
+        expired = (
+            _FakeCatalog.expired
+            if include_expired and load_history and identifier == "coll1.src"
+            else []
+        )
         return _FakeDataset(
             history,
             with_history=load_history,
             previous_id=_FakeCatalog.previous_user_snapshot_id,
+            expired=expired,
         )
 
     def list_tags(self, identifier):
@@ -190,6 +222,7 @@ def catalog_workspace():
     _FakeCatalog.loads = []
     _FakeCatalog.history = _HISTORY
     _FakeCatalog.tags = [{"name": "month_end", "snapshot-id": 7283774102}]
+    _FakeCatalog.expired = _EXPIRED
     _FakeCatalog.previous_user_snapshot_id = 7283449002
     register_workspace("cat", OpteryxConnector, catalog=_FakeCatalog)
     return _FakeCatalog
@@ -415,3 +448,126 @@ def test_show_snapshots_from_is_not_the_spelling(catalog_workspace):
 
     with pytest.raises(UnsupportedSyntaxError):
         list(session.execute_to_morsels("SHOW SNAPSHOTS FROM cat.coll1.src"))
+
+
+# --- SHOW ALL SNAPSHOTS FOR: the live history plus the tombstones
+
+
+def test_show_all_snapshots_lists_expired_snapshots_too(catalog_workspace):
+    """The whole point of the form: an expired snapshot is invisible to
+    `SHOW SNAPSHOTS FOR` (the catalog's loader keeps tombstones out of the
+    history), and this is the one statement that reports it."""
+    live = [row["snapshot_id"] for row in _rows("SHOW SNAPSHOTS FOR cat.coll1.src")]
+    every = [row["snapshot_id"] for row in _rows("SHOW ALL SNAPSHOTS FOR cat.coll1.src")]
+
+    assert 7283001155 not in live
+    # Merged into one timeline and sorted with the rest, not appended after it.
+    assert every == [7284091337, 7283774102, 7283449002, 7283001155]
+
+
+def test_show_all_snapshots_adds_the_two_expiry_columns(catalog_workspace):
+    """Both statements' shapes are stated here, together: the plain form must
+    NOT grow a column that would be null on every row it can return."""
+    rows = _rows("SHOW ALL SNAPSHOTS FOR cat.coll1.src")
+    plain = _rows("SHOW SNAPSHOTS FOR cat.coll1.src")
+
+    assert list(rows[0].keys())[-2:] == ["expired_at", "is_queryable"]
+    assert "expired_at" not in plain[0]
+    assert "is_queryable" not in plain[0]
+
+
+def test_expired_at_is_set_only_on_the_tombstone(catalog_workspace):
+    rows = _rows("SHOW ALL SNAPSHOTS FOR cat.coll1.src")
+
+    assert [row["expired_at"] for row in rows[:3]] == [None, None, None]
+    assert rows[3]["expired_at"] == datetime.datetime.fromtimestamp(
+        _T2 / 1000, tz=datetime.timezone.utc
+    ).replace(tzinfo=None)
+
+
+def test_is_queryable_says_which_rows_can_still_be_read(catalog_workspace):
+    """A timestamp alone leaves the reader to know that `VERSION AS OF` refuses
+    an expired id. The column says it."""
+    rows = _rows("SHOW ALL SNAPSHOTS FOR cat.coll1.src")
+
+    assert [row["is_queryable"] for row in rows] == [True, True, True, False]
+
+
+def test_an_expired_snapshot_is_never_current(catalog_workspace):
+    rows = _rows("SHOW ALL SNAPSHOTS FOR cat.coll1.src")
+
+    assert rows[3]["is_current"] is False
+    assert [row["is_current"] for row in rows] == [True, False, False, False]
+
+
+def test_show_all_snapshots_asks_the_catalog_for_tombstones(catalog_workspace):
+    """The plain form must not: tombstones are a second read the statement that
+    cannot show them has no use for."""
+    seen = {}
+
+    original = _FakeCatalog.load_dataset
+
+    def _record(self, identifier, load_history=False, include_expired=False):
+        seen[identifier] = include_expired
+        return original(self, identifier, load_history, include_expired)
+
+    _FakeCatalog.load_dataset = _record
+    try:
+        _rows("SHOW SNAPSHOTS FOR cat.coll1.src")
+        assert seen["coll1.src"] is False
+        _rows("SHOW ALL SNAPSHOTS FOR cat.coll1.src")
+        assert seen["coll1.src"] is True
+    finally:
+        _FakeCatalog.load_dataset = original
+
+
+def test_a_relation_with_nothing_committed_has_no_rows_in_the_all_form(catalog_workspace):
+    catalog_workspace.history = []
+    catalog_workspace.expired = []
+
+    assert _rows("SHOW ALL SNAPSHOTS FOR cat.coll1.src") == []
+
+
+# The owner-tier gate on this form is pinned in
+# tests/storage/test_permissions_capability.py, beside the MANIFEST gate it
+# borrows and with the scripted capability those tests install: an
+# access_policies session here answers through the intrinsic permissive
+# capability, which is not a gate at all.
+
+
+# --- the grammar
+
+
+def test_bare_show_all_snapshots_is_rejected(catalog_workspace):
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(UnsupportedSyntaxError, match="SHOW ALL SNAPSHOTS FOR"):
+        list(session.execute_to_morsels("SHOW ALL SNAPSHOTS"))
+
+
+def test_show_all_is_only_for_snapshots(catalog_workspace):
+    """LINEAGE is per-commit receipts and SOURCES is a field on the dataset;
+    neither has an expired half for ALL to mean anything about."""
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    with pytest.raises(UnsupportedSyntaxError, match="only supported for snapshots"):
+        list(session.execute_to_morsels("SHOW ALL LINEAGE FOR cat.coll1.src"))
+
+
+def test_a_catalog_that_cannot_read_tombstones_says_so(catalog_workspace):
+    """Mid-upgrade: the engine is new enough to have the statement and the
+    catalog is not. It must refuse rather than answer with the live history,
+    which is a different answer wearing this statement's name."""
+
+    class _OldCatalog(_FakeCatalog):
+        def load_dataset(self, identifier, load_history=False):
+            return _FakeCatalog.load_dataset(self, identifier, load_history)
+
+    register_workspace("old", OpteryxConnector, catalog=_OldCatalog)
+    session = opteryx.session(user="olive", access_policies=_OWNER_POLICY)
+
+    # The live history still answers.
+    list(session.execute_to_morsels("SHOW SNAPSHOTS FOR old.coll1.src"))
+
+    with pytest.raises(UnsupportedSyntaxError, match="cannot"):
+        list(session.execute_to_morsels("SHOW ALL SNAPSHOTS FOR old.coll1.src"))

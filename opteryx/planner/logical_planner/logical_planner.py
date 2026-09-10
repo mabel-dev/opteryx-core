@@ -3978,8 +3978,10 @@ _HISTORY_STATEMENTS = {
 }
 
 
-def _plan_show_history(table_name: str, word: str) -> LogicalPlan:
-    """`SHOW SNAPSHOTS|LINEAGE|SOURCES FOR <table>` — Scan (bound for the
+def _plan_show_history(
+    table_name: str, word: str, include_expired: bool = False
+) -> LogicalPlan:
+    """`SHOW [ALL] SNAPSHOTS|LINEAGE|SOURCES FOR <table>` — Scan (bound for the
     commit history only, never read) -> ShowSnapshots / ShowLineage /
     ShowSources.
 
@@ -3996,6 +3998,12 @@ def _plan_show_history(table_name: str, word: str) -> LogicalPlan:
     loads that one and the Show node above consumes exactly that.
     """
     node_type, history_view = _HISTORY_STATEMENTS[word]
+    # The ALL form is a different view of the same history, not a different
+    # statement: same node, same Scan shape, a wider load and a wider output.
+    # Naming it here is what makes the binder gate it at MANIFEST and hand the
+    # connector the loader that reads tombstones.
+    if include_expired:
+        history_view = "snapshots_all"
     plan = LogicalPlan()
 
     from_step = LogicalPlanNode(node_type=LogicalPlanStepType.Scan)
@@ -4017,6 +4025,11 @@ def _plan_show_history(table_name: str, word: str) -> LogicalPlan:
 
     show_step = LogicalPlanNode(node_type=node_type)
     show_step.relation = table_name
+    # Carried on the Show node as well as the Scan: the Scan's copy picks the
+    # loader, this one picks the output schema, and both being the same value
+    # from the same place is what stops the rows and the schema disagreeing
+    # about which shape the statement is.
+    show_step.history_view = history_view
     previous_step_id, step_id = step_id, random_string()
     plan.add_node(step_id, show_step)
     plan.add_edge(previous_step_id, step_id)
@@ -4131,6 +4144,27 @@ def plan_show_variables(statement, **kwargs):
         # `words` list; catalog/schema/table names are case-sensitive.
         table_name = ".".join(part["value"] for part in parts[2:])
         return _plan_show_manifest(table_name)
+    if words[0] == "ALL":
+        # `SHOW ALL SNAPSHOTS FOR <table>`: the live history AND the tombstones
+        # expiration has retired but not yet purged. sqlparser hands `ALL`
+        # through as a plain word here, so this needs no grammar of its own.
+        #
+        # SNAPSHOTS only. There is nothing for ALL to mean on the other two:
+        # LINEAGE is per-commit receipts (the receipts of expired commits go
+        # with them) and SOURCES is a field on the dataset, not a history.
+        if len(words) < 2 or words[1] != "SNAPSHOTS":
+            raise UnsupportedSyntaxError(
+                "`SHOW ALL` is only supported for snapshots: "
+                "`SHOW ALL SNAPSHOTS FOR <table>`."
+            )
+        if len(words) < 4 or words[2] != "FOR":
+            raise UnsupportedSyntaxError(
+                "`SHOW ALL SNAPSHOTS FOR <table>` requires a table name, e.g. "
+                "`SHOW ALL SNAPSHOTS FOR opteryx.test.pypi`."
+            )
+        # Original case preserved, as for SHOW MANIFEST FOR above.
+        table_name = ".".join(part["value"] for part in parts[3:])
+        return _plan_show_history(table_name, "SNAPSHOTS", include_expired=True)
     if words[0] in _HISTORY_STATEMENTS:
         if len(words) < 3 or words[1] != "FOR":
             # Bare SHOW SNAPSHOTS / LINEAGE / SOURCES has nothing to enumerate
@@ -4162,8 +4196,8 @@ def plan_show_variables(statement, **kwargs):
         f"Opteryx does not support 'SHOW {' '.join(words)}'; "
         "supported forms are `SHOW VARIABLES`, `SHOW USER`, `SHOW GRANTS`, "
         "`SHOW TRIGGERS FOR <table>`, `SHOW MANIFEST FOR <table>`, "
-        "`SHOW SNAPSHOTS FOR <table>`, `SHOW LINEAGE FOR <table>`, and "
-        "`SHOW SOURCES FOR <table>`."
+        "`SHOW SNAPSHOTS FOR <table>`, `SHOW ALL SNAPSHOTS FOR <table>`, "
+        "`SHOW LINEAGE FOR <table>`, and `SHOW SOURCES FOR <table>`."
     )
 
 

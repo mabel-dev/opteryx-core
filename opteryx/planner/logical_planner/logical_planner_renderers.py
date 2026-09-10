@@ -305,6 +305,10 @@ def render_show_manifest(node: LogicalPlanNode) -> str:
 
 @register_render(LogicalPlanStepType.ShowSnapshots)
 def render_show_snapshots(node: LogicalPlanNode) -> str:
+    # The ALL form reads a wider history under a stricter gate, so an EXPLAIN
+    # that called it plain SHOW SNAPSHOTS would name a statement that was not run.
+    if getattr(node, "history_view", None) == "snapshots_all":
+        return f"SHOW ALL SNAPSHOTS FOR ({node.relation})"
     return f"SHOW SNAPSHOTS FOR ({node.relation})"
 
 

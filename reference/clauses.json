@@ -649,12 +649,13 @@
         "scope": "statement",
         "status": "supported",
         "syntax_forms": [
-            "SHOW SNAPSHOTS FOR table_name"
+            "SHOW SNAPSHOTS FOR table_name",
+            "SHOW ALL SNAPSHOTS FOR table_name"
         ],
         "bare_form_rejected": true,
         "summary": "List the commit history of a catalog-backed table.",
         "documentation": "Reached through the parser's generic SHOW catch-all and planned as a Scan bound for the commit history alone - the relation's data and its manifest are never read. One row per live snapshot, newest first, carrying the snapshot's identity, its author and operation, and the added/deleted/total record, file and byte counts the catalog recorded with it. Gated at READ, the same tier as selecting from the table: a snapshot row is commit metadata, and exposes no file paths or storage layout.",
-        "notes": "Bare SHOW SNAPSHOTS is rejected - a commit history belongs to one relation and there is no session default workspace to sweep. Only connectors that keep a commit log answer it; others report that they have no snapshot history rather than an empty one. Expired snapshots are not listed - the catalog retires them from the history it returns."
+        "notes": "Bare SHOW SNAPSHOTS is rejected - a commit history belongs to one relation and there is no session default workspace to sweep. Only connectors that keep a commit log answer it; others report that they have no snapshot history rather than an empty one. Expired snapshots are not listed - the catalog retires them from the history it returns. SHOW ALL SNAPSHOTS FOR lists them as well, for as long as their tombstones survive the recovery window, with expired_at and is_queryable columns saying which rows those are and that the data behind them cannot be queried. That form is gated at MANIFEST (owner), not READ: what it adds is what the table is still holding in the restore window rather than data the caller can already read."
     },
     "show_triggers": {
         "canonical_name": "SHOW TRIGGERS",

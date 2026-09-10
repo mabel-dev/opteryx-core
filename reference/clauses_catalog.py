@@ -1072,7 +1072,10 @@ CLAUSE_DEFINITIONS = {
         "planner_entry": "plan_show_variables",
         "scope": "statement",
         "status": "supported",
-        "syntax_forms": ["SHOW SNAPSHOTS FOR table_name"],
+        "syntax_forms": [
+            "SHOW SNAPSHOTS FOR table_name",
+            "SHOW ALL SNAPSHOTS FOR table_name",
+        ],
         # See show_manifest's bare_form_rejected note above.
         "bare_form_rejected": True,
         "summary": "List the commit history of a catalog-backed table.",
@@ -1091,7 +1094,14 @@ CLAUSE_DEFINITIONS = {
             "relation and there is no session default workspace to sweep. Only "
             "connectors that keep a commit log answer it; others report that they "
             "have no snapshot history rather than an empty one. Expired snapshots "
-            "are not listed - the catalog retires them from the history it returns."
+            "are not listed - the catalog retires them from the history it returns. "
+            "SHOW ALL SNAPSHOTS FOR lists them as well, for as long as their "
+            "tombstones survive the recovery window, with expired_at and "
+            "is_queryable columns saying which rows those are and that the data "
+            "behind them cannot be queried. That form is gated at MANIFEST "
+            "(owner), not READ: what "
+            "it adds is what the table is still holding in the restore window "
+            "rather than data the caller can already read."
         ),
     },
     "show_triggers": {

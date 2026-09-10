@@ -48,6 +48,10 @@ def _check(sql):
         "WHEN MATCHED THEN UPDATE SET details = n.details",
         f"SHOW MANIFEST FOR {TARGET}",
         f"SHOW SNAPSHOTS FOR {TARGET}",
+        # Same history-only Scan, wider output: a check binds it without
+        # reading the history, so the shape is all there is to report and it
+        # must still be reported rather than refused.
+        f"SHOW ALL SNAPSHOTS FOR {TARGET}",
         # The two provenance reads bind through the same history-only Scan as
         # SHOW SNAPSHOTS, and their shape is fixed the same way - so a check
         # that does not read the history still has a schema to report.

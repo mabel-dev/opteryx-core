@@ -1245,6 +1245,25 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
                 f"User does not have permission to view the manifest for {node.relation}"
             )
 
+    # SHOW ALL SNAPSHOTS FOR is held to the same owner-tier gate, for a related
+    # reason: the rows it adds are expired snapshots, which describe what this
+    # relation is still holding in the restore window and for how long. That is
+    # a question about the storage and its retention, not about data the caller
+    # can already read - and acting on the answer (restoring one) is the
+    # owner's to do. The plain SHOW SNAPSHOTS FOR stays at READ.
+    #
+    # It reuses the MANIFEST action rather than introducing one: the action
+    # vocabulary is closed (opteryx.managers.permissions), a capability maps an
+    # unknown action to no roles at all, and a name this engine invented would
+    # therefore refuse every caller - including owners - until every deployed
+    # capability shipped it. Splitting them later is a capability change, not
+    # an engine one.
+    if getattr(node, "history_view", None) == "snapshots_all":
+        if not can_perform_action(context.execution_context, node.relation, action="MANIFEST"):
+            raise PermissionError(
+                f"User does not have permission to view expired snapshots for {node.relation}"
+            )
+
     if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables
     if gateway.supports_diachronic:
@@ -1291,6 +1310,12 @@ def visit_scan(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
 
             loader_name, output_schema = {
                 "snapshots": ("get_snapshots", snapshots_output_schema),
+                # The live history plus the tombstones, in the wider shape that
+                # can say which is which - SHOW ALL SNAPSHOTS FOR, gated above.
+                "snapshots_all": (
+                    "get_all_snapshots",
+                    lambda relation: snapshots_output_schema(relation, include_expiry=True),
+                ),
                 "lineage": ("get_lineage", lineage_output_schema),
                 "sources": ("get_sources", sources_output_schema),
             }[node.history_view or "snapshots"]

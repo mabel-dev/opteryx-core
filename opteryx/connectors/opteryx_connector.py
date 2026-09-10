@@ -88,6 +88,27 @@ from opteryx.types.logical_type import LogicalCategory
 from opteryx.types.schema import SchemaColumn, RelationSchema
 
 
+def _accepts_include_expired(loader) -> bool:
+    """Whether this catalog's `load_dataset` can be asked for tombstones.
+
+    `SHOW ALL SNAPSHOTS FOR` needs a catalog new enough to read expired
+    snapshots, and a deployment can be mid-upgrade. Asked of the signature
+    rather than caught as a TypeError from the call: a TypeError raised INSIDE
+    the loader looks identical from out here, and reporting a real fault as
+    "this catalog is too old" sends whoever reads it looking in the wrong
+    place. A loader taking **kwargs is taken at its word.
+    """
+    import inspect
+
+    try:
+        parameters = inspect.signature(loader).parameters
+    except (TypeError, ValueError):  # pragma: no cover - unintrospectable callable
+        return True
+    if "include_expired" in parameters:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
 class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
     """
     Plan-time table metadata provider for Opteryx tables.
@@ -383,6 +404,23 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         self.schema = self._normalize_schema(raw_schema, relation_name=self.dataset)
         return self.schema
 
+    def get_all_snapshots(self) -> list:
+        """The same history plus the TOMBSTONES, for `SHOW ALL SNAPSHOTS FOR`.
+
+        Expired snapshots are records of what is still restorable, not versions:
+        their files are in the orphan quarantine or GCS soft-delete, reading one
+        by id is refused everywhere, and the record itself is purged when the
+        recovery window closes. The rows say so in `expired_at` and
+        `is_queryable` - the two columns this form adds - rather than sitting
+        in the list looking like history.
+
+        Gated at MANIFEST (owner) by the binder, not READ like `get_snapshots`:
+        what is asked here is what this relation is still holding in the restore
+        window and how long it has, which is an operational question about the
+        storage rather than a question about data the caller can already read.
+        """
+        return self._snapshot_rows(include_expired=True)
+
     def get_snapshots(self) -> list:
         """The relation's commit history, newest first, for `SHOW SNAPSHOTS FOR`.
 
@@ -405,14 +443,40 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         Expired snapshots are absent - the catalog's loader tombstones them out
         of the history it returns. A TAGGED snapshot can never be one of them: a
         tag holds its snapshot from expiry, which is why the `tags` column is
-        also the answer to "why is this old snapshot still here".
+        also the answer to "why is this old snapshot still here". The ALL form
+        above is the one statement that sees them.
         """
+        return self._snapshot_rows(include_expired=False)
+
+    def _snapshot_rows(self, include_expired: bool) -> list:
+        """The rows behind both SHOW SNAPSHOTS forms. One implementation, so the
+        two cannot order, tag or count a history differently."""
+        from opteryx.models.snapshot_history import SnapshotRows
         from opteryx.models.snapshot_history import normalize_snapshot
 
-        dataset = self.catalog.load_dataset(self.dataset, load_history=True)
-        snapshots = dataset.snapshots()
-        if not snapshots:
-            return []
+        if include_expired:
+            # A deployment can be mid-upgrade: the engine has the statement and
+            # the catalog cannot answer it. Refused, rather than quietly served
+            # the live history under a statement that asked for more.
+            if not _accepts_include_expired(self.catalog.load_dataset):
+                from opteryx.exceptions import UnsupportedSyntaxError
+
+                raise UnsupportedSyntaxError(
+                    "`SHOW ALL SNAPSHOTS FOR` needs a catalog that can read expired "
+                    "snapshots; this deployment's catalog cannot. `SHOW SNAPSHOTS FOR` "
+                    "answers the live history."
+                )
+            dataset = self.catalog.load_dataset(
+                self.dataset, load_history=True, include_expired=True
+            )
+        else:
+            dataset = self.catalog.load_dataset(self.dataset, load_history=True)
+        snapshots = list(dataset.snapshots())
+        # Tombstones arrive in a list of their own and are merged only here: to
+        # the catalog they are not history, and to this statement they are rows.
+        expired = list(dataset.expired_snapshots()) if include_expired else []
+        if not snapshots and not expired:
+            return SnapshotRows((), include_expiry=include_expired)
 
         # The catalog's head pointer. `current`, not `latest`: a rollback moves
         # it BACKWARDS, so the snapshot it names is not necessarily the newest
@@ -420,7 +484,7 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         # `current-snapshot-id`.
         current_snapshot_id = dataset.metadata.current_snapshot_id
         ordered = sorted(
-            snapshots, key=lambda s: (s.timestamp_ms, s.snapshot_id), reverse=True
+            snapshots + expired, key=lambda s: (s.timestamp_ms, s.snapshot_id), reverse=True
         )
 
         # Tags point AT snapshots, so they are grouped by target here rather than
@@ -467,15 +531,19 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
                 names.append("previous")
             return names
 
-        return [
-            normalize_snapshot(
-                snapshot,
-                current_snapshot_id,
-                tags=sorted(tags_by_snapshot.get(snapshot.snapshot_id, []))
-                + _virtual_tags(snapshot.snapshot_id),
-            )
-            for snapshot in ordered
-        ]
+        return SnapshotRows(
+            (
+                normalize_snapshot(
+                    snapshot,
+                    current_snapshot_id,
+                    tags=sorted(tags_by_snapshot.get(snapshot.snapshot_id, []))
+                    + _virtual_tags(snapshot.snapshot_id),
+                    include_expiry=include_expired,
+                )
+                for snapshot in ordered
+            ),
+            include_expiry=include_expired,
+        )
 
     def get_lineage(self) -> list:
         """The relation's receipts, newest snapshot first, for `SHOW LINEAGE FOR`.

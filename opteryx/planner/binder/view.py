@@ -69,21 +69,27 @@ def visit_show_manifest(self, node: Node, context: BindingContext) -> Tuple[Node
 
 
 def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
-    """Bind SHOW SNAPSHOTS FOR: consume the commit history the Scan below
+    """Bind SHOW [ALL] SNAPSHOTS FOR: consume the commit history the Scan below
     already fetched (visit_scan populates context.snapshots for a
-    `for_snapshots_only` Scan, gated at READ — see dataset.py) and fix the
-    output to the history's own schema, never the scanned relation's column
-    schema, which is unrelated.
+    `for_snapshots_only` Scan, gated at READ — or at MANIFEST for the ALL form,
+    see dataset.py) and fix the output to the history's own schema, never the
+    scanned relation's column schema, which is unrelated.
+
+    `history_view` is the planner's, set on this node and on the Scan from one
+    value, so the schema fixed here and the rows the Scan loaded are the same
+    shape by construction.
     """
     from opteryx.exceptions import UnsupportedSyntaxError
     from opteryx.models.snapshot_history import snapshots_output_schema
+
+    include_expiry = getattr(node, "history_view", None) == "snapshots_all"
 
     if context.schema_only:
         # The history IS this statement's result, and a schema-only bind
         # deliberately did not read one — the same reasoning as SHOW MANIFEST:
         # the output schema is fixed, so the statement checks clean and only the
         # rows (and with them the row-count estimate) are left unknown.
-        node.schema = snapshots_output_schema(node.relation)
+        node.schema = snapshots_output_schema(node.relation, include_expiry=include_expiry)
     else:
         snapshots = context.snapshots.get(node.relation)
         if snapshots is None:
@@ -94,7 +100,7 @@ def visit_show_snapshots(self, node: Node, context: BindingContext) -> Tuple[Nod
                 "keep a commit log)."
             )
         node.snapshots = snapshots
-        node.schema = snapshots_output_schema(node.relation)
+        node.schema = snapshots_output_schema(node.relation, include_expiry=include_expiry)
         node.schema.row_count_estimate = len(snapshots)
     node.columns = []
     for schema_column in node.schema.columns:
