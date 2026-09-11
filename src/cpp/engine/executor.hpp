@@ -23,6 +23,7 @@
 #include <ctime>
 #include <functional>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -261,6 +262,33 @@ inline void run_worker_task(void* raw) {
     run_worker(static_cast<WorkerCtx*>(raw));
 }
 
+// ErrCtx::msg is a BORROWED `const char*`, documented as "valid at raise time"
+// (cxx_morsel.h). An operator that raises with a message of its own keeps the
+// text in its OWN state -- a scan source, for instance, holds it in its
+// GlobalSourceState (native_postgres_scan_source.hpp: `std::string err; //
+// ErrCtx::msg points here`). Those states are locals of run_pipeline_impl below,
+// so they are destroyed the instant it returns and every such pointer dangles.
+//
+// The consumer reads the message much later: Engine::run() unwinds back to
+// _engine_plan_run (_operators.pyx), which only THEN copies it into the error
+// slot. Copying from freed memory yielded a garbage message -- observed as
+// `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xf5 in position 0`,
+// with a different byte each run, masking the real server error entirely.
+//
+// So latch the text into storage owned by THIS thread before the raiser's state
+// dies. The driver calls run_pipeline_impl and copies the message on the same
+// thread, so the latch outlives the read; it is overwritten by the next raising
+// pipeline on this thread, by which point the previous message has been copied
+// (the engine stops at the first error). A message that is already latched, or
+// that points at a string literal, is left alone.
+inline void latch_err_msg(ErrCtx& err) {
+    static thread_local std::string latched;
+    if (err.code == 0 || err.msg == nullptr) return;
+    if (err.msg == latched.c_str()) return;   // already latched; assign would self-alias
+    latched.assign(err.msg);
+    err.msg = latched.c_str();
+}
+
 // Shared setup: global states + per-worker contexts. `dispatch(ctxs)` runs all of them
 // to completion (join or pool-wait — whichever backend the caller chose), then this
 // checks errors and finalizes exactly as before.
@@ -302,7 +330,8 @@ run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch,
     }
 
     for (ErrCtx& e : errs) {
-        if (e.code != 0) { err = e; return gsink; }  // skip finalize on any worker error
+        // skip finalize on any worker error; latch before gsrc/gsink are destroyed
+        if (e.code != 0) { err = e; latch_err_msg(err); return gsink; }
     }
     // P2: finalize() — the breaker's result construction — was, like combine(),
     // timed by nothing. Runs exactly once per pipeline. Wall only, for the same
@@ -315,6 +344,8 @@ run_pipeline_impl(Pipeline& p, int dop, ErrCtx& err, DispatchFn&& dispatch,
         fs.finalize_ns.fetch_add(telem_now_ns() - ft0, std::memory_order_relaxed);
         trace_end(fh, 0, 0);
     }
+    // finalize() may raise with text owned by gsink, which dies on return.
+    latch_err_msg(err);
     return gsink;
 }
 

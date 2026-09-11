@@ -38,7 +38,6 @@ sets `preserve_sql_case` uses the relation name exactly as typed, for schemas
 whose objects were created with quoted mixed-case names.
 """
 
-import datetime
 import decimal
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -55,7 +54,7 @@ from opteryx.exceptions import UnsupportedSyntaxError
 from opteryx.expression import NodeType, get_all_nodes_of_type
 from opteryx.models import QueryTelemetry
 from opteryx.types import logical_type as _lt
-from opteryx.types.logical_type import ColumnType, LogicalCategory, LogicalKind
+from opteryx.types.logical_type import ColumnType, DrakenType, LogicalCategory, LogicalKind
 from opteryx.types.schema import RelationSchema, SchemaColumn, mint_column_identity
 
 # Rows per morsel the native Source cuts the server stream into. One morsel of
@@ -428,7 +427,15 @@ class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
 
         if not file_entries:
             return None
-        return Manifest(file_entries, schema, stats_are_authoritative=False)
+        # `bounds_are_ordinal=True` because the refresh writes them that way, and
+        # it MUST travel with them: `prune_files` ordinalizes a predicate literal
+        # before comparing only when this is set, so a manifest carrying ordinals
+        # without it compares a real value against an ordinal and matches
+        # nothing. The bounds are ordinals for the reason the writer records -
+        # one typed ARRAY column cannot hold a relation's mixed value types.
+        return Manifest(
+            file_entries, schema, stats_are_authoritative=False, bounds_are_ordinal=True
+        )
 
     def _row_estimate(self, query_text) -> Optional[int]:
         """pg_class.reltuples — the planner's own estimate, free to read. -1 (never
@@ -496,6 +503,13 @@ class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
         for node in get_all_nodes_of_type(condition, (NodeType.IDENTIFIER,)):
             if node.schema_column.name.lower() not in self._meta:
                 return False
+        # Every literal must be spellable as a PostgreSQL bind parameter. The
+        # builder has no fallback - a predicate admitted here and then refused by
+        # `_literal_text` is a failed query, not a missed pushdown - so the gate
+        # asks the renderer itself rather than restating what it can spell.
+        for node in get_all_nodes_of_type(condition, (NodeType.LITERAL,)):
+            if _render_literal(node) is _UNRENDERABLE:
+                return False
         return True
 
     # ---- execution is native ------------------------------------------------
@@ -535,13 +549,70 @@ _UNARY_SQL = {
 }
 
 
-def _literal_text(value: Any) -> Optional[str]:
-    """A literal as a TEXT bind parameter. The server casts it to the column's
-    type, so this is the literal's input-syntax form, never SQL."""
-    if value is None:
+# `_render_literal` returns this for a literal it cannot spell as PostgreSQL
+# input syntax. It is a value, not an exception, because `can_push` has to ask
+# the same question as `build_scan_statement` and get an answer rather than
+# control flow - the two MUST agree, or a predicate admitted by the gate reaches
+# a builder that raises, and the query fails instead of filtering above the scan.
+_UNRENDERABLE = object()
+
+
+def _pg_input_syntax(text: str) -> Any:
+    """Decline the one rendering the engine's formatters emit that PostgreSQL
+    cannot read back: a year before 1 CE ('-0221-09-05', '0000-01-01'). Postgres
+    spells those with a `BC` suffix; rather than invent that spelling here,
+    decline and let the predicate filter above the scan."""
+    if text[0] == "-" or text.startswith("0000"):
+        return _UNRENDERABLE
+    return text
+
+
+def _render_literal(node) -> Any:
+    """A bound LITERAL node as a TEXT bind parameter, `None` for NULL, or
+    `_UNRENDERABLE`.
+
+    The server casts the parameter to the column's type, so this is the
+    literal's input-syntax form, never SQL.
+
+    Dispatch is on the literal's TYPE TAG, never on the Python type of its
+    value. A temporal literal reaches the connector as its PHYSICAL storage
+    integer - DATE32 is days since the epoch, TIMESTAMP64 microseconds - so the
+    `10470` of `CAST('1998-09-01' AS DATE)` is indistinguishable from the
+    integer 10470, and only `node.type` tells them apart. Rendering from the
+    value alone sent '10470' to the server as a date.
+
+    The days/microseconds renderings come from `opteryx.expression.formatter`,
+    the engine's own literal formatters, so a pushed bound is spelled exactly as
+    the same literal is spelled everywhere else.
+    """
+    from opteryx.expression.formatter import _format_date_days
+    from opteryx.expression.formatter import _format_timestamp_micros
+
+    column_type = node.type
+    if not isinstance(column_type, ColumnType):
+        # An unbound or synthetic literal carries no type, and an untagged
+        # integer cannot be told from an epoch day count.
+        return _UNRENDERABLE
+
+    value = node.value
+    physical = column_type.physical
+    if value is None or physical == DrakenType.NULL:
         return None
+
+    # bool is a subclass of int - test it before the integer widths.
     if isinstance(value, bool):
         return "true" if value else "false"
+
+    if physical == DrakenType.DATE32:
+        if not isinstance(value, int):
+            return _UNRENDERABLE
+        return _pg_input_syntax(_format_date_days(value))
+
+    if physical == DrakenType.TIMESTAMP64:
+        if not isinstance(value, int):
+            return _UNRENDERABLE
+        return _pg_input_syntax(_format_timestamp_micros(value))
+
     if isinstance(value, (int, float, decimal.Decimal)):
         return str(value)
     if isinstance(value, str):
@@ -550,20 +621,24 @@ def _literal_text(value: Any) -> Optional[str]:
         # VARCHAR literals are bytes inside the plan. Only VARCHAR is pushable
         # (PUSHABLE_TYPES), so this is text, never an opaque VARBINARY value.
         return value.decode("utf-8")
-    if isinstance(value, datetime.datetime):
-        return value.isoformat(sep=" ")
-    if isinstance(value, datetime.date):
-        return value.isoformat()
-    raise NotSupportedError(
-        f"cannot push a {type(value).__name__} literal into a PostgreSQL scan"
-    )
+    return _UNRENDERABLE
+
+
+def _literal_text(node) -> Optional[str]:
+    """`_render_literal`, raising rather than returning the sentinel."""
+    text = _render_literal(node)
+    if text is _UNRENDERABLE:
+        raise NotSupportedError(
+            f"cannot push a {node.type} literal ({node.value!r}) into a PostgreSQL scan"
+        )
+    return text
 
 
 def _operand_sql(table: PostgresTable, node, params: List[Optional[str]]) -> str:
     if node.node_type == NodeType.IDENTIFIER:
         return _quote_identifier(table.pg_name(node.schema_column))
     if node.node_type == NodeType.LITERAL:
-        params.append(_literal_text(node.value))
+        params.append(_literal_text(node))
         return f"${len(params)}"
     raise NotSupportedError(f"cannot push a {node.node_type} operand into a PostgreSQL scan")
 

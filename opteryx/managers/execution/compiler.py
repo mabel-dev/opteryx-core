@@ -5298,12 +5298,23 @@ class _Compiler:
         self.scan_sources[scan.identity] = "NativePostgresScanSource"
         # The scan_facts shape is the parquet/skene one so the post-run fold
         # reads it uniformly; a server stream has no files or row groups.
+        #
+        # `remote_sql` is the statement this scan actually sends to the server,
+        # with its `$n` parameters alongside. It is a plan-time fact of the scan
+        # — the one piece of this node's work that happens somewhere we cannot
+        # otherwise see — so it belongs on the node's telemetry row, the same
+        # channel the parquet scan uses to report what it read. Parameters are
+        # carried separately rather than interpolated: the statement stays the
+        # literal text sent on the wire, and a reader who wants to replay it has
+        # the bindings without the connector having to re-quote anything.
         self.scan_facts[scan.identity] = {
             "files_read": 0,
             "row_groups_read": 0,
             "row_groups_pruned": 0,
             "parquet_rows_before_filter": 0,
             "columns_read": len(columns),
+            "remote_sql": statement.sql,
+            "remote_sql_parameters": list(statement.params),
         }
         p = self.nplan.new_pipeline()
         self.nplan.set_native_postgres_scan_source(p, plan)

@@ -458,6 +458,16 @@ def _collect_node_stats(plan: PhysicalPlan, stats: list = None):
                         node_stat["parquet_projection_columns_read"] = facts["columns_read"]
                         node_stat["rows_read"] = node_stat.get("records_out", 0)
                         node_stat["bytes_processed"] = node_stat.get("bytes_out", 0)
+                        # A remote scan (PostgreSQL) does its reading on a server,
+                        # where none of the counters above can see it. The statement
+                        # it sent is the only record of what that work was, so it is
+                        # reported on the node's row. Absent for file scans — there
+                        # is no remote statement to state.
+                        if "remote_sql" in facts:
+                            node_stat["remote_sql"] = facts["remote_sql"]
+                            node_stat["remote_sql_parameters"] = facts[
+                                "remote_sql_parameters"
+                            ]
 
             # Operator config — the per-node human-readable summary each operator
             # already exposes for diagnostics (the FILTER's predicate expression,

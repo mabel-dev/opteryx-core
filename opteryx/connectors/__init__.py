@@ -57,7 +57,11 @@ nested.
 System metadata (information_schema) is a reserved nested schema addressed
 as `<workspace>.information_schema.<table>` and served by OpteryxConnector
 itself (see opteryx/connectors/information_schema.py) - not a separate
-top-level connector prefix.
+top-level connector prefix. It is a question about the WORKSPACE, not about
+its data, so `connector_factory` routes it down the SETTINGS chain: it is
+answered from the opteryx catalog entry whatever the workspace's data is
+bound to, and an externally-bound workspace's own information_schema is not
+reachable through Opteryx.
 
 Legacy Compatibility:
 The following names are supported for backward compatibility and map to FileSystemConnector:
@@ -482,6 +486,30 @@ def connector_factory(dataset, telemetry, **config):
         # Virtual data connector is a gateway - it doesn't need dataset/telemetry
         # Those are passed when creating the table reader via table_engine()
         return VirtualDataConnector()
+
+    # `information_schema` is the workspace's OWN metadata - its grants, tasks,
+    # triggers, listeners and catalog listings - and none of it depends on what
+    # the workspace's data is bound to. Grants in particular are answered by the
+    # registered permissions capability, which knows nothing of any data
+    # provider. So the reserved schema resolves through the SETTINGS chain, the
+    # opteryx catalog entry that exists whatever the binding is and needs no
+    # credential, exactly as `ALTER WORKSPACE` and `DROP WORKSPACE` do.
+    #
+    # Routed through the DATA binding instead, an externally-bound workspace
+    # asked its source for our metadata: `aiven.information_schema.grants`
+    # became `SELECT * FROM information_schema.grants` at a PostgreSQL server,
+    # which has no such view, so the query died as dataset-not-found. Where a
+    # name DOES exist at both ends (`tables`, `columns`, `views`, `schemata`,
+    # `triggers`) the failure would have been worse than an error: the source's
+    # answer to a different question. A bound source's own information_schema
+    # is therefore not reachable through Opteryx at all - by design.
+    workspace_segment, _, relative_id = dataset.partition(".")
+    if relative_id.partition(".")[0] == "information_schema" and _IDENTIFIER.match(
+        workspace_segment
+    ):
+        # Passed the workspace alone, so the settings chain's own fallback to
+        # this function (no settings resolver installed) cannot re-enter here.
+        return workspace_settings_connector(workspace_segment, telemetry)
 
     connector = None
     entry: dict = {}

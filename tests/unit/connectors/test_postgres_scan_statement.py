@@ -7,7 +7,6 @@ The server-facing half (describe, pushdown decisions on a real plan, the
 native Source) is covered by tests/storage/test_postgres_connector.py.
 """
 
-import datetime
 import decimal
 import os
 import sys
@@ -24,6 +23,7 @@ from opteryx.connectors.postgres_connector import build_scan_statement
 from opteryx.exceptions import InvalidInternalStateError
 from opteryx.exceptions import NotSupportedError
 from opteryx.exceptions import UnsupportedSyntaxError
+from opteryx.expression import Node
 from opteryx.expression import NodeType
 from opteryx.types import logical_type as _lt
 from opteryx.types.schema import SchemaColumn
@@ -33,13 +33,18 @@ from opteryx.types.schema import mint_column_identity
 class _Node:
     """Attribute-shaped like an expression Node, for the builder only."""
 
-    def __init__(self, node_type, value=None, left=None, right=None, centre=None, schema_column=None):
+    def __init__(self, node_type, value=None, left=None, right=None, centre=None, schema_column=None, type=None):
         self.node_type = node_type
         self.value = value
         self.left = left
         self.right = right
         self.centre = centre
         self.schema_column = schema_column
+        # A bound LITERAL always carries its ColumnType, and the builder renders
+        # temporal literals FROM that tag - their value is the physical storage
+        # integer. A fixture that omits it is not a literal the planner can
+        # produce, so every `_lit` here supplies one.
+        self.type = type
 
 
 def _typmod(precision: int, scale: int) -> int:
@@ -67,8 +72,8 @@ def _col(name):
     return _Node(NodeType.IDENTIFIER, value=name, schema_column=_schema_column(name))
 
 
-def _lit(value):
-    return _Node(NodeType.LITERAL, value=value)
+def _lit(value, column_type=_lt.INT64):
+    return _Node(NodeType.LITERAL, value=value, type=column_type)
 
 
 def _projection(*names):
@@ -96,7 +101,7 @@ def test_zero_projection_selects_a_constant():
 
 
 def test_predicates_become_bind_parameters_in_order():
-    predicates = [_cmp("Eq", _col("name"), _lit(b"Earth")), _cmp("Gt", _col("mass"), _lit(1))]
+    predicates = [_cmp("Eq", _col("name"), _lit(b"Earth", _lt.VARCHAR)), _cmp("Gt", _col("mass"), _lit(1))]
     statement = build_scan_statement(_table(), _projection("name"), predicates, None)
     assert statement.sql == (
         'SELECT "name" FROM "public"."planets" WHERE ("name" = $1) AND ("mass" > $2)'
@@ -173,18 +178,66 @@ def test_unsupported_predicate_shapes_fail_loud():
 
 
 def test_literal_rendering():
-    assert _literal_text(None) is None
-    assert _literal_text(True) == "true"
-    assert _literal_text(False) == "false"
-    assert _literal_text(42) == "42"
-    assert _literal_text(1.5) == "1.5"
-    assert _literal_text(decimal.Decimal("1.50")) == "1.50"
-    assert _literal_text("text") == "text"
-    assert _literal_text(b"bytes") == "bytes"
-    assert _literal_text(datetime.datetime(2024, 1, 2, 3, 4, 5)) == "2024-01-02 03:04:05"
-    assert _literal_text(datetime.date(2024, 1, 2)) == "2024-01-02"
+    assert _literal_text(_lit(None, _lt.INT64)) is None
+    assert _literal_text(_lit(True, _lt.BOOLEAN)) == "true"
+    assert _literal_text(_lit(False, _lt.BOOLEAN)) == "false"
+    assert _literal_text(_lit(42)) == "42"
+    assert _literal_text(_lit(1.5, _lt.FLOAT64)) == "1.5"
+    assert _literal_text(_lit(decimal.Decimal("1.50"), _lt.DECIMAL(6, 2))) == "1.50"
+    assert _literal_text(_lit("text", _lt.VARCHAR)) == "text"
+    assert _literal_text(_lit(b"bytes", _lt.VARCHAR)) == "bytes"
     with pytest.raises(NotSupportedError):
-        _literal_text([1, 2])
+        _literal_text(_lit([1, 2], _lt.VARCHAR))
+
+
+def test_temporal_literals_render_from_the_type_tag_not_the_value():
+    # The planner hands a temporal literal its PHYSICAL storage integer: a DATE
+    # is days since the epoch, a TIMESTAMP microseconds. Dispatching on the
+    # Python type sent '10470' to the server as a date ('invalid input syntax
+    # for type date'), so the tag is what decides.
+    assert _literal_text(_lit(10470, _lt.DATE)) == "1998-09-01"
+    assert _literal_text(_lit(0, _lt.DATE)) == "1970-01-01"
+    assert _literal_text(_lit(-1, _lt.DATE)) == "1969-12-31"
+    assert _literal_text(_lit(904644672000000, _lt.TIMESTAMP())) == "1998-09-01T10:11:12.000000"
+    # ... and the same integer under an INTEGER tag is still the integer.
+    assert _literal_text(_lit(10470)) == "10470"
+
+
+def test_a_literal_without_a_type_tag_is_not_pushable():
+    # An untagged 10470 cannot be told from an epoch day count, so it renders as
+    # nothing rather than as a guess.
+    with pytest.raises(NotSupportedError):
+        _literal_text(_Node(NodeType.LITERAL, value=10470))
+
+
+def test_pre_common_era_temporal_literals_are_declined():
+    # The formatters spell year 0 and earlier in a form PostgreSQL cannot read
+    # back (it wants a `BC` suffix), so those decline rather than mis-bind.
+    with pytest.raises(NotSupportedError):
+        _literal_text(_lit(-800000, _lt.DATE))
+    with pytest.raises(NotSupportedError):
+        _literal_text(_lit(-800000 * 86400 * 1000000, _lt.TIMESTAMP()))
+
+
+def test_can_push_declines_a_predicate_holding_an_unrenderable_literal():
+    # The gate and the builder MUST agree: build_scan_statement has no fallback,
+    # so a predicate can_push admits and _literal_text then refuses is a failed
+    # query, not a missed pushdown. Real expression Nodes here - the gate walks
+    # the tree with the engine's own traversal.
+    def _predicate(literal):
+        return types.SimpleNamespace(
+            condition=Node(
+                NodeType.COMPARISON_OPERATOR,
+                value="Gt",
+                left=Node(NodeType.IDENTIFIER, value="id", schema_column=_schema_column("id")),
+                right=literal,
+            )
+        )
+
+    table = _table()
+    # A pre-1 CE DATE is the shape the builder cannot spell.
+    assert table.can_push(_predicate(Node(NodeType.LITERAL, value=-800000, type=_lt.DATE))) is False
+    assert table.can_push(_predicate(Node(NodeType.LITERAL, value=10470, type=_lt.DATE))) is True
 
 
 # ---- relation names ----------------------------------------------------------

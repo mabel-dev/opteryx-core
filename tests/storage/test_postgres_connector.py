@@ -140,6 +140,92 @@ def test_like_lowered_to_a_function_is_declined_not_broken():
     assert "Filter" in text
 
 
+# The fixture the temporal tests read. Provisioned out of band on the shared dev
+# server (the suite itself is read-only); recreate it with:
+#
+#   CREATE TABLE test.temporal (id integer PRIMARY KEY, d date, ts timestamp,
+#                               tstz timestamptz);
+#   INSERT INTO test.temporal VALUES
+#     (1, DATE '1969-12-31', TIMESTAMP '1969-12-31 23:59:59.000001', TIMESTAMPTZ '1969-12-31 23:59:59.000001+00'),
+#     (2, DATE '1970-01-01', TIMESTAMP '1970-01-01 00:00:00',        TIMESTAMPTZ '1970-01-01 00:00:00+00'),
+#     (3, DATE '1998-09-01', TIMESTAMP '1998-09-01 10:11:12.000001', TIMESTAMPTZ '1998-09-01 10:11:12.000001+00'),
+#     (4, DATE '2024-02-29', TIMESTAMP '2024-02-29 12:00:00',        TIMESTAMPTZ '2024-02-29 12:00:00+00'),
+#     (5, NULL, NULL, NULL);
+#
+# Row 1 is the point of the pre-epoch row: its DATE is day -1, so it proves the
+# sign path, which an all-positive fixture would leave untested.
+TEMPORAL = f"{WORKSPACE}.test.temporal"
+
+
+def _pushed_params(sql):
+    """Run `sql` and return the bind parameters each pushed scan was given."""
+    captured = []
+    original = postgres_connector.build_scan_statement
+
+    def _capture(table, columns, predicates, limit):
+        statement = original(table, columns, predicates, limit)
+        captured.append(statement.params)
+        return statement
+
+    postgres_connector.build_scan_statement = _capture
+    try:
+        rows = _column(sql, "COUNT(*)")
+    finally:
+        postgres_connector.build_scan_statement = original
+    return rows[0], captured
+
+
+def test_a_temporal_predicate_is_pushed_as_a_temporal_parameter():
+    """The regression the unit fixtures could not see.
+
+    A temporal literal reaches the connector as its PHYSICAL storage integer -
+    a DATE is days since the epoch, a TIMESTAMP microseconds - so rendering the
+    bind parameter from the Python value alone sent `'10470'` where the server
+    wanted `'1998-09-01'`, and EVERY date or timestamp predicate on a
+    Postgres-bound relation failed with 22007/22008. The old unit test
+    hand-built a `datetime.date` the planner never produces, so it stayed green
+    throughout.
+
+    Both halves are asserted: the PARAMETER is what the bug corrupted, and the
+    COUNT is what proves the parameter meant what it said. A parameter that
+    merely parses as a date would pass the first assertion alone.
+    """
+    cases = [
+        ("d >= CAST('1970-01-01' AS DATE)", 3, "1970-01-01"),
+        ("d < CAST('1970-01-01' AS DATE)", 1, "1970-01-01"),
+        ("d = CAST('1969-12-31' AS DATE)", 1, "1969-12-31"),  # day -1
+        ("d = CAST('2024-02-29' AS DATE)", 1, "2024-02-29"),
+        ("ts > CAST('1998-09-01 10:11:12' AS TIMESTAMP)", 2, "1998-09-01T10:11:12.000000"),
+        ("ts < CAST('1970-01-01 00:00:00' AS TIMESTAMP)", 1, "1970-01-01T00:00:00.000000"),
+        ("tstz > CAST('1998-09-01 10:11:12' AS TIMESTAMP)", 2, "1998-09-01T10:11:12.000000"),
+    ]
+    for predicate, expected_rows, expected_param in cases:
+        sql = f"SELECT COUNT(*) FROM {TEMPORAL} WHERE {predicate}"
+        rows, params = _pushed_params(sql)
+        assert params == [[expected_param]], (predicate, params)
+        assert rows == expected_rows, (predicate, rows)
+        assert "predicate pushdown into sc" in _explain_text(sql), predicate
+
+
+def test_a_temporal_between_is_pushed_as_two_temporal_parameters():
+    sql = (
+        f"SELECT COUNT(*) FROM {TEMPORAL} "
+        "WHERE d BETWEEN CAST('1969-12-31' AS DATE) AND CAST('1970-01-01' AS DATE)"
+    )
+    rows, params = _pushed_params(sql)
+    assert params == [["1969-12-31", "1970-01-01"]], params
+    assert rows == 2
+
+
+def test_a_null_temporal_column_is_not_matched_by_a_pushed_bound():
+    # Row 5 is all NULL; a pushed comparison must not claim it.
+    assert _column(f"SELECT COUNT(*) FROM {TEMPORAL}", "COUNT(*)")[0] == 5
+    rows, _ = _pushed_params(
+        f"SELECT COUNT(*) FROM {TEMPORAL} WHERE d >= CAST('1900-01-01' AS DATE)"
+    )
+    assert rows == 4
+
+
 def test_limit_is_pushed():
     sql = f"SELECT table_name FROM {WORKSPACE}.information_schema.tables LIMIT 3"
     assert len(_column(sql, "table_name")) == 3

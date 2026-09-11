@@ -214,3 +214,73 @@ def test_settings_resolver_must_return_a_resolution(clean_registry):
 def test_settings_resolver_must_be_callable(clean_registry):
     with pytest.raises(ValueError):
         set_workspace_settings_resolver("not callable")
+
+
+# ---------------------------------------------------------------------------
+# information_schema is a question about the WORKSPACE, not about its data
+# ---------------------------------------------------------------------------
+
+
+def test_information_schema_resolves_through_the_settings_chain(clean_registry):
+    # `<workspace>.information_schema.<table>` is the workspace's own metadata
+    # - its grants, tasks, triggers, listeners and catalog listings - and none
+    # of it lives in whatever the workspace's DATA is bound to. Grants are
+    # answered by the registered permissions capability, which has no data
+    # provider in it at all.
+    set_workspace_resolver(lambda workspace: Resolution(StubConnector, {"marker": "data"}))
+    set_workspace_settings_resolver(
+        lambda workspace: Resolution(SettingsConnector, {"marker": "settings"})
+    )
+
+    connector = connector_factory("aiven.information_schema.grants", telemetry=None)
+
+    assert isinstance(connector, SettingsConnector)
+    assert connector.kwargs["marker"] == "settings"
+
+
+def test_information_schema_never_touches_the_data_binding(clean_registry):
+    # Stronger than "the settings answer wins": the data resolver must not be
+    # consulted, so the reserved schema is readable on a workspace whose
+    # stored credential has gone bad - the same property ALTER WORKSPACE has.
+    set_workspace_resolver(_data_resolver_that_needs_a_credential)
+    set_workspace_settings_resolver(
+        lambda workspace: Resolution(SettingsConnector, {"marker": "settings"})
+    )
+
+    connector = connector_factory("aiven.information_schema.grants", telemetry=None)
+
+    assert isinstance(connector, SettingsConnector)
+
+
+def test_a_real_relation_in_the_same_workspace_still_uses_the_data_binding(clean_registry):
+    # The routing is scoped to the reserved schema; everything else in the
+    # workspace is still served by whatever its data is bound to.
+    set_workspace_resolver(lambda workspace: Resolution(StubConnector, {"marker": "data"}))
+    set_workspace_settings_resolver(
+        lambda workspace: Resolution(SettingsConnector, {"marker": "settings"})
+    )
+
+    connector = connector_factory("aiven.public.orders", telemetry=None)
+
+    assert connector.kwargs["marker"] == "data"
+
+
+def test_information_schema_is_not_a_top_level_prefix(clean_registry):
+    # It is a nested schema inside a workspace, never a workspace of its own,
+    # so a leading `information_schema` segment is an ordinary name.
+    register_workspace("information_schema", StubConnector, marker="static")
+
+    connector = connector_factory("information_schema.tables", telemetry=None)
+
+    assert connector.kwargs["marker"] == "static"
+
+
+def test_information_schema_with_no_resolvers_uses_the_ordinary_chain(clean_registry):
+    # Embedded use and tests: no bindings exist, so the settings chain lands
+    # back on the same connector the data chain would have returned.
+    register_workspace("ws", StubConnector, marker="static")
+
+    connector = connector_factory("ws.information_schema.tables", telemetry=None)
+
+    assert isinstance(connector, StubConnector)
+    assert connector.kwargs["marker"] == "static"
