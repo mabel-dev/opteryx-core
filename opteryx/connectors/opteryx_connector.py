@@ -886,6 +886,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
                 files=[],
                 schema=self.schema,
                 bounds_are_ordinal=bounds_are_ordinal,
+                # A relation with no committed snapshot genuinely HAS no rows -
+                # that is a fact about the catalog, not a stale reading.
+                stats_are_authoritative=True,
             )
             return self.schema, self.manifest
 
@@ -1014,6 +1017,9 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
             histogram_vector=sketch_vectors.get("histogram_counts"),
             char_class_vector=sketch_vectors.get("char_class_counts"),
             bounds_are_ordinal=bounds_are_ordinal,
+            # Written by the commit that produced these files; they cannot
+            # disagree with the data.
+            stats_are_authoritative=True,
         )
 
         return self.schema, self.manifest

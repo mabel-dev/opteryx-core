@@ -83,7 +83,12 @@ class ManifestPruningStrategy(OptimizationStrategy):
                     context.pre_optimized_tree, context.node_id, node
                 )
             )
-            if node.manifest is not None and prunable:
+            if (
+                node.manifest is not None
+                # LAW: pruning DROPS files, so a stale bound loses real rows.
+                and node.manifest.stats_are_authoritative
+                and prunable
+            ):
                 # Apply manifest-based pruning. Copy-on-write: prune_files
                 # returns a NEW Manifest when files were removed (same object
                 # back when nothing was), so the optimizer's id()-keyed scan

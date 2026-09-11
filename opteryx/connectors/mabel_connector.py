@@ -315,7 +315,7 @@ class MabelTable(BaseTable, Diachronic):
         ]
 
         self.schema = schema
-        self._manifest = Manifest(file_entries, schema)
+        self._manifest = Manifest(file_entries, schema, stats_are_authoritative=True)
         return self.schema, self._manifest
 
     def read_dataset(self, **kwargs):

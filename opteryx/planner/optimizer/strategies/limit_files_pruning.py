@@ -76,6 +76,12 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
             if node.manifest is None:
                 return context
 
+            # LAW: this DROPS files, trusting each one's record_count to supply
+            # the limit. A stale count returns fewer rows than the query asked
+            # for, which no caller can detect.
+            if not node.manifest.stats_are_authoritative:
+                return context
+
             # Sort file POSITIONS by row count descending — positions, not the
             # FileEntry objects, so the surviving set can be handed to
             # Manifest.subset, which keeps the sketch-vector row mapping

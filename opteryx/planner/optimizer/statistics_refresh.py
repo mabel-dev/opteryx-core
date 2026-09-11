@@ -379,7 +379,13 @@ def _scan_base_stats(node: LogicalPlanNode, wanted=None) -> RelationStatistics:
             row_count = manifest.get_record_count()
         except Exception:
             row_count = None
-        row_count_is_metric = row_count is not None
+        # A HINT manifest's count is still the best number available - it feeds
+        # filter selectivity, join ordering and distinct-value estimates exactly
+        # as a measured one does - but it is not a METRIC, which in this module's
+        # vocabulary means "we claim to know it". It was written by a refresh
+        # over a source that moves underneath it. Calling it a metric would tell
+        # `result_size_guard` that a number nobody measured is a declared fact.
+        row_count_is_metric = row_count is not None and manifest.stats_are_authoritative
     if row_count is None and schema is not None:
         row_count = schema.row_count_metric
         row_count_is_metric = row_count is not None

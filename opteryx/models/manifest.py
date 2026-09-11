@@ -171,6 +171,7 @@ class Manifest:
         histogram_vector=None,
         bounds_are_ordinal: bool = False,
         char_class_vector=None,
+        stats_are_authoritative: bool = False,
     ):
         """
         Initialize Manifest with file entries and schema.
@@ -204,6 +205,29 @@ class Manifest:
                 mixed within one Manifest instance, so this is a single flag
                 for the whole object, set explicitly by the producer
                 (filesystem_connector.py) rather than inferred.
+            stats_are_authoritative: True when these statistics were written by
+                the commit that produced the data, so they cannot disagree with
+                it. Only then may a consumer treat them as LAW — prune a file
+                away, answer COUNT/MIN/MAX without reading, or eliminate a LIMIT
+                — because each of those returns a WRONG ANSWER on a stale number
+                rather than a slow one.
+
+                DEFAULT FALSE, and deliberately the conservative direction: a
+                producer that forgets to say loses optimisations, where one that
+                had to remember to say "these are stale" would lose rows. The
+                native commit path asserts it explicitly; a manifest assembled by
+                a refresh over an external source (a PostgreSQL server's
+                `pg_stats`, an Iceberg snapshot summary) must not, because the
+                source moves underneath it and its own ANALYZE moves the numbers
+                again.
+
+                Hint statistics remain fully usable for ESTIMATION — rows
+                surviving a filter, join ordering, distinct-value counts — where
+                a bad number costs a worse plan and never a wrong result. See
+                `statistics_refresh._scan_base_stats`, which routes a hint
+                manifest's row count to `row_count_estimate` rather than
+                `row_count_metric`: "metric" in this codebase means "we claim to
+                know it", which is exactly what a refresh-written count is not.
         """
         self.files = files
         self.schema = schema
@@ -211,6 +235,7 @@ class Manifest:
         self._histogram_vector = histogram_vector
         self._char_class_vector = char_class_vector
         self.bounds_are_ordinal = bounds_are_ordinal
+        self.stats_are_authoritative = stats_are_authoritative
         # The sketch vectors are built once over the FULL file set and are indexed
         # by original file position. Pruning (copy-on-write — prune_files/
         # prune_files_for_topn/subset return a NEW Manifest, see subset's
@@ -442,6 +467,7 @@ class Manifest:
         clone._histogram_vector = self._histogram_vector
         clone._char_class_vector = self._char_class_vector
         clone.bounds_are_ordinal = self.bounds_are_ordinal
+        clone.stats_are_authoritative = self.stats_are_authoritative
         clone._live_rows = kept_rows
         clone._load_time_columns = self._load_time_columns
         clone._field_id_to_name = self._field_id_to_name

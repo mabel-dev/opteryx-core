@@ -145,7 +145,13 @@ class LimitEliminationStrategy(OptimizationStrategy):
             scan_node = scan_nodes[0][1]
             one_row_scan = getattr(scan_node, "relation", None) == "$one_row"
             manifest = getattr(scan_node, "manifest", None)
-            manifest_row_count = manifest.get_record_count() if manifest is not None else None
+            # LAW: removing the LIMIT returns the WHOLE relation. A stale
+            # count that under-reports turns `LIMIT 10` into an unbounded scan.
+            manifest_row_count = (
+                manifest.get_record_count()
+                if manifest is not None and manifest.stats_are_authoritative
+                else None
+            )
 
         for nid, limit_node in get_nodes_of_type_from_logical_plan(
             plan, (LogicalPlanStepType.Limit,)

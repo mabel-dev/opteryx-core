@@ -148,6 +148,7 @@ class PostgresConnector(BaseConnector):
         schema: str = "public",
         timeout_s: int = 30,
         preserve_sql_case: bool = False,
+        gcs_bucket: Optional[str] = None,
         telemetry: Optional[QueryTelemetry] = None,
         prefix: Optional[str] = None,
         **kwargs,
@@ -156,7 +157,7 @@ class PostgresConnector(BaseConnector):
             raise ValueError(
                 f"PostgresConnector: unknown configuration keys {sorted(kwargs)}; "
                 "expected host, port, dbname, user, password, sslmode, schema, timeout_s, "
-                "preserve_sql_case"
+                "preserve_sql_case, gcs_bucket"
             )
         for label, value in (("host", host), ("dbname", dbname), ("user", user)):
             if not isinstance(value, str) or not value:
@@ -178,6 +179,11 @@ class PostgresConnector(BaseConnector):
         }
         self.default_schema = schema
         self.preserve_sql_case = bool(preserve_sql_case)
+        # Where this deployment keeps workspace metadata. Not part of the
+        # customer's binding - the deployment's resolver supplies it, the same
+        # value it hands a native workspace - and its absence simply means no
+        # statistics manifest is read.
+        self.gcs_bucket = gcs_bucket
         self.telemetry = telemetry
         # connector_factory overwrites this with the resolved workspace/prefix
         # after construction; a direct construction keeps what it was given.
@@ -225,6 +231,23 @@ class PostgresConnector(BaseConnector):
 
     def table_engine(self, name: str, **kwargs):
         return PostgresTable(dataset=name, gateway=self, **kwargs)
+
+    def stats_manifest_path(self, schema_name: str, table_name: str) -> Optional[str]:
+        """Where this relation's statistics manifest lives, or None if unconfigured.
+
+        The SAME location an Opteryx-backed relation's manifests use - the
+        formula in `OpteryxConnector._dataset_location` plus `metadata/` - so
+        one storage layout serves both and the tooling that walks a workspace's
+        metadata needs no special case. There are no snapshots here, so the file
+        is named for the dataset rather than a snapshot id, and each refresh
+        rewrites that one file.
+        """
+        if not self.gcs_bucket or not self._matched_prefix:
+            return None
+        return (
+            f"gs://{self.gcs_bucket}/{self._matched_prefix}/{schema_name}/{table_name}"
+            f"/metadata/manifest-{table_name}.parquet"
+        )
 
 
 class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
@@ -360,6 +383,52 @@ class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
                 f"{type_name(oid)}, which Opteryx cannot read; exclude it or cast it in a view"
             )
         return _TYPE_BY_PHYSICAL[tag]
+
+    def get_dataset_metadata(self) -> Tuple[RelationSchema, Optional["Manifest"]]:
+        """The relation's schema, plus a HINT statistics manifest when one exists.
+
+        The manifest holds nothing about files - the rows come over a socket -
+        and exists purely so the planner's existing statistics surface
+        (`estimate_cardinality`, `get_value_range`, `estimate_null_fraction`,
+        ...) can answer for a PostgreSQL relation without inventing a second
+        channel. It is written by the control plane's catalog refresh from the
+        server's own `pg_stats`, to the same storage layout an Opteryx-backed
+        relation uses.
+
+        `stats_are_authoritative` is FALSE, always. These numbers describe the
+        server as it was at the last refresh and the server moves underneath
+        them, so they may shape a plan and must never decide an answer - see
+        `Manifest.stats_are_authoritative`. A missing or unreadable manifest is
+        not an error: the relation simply plans with the row estimate alone,
+        exactly as it did before any of this existed.
+        """
+        schema = self.get_dataset_schema()
+        return schema, self._read_stats_manifest(schema)
+
+    def _read_stats_manifest(self, schema: RelationSchema) -> Optional["Manifest"]:
+        path = self.gateway.stats_manifest_path(self.schema_name, self.table_name)
+        if path is None:
+            return None
+
+        from opteryx.models.manifest import Manifest
+        from opteryx.models.manifest_io import read_manifest_file_entries
+
+        try:
+            from opteryx.connectors.io_systems.gcs_filesystem import OpteryxGcsFileSystem
+
+            filesystem = OpteryxGcsFileSystem(bucket=self.gateway.gcs_bucket)
+            with filesystem.open_input_file(path) as handle:
+                data = bytes(handle.memoryview)
+            file_entries, _ = read_manifest_file_entries(data)
+        except Exception:
+            # A relation whose statistics have never been refreshed, or a
+            # storage blip. Planning without them is the pre-existing behaviour,
+            # not a degraded one, so this must not fail the query.
+            return None
+
+        if not file_entries:
+            return None
+        return Manifest(file_entries, schema, stats_are_authoritative=False)
 
     def _row_estimate(self, query_text) -> Optional[int]:
         """pg_class.reltuples — the planner's own estimate, free to read. -1 (never

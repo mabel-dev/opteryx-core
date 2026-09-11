@@ -453,6 +453,18 @@ def _create_scan_node(logical_node, query_properties, registry):
         # rows are not part of the answer. SHOW MANIFEST FOR differs here — its
         # Scan does carry a Manifest, because that IS its result.
         return registry.create("Null Reader", query_properties, **node_config)
+    elif connector and getattr(connector, "scan_reader", None):
+        # A reader that names its own physical scan node decides the reader,
+        # BEFORE the manifest branch below and not after it.
+        #
+        # The ordering is load-bearing. A manifest no longer implies the rows
+        # come from files: an external source (a PostgreSQL server) may carry
+        # one purely to hold STATISTICS for the planner. Testing the manifest
+        # first would route such a scan to a FILE reader, and a manifest with no
+        # data files falls through `_scan_reader_for_manifest` to the parquet
+        # reader, which reads nothing and yields no rows. Every query against
+        # every external table would return empty, with no error anywhere.
+        return registry.create(connector.scan_reader, query_properties, **node_config)
     elif connector and node_config.get("manifest") is not None:
         # Manifest-backed Scan: dispatch on the dataset's single format.
         # For parquet this is the column-chunk range-read path: footer-first
@@ -467,11 +479,6 @@ def _create_scan_node(logical_node, query_properties, registry):
         elif reader_name == "Skene Reader":
             node_config = _skene_scan_config(node_config)
         return registry.create(reader_name, query_properties, **node_config)
-    elif connector and getattr(connector, "scan_reader", None):
-        # A reader with no file manifest that names its own physical scan node
-        # (BaseTable.scan_reader) — today the PostgreSQL connector, whose rows
-        # arrive over a server session and are decoded by a native Source.
-        return registry.create(connector.scan_reader, query_properties, **node_config)
     elif connector and getattr(connector, "interal_only", False):
         # Internal virtual datasets (for example $one_row) do not use file manifests.
         return registry.create("Reader", query_properties, **node_config)

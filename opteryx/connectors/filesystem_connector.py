@@ -635,6 +635,7 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
                 histogram_vector=cached[3],
                 bounds_are_ordinal=cached[4],
                 char_class_vector=cached[5],
+                stats_are_authoritative=True,  # cached copy of the file-derived manifest below
             )
 
         # ANALYZE's per-dataset manifest, when it describes exactly this file set.
@@ -877,6 +878,10 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             histogram_vector=histogram_vector,
             bounds_are_ordinal=bounds_are_ordinal,
             char_class_vector=char_class_vector,
+            # Bounds come from the files themselves (parquet footers, or
+            # ANALYZE's pass over them), so pruning on them cannot drop a row
+            # the predicate would have matched.
+            stats_are_authoritative=True,
         )
 
     def _read_dataset_manifest(self, manifest_path, parquet_names):

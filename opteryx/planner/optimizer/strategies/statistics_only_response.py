@@ -431,6 +431,12 @@ def get_count_from_manifest(manifest) -> Optional[int]:
     if manifest is None:
         return None
 
+    # LAW: the caller REPLACES the scan with this number, so it is returned to
+    # the user as the answer. A refresh-written count describes the source as it
+    # was at the last refresh, which is not what COUNT(*) means.
+    if not manifest.stats_are_authoritative:
+        return None
+
     return manifest.get_record_count()
 
 
@@ -523,6 +529,13 @@ def get_min_max_from_manifest(manifest, column_name: str, operation: str):
         The min or max value (int/timestamp), or None if not available
     """
     if manifest is None:
+        return None
+
+    # LAW: this value is RETURNED TO THE USER as the answer to MIN()/MAX(), with
+    # the scan removed entirely. Bounds from a refresh describe the source as it
+    # was when the refresh ran, so answering from them reports a value that may
+    # never have been the extreme - and nothing downstream could tell.
+    if not manifest.stats_are_authoritative:
         return None
 
     # The manifest owns this mapping: per-file stats are keyed by the column's

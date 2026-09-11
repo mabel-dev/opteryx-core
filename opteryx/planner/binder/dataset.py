@@ -855,7 +855,7 @@ def visit_function_dataset(
             )
             for f, info in zip(parquet_files, file_infos)
         ]
-        manifest = Manifest(file_entries, schema)
+        manifest = Manifest(file_entries, schema, stats_are_authoritative=True)
 
         # node.connector is a real FileSystemTable (not just a predicate-pushdown
         # capability marker the way JsonlPredicatePushable is for READ_JSONL) --

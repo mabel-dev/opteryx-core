@@ -89,7 +89,11 @@ class TopNManifestPruningStrategy(OptimizationStrategy):
 
         sort_name = getattr(node, "topn_sort_name", None)
         limit = getattr(node, "topn_limit", None)
-        if node.manifest is None or not sort_name or not limit:
+        # LAW: prune_files_for_topn drops files by their bounds; stale bounds
+        # would drop the rows the top-N actually wanted.
+        if node.manifest is None or not node.manifest.stats_are_authoritative:
+            return context
+        if not sort_name or not limit:
             return context
 
         if node.predicates:

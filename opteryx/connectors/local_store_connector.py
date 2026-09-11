@@ -1815,5 +1815,6 @@ class LocalStoreTable(BaseTable):
             min_k_vector=min_k_vector,
             histogram_vector=histogram_vector,
             char_class_vector=char_class_vector,
+            stats_are_authoritative=True,  # read from the files' own footers
         )
         return self.schema, self.manifest
