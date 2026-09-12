@@ -2783,25 +2783,6 @@ class ParquetIOPipeline {
         return h;
     }
 
-    // ── Remote range coalescing (see the merge loop in decode_row_group) ─────
-    // Parquet stores a row group's column chunks CONTIGUOUSLY, so a wide
-    // projection is one unbroken extent that we nonetheless issue as N separate
-    // range GETs (measured: 105 columns of ClickBench hits = 105 requests per
-    // row group, and merging them all wastes 0.000% of the bytes).
-    //   waste_ratio: merge a run while bytes THROWN AWAY stay within this
-    //     fraction of bytes actually needed. 0.0 = merge only touching chunks
-    //     (byte-neutral). Sparse projections self-limit: skipping a fat column
-    //     you did not select blows the budget and splits the run.
-    //   max_bytes: ceiling on one merged request. A single huge GET serialises
-    //     what were concurrent transfers — measured 1x16MB (1.05s) SLOWER than
-    //     8x2MB (0.79s) for identical bytes — so unbounded merging is not free.
-    //     0 = unbounded.
-    double  coalesce_waste_ratio_ = 0.10;
-    int64_t coalesce_max_bytes_   = 0;
-    void set_coalesce_tuning(double waste_ratio, int64_t max_bytes) {
-        coalesce_waste_ratio_ = waste_ratio;
-        coalesce_max_bytes_   = max_bytes;
-    }
     // Fetch-ahead depth: a dedicated pool of `depth` threads that only issue
     // the remote range GETs, so concurrent fetches are no longer pinned to the
     // decode thread count (measured: with 4 decode workers, deepening the
@@ -2843,6 +2824,26 @@ class ParquetIOPipeline {
         set_http_tuning(t);
     }
 #endif
+
+    // ── Remote range coalescing (see the merge loop in decode_row_group) ─────
+    // Parquet stores a row group's column chunks CONTIGUOUSLY, so a wide
+    // projection is one unbroken extent that we nonetheless issue as N separate
+    // range GETs (measured: 105 columns of ClickBench hits = 105 requests per
+    // row group, and merging them all wastes 0.000% of the bytes).
+    //   waste_ratio: merge a run while bytes THROWN AWAY stay within this
+    //     fraction of bytes actually needed. 0.0 = merge only touching chunks
+    //     (byte-neutral). Sparse projections self-limit: skipping a fat column
+    //     you did not select blows the budget and splits the run.
+    //   max_bytes: ceiling on one merged request. A single huge GET serialises
+    //     what were concurrent transfers — measured 1x16MB (1.05s) SLOWER than
+    //     8x2MB (0.79s) for identical bytes — so unbounded merging is not free.
+    //     0 = unbounded.
+    double  coalesce_waste_ratio_ = 0.10;
+    int64_t coalesce_max_bytes_   = 0;
+    void set_coalesce_tuning(double waste_ratio, int64_t max_bytes) {
+        coalesce_waste_ratio_ = waste_ratio;
+        coalesce_max_bytes_   = max_bytes;
+    }
 
     // Standalone path (unchanged behaviour): self-constructs an exclusive pool.
     // Kept for the standalone rugo wheel and any caller that doesn't inject one —
