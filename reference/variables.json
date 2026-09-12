@@ -510,6 +510,18 @@
         "default_source": "environment",
         "environment_key": "PARQUET_IO_COALESCE_WASTE_RATIO"
     },
+    "parquet_io_fetch_ahead": {
+        "name": "parquet_io_fetch_ahead",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "PARQUET_IO_FETCH_AHEAD"
+    },
     "parquet_io_in_flight_limit": {
         "name": "parquet_io_in_flight_limit",
         "type": "INT64",

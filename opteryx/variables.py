@@ -348,6 +348,11 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
         INT64, FromConfig("PARQUET_IO_COALESCE_MAX_BYTES"), VariableOwner.USER, Visibility.RESTRICTED),
     "parquet_io_in_flight_limit": (
         INT64, FromConfig("PARQUET_IO_IN_FLIGHT_LIMIT"), VariableOwner.USER, Visibility.RESTRICTED),
+    # Remote fetch-ahead depth (0 = off): decouples requests in flight from the
+    # decode thread count — see PARQUET_IO_FETCH_AHEAD in config.py for the
+    # measurements and the two combinations the planner rejects as inert.
+    "parquet_io_fetch_ahead": (
+        INT64, FromConfig("PARQUET_IO_FETCH_AHEAD"), VariableOwner.USER, Visibility.RESTRICTED),
 
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an

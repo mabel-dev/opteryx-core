@@ -400,6 +400,35 @@ concurrently (threads) and how deep the submission window runs ahead of the
 consumer. The 128→16 worker sweep could not tell which of those produced the 33%
 win because they move together; this splits them. It also sizes the IO pool
 (`est_rg * (in_flight_limit + 1)`), so raising it costs memory linearly."""
+
+PARQUET_IO_FETCH_AHEAD: int = int(get("PARQUET_IO_FETCH_AHEAD", 128))
+"""Remote fetch-ahead depth: a dedicated pool of N threads that ONLY issue the
+row-group range GETs, so requests in flight are decoupled from the decode thread
+count. 0 = off = the coupled path, byte-for-byte. Default 128 (architect, 2026-09-12,
+from a live trial: 32 showed no effect, 256 died, 128 is the working point).
+Only remote scans arm it; a local-only scan never starts the pool.
+
+Why: `ParquetIOPipeline::decode_row_group` fetches AND decodes on one thread, so
+concurrent fetches == `parquet_gcs_io_workers`, by construction — the submission
+window (`parquet_io_in_flight_limit`) never bound. Dev rig, dev/throttle_server.py
+at rtt=50ms / 100 Mbps per connection, 240 row groups, 79 MB, A/A floor 0.9996:
+
+    workers=4, window 6 -> 64 (coupled)        4.70s -> 4.45s   (window: inert)
+    workers=4 -> 32 (coupled)                  4.70s -> 1.31s   (threads move it)
+    workers=4, fetch_ahead=32, window=48       0.74s            (5.5x vs coupled)
+    workers=4, fetch_ahead=4                   5.42s            (SLOWER — rejected)
+
+That is the LATENCY regime. Production Cloud Run -> GCS is bandwidth-capped at
+~64 MB/s (`parquet_gcs_io_workers` docstring), where more requests in flight buy
+much less; the 128 default came from a live trial, not from this rig.
+
+Rules enforced at plan time (ValueError, never silently inert): the depth must
+EXCEED `parquet_gcs_io_workers`, and an explicit `parquet_io_in_flight_limit`
+must not be smaller than the depth. With the window on auto it widens to
+`max(workers, fetch_ahead) + 2`. Memory: each in-flight row group holds its
+COMPRESSED bytes from fetch until decode, on top of the decode pool reservation.
+The pipeline reports the depth it actually runs as `fetch_ahead_depth` and the
+bytes a cancel threw away as `prefetch_discarded_bytes` (io_scan_diagnostics)."""
 """Pin HTTP requests to HTTP/1.1. Diagnostic ONLY — this exists to measure what
 HTTP/2 contributes (with multiplexing unavailable, a low connection cap should
 become catastrophic rather than faster). Leaving it True forfeits multiplexing."""

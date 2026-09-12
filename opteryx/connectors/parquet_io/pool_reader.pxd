@@ -78,6 +78,10 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         # HttpTuning's comment in http_client.hpp for why this is never stored
         # on the (thread_local, process-lifetime) HttpClient itself.
         void set_coalesce_tuning(double waste_ratio, int64_t max_bytes)
+        # Fetch-ahead depth (0 = off): dedicated GET-only pool so concurrent
+        # fetches are decoupled from the decode thread count. Plan-time, once,
+        # before any submit — see set_fetch_ahead in io_pipeline.hpp.
+        void set_fetch_ahead(int depth) except +
         void set_http_tuning(long max_host_connections, int max_retries,
                               double min_bandwidth_bytes_per_s, long timeout_floor_ms,
                               bint use_multiplexing, bint use_pipewait, bint force_http11)
@@ -106,6 +110,8 @@ cdef extern from "io_pipeline.hpp" namespace "rugo":
         void wait_shutdown() nogil
         int pending_work_count() nogil
         uint64_t cancelled_skips() nogil
+        int fetch_ahead_depth() nogil
+        uint64_t prefetch_discarded_bytes() nogil
         uint64_t spin_iterations() nogil
         uint64_t enqueue_count() nogil
         size_t queue_high_watermark() nogil
@@ -229,6 +235,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     pool=*,
     filesystem=*,
     footer_bytes_cache=*,
+    int fetch_ahead=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed

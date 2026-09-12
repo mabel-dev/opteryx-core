@@ -18,6 +18,7 @@
 #include <atomic>
 #include <deque>
 #include <exception>
+#include <stdexcept>
 #include <cstdint>
 #include <cstdio>
 #include <utility>
@@ -1522,6 +1523,23 @@ class ParquetIOPipeline {
         uint64_t issued_ns = 0;
         uint32_t corr_id = 0;
         uint32_t file_id = 0;  // draken_trace_intern_file(path); 0 == untraced
+        // Fetch-ahead (set_fetch_ahead): bytes fetched by the FETCH stage, indexed
+        // by coalesced group exactly as decode_row_group's local remote_buffers is.
+        // Empty + prefetch_done==false means "decode fetches it itself" (the
+        // coupled path, the default).
+        std::vector<std::vector<uint8_t>> prefetched;
+        bool prefetch_done = false;
+        // A fetch-stage failure travels HERE and is rethrown by decode_row_group
+        // inside its existing catch — one error path, the original message. It is
+        // NOT a signal for decode to re-fetch: that would be a hidden second retry
+        // round on top of HttpClient's own budget, doubling time-to-failure and
+        // burying the first failure.
+        std::exception_ptr prefetch_error;
+        // Nanoseconds the FETCH stage spent on this row group's GETs. Carried so
+        // decode can fold it into the item's read_ns: the bytes still cost what
+        // they cost, and a scan that reported read_ns == 0 because the fetch
+        // moved to another thread would be telemetry that lies about its own IO.
+        uint64_t prefetch_ns = 0;
     };
 
     // Priority-capable pool (Gap #3 Phase 2b): same vendored BS::thread_pool template
@@ -1532,6 +1550,18 @@ class ParquetIOPipeline {
     // only one priority ever used behaves identically to tp::none, so this is safe
     // for the standalone-constructor (self-owned, no injection) path too.
     std::shared_ptr<BS::thread_pool<BS::tp::priority>> decode_pool_;
+    // Fetch-ahead (set_fetch_ahead(N); 0 = off, the default): a pool that ONLY
+    // issues the remote range GETs, so the number of concurrent fetches stops
+    // being pinned to the decode thread count. Measured motivation: with 4
+    // decode workers, deepening the submission window 6 -> 64 moves nothing
+    // (4.54s -> 4.45s) because a ticket beyond the pool size merely queues —
+    // concurrency == pool size, by construction.
+    //
+    // MUST be exclusive to this pipeline (never the injected exec pool): the
+    // no-deadlock argument in wait_and_get_result relies on a fetch stage that
+    // cannot itself be blocked behind a consumer waiting on its output.
+    std::unique_ptr<BS::thread_pool<BS::tp::priority>> fetch_pool_;
+    int fetch_ahead_ = 0;
     // True when this pipeline constructed decode_pool_ itself (the original,
     // standalone-rugo-compatible path) — safe to decode_pool_->wait() on shutdown,
     // since the pool is exclusive to this pipeline. False when the pool was INJECTED
@@ -1599,6 +1629,11 @@ class ParquetIOPipeline {
     // is out of scope) but its result is dropped at the enqueue guard.
     std::atomic<bool> cancelled_{false};
     std::atomic<uint64_t> cancelled_skips_{0};
+    // Fetch-ahead: compressed bytes the FETCH stage bought that a cancelled
+    // decode then threw away (LIMIT satisfied early, dropped cursor). Billed
+    // egress for rows nobody read — surfaced so a wrong depth policy shows up
+    // in telemetry rather than on the bill.
+    std::atomic<uint64_t> prefetch_discarded_bytes_{0};
 
     // docs/EXECUTION_TRACING_DESIGN.md: trace_node_id_ is the plan-node
     // identity this pipeline's spans carry, set once via set_trace_node_id()
@@ -1742,6 +1777,136 @@ class ParquetIOPipeline {
      * Read a byte range from any supported path type.
      * Returns (bytes, elapsed_ns).
      */
+    // ── Remote fetch geometry ────────────────────────────────────────────────
+    // Pure functions of the WorkItem (+ dict_preds_, set before any submit).
+    // Factored out so the fetch-ahead stage and decode_row_group derive the SAME
+    // extents from ONE definition rather than two copies that could drift: a
+    // drift here would decode a column from the wrong offset.
+    static bool path_is_local(const std::string& path) {
+        return path.rfind("gs://",    0) != 0 &&
+               path.rfind("http://",  0) != 0 &&
+               path.rfind("https://", 0) != 0;
+    }
+
+    // Per-column base offset (dictionary page if it precedes the data page,
+    // else the data page).
+    static std::vector<int64_t> compute_base_offsets(const WorkItem& item) {
+        std::vector<int64_t> base_offsets(item.column_stats.size());
+        for (size_t i = 0; i < item.column_stats.size(); ++i) {
+            int64_t base = item.column_stats[i].data_page_offset;
+            if (item.column_stats[i].dictionary_page_offset >= 0 &&
+                item.column_stats[i].dictionary_page_offset < base) {
+                base = item.column_stats[i].dictionary_page_offset;
+            }
+            base_offsets[i] = base;
+        }
+        return base_offsets;
+    }
+
+    // Remote bloom decode-skip: for a column carrying a pushed equality/IN
+    // predicate whose bloom filter sits immediately before its column chunk
+    // (adjacent layout), extend that column's fetch backwards to swallow the
+    // bloom bytes. They ride in the same GET we already issue for the chunk,
+    // so testing them costs no extra round trip — a probe that proves the
+    // needle absent lets us skip the whole row group's decode. Gated on the
+    // three conditions: (1) bloom adjacent to the chunk, (2) a pushed =/IN
+    // predicate on the column, (3) the row group survived min/max (implicit —
+    // manifest pruning already dropped the rest). Remote-only: local files
+    // are bloom-pruned at manifest time and never reach here excluded. Not
+    // applied under a row_mask (pass-2 late materialization already has
+    // survivors). bloom_prefix[i] == 0 means "no bloom in column i's fetch".
+    std::vector<int64_t> compute_bloom_prefix(
+            const WorkItem& item, const std::vector<int64_t>& base_offsets) const {
+        std::vector<int64_t> bloom_prefix(item.column_stats.size(), 0);
+        if (path_is_local(item.path) || !item.row_mask.empty() || dict_preds_.empty())
+            return bloom_prefix;
+        for (size_t i = 0; i < item.column_stats.size(); ++i) {
+            const auto& cs = item.column_stats[i];
+            if (cs.bloom_offset < 0 || cs.bloom_length <= 0) continue;
+            if (cs.bloom_offset + cs.bloom_length != base_offsets[i]) continue;  // not adjacent
+            auto it = dict_preds_.find(cs.name);
+            if (it == dict_preds_.end()) continue;
+            if (it->second.kind != 0 && it->second.kind != 1) continue;  // only =/IN
+            bloom_prefix[i] = cs.bloom_length;
+        }
+        return bloom_prefix;
+    }
+
+    struct RemotePlan {
+        struct Group { int64_t start, end, useful; std::vector<size_t> cols; };
+        std::vector<int64_t> cstart, clen;
+        std::vector<Group>   groups;
+    };
+
+    // Coalesce runs of adjacent/near-adjacent column extents into single range
+    // GETs — see set_coalesce_tuning() for the rationale and the measurements
+    // behind both bounds.
+    RemotePlan build_remote_plan(const WorkItem& item,
+                                 const std::vector<int64_t>& base_offsets,
+                                 const std::vector<int64_t>& bloom_prefix) const {
+        RemotePlan plan;
+        const size_t ncols = item.column_stats.size();
+        plan.cstart.resize(ncols);
+        plan.clen.resize(ncols);
+        std::vector<size_t> order(ncols);
+        for (size_t i = 0; i < ncols; ++i) {
+            plan.cstart[i] = base_offsets[i] - bloom_prefix[i];
+            plan.clen[i]   = bloom_prefix[i] + item.column_stats[i].total_compressed_size;
+            order[i]       = i;
+        }
+        std::sort(order.begin(), order.end(),
+                  [&](size_t a, size_t b) { return plan.cstart[a] < plan.cstart[b]; });
+
+        const int64_t max_bytes = coalesce_max_bytes_ > 0
+            ? coalesce_max_bytes_ : std::numeric_limits<int64_t>::max();
+        for (size_t k = 0; k < ncols; ++k) {
+            const size_t  i = order[k];
+            const int64_t st = plan.cstart[i], e = plan.cstart[i] + plan.clen[i];
+            bool merged = false;
+            if (!plan.groups.empty()) {
+                RemotePlan::Group& g = plan.groups.back();
+                const int64_t ne      = std::max(g.end, e);
+                const int64_t nspan   = ne - g.start;
+                const int64_t nuseful = g.useful + plan.clen[i];
+                const int64_t nwaste  = nspan - nuseful;
+                if (nspan <= max_bytes &&
+                    static_cast<double>(nwaste) <=
+                        coalesce_waste_ratio_ * static_cast<double>(nuseful)) {
+                    g.end = ne; g.useful = nuseful; g.cols.push_back(i);
+                    merged = true;
+                }
+            }
+            if (!merged)
+                plan.groups.push_back(RemotePlan::Group{st, e, plan.clen[i], {i}});
+        }
+        return plan;
+    }
+
+#ifdef RUGO_ENABLE_HTTP
+    // Issue every coalesced range for one row group concurrently. Used by the
+    // decode stage (coupled, default) and by the fetch-ahead stage (decoupled).
+    std::vector<std::vector<uint8_t>> fetch_remote_groups(
+            const WorkItem& item, const RemotePlan& plan, uint64_t* out_ns) {
+        const std::string url = fetch_url_for(item.path);
+        std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
+        reqs.reserve(plan.groups.size());
+        for (const auto& g : plan.groups) {
+            reqs.emplace_back(url, http_headers_(
+                "bytes=" + std::to_string(g.start) +
+                "-" + std::to_string(g.end - 1)));
+        }
+        auto t_fetch = std::chrono::steady_clock::now();
+        auto bufs = tl_http_client().get_many(
+            reqs, http_tuning_set_ ? &http_tuning_ : nullptr);
+        const uint64_t batch_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t_fetch).count();
+        if (out_ns != nullptr) *out_ns += batch_ns;
+        // One fetch operation covering reqs.size() concurrent ranges.
+        record_http_fetch(batch_ns, reqs.size());
+        return bufs;
+    }
+#endif
+
     std::pair<std::vector<uint8_t>, uint64_t> read_range(
             const std::string& path, int64_t offset, int64_t size) {
 
@@ -1831,6 +1996,46 @@ class ParquetIOPipeline {
     // the ticket. The ticket decrements tickets_inflight_ as its LAST act, after
     // run_one_pending (hence after decode_row_group's trailing queue_cv_.notify) —
     // so tickets_inflight_==0 guarantees no ticket will touch `this` again.
+    // Fetch-ahead: the FETCH stage's ticket body. Issues this row group's
+    // range GETs on fetch_pool_, parks the bytes in the item, and only THEN
+    // publishes it as decodable work. Hands its ticket over to the decode ticket
+    // (tickets_inflight_ is incremented for the successor BEFORE this one is
+    // released) so wait_shutdown()'s "0 == nothing will touch `this` again"
+    // invariant holds across the two stages.
+    //
+    // A fetch failure is NOT swallowed and NOT retried here: the exception is
+    // carried on the item and rethrown by decode_row_group inside its existing
+    // catch, so it surfaces with its original message through the one error
+    // path. Re-fetching from decode would be a hidden second retry round.
+    void run_one_fetch(WorkItem&& item) {
+        if (!cancelled_.load(std::memory_order_relaxed) &&
+            !path_is_local(item.path) && !item.column_stats.empty()) {
+#ifdef RUGO_ENABLE_HTTP
+            try {
+                const auto base_offsets = compute_base_offsets(item);
+                const auto bloom_prefix = compute_bloom_prefix(item, base_offsets);
+                const RemotePlan plan = build_remote_plan(item, base_offsets, bloom_prefix);
+                item.prefetched = fetch_remote_groups(item, plan, &item.prefetch_ns);
+                item.prefetch_done = true;
+            } catch (...) {
+                item.prefetched.clear();
+                item.prefetch_done = false;
+                item.prefetch_error = std::current_exception();
+            }
+#endif
+        }
+        {
+            std::lock_guard<std::mutex> lk(queue_mutex_);
+            pending_items_.push_back(std::move(item));
+        }
+        queue_cv_.notify_one();   // a helper blocked in wait_and_get_result can now claim it
+        tickets_inflight_.fetch_add(1, std::memory_order_relaxed);   // successor, before we release
+        decode_pool_->detach_task([this]() {
+            run_one_pending();
+            tickets_inflight_.fetch_sub(1, std::memory_order_release);
+        }, BS::pr::high);
+    }
+
     void enqueue_pending(WorkItem&& item) {
         // docs/EXECUTION_TRACING_DESIGN.md: stamp the gather's issue time (queue-
         // wait span start) and mint its correlation id here, once, rather than in
@@ -1845,6 +2050,20 @@ class ParquetIOPipeline {
             item.file_id = draken_trace_intern_file(item.path.data(), item.path.size());
         }
         pending_work_++;
+        // Fetch-ahead: when the dedicated fetch pool exists, a REMOTE item is
+        // NOT yet decodable — it becomes claimable only once its bytes are in
+        // hand (run_one_fetch publishes it). Local paths skip the stage entirely
+        // (served by mmap in decode); routing them through it would add a
+        // hand-off for no IO.
+        if (fetch_pool_ && !path_is_local(item.path)) {
+            tickets_inflight_.fetch_add(1, std::memory_order_relaxed);
+            fetch_pool_->detach_task(
+                [this, it = std::move(item)]() mutable {
+                    run_one_fetch(std::move(it));
+                    tickets_inflight_.fetch_sub(1, std::memory_order_release);
+                }, BS::pr::high);
+            return;
+        }
         {
             std::lock_guard<std::mutex> lk(queue_mutex_);
             pending_items_.push_back(std::move(item));
@@ -1903,13 +2122,23 @@ class ParquetIOPipeline {
         return false;  // LIKE / unknown kind → cannot prune
     }
 
-    void decode_row_group(const WorkItem& item) {
+    // Non-const: with fetch-ahead the item OWNS its prefetched bytes and decode
+    // moves them out (they are dead the moment decode starts). Both call sites
+    // hold a non-const local WorkItem.
+    void decode_row_group(WorkItem& item) {
         // WP-8 cancel: a queued task whose work is no longer wanted bails here,
         // before any IO / decode / allocation. Nothing was reserved yet, so
         // there is nothing to release; just balance the pending-work ledger and
         // wake anyone waiting on the queue.
         if (cancelled_.load(std::memory_order_relaxed)) {
             cancelled_skips_.fetch_add(1, std::memory_order_relaxed);
+            // Fetch-ahead bought these bytes and nobody will read them: count
+            // them so the waste is a number in telemetry, not an inference.
+            if (item.prefetch_done) {
+                uint64_t nb = 0;
+                for (const auto& b : item.prefetched) nb += b.size();
+                prefetch_discarded_bytes_.fetch_add(nb, std::memory_order_relaxed);
+            }
             pending_work_--;
             queue_cv_.notify_one();
             return;
@@ -1939,9 +2168,7 @@ class ParquetIOPipeline {
         // open+mmap per FILE per pipeline, not per row group). Falls back to
         // read_range() for HTTP/GCS, and to per-column pread when the map
         // failed. PROTOTYPE H6 — see local_file_mapping's comment.
-        bool is_local = item.path.rfind("gs://",   0) != 0 &&
-                        item.path.rfind("http://",  0) != 0 &&
-                        item.path.rfind("https://", 0) != 0;
+        const bool is_local = path_is_local(item.path);
 
         void*   mmap_base   = MAP_FAILED;
         size_t  mmap_len    = 0;
@@ -2016,43 +2243,12 @@ class ParquetIOPipeline {
         // Precompute mask pointer once — shared across all columns in this row group.
         const uint8_t* mask_ptr = item.row_mask.empty() ? nullptr : item.row_mask.data();
 
-        // Per-column base offset (dictionary page if it precedes the data page,
-        // else the data page). Computed once here and reused for both the
-        // remote batch request and the in-loop chunk slicing.
-        std::vector<int64_t> base_offsets(item.column_stats.size());
-        for (size_t i = 0; i < item.column_stats.size(); ++i) {
-            int64_t base = item.column_stats[i].data_page_offset;
-            if (item.column_stats[i].dictionary_page_offset >= 0 &&
-                item.column_stats[i].dictionary_page_offset < base) {
-                base = item.column_stats[i].dictionary_page_offset;
-            }
-            base_offsets[i] = base;
-        }
-
-        // Remote bloom decode-skip: for a column carrying a pushed equality/IN
-        // predicate whose bloom filter sits immediately before its column chunk
-        // (adjacent layout), extend that column's fetch backwards to swallow the
-        // bloom bytes. They ride in the same GET we already issue for the chunk,
-        // so testing them costs no extra round trip — a probe that proves the
-        // needle absent lets us skip the whole row group's decode. Gated on the
-        // three conditions: (1) bloom adjacent to the chunk, (2) a pushed =/IN
-        // predicate on the column, (3) the row group survived min/max (implicit —
-        // manifest pruning already dropped the rest). Remote-only: local files
-        // are bloom-pruned at manifest time and never reach here excluded. Not
-        // applied under a row_mask (pass-2 late materialization already has
-        // survivors). bloom_prefix[i] == 0 means "no bloom in column i's fetch".
-        std::vector<int64_t> bloom_prefix(item.column_stats.size(), 0);
-        if (!is_local && item.row_mask.empty() && !dict_preds_.empty()) {
-            for (size_t i = 0; i < item.column_stats.size(); ++i) {
-                const auto& cs = item.column_stats[i];
-                if (cs.bloom_offset < 0 || cs.bloom_length <= 0) continue;
-                if (cs.bloom_offset + cs.bloom_length != base_offsets[i]) continue;  // not adjacent
-                auto it = dict_preds_.find(cs.name);
-                if (it == dict_preds_.end()) continue;
-                if (it->second.kind != 0 && it->second.kind != 1) continue;  // only =/IN
-                bloom_prefix[i] = cs.bloom_length;
-            }
-        }
+        // Per-column base offset and bloom prefix. Computed once here and reused
+        // for both the remote batch request and the in-loop chunk slicing — via
+        // the same helpers the fetch-ahead stage uses, so the two stages cannot
+        // derive different extents for the same row group.
+        const std::vector<int64_t> base_offsets = compute_base_offsets(item);
+        const std::vector<int64_t> bloom_prefix = compute_bloom_prefix(item, base_offsets);
 
         // Remote batch prefetch: for HTTP/GCS, fetch every column chunk for
         // this row group concurrently in a single get_many() call rather than
@@ -2074,65 +2270,24 @@ class ParquetIOPipeline {
         try {
 #ifdef RUGO_ENABLE_HTTP
             if (remote && !item.column_stats.empty()) {
-                const std::string url = fetch_url_for(item.path);
                 const size_t ncols = item.column_stats.size();
+                const RemotePlan plan =
+                    build_remote_plan(item, base_offsets, bloom_prefix);
 
-                // Per-column byte extent. The start is extended backwards by
-                // bloom_prefix[i] (0 unless this column's adjacent bloom is being
-                // fetched for a decode-skip probe) so the bloom rides in front of
-                // the chunk within the same extent.
-                std::vector<int64_t> cstart(ncols), clen(ncols);
-                std::vector<size_t>  order(ncols);
-                for (size_t i = 0; i < ncols; ++i) {
-                    cstart[i] = base_offsets[i] - bloom_prefix[i];
-                    clen[i]   = bloom_prefix[i] + item.column_stats[i].total_compressed_size;
-                    order[i]  = i;
+                if (item.prefetch_error)
+                    std::rethrow_exception(item.prefetch_error);
+                if (item.prefetch_done) {
+                    // Fetch-ahead: the bytes are already here. `plan` is rebuilt
+                    // from the same pure helpers the fetch stage used, so the
+                    // group geometry is identical by construction — that is why
+                    // the fetch stage ships raw buffers and no pointers (a
+                    // pointer computed on another thread into a moved vector is
+                    // the bug class this design avoids outright).
+                    remote_buffers = std::move(item.prefetched);
+                    total_read_ns += item.prefetch_ns;
+                } else {
+                    remote_buffers = fetch_remote_groups(item, plan, &total_read_ns);
                 }
-                std::sort(order.begin(), order.end(),
-                          [&](size_t a, size_t b) { return cstart[a] < cstart[b]; });
-
-                // Coalesce runs of adjacent/near-adjacent extents into single
-                // range GETs — see set_coalesce_tuning() for the rationale and
-                // the measurements behind both bounds.
-                struct Group { int64_t start, end, useful; std::vector<size_t> cols; };
-                std::vector<Group> groups;
-                const int64_t max_bytes = coalesce_max_bytes_ > 0
-                    ? coalesce_max_bytes_ : std::numeric_limits<int64_t>::max();
-                for (size_t k = 0; k < ncols; ++k) {
-                    const size_t  i = order[k];
-                    const int64_t s = cstart[i], e = cstart[i] + clen[i];
-                    bool merged = false;
-                    if (!groups.empty()) {
-                        Group& g = groups.back();
-                        const int64_t ne      = std::max(g.end, e);
-                        const int64_t nspan   = ne - g.start;
-                        const int64_t nuseful = g.useful + clen[i];
-                        const int64_t nwaste  = nspan - nuseful;
-                        if (nspan <= max_bytes &&
-                            static_cast<double>(nwaste) <=
-                                coalesce_waste_ratio_ * static_cast<double>(nuseful)) {
-                            g.end = ne; g.useful = nuseful; g.cols.push_back(i);
-                            merged = true;
-                        }
-                    }
-                    if (!merged) groups.push_back(Group{s, e, clen[i], {i}});
-                }
-
-                std::vector<std::pair<std::string, std::map<std::string, std::string>>> reqs;
-                reqs.reserve(groups.size());
-                for (const auto& g : groups) {
-                    reqs.emplace_back(url, http_headers_(
-                        "bytes=" + std::to_string(g.start) +
-                        "-" + std::to_string(g.end - 1)));
-                }
-                auto t_fetch = std::chrono::steady_clock::now();
-                remote_buffers = tl_http_client().get_many(
-                    reqs, http_tuning_set_ ? &http_tuning_ : nullptr);
-                uint64_t batch_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - t_fetch).count();
-                total_read_ns += batch_ns;
-                // One fetch operation covering reqs.size() concurrent ranges.
-                record_http_fetch(batch_ns, reqs.size());
 
                 // Point each column at its slice of whichever group buffer it
                 // landed in. A short/missing buffer leaves the column's view null
@@ -2140,14 +2295,14 @@ class ParquetIOPipeline {
                 // the wrong offset.
                 col_ptr.assign(ncols, nullptr);
                 col_len.assign(ncols, 0);
-                for (size_t gi = 0; gi < groups.size() && gi < remote_buffers.size(); ++gi) {
-                    const Group& g = groups[gi];
+                for (size_t gi = 0; gi < plan.groups.size() && gi < remote_buffers.size(); ++gi) {
+                    const RemotePlan::Group& g = plan.groups[gi];
                     const std::vector<uint8_t>& buf = remote_buffers[gi];
                     for (size_t i : g.cols) {
-                        const size_t off = static_cast<size_t>(cstart[i] - g.start);
-                        if (off + static_cast<size_t>(clen[i]) <= buf.size()) {
+                        const size_t off = static_cast<size_t>(plan.cstart[i] - g.start);
+                        if (off + static_cast<size_t>(plan.clen[i]) <= buf.size()) {
                             col_ptr[i] = buf.data() + off;
-                            col_len[i] = static_cast<size_t>(clen[i]);
+                            col_len[i] = static_cast<size_t>(plan.clen[i]);
                         }
                     }
                 }
@@ -2647,6 +2802,30 @@ class ParquetIOPipeline {
         coalesce_waste_ratio_ = waste_ratio;
         coalesce_max_bytes_   = max_bytes;
     }
+    // Fetch-ahead depth: a dedicated pool of `depth` threads that only issue
+    // the remote range GETs, so concurrent fetches are no longer pinned to the
+    // decode thread count (measured: with 4 decode workers, deepening the
+    // submission window 6 -> 64 moved nothing, 4.54s -> 4.45s, because a ticket
+    // beyond the pool size merely queues). 0 = off = the coupled path, exactly.
+    // Set once at plan time, before any submit_row_group — the routing decision
+    // in enqueue_pending reads fetch_pool_ unsynchronised on that promise.
+    //
+    // Depth is bounded by the caller's SUBMISSION window (in_flight_limit):
+    // fetch-ahead can only run as far ahead as there are submitted items, so
+    // the caller must size the window >= depth (pool_reader.pyx derives it).
+    // Memory: each in-flight item holds its COMPRESSED row-group bytes from
+    // fetch until decode — worst case in_flight_limit x row-group bytes on top
+    // of the existing pool reservation.
+    void set_fetch_ahead(int depth) {
+        if (depth <= 0) throw std::invalid_argument(
+            "set_fetch_ahead: depth must be positive (got " + std::to_string(depth) + ")");
+        if (fetch_pool_) throw std::logic_error("set_fetch_ahead: already set");
+        if (pending_work_.load(std::memory_order_relaxed) != 0 ||
+            enqueue_count_.load(std::memory_order_relaxed) != 0)
+            throw std::logic_error("set_fetch_ahead: called after work was submitted");
+        fetch_ahead_ = depth;
+        fetch_pool_ = std::make_unique<BS::thread_pool<BS::tp::priority>>(depth);
+    }
     // Primitive-args overload: Cython declares HttpTuning-by-struct awkwardly
     // (it's a plain C++ aggregate, not exposed to Python), so the binding calls
     // this instead of constructing an HttpTuning on the Cython side.
@@ -2854,6 +3033,11 @@ class ParquetIOPipeline {
         shutdown_ = true;
         queue_cv_.notify_all();
         if (!decode_pool_) return;
+        // Fetch-ahead: drain the FETCH stage first. Every fetch ticket dispatches
+        // a decode ticket as its last act, so decode cannot be quiescent while a
+        // fetch ticket is still running. Exclusive pool, so wait() is safe here
+        // in a way decode_pool_->wait() is not when the decode pool is injected.
+        if (fetch_pool_) fetch_pool_->wait();
         if (owns_pool_) {
             // Exclusive pool: safe to wait for EVERYTHING in it, nothing else
             // submits here.
@@ -2877,6 +3061,14 @@ class ParquetIOPipeline {
                 std::this_thread::yield();
             }
         }
+    }
+
+    // 0 when fetch-ahead is off, else the fetch pool's thread count — the max
+    // number of range GETs that can be in flight independent of decode. This
+    // is the read-back that proves the knob reached the pipeline.
+    int fetch_ahead_depth() const { return fetch_ahead_; }
+    uint64_t prefetch_discarded_bytes() const {
+        return prefetch_discarded_bytes_.load(std::memory_order_relaxed);
     }
 
     int pending_work_count() const {

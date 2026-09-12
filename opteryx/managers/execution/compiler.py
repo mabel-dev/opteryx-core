@@ -3616,6 +3616,14 @@ class _Compiler:
             # gate above already proved every path is local or signable.
             filesystem=filesystem,
             footer_bytes_cache=scan_footer_bytes_cache(),
+            # Remote fetch-ahead depth (0 = off). Session-settable so a production
+            # A/B needs no redeploy; the plan reports the depth it actually runs
+            # in io_scan_diagnostics (`fetch_ahead_depth`).
+            fetch_ahead=_resolve_var(
+                "parquet_io_fetch_ahead",
+                getattr(scan.properties, "variables", None),
+                config.PARQUET_IO_FETCH_AHEAD,
+            ),
         )
         self.footer_fetch_ns += splan.footer_fetch_ns
 
@@ -3786,6 +3794,11 @@ class _Compiler:
                 config.PARQUET_LOCAL_IO_WORKERS,
             )
         )
+        fetch_ahead = _resolve_var(
+            "parquet_io_fetch_ahead",
+            getattr(scan.properties, "variables", None),
+            config.PARQUET_IO_FETCH_AHEAD,
+        )
         # Row-group pruning triples — identical to the single-pass path, applied to
         # BOTH plans so the two agree on which row groups exist. Pass 2 re-submits
         # only the row groups pass 1 leaves standing, so its own work-item list is
@@ -3810,6 +3823,7 @@ class _Compiler:
                     1 if sc.identity in (getattr(scan, "_length_only_columns", None)
                                          or frozenset()) else 0 for sc in scs],
                 pool=None,
+                fetch_ahead=fetch_ahead,
                 filesystem=filesystem,
                 footer_bytes_cache=scan_footer_bytes_cache(),
             )

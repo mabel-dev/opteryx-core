@@ -387,13 +387,65 @@ cdef inline int64_t _absent_as_sentinel(object value) except? -1:
     return <int64_t>value
 
 
+cdef int _submission_window(int decode_workers, int fetch_ahead,
+                            int in_flight_limit_override) except -1:
+    """Row groups submitted but not yet consumed, given the decode width, the
+    fetch-ahead depth and an explicit override (0 = auto).
+
+    Auto is ``max(decode_workers, fetch_ahead) + 2``: with fetch-ahead off that is
+    the historical ``workers + 2`` exactly; with it on, the window must cover the
+    fetch pool or the extra depth can never be issued — fetch-ahead only runs as
+    far ahead as there are submitted items.
+
+    Two combinations are REJECTED rather than silently inert (the design rule:
+    never ship a knob whose wrong setting is quietly slower):
+      * ``0 < fetch_ahead <= decode_workers`` — a fetch pool no wider than the
+        decode pool adds a hand-off and no concurrency. Measured on the rig:
+        fetch_ahead=4 with workers=4 ran 5.42s where coupled ran 4.46s.
+      * an explicit window smaller than ``fetch_ahead`` — the depth would be
+        capped by the window and the knob would appear to do nothing."""
+    if fetch_ahead < 0:
+        raise ValueError(f"parquet_io_fetch_ahead must be >= 0 (0 = off), got {fetch_ahead}")
+    if 0 < fetch_ahead <= decode_workers:
+        raise ValueError(
+            f"parquet_io_fetch_ahead={fetch_ahead} must exceed the decode worker "
+            f"count ({decode_workers}) or be 0 (off): a fetch pool no wider than the "
+            "decode pool adds a hand-off and no concurrency (measured slower)"
+        )
+    if in_flight_limit_override > 0:
+        if fetch_ahead > in_flight_limit_override:
+            raise ValueError(
+                f"parquet_io_in_flight_limit={in_flight_limit_override} is smaller "
+                f"than parquet_io_fetch_ahead={fetch_ahead}: the submission window "
+                "caps fetch depth, so this setting would silently do nothing"
+            )
+        return in_flight_limit_override
+    return max(decode_workers, fetch_ahead) + 2
+
+
+cdef bint _any_remote_path(paths):
+    """True when at least one scan path is served over HTTP(S)/GCS — the only
+    paths the fetch-ahead stage does any work for. Mirrors the C++ side's
+    path_is_local (io_pipeline.hpp): local files are mmap'd in decode and never
+    enter the fetch stage, so a local-only scan must not spin up a fetch pool."""
+    for p in paths:
+        if p.startswith("gs://") or p.startswith("http://") or p.startswith("https://"):
+            return True
+    return False
+
+
 cdef class CppIOPipeline:
     # C attributes declared in pool_reader.pxd; only method bodies here.
 
     def __cinit__(self, int decode_workers=4, size_t queue_capacity=256,
                   int64_t pool_size=256*1024*1024,
-                  http_tuning=None, coalesce_tuning=None, auth_header=None):
+                  http_tuning=None, coalesce_tuning=None, auth_header=None,
+                  int fetch_ahead=0):
         self.pipeline = new ParquetIOPipeline(decode_workers, queue_capacity)
+        # Fetch-ahead depth (0 = off = the coupled path). Validated by the
+        # opener via _submission_window; set before any submit.
+        if fetch_ahead > 0:
+            self.pipeline.set_fetch_ahead(fetch_ahead)
         self.pool = MemoryPool(pool_size, name="parquet-io", auto_resize=False)
         self.committed_bytes = 0
         # Workers serialize decoded columns directly into this pool's reserved
@@ -714,6 +766,11 @@ cdef class CppIOPipeline:
             "ipc_bytes_serialized": self.pipeline.ipc_bytes_serialized(),
             "ipc_bytes_committed": self.committed_bytes,
             "cancelled_skips": self.pipeline.cancelled_skips(),
+            # Fetch-ahead: the depth the pipeline actually runs (0 = off) — the
+            # read-back that proves `parquet_io_fetch_ahead` reached the scan —
+            # and the compressed bytes it bought that a cancel then discarded.
+            "fetch_ahead_depth": self.pipeline.fetch_ahead_depth(),
+            "prefetch_discarded_bytes": self.pipeline.prefetch_discarded_bytes(),
         }
 
 
@@ -1765,6 +1822,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     http_tuning=None,
     int in_flight_limit_override=0,
     coalesce_tuning=None,
+    int fetch_ahead=0,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -1918,7 +1976,9 @@ cpdef IpcRowGroupSource open_ipc_source(
     # worker sweep could not attribute its win to one or the other. Absolute
     # rather than a delta because the discriminating case (MANY threads, SHALLOW
     # window) needs in_flight < workers, unexpressible as a positive delta.
-    in_flight_limit = in_flight_limit_override if in_flight_limit_override > 0 else decode_workers + 2
+    # With fetch-ahead on, the auto window widens to cover the fetch pool —
+    # see _submission_window for the two rejected (silently inert) combinations.
+    in_flight_limit = _submission_window(decode_workers, fetch_ahead, in_flight_limit_override)
     if in_flight_limit < 1:
         in_flight_limit = 1
     est_rg = max_rg_bytes * 2
@@ -1933,6 +1993,9 @@ cpdef IpcRowGroupSource open_ipc_source(
         http_tuning=http_tuning,
         coalesce_tuning=coalesce_tuning,
         auth_header=_native_auth_header(filesystem),
+        # Armed only when something is remote: a local-only scan gets the
+        # validated window but no idle fetch threads.
+        fetch_ahead=fetch_ahead if _any_remote_path(paths) else 0,
     )
     # Phase 2: pushed per-value predicates → worker dictionary decode-skip. Same
     # conjunct assumption as min/max row-group pruning above.
@@ -1962,6 +2025,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     http_tuning=None,
     int in_flight_limit_override=0,
     coalesce_tuning=None,
+    int fetch_ahead=0,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -2021,7 +2085,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     src.n_items = len(wi)
     if src.n_items == 0:
         return src
-    src.in_flight_limit = max(1, in_flight_limit_override if in_flight_limit_override > 0 else decode_workers + 2)
+    src.in_flight_limit = max(1, _submission_window(decode_workers, fetch_ahead, in_flight_limit_override))
     src.pipeline = CppIOPipeline(
         decode_workers=decode_workers,
         queue_capacity=1024,
@@ -2029,6 +2093,7 @@ cpdef IpcRowGroupSource open_pass2_source(
         http_tuning=http_tuning,
         coalesce_tuning=coalesce_tuning,
         auth_header=_native_auth_header(filesystem),
+        fetch_ahead=fetch_ahead if _any_remote_path([p for p, _, _ in work_items]) else 0,
     )
     return src
 
@@ -2146,6 +2211,10 @@ cdef class NativeScanPlan:
             # bytes_in/bytes_out are a rows*cols*8 estimate of the morsel that
             # survived filtering and LIMIT, so they cannot report this.
             "bytes_fetched": self.pipeline_ptr.bytes_fetched(),
+            # Fetch-ahead: see CppIOPipeline.diagnostics() — same two counters, so
+            # the native path can prove the knob bound and see the waste.
+            "fetch_ahead_depth": self.pipeline_ptr.fetch_ahead_depth(),
+            "prefetch_discarded_bytes": self.pipeline_ptr.prefetch_discarded_bytes(),
         }
 
     def set_pass1_predicate(self, size_t fn, size_t ctx, list columns):
@@ -2204,6 +2273,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     pool=None,
     filesystem=None,
     footer_bytes_cache=None,
+    int fetch_ahead=0,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
     Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
@@ -2413,7 +2483,10 @@ cpdef NativeScanPlan open_native_scan_plan(
         if rg_bytes > max_rg_bytes:
             max_rg_bytes = rg_bytes
 
-    plan.in_flight_limit = decode_workers + 2
+    # No in-flight override reaches this path (see the parameter list); the
+    # window is auto = workers + 2, widened to cover the fetch pool when
+    # fetch-ahead is on — _submission_window also rejects an inert depth.
+    plan.in_flight_limit = _submission_window(decode_workers, fetch_ahead, 0)
     est_rg = max_rg_bytes * 2
     dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
     if dyn_pool_size < 256*1024*1024:
@@ -2424,6 +2497,10 @@ cpdef NativeScanPlan open_native_scan_plan(
         plan.pipeline_ptr = new ParquetIOPipeline(_shared_handle, 1024)
     else:
         plan.pipeline_ptr = new ParquetIOPipeline(decode_workers, 1024)
+    # Armed only when something is remote (see _any_remote_path); the window
+    # above was validated either way.
+    if fetch_ahead > 0 and _any_remote_path([p for p, _ in work_items]):
+        plan.pipeline_ptr.set_fetch_ahead(fetch_ahead)
     # E37: hand the per-column key flags to the decoder so non-key string columns
     # skip the seed XXH3 entirely (the "hash only when a query needs it" gate).
     plan.pipeline_ptr.set_hash_key_columns(plan.hash_key_columns)
@@ -2763,7 +2840,9 @@ def iter_row_groups_ipc(
     query_id=None,
     prefetched_footers=None,
     footer_bytes_cache=None,
-    **kwargs,
+    int in_flight_limit_override=0,
+    coalesce_tuning=None,
+    int fetch_ahead=0,
 ):
     """
     C++ Parquet IO pipeline: read + decode + serialize all in C++, no Python in hot path.
@@ -2773,13 +2852,20 @@ def iter_row_groups_ipc(
     Thin generator wrapper over IpcRowGroupSource for callers that want the
     (ScanRowGroup, {col: Vector}) contract (latmat pass-1, tests). The single-pass
     scan operator drives IpcRowGroupSource directly with no generator frame.
+
+    The signature is explicit — no **kwargs catch-all — so a keyword this wrapper
+    does not forward raises TypeError instead of being silently dropped. The
+    remaining `open_ipc_source` knobs (null_fillers, string_types, limit,
+    http_tuning) are reachable only by driving `open_ipc_source` directly.
     """
     cdef IpcRowGroupSource src = open_ipc_source(
         filesystem, paths, column_names,
         decode_workers=decode_workers, predicates=predicates,
         file_sizes=file_sizes, connector=connector, query_id=query_id,
         prefetched_footers=prefetched_footers, footer_bytes_cache=footer_bytes_cache,
-        coalesce_tuning=kwargs.get("coalesce_tuning"),
+        in_flight_limit_override=in_flight_limit_override,
+        coalesce_tuning=coalesce_tuning,
+        fetch_ahead=fetch_ahead,
     )
     cdef list names = src.column_names_bytes
     cdef list vectors
