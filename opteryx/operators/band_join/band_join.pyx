@@ -29,7 +29,7 @@ for a 4.8M-row answer). Executed here, each equi group's build rows are kept
 sorted by the banded column and a probe row emits the contiguous slice between
 two bisects, so the discarded pairs are never formed.
 
-JoinOrderingStrategy is the ONLY producer of this join type — it owns the single
+JoinAlgorithmStrategy is the ONLY producer of this join type — it owns the single
 retype decision that chooses between "band" and "nested loop" — and it attaches
 the descriptor this class carries. Execution is 100% native (see
 opteryx/managers/execution/compiler.py's _compile_band_join, which reads
@@ -62,7 +62,7 @@ cdef class BandJoinNode(JoinNode):
         # The BUILD-side column the sorted runs are ordered by — a column IDENTITY
         # (bytes), matching how left_columns/right_columns carry join keys.
         self.band_column = parameters.get("band_column")
-        # EXPLAIN only — never used to resolve anything. See join_ordering.
+        # EXPLAIN only — never used to resolve anything. See join_algorithm.
         self.band_column_name = parameters.get("band_column_name")
         # The two bounds, as bound expression NODES over the probe leg. They stay
         # expressions here: the compiler materialises them as synthetic probe

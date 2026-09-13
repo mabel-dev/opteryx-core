@@ -53,7 +53,7 @@ no-group aggregate = 1) or ``row_count_estimate`` (anything touched by a
 selectivity or NDV heuristic). The plan-time result-size guard acts only on
 metrics; estimates defer to the runtime row counter.
 
-Consumers (JoinOrderingStrategy, JoinPlanningStrategy) currently still
+Consumers (JoinAlgorithmStrategy, JoinPlanningStrategy) currently still
 read ``node.left_size`` / manifest directly; rewiring them to consume
 ``node.statistics`` is a follow-up.
 """
@@ -876,7 +876,7 @@ def _equi_key_classes(
     under FK-PK structure the smaller relation upper-bounds the distinct key
     count, and dividing by the post-filter count instead yields exactly
     ``max(rows)``, erasing every dimension filter. Null fractions take the worst
-    case per side, matching ``JoinOrderingStrategy._key_null_fraction``.
+    case per side, matching ``JoinAlgorithmStrategy._key_null_fraction``.
 
     This mirrors ``plan_adapter._build_equiv_tdoms``, which already groups the
     identical way for the edges DPccp enumerates. The two paths must agree, or
@@ -953,7 +953,7 @@ def _equi_key_classes(
             # A side that reports no NDV falls back to the domain bound -- the
             # smaller relation's PRE-filter size, per this function's docstring.
             # Composition across the side's endpoints is the shared helper --
-            # the same one join_ordering._key_ndv uses for the build-side pick.
+            # the same one join_algorithm._key_ndv uses for the build-side pick.
             side_ndv = composite_key_ndv(known_ndvs[side])
             side_measured = side_ndv is not None
             side_tdom = side_ndv if side_ndv is not None else fallback
@@ -1080,7 +1080,7 @@ def _join_stats(
 
     if not left_keys or not right_keys:
         # Without a usable equi key, fall back to a cross-product upper bound;
-        # JoinOrdering already guards against nested-loop blow-up by row count.
+        # JoinAlgorithm already guards against nested-loop blow-up by row count.
         out_rows = max(1, left.row_count * right.row_count)
         if join_notes is not None:
             join_notes.append(

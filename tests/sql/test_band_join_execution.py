@@ -42,7 +42,7 @@ import opteryx
 from opteryx import config
 
 # Bands `flow_start`, which lives on `flows` (5 rows) -- the SMALLER side, which is
-# the one JoinOrderingStrategy puts on the build leg, and the band column has to be
+# the one JoinAlgorithmStrategy puts on the build leg, and the band column has to be
 # on the build leg to be the one that gets sorted.
 BAND = """
 SELECT f.client, l.tag
@@ -100,7 +100,7 @@ SELECT f.client, l.tag
 """
 
 # The band column here is `event_time`, on `lookups` (23 rows) -- the LARGER side,
-# so JoinOrderingStrategy leaves it on the PROBE leg.
+# so JoinAlgorithmStrategy leaves it on the PROBE leg.
 PROBE_SIDE_BAND = """
 SELECT f.client, l.tag
   FROM testdata.band_join.flows AS f

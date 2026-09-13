@@ -38,7 +38,7 @@ cdef class FilterJoinNode(JoinNode):
     # feeds it to the native probe, where it gates the existence test per candidate
     # pair — it is NOT a post-join filter.
     cdef public object residual
-    # JoinOrderingStrategy's build-side exchange decision (compiler.py's
+    # JoinAlgorithmStrategy's build-side exchange decision (compiler.py's
     # _compile_swapped_semi_anti). A cdef class has no __dict__, so a slot the
     # __init__ does not copy is silently ABSENT — which is how this decision was
     # made, counted in telemetry, shown in EXPLAIN, and never executed: at TPC-H

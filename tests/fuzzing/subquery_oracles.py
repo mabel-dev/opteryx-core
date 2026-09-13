@@ -271,7 +271,7 @@ _DIFFERENTIAL_STRATEGIES = (
     "disable_constant_folding",
     "disable_boolean_simplification",
     "disable_projection_pushdown",
-    "disable_join_ordering",
+    "disable_join_algorithm",
     "disable_join_elimination",
     "disable_join_rewrite",
     "disable_cross_join_filter_pushdown",

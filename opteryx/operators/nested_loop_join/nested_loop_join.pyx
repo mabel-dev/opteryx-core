@@ -18,7 +18,7 @@ Inner (Nested Loop) Join Node
 
 Every join whose ON clause contains a non-equi comparator lands here — pure
 theta (`a > b`), mixed equi+theta (`a = b AND c > d`), and `!=` alike. The
-optimizer's join_ordering strategy rewrites the logical join type to
+optimizer's join_algorithm strategy rewrites the logical join type to
 "nested loop" for all of them (see _contains_non_equi_comparator), so this is
 the ONLY node that carries a non-equi join.
 

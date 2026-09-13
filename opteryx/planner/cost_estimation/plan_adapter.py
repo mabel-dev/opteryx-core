@@ -43,7 +43,7 @@ def _identifier_source(expr: Optional[Node]) -> Optional[str]:
 def _identifier_identity(expr: Optional[Node]) -> Optional[bytes]:
     """Identity of an identifier's bound column, matching how
     ``RelationStatistics.columns`` is keyed (see that class's docstring and
-    ``join_ordering._join_key_identity``).
+    ``join_algorithm._join_key_identity``).
 
     Returns None when the expression carries no bound ``schema_column``
     (NDV/null then go unknown and the tdom fallback applies). Never falls

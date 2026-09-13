@@ -10,7 +10,7 @@ where the build-side chooser and the cardinality estimator silently priced
 the same join or predicate differently:
 
   A. Composite-key NDV composition: statistics_refresh took max() across a
-     side's key-column NDVs while join_ordering._key_ndv took min() -- the
+     side's key-column NDVs while join_algorithm._key_ndv took min() -- the
      two read DIFFERENT NDVs for the same join. Ruling: max (the standard
      conservative lower bound on a composite key's NDV), in one shared
      helper `composite_key_ndv`.
@@ -42,7 +42,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
 # __init__ imports the strategies, and strategies.predicate_ordering imports
 # selectivity back -- a pre-existing cycle that resolves only in this order.
 from opteryx.planner.optimizer import statistics_refresh
-from opteryx.planner.optimizer.strategies import join_ordering
+from opteryx.planner.optimizer.strategies import join_algorithm
 from opteryx.planner.optimizer.strategies import predicate_ordering as strategy_predicate_ordering
 import sys as _sys
 
@@ -67,7 +67,7 @@ from opteryx.planner.cost_estimation.join_cardinality import composite_key_ndv
 def test_composite_key_ndv_is_the_single_composition():
     """Both consumers bind the ONE helper, not local copies."""
     assert statistics_refresh.composite_key_ndv is composite_key_ndv
-    assert join_ordering.composite_key_ndv is composite_key_ndv
+    assert join_algorithm.composite_key_ndv is composite_key_ndv
 
 
 def test_occupancy_bound_is_the_single_function():

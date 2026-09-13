@@ -138,7 +138,7 @@ def _join_condition(node):
 # Which input leg each join materialises, mirroring _compile_join's own rules
 # (managers/execution/compiler.py). A consumer cannot derive this: the leg
 # labels are on the edges, but the INNER-vs-everything-else rule and the
-# JoinOrderingStrategy swap that flips SEMI/ANTI live here, in plan-land.
+# JoinAlgorithmStrategy swap that flips SEMI/ANTI live here, in plan-land.
 # Absent for any join shape not listed — an unknown build side is better said
 # by silence than by a guess, since naming the wrong leg inverts the reading.
 def _join_legs(node):
@@ -155,7 +155,7 @@ def _join_legs(node):
     if join_type == "inner":
         return "left", "right"
     # SEMI / ANTI normally build the right leg like every other filtering join,
-    # but JoinOrderingStrategy can swap them to build the left instead — and
+    # but JoinAlgorithmStrategy can swap them to build the left instead — and
     # then the compiler runs a different pipeline shape entirely.
     if join_type in ("left semi", "left anti") and getattr(node, "swap_build_side", False):
         return "left", "right"

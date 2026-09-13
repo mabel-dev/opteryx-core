@@ -695,7 +695,7 @@ struct Join2BuildSink : Sink {
         // column per morsel — NOT free, and not pretended to be: the hash above
         // destroys order, so nothing already computed can be reused. The column
         // is hot from compute_row_hashes and this is the small side of the join
-        // by construction (JoinOrderingStrategy builds the smaller leg).
+        // by construction (JoinAlgorithmStrategy builds the smaller leg).
         //
         // The bound covers every NON-NULL value of this column in this morsel,
         // including rows that the loop below excludes from the table because a

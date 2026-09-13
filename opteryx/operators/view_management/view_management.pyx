@@ -39,6 +39,11 @@ class ViewManagementNode(BasePlanNode):
         # CREATE / ALTER
         self.view_name: Optional[str] = parameters.get("view_name")
         self.query = parameters.get("query")
+        # Both are the binder's: it renders the defining SQL and binds it to
+        # derive the view's output schema, so the text stored and the schema
+        # describing it come from one place. See `_view_output_schema`.
+        self.view_sql = parameters.get("view_sql")
+        self.view_schema = parameters.get("view_schema")
         self.or_replace = parameters.get("or_replace", False)
         self.if_not_exists = parameters.get("if_not_exists", False)
 
@@ -82,15 +87,6 @@ class ViewManagementNode(BasePlanNode):
         # Perform the action and return a NonTabularResult object
 
         if self.action in ("create_view", "alter_view"):
-            from opteryx.third_party import sqloxide
-
-            if self.query is None:
-                # Nothing to store
-                raise ValueError("No view query supplied")
-
-            # The rust module expects and returns lists of statements
-            view_sql = sqloxide.ast_to_sql([{"Query": self.query}])[0]
-
             if not self.connector:
                 # Defensive: if connector is missing, derive via connector_factory lazily
                 from opteryx.connectors import connector_factory
@@ -106,7 +102,11 @@ class ViewManagementNode(BasePlanNode):
             # "opteryx" made the stored owner useless for telling authors apart.
             update_if_exists = self.or_replace or self.action == "alter_view"
             self.connector.create_view(
-                self.view_name, view_sql, update_if_exists=update_if_exists, owner=self._author
+                self.view_name,
+                self.view_sql,
+                update_if_exists=update_if_exists,
+                owner=self._author,
+                schema=self.view_schema,
             )
 
             return NonTabularResult(record_count=1, status=QueryStatus.SQL_SUCCESS)

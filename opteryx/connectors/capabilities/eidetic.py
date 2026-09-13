@@ -1,5 +1,9 @@
 import dataclasses
+from typing import TYPE_CHECKING
 from typing import Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from opteryx.types.schema import RelationSchema
 
 
 @dataclasses.dataclass
@@ -10,6 +14,13 @@ class ViewDefinition:
     last_row_count: Optional[int] = None
     description: Optional[str] = None
     describer: Optional[str] = None
+    # The view's output columns, named and typed, as the binder resolved them
+    # when the definition was stored. None only for a view recorded before
+    # schemas were kept. Metadata: a view is always expanded by re-planning
+    # `statement`, so this describes the view but never determines it - and for
+    # a definition with a wildcard it is a snapshot that the source gaining a
+    # column leaves stale.
+    schema: Optional["RelationSchema"] = None
 
 
 class Eidetic:
@@ -32,7 +43,14 @@ class Eidetic:
         # the connector's metadata for available views.
         raise NotImplementedError("list_views method must be implemented by subclasses.")
 
-    def create_view(self, view_name: str, statement: str, owner: Optional[str] = None):
+    def create_view(
+        self,
+        view_name: str,
+        statement: str,
+        update_if_exists: bool = False,
+        owner: Optional[str] = None,
+        schema: Optional["RelationSchema"] = None,
+    ):
         """Create a new view with the given name and definition."""
         # Placeholder implementation; actual implementation would add
         # the view to the connector's metadata.

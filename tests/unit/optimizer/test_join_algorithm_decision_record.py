@@ -3,7 +3,7 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""JoinOrderingStrategy is a costed pair, so its choices must be visible.
+"""JoinAlgorithmStrategy is a costed pair, so its choices must be visible.
 
 `OptimizationStrategy.record_decision` states the contract: a strategy that compares
 concrete plan alternatives must report the outcome WITH the numbers it decided on.
@@ -35,7 +35,7 @@ sys.path.insert(1, os.path.join(sys.path[0], "../../.."))
 import pytest
 
 import opteryx
-from opteryx.planner.optimizer.strategies.join_ordering import _decide_swap_reasoned
+from opteryx.planner.optimizer.strategies.join_algorithm import _decide_swap_reasoned
 
 TPCH = "testdata.tpch_1"
 

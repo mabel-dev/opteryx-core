@@ -3,12 +3,12 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
-"""WP-7: JoinOrderingStrategy consumes node.statistics (post-filter row counts).
+"""WP-7: JoinAlgorithmStrategy consumes node.statistics (post-filter row counts).
 
 Two layers:
   * ``_decide_swap_reasoned`` — the pure side-selection logic, including the case the old
     pre-filter size heuristic got wrong (a heavily-filtered large table).
-  * ``JoinOrderingStrategy.visit`` end-to-end — proves the strategy reads the
+  * ``JoinAlgorithmStrategy.visit`` end-to-end — proves the strategy reads the
     children's post-filter ``statistics.row_count`` (by 'left'/'right' edge
     label) instead of the binder's pre-filter ``left_size``/``right_size``.
 """
@@ -27,8 +27,8 @@ from opteryx.planner.logical_planner.logical_planner import LogicalPlanNode
 from opteryx.planner.logical_planner.logical_planner import LogicalPlanStepType
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
-from opteryx.planner.optimizer.strategies.join_ordering import JoinOrderingStrategy
-from opteryx.planner.optimizer.strategies.join_ordering import _decide_swap_reasoned
+from opteryx.planner.optimizer.strategies.join_algorithm import JoinAlgorithmStrategy
+from opteryx.planner.optimizer.strategies.join_algorithm import _decide_swap_reasoned
 
 
 def _decide_swap(*args):
@@ -170,7 +170,7 @@ def test_visit_swaps_on_post_filter_statistics_not_pre_filter_size():
     right_scan = _scan_with_stats("small", row_count=1000)
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
-    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry.detached())
+    strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan)
     context.node_id = "j"
 
@@ -191,7 +191,7 @@ def test_visit_swaps_when_statistics_show_left_is_larger():
     right_scan = _scan_with_stats("small", row_count=100)
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
-    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry.detached())
+    strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan)
     context.node_id = "j"
 
@@ -216,7 +216,7 @@ def test_visit_falls_back_to_pre_filter_size_without_statistics():
     right_scan.columns = []
     plan = _build_join_plan(join_node, left_scan, right_scan)
 
-    strategy = JoinOrderingStrategy(telemetry=QueryTelemetry.detached())
+    strategy = JoinAlgorithmStrategy(telemetry=QueryTelemetry.detached())
     context = OptimizerContext(plan)
     context.node_id = "j"
 

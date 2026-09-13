@@ -39,6 +39,18 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _view_schema_from_stored(stored) -> Optional[RelationSchema]:
+    """Rebuild a stored view schema, or None for a view recorded without one.
+
+    A view written before schemas were kept has no `schema` key at all, which is
+    not the same as a view with no columns - the first is unknown, the second
+    cannot happen (a definition that produced nothing would not have bound).
+    """
+    if stored is None:
+        return None
+    return RelationSchema.from_dict(stored)
+
+
 def _ts_for_filename(iso: str) -> str:
     """Convert ISO 8601 timestamp to filename-safe format.
 
@@ -1658,6 +1670,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             last_row_count=data.get("last_row_count"),
             description=data.get("description"),
             describer=data.get("describer"),
+            schema=_view_schema_from_stored(data.get("schema")),
         )
 
     def list_views(self, prefix: Optional[str] = None) -> List[ViewDefinition]:
@@ -1680,6 +1693,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
                     last_row_count=data.get("last_row_count"),
                     description=data.get("description"),
                     describer=data.get("describer"),
+                    schema=_view_schema_from_stored(data.get("schema")),
                 )
             )
         return views
@@ -1690,6 +1704,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         statement: str,
         update_if_exists: bool = False,
         owner: Optional[str] = None,
+        schema: Optional[RelationSchema] = None,
     ) -> None:
         """Create (or replace) a view definition.
 
@@ -1698,6 +1713,9 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             statement: SQL statement defining the view
             update_if_exists: If True, overwrite an existing view definition
             owner: Optional owner attribution
+            schema: The view's output columns, named and typed, as the binder
+                resolved them from `statement`. Recorded as metadata; the view
+                is still expanded from `statement` when it is queried.
 
         Raises:
             ValueError: If the name is already used by a relation, or the view
@@ -1721,6 +1739,7 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             "last_row_count": None,
             "description": None,
             "describer": None,
+            "schema": None if schema is None else schema.to_dict(),
             "created_at": _now_utc_iso(),
         }
 

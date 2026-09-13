@@ -15,7 +15,7 @@ from .join_build_shape import JoinBuildShapeStrategy
 from .join_condition_hoist import JoinConditionHoistStrategy
 from .join_elimination import JoinEliminationStrategy
 from .join_key_materialization import JoinKeyMaterializationStrategy
-from .join_ordering import JoinOrderingStrategy
+from .join_algorithm import JoinAlgorithmStrategy
 from .join_planning import JoinPlanningStrategy
 from .join_rewriter import JoinRewriteStrategy
 from .limit_elimination import LimitEliminationStrategy
@@ -59,7 +59,7 @@ __all__ = [
     "JoinBuildShapeStrategy",
     "JoinConditionHoistStrategy",
     "JoinEliminationStrategy",
-    "JoinOrderingStrategy",
+    "JoinAlgorithmStrategy",
     "JoinPlanningStrategy",
     "JoinRewriteStrategy",
     "LimitEliminationStrategy",

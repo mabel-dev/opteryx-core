@@ -4,26 +4,45 @@
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 """
-Optimization Rule - Join Ordering
+Optimization Rule - Join Algorithm
 
 Type: Cost-Based / Correctness
 Goal: Faster Joins
 
-Build a left-deep join tree, where the left relation of any pair is the smaller relation.
+This pass makes the PHYSICAL decisions for a join whose shape and semantics are
+already fixed: which leg builds and which leg probes, and which join algorithm
+executes the pair (hash, nested loop, or band).
 
-We also decide whether a join needs the nested-loop strategy: a non-equi conjunct
-(pure theta, or mixed equi+theta) has no hash key to build from, so nested loop is
-the only correct execution — never a cost-based choice. A PURE equi join always
-uses the hash-join mode; there is no longer a nested-loop-vs-hash-join cost
-trade-off to make for equi joins in the native engine (see below).
+It does NOT decide the join TREE. Tree shape -- which relations pair with which,
+and in what order -- is chosen by JoinPlanningStrategy (join_planning.py, DPccp
+or greedy) or, when that strategy declines, is simply the FROM-clause order as
+the logical planner built it. Nothing here reparents a join or changes which
+relations meet. If you are chasing why a query joins relations in a particular
+ORDER, this is the wrong file: read join_planning.py.
 
-Join Ordering Rules (from COST-BASED-OPTIMIZER.md):
+What this pass does own:
+
+Build-side selection (per pair, never a re-parenting). The rules below decide
+only which of the two legs of an EXISTING pair materialises into the hash table
+and which streams past it; a swap rewrites node.left_*/node.right_*, and sets
+node.swap_build_side for SEMI/ANTI where the build side is otherwise pinned:
 1. If one table is more than 3x the bytes of the other, larger table goes right (memory pressure heuristic)
 2. If cardinalities are within 1%, larger table goes right
 3. Otherwise, use cardinality estimation of join column(s) to decide left/right tables
    -- but only where it does not contradict the row counts: a cardinality
    preference may break a row-count near-tie, never overturn it (see _decide_swap_reasoned)
 4. If table sizes and cardinalities are the same (e.g. self join), don't change order
+
+Algorithm selection (node.type, plus the band descriptors node.band_column,
+node.band_lower, node.band_upper and friends). A non-equi conjunct (pure theta,
+or mixed equi+theta) has no hash key to build from, so nested loop -- or a band
+join, where the theta is recognised as a range on one column -- is the only
+correct execution, never a cost-based choice. A PURE equi join always uses the
+hash-join mode; there is no longer a nested-loop-vs-hash-join cost trade-off to
+make for equi joins in the native engine (see below). This retyping is a
+CORRECTNESS obligation, not an optimisation: predicate pushdown absorbs theta
+conjuncts into joins that were keyed equi joins when they were planned, and
+without the retype here that plan is unrunnable.
 
 Historical note: this strategy used to ALSO route a pure equi join to
 "nested loop" when the smaller side was tiny and the larger side was in a
@@ -411,7 +430,7 @@ def _side_facts(rows, ndv=_NOT_CONSULTED, null_fraction=None) -> str:
     return ", ".join(parts)
 
 
-class JoinOrderingStrategy(OptimizationStrategy):
+class JoinAlgorithmStrategy(OptimizationStrategy):
     optimization_technique = "cost"
     requires = ("joins-planned",)
 

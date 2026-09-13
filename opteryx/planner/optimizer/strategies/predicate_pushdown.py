@@ -347,7 +347,7 @@ def _deep_pushdown_target(plan, start_nid, predicate_ids, group_key_identity, em
 
 
 # The non-equality comparators. A join ON clause containing one of these has no
-# hash key to build from for that conjunct, so JoinOrderingStrategy re-types the
+# hash key to build from for that conjunct, so JoinAlgorithmStrategy re-types the
 # join to "nested loop" and the compiler applies the whole ON as a per-pair
 # residual (see compiler.py's `zero_key`/`residual`).
 _THETA_COMPARATORS = frozenset({"NotEq", "Gt", "GtEq", "Lt", "LtEq"})
@@ -1440,7 +1440,7 @@ class PredicatePushdownStrategy(OptimizationStrategy):
                     # A cross-relation NON-EQUALITY over the same two legs is folded
                     # in as well, into a join that already has an `on`. It supplies no
                     # join key -- extract_join_fields reads Eq conjuncts only -- so the
-                    # join stays KEYED on its equi conjuncts, JoinOrderingStrategy
+                    # join stays KEYED on its equi conjuncts, JoinAlgorithmStrategy
                     # re-types it "nested loop", and the compiler applies the whole ON
                     # as a per-pair residual (compiler.py's `residual`). The temporal
                     # BAND JOIN is what this is for:

@@ -305,7 +305,7 @@ against a live, growing table.
    syntax is a separate question from optimising the shape users already write;
    the proposal assumes planner-only.
 4. **Which side builds.** The build side is the one sorted by the band column;
-   `join_ordering` currently chooses on cardinality and NDV. The band form may
+   `join_algorithm` currently chooses on cardinality and NDV. The band form may
    want a different rule, and that interacts with the row-count guard added in
    the Rule 3 work.
 
@@ -317,19 +317,19 @@ against a live, growing table.
 
 1. **Unconditional for the shape.** Not costed. Vindicated by measurement below —
    there is no measured crossover to cost against.
-2. **`join_ordering` owns recognition**, at its existing retype site
-   ([join_ordering.py:396](../opteryx/planner/optimizer/strategies/join_ordering.py:396)),
+2. **`join_algorithm` owns recognition**, at its existing retype site
+   ([join_algorithm.py:396](../opteryx/planner/optimizer/strategies/join_algorithm.py:396)),
    as `if band -> "band" elif non-equi -> "nested loop"`. One decision point, so the
    band and the theta-nested-loop cannot both claim the shape — structurally, not by
    coordination. `predicate_pushdown` keeps only MOVING the predicate into `on`.
 3. **Planner-only.** No SQL surface.
-4. **`join_ordering`'s build-side rule stands**, untouched, including the Rule 3
+4. **`join_algorithm`'s build-side rule stands**, untouched, including the Rule 3
    row-count guard.
 
 ### The prerequisite nobody had spotted
 
 The recogniser reads `node.on`, and `PredicatePushdownStrategy` runs before
-`JoinOrderingStrategy` — so a band only reaches recognition if theta absorption put
+`JoinAlgorithmStrategy` — so a band only reaches recognition if theta absorption put
 it there. It was DECLINING on the CTE spelling, which is the spelling this
 document's own motivating query uses. Traced at the relations gate: a relation
 crossing a CTE boundary is known by several names (the user's alias AND the minted
@@ -438,7 +438,7 @@ off either way; it measures exactly zero there and 1.34x on a query with a live 
 ### Known gaps
 
 🔴 **Bound inversion is not implemented.** The band column must land on the BUILD
-leg, which is `join_ordering`'s existing cardinality choice — so whether the
+leg, which is `join_algorithm`'s existing cardinality choice — so whether the
 optimisation fires depends on which relation is smaller. A two-sided band with
 literal offsets IS invertible (`l.t <= f.t AND l.t > f.t - 20s` IS
 `f.t >= l.t AND f.t < l.t + 20s`), which is what the ruling on decision 4 relies on
@@ -454,7 +454,7 @@ inclusivity edges against the coerced type first.
 
 ### Where it lives
 
-* Recognition + retype — `join_ordering.py` (`_recognize_band`, `_band_or_nested_loop`)
+* Recognition + retype — `join_algorithm.py` (`_recognize_band`, `_band_or_nested_loop`)
 * Leg attribution — `join_helpers.band_operand_leg`, beside `hoistable_operand_leg`
 * Plan node — `opteryx/operators/band_join/band_join.pyx`
 * Compile — `compiler._compile_band_join`; bounds materialised as synthetic probe

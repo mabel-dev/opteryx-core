@@ -187,34 +187,92 @@ class JoinPlanningStrategy(OptimizationStrategy):
             chain_tops.append(nid)
 
         for top_id in chain_tops:
+            # EVERY decline below is recorded. The six ways this strategy can walk
+            # away point at six different pieces of work, and a plan that got no
+            # join ordering at all is indistinguishable in optimizer_trace from one
+            # that was considered and kept ({'changed': False} either way). TPC-H
+            # Q21 at SF100 ran with NO join ordering for exactly that reason, and
+            # finding out required monkeypatching this method.
+            label = f"cost-based join planning ({top_id})"
+
             chain = _collect_chain_top_down(plan, top_id)
             if len(chain) < 1:
+                self.record_decision(
+                    label,
+                    "declined, no cross-join chain collected below the chain top",
+                )
                 continue
 
             leaves = _gather_leaves(plan, chain)
-            if leaves is None or len(leaves) < 2:
+            # Two distinct declines: an UNRECOGNISED chain shape is a gap in
+            # _gather_leaves, a chain with one leaf is nothing to order.
+            if leaves is None:
+                self.record_decision(
+                    label,
+                    f"declined, chain shape not recognised by _gather_leaves:"
+                    f" {len(chain)} join(s) in chain",
+                )
+                continue
+            if len(leaves) < 2:
+                self.record_decision(
+                    label,
+                    f"declined, fewer than 2 leaves to order: {len(leaves)} leaf"
+                    f" ({len(chain)} join(s) in chain)",
+                )
                 continue
 
             predicates = _collect_predicates_above(plan, top_id)
             if not predicates:
+                # NOT benign. _collect_predicates_above stops at nodes it does not
+                # walk through, so anything it declines to traverse hides every join
+                # predicate from this strategy and DPccp never runs. It DOES now walk
+                # through Join parents (the decorrelated EXISTS/NOT EXISTS case that
+                # cost Q21 a 1.9x); a decline here means a Project/Aggregate/Subquery
+                # boundary, or a genuine cartesian. Named separately so the next such
+                # blind spot is visible in telemetry instead of looking like
+                # "nothing to do".
+                self.record_decision(
+                    label,
+                    f"declined, no predicates above the chain: {len(leaves)} leaves,"
+                    " DPccp did not run",
+                )
                 continue
 
             graph = build_join_graph(plan, leaves, predicates)
             if graph is None:
+                # build_join_graph refuses for three reasons it does not currently
+                # distinguish: no cross-leaf equi predicate, a leaf with no row
+                # count, or a disconnected graph. The counts below narrow it.
+                self.record_decision(
+                    label,
+                    f"declined, no usable join graph: {len(leaves)} leaves,"
+                    f" {len(predicates)} predicate(s) above the chain"
+                    " (no equi edge, missing row statistics, or disconnected)",
+                )
                 continue
 
-            try:
-                tree = enumerate_join_tree(graph)
-            except (ValueError, RuntimeError):
-                # Disconnected / unsupported graph shape — leave plan alone.
-                continue
+            # No guard around the enumerator: build_join_graph has ALREADY enforced
+            # every precondition it can refuse on (>= 1 vertex, connected), so a
+            # raise here is an invariant violation, not a shape this strategy may
+            # decline. It must fail loudly rather than silently cost nothing.
+            tree = enumerate_join_tree(graph)
 
             # Skip when DPccp picks the same left-deep chain we already have.
             existing_order = [leaf.original_index for leaf in leaves]
             if _tree_is_left_deep_in_leaf_order(tree, existing_order):
+                self.record_decision(
+                    label,
+                    f"kept, enumerator chose the existing left-deep order:"
+                    f" {graph.n} vertices, {len(graph.edges)} edge(s)",
+                )
                 continue
 
             _apply_join_tree(plan, chain, leaves, tree)
+            self.record_decision(
+                label,
+                f"reordered, enumerator chose a different tree:"
+                f" {graph.n} vertices, {len(graph.edges)} edge(s)",
+            )
 
         return plan
 

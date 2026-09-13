@@ -1185,3 +1185,138 @@ def test_create_collection_requires_two_part_name(tmp_path):
             list(owner.execute_to_morsels(f"CREATE COLLECTION {name}"))
 
 
+
+
+def test_create_view_records_its_output_columns_and_types(tmp_path):
+    """The view's shape is bound at CREATE time and stored, so a catalog reader
+    can describe its columns without planning its SQL."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(
+        session.execute_to_morsels(
+            "CREATE VIEW ws.events_view AS SELECT id, name AS label FROM ws.events"
+        )
+    )
+
+    with open(tmp_path / "ws" / "events_view" / "view.json") as f:
+        stored = json.load(f)["schema"]
+    assert [column["name"] for column in stored["columns"]] == ["id", "label"]
+    assert [column["column_type"] for column in stored["columns"]] == ["INT64", "VARCHAR"]
+
+
+def test_create_view_records_the_alias_not_the_expression(tmp_path):
+    """A computed column is stored under the name the reader will see, with the
+    type the binder resolved for the expression."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(
+        session.execute_to_morsels(
+            "CREATE VIEW ws.events_view AS SELECT id + 1 AS next_id FROM ws.events"
+        )
+    )
+
+    with open(tmp_path / "ws" / "events_view" / "view.json") as f:
+        stored = json.load(f)["schema"]
+    assert [column["name"] for column in stored["columns"]] == ["next_id"]
+    assert stored["columns"][0]["column_type"] == "INT64"
+
+
+def test_a_wildcard_view_records_the_columns_it_expands_to_today(tmp_path):
+    """A wildcard is bound like anything else: the stored columns are a snapshot
+    of the sources as they are now, which is a description and never what the
+    view returns - that is still expanded at read time."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT * FROM ws.events"))
+
+    with open(tmp_path / "ws" / "events_view" / "view.json") as f:
+        stored = json.load(f)["schema"]
+    assert [column["name"] for column in stored["columns"]] == ["id", "name"]
+
+
+def test_replacing_a_view_rewrites_its_schema(tmp_path):
+    """The schema is derived from the body, so a redefinition rewrites it -
+    leaving the previous definition's columns standing would describe a view
+    that no longer exists."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT id FROM ws.events"))
+    list(
+        session.execute_to_morsels(
+            "CREATE OR REPLACE VIEW ws.events_view AS SELECT name FROM ws.events"
+        )
+    )
+
+    with open(tmp_path / "ws" / "events_view" / "view.json") as f:
+        stored = json.load(f)["schema"]
+    assert [column["name"] for column in stored["columns"]] == ["name"]
+
+
+def test_view_schema_is_read_back_as_a_relation_schema(tmp_path):
+    """The stored columns come back typed on the ViewDefinition the engine
+    reads, not as the raw stored spelling."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(
+        session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT id, name FROM ws.events")
+    )
+
+    from opteryx.connectors import connector_factory
+
+    schema = connector_factory("ws.events_view", telemetry=None).get_view("ws.events_view").schema
+    assert [(c.name, str(c.column_type)) for c in schema.columns] == [
+        ("id", "INT64"),
+        ("name", "VARCHAR"),
+    ]
+
+
+def test_create_view_over_an_unknown_relation_is_refused(tmp_path):
+    """A definition whose shape cannot be determined is not recorded: the view
+    would be one no reader could be told the shape of."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    with pytest.raises(DatasetNotFoundError):
+        list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT id FROM ws.nope"))
+
+    assert not (tmp_path / "ws" / "events_view" / "view.json").exists()
+
+
+def test_alter_view_rewrites_the_schema_too(tmp_path):
+    """ALTER VIEW redefines the body, and the stored shape follows it - the
+    schema describes the statement the catalog holds, not the one it held."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.events_view AS SELECT id FROM ws.events"))
+    list(session.execute_to_morsels("ALTER VIEW ws.events_view AS SELECT name FROM ws.events"))
+
+    with open(tmp_path / "ws" / "events_view" / "view.json") as f:
+        stored = json.load(f)["schema"]
+    assert [column["name"] for column in stored["columns"]] == ["name"]
+
+
+def test_a_view_over_a_view_records_the_inner_views_columns(tmp_path):
+    """The bind expands the inner view, so the outer one's recorded shape is the
+    shape a reader actually gets."""
+    _setup_workspace(tmp_path)
+    session = opteryx.session()
+
+    list(session.execute_to_morsels("CREATE TABLE ws.events (id BIGINT, name VARCHAR)"))
+    list(session.execute_to_morsels("CREATE VIEW ws.inner_view AS SELECT name FROM ws.events"))
+    list(session.execute_to_morsels("CREATE VIEW ws.outer_view AS SELECT * FROM ws.inner_view"))
+
+    with open(tmp_path / "ws" / "outer_view" / "view.json") as f:
+        stored = json.load(f)["schema"]
+    assert [column["name"] for column in stored["columns"]] == ["name"]

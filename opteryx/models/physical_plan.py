@@ -79,7 +79,7 @@ class PhysicalPlan(Graph):
         """Ensure every join's ingoing edges carry a left/right label.
 
         A label already on an edge is authoritative. The logical planner sets it
-        when it builds the join, ``JoinOrderingStrategy`` flips it when it swaps
+        when it builds the join, ``JoinAlgorithmStrategy`` flips it when it swaps
         the build side, and ``remove_node(heal=True)`` carries it across removed
         nodes. Labels are only *inferred* for edges an optimizer rewrite left
         unlabelled — cross-join filter pushdown, cross-join chain reorder and

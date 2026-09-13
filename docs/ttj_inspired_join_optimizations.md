@@ -60,7 +60,7 @@ planner when the SQL query explicitly uses `IN (subquery)` or `NOT IN (subquery)
 
 ### Join planning
 
-`JoinOrderingStrategy` (`opteryx/planner/optimizer/strategies/join_ordering.py`) arranges
+`JoinAlgorithmStrategy` (`opteryx/planner/optimizer/strategies/join_algorithm.py`) arranges
 two-relation join pairs so the smaller side is always on the left (probe) and the larger side on
 the right (build). The decision uses: relation byte size, column cardinality from manifest
 statistics, and null fraction adjustments. For sufficiently small relations it falls back to
@@ -104,7 +104,7 @@ Opteryx's analytical query patterns.
 **Where the code lives.**
 
 - New optimizer strategy: `opteryx/planner/optimizer/strategies/semijoin_injection.py`
-- Hooks into the same registration point as `JoinOrderingStrategy` and `JoinRewriteStrategy` in
+- Hooks into the same registration point as `JoinAlgorithmStrategy` and `JoinRewriteStrategy` in
   `opteryx/planner/optimizer/strategies/__init__.py`
 - Emits `FilterJoinNode` plan nodes, reusing the existing semi-join execution path in
   `opteryx/operators/filter_join/filter_join.pyx`
@@ -121,7 +121,7 @@ for each inner-join node J in the logical plan (leaf-first, bottom-up):
 ```
 
 Selectivity is estimated from manifest cardinality statistics already collected for
-`JoinOrderingStrategy`. The semi-join is only injected when there is statistical evidence it
+`JoinAlgorithmStrategy`. The semi-join is only injected when there is statistical evidence it
 will reduce the build side materially; otherwise it adds only overhead (the TTJ paper Section 6.1
 notes the no-good list optimization regresses on queries where each filter element only reduces
 intermediate results by a factor of 182, versus 318 for the cases where it helps).
@@ -204,7 +204,7 @@ probes are ~1–2 ns at L1-cached sizes; this is negligible compared to a hash t
 **What it is.** For queries joining three or more relations, detect whether the join graph is
 acyclic (α-acyclic in the sense of Definition 3.1 in the paper), and if so, compute a GYO
 reduction order to guide the join sequence. This replaces or supplements the current per-pair
-heuristic in `JoinOrderingStrategy`, which optimises each two-relation join in isolation and
+heuristic in `JoinAlgorithmStrategy`, which optimises each two-relation join in isolation and
 may produce a suboptimal global ordering for the multi-join.
 
 **How it connects to the paper.** Section 3.1 defines the GYO algorithm: iteratively identify
@@ -221,8 +221,8 @@ is five lines. Both are O(|atoms|²) in the number of relations — negligible f
 **Where the code lives.**
 
 - New function `gyo_reduction_order(join_graph)` in
-  `opteryx/planner/optimizer/strategies/join_ordering.py` or a new utility module
-- Called from `JoinOrderingStrategy.complete()` when three or more join nodes are present in
+  `opteryx/planner/optimizer/strategies/join_algorithm.py` or a new utility module
+- Called from `JoinAlgorithmStrategy.complete()` when three or more join nodes are present in
   the plan
 
 **Algorithm.**

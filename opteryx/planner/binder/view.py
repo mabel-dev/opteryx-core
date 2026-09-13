@@ -5,6 +5,7 @@
 
 from typing import Tuple
 
+from opteryx.exceptions import SqlError
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
@@ -257,6 +258,83 @@ def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
     return node, context
 
 
+def _view_output_schema(node, context: BindingContext):
+    """The RelationSchema a view's defining statement produces.
+
+    Stored on the view so a catalog reader - `information_schema`, the OData
+    metadata document - can describe a view's columns without planning its SQL.
+    That means TYPES as well as names, which is why this is a bind and not a
+    read of the projection: a name carries no type, and a consumer that needs
+    one would have to invent it.
+
+    Bound from the SQL TEXT the statement is about to store, not from the AST in
+    hand. That text is what gets planned every time the view is read, so binding
+    anything else would describe a statement the catalog does not hold.
+
+    `schema_only=True` because this needs names and types and nothing a name
+    cannot be resolved without - in particular not each relation's Manifest,
+    which is the larger of binding's two cloud reads and describes rows, which a
+    definition has none of.
+
+    A failure here is NOT swallowed: the sources must resolve, and the creator
+    must be able to read them. A view whose shape cannot be determined is one no
+    reader can be told the shape of, and recording it anyway would leave the
+    catalog holding a definition it silently cannot describe.
+
+    A wildcard is bound like anything else. Its column list is a SNAPSHOT of the
+    sources as they are now, and the source gaining a column later leaves this
+    stale - the view itself still expands the wildcard at read time, so this can
+    misdescribe the view but can never change what it returns.
+    """
+    from opteryx.planner import bind_statement
+    from opteryx.types.schema import RelationSchema
+    from opteryx.types.schema import SchemaColumn
+    from opteryx.types.schema import mint_column_identity
+
+    bound_plan, _clean_sql, _ast = bind_statement(
+        operation=node.view_sql,
+        parameters=None,
+        # Row visibility filters restrict which ROWS a reader sees; they cannot
+        # add, remove or retype a column, so they have no bearing on the shape
+        # being recorded here.
+        visibility_filters=None,
+        execution_context=context.execution_context,
+        query_id=context.query_id,
+        telemetry=context.telemetry,
+        schema_only=True,
+    )
+
+    heads = bound_plan.get_exit_points()
+    head = bound_plan[heads[0]]
+
+    columns = []
+    for column in head.columns:
+        # `current_name` is `alias or source_column`, and is recorded as a list
+        # when one expression was named more than once - the reader sees the
+        # first. This is the name the view answers to, which is not necessarily
+        # the bound column's own name.
+        name = column.current_name
+        if isinstance(name, (list, tuple)):
+            name = name[0] if name else None
+        if name is None:
+            name = column.source_column
+        name = str(name)
+        columns.append(
+            SchemaColumn(
+                name=name,
+                column_type=column.schema_column.column_type,
+                nullable=column.schema_column.nullable,
+                # A fresh identity, not the bound column's: these describe the
+                # VIEW's columns, and the plan they were bound in is discarded
+                # here. Reusing an identity from a throwaway plan would hand the
+                # catalog a handle onto columns that no longer exist.
+                identity=mint_column_identity(node.view_name, name),
+            )
+        )
+
+    return RelationSchema(name=node.view_name, columns=columns)
+
+
 def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the CREATE VIEW node to determine which connector should handle
@@ -274,6 +352,16 @@ def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, 
     # Ensure this user can write to the view location
     if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
         raise PermissionError(f"User does not have permission to create view {node.view_name}")
+
+    # Rendered HERE, not in the operator, so the text that is bound below and the
+    # text that is stored are the same string by construction rather than by two
+    # calls that happen to agree.
+    from opteryx.third_party import sqloxide
+
+    if node.query is None:
+        raise SqlError("**CREATE VIEW** requires a defining query.")
+    node.view_sql = sqloxide.ast_to_sql([{"Query": node.query}])[0]
+    node.view_schema = _view_output_schema(node, context)
 
     if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables
@@ -299,6 +387,16 @@ def visit_alter_view(self, node: Node, context: BindingContext) -> Tuple[Node, B
     # Ensure this user can write to the view location
     if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
         raise PermissionError(f"User does not have permission to alter view {node.view_name}")
+
+    # Rendered HERE, not in the operator, so the text that is bound below and the
+    # text that is stored are the same string by construction rather than by two
+    # calls that happen to agree.
+    from opteryx.third_party import sqloxide
+
+    if node.query is None:
+        raise SqlError("**ALTER VIEW** requires a defining query.")
+    node.view_sql = sqloxide.ast_to_sql([{"Query": node.query}])[0]
+    node.view_schema = _view_output_schema(node, context)
 
     if "variables" in dir(node.connector):
         node.connector.variables = context.execution_context.variables

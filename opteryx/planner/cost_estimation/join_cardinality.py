@@ -97,7 +97,7 @@ def composite_key_ndv(ndvs: Iterable[Optional[int]]) -> Optional[int]:
     per-column NDVs and at most their product; ``max`` is the standard
     conservative lower bound (architect ruling 2026-08-21). This is the ONE
     composition both the cardinality estimator (statistics_refresh) and the
-    build-side chooser (join_ordering) use -- they previously disagreed
+    build-side chooser (join_algorithm) use -- they previously disagreed
     (max vs min) and read different NDVs for the same join.
 
     Returns None when no NDV is known for any column.
@@ -229,7 +229,7 @@ def _effective_rows(rows: int, keys: List[KeyStats]) -> float:
     """Reduce row count by the worst-case (max) null fraction across keys.
 
     Mirrors the per-side null-fraction composition in
-    JoinOrderingStrategy._key_null_fraction.
+    JoinAlgorithmStrategy._key_null_fraction.
     """
     if not keys:
         return float(rows)

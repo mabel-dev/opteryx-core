@@ -107,7 +107,7 @@ class JoinBuildShapeStrategy(OptimizationStrategy):
 
         Read straight off the statistics the refresh pass already propagated —
         ``_join_stats`` is what computes it, and it is the same number
-        JoinOrderingStrategy costs its trees with. Never fabricated: a node with
+        JoinAlgorithmStrategy costs its trees with. Never fabricated: a node with
         no propagated statistics returns None, and the sink then keeps its
         existing gather rather than being moved by a made-up number.
         """

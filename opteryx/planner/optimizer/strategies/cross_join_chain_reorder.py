@@ -28,6 +28,14 @@ strategy converts every cross join into an inner join.
 
 Connectivity is the hard constraint. Original FROM-order is preserved as the
 tie-breaker so plans for queries that already work today are unchanged.
+
+The predicates that supply that connectivity are gathered by
+`_collect_predicates_above`, which is shared with `JoinPlanningStrategy` (DPccp).
+It walks up through Join parents as well as Filters — decorrelated EXISTS /
+NOT EXISTS lower to semi/anti joins that sit between the chain and the WHERE
+filters, and stopping at them blinded both strategies. The soundness argument
+for traversing joins is written out in full on that function; read it before
+narrowing or widening the walk.
 """
 
 from typing import Dict, List, Optional, Set, Tuple
@@ -404,14 +412,65 @@ def _rewire_chain(
 
 def _collect_predicates_above(plan: LogicalPlan, chain_top_id: str) -> List[Node]:
     """
-    Walk up from chain_top_id collecting predicates from every Filter node
-    that sits directly above the chain. Stops at the first non-Filter parent
-    (Project, Aggregate, Subquery, etc.) — predicates above those don't
-    constrain operands of this chain.
+    Walk up from chain_top_id collecting predicates from every Filter node that
+    sits above the chain, traversing THROUGH Join parents on the way. Stops at
+    any other parent (Project, Aggregate, Subquery, ...) — predicates above
+    those don't constrain operands of this chain.
 
     SplitConjunctivePredicatesStrategy runs before us and explodes one WHERE
     into many Filter nodes (one predicate each), so we must collect across all
     of them.
+
+    Join parents are TRAVERSED but contribute NOTHING themselves: a join's own
+    ON condition lives on the Join node, is already enforced there, and is not
+    a constraint the caller may treat as a free-standing chain predicate.
+
+    Why traversing joins is sound
+    -----------------------------
+    ``DecorrelateSubqueryStrategy`` is optimizer position 1 and lowers
+    EXISTS / NOT EXISTS into semi/anti Join nodes, which land BETWEEN the cross
+    join chain and the WHERE filters. Stopping at the first non-Filter parent
+    therefore returned ZERO predicates for TPC-H Q21, and
+    ``JoinPlanningStrategy`` declined (``no predicates above the chain``) so
+    DPccp never ran — the chain kept FROM order and a 25-row filtered dimension
+    was joined last, on top of a 379M-row intermediate.
+
+    Three properties make traversal safe, and all three are load-bearing:
+
+    1. **The result is a HINT, never an attachment.** Callers feed these
+       predicates to a join-graph builder purely to decide an ORDER. Neither
+       ``build_join_graph`` (plan_adapter) nor the local ``_build_join_graph``
+       attaches, moves or consumes a predicate; every Filter node stays exactly
+       where it was. A predicate collected from "too far up" can only produce a
+       worse ordering decision, never a different answer.
+
+    2. **Off-chain relations cannot fabricate edges.** Both graph builders
+       resolve each identifier's source through a ``rel_to_leaf`` map built from
+       the chain leaves and skip the predicate when either endpoint is absent.
+       A predicate referencing the quantified side of the semi join (Q21's
+       ``l2`` / ``l3``) is dropped, not turned into an edge to a relation the
+       chain does not contain.
+
+    3. **We never see a predicate the attacher isn't already acting on.**
+       ``CrossJoinFilterPushdownStrategy`` — the strategy that actually converts
+       a cross join to an inner join by sinking a Filter equality into it — runs
+       ``_collect_cross_joins`` DOWN from every Filter through any node type
+       except ``Subquery``, semi/anti/outer joins included. So every Filter this
+       upward walk reaches through Join parents is a Filter that strategy
+       already descends from into this same chain. The predicate set here is a
+       strict SUBSET of the set already in use by the code with the power to
+       change the plan's semantics.
+
+    Property 3 is why the traversal does not discriminate by join type. Ruled
+    with the architect 2026-09-13: align with the pushdown rather than maintain
+    a second, narrower notion of which joins are transparent — two strategies
+    rewriting the same chain from different predicate views is its own trap.
+
+    What this does NOT do: the rewrite the callers perform reuses the chain's
+    own node ids and preserves the chain top's id as the new root, removing only
+    the INGOING edges of chain joins. The Join parents walked through here are
+    never re-parented, re-typed or moved — a semi/anti join above the chain
+    stays exactly where it is.
     """
     predicates: List[Node] = []
     seen: Set[str] = set()
@@ -427,6 +486,10 @@ def _collect_predicates_above(plan: LogicalPlan, chain_top_id: str) -> List[Node
             if parent.node_type == LogicalPlanStepType.Filter:
                 if parent.condition is not None:
                     predicates.extend(_split_and_conditions(parent.condition))
+                frontier.append(parent_id)
+            elif parent.node_type == LogicalPlanStepType.Join:
+                # Traversed, contributes nothing. See "Why traversing joins is
+                # sound" above.
                 frontier.append(parent_id)
     return predicates
 

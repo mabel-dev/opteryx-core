@@ -4252,7 +4252,7 @@ class _Compiler:
         #
         # ⛔ Only the conjuncts the KEY did not already decide. `on` is equi conjuncts
         # PLUS whatever could not be keyed, and re-checking a keyed equality per pair
-        # is work the hash key has already done — join_ordering's own docstring calls
+        # is work the hash key has already done — join_algorithm's own docstring calls
         # it "an extra, wholly redundant residual re-check of the equi condition it
         # already keyed on". It is not free: an absorbed band join re-compared a
         # VARCHAR key on every one of 26M emitted pairs.
@@ -4314,7 +4314,7 @@ class _Compiler:
                 )
 
         # RIGHT SEMI / RIGHT ANTI: the same answer with the legs exchanged, taken when
-        # JoinOrderingStrategy found the leg this join would otherwise MATERIALISE to
+        # JoinAlgorithmStrategy found the leg this join would otherwise MATERIALISE to
         # be far larger than the one it streams. The rule below pins the emitted leg to
         # the probe, which also pins the other leg into the hash table — two decisions
         # that only look like one. See native_join2.hpp's Join2MarkSink.
@@ -4551,7 +4551,7 @@ class _Compiler:
 
         The emitted rows are identical to the LEFT form's; what changes is which leg is
         materialised, that nothing emits until the stream is drained, and that rows
-        arrive in build order. JoinOrderingStrategy owns those consequences — by the
+        arrive in build order. JoinAlgorithmStrategy owns those consequences — by the
         time we are here the decision is made.
         """
         build_id, probe_id = legs["left"], legs["right"]
@@ -5205,7 +5205,7 @@ class _Compiler:
         whose band column falls between two per-probe-row bounds.
 
         LEFT leg = build (matching `_compile_join`'s INNER rule, so the side
-        JoinOrderingStrategy chose to build is the side that gets sorted); RIGHT leg =
+        JoinAlgorithmStrategy chose to build is the side that gets sorted); RIGHT leg =
         probe. Per probe row the output is a contiguous RUN of build rows, which is
         what separates this from ASOF's exactly-one.
 

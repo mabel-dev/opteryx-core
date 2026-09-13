@@ -42,7 +42,7 @@ selectivity — bounded downside (the margin), unbounded upside.
 
 Runs before SemiJoinReducerStrategy: a pushed semi then sits on a bare scan
 whose leg the reducer's `_is_restricted` gate correctly refuses to copy, and
-JoinOrderingStrategy later still owns the build-side decision for the new
+JoinAlgorithmStrategy later still owns the build-side decision for the new
 shape. The decision — either way — is recorded with its numbers in EXPLAIN's
 OPTIMIZATIONS block.
 """
@@ -61,7 +61,7 @@ from .semi_join_reducer import _equi_pairs
 
 # Plain semi/anti only. "left anti null-aware" (NOT IN) and the not-distinct
 # set-operation joins decide their answer from a property of the build side;
-# they are excluded by exact match, the same posture JoinOrderingStrategy takes.
+# they are excluded by exact match, the same posture JoinAlgorithmStrategy takes.
 _PUSHABLE_TYPES = ("left semi", "left anti")
 
 # Sink one level only while the key-supplying leg is not materially bigger than

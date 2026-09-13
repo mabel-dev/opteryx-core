@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(1, os.path.join(sys.path[0], "../.."))
 
 import opteryx
+from opteryx.connectors import connector_factory
 from opteryx.connectors import register_workspace
 from opteryx.connectors.base.base_connector import BaseConnector
 from opteryx.connectors.capabilities.eidetic import Eidetic
@@ -108,16 +109,28 @@ def views():
         "CREATE VIEW ws.with_cte AS WITH small AS (SELECT id, name FROM $planets WHERE id < 5) "
         "  SELECT * FROM small",
         "CREATE VIEW ws.on_a_view AS SELECT id, name FROM ws.in_sq",
-        "CREATE VIEW ws.self_ref AS SELECT id FROM ws.self_ref",
-        "CREATE VIEW ws.cycle_a AS SELECT id FROM ws.cycle_b",
-        "CREATE VIEW ws.cycle_b AS SELECT id FROM ws.cycle_a",
-        "CREATE VIEW ws.wants_outer_cte AS SELECT id FROM some_outer_cte",
         "CREATE VIEW ws.group_by_all AS SELECT UPPER(name) AS n, COUNT(*) AS total "
         "  FROM $planets GROUP BY ALL",
         "CREATE VIEW ws.using_join AS SELECT id, a.name FROM $planets AS a "
         "  INNER JOIN $planets AS b USING (id)",
     ):
         list(session.execute_to_morsels(statement))
+
+    # Written straight to the store, because CREATE VIEW can no longer make
+    # them: it binds the body to record the view's schema, and none of these
+    # bodies binds - a view defined on itself, a cycle whose other half does not
+    # exist yet, and a view naming a relation that exists only as the CALLER's
+    # CTE. The resolver's guards still have to hold for them, because a catalog
+    # can already hold definitions like these: written before the bind existed,
+    # or by something that is not this engine.
+    connector = connector_factory("ws.in_sq", telemetry=None)
+    for name, body in (
+        ("ws.self_ref", "SELECT id FROM ws.self_ref"),
+        ("ws.cycle_a", "SELECT id FROM ws.cycle_b"),
+        ("ws.cycle_b", "SELECT id FROM ws.cycle_a"),
+        ("ws.wants_outer_cte", "SELECT id FROM some_outer_cte"),
+    ):
+        connector.create_view(name, body, owner="tester", schema=None)
 
 
 # ---------------------------------------------------------------------------

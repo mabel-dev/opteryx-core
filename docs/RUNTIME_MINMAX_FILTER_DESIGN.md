@@ -120,7 +120,7 @@ cannot be read off any of that. `Join2BuildGlobal` (native_join2.hpp:240) stores
 
 Capturing min/max is therefore a genuine **second pass over the build key column**. It is a cheap
 one — the column is hot from `compute_row_hashes`, it is batch-orientated, and it only touches the
-build side (the small side, by construction of `JoinOrderingStrategy`) — but it is not free and
+build side (the small side, by construction of `JoinAlgorithmStrategy`) — but it is not free and
 should not be sold as free.
 
 ### 2.2 Use draken's ordinal space; do not invent a comparison
@@ -471,17 +471,17 @@ carries, so an absent win reads as "the layout doesn't support it", not "the fil
 
 ## 6. Interaction with join ordering, the estimator, and existing strategies
 
-### 6.1 `JoinOrderingStrategy` mostly helps, and must not be changed to help more
+### 6.1 `JoinAlgorithmStrategy` mostly helps, and must not be changed to help more
 
-`join_ordering.py:20-25`: rule 1 puts the larger side on the **right** (probe) when one side is >3×
+`join_algorithm.py:20-25`: rule 1 puts the larger side on the **right** (probe) when one side is >3×
 the other; rule 3 uses key cardinality. The build is the smaller side, which correlates with a
 narrower key range, so the existing rule usually points the right way. Q21 and JOB both land
 correctly with no change.
 
 Rule 3 (NDV) can override into a shape where the build side is the wide-range one — see
-`join_ordering_ndv_rule3_overrides_rowcount`. **Do not add a runtime-filter term to the join-ordering
+`join_algorithm_ndv_rule3_overrides_rowcount`. **Do not add a runtime-filter term to the join-ordering
 cost model.** Ordering is load-bearing for absorbed thetas and swapped semi/anti
-(`join_ordering_is_load_bearing_for_absorbed_thetas`, `swapped_semi_anti_was_dead_two_bugs_fixed`);
+(`join_algorithm_is_load_bearing_for_absorbed_thetas`, `swapped_semi_anti_was_dead_two_bugs_fixed`);
 perturbing it to chase a filter that pays only under a data-layout precondition the optimizer cannot
 see is a bad trade. The filter should be a pure consumer of whatever ordering it is given.
 

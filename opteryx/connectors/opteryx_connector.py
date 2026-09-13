@@ -1025,6 +1025,23 @@ class OpteryxTable(BaseTable, Diachronic, PredicatePushable):
         return self.schema, self.manifest
 
 
+def _normalized_view_schema(stored, view_name: str) -> Optional[RelationSchema]:
+    """A view's stored schema as an engine RelationSchema, or None.
+
+    The catalog hands back its own dependency-free schema object - the same one
+    `SimpleDataset.schema()` returns - so this is the identical normalization a
+    dataset's schema gets, and a type means the same thing whichever of the two
+    it was read from.
+
+    None is a view registered before schemas were stored, not a view with no
+    columns: nothing can be registered without binding, and a definition that
+    bound produced at least one column.
+    """
+    if stored is None:
+        return None
+    return OpteryxTable._normalize_schema(stored, relation_name=view_name)
+
+
 class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     """
     Long-lived Opteryx catalog gateway supporting multiple catalogs.
@@ -1345,6 +1362,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                 statement=obj.definition,
                 owner=obj.metadata.author,
                 last_row_count=obj.metadata.last_execution_records,
+                schema=_normalized_view_schema(obj.metadata.schema, name),
             )
         if kind == "dataset":
             return "dataset", obj
@@ -3047,6 +3065,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             statement=view.definition,
             owner=view.metadata.author,
             last_row_count=view.metadata.last_execution_records,
+            schema=_normalized_view_schema(view.metadata.schema, view_name),
         )
 
     def list_views(self, prefix: str = None) -> list:
@@ -3073,6 +3092,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
                         statement=view.metadata.sql_text,
                         owner=view.metadata.author,
                         last_row_count=view.metadata.last_row_count,
+                        schema=_normalized_view_schema(view.metadata.schema, view.name),
                     )
                 )
             except (KeyError, AttributeError):
@@ -3082,9 +3102,20 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         return views
 
     def create_view(
-        self, view_name: str, statement: str, update_if_exists: bool = False, owner: str = None
+        self,
+        view_name: str,
+        statement: str,
+        update_if_exists: bool = False,
+        owner: str = None,
+        schema: Optional[RelationSchema] = None,
     ):
-        """Create a new view with the given name and definition."""
+        """Create a new view with the given name and definition.
+
+        `schema` is the view's output columns as the binder resolved them from
+        `statement` - recorded as catalog metadata, never read back to expand
+        the view. The catalog stores it in its own column spelling, the same one
+        a dataset's schema document uses.
+        """
         # Parse view_name into workspace and relative identifier
         workspace, relative_id = self._parse_identifier(view_name)
         catalog = self._get_catalog(workspace)
@@ -3096,7 +3127,11 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
 
         identifier = (collection, name)
         catalog.create_view(
-            identifier=identifier, sql=statement, update_if_exists=update_if_exists, author=owner
+            identifier=identifier,
+            sql=statement,
+            update_if_exists=update_if_exists,
+            author=owner,
+            schema=schema,
         )
 
     def drop_view(self, view_name: str, author: Optional[str] = None):

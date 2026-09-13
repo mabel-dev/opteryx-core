@@ -656,13 +656,13 @@ class Features:
     disable_function_rewrite = get_bool("FEATURE_DISABLE_FUNCTION_REWRITE", False)
     disable_group_key_reduction = get_bool("FEATURE_DISABLE_GROUP_KEY_REDUCTION", False)
     disable_hash_map_variant = get_bool("FEATURE_DISABLE_HASH_MAP_VARIANT", False)
+    disable_join_algorithm = get_bool("FEATURE_DISABLE_JOIN_ALGORITHM", False)
     disable_join_build_shape = get_bool("FEATURE_DISABLE_JOIN_BUILD_SHAPE", False)
     disable_join_condition_hoist = get_bool("FEATURE_DISABLE_JOIN_CONDITION_HOIST", False)
     disable_join_elimination = get_bool("FEATURE_DISABLE_JOIN_ELIMINATION", False)
     disable_join_key_materialization = get_bool(
         "FEATURE_DISABLE_JOIN_KEY_MATERIALIZATION", False
     )
-    disable_join_ordering = get_bool("FEATURE_DISABLE_JOIN_ORDERING", False)
     disable_join_planning = get_bool("FEATURE_DISABLE_JOIN_PLANNING", False)
     disable_join_rewrite = get_bool("FEATURE_DISABLE_JOIN_REWRITE", False)
     disable_length_only_column = get_bool("FEATURE_DISABLE_LENGTH_ONLY_COLUMN", False)

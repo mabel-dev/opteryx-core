@@ -57,7 +57,7 @@ from opteryx.planner.optimizer.strategies import (
     JoinConditionHoistStrategy,
     JoinEliminationStrategy,
     JoinKeyMaterializationStrategy,
-    JoinOrderingStrategy,
+    JoinAlgorithmStrategy,
     JoinPlanningStrategy,
     JoinRewriteStrategy,
     LengthOnlyColumnStrategy,
@@ -115,7 +115,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "JoinConditionHoistStrategy": "disable_join_condition_hoist",
     "JoinEliminationStrategy": "disable_join_elimination",
     "JoinKeyMaterializationStrategy": "disable_join_key_materialization",
-    "JoinOrderingStrategy": "disable_join_ordering",
+    "JoinAlgorithmStrategy": "disable_join_algorithm",
     "JoinPlanningStrategy": "disable_join_planning",
     "JoinRewriteStrategy": "disable_join_rewrite",
     "LengthOnlyColumnStrategy": "disable_length_only_column",
@@ -284,7 +284,7 @@ class OptimizerVisitor:
             TimestampCastSinkStrategy(telemetry),
             JoinEliminationStrategy(telemetry),
             JoinRewriteStrategy(telemetry),
-            JoinOrderingStrategy(telemetry),
+            JoinAlgorithmStrategy(telemetry),
             DistinctPushdownStrategy(telemetry),
             OperatorFusionStrategy(telemetry),
             TopNScanPushdownStrategy(telemetry),  # WP-2: top-N spec onto scan feeding HeapSort
@@ -315,7 +315,7 @@ class OptimizerVisitor:
             # Also runs late, and for the same reason: it annotates each join with
             # the row count that join is expected to EMIT, so every strategy that
             # can add, remove or reorder a join (JoinElimination/JoinRewrite/
-            # JoinOrdering above) must already have had its say — otherwise the
+            # JoinAlgorithm above) must already have had its say — otherwise the
             # estimate describes a join the plan no longer contains.
             JoinBuildShapeStrategy(telemetry),
             # Runs dead last: it enumerates every reference to a column, so
