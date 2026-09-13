@@ -401,11 +401,12 @@ consumer. The 128→16 worker sweep could not tell which of those produced the 3
 win because they move together; this splits them. It also sizes the IO pool
 (`est_rg * (in_flight_limit + 1)`), so raising it costs memory linearly."""
 
-PARQUET_IO_FETCH_AHEAD: int = int(get("PARQUET_IO_FETCH_AHEAD", 128))
+PARQUET_IO_FETCH_AHEAD: int = int(get("PARQUET_IO_FETCH_AHEAD", 64))
 """Remote fetch-ahead depth: a dedicated pool of N threads that ONLY issue the
 row-group range GETs, so requests in flight are decoupled from the decode thread
-count. 0 = off = the coupled path, byte-for-byte. Default 128 (architect, 2026-09-12,
-from a live trial: 32 showed no effect, 256 died, 128 is the working point).
+count. 0 = off = the coupled path, byte-for-byte. Default 64 (architect, 2026-09-13,
+from the production sweep: 48-64 was the optimum, 128 and 256 ran SLOWER than off;
+the earlier 128 default from the 2026-09-12 live trial was a regression).
 Only remote scans arm it; a local-only scan never starts the pool.
 
 Why: `ParquetIOPipeline::decode_row_group` fetches AND decodes on one thread, so
@@ -420,7 +421,7 @@ at rtt=50ms / 100 Mbps per connection, 240 row groups, 79 MB, A/A floor 0.9996:
 
 That is the LATENCY regime. Production Cloud Run -> GCS is bandwidth-capped at
 ~64 MB/s (`parquet_gcs_io_workers` docstring), where more requests in flight buy
-much less; the 128 default came from a live trial, not from this rig.
+much less; the 64 default came from the production sweep, not from this rig.
 
 Rules enforced at plan time (ValueError, never silently inert): the depth must
 EXCEED `parquet_gcs_io_workers`, and an explicit `parquet_io_in_flight_limit`
@@ -428,7 +429,42 @@ must not be smaller than the depth. With the window on auto it widens to
 `max(workers, fetch_ahead) + 2`. Memory: each in-flight row group holds its
 COMPRESSED bytes from fetch until decode, on top of the decode pool reservation.
 The pipeline reports the depth it actually runs as `fetch_ahead_depth` and the
-bytes a cancel threw away as `prefetch_discarded_bytes` (io_scan_diagnostics)."""
+bytes a cancel threw away as `prefetch_discarded_bytes` (io_scan_diagnostics).
+
+This is the DEPTH only. Whether a given scan is big enough to arm it is
+`PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS` below, a separate knob — so a scan whose
+`fetch_ahead_depth` reads 0 with a non-zero depth set here was gated, not
+ignored."""
+
+PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS: int = int(
+    get("PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS", 48)
+)
+"""Minimum REMOTE row groups a scan must submit before `PARQUET_IO_FETCH_AHEAD`
+is armed at all; below it the scan runs the coupled path (depth 0). Counted
+after row-group pruning, on the same work-item list the pipeline fetches, so a
+scan pruned down to a handful of row groups is gated on what it will actually
+read rather than on what the manifest listed.
+
+Why gate at all: the depth is a THREAD COUNT, and `set_fetch_ahead` builds that
+pool eagerly (io_pipeline.hpp), while the auto submission window widens to
+`max(workers, fetch_ahead) + 2` and sizes the IO arena from it. A small remote
+scan therefore pays the whole setup — threads plus roughly double the arena
+reservation — for concurrency it has too few row groups to use.
+
+Deliberately a SEPARATE knob from the depth, not derived from it or from the
+worker count (architect, 2026-09-13). The two answer different questions: the
+depth is how wide to fetch, the gate is how big a scan has to be before that
+width pays. Tying them would make one unmeasurable without moving the other,
+which is the mistake the worker/window sweep already made once.
+
+0 means no minimum — arm on any remote scan, which is the pre-gate behaviour
+exactly. There is no special case for it: the test is `remote row groups >=
+this`. Negative is rejected at plan time.
+
+Default 48 against a depth of 64 (architect, 2026-09-13): the gate is set BELOW
+the depth deliberately. It is the size at which fetch-ahead starts paying, not
+the size at which every fetch thread has its own row group — those are different
+questions, which is the whole reason this is not the depth."""
 """Pin HTTP requests to HTTP/1.1. Diagnostic ONLY — this exists to measure what
 HTTP/2 contributes (with multiplexing unavailable, a low connection cap should
 become catastrophic rather than faster). Leaving it True forfeits multiplexing."""

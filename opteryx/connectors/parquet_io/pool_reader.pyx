@@ -387,15 +387,14 @@ cdef inline int64_t _absent_as_sentinel(object value) except? -1:
     return <int64_t>value
 
 
-cdef int _submission_window(int decode_workers, int fetch_ahead,
-                            int in_flight_limit_override) except -1:
-    """Row groups submitted but not yet consumed, given the decode width, the
-    fetch-ahead depth and an explicit override (0 = auto).
+cdef int _validate_fetch_ahead(int decode_workers, int fetch_ahead,
+                               int in_flight_limit_override) except -1:
+    """Reject a CONFIGURED fetch-ahead depth that could only be inert. Returns 0.
 
-    Auto is ``max(decode_workers, fetch_ahead) + 2``: with fetch-ahead off that is
-    the historical ``workers + 2`` exactly; with it on, the window must cover the
-    fetch pool or the extra depth can never be issued — fetch-ahead only runs as
-    far ahead as there are submitted items.
+    Split out of `_submission_window` so it can be run against the value the
+    session actually set, BEFORE `_gated_fetch_ahead` may zero it: otherwise a
+    mis-set depth would raise only on scans big enough to arm it, and a small
+    remote scan would quietly accept a setting the next query rejects.
 
     Two combinations are REJECTED rather than silently inert (the design rule:
     never ship a knob whose wrong setting is quietly slower):
@@ -412,13 +411,75 @@ cdef int _submission_window(int decode_workers, int fetch_ahead,
             f"count ({decode_workers}) or be 0 (off): a fetch pool no wider than the "
             "decode pool adds a hand-off and no concurrency (measured slower)"
         )
+    if in_flight_limit_override > 0 and fetch_ahead > in_flight_limit_override:
+        raise ValueError(
+            f"parquet_io_in_flight_limit={in_flight_limit_override} is smaller "
+            f"than parquet_io_fetch_ahead={fetch_ahead}: the submission window "
+            "caps fetch depth, so this setting would silently do nothing"
+        )
+    return 0
+
+
+cdef int _count_remote_items(items) except -1:
+    """How many of this scan's work items are fetched over the wire.
+
+    The fetch stage dispatches ONE task per remote row group (io_pipeline.hpp
+    submit_row_group), so this is the most concurrency the depth can ever use,
+    and it is what the gate is measured against. Local items never enter the
+    stage — they are mmap'd in decode — so they are not counted. The remote test
+    is `_any_remote_path`'s, character for character, so the count and the
+    arming condition can never disagree about what "remote" means."""
+    cdef int n = 0
+    for p in items:
+        if p.startswith("gs://") or p.startswith("http://") or p.startswith("https://"):
+            n += 1
+    return n
+
+
+cdef int _gated_fetch_ahead(int fetch_ahead, int gate, int remote_items) except -1:
+    """The depth this scan actually runs: the configured depth once the scan has
+    at least ``gate`` remote row groups to fetch, otherwise 0 (coupled path).
+
+    The depth is a THREAD COUNT and `set_fetch_ahead` builds that pool eagerly,
+    while the auto window widens to cover it and sizes the IO arena from the
+    result — so a small remote scan pays threads plus roughly double the arena
+    reservation for concurrency it has too few row groups to use.
+
+    ``gate`` is a SEPARATE knob from the depth and is NOT derived from it or from
+    the worker count (architect, 2026-09-13): the depth is how wide to fetch, the
+    gate is how big a scan has to be before that width pays, and each has to be
+    movable without the other for either to be measurable.
+
+    0 is no minimum — the test is a plain ``>=``, so gate 0 reproduces the
+    pre-gate behaviour with no special case. The depth is validated separately by
+    `_validate_fetch_ahead`; this only ever turns a legal depth off, never on."""
+    if gate < 0:
+        raise ValueError(
+            f"parquet_io_fetch_ahead_min_row_groups must be >= 0 (0 = no minimum), got {gate}"
+        )
+    if fetch_ahead <= 0:
+        return 0
+    if remote_items < gate:
+        return 0
+    return fetch_ahead
+
+
+cdef int _submission_window(int decode_workers, int fetch_ahead,
+                            int in_flight_limit_override) except -1:
+    """Row groups submitted but not yet consumed, given the decode width, the
+    EFFECTIVE fetch-ahead depth (post-gate) and an explicit override (0 = auto).
+
+    Auto is ``max(decode_workers, fetch_ahead) + 2``: with fetch-ahead off that is
+    the historical ``workers + 2`` exactly; with it on, the window must cover the
+    fetch pool or the extra depth can never be issued — fetch-ahead only runs as
+    far ahead as there are submitted items.
+
+    Sized from the EFFECTIVE depth, so a gated-off scan gets the historical
+    ``workers + 2`` window and the smaller arena that goes with it. The same
+    validation runs here (against a depth the gate may already have zeroed, where
+    it is a no-op) so no caller can reach this with an inert depth."""
+    _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
     if in_flight_limit_override > 0:
-        if fetch_ahead > in_flight_limit_override:
-            raise ValueError(
-                f"parquet_io_in_flight_limit={in_flight_limit_override} is smaller "
-                f"than parquet_io_fetch_ahead={fetch_ahead}: the submission window "
-                "caps fetch depth, so this setting would silently do nothing"
-            )
         return in_flight_limit_override
     return max(decode_workers, fetch_ahead) + 2
 
@@ -1823,6 +1884,7 @@ cpdef IpcRowGroupSource open_ipc_source(
     int in_flight_limit_override=0,
     coalesce_tuning=None,
     int fetch_ahead=0,
+    int fetch_ahead_min_row_groups=0,
 ):
     """Plan a single-pass scan: fetch footers, prune row groups, size the pool,
     and create the C++ pipeline. Returns a started IpcRowGroupSource; the caller
@@ -1978,6 +2040,14 @@ cpdef IpcRowGroupSource open_ipc_source(
     # window) needs in_flight < workers, unexpressible as a positive delta.
     # With fetch-ahead on, the auto window widens to cover the fetch pool —
     # see _submission_window for the two rejected (silently inert) combinations.
+    # Validate what the SESSION set, then let the gate decide whether this scan is
+    # big enough to arm it — in that order, so a mis-set depth raises on every scan
+    # rather than only on the ones large enough to reach the fetch pool.
+    _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
+    fetch_ahead = _gated_fetch_ahead(
+        fetch_ahead, fetch_ahead_min_row_groups,
+        _count_remote_items([_wi_path for _wi_path, _ in work_items]),
+    )
     in_flight_limit = _submission_window(decode_workers, fetch_ahead, in_flight_limit_override)
     if in_flight_limit < 1:
         in_flight_limit = 1
@@ -2026,6 +2096,7 @@ cpdef IpcRowGroupSource open_pass2_source(
     int in_flight_limit_override=0,
     coalesce_tuning=None,
     int fetch_ahead=0,
+    int fetch_ahead_min_row_groups=0,
 ):
     """Pass-2 late-materialization driver: decode only the surviving rows of the
     pre-determined ``work_items`` (``(path, rg_idx, mask_bytes)`` from pass-1).
@@ -2085,6 +2156,12 @@ cpdef IpcRowGroupSource open_pass2_source(
     src.n_items = len(wi)
     if src.n_items == 0:
         return src
+    # Same order as the single-pass path: validate the configured depth, then gate.
+    _validate_fetch_ahead(decode_workers, fetch_ahead, in_flight_limit_override)
+    fetch_ahead = _gated_fetch_ahead(
+        fetch_ahead, fetch_ahead_min_row_groups,
+        _count_remote_items([_wi_path for _wi_path, _, _ in work_items]),
+    )
     src.in_flight_limit = max(1, _submission_window(decode_workers, fetch_ahead, in_flight_limit_override))
     src.pipeline = CppIOPipeline(
         decode_workers=decode_workers,
@@ -2274,6 +2351,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     filesystem=None,
     footer_bytes_cache=None,
     int fetch_ahead=0,
+    int fetch_ahead_min_row_groups=0,
 ):
     """Plan-time setup for the fully-native scan-pull path (see `NativeScanPlan`).
     Mirrors `open_ipc_source`'s footer-fetch + row-group pruning + pool sizing,
@@ -2486,6 +2564,12 @@ cpdef NativeScanPlan open_native_scan_plan(
     # No in-flight override reaches this path (see the parameter list); the
     # window is auto = workers + 2, widened to cover the fetch pool when
     # fetch-ahead is on — _submission_window also rejects an inert depth.
+    # Same order as the trampoline paths: validate the configured depth, then gate.
+    _validate_fetch_ahead(decode_workers, fetch_ahead, 0)
+    fetch_ahead = _gated_fetch_ahead(
+        fetch_ahead, fetch_ahead_min_row_groups,
+        _count_remote_items([_wi_path for _wi_path, _ in work_items]),
+    )
     plan.in_flight_limit = _submission_window(decode_workers, fetch_ahead, 0)
     est_rg = max_rg_bytes * 2
     dyn_pool_size = est_rg * (plan.in_flight_limit + 1)
@@ -2843,6 +2927,7 @@ def iter_row_groups_ipc(
     int in_flight_limit_override=0,
     coalesce_tuning=None,
     int fetch_ahead=0,
+    int fetch_ahead_min_row_groups=0,
 ):
     """
     C++ Parquet IO pipeline: read + decode + serialize all in C++, no Python in hot path.
@@ -2866,6 +2951,7 @@ def iter_row_groups_ipc(
         in_flight_limit_override=in_flight_limit_override,
         coalesce_tuning=coalesce_tuning,
         fetch_ahead=fetch_ahead,
+        fetch_ahead_min_row_groups=fetch_ahead_min_row_groups,
     )
     cdef list names = src.column_names_bytes
     cdef list vectors

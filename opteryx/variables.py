@@ -353,6 +353,15 @@ SYSTEM_VARIABLES_DEFAULTS: Dict[str, VariableSchema] = {
     # measurements and the two combinations the planner rejects as inert.
     "parquet_io_fetch_ahead": (
         INT64, FromConfig("PARQUET_IO_FETCH_AHEAD"), VariableOwner.USER, Visibility.RESTRICTED),
+    # Minimum REMOTE row groups (post-pruning) before the depth above is armed;
+    # 0 = no minimum. SET-able SEPARATELY from the depth on purpose: the depth is
+    # how wide to fetch, the gate is how big a scan has to be before that width
+    # pays, and tuning either through the other is exactly the entanglement that
+    # made the worker/window sweep unattributable. See
+    # PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS in config.py.
+    "parquet_io_fetch_ahead_min_row_groups": (
+        INT64, FromConfig("PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS"),
+        VariableOwner.USER, Visibility.RESTRICTED),
 
     # ── SERVER (informational) — these DECLARE system behaviour to a client ─────
     # Not read by the engine, and that is not a reason to drop them: they are an

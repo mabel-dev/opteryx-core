@@ -236,6 +236,7 @@ cpdef NativeScanPlan open_native_scan_plan(
     filesystem=*,
     footer_bytes_cache=*,
     int fetch_ahead=*,
+    int fetch_ahead_min_row_groups=*,
 )
 
 # Plan-time eligibility gate for the native scan Source: proves from parsed

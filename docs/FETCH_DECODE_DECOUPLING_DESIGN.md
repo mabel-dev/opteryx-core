@@ -3,7 +3,8 @@
 **Status:** P0 LANDED 2026-09-12 (see §0); P1–P4 remain proposals awaiting the
 rulings in §5. The env-var POC (`RUGO_FETCH_AHEAD`) is gone — the instrument is
 now the session variable `parquet_io_fetch_ahead` (config `PARQUET_IO_FETCH_AHEAD`).
-**Default 128** (architect, 2026-09-12, from a live trial: 32 no effect, 256 died);
+**Default 64** (architect, 2026-09-13, from the production sweep: 48-64 optimal, 128
+and 256 slower than off; the initial 128 default of 2026-09-12 was a regression);
 0 = off = the coupled path byte-for-byte.
 
 ---
@@ -15,7 +16,7 @@ now the session variable `parquet_io_fetch_ahead` (config `PARQUET_IO_FETCH_AHEA
 - `ParquetIOPipeline::set_fetch_ahead(depth)` replaces the `getenv` channel: an
   explicit plan-time setter, no hidden configuration inside a C++ constructor.
 - `parquet_io_fetch_ahead` (USER/RESTRICTED, like `parquet_io_in_flight_limit`),
-  default 128, reaches BOTH scan paths — the trampoline (`parquet_read.pyx`) and the native
+  default 64, reaches BOTH scan paths — the trampoline (`parquet_read.pyx`) and the native
   compiler path (`compiler.py` → `open_native_scan_plan`). Every pipeline
   reports the depth it actually runs as `fetch_ahead_depth` in
   `io_scan_diagnostics`, so a production run can prove the knob bound before

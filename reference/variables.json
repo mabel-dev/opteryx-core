@@ -522,6 +522,18 @@
         "default_source": "environment",
         "environment_key": "PARQUET_IO_FETCH_AHEAD"
     },
+    "parquet_io_fetch_ahead_min_row_groups": {
+        "name": "parquet_io_fetch_ahead_min_row_groups",
+        "type": "INT64",
+        "owner": "USER",
+        "visibility": "RESTRICTED",
+        "settable": true,
+        "requires_entitlement": "platform_admin",
+        "set_by": "platform_admin only",
+        "default": null,
+        "default_source": "environment",
+        "environment_key": "PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS"
+    },
     "parquet_io_in_flight_limit": {
         "name": "parquet_io_in_flight_limit",
         "type": "INT64",

@@ -104,6 +104,15 @@ cdef int _resolve_fetch_ahead(variables):
         "parquet_io_fetch_ahead", variables, config.PARQUET_IO_FETCH_AHEAD)
 
 
+cdef int _resolve_fetch_ahead_gate(variables):
+    """Minimum remote row groups before the depth above is armed; 0 = no minimum.
+    A knob of its own, not derived from the depth or the worker count — see
+    PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS in config.py."""
+    return <int>_resolve_var(
+        "parquet_io_fetch_ahead_min_row_groups", variables,
+        config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS)
+
+
 # Hoisted out of the per-row-group hot path. Previously these imports happened
 # 3× per row group via `from ... import ...` inside the loop body.
 import draken.draken_native as _draken_native_parquet
@@ -1713,6 +1722,8 @@ cdef class ParquetReadNode(ReaderNode):
                 in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
                 coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
                 fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+                fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+                    getattr(self.properties, "variables", None)),
             )
             # Q24 latmat: push the pass-1 predicate to the decode workers so the match
             # runs in parallel there (nogil), not serially on this thread. Only when the
@@ -1782,6 +1793,8 @@ cdef class ParquetReadNode(ReaderNode):
             in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
             coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+            fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+                getattr(self.properties, "variables", None)),
         )
 
     cdef void _coerce_vectors(self, list vectors):
@@ -2213,6 +2226,8 @@ cdef class ParquetReadNode(ReaderNode):
             in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
             coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+            fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+                getattr(self.properties, "variables", None)),
         )
         self._lm_pass1_done = True
 
@@ -2301,6 +2316,8 @@ cdef class ParquetReadNode(ReaderNode):
             in_flight_limit_override=_resolve_in_flight_limit(getattr(self.properties, "variables", None)),
             coalesce_tuning=_resolve_coalesce_tuning(getattr(self.properties, "variables", None)),
             fetch_ahead=_resolve_fetch_ahead(getattr(self.properties, "variables", None)),
+            fetch_ahead_min_row_groups=_resolve_fetch_ahead_gate(
+                getattr(self.properties, "variables", None)),
         )
         try:
             while True:

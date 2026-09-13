@@ -3624,6 +3624,14 @@ class _Compiler:
                 getattr(scan.properties, "variables", None),
                 config.PARQUET_IO_FETCH_AHEAD,
             ),
+            # How many remote row groups this scan must submit before that depth is
+            # armed at all — a separate knob from the depth, so either can be swept
+            # without moving the other.
+            fetch_ahead_min_row_groups=_resolve_var(
+                "parquet_io_fetch_ahead_min_row_groups",
+                getattr(scan.properties, "variables", None),
+                config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS,
+            ),
         )
         self.footer_fetch_ns += splan.footer_fetch_ns
 
@@ -3799,6 +3807,11 @@ class _Compiler:
             getattr(scan.properties, "variables", None),
             config.PARQUET_IO_FETCH_AHEAD,
         )
+        fetch_ahead_gate = _resolve_var(
+            "parquet_io_fetch_ahead_min_row_groups",
+            getattr(scan.properties, "variables", None),
+            config.PARQUET_IO_FETCH_AHEAD_MIN_ROW_GROUPS,
+        )
         # Row-group pruning triples — identical to the single-pass path, applied to
         # BOTH plans so the two agree on which row groups exist. Pass 2 re-submits
         # only the row groups pass 1 leaves standing, so its own work-item list is
@@ -3824,6 +3837,7 @@ class _Compiler:
                                          or frozenset()) else 0 for sc in scs],
                 pool=None,
                 fetch_ahead=fetch_ahead,
+                fetch_ahead_min_row_groups=fetch_ahead_gate,
                 filesystem=filesystem,
                 footer_bytes_cache=scan_footer_bytes_cache(),
             )
