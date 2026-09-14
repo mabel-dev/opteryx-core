@@ -513,20 +513,28 @@ def test_pushed_limit_skips_uncontributing_row_groups():
     row group" would hold no matter what the frontier did — the assertion would
     pass without exercising anything.
 
-    `testdata/tpch_1/lineitem` exists SOLELY for this test: one SF1 lineitem file,
-    6,001,215 rows in 23 row groups, the rest of SF1 having been retired when the
-    benchmarks moved to SF10. It is a fixture, not a benchmark dataset — do not
-    point performance work at it, and do not "tidy" it away as a leftover of the
-    old scale. Delete it only together with this test.
+    `testdata/flat/many_row_groups` exists SOLELY for this test: 64,000 rows in 64
+    row groups, ~700KB, written by `dev/generate_row_group_fixture.py`. The
+    row-group count is the load-bearing property — it must exceed the prefetch
+    window (`in_flight_limit`, == workers + 2) on every machine the suite runs on,
+    or "decoded exactly one" is a tautology. The row count, column set and values
+    are not load bearing.
+
+    It replaced `testdata/tpch_1/lineitem`, a 223MB SF1 dataset that `**.parquet`
+    in .gitignore kept out of the repo — so a clean checkout (i.e. CI) failed with
+    DatasetNotFoundError. Nothing about TPC-H was doing any work here.
+
+    It is a fixture, not a benchmark dataset — do not point performance work at it.
+    Delete it only together with this test.
     """
     import opteryx
 
     session = opteryx.session()
     for _ in session.execute_to_morsels(
-            "SELECT l_orderkey FROM testdata.tpch_1.lineitem LIMIT 5"):
+            "SELECT id FROM 'testdata/flat/many_row_groups' LIMIT 5"):
         pass
     diagnostics = session.telemetry["io_scan_diagnostics"][0]
-    # 23 row groups in the file; LIMIT 5 fits entirely in the first.
+    # 64 row groups in the file; LIMIT 5 fits entirely in the first.
     assert diagnostics["enqueue_count"] == 1, diagnostics
 
 
