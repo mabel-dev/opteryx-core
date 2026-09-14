@@ -542,9 +542,7 @@ class Manifest:
         so a non-ordinal literal is not comparable with them at all.
         """
         from opteryx.expression import NodeType
-        from opteryx.planner.optimizer.strategies.split_conjunctive_predicates import (
-            _inner_split,
-        )
+        from opteryx.planner.optimizer.predicate_bounds import derive_bound_conjuncts
 
         if not self.bounds_are_ordinal:
             return []
@@ -573,12 +571,14 @@ class Manifest:
 
         # `predicates` is a list of separately-pushed conjuncts, but any one of
         # them can itself be an AND tree or a DNF node (this engine's n-ary AND)
-        # after PredicateOrderingStrategy. `_inner_split` is the ONE splitter that
-        # knows both shapes — never write a second one.
-        conjuncts = []
-        for predicate in predicates or []:
-            if predicate is not None:
-                conjuncts.extend(_inner_split(predicate))
+        # after PredicateOrderingStrategy. `derive_bound_conjuncts` splits them
+        # through `_inner_split` — the ONE splitter, which knows both shapes —
+        # and then ADDS a `column <op> literal` for each conjunct that confines a
+        # column without saying so in that shape (IN, LIKE 'abc%', a monotone
+        # transform around the column). Row groups gain those shapes for the same
+        # reason files do, from the same derivation: a second one here would be
+        # the second dialect this method's docstring exists to prevent.
+        conjuncts = derive_bound_conjuncts(predicates, self._column_type)
 
         for conjunct in conjuncts:
             if self._predicate_domain_mismatch(conjunct):
@@ -631,9 +631,9 @@ class Manifest:
             The Manifest describing the surviving file set.
         """
         from opteryx.expression import NodeType
-        from opteryx.planner.optimizer.strategies.split_conjunctive_predicates import (
-            _inner_split,
-        )
+        from opteryx.planner.optimizer.predicate_bounds import derive_bound_conjuncts
+        from opteryx.planner.optimizer.predicate_bounds import derive_case_fold_conjuncts
+        from opteryx.planner.optimizer.predicate_bounds import derive_null_terms
 
         # Define handlers for each comparison operator
         # Returns True if file can be pruned (skipped)
@@ -671,10 +671,15 @@ class Manifest:
         # switch and does not run on filters synthesized after it, so pruning
         # was silently conditional on it; splitting here makes prune_files
         # correct on the predicate it is actually handed.
-        conjuncts: List = []
-        for predicate in predicates or []:
-            if predicate is not None:
-                conjuncts.extend(_inner_split(predicate))
+        #
+        # `derive_bound_conjuncts` does that split (through the same
+        # `_inner_split`) and then APPENDS a derived `column <op> literal` for
+        # each conjunct that confines a column in a shape the loop below cannot
+        # read — `IN`, `LIKE 'abc%'`, a same-column `OR`, or a monotone transform
+        # wrapped around the column. A derived term is implied by the term it came
+        # from, so it is evidence about the same conjunction and the paragraph
+        # above applies to it unchanged.
+        conjuncts: List = derive_bound_conjuncts(predicates, self._column_type)
 
         # Whether a literal is order-comparable with a column's raw stored bounds
         # depends only on the two TYPES, so it is settled once per predicate here
@@ -697,6 +702,34 @@ class Manifest:
         # sketch vector and an eligible integer-equality predicate are both present.
         membership_masks = self._membership_keep_masks(predicates)
 
+        # `IS NULL` / `IS NOT NULL` are not bounds and never will be — no interval
+        # describes "is absent" — but the manifest counts nulls per file per
+        # column, which answers both outright. Resolved to field ids once here
+        # rather than per file. A column that will not resolve contributes no
+        # term, so the file survives on its other conjuncts, as with any shape
+        # this cannot evaluate.
+        null_terms = []
+        for column_name, requires_null in derive_null_terms(predicates):
+            null_field_id = self._resolve_field_id(column_name)
+            if null_field_id is not None:
+                null_terms.append((null_field_id, requires_null))
+
+        # Bounds that hold only where a case fold is provably the identity —
+        # `LOWER(col) = 'opteryx'` in a file whose `col` carries no uppercase
+        # byte. Resolved to a sketch-column index here; the per-file precondition
+        # is checked in the loop, and a term whose precondition fails is simply
+        # not applied to that file. See `_fold_is_identity`.
+        case_fold_terms = []
+        if self._char_class_vector is not None:
+            for column_name, fold, conjuncts in derive_case_fold_conjuncts(
+                predicates, self._column_type
+            ):
+                sketch_index = self._sketch_index(column_name)
+                if sketch_index is not None:
+                    case_fold_terms.append(
+                        (sketch_index, fold, self._column_type(column_name), conjuncts)
+                    )
+
         for position, file_entry in enumerate(self.files):
             # Original vector-row index for this file (identity until first prune).
             original_row = position if self._live_rows is None else self._live_rows[position]
@@ -711,8 +744,36 @@ class Manifest:
             if skip_file:
                 continue
 
+            # Null-count elimination. Both tests survive merge-on-read deletes:
+            # deleting rows can only shrink both counts, so a file with no nulls
+            # before deletes has none after, and an all-null one stays all-null.
+            for null_field_id, requires_null in null_terms:
+                null_count = self._file_null_count(file_entry, null_field_id)
+                if null_count is None:
+                    continue  # UNKNOWN is not zero — no evidence, keep the file
+                if requires_null:
+                    if null_count == 0:
+                        skip_file = True  # IS NULL, and this file holds no nulls
+                        break
+                elif file_entry.record_count is not None and null_count >= file_entry.record_count:
+                    skip_file = True  # IS NOT NULL, and every row here is null
+                    break
+            if skip_file:
+                continue
+
+            file_predicates = predicates
+            if case_fold_terms:
+                admitted = [
+                    conjunct
+                    for sketch_index, fold, column_type, conjuncts in case_fold_terms
+                    if self._fold_is_identity(original_row, sketch_index, fold, column_type)
+                    for conjunct in conjuncts
+                ]
+                if admitted:
+                    file_predicates = predicates + admitted
+
             # Check each predicate
-            for predicate in predicates:
+            for predicate in file_predicates:
                 # Handle simple comparisons: column op literal
                 if (
                     predicate.node_type == NodeType.COMPARISON_OPERATOR
@@ -1755,18 +1816,82 @@ class Manifest:
 
         total = 0
         for file in self.files:
-            if file.column_stats is not None:
-                nc = file.column_stats.get_null_count(field_id)
-                if nc is None:
-                    return None
-                total += nc
-            elif file.null_value_counts:
-                if field_id not in file.null_value_counts:
-                    return None
-                total += file.null_value_counts[field_id]
-            else:
+            nc = self._file_null_count(file, field_id)
+            if nc is None:
                 return None
+            total += nc
         return total
+
+    # Indexes into the 8-class byte histogram draken's char_class_stats() writes,
+    # in the order opteryx.planner.cost_estimation.selectivity._CHAR_CLASSES
+    # states. Named here rather than spelled as bare integers at the use site.
+    _CHAR_CLASS_UPPER = 0
+    _CHAR_CLASS_LOWER = 1
+    _CHAR_CLASS_EXTENDED = 6
+
+    def _fold_is_identity(self, original_row: int, sketch_index: int, fold: str, column_type) -> bool:
+        """True when `fold` provably changes NOTHING in this file's column, so a
+        predicate written over `fold(col)` is a predicate over `col` itself.
+
+        The evidence is ANALYZE's per-file char-class byte counts: a column with
+        zero uppercase bytes in this file cannot be altered by LOWER, and one
+        with zero lowercase bytes cannot be altered by UPPER.
+
+        The type split is load-bearing, and it is the difference between the
+        engine's two folds (vector_string_case.cpp): VARCHAR and VARBINARY take
+        an ASCII-only BYTE fold, so bytes outside A-Z/a-z pass through untouched
+        and the class count alone settles it. NVARCHAR takes a UNICODE CODEPOINT
+        fold, which also rewrites accented letters — and those are counted as
+        `extended`, not `upper` — so it additionally needs the column to hold no
+        high bytes at all. Any other category is refused outright.
+
+        False on any missing evidence: no char-class row, an unresolvable type, a
+        manifest with no stats pass. The caller then simply does not apply the
+        term to this file, which costs a read and never an answer.
+        """
+        if column_type is None:
+            return False
+        category = column_type.category
+        if category not in (
+            LogicalCategory.VARCHAR,
+            LogicalCategory.VARBINARY,
+            LogicalCategory.NVARCHAR,
+        ):
+            return False
+
+        from opteryx.compiled.nanobind.vectors import char_class_field_totals
+
+        handle = self._native_handle(self._char_class_vector)
+        totals = char_class_field_totals(handle, sketch_index, [original_row])
+        if totals is None:
+            return False
+
+        forbidden = self._CHAR_CLASS_UPPER if fold == "LOWER" else self._CHAR_CLASS_LOWER
+        if totals[forbidden] != 0:
+            return False
+        if category == LogicalCategory.NVARCHAR and totals[self._CHAR_CLASS_EXTENDED] != 0:
+            return False
+        return True
+
+    def _file_null_count(self, file_entry, field_id: int) -> Optional[int]:
+        """Null count for one column of ONE file, or None when it is UNKNOWN.
+
+        Two sources, both keyed by real field_id: `column_stats` (the local /
+        filesystem_connector path) and `null_value_counts` (the catalog path,
+        which `from_datafile` re-keys from the positional `null_counts` list).
+        The plain `null_counts` list is deliberately NOT read here — it is
+        positional by WRITE ORDER, so indexing it by a catalog field_id reads
+        another column's count after a schema evolution, which is the same
+        misalignment `get_total_uncompressed_size` documents at length.
+
+        None is UNKNOWN, never zero: every caller prunes on this number, and
+        "no nulls recorded" read as "no nulls present" drops rows.
+        """
+        if file_entry.column_stats is not None:
+            return file_entry.column_stats.get_null_count(field_id)
+        if file_entry.null_value_counts:
+            return file_entry.null_value_counts.get(field_id)
+        return None
 
     def get_total_uncompressed_size(self, column) -> Optional[int]:
         """Total uncompressed byte size for a column across all files, or None.

@@ -3454,10 +3454,32 @@ class _Compiler:
         # says the predicate does not prune enough) — for those a single-pass
         # native scan is the same work the trampoline would have done.
         manifest = getattr(scan, "manifest", None)
-        if manifest is None or manifest.get_file_count() == 0:
-            # R7a: no manifest / zero files
+        if manifest is None:
+            # R7a: no manifest at all. Structurally defensive — a bind that never
+            # read one (see the schema_only bind, which sets manifest=None ON
+            # PURPOSE) tells us nothing about what the connector holds, so there is
+            # no file list to plan a native scan from and the trampoline's own
+            # `read_morsels` generator is the only thing that can answer.
             self.scan_residual_reasons[scan.identity] = "no_manifest"
             return None
+        # A ZERO-FILE manifest is NOT the R7a case and must not be conflated with
+        # it: "we did not read a manifest" and "we read one and it proves there is
+        # nothing to read" are different answers. Pruning that eliminates every
+        # file is a SUCCESS — the scan's whole answer is "no rows" — and bouncing
+        # it to the per-morsel Python trampoline made the best-pruned queries in
+        # the battery the only ones that left the native path. The native scan
+        # plans over an empty path list: `native_scan_supported`'s "every column of
+        # every file" loops are vacuously true, `open_native_scan_plan` builds zero
+        # work items, and the Source reports exhaustion on its first pull. The
+        # downstream native operators see an input that produced no morsels, which
+        # is exactly what they see when a predicate filters every row of every file
+        # — a shape they already handle.
+        #
+        # Reachable since 2026-09-14: predicate_bounds.py derives bounds for IS
+        # NULL / IS NOT NULL (via per-file null counts) and other non-canonical
+        # shapes, so `... WHERE <never-null col> IS NULL` now prunes to zero files.
+        # Before that no battery query could prune this hard and the conflation was
+        # unreachable, which is why it survived this long.
 
         predicates = getattr(scan, "predicates", None)
 

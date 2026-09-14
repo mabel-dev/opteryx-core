@@ -117,6 +117,10 @@ from rugo.parquet_reader cimport ParquetFooterResult, FetchParquetFooter, FetchP
 # fetched, keyed by data-file path. Envelope bytes only — reconstructed through the same
 # parser as a cold fetch, so a hit can never disagree with a cold read.
 from opteryx.connectors.parquet_io.footer_remote_cache import remote_footer_cache
+from opteryx.exceptions import DatasetReadError
+from opteryx.logging import get_logger
+
+_logger = get_logger(__name__)
 
 _PARQUET_MAGIC = b"PAR1"
 _PARQUET_FOOTER_SUFFIX = 8
@@ -1335,7 +1339,16 @@ cdef class IpcRowGroupSource:
         if not got:
             raise RuntimeError("Parquet pipeline drained with result(s) missing")
         if not result.success:
-            raise RuntimeError(f"Parquet pipeline error: {result.error.decode('utf-8')}")
+            # The underlying failure (URL, byte range, CURL errno, retry count) is
+            # operational detail: logged in full, kept out of the user-facing message.
+            _logger.error(
+                "Parquet pipeline error: %s",
+                result.error.decode('utf-8'),
+            )
+            raise DatasetReadError(
+                "Unable to read data from storage, the read did not complete. "
+                "The cause has been logged."
+            )
 
         cpp_path = result.path.decode('utf-8')
         path_str = self.cpp_to_orig.get(cpp_path, cpp_path)

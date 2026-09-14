@@ -47,7 +47,7 @@ a = ANY(z) AND b = ANY(z) AND c = ANY(z)    → z @>> (a, b, c)
 import datetime
 import math
 import re
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from draken.draken_native import DrakenType as _DrakenType
 
@@ -1424,6 +1424,79 @@ def rewrite_int_vs_fractional_const(predicate, telemetry: QueryTelemetry):
     return predicate
 
 
+# LOWER and UPPER, as the fixed-point test each one implies.
+_CASE_FOLDS = {"LOWER": str.lower, "UPPER": str.upper}
+
+
+def _ascii_literal_text(value) -> Optional[str]:
+    """`value` as an ASCII `str`, or None. A VARCHAR literal reaches here as
+    `bytes` (the draken string edge is bytes-only) and an NVARCHAR one as `str`,
+    so both spellings are accepted — but only while every byte is ASCII, which
+    is what makes the reasoning below independent of which fold ran."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("ascii") if all(byte < 0x80 for byte in value) else None
+    if isinstance(value, str):
+        return value if all(ord(char) < 0x80 for char in value) else None
+    return None
+
+
+def rewrite_unsatisfiable_case_fold(predicate, telemetry: QueryTelemetry):
+    """Collapse `LOWER(col) = 'Opteryx'` to FALSE.
+
+    `LOWER` returns no value containing an uppercase ASCII letter — under EITHER
+    of the engine's two folds, the ASCII byte fold VARCHAR takes and the Unicode
+    codepoint fold NVARCHAR takes, because no Unicode lowercase mapping produces
+    an ASCII capital. So a literal that is not its own lower-case cannot be
+    equalled by the function's output for ANY input, and the comparison is false
+    for every row. `UPPER` is the mirror.
+
+    The literal is required to be pure ASCII, which is what lets one test stand
+    for both folds: outside ASCII the two disagree (Kelvin sign U+212A folds to
+    'k' under one and not the other), and a rewrite that depends on which one ran
+    would be a wrong answer on the type it guessed wrong.
+
+    Eq ONLY. `LOWER(col) != 'Opteryx'` is not the complement: it is NULL, not
+    true, for a null row, so folding it to TRUE would admit rows a WHERE clause
+    must drop. Eq has no such asymmetry — false and null are both dropped.
+
+    This is a typo detector more than an optimisation. It is worth having
+    because the alternative is a full scan that returns nothing and looks like a
+    data problem.
+    """
+    if predicate.value != "Eq":
+        return predicate
+
+    for function_node, literal_node in (
+        (predicate.left, predicate.right),
+        (predicate.right, predicate.left),
+    ):
+        if (
+            function_node is None
+            or function_node.node_type != NodeType.FUNCTION
+            or function_node.value not in _CASE_FOLDS
+            or literal_node is None
+            or literal_node.node_type != NodeType.LITERAL
+        ):
+            continue
+
+        text = _ascii_literal_text(literal_node.value)
+        if text is None or text == _CASE_FOLDS[function_node.value](text):
+            return predicate
+
+        telemetry.optimization_predicate_rewriter_unsatisfiable_case_fold += 1
+        predicate.node_type = NodeType.LITERAL
+        predicate.type = _lt.BOOLEAN
+        predicate.value = False
+        predicate.left = None
+        predicate.right = None
+        predicate.parameters = None
+        if predicate.schema_column is not None:
+            predicate.schema_column.column_type = _lt.BOOLEAN
+        return predicate
+
+    return predicate
+
+
 # Define dispatcher conditions and actions
 dispatcher: Dict[str, Callable] = {
     "rewrite_in_to_eq": rewrite_in_to_eq,
@@ -1670,6 +1743,13 @@ def _rewrite_predicate(predicate, telemetry: QueryTelemetry):
     # so return early when it is no longer a comparison.
     if predicate.node_type == NodeType.COMPARISON_OPERATOR:
         predicate = rewrite_int_vs_fractional_const(predicate, telemetry)
+        if predicate.node_type != NodeType.COMPARISON_OPERATOR:
+            return predicate
+
+    # Collapse a case-fold equality that can never hold (`LOWER(col) = 'Mixed'`).
+    # Becomes a boolean literal, so return early once it is no longer a comparison.
+    if predicate.node_type == NodeType.COMPARISON_OPERATOR:
+        predicate = rewrite_unsatisfiable_case_fold(predicate, telemetry)
         if predicate.node_type != NodeType.COMPARISON_OPERATOR:
             return predicate
 

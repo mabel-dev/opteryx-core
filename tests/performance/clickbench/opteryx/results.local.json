@@ -63,8 +63,8 @@ make clickbench-skene (11.24s) (17-AUG) [1.05x]
 (10.65 seconds) <- DuckDB Baseline
 
 make tpch-sf1    (758.5ms) (20-AUG) [SF1] [2.18x]
-make tpch-sf10   (3401.1ms) (13-SEP) [SF10] [0.81x]
-make tpch-sf100  (39314.6ms) (13-SEP) [SF100] [1.29x]
+make tpch-sf10   (3368.2ms) (14-SEP) [SF10] [0.81x]
+make tpch-sf100  (36578.8ms) (14-SEP) [SF100] [1.20x]
 make tpcds-sf1   (25.6s) (25-AUG) [1 fails] [SF1]
 make tpcds-sf001 (18.3s) (25-AUG) [1 fails] [SF001]
 make medicare1   (426.3ms) (25-AUG) [2.63x]
@@ -73,5 +73,3 @@ make h2o         (45.1s) (20-AUG) [medium]
 make jsonbench   (5510.6ms) (16-AUG) [10m] [2.12x]
 make dash        (172.1ms) (20-AUG) [1.90x]
 make signals     (0.8s) [only two tests] (05-AUG)
-
-SF1 numbers

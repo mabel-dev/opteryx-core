@@ -38,9 +38,8 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
     node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
 
     store = view_store_connector(node.object_name, telemetry=context.telemetry)
-    if store is not node.connector and isinstance(store, Eidetic):
-        if store.locate_object(node.object_name)[0] == TableType.View:
-            node.connector = store
+    if isinstance(store, Eidetic) and store.locate_object(node.object_name)[0] == TableType.View:
+        node.connector = store
 
     if not isinstance(node.connector, Writable):
         raise ReadOnlyConnectorError(

@@ -616,10 +616,22 @@ cdef extern from "pythread.h":
 # WP-INSTR: execution-time GIL instrumentation (off by default, ~0 cost when off)
 #
 # Instruments 1 & 4 of the measurement harness. Times the wall-clock nanoseconds
-# spent inside the KNOWN execution-time ``with gil`` bodies — the scan-pull
-# trampoline (``_scan_pull_run``, entered once per morsel per worker for a
-# StreamingScanSource) and the carrier-flip error stash (``_stash_exc``) — and
-# records which OS thread entered which named site. Two derived readings:
+# spent inside the KNOWN execution-time ``with gil`` bodies and records which OS
+# thread entered which named site. The instrumented sites are:
+#   * ``_scan_pull_run``  — the scan-pull trampoline, entered once per morsel per
+#     worker for a StreamingScanSource.
+#   * ``_dispatch_push``  — BasePlanNode's DEFAULT push path, the "transitional
+#     gil-adapter" that re-acquires the GIL to decode the carrier to a Python
+#     Morsel and run ``_push_impl``. Entered once per morsel per operator on any
+#     chain node that does NOT override it at C level. Instrumented so the purity
+#     guard stops being blind to it: before this it was an uncounted per-morsel
+#     GIL body, so ``gil_held_ns == 0`` proved only "no scan-pull re-entry", not
+#     "no execution Python". It is deliberately NOT whitelisted in
+#     ``dev/instrument_engine.DEFAULT_WORKER_WHITELIST`` — it is debt to be seen.
+#   * ``_stash_exc``      — the carrier-flip error stash (error path only). NOTE:
+#     on that path it nests INSIDE ``_dispatch_push``'s span, so its ns is counted
+#     twice in ``gil_held_ns``. Error path only, never the steady state.
+# Two derived readings:
 #   1. gil_held_ns  — summed over all sites; a native-gated numeric scan touches
 #      no execution Python and reports ~0, a trampoline scan reports clearly > 0.
 #   4. worker_gil_sites — the enumerated (thread, site) breakdown a purity guard
@@ -652,6 +664,7 @@ cdef int _gil_instr_site_count = 0
 # compare by pointer identity; each call-site passes the same constant.
 cdef const char* _SITE_SCAN_PULL = "_scan_pull_run"
 cdef const char* _SITE_STASH_EXC = "_stash_exc"
+cdef const char* _SITE_DISPATCH_PUSH = "_dispatch_push"
 
 
 cdef inline long long _instr_mono_ns() noexcept:
@@ -1225,10 +1238,20 @@ cdef class BasePlanNode:
         true C-level vtable dispatch. Default = transitional gil-adapter:
         re-acquire the GIL, decode the carrier to a Morsel (or recover the EOS
         sentinel from MorselState), and run the existing `_push_impl(Morsel)` so
-        Python-class subclasses (aggregate/unnest/insert) keep working unchanged."""
+        Python-class subclasses (aggregate/unnest/insert) keep working unchanged.
+
+        WP-INSTR: this is an execution-time GIL body entered once per morsel per
+        operator, so when the engine instrumentation is armed it is bracketed and
+        reported as the `_dispatch_push` site. A subclass that overrides this
+        method at C level (JoinLeftAdapter/JoinRightAdapter) never runs this body
+        and so records nothing — that absence IS the measurement, exactly as it is
+        for the native scan Sources."""
         cdef CxxMorsel* raw = m.get()
         cdef bint is_eos = (raw != NULL and raw.state == MorselState.END_OF_STREAM)
+        cdef long long _t0
         with gil:
+            if _gil_instr_enabled:
+                _t0 = _instr_mono_ns()
             try:
                 if is_eos:
                     self._push_impl(_EOS_SENTINEL)
@@ -1236,6 +1259,8 @@ cdef class BasePlanNode:
                     self._push_impl(cxx_to_morsel(m))
             except BaseException as exc:  # noqa: BLE001 — surfaced via ErrCtx at the boundary
                 self._stash_exc(exc, err)
+            if _gil_instr_enabled:
+                _instr_record(_SITE_DISPATCH_PUSH, _instr_mono_ns() - _t0)
         return err.code if err != NULL else 0
 
     cpdef void _push_impl(self, Morsel morsel) except *:

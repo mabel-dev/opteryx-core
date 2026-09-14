@@ -19,7 +19,6 @@ from typing import Dict
 from typing import Optional
 from typing import Tuple
 
-from opteryx.connectors import connector_factory
 from opteryx.connectors import view_store_connector
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import DatasetNotFoundError
@@ -51,14 +50,22 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
     unchanged. Non-eidetic connectors (e.g. local filesystem) never look up
     views, so they return (None, None) and bind on the normal path.
 
-    A view lives in the workspace's VIEW STORE, which for an externally-bound
-    workspace is NOT the connector serving its data. When the two differ the
-    store is probed for a view and only a view: the data answer is the data
-    binding's to give, and a dataset document in the catalog entry of a bound
-    workspace would be one that workspace cannot domicile. That probe is a
-    catalog round trip a bound workspace did not pay before - accepted
-    (architect, 2026-09-14) so that a view means the same thing in every
-    workspace, rather than existing only where the catalog also serves data.
+    The connector asked is the workspace's VIEW STORE, which for an
+    externally-bound workspace is the opteryx catalog entry rather than the
+    connector serving its data - a view is catalog text and CREATE VIEW wrote
+    it there, so this is where it is read back from. That is a catalog round
+    trip a workspace whose data connector is not eidetic did not pay before -
+    accepted (architect, 2026-09-14) so that a view means the same thing in
+    every workspace, rather than existing only where the catalog also serves
+    data. The early return above keeps disk and virtual relations free.
+
+    A DATASET answer from that lookup is honoured exactly as before. It used
+    to be dropped whenever the store was not the same OBJECT as
+    `connector_factory`'s answer, on the assumption that the two objects
+    differing meant the data lived outside the catalog. They also differ when
+    both resolvers are installed and resolve to the SAME catalog - two cache
+    entries, one catalog - which is the ordinary production shape, so every
+    relation in it reported as not found.
 
     `catalog_cache` is an OPT-IN, caller-owned `CatalogCache`. It caches the round
     trip above and nothing else: what goes in it is the raw `(kind, object)` the
@@ -81,11 +88,6 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
             # dataset): bind it on the normal path, no round trip.
             return None, None
 
-        # For a workspace with no external binding the store ALSO serves the
-        # data, and may answer with a dataset as well as a view. Where they
-        # differ, the data answer is the data binding's to give.
-        views_only = store is not connector_factory(relation, telemetry)
-
         resolver = getattr(store, "get_relation", None)
         if resolver is None:
             definition = _get_view_definition(relation, telemetry, store)
@@ -98,7 +100,7 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
         kind, obj = cached
         if kind == "view":
             return "view", _view_plan_from_definition(obj)
-        if kind == "dataset" and not views_only:
+        if kind == "dataset":
             return "dataset", obj
         return None, None
     finally:

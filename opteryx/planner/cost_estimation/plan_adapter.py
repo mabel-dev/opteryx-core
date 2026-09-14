@@ -163,10 +163,16 @@ def _key_stats(scan_node, column_identity: Optional[bytes]) -> KeyStats:
     col = stats.columns.get(column_identity)
     if col is None:
         return KeyStats(ndv=None, null_fraction=None)
-    if col.distinct_count is None:
+    # The DOMAIN count, not the live one: a key domain is a property of the
+    # relation as stored, and a filter removes ROWS, not the values the key
+    # column could hold. Reading the post-filter count here charges the
+    # filter's selectivity a second time inside the divisor -- see
+    # _build_equiv_tdoms for the measured cost of that exact error.
+    ndv = col.domain_distinct_count
+    if ndv is None:
         return KeyStats(ndv=None, null_fraction=col.null_fraction)
     return KeyStats(
-        ndv=col.distinct_count,
+        ndv=ndv,
         null_fraction=col.null_fraction,
         ndv_provenance=NdvProvenance.MEASURED,
     )
@@ -342,8 +348,15 @@ def _build_equiv_tdoms(
                 if stats is None:
                     continue
                 col_stat = stats.columns.get(col_identity)
-                if col_stat is not None and col_stat.distinct_count is not None:
-                    known_ndvs.append(col_stat.distinct_count)
+                if col_stat is None:
+                    continue
+                # The DOMAIN count, for the same reason the fallback below
+                # reads domain_row_count: the warning in this docstring is
+                # about a post-filter number in the divisor, and it applies
+                # whichever field carries it.
+                col_ndv = col_stat.domain_distinct_count
+                if col_ndv is not None:
+                    known_ndvs.append(col_ndv)
 
         tdom = (
             max(known_ndvs)

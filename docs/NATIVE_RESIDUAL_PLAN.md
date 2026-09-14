@@ -18,6 +18,19 @@
 > `unlowerable_predicate` (R4) is now **CLOSED** — see item 7. It was the last
 > entry in the strict-xfail frontier, which is now empty; `footer_gate` via schema
 > evolution remains the one residual with a live SQL trigger.
+>
+> **2026-09-14 — the frontier regressed and was re-closed.** `predicate_bounds.py`
+> made a `get_file_count() == 0` manifest reachable from the battery for the first
+> time, and the R7a guard was classifying "pruned to nothing" as "no manifest" and
+> trampolining it — `__trampoline__` 0 → 2. The guard is now split (see R7a below)
+> and the census reads **168 scans, 168 native, 0 trampoline**. Worth noting how it
+> was caught: `test_census_reports_no_fused_topn_residual` asserts the count is 0,
+> and it only ran because someone ran it. That is now fixed —
+> `test_native_scan_residual_gate.py::test_census_frontier_is_empty` is the
+> canonical census gate and **`make q` runs it**, so the frontier cannot reopen
+> unobserved. It asserts a corpus floor (`__scans__ >= 150`) BEFORE asserting the
+> tally: `_read_battery` silently skips a battery file that has moved, and a zero
+> trampoline count over zero scans is vacuous, not green.
 
 The native C++ engine runs plain `SELECT` end-to-end **except** for parquet scans
 that fall back to the per-morsel Python trampoline (`StreamingScanSource`). That
@@ -731,7 +744,38 @@ a standalone Filter and raises in `_lower_expression`) is unchanged and was neve
 tagged R4 — see finding 2 above.
 
 ### (not a close-out) `no_manifest` (R7a)
-Defensive guard, unreachable from SQL. Leave as-is.
+Defensive guard, unreachable from SQL — **but only after the 2026-09-14 split, and
+the earlier "leave as-is" ruling was falsified before it.**
+
+The guard used to read `manifest is None or manifest.get_file_count() == 0`, which
+conflates two different answers:
+
+* **no manifest** — we never read one. A `schema_only` bind sets `manifest = None`
+  ON PURPOSE, and an absence is not evidence about the connector, so there is no
+  file list to plan from. Genuinely defensive; keeps the reason code.
+* **zero files** — we read one and it proves there is nothing to read. That is a
+  *success*: pruning eliminated every file and the scan's whole answer is "no rows".
+
+Bouncing the second case to the per-morsel Python trampoline meant the
+BEST-pruned queries in the battery were the only ones leaving the native path.
+It survived unnoticed because nothing could prune that hard; `predicate_bounds.py`
+(2026-09-14) changed that by deriving bounds for `IS NULL`/`IS NOT NULL` from
+per-file null counts, and two tpch battery queries
+(`... WHERE o_orderpriority IS NULL`, `... WHERE o_totalprice IS NULL`) began
+pruning to zero files — taking `__trampoline__` from 0 to 2.
+
+Split in `_native_scan_plan`: `manifest is None` keeps R7a; `file_count == 0`
+plans natively over an empty path list. `native_scan_supported`'s "every column of
+every file" loops are vacuously true, `open_native_scan_plan` builds zero work
+items, the Source reports exhaustion on its first pull, and the downstream native
+operators see the same thing they see when a predicate filters every row of every
+file. Verified: `SELECT *` returns 0 rows with the full column list intact (schema
+visibility survives), `COUNT(*)` returns one row valued 0, both on
+`NativeParquetScanSource`. Census back to **168/168 native, 0 trampoline**.
+
+The equivalent `file_count == 0` checks in `_skene_latmat_plan` and
+`_latmat_scan_plan` are deliberately UNCHANGED — those decline an *optimization*
+and fall through to `_native_scan_plan`, so they never produce a residual.
 
 ## How a close-out chip uses this gate
 

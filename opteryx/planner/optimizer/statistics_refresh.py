@@ -74,6 +74,7 @@ from opteryx.planner.cost_estimation import composite_key_ndv
 from opteryx.planner.cost_estimation import estimate_after_filter
 from opteryx.planner.cost_estimation import estimate_group_by_cardinality
 from opteryx.planner.cost_estimation import estimate_join_cardinality
+from opteryx.planner.cost_estimation import surviving_distinct_count
 from opteryx.planner.optimizer.statistics import ColumnRange
 from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
@@ -107,6 +108,29 @@ _JOIN_TYPE_FOR_CARDINALITY = {
     "left": "left outer",
     "right": "right outer",
     "outer": "full outer",
+}
+
+
+# The planner's five semi/anti spellings, mapped to the cardinality module's
+# vocabulary. They are five ANSWERS, not five names: the not-distinct pair
+# (INTERSECT / EXCEPT) treats NULL as a value equal to itself, and null-aware
+# anti (NOT IN) emits nothing at all when the right key holds a NULL.
+_SEMI_ANTI_ESTIMATOR = {
+    "left semi": "semi",
+    "left anti": "anti",
+    "left anti null-aware": "anti null-aware",
+    "left semi not-distinct": "semi not-distinct",
+    "left anti not-distinct": "anti not-distinct",
+}
+
+# Which _NARROWABLE_JOIN_SIDES rule each of those follows. Every anti variant
+# narrows NOTHING -- see the entry there.
+_SEMI_ANTI_NARROWING = {
+    "semi": "semi",
+    "semi not-distinct": "semi",
+    "anti": "anti",
+    "anti not-distinct": "anti",
+    "anti null-aware": "anti",
 }
 
 
@@ -654,6 +678,14 @@ def _scan_stats(
                 narrowed_columns = _scale_total_bytes(
                     narrowed_columns, _ratio(new_rows, base.row_count)
                 )
+                # NDV follows the rows, by its own model and then the row-count
+                # invariant -- see _filter_stats for the full note. A predicate
+                # folded into the scan reduces rows HERE, so scaling only in
+                # _filter_stats left the common shape (a pushed-down predicate)
+                # entirely unscaled: NDV stayed at its pre-filter value and
+                # could exceed the scan's own row count.
+                narrowed_columns = _scale_ndvs(narrowed_columns, base, selectivity)
+                narrowed_columns = _cap_ndvs(narrowed_columns, new_rows)
                 if new_rows != base.row_count or narrowed_columns is not base.columns:
                     base = RelationStatistics(
                         columns=narrowed_columns,
@@ -696,6 +728,14 @@ def _scan_stats(
         if selectivity != 1.0:
             new_rows = max(1, int(base.row_count * selectivity))
         narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
+        # NDV follows the rows, by its own model and then the row-count
+        # invariant -- see _filter_stats for the full note. A predicate
+        # folded into the scan reduces rows HERE, so scaling only in
+        # _filter_stats left the common shape (a pushed-down predicate)
+        # entirely unscaled: NDV stayed at its pre-filter value and
+        # could exceed the scan's own row count.
+        narrowed_columns = _scale_ndvs(narrowed_columns, base, selectivity)
+        narrowed_columns = _cap_ndvs(narrowed_columns, new_rows)
         if new_rows != base.row_count or narrowed_columns is not base.columns:
             base = RelationStatistics(
                 columns=narrowed_columns,
@@ -827,6 +867,13 @@ def _filter_stats(
     if selectivity != 1.0:
         new_rows = estimate_after_filter(base.row_count, selectivity)
     narrowed_columns = _scale_total_bytes(narrowed_columns, _ratio(new_rows, base.row_count))
+    # A filter drops ROWS; a distinct value survives while ANY row carrying it
+    # does, so NDV has to be scaled by its own model rather than by the row
+    # ratio -- and then capped, because a relation cannot hold more distinct
+    # values than rows. Model first, invariant second (architect ruling
+    # 2026-09-14); see docs/SEMI_ANTI_CARDINALITY_DESIGN.md 4.2.
+    narrowed_columns = _scale_ndvs(narrowed_columns, base, selectivity)
+    narrowed_columns = _cap_ndvs(narrowed_columns, new_rows)
     # Filtering shrinks the cardinality, never the key domain it was drawn from.
     return RelationStatistics(
         columns=narrowed_columns, row_count_estimate=new_rows, base_row_count=base.domain_row_count
@@ -937,6 +984,10 @@ def _equi_key_classes(
     equi_keys: List[Tuple[KeyStats, KeyStats]] = []
     for members in classes.values():
         known_ndvs: Dict[str, List[int]] = {"left": [], "right": []}
+        # The POST-filter counts, alongside the domain counts above. Only
+        # semi/anti reads these (KeyStats.live_ndv); every divisor here reads
+        # the domain.
+        live_ndvs: Dict[str, List[int]] = {"left": [], "right": []}
         spans: Dict[str, List[int]] = {"left": [], "right": []}
         left_nulls: List[float] = []
         right_nulls: List[float] = []
@@ -946,8 +997,19 @@ def _equi_key_classes(
             for side, col in (("left", left_col), ("right", right_col)):
                 if col is None:
                     continue
+                # The DOMAIN count. `fallback` below is the PRE-filter relation
+                # size for exactly this reason, and a measured NDV must be read
+                # on the same footing -- a filter removes rows, not the values
+                # the key could hold. This mirrors plan_adapter._key_stats /
+                # _build_equiv_tdoms, which this function is required to agree
+                # with. The post-filter count is not discarded: it is what
+                # semi/anti cardinality measures AGAINST this domain
+                # (docs/SEMI_ANTI_CARDINALITY_DESIGN.md 3.2).
+                col_ndv = col.domain_distinct_count
+                if col_ndv is not None:
+                    known_ndvs[side].append(col_ndv)
                 if col.distinct_count is not None:
-                    known_ndvs[side].append(col.distinct_count)
+                    live_ndvs[side].append(col.distinct_count)
                 span = _value_range_span(col)
                 if span is not None:
                     spans[side].append(span)
@@ -993,23 +1055,44 @@ def _equi_key_classes(
                     # The number in play is now the span, not the count.
                     side_measured = False
                 side_tdom = capped
+            # A non-positive count is not a count. Clamping to 1 replaces the
+            # number with a floor, so it stops being measured -- the same rule
+            # the span cap above applies, for the same reason.
+            if side_tdom < 1:
+                side_tdom = 1
+                side_measured = False
             side_tdoms.append((side_tdom, side_measured))
-        tdom = max(1, max(t for t, _ in side_tdoms))
-        # tdom stands in for max(ndv_left, ndv_right); its provenance is the
-        # provenance of the side that supplied that max. A measured value
-        # tying the max still counts as measured.
-        measured = any(is_measured for t, is_measured in side_tdoms if t == tdom)
-        provenance = NdvProvenance.MEASURED if measured else NdvProvenance.DOMAIN_STANDIN
+        # Each side keeps its OWN number. `_key_selectivity` and
+        # `apply_occupancy_bound` both take max(left.ndv, right.ndv), so the
+        # divisor is still the tdom that stands in for max(ndv_left, ndv_right)
+        # -- writing that maximum into BOTH slots changed no arithmetic and
+        # destroyed the only record of which side it came from. Semi/anti
+        # cardinality is a RATIO of the two sides, so it cannot be estimated at
+        # all from two copies of their maximum (see
+        # docs/SEMI_ANTI_CARDINALITY_DESIGN.md 4.1), and per-side provenance
+        # stops a MEASURED count on one side being relabelled by the other.
+        (left_tdom, left_measured), (right_tdom, right_measured) = side_tdoms
+        # Composed the same way the domain counts are, and NOT stood in for when
+        # absent: an unknown live NDV must stay unknown so semi/anti declines to
+        # estimate rather than reading a domain size as a live count.
+        left_live = composite_key_ndv(live_ndvs["left"])
+        right_live = composite_key_ndv(live_ndvs["right"])
         equi_keys.append((
             KeyStats(
-                ndv=tdom,
+                ndv=left_tdom,
                 null_fraction=max(left_nulls) if left_nulls else None,
-                ndv_provenance=provenance,
+                ndv_provenance=(
+                    NdvProvenance.MEASURED if left_measured else NdvProvenance.DOMAIN_STANDIN
+                ),
+                live_ndv=left_live,
             ),
             KeyStats(
-                ndv=tdom,
+                ndv=right_tdom,
                 null_fraction=max(right_nulls) if right_nulls else None,
-                ndv_provenance=provenance,
+                ndv_provenance=(
+                    NdvProvenance.MEASURED if right_measured else NdvProvenance.DOMAIN_STANDIN
+                ),
+                live_ndv=right_live,
             ),
         ))
 
@@ -1055,22 +1138,51 @@ def _join_stats(
         estimator_type = "right"
     elif join_type in ("full outer", "outer"):
         estimator_type = "outer"
-    elif join_type in (
-        "left semi",
-        "left anti",
-        "left anti null-aware",
-        "left semi not-distinct",
-        "left anti not-distinct",
-    ):
-        # Semi/anti emit only left-side columns; right contributes nothing.
+    elif join_type in _SEMI_ANTI_ESTIMATOR:
+        # Semi/anti emit only left-side COLUMNS; the right contributes none. That
+        # is a fact about the schema and says nothing about the row count, which
+        # is what this branch used to return `left.row_count` on the strength of
+        # -- asserting that a join whose whole purpose is to reduce reduces
+        # nothing. See docs/SEMI_ANTI_CARDINALITY_DESIGN.md.
+        estimator_type = _SEMI_ANTI_ESTIMATOR[join_type]
+        left_keys = _join_key_identities(getattr(node, "left_columns", None))
+        right_keys = _join_key_identities(getattr(node, "right_columns", None))
+        columns = left.columns
+        if not left_keys or not right_keys:
+            # No usable equi key: nothing to measure a match fraction with. The
+            # left row count is the only sound bound, exactly as before.
+            out_rows = left.row_count
+            key_class_count = 0
+        else:
+            equi_keys = _equi_key_classes(left_keys, right_keys, left, right)
+            key_class_count = len(equi_keys)
+            # No occupancy bound here. It exists to cap a PRODUCT OF DIVISORS
+            # against the rows available to hold the key tuples, and it caps it
+            # by collapsing the class list to one synthetic pair. A match
+            # fraction is not a divisor product, and the collapsed pair carries
+            # no live NDV, so applying it would silently turn every composite
+            # semi/anti key into "cannot estimate".
+            out_rows = estimate_join_cardinality(
+                left_rows=left.row_count,
+                right_rows=right.row_count,
+                join_type=estimator_type,
+                equi_keys=equi_keys,
+                extra_predicates_selectivity=1.0,
+            )
+            columns = _intersect_join_keys(
+                columns, left, right, left_keys, right_keys,
+                _SEMI_ANTI_NARROWING[estimator_type],
+            )
         if join_notes is not None:
             join_notes.append(
-                _join_note(nid, join_type, left.row_count, right.row_count, left.row_count, 0)
+                _join_note(
+                    nid, join_type, left.row_count, right.row_count, out_rows, key_class_count
+                )
             )
-        # Bounded by the left side, not equal to it — an estimate.
         return RelationStatistics(
-            columns=_cap_ndvs(left.columns, left.row_count),
-            row_count_estimate=left.row_count,
+            columns=_cap_ndvs(columns, out_rows),
+            row_count_estimate=out_rows,
+            base_row_count=left.domain_row_count,
         )
 
     if join_type == "asof":
@@ -1175,6 +1287,16 @@ _NARROWABLE_JOIN_SIDES = {
     "left": ("right",),  # left preserved
     "right": ("left",),  # right preserved
     "outer": (),  # both preserved
+    # SEMI emits only left rows that MATCHED, so the left key is bounded by the
+    # intersection. The right side is not emitted at all.
+    "semi": ("left",),
+    # ANTI emits the left rows that did NOT match. Their keys lie in the
+    # COMPLEMENT of the intersection, so narrowing to the intersection would
+    # describe a relation this join never produces -- and this dict's default
+    # (below) narrows BOTH sides, so the entry has to exist to say "neither".
+    # That is the error the docstring on _intersect_join_keys warns about,
+    # arriving through a missing key rather than a wrong one.
+    "anti": (),
 }
 
 
@@ -1722,6 +1844,48 @@ def _cap_ndvs(columns: Dict[bytes, ColumnStatistics], row_count: int) -> Dict[by
             out[k] = c.but(distinct_count=max(1, int(row_count)))
         else:
             out[k] = c
+    return out
+
+
+def _scale_ndvs(
+    columns: Dict[bytes, ColumnStatistics],
+    base: RelationStatistics,
+    selectivity: float,
+) -> Dict[bytes, ColumnStatistics]:
+    """Reduce every column's distinct_count by a filter's selectivity.
+
+    The scaling is ``surviving_distinct_count`` -- NDV falls far more slowly
+    than the row count, because a value disappears only when every row carrying
+    it is dropped. Two things this must not get wrong:
+
+    * The scaling is applied to the PRE-filter count read off ``base``, never
+      to whatever ``_narrow_filter_columns`` already wrote. Those two are
+      different reductions of the same number and composing them multiplies the
+      filter in twice; the result is the MINIMUM of the two, because the
+      predicate's own equality cardinality is the sharper bound where it
+      exists and ``surviving_distinct_count`` is explicitly too weak on the
+      column a predicate constrains.
+    * ``base_distinct_count`` carries the DOMAIN forward. A filter shrinks the
+      live count, never the domain the values were drawn from, and a consumer
+      that needs the domain (semi/anti's denominator -- §3.2) cannot rebuild it
+      once this function has run.
+    """
+    if selectivity >= 1.0:
+        return columns
+    out: Dict[bytes, ColumnStatistics] = {}
+    for key, col in columns.items():
+        source = base.columns.get(key)
+        domain = col.domain_distinct_count if source is None else source.domain_distinct_count
+        pre_filter = col.distinct_count if source is None else source.distinct_count
+        scaled = surviving_distinct_count(pre_filter, base.row_count, selectivity)
+        if scaled is None:
+            # No NDV to scale. The domain still has to be recorded when the
+            # column carries one, or it is lost at the next operator.
+            out[key] = col if domain is None else col.but(base_distinct_count=domain)
+            continue
+        if col.distinct_count is not None:
+            scaled = min(scaled, col.distinct_count)
+        out[key] = col.but(distinct_count=scaled, base_distinct_count=domain)
     return out
 
 

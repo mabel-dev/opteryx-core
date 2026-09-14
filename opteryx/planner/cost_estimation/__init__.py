@@ -16,6 +16,7 @@ from opteryx.planner.cost_estimation.join_cardinality import NdvProvenance
 from opteryx.planner.cost_estimation.join_cardinality import apply_occupancy_bound
 from opteryx.planner.cost_estimation.join_cardinality import composite_key_ndv
 from opteryx.planner.cost_estimation.join_cardinality import estimate_after_filter
+from opteryx.planner.cost_estimation.join_cardinality import surviving_distinct_count
 from opteryx.planner.cost_estimation.join_cardinality import estimate_group_by_cardinality
 from opteryx.planner.cost_estimation.join_cardinality import estimate_join_cardinality
 from opteryx.planner.cost_estimation.join_graph import JoinEdge
@@ -50,6 +51,7 @@ __all__ = [
     "apply_occupancy_bound",
     "composite_key_ndv",
     "estimate_after_filter",
+    "surviving_distinct_count",
     "estimate_group_by_cardinality",
     "estimate_join_cardinality",
     "JoinVertex",

@@ -278,11 +278,16 @@ def assert_native_worker_purity(
 
     What it catches / limitations:
     * It counts entries into the INSTRUMENTED execution-time ``with gil`` bodies
-      (currently ``_scan_pull_run`` and ``_stash_exc``). It is an *enumerated*
-      guard, not a universal ``settrace`` — a worker that re-entered Python through
-      some OTHER, not-yet-instrumented ``with gil`` body would not be seen until that
-      body is added to the instrumentation. As each such body is discovered it must
-      be wrapped (see ``_operators.pyx`` WP-INSTR block) so this guard covers it.
+      (currently ``_scan_pull_run``, ``_dispatch_push`` and ``_stash_exc``). It is
+      an *enumerated* guard, not a universal ``settrace`` — a worker that re-entered
+      Python through some OTHER, not-yet-instrumented ``with gil`` body would not be
+      seen until that body is added to the instrumentation. As each such body is
+      discovered it must be wrapped (see ``_operators.pyx`` WP-INSTR block) so this
+      guard covers it. ``_dispatch_push`` was added for exactly that reason: it is
+      BasePlanNode's default per-morsel push path and was an uncounted GIL body, so
+      a ``gil_held_ns == 0`` reading previously proved only "no scan-pull re-entry".
+      It is deliberately absent from :data:`DEFAULT_WORKER_WHITELIST` — the point of
+      instrumenting it is to see it, not to permit it.
     * Passing ``whitelist=()`` turns any execution-time Python re-entry into a
       failure — this is how a test deliberately flags the trampoline path.
     * Requires OPTERYX_INSTRUMENT_ENGINE armed for the run; on an unarmed run

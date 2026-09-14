@@ -162,6 +162,30 @@ class ColumnStatistics:
     # no ANALYZE pass and no manifest-level size) — never fabricated.
     total_bytes: Optional[int] = None
 
+    # PRE-filter distinct count -- the size of the key DOMAIN this column's
+    # values are drawn from. None means "same as distinct_count", so every
+    # existing construction site keeps its previous meaning.
+    #
+    # The exact column-level analogue of RelationStatistics.base_row_count, and
+    # it exists for the same reason: once a filter scales `distinct_count` down
+    # (`surviving_distinct_count`), the domain the values came from is gone,
+    # and a consumer that needs the DOMAIN rather than the live count cannot
+    # recover it. Semi/anti cardinality is exactly such a consumer -- it
+    # measures the right side's live key set AGAINST that domain, so scaling in
+    # place would destroy its denominator (see
+    # docs/SEMI_ANTI_CARDINALITY_DESIGN.md 3.2).
+    #
+    # Filtering shrinks the live count, never the domain: this field is carried
+    # forward unchanged through the operators that rescale `distinct_count`.
+    base_distinct_count: Optional[int] = None
+
+    @property
+    def domain_distinct_count(self) -> Optional[int]:
+        """Pre-filter distinct count, falling back to the live one."""
+        if self.base_distinct_count is None:
+            return self.distinct_count
+        return self.base_distinct_count
+
     def but(
         self,
         *,
@@ -169,12 +193,13 @@ class ColumnStatistics:
         histogram=_KEEP,
         distinct_count=_KEEP,
         total_bytes=_KEEP,
+        base_distinct_count=_KEEP,
     ) -> "ColumnStatistics":
         """Copy with the given fields changed — the statistics propagators'
         replacement for ``dataclasses.replace``, which re-derives the field
         list on every call and was the single hottest function in planning.
-        Only the four fields the propagators actually rewrite are exposed;
-        add a parameter here rather than reintroducing ``replace``.
+        Only the fields the propagators actually rewrite are exposed; add a
+        parameter here rather than reintroducing ``replace``.
         """
         return ColumnStatistics(
             column_name=self.column_name,
@@ -188,6 +213,11 @@ class ColumnStatistics:
             ordinal_bounds=self.ordinal_bounds,
             length_bounds=self.length_bounds,
             total_bytes=self.total_bytes if total_bytes is _KEEP else total_bytes,
+            base_distinct_count=(
+                self.base_distinct_count
+                if base_distinct_count is _KEEP
+                else base_distinct_count
+            ),
         )
 
 

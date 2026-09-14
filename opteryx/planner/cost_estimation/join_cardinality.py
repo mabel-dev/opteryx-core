@@ -25,8 +25,23 @@ from typing import Tuple
 
 from opteryx.planner.cost_estimation.fallback_selectivity import EQ_UNKNOWN_NDV_FALLBACK
 
+# Semi/anti carry FIVE spellings, not two: the not-distinct pair (INTERSECT /
+# EXCEPT) treats NULL as an ordinary value that equals itself, and null-aware
+# anti (NOT IN) propagates UNKNOWN. Those are different ANSWERS, not different
+# names, so each is its own join type rather than a flag on one.
 _VALID_JOIN_TYPES = frozenset(
-    {"inner", "left outer", "right outer", "full outer", "cross", "semi", "anti"}
+    {
+        "inner",
+        "left outer",
+        "right outer",
+        "full outer",
+        "cross",
+        "semi",
+        "anti",
+        "semi not-distinct",
+        "anti not-distinct",
+        "anti null-aware",
+    }
 )
 
 
@@ -61,9 +76,24 @@ class NdvProvenance(Enum):
 
 @dataclass(frozen=True)
 class KeyStats:
+    """Statistics for one side of one equi-key class.
+
+    ``ndv`` is the key's DOMAIN size -- the number of distinct values the column
+    could hold, measured before any filter. That is what every divisor here
+    wants: dividing by a post-filter count charges the filter's selectivity a
+    second time (see ``_build_equiv_tdoms``).
+
+    ``live_ndv`` is the number of distinct values the relation holds NOW, after
+    filters. Only semi/anti cardinality reads it, because only it asks a
+    question the domain alone cannot answer: what fraction of the key domain
+    does the right side still cover? None means unknown, and semi/anti then
+    declines to estimate rather than inventing a fraction.
+    """
+
     ndv: Optional[int]
     null_fraction: Optional[float]
     ndv_provenance: NdvProvenance = NdvProvenance.UNKNOWN
+    live_ndv: Optional[int] = None
 
     def __post_init__(self):
         # No default provenance for a present NDV: a construction site that
@@ -169,10 +199,20 @@ def apply_occupancy_bound(
     for left_stat, right_stat in equi_keys:
         if left_stat.ndv is None or right_stat.ndv is None:
             return equi_keys
-        if left_stat.ndv_is_measured or right_stat.ndv_is_measured:
-            any_measured = True
         # The per-pair divisor _key_selectivity actually applies.
-        composite *= max(left_stat.ndv, right_stat.ndv)
+        factor = max(left_stat.ndv, right_stat.ndv)
+        # Was THAT factor counted? The question is about the number entering
+        # `composite`, not about the pair: a MEASURED 100 on one side does not
+        # make a DOMAIN_STANDIN 1000 on the other into a counted value, and the
+        # 1000 is what gets multiplied in. A measured side tying the maximum
+        # does supply it. (While `_equi_key_classes` wrote max(l, r) into BOTH
+        # slots this read the same either way; per-side NDVs are what make the
+        # distinction reachable -- see docs/SEMI_ANTI_CARDINALITY_DESIGN.md 4.1.)
+        if (left_stat.ndv == factor and left_stat.ndv_is_measured) or (
+            right_stat.ndv == factor and right_stat.ndv_is_measured
+        ):
+            any_measured = True
+        composite *= factor
 
     bound = max(1, min(left_domain_rows, right_domain_rows))
     if not any_measured:
@@ -263,6 +303,61 @@ def _inner_estimate(
     return eff_left * eff_right * selectivity * extra_predicates_selectivity
 
 
+def _match_fraction(equi_keys: List[Tuple[KeyStats, KeyStats]]) -> Optional[float]:
+    """Fraction of left rows whose key is present in the right relation.
+
+    The right side's LIVE key set measured against the shared key DOMAIN::
+
+        min(1, live_ndv(right) / max(domain_ndv(left), domain_ndv(right)))
+
+    Measuring against the domain rather than against the LEFT's NDV is the
+    whole of it. The containment form ``min(1, ndv_right / ndv_left)`` pins at
+    1.0 whenever the right holds more distinct keys than the left has rows --
+    which a filtered fact table still does -- so it reports every left row as
+    matching and makes anti zero. Measured on TPC-H Q21 at SF100: containment
+    gives anti = 0 against an actual 396,100; this form gives 281,365.
+
+    Multiple key classes multiply under the same independence assumption
+    ``_inner_estimate`` uses.
+
+    Returns None when the right side's live NDV or the domain is unknown for
+    any class. The caller must then decline to estimate: there is no fraction
+    here to fall back to, and inventing one is how an unknown becomes a wrong
+    answer.
+    """
+    if not equi_keys:
+        return None
+    fraction = 1.0
+    for left_stat, right_stat in equi_keys:
+        if right_stat.live_ndv is None:
+            return None
+        domain = max(left_stat.ndv or 0, right_stat.ndv or 0)
+        if domain <= 0:
+            return None
+        fraction *= min(1.0, float(right_stat.live_ndv) / float(domain))
+    return fraction
+
+
+def _semi_estimate(
+    left_rows: int,
+    equi_keys: List[Tuple[KeyStats, KeyStats]],
+    exclude_left_nulls: bool,
+) -> Optional[float]:
+    """Rows a SEMI join emits, or None when it cannot be estimated.
+
+    ``exclude_left_nulls`` is False for the not-distinct (INTERSECT / EXCEPT)
+    variants, where NULL is an ordinary value that equals itself and a NULL
+    left key therefore DOES match.
+    """
+    fraction = _match_fraction(equi_keys)
+    if fraction is None:
+        return None
+    rows = float(left_rows)
+    if exclude_left_nulls:
+        rows = _effective_rows(left_rows, [pair[0] for pair in equi_keys])
+    return rows * fraction
+
+
 def estimate_join_cardinality(
     left_rows: int,
     right_rows: int,
@@ -309,10 +404,50 @@ def estimate_join_cardinality(
         left_unmatched = max(0.0, float(left_rows) - inner)
         right_unmatched = max(0.0, float(right_rows) - inner)
         result = inner + left_unmatched + right_unmatched
-    elif join_type == "semi":
-        result = min(float(left_rows), inner)
-    elif join_type == "anti":
-        result = max(0.0, float(left_rows) - inner)
+    elif join_type in ("semi", "anti", "semi not-distinct", "anti not-distinct",
+                       "anti null-aware"):
+        # NOT the inner estimate. A semi join emits LEFT ROWS, not matched
+        # pairs: `inner` counts pairs and over-counts by the right side's
+        # per-key multiplicity, so `min(left_rows, inner)` only ever reduces
+        # when the right relation is smaller than the key domain -- never for a
+        # fact table. See _match_fraction.
+        semi = _semi_estimate(
+            left_rows, equi_keys, exclude_left_nulls=not join_type.endswith("not-distinct")
+        )
+        if semi is None:
+            # Unknown. Bounded by the left side, which is what a semi/anti join
+            # can never exceed -- the same fail-safe as before this model
+            # existed, and honest about knowing nothing rather than fabricating
+            # a fraction.
+            return max(1, int(left_rows))
+        # Every anti arm below subtracts the TRUNCATED semi, not the float. Both
+        # halves are floored independently on the way out, so `int(semi)` plus
+        # `int(left - semi)` loses a row whenever semi has a fractional part --
+        # and "every left row either matched or did not" stops being true of the
+        # numbers actually returned. Truncating once, here, keeps semi + anti
+        # == left_rows exactly.
+        semi = float(int(semi))
+        if join_type.startswith("semi"):
+            result = semi
+        elif join_type == "anti null-aware":
+            # NOT IN: one NULL anywhere in the right key makes every comparison
+            # UNKNOWN, so the join emits nothing at all. A null fraction we do
+            # not know cannot establish that, so it falls through to the
+            # ordinary complement.
+            right_nulls = [
+                pair[1].null_fraction
+                for pair in equi_keys
+                if pair[1].null_fraction is not None
+            ]
+            result = 0.0 if right_nulls and max(right_nulls) > 0.0 else float(left_rows) - semi
+        else:
+            # The complement is exact GIVEN semi: every left row either matched
+            # or did not. It is also what puts NULL-keyed left rows back --
+            # _effective_rows removed them from `semi`, and they all survive an
+            # anti join. Writing this as left_rows * (1 - fraction) would drop
+            # them.
+            result = float(left_rows) - semi
+        result = max(0.0, result)
     else:  # pragma: no cover — guarded by _VALID_JOIN_TYPES check above
         raise ValueError(f"unhandled join_type: {join_type!r}")
 
@@ -330,6 +465,53 @@ def estimate_after_filter(input_rows: int, selectivity: float) -> int:
     if selectivity < 0.0:
         raise ValueError(f"selectivity must be non-negative (got {selectivity})")
     return max(1, int(input_rows * selectivity))
+
+
+def surviving_distinct_count(
+    distinct_count: Optional[int],
+    input_rows: int,
+    selectivity: float,
+) -> Optional[int]:
+    """Distinct values expected to survive a filter of the given selectivity.
+
+    The row-count sibling of ``estimate_after_filter``, for NDV. A filter drops
+    ROWS; a distinct value disappears only when EVERY row carrying it is
+    dropped, so NDV falls far more slowly than the row count. Assuming the
+    filter is independent of this column and its values are evenly spread::
+
+        rows_per_value = input_rows / distinct_count
+        survivors      = distinct_count * (1 - (1 - selectivity) ** rows_per_value)
+
+    The independence assumption is the load-bearing one, and it is FALSE for
+    the column the predicate is on: ``x > 5`` removes values of ``x``
+    wholesale rather than at random, so this function OVER-states how many of
+    them survive. Callers must take the minimum of this and any bound derived
+    from the predicate itself (``_narrow_filter_columns``'s equality
+    cardinality) rather than using it alone on a constrained column.
+
+    Scaling only. The invariant that a relation cannot hold more distinct
+    values than it has rows is NOT applied here -- that is ``_cap_ndvs``, and
+    it belongs to the caller, after this (architect ruling 2026-09-14: the
+    scaling is the model, the cap is the invariant, in that order).
+
+    Returns None for an unknown input NDV: this function does not invent
+    statistics it wasn't given.
+    """
+    if distinct_count is None:
+        return None
+    if distinct_count <= 0 or input_rows <= 0:
+        return distinct_count
+    if selectivity >= 1.0:
+        # Nothing was removed, so nothing can have disappeared.
+        return distinct_count
+    if selectivity <= 0.0:
+        # Everything was removed. Floored at 1 for the same reason every other
+        # estimate here is: a zero must not propagate as a multiplicative zero.
+        return 1
+    rows_per_value = float(input_rows) / float(distinct_count)
+    survivors = float(distinct_count) * (1.0 - (1.0 - selectivity) ** rows_per_value)
+    # Can only shrink, and never below 1.
+    return max(1, min(int(distinct_count), int(survivors)))
 
 
 def estimate_group_by_cardinality(

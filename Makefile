@@ -202,6 +202,7 @@ test: ## Run full test suite with compiled extensions
 q:
 	@clear || true
 	@VALIDATE_OPTIMIZER_PLANS=1 $(PYTHON) tests/integration/sql_battery/test_shapes_basic.py
+	@$(PYTEST) tests/unit/operators/test_native_scan_residual_gate.py -q
 
 rugo-floor: ## Run the rugo release floor (oracle + notebook actions + cli) — gates the rugo wheel
 	$(call print_blue,"Running rugo release floor: parquet oracle conformance...")

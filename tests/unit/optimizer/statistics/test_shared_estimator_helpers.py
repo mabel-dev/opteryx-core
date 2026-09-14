@@ -187,6 +187,54 @@ def test_occupancy_bound_ignores_a_single_class():
     assert apply_occupancy_bound(equi_keys, 5, 5) is equi_keys
 
 
+def _measured(ndv):
+    return KeyStats(ndv=ndv, null_fraction=None, ndv_provenance=NdvProvenance.MEASURED)
+
+
+def _standin(ndv):
+    return KeyStats(ndv=ndv, null_fraction=None, ndv_provenance=NdvProvenance.DOMAIN_STANDIN)
+
+
+def test_occupancy_widening_asks_about_the_factor_not_the_pair():
+    """The widening question is about the number entering `composite`.
+
+    `composite *= max(left.ndv, right.ndv)`, so a MEASURED 100 opposite a
+    DOMAIN_STANDIN 1000 contributes the 1000 -- a stand-in -- and the product is
+    a product of upper bounds however well counted the other side was. Reading
+    this as "either side measured" suppresses the widening on a product that
+    nothing counted.
+
+    Unreachable while `_equi_key_classes` wrote max(l, r) into BOTH slots: the
+    two spellings could not disagree. Per-side NDVs make it reachable, so it is
+    pinned here (docs/SEMI_ANTI_CARDINALITY_DESIGN.md 4.1).
+    """
+    # 1000 x 1000 = 1e6 against a 500-row bound, so the bound binds either way;
+    # what differs is WHERE. Widened it lands at the geometric mean.
+    measured_side_supplies_the_factor = [
+        (_measured(1000), _standin(100)),
+        (_measured(1000), _standin(100)),
+    ]
+    standin_side_supplies_the_factor = [
+        (_measured(100), _standin(1000)),
+        (_measured(100), _standin(1000)),
+    ]
+
+    at_full_strength = apply_occupancy_bound(measured_side_supplies_the_factor, 500, 800)
+    widened = apply_occupancy_bound(standin_side_supplies_the_factor, 500, 800)
+
+    assert at_full_strength[0][0].ndv == 500, "a counted factor binds at the bound"
+    assert widened[0][0].ndv > 500, (
+        "every factor in the product is a stand-in, so the bound must widen; "
+        "the measured NDV on the opposite side is not what was multiplied in"
+    )
+
+
+def test_occupancy_widening_counts_a_measured_side_that_ties_the_factor():
+    """A tie means the measured side DID supply the factor."""
+    tied = [(_standin(1000), _measured(1000)), (_standin(1000), _measured(1000))]
+    assert apply_occupancy_bound(tied, 500, 800)[0][0].ndv == 500
+
+
 if __name__ == "__main__":  # pragma: no cover
     import pytest
 

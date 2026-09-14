@@ -16,9 +16,13 @@ view silently created somewhere we do not own.
 
 What is pinned here: the store is the catalog entry for a bound workspace and
 the SAME object as the data connector for an unbound one, a store that cannot
-hold views says so, a name the data source already holds is refused at CREATE,
-and the read path finds a stored view without ever taking a DATASET answer
-from the store.
+hold views says so, a name a TABLE already holds is refused at CREATE, and the
+read path finds a stored view while still honouring a dataset answer.
+
+⛔ Two connector objects do NOT mean two places. Both resolvers installed and
+pointing at the same catalog gives two cache entries and so two objects; an
+`is` compare that treated that as "the data lives elsewhere" dropped every
+dataset answer in production.
 """
 
 import os
@@ -168,44 +172,34 @@ def test_a_store_that_cannot_hold_views_says_so(clean_registry):
 # ---------------------------------------------------------------------------
 
 
-def test_create_view_refuses_a_name_the_source_holds(clean_registry):
-    # The two catalogs share one namespace and neither can see the other's
+def test_create_view_refuses_a_name_a_table_holds(clean_registry):
+    # The two catalogs can share one namespace while neither sees the other's
     # names, so bind time is the only place this collision can be caught.
     # Uncaught, the view shadows the table and makes it unreachable.
     _bind_a_workspace()
     data = connector_factory("aiven.public.orders", telemetry=None)
     data.names_held.add("aiven.public.orders")
 
-    store = view_store_connector("aiven.public.orders", telemetry=None)
-
     with pytest.raises(SqlError) as raised:
-        _assert_name_free_in_source("aiven.public.orders", store, _context())
+        _assert_name_free_in_source("aiven.public.orders", _context())
     assert "orders" in str(raised.value)
 
 
-def test_create_view_allows_a_name_the_source_does_not_hold(clean_registry):
+def test_create_view_allows_a_name_nothing_holds(clean_registry):
     _bind_a_workspace()
-    store = view_store_connector("aiven.public.orders_v", telemetry=None)
 
-    _assert_name_free_in_source("aiven.public.orders_v", store, _context())
+    _assert_name_free_in_source("aiven.public.orders_v", _context())
 
 
-def test_the_source_is_not_asked_when_it_is_the_store(clean_registry):
-    # One catalog can see its own names and refuses there; asking twice would
-    # put a second round trip on every ordinary CREATE VIEW.
-    asked = []
-
-    class _Store(CatalogConnector):
-        def locate_object(self, name):
-            asked.append(name)
-            return super().locate_object(name)
-
-    register_workspace("ws", _Store)
+def test_create_view_is_not_refused_by_a_view_of_the_same_name(clean_registry):
+    # CREATE OR REPLACE VIEW: the store and the data binding are frequently the
+    # same catalog reached through two cache entries, so the existing VIEW is
+    # visible here. Whether it may be replaced is update_if_exists's question.
+    register_workspace("ws", CatalogConnector)
     store = view_store_connector("ws.orders_v", telemetry=None)
+    store.create_view("ws.orders_v", "SELECT 1 AS one")
 
-    _assert_name_free_in_source("ws.orders_v", store, _context())
-
-    assert asked == []
+    _assert_name_free_in_source("ws.orders_v", _context())
 
 
 # ---------------------------------------------------------------------------
@@ -226,20 +220,28 @@ def test_a_view_stored_in_the_catalog_entry_is_found_again(clean_registry):
     assert resolved is not None
 
 
-def test_the_store_never_answers_with_a_dataset_for_a_bound_workspace(clean_registry):
-    # The data answer is the data binding's to give. A dataset document in the
-    # catalog entry of a bound workspace is one that workspace cannot domicile,
-    # so it is not honoured here.
+def test_a_dataset_answer_from_the_store_is_honoured(clean_registry):
+    # Regression: the dataset answer used to be dropped whenever the store was
+    # not the same OBJECT as connector_factory's, on the assumption that two
+    # objects meant two places. Both resolvers pointing at the SAME catalog
+    # also gives two objects - two cache entries, one catalog - which is the
+    # ordinary production shape, and every relation in it reported as not found.
     from opteryx.managers.views import resolve_relation
 
-    class _StoreWithADataset(CatalogConnector):
+    class _CatalogWithADataset(CatalogConnector):
         def get_relation(self, relation):
-            return "dataset", "handle"
+            return "dataset", f"handle-for-{relation}"
 
-    set_workspace_resolver(lambda workspace: Resolution(DataConnector, {"marker": "data"}))
-    set_workspace_settings_resolver(lambda workspace: Resolution(_StoreWithADataset, {}))
+    set_workspace_resolver(lambda workspace: Resolution(_CatalogWithADataset, {"e": "data"}))
+    set_workspace_settings_resolver(
+        lambda workspace: Resolution(_CatalogWithADataset, {"e": "settings"})
+    )
 
-    kind, resolved = resolve_relation("aiven.public.orders", None)
+    data = connector_factory("cockroach.public.tpch_08", telemetry=None)
+    store = view_store_connector("cockroach.public.tpch_08", telemetry=None)
+    assert store is not data  # same catalog, two cache entries
 
-    assert kind is None
-    assert resolved is None
+    kind, obj = resolve_relation("cockroach.public.tpch_08", None)
+
+    assert kind == "dataset"
+    assert obj == "handle-for-cockroach.public.tpch_08"

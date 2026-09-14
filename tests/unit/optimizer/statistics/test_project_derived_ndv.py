@@ -203,7 +203,12 @@ def test_the_join_divisor_stops_being_the_relation_size():
     )
     (left_key, right_key), = _equi_key_classes([_DERIVED], [_RIGHT_KEY], left, right)
 
-    assert left_key.ndv == 10_087, "tdom must be max(10087, 55), not the dns row count"
-    assert right_key.ndv == 10_087
+    # The divisor `_key_selectivity` applies is max(left.ndv, right.ndv); each
+    # side now keeps its own count rather than a copy of that maximum
+    # (docs/SEMI_ANTI_CARDINALITY_DESIGN.md 4.1).
+    assert max(left_key.ndv, right_key.ndv) == 10_087, (
+        "tdom must be max(10087, 55), not the dns row count"
+    )
+    assert (left_key.ndv, right_key.ndv) == (10_087, 55)
     assert left_key.ndv_provenance is NdvProvenance.MEASURED
-    assert left_key.ndv < 283_839
+    assert max(left_key.ndv, right_key.ndv) < 283_839

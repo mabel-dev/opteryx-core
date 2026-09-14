@@ -21,6 +21,7 @@ GETs, injected faults) like test_http_retry.py does.
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -31,6 +32,8 @@ import pyarrow.parquet as pq
 import pytest
 
 sys.path.insert(1, os.path.join(sys.path[0], "../../../.."))
+
+from opteryx.exceptions import DatasetReadError
 
 SERVER = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../dev/throttle_server.py")
@@ -218,11 +221,12 @@ def test_explicit_window_smaller_than_depth_is_rejected():
 
 # ── failure and cancellation ─────────────────────────────────────────────────
 
-def test_fetch_stage_failure_surfaces_with_the_original_error():
-    """Every range GET 503s. The fetch stage's failure must reach the consumer
-    as the SAME error the coupled path raises (HttpClient's own "exhausted N
-    retries" message) — carried on the item and rethrown by decode, not
-    swallowed, and not turned into a second, hidden fetch attempt."""
+def test_fetch_stage_failure_surfaces_with_the_original_error(caplog):
+    """Every range GET 503s. The fetch stage's failure must reach the consumer —
+    carried on the item and rethrown by decode, not swallowed, and not turned
+    into a second, hidden fetch attempt. The original error (HttpClient's own
+    "exhausted N retries" message, with the URL and byte range) is operational
+    detail: it goes to the log, and the raised error stays clean."""
     from opteryx.compiled.structures.footer_cache import ParquetFooterBytesCache
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -235,13 +239,20 @@ def test_fetch_stage_failure_surfaces_with_the_original_error():
             cache = ParquetFooterBytesCache()
             cache.put(url, _footer_envelope(path))
             sizes = {url: os.path.getsize(path)}
-            with pytest.raises(RuntimeError) as ei:
-                _scan(url, fetch_ahead=6, footer_bytes_cache=cache, file_sizes=sizes)
+            with caplog.at_level(logging.ERROR, logger="opteryx"):
+                with pytest.raises(DatasetReadError) as ei:
+                    _scan(url, fetch_ahead=6, footer_bytes_cache=cache, file_sizes=sizes)
         finally:
             proc.kill(); proc.wait()
+    # The user-facing message carries none of the transport detail.
     msg = str(ei.value)
-    assert "Parquet pipeline error" in msg, msg
-    assert "exhausted" in msg and "retries" in msg, msg
+    assert "Unable to read data from storage" in msg, msg
+    assert "exhausted" not in msg and url not in msg, msg
+    # ...but the log has all of it.
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Parquet pipeline error" in logged, logged
+    assert "exhausted" in logged and "retries" in logged, logged
+    assert url in logged, logged
 
 
 def test_early_abandonment_is_clean_and_discarded_bytes_are_reported():

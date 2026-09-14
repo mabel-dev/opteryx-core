@@ -364,34 +364,34 @@ def _view_store(view_name: str, context: BindingContext):
     return store
 
 
-def _assert_name_free_in_source(view_name: str, store, context: BindingContext) -> None:
-    """Refuse a view name that a relation in the workspace's DATA binding holds.
+def _assert_name_free_in_source(view_name: str, context: BindingContext) -> None:
+    """Refuse a view name that a TABLE in the workspace's DATA binding holds.
 
-    The view store and the data binding are two catalogs that share one
-    namespace, and neither can see the other's names - so this is the only
+    The view store and the data binding can be two different catalogs sharing
+    one namespace, and neither can see the other's names - so this is the only
     place the collision can be caught. Left uncaught, the view would shadow the
-    source relation (the resolver probes views first) and make it unreachable.
+    table (the resolver resolves views first) and make it unreachable.
 
-    Skipped when the store IS the data connector: one catalog can see its own
-    names, `create_view` already refuses there, and asking twice would put a
-    second round trip on every ordinary CREATE VIEW.
+    Only a TABLE refuses. A VIEW found here is either the very view being
+    replaced - the store and the data binding are frequently the same catalog
+    reached through two cache entries, and `is` does not tell you that - or a
+    view in the data binding, and either way whether it may be replaced is
+    `update_if_exists`'s question, not this one.
     """
+    from opteryx.connectors import TableType
     from opteryx.connectors import connector_factory
     from opteryx.exceptions import SqlError
     from opteryx.exceptions import compose
 
     source = connector_factory(view_name, telemetry=context.telemetry)
-    if source is store:
-        return
-
     existing_type, _ = source.locate_object(view_name)
-    if existing_type is None:
+    if existing_type != TableType.Table:
         return
 
     raise SqlError(
         compose(
-            f"{md_table(view_name)} already names a relation in this workspace's data source",
-            "A view and a relation share one namespace, so a name identifies exactly one "
+            f"{md_table(view_name)} already names a table",
+            "A view and a table share one namespace, so a name identifies exactly one "
             "of them",
         )
     )
@@ -417,7 +417,7 @@ def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, 
     if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
         raise PermissionError(f"User does not have permission to create view {node.view_name}")
 
-    _assert_name_free_in_source(node.view_name, node.connector, context)
+    _assert_name_free_in_source(node.view_name, context)
 
     # Rendered HERE, not in the operator, so the text that is bound below and the
     # text that is stored are the same string by construction rather than by two

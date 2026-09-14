@@ -380,3 +380,65 @@ if __name__ == "__main__":  # pragma: no cover
     from tests import run_tests
 
     run_tests()
+
+
+# ---------------------------------------------------------------------------
+# `LOWER(col) = 'Mixed'` can never be true
+# ---------------------------------------------------------------------------
+
+
+def test_unsatisfiable_case_fold_returns_no_rows():
+    """LOWER emits no uppercase ASCII letter under EITHER of the engine's folds —
+    the ASCII byte fold VARCHAR takes, and the Unicode codepoint fold NVARCHAR
+    takes, because no Unicode lowercase mapping produces an ASCII capital. So a
+    literal that is not its own lower-case is unreachable for every row."""
+    import opteryx
+
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+        "SELECT name FROM $planets WHERE LOWER(name) = 'Earth'"
+    ):
+        rows.extend(morsel.column(b"name").to_pylist())
+    assert rows == [], rows
+
+
+def test_satisfiable_case_fold_is_left_alone():
+    import opteryx
+
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+        "SELECT name FROM $planets WHERE LOWER(name) = 'earth'"
+    ):
+        rows.extend(morsel.column(b"name").to_pylist())
+    assert rows == ["Earth"], rows
+
+
+def test_upper_is_the_mirror():
+    import opteryx
+
+    session = opteryx.session()
+    for sql, expected in (
+        ("SELECT name FROM $planets WHERE UPPER(name) = 'EARTH'", ["Earth"]),
+        ("SELECT name FROM $planets WHERE UPPER(name) = 'Earth'", []),
+    ):
+        rows = []
+        for morsel in session.execute_to_morsels(sql):
+            rows.extend(morsel.column(b"name").to_pylist())
+        assert rows == expected, (sql, rows)
+
+
+def test_negated_case_fold_is_not_folded_to_true():
+    """`LOWER(col) != 'Earth'` is not the complement of the equality: it is NULL,
+    not true, for a null row, so folding it to TRUE would admit rows a WHERE
+    clause must drop. Eq has no such asymmetry — false and null are both dropped."""
+    import opteryx
+
+    session = opteryx.session()
+    rows = []
+    for morsel in session.execute_to_morsels(
+        "SELECT name FROM $planets WHERE LOWER(name) != 'Earth'"
+    ):
+        rows.extend(morsel.column(b"name").to_pylist())
+    assert len(rows) == 9, rows

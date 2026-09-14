@@ -691,5 +691,45 @@ def test_regex_predicate_survivor_count_matches_trampoline():
     assert native_rows > 0, "predicate matched nothing — not a meaningful parity check"
 
 
+# ---------------------------------------------------------------------------
+# CENSUS FRONTIER — the whole-battery tally, gated.
+#
+# This is the number docs/NATIVE_RESIDUAL_PLAN.md reports against, and until now
+# NOTHING RAN IT automatically: the only assertion on it lived inside
+# test_wp_a3_fused_topn_scan.py, an A3-specific file, and it caught the
+# 2026-09-14 predicate_bounds regression (__trampoline__ 0 -> 2) purely because
+# someone happened to run that file by hand. Wired into `make q` so the frontier
+# cannot reopen unobserved.
+# ---------------------------------------------------------------------------
+
+#: Coverage floor for the census corpus. NOT an exact count — the battery grows,
+#: and pinning the exact number would make every new query a gate failure. It
+#: exists to catch the FAKE-GREEN case: `_read_battery` silently skips a battery
+#: file that has been moved or renamed, so a census measuring NOTHING would
+#: otherwise satisfy "zero trampoline" trivially. 168 scans today.
+_MIN_CENSUS_SCANS = 150
+
+
+def test_census_frontier_is_empty():
+    """Every parquet scan in the clickbench + tpch battery selects a native Source.
+
+    Asserts the corpus was actually measured before asserting what it measured —
+    a zero trampoline count over zero scans proves nothing.
+    """
+    tally = census.census()
+
+    assert tally["__scans__"] >= _MIN_CENSUS_SCANS, (
+        "census measured only %d parquet scans (floor %d) — the battery corpus is "
+        "not being read; a 'zero trampoline' result over it is vacuous. tally=%r"
+        % (tally["__scans__"], _MIN_CENSUS_SCANS, tally)
+    )
+    assert tally["__trampoline__"] == 0, (
+        "%d scan(s) fell back to the Python trampoline: %r"
+        % (tally["__trampoline__"], {k: v for k, v in tally.items()
+                                     if not k.startswith("__")})
+    )
+    assert tally["__native__"] == tally["__scans__"], tally
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))

@@ -12,9 +12,16 @@ from opteryx.planner.cost_estimation import NdvProvenance
 from opteryx.planner.cost_estimation import estimate_join_cardinality
 
 
-def _stats(ndv, null_fraction=0.0):
+def _stats(ndv, null_fraction=0.0, live_ndv=None):
+    """``ndv`` is the key DOMAIN; ``live_ndv`` is what the relation holds now.
+
+    Only semi/anti reads the live count. Leaving it None is the "no live NDV
+    known" case, where semi/anti must DECLINE rather than invent a fraction.
+    """
     provenance = NdvProvenance.UNKNOWN if ndv is None else NdvProvenance.MEASURED
-    return KeyStats(ndv=ndv, null_fraction=null_fraction, ndv_provenance=provenance)
+    return KeyStats(
+        ndv=ndv, null_fraction=null_fraction, ndv_provenance=provenance, live_ndv=live_ndv
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,12 +148,21 @@ def test_inner_clamped_to_one_when_ndv_huge():
     assert out == 1
 
 
-def test_anti_clamped_to_one_when_inner_exceeds_left():
-    # inner = 100×100/1 = 10_000; anti = max(0, 100 - 10_000) = 0 → floor 1
+def test_anti_does_not_read_the_inner_estimate():
+    """The old arm was `max(0, left - inner)`, which collapsed to the floor
+    whenever inner >= left -- the common case. A semi/anti join emits LEFT ROWS,
+    not matched pairs, so the inner estimate is not the right quantity at all.
+    Here the right covers the whole (tiny) domain, so nothing is anti-matched
+    and the answer is the floor for a REASON, not by collapse."""
     out = estimate_join_cardinality(
-        100, 100, "anti", [(_stats(1), _stats(1))]
+        100, 100, "anti", [(_stats(1, live_ndv=1), _stats(1, live_ndv=1))]
     )
     assert out == 1
+    # ... and the semi is everything, which `max(0, left - inner)` could never
+    # have paired with.
+    assert estimate_join_cardinality(
+        100, 100, "semi", [(_stats(1, live_ndv=1), _stats(1, live_ndv=1))]
+    ) == 100
 
 
 # ---------------------------------------------------------------------------
@@ -247,36 +263,81 @@ def test_full_outer_at_least_inner():
 # ---------------------------------------------------------------------------
 
 
-def test_semi_capped_at_left_rows():
-    # inner = 100×100/1 = 10_000; semi = min(100, 10_000) = 100
-    out = estimate_join_cardinality(
-        100, 100, "semi", [(_stats(1), _stats(1))]
-    )
-    assert out == 100
+def test_semi_and_anti_decline_without_a_live_ndv():
+    """No live NDV means no match fraction. The estimate must fall back to the
+    left row count -- the only sound bound -- rather than fabricating one."""
+    keys = [(_stats(1_000_000), _stats(1_000_000))]
+    assert estimate_join_cardinality(1000, 1000, "semi", keys) == 1000
+    assert estimate_join_cardinality(1000, 1000, "anti", keys) == 1000
 
 
-def test_semi_uses_inner_when_smaller():
-    # inner = 100×100/100 = 100; semi = min(100, 100) = 100
-    out = estimate_join_cardinality(
-        100, 100, "semi", [(_stats(100), _stats(100))]
-    )
-    assert out == 100
+def test_right_covering_the_whole_domain_matches_everything():
+    """The limit case: the right holds every value the key can take, so every
+    left row matches. This is the answer a declared foreign key asserts, arrived
+    at by the formula rather than by a special branch."""
+    keys = [(_stats(50_000, live_ndv=50_000), _stats(50_000, live_ndv=50_000))]
+    assert estimate_join_cardinality(1000, 9999, "semi", keys) == 1000
+    assert estimate_join_cardinality(1000, 9999, "anti", keys) == 1  # floored zero
 
 
-def test_semi_small_inner():
-    # inner = 1000 × 1000 / 1_000_000 = 1; semi = min(1000, 1) = 1
-    out = estimate_join_cardinality(
-        1000, 1000, "semi", [(_stats(1_000_000), _stats(1_000_000))]
-    )
-    assert out == 1
+def test_a_filtered_right_side_matches_proportionally():
+    """The right holds a quarter of the domain, so a quarter of the left matches."""
+    keys = [(_stats(40_000, live_ndv=10_000), _stats(40_000, live_ndv=10_000))]
+    assert estimate_join_cardinality(1000, 9999, "semi", keys) == 250
+    assert estimate_join_cardinality(1000, 9999, "anti", keys) == 750
 
 
-def test_anti_when_few_matches():
-    # inner = 1000 × 1000 / 1_000_000 = 1; anti = max(0, 1000-1) = 999
-    out = estimate_join_cardinality(
-        1000, 1000, "anti", [(_stats(1_000_000), _stats(1_000_000))]
-    )
-    assert out == 999
+def test_semi_and_anti_sum_to_the_left_row_count():
+    """The complement is exact: every left row either matched or did not."""
+    keys = [(_stats(40_000, live_ndv=17_351), _stats(40_000, live_ndv=17_351))]
+    semi = estimate_join_cardinality(4000, 9999, "semi", keys)
+    anti = estimate_join_cardinality(4000, 9999, "anti", keys)
+    assert semi + anti == 4000
+
+
+def test_the_right_side_is_measured_against_the_domain_not_the_left():
+    """TPC-H Q21's anti at SF100. A filtered fact table still holds far more
+    distinct keys than the left has ROWS, so the containment form
+    min(1, ndv_right/ndv_left) pins at 1.0 and reports anti = 0 against an
+    actual 396,100. Measuring against the domain gives a usable number."""
+    keys = [(_stats(150_000_000, live_ndv=147_188_758),
+             _stats(150_000_000, live_ndv=147_188_758))]
+    anti = estimate_join_cardinality(15_012_825, 600_000_000, "anti", keys)
+    assert 250_000 < anti < 500_000, anti
+
+
+def test_null_left_keys_survive_anti_and_never_match_semi():
+    """A NULL key matches nothing, so it is excluded from semi and MUST come
+    back in anti. The complement is what puts it back; writing anti directly as
+    left * (1 - fraction) would drop it."""
+    keys = [(_stats(1000, null_fraction=0.5, live_ndv=1000),
+             _stats(1000, live_ndv=1000))]
+    # Right covers the whole domain: every NON-NULL left row matches.
+    assert estimate_join_cardinality(1000, 1000, "semi", keys) == 500
+    # The 500 NULL-keyed rows are exactly what anti emits.
+    assert estimate_join_cardinality(1000, 1000, "anti", keys) == 500
+
+
+def test_not_distinct_treats_null_as_an_ordinary_value():
+    """INTERSECT / EXCEPT compare with IS NOT DISTINCT FROM, where NULL equals
+    itself -- so a NULL left key DOES match and is not excluded."""
+    keys = [(_stats(1000, null_fraction=0.5, live_ndv=1000),
+             _stats(1000, live_ndv=1000))]
+    assert estimate_join_cardinality(1000, 1000, "semi not-distinct", keys) == 1000
+    assert estimate_join_cardinality(1000, 1000, "anti not-distinct", keys) == 1
+
+
+def test_not_in_emits_nothing_when_the_right_key_holds_a_null():
+    """NOT IN propagates UNKNOWN: one NULL on the right and every comparison is
+    UNKNOWN, so the join emits no rows at all."""
+    nulls = [(_stats(1000, live_ndv=500), _stats(1000, null_fraction=0.01, live_ndv=500))]
+    assert estimate_join_cardinality(1000, 1000, "anti null-aware", nulls) == 1
+
+    # An UNKNOWN null fraction cannot establish that, so it must not be assumed.
+    unknown = [(_stats(1000, live_ndv=500),
+                KeyStats(ndv=1000, null_fraction=None,
+                         ndv_provenance=NdvProvenance.MEASURED, live_ndv=500))]
+    assert estimate_join_cardinality(1000, 1000, "anti null-aware", unknown) == 500
 
 
 # ---------------------------------------------------------------------------

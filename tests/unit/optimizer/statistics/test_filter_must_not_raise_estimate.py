@@ -33,6 +33,19 @@ from opteryx.planner.optimizer.statistics import ColumnStatistics
 from opteryx.planner.optimizer.statistics import RelationStatistics
 from opteryx.planner.optimizer.statistics_refresh import _equi_key_classes
 
+
+def _divisor(pair):
+    """The number `_key_selectivity` actually divides by.
+
+    These tests are about the DIVISOR -- tdom, standing in for
+    max(ndv_left, ndv_right) -- not about which slot carries it. It used to be
+    written into both slots, so reading either one was the same thing; each
+    side now keeps its own NDV (docs/SEMI_ANTI_CARDINALITY_DESIGN.md 4.1), so
+    the divisor has to be composed the way its consumer composes it.
+    """
+    left, right = pair
+    return max(left.ndv, right.ndv)
+
 KEY = b"tes_grp_aTElGxhx"
 OTHER_KEY = b"tes_grp_SasR64jX"
 
@@ -62,10 +75,12 @@ def test_one_sided_ndv_does_not_collapse_the_key_domain():
 
     ((left_key, right_key),) = _equi_key_classes([KEY], [OTHER_KEY], left, right)
 
-    assert left_key.ndv == right_key.ndv, "tdom is one domain, applied to both sides"
-    assert left_key.ndv > 1, (
-        f"tdom collapsed to {left_key.ndv}: the filtered side's NDV was adopted as the "
-        "whole key domain, so the join estimates as |L| x |R|"
+    # The filtered side's own NDV is 1 and says so -- that is its honest number.
+    # What must not happen is that 1 becoming the DIVISOR for the whole class.
+    assert left_key.ndv == 1, "the filtered side's own NDV is 1"
+    assert _divisor((left_key, right_key)) > 1, (
+        f"tdom collapsed to {_divisor((left_key, right_key))}: the filtered side's NDV "
+        "was adopted as the whole key domain, so the join estimates as |L| x |R|"
     )
 
 
@@ -78,8 +93,8 @@ def test_a_narrow_range_on_one_side_does_not_cap_the_other():
     filtered = _relation(20_000, ndv=None, lower=5, upper=5, base=200_000)
     right = _relation(100_000, ndv=50_000, lower=0, upper=49_999, key=OTHER_KEY)
 
-    without_filter = _equi_key_classes([KEY], [OTHER_KEY], unfiltered, right)[0][0].ndv
-    with_filter = _equi_key_classes([KEY], [OTHER_KEY], filtered, right)[0][0].ndv
+    without_filter = _divisor(_equi_key_classes([KEY], [OTHER_KEY], unfiltered, right)[0])
+    with_filter = _divisor(_equi_key_classes([KEY], [OTHER_KEY], filtered, right)[0])
 
     assert with_filter == without_filter, (
         f"narrowing one side's range moved tdom {without_filter} -> {with_filter}; "
@@ -93,9 +108,11 @@ def test_both_sides_known_still_take_the_maximum():
     left = _relation(200_000, ndv=10_000)
     right = _relation(800_000, ndv=200_000, key=OTHER_KEY)
 
-    ((left_key, _),) = _equi_key_classes([KEY], [OTHER_KEY], left, right)
+    ((left_key, right_key),) = _equi_key_classes([KEY], [OTHER_KEY], left, right)
 
-    assert left_key.ndv == 200_000
+    assert _divisor((left_key, right_key)) == 200_000
+    # Each side reports the NDV it was actually given, not the pair's maximum.
+    assert (left_key.ndv, right_key.ndv) == (10_000, 200_000)
 
 
 def _exit_estimate(sql):
