@@ -15,59 +15,132 @@ import struct
 from typing import Dict, Optional, Tuple
 
 from draken.morsels.morsel import Morsel
-from rugo.parquet import write_parquet_with_bounds
-
 from opteryx.models.file_entry import FileEntry
 from opteryx.utils import unique_id
 
 
-def write_morsel(morsel: Morsel, relation_dir: str) -> FileEntry:
-    """Write a Morsel as a single parquet file in relation_dir.
+class LocalDataFileWriter:
+    """One parquet file in `relation_dir`, written a row group at a time.
 
-    File name is data-{unique_id}.parquet (relative path stored in FileEntry).
+    Streams through rugo's constant-memory writer into a `.tmp` file that is
+    renamed into place on `close`, so a reader never sees a partial file.
+    `abort` removes the temporary file; nothing is left behind.
 
-    Args:
-        morsel: Draken Morsel containing the rows to write.
-        relation_dir: Path to the relation directory. Must already exist.
-
-    Returns:
-        FileEntry with file_path (relative to relation_dir), file_format="PARQUET",
-        record_count, file_size_in_bytes, and lower_bounds/upper_bounds populated
-        from the writer's per-column min/max statistics where available.
-
-    Raises:
-        ValueError: If morsel is empty (zero rows).
-        OSError: If write fails.
+    Per-column bounds are folded in per row group for INT64 and FLOAT64
+    columns - the two the native min/max kernels answer for. The whole-morsel
+    writer this replaced took bounds from the parquet statistics of single-
+    row-group files, which also covered BOOL and UTF8; those two columns kinds
+    carry no bounds on this connector now. This store has no catalog and no
+    statistics pass, so bounds here are a pruning convenience, not a contract.
     """
-    if len(morsel) == 0:
-        raise ValueError("cannot write empty morsel")
 
-    data, bounds = write_parquet_with_bounds(morsel, compression="zstd")
+    def __init__(self, relation_dir: str, sorted_by: Optional[str], sorted_descending: bool,
+                 write_profile: str):
+        from draken.draken_native import DrakenType
+        from rugo.parquet import open_parquet_writer
 
-    file_name = f"data-{unique_id()}.parquet"
-    full_path = os.path.join(relation_dir, file_name)
-    tmp_path = f"{full_path}.tmp"
+        self._bounded_types = (DrakenType.INT64, DrakenType.FLOAT64)
+        self.file_name = f"data-{unique_id()}.parquet"
+        self._full_path = os.path.join(relation_dir, self.file_name)
+        self._tmp_path = f"{self._full_path}.tmp"
+        # Held open across row groups; closed by close() or abort(), not a `with`.
+        self._fh = open(self._tmp_path, "wb")  # noqa: SIM115
+        self._writer = open_parquet_writer(
+            self._fh.write,
+            compression="zstd",
+            sorted_by=sorted_by,
+            sorted_descending=sorted_descending,
+            profile=write_profile,
+        )
+        self._rows = 0
+        self._bytes = 0
+        self._row_groups = 0
+        self._bounds: Dict[int, Tuple[object, object]] = {}
+        self._done = False
 
-    with open(tmp_path, "wb") as f:
-        f.write(data)
-    os.replace(tmp_path, full_path)
+    @property
+    def file_path(self) -> str:
+        return self.file_name
 
-    file_size_in_bytes = os.path.getsize(full_path)
-    lower_bounds, upper_bounds = _bounds_to_entry(bounds)
+    @property
+    def record_count(self) -> int:
+        return self._rows
 
-    return FileEntry(
-        file_path=file_name,
-        file_format="PARQUET",
-        record_count=len(morsel),
-        file_size_in_bytes=file_size_in_bytes,
-        uncompressed_size_in_bytes=None,
-        lower_bounds=lower_bounds,
-        upper_bounds=upper_bounds,
-        null_value_counts=None,
-        min_values=None,
-        max_values=None,
-        column_uncompressed_sizes_in_bytes=None,
-    )
+    @property
+    def uncompressed_size_in_bytes(self) -> int:
+        return self._bytes
+
+    def write_row_group(self, morsel: Morsel) -> None:
+        if self._done:
+            raise ValueError(f"write_row_group on a finished writer for '{self.file_name}'")
+        if len(morsel) == 0:
+            raise ValueError("cannot write an empty row group")
+        self._writer.write_row_group(morsel)
+        self._rows += len(morsel)
+        self._bytes += morsel.nbytes
+        self._row_groups += 1
+        self._fold_bounds(morsel)
+
+    def _fold_bounds(self, morsel: Morsel) -> None:
+        rows = len(morsel)
+        for index, name in enumerate(morsel.column_names):
+            # `_cxx_column`: the engine's morsels are substrate-backed and
+            # refuse PyObject column access; this reads either backing.
+            vec = morsel._cxx_column(name)
+            if vec.type not in self._bounded_types or vec.null_count() == rows:
+                continue
+            lo, hi = vec.min(), vec.max()
+            held = self._bounds.get(index)
+            if held is None:
+                self._bounds[index] = (lo, hi)
+            else:
+                self._bounds[index] = (min(held[0], lo), max(held[1], hi))
+
+    def close(self) -> FileEntry:
+        if self._done:
+            raise ValueError(f"close on a finished writer for '{self.file_name}'")
+        if self._row_groups == 0:
+            raise ValueError(f"close on '{self.file_name}' with no row groups written; abort it instead")
+        self._done = True
+        self._writer.close()
+        self._fh.close()
+        os.replace(self._tmp_path, self._full_path)
+        lower_bounds, upper_bounds = _bounds_to_entry(self._bounds)
+        return FileEntry(
+            file_path=self.file_name,
+            file_format="PARQUET",
+            record_count=self._rows,
+            file_size_in_bytes=os.path.getsize(self._full_path),
+            uncompressed_size_in_bytes=self._bytes,
+            row_group_count=self._row_groups,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            null_value_counts=None,
+            min_values=None,
+            max_values=None,
+            column_uncompressed_sizes_in_bytes=None,
+        )
+
+    def abort(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._writer = None
+        self._fh.close()
+        if os.path.exists(self._tmp_path):
+            os.remove(self._tmp_path)
+
+
+def open_data_file_writer(
+    relation_dir: str,
+    sorted_by: Optional[str] = None,
+    sorted_descending: bool = False,
+    write_profile: str = "fast",
+) -> LocalDataFileWriter:
+    """Open a streaming parquet file in `relation_dir` (must already exist).
+
+    See Writable.open_data_file_writer for the handle's contract."""
+    return LocalDataFileWriter(relation_dir, sorted_by, sorted_descending, write_profile)
 
 
 def _bounds_to_entry(

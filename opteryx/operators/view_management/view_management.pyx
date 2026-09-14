@@ -23,6 +23,7 @@ from typing import Optional
 from opteryx.connectors import TableType
 from opteryx.constants import QueryStatus
 from opteryx.exceptions import DatasetNotFoundError
+from opteryx.exceptions import InvalidInternalStateError
 from opteryx.models import NonTabularResult
 from opteryx.models import QueryProperties
 
@@ -88,10 +89,13 @@ class ViewManagementNode(BasePlanNode):
 
         if self.action in ("create_view", "alter_view"):
             if not self.connector:
-                # Defensive: if connector is missing, derive via connector_factory lazily
-                from opteryx.connectors import connector_factory
-
-                self.connector = connector_factory(self.view_name, telemetry=self.telemetry)
+                # The binder resolves the VIEW STORE and nothing else may: a
+                # lazy connector_factory() here would re-derive the workspace's
+                # DATA binding and write the definition to a source we do not
+                # own - silently, and only for the workspaces where it matters.
+                raise InvalidInternalStateError(
+                    f"{self.action} reached execution without a bound view store"
+                )
 
             if self.action == "create_view" and self.if_not_exists:
                 existing_type, _ = self.connector.locate_object(self.view_name)
@@ -117,14 +121,12 @@ class ViewManagementNode(BasePlanNode):
 
             dropped = 0
             for vn in self.view_names:
-                # Prefer connector instances prepared in binder
-                connector = None
-                if self.connectors and vn in self.connectors:
-                    connector = self.connectors[vn]
-                else:
-                    from opteryx.connectors import connector_factory
-
-                    connector = connector_factory(vn, telemetry=self.telemetry)
+                # Bound by the binder, from the VIEW STORE - see create_view.
+                if not self.connectors or vn not in self.connectors:
+                    raise InvalidInternalStateError(
+                        f"drop_view reached execution without a bound view store for {vn}"
+                    )
+                connector = self.connectors[vn]
 
                 if connector.locate_object(vn)[0] != TableType.View:
                     if self.if_exists:
@@ -142,10 +144,12 @@ class ViewManagementNode(BasePlanNode):
                 raise ValueError("No object name supplied for COMMENT")
 
             if not self.connector:
-                # Defensive: if connector is missing, derive via connector_factory lazily
-                from opteryx.connectors import connector_factory
-
-                self.connector = connector_factory(self.object_name, telemetry=self.telemetry)
+                # visit_comment resolves this, choosing the view store or the
+                # data binding by what the name holds; re-deriving one of them
+                # here would comment on the wrong object's behalf.
+                raise InvalidInternalStateError(
+                    f"comment reached execution without a bound connector for {self.object_name}"
+                )
 
             # Try to locate the object to verify it exists (unless IF EXISTS is specified)
             object_type, _ = self.connector.locate_object(self.object_name)

@@ -5296,7 +5296,8 @@ class _Compiler:
 
     def _compile_postgres_scan(self, scan):
         """A PostgreSQL-bound relation: build the scan statement from what the
-        planner decided (projection, pushed predicates, pushed LIMIT), pin it in
+        planner decided (projection, pushed predicates, pushed LIMIT, top-N spec,
+        absorbed aggregate or DISTINCT), pin it in
         a PostgresScanPlan and give the pipeline a NativePostgresScanSource. The
         Source streams the server's binary rows into morsels on a worker thread;
         nothing here runs during execution."""
@@ -5306,19 +5307,38 @@ class _Compiler:
 
         table = scan.connector
         columns = list(scan.columns or [])
-        statement = build_scan_statement(table, columns, scan.predicates, scan.limit)
-        identities = [column.schema_column.identity for column in columns]
+        pushed_groups = list(scan.pushed_groups or [])
+        pushed_aggregates = scan.pushed_aggregates
+        topn_limit = scan.topn_limit if scan.topn_order_by else None
+        statement = build_scan_statement(
+            table,
+            columns,
+            scan.predicates,
+            scan.limit,
+            order_by=scan.topn_order_by,
+            topn_limit=topn_limit,
+            groups=pushed_groups if pushed_aggregates is not None else None,
+            aggregates=None if pushed_aggregates is None else list(pushed_aggregates),
+            distinct=bool(scan.pushed_distinct),
+        )
+        # The statement describes what it returns (`emit`): a relation column
+        # under its own OID, or an aggregate under the OID its spelling casts to.
+        # The plan is built from that, never from re-deriving OIDs by column name
+        # here — `count(*)` has no column to look up.
+        identities = [column.identity for column in statement.emit]
+        # A top-N's LIMIT is also a row cap on the stream, same as a pushed LIMIT.
+        row_limit = scan.limit if scan.limit is not None else topn_limit
         plan = PostgresScanPlan(
             table.connection_config,
             statement.sql,
             statement.params,
             identities,
-            [table.column_oid(column.schema_column) for column in columns],
-            [column.schema_column.column_type.physical.value for column in columns],
-            [table.column_decimal_precision(column.schema_column) for column in columns],
-            [table.column_decimal_scale(column.schema_column) for column in columns],
+            [column.oid for column in statement.emit],
+            [column.physical for column in statement.emit],
+            [column.precision for column in statement.emit],
+            [column.scale for column in statement.emit],
             POSTGRES_SCAN_BATCH_ROWS,
-            scan.limit,
+            row_limit,
             statement.zero_columns,
         )
         plan.scan_identity = scan.identity
@@ -5340,13 +5360,19 @@ class _Compiler:
             "row_groups_read": 0,
             "row_groups_pruned": 0,
             "parquet_rows_before_filter": 0,
-            "columns_read": len(columns),
+            "columns_read": len(statement.emit),
             "remote_sql": statement.sql,
             "remote_sql_parameters": list(statement.params),
         }
         p = self.nplan.new_pipeline()
         self.nplan.set_native_postgres_scan_source(p, plan)
         self._remember_types(scan.columns)
+        if pushed_aggregates is not None:
+            # The stream carries the aggregate outputs under the AGGREGATOR
+            # nodes' own identities and bound types; register them the way a
+            # local aggregate's outputs would be.
+            self._remember_types(pushed_groups)
+            self._remember_types(pushed_aggregates)
         return p, identities
 
     def _compile_materialized_source(self, node):

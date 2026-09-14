@@ -1372,7 +1372,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
     def _dataset_location(self, relation_name: str) -> str:
         """Resolve the GCS location data files for this relation live under.
 
-        Called from `write_morsel`, which runs before the relation is
+        Called from `open_data_file_writer`, which runs before the relation is
         necessarily registered in the catalog (CREATE OR REPLACE writes files
         before creating/replacing the catalog entry at EOS - see insert.pyx).
         For an existing relation this reads its real registered location; for
@@ -1387,37 +1387,59 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         collection, dataset_name = relative_id.split(".")
         return f"gs://{catalog.gcs_bucket}/{catalog.workspace}/{collection}/{dataset_name}"
 
-    def write_morsel(self, relation_name: str, morsel) -> FileEntry:
-        """Write a morsel as a parquet file via the catalog's own GCS-aware
-        FileIO. Opteryx has no GCS write path of its own; this reuses the
-        exact write primitive `opteryx_catalog`'s `SimpleDataset.append`/
-        `overwrite` use internally (`catalog.io.new_output(...)` +
-        `rugo.parquet.write_parquet`), so a CTAS/REPLACE writing many morsels
-        lands them the same way the catalog would land a single one.
-        """
-        from rugo.parquet import write_parquet
+    def open_data_file_writer(
+        self,
+        relation_name: str,
+        sorted_by: Optional[str] = None,
+        sorted_descending: bool = False,
+        write_profile: str = "fast",
+    ):
+        """Open one streaming data file - see Writable.open_data_file_writer.
 
-        from opteryx.utils import unique_id
+        The catalog owns the file's name, its storage stream and its manifest
+        entry (`Dataset.open_data_file_writer`); this wraps that handle so the
+        engine sees a FileEntry on close. The two write profiles are the
+        catalog's own two option sets: "fast" for ingest and CTAS, "storage"
+        for a compaction rewrite that is read many times.
+        """
+        from opteryx_catalog.iops.fileio import COMPACTION_WRITE_PARQUET_OPTIONS
+        from opteryx_catalog.iops.fileio import WRITE_PARQUET_OPTIONS
+
+        if write_profile == "fast":
+            options = WRITE_PARQUET_OPTIONS
+        elif write_profile == "storage":
+            options = COMPACTION_WRITE_PARQUET_OPTIONS
+        else:
+            raise ValueError(
+                f"open_data_file_writer: write_profile must be 'fast' or 'storage', "
+                f"got {write_profile!r}"
+            )
 
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        location = self._dataset_location(relation_name)
-
-        file_name = f"data-{unique_id()}.parquet"
-        data_path = f"{location}/data/{file_name}"
-
-        pdata = write_parquet(morsel, compression="zstd", bloom_filters=True)
-
-        out = catalog.io.new_output(data_path).create()
-        out.write(pdata)
-        out.close()
-
-        return FileEntry(
-            file_path=data_path,
-            file_format="PARQUET",
-            record_count=len(morsel),
-            file_size_in_bytes=len(pdata),
+        dataset = catalog.load_dataset(relative_id)
+        handle = dataset.open_data_file_writer(
+            sorted_by=sorted_by,
+            sorted_descending=sorted_descending,
+            write_options=options,
         )
+        return _DataFileWriterHandle(handle)
+
+    @staticmethod
+    def _catalog_entries(operation: str, file_entries) -> list:
+        """The manifest rows the writer built as the files streamed out.
+
+        Handing them to the commit is what stops the catalog downloading and
+        decoding every output to describe it; an entry without one came from
+        somewhere other than open_data_file_writer, and that is a bug to name.
+        """
+        missing = [fe.file_path for fe in file_entries if fe.catalog_entry is None]
+        if missing:
+            raise ValueError(
+                f"{operation}: {len(missing)} output file(s) carry no manifest entry "
+                f"({missing[:3]}); outputs must be written through open_data_file_writer"
+            )
+        return [fe.catalog_entry for fe in file_entries]
 
     def delete_data_file(self, relation_name: str, file_path: str) -> None:
         """Remove one data file this session wrote, through the catalog's FileIO.
@@ -1749,12 +1771,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        file_paths = [fe.file_path for fe in file_entries]
+        entries = self._catalog_entries("insert", file_entries)
 
         def _commit_add_files():
             dataset = catalog.load_dataset(relative_id)
             return dataset.add_files(
-                file_paths,
+                entries=entries,
                 author=author,
                 commit_message=commit_message,
                 **self._provenance_kwargs(dataset.add_files, read_sources, produced_by),
@@ -1799,7 +1821,7 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         The write half of MERGE - see `Writable.merge_commit` for why the two
         halves cannot be two commits. `delete_positions` maps data-file paths as
         they appear in the current manifest to file-local row ordinals; those
-        paths are the same strings `write_morsel` produced and the scan read
+        paths are the same strings the data file writer produced and the scan read
         back, so no translation happens here.
 
         `commit_message` is passed through as given, including None: the catalog
@@ -1809,13 +1831,13 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         and the audit record, and validates it against its own vocabulary."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        file_paths = [fe.file_path for fe in file_entries]
+        entries = self._catalog_entries("merge_commit", file_entries)
 
         def _commit_merge():
             dataset = catalog.load_dataset(relative_id)
             return dataset.merge_commit(
-                file_paths,
-                delete_positions,
+                entries=entries,
+                positions=delete_positions,
                 author=author,
                 commit_message=commit_message,
                 operation=operation,
@@ -1846,12 +1868,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         """
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        file_paths = [fe.file_path for fe in file_entries]
+        entries = self._catalog_entries("compaction_commit", file_entries)
         self._commit(
             relation_name,
             lambda: catalog.load_dataset(relative_id).compaction_commit(
-                file_paths,
-                retired_files,
+                entries=entries,
+                retired_files=retired_files,
                 author=author,
                 baseline_snapshot_id=baseline_snapshot_id,
                 commit_message=commit_message,
@@ -1877,12 +1899,12 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
         replace that has nothing more specific to say."""
         workspace, relative_id = self._parse_identifier(relation_name)
         catalog = self._get_catalog(workspace)
-        file_paths = [fe.file_path for fe in file_entries]
+        entries = self._catalog_entries("replace_relation", file_entries)
 
         def _commit_replace():
             dataset = catalog.load_dataset(relative_id)
             return dataset.truncate_and_add_files(
-                file_paths,
+                entries=entries,
                 author=author,
                 commit_message=commit_message,
                 **self._provenance_kwargs(
@@ -3190,3 +3212,45 @@ class OpteryxConnector(Eidetic, Writable, PredicatePushable):
             return
 
         raise DatasetNotFoundError(connector=self, dataset=object_name)
+
+
+class _DataFileWriterHandle:
+    """The engine's view of one streaming data file (Writable.open_data_file_writer).
+
+    Wraps the catalog's DataFileWriter: same three operations, but `close`
+    answers with the engine's FileEntry, carrying the catalog's own manifest
+    row in `catalog_entry` for the commit.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def file_path(self) -> str:
+        return self._inner.data_path
+
+    @property
+    def uncompressed_size_in_bytes(self) -> int:
+        return self._inner.uncompressed_size_in_bytes
+
+    @property
+    def record_count(self) -> int:
+        return self._inner.record_count
+
+    def write_row_group(self, morsel) -> None:
+        self._inner.write_row_group(morsel)
+
+    def close(self) -> FileEntry:
+        entry = self._inner.close()
+        return FileEntry(
+            file_path=entry.file_path,
+            file_format="PARQUET",
+            record_count=int(entry.record_count),
+            file_size_in_bytes=int(entry.file_size_in_bytes),
+            uncompressed_size_in_bytes=int(entry.uncompressed_size_in_bytes),
+            row_group_count=self._inner.row_group_count,
+            catalog_entry=entry.to_dict(),
+        )
+
+    def abort(self) -> None:
+        self._inner.abort()

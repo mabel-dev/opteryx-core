@@ -9,8 +9,8 @@ relation.
 
 The node is a passive attribute bag, like SkeneReadNode: the plan compiler
 (opteryx/managers/execution/compiler.py::_compile_postgres_scan) reads the
-scan's projection, pushed predicates and pushed LIMIT off it, builds the
-statement, pins everything in a PostgresScanPlan and hands the engine a
+scan's projection, pushed predicates, pushed LIMIT, top-N spec, absorbed
+aggregate or DISTINCT off it, builds the statement, pins everything in a PostgresScanPlan and hands the engine a
 NativePostgresScanSource. There is NO Python read path: read_morsels() raises,
 because a scan that reached it would mean the compiler routed a Postgres scan
 somewhere other than the native Source.
@@ -32,10 +32,26 @@ cdef class PostgresReadNode(ReaderNode):
     # The PostgresScanPlan the compiler built for this scan. Held so that the
     # rows the server sent (spec.rows_read) can be read back after the run.
     cdef public object scan_plan
+    # Pushed shapes the optimizer stamped on the logical Scan (each None when
+    # not pushed). The compiler renders them into the statement; the node only
+    # carries them. `topn_order_by` is [(schema_column, ascending), ...];
+    # `pushed_groups` / `pushed_aggregates` the GROUP BY keys and AGGREGATOR
+    # nodes of an absorbed Aggregate; `pushed_distinct` True for an absorbed
+    # DISTINCT over the projection.
+    cdef public object topn_order_by
+    cdef public object topn_limit
+    cdef public object pushed_groups
+    cdef public object pushed_aggregates
+    cdef public bint pushed_distinct
 
     def __init__(self, properties: QueryProperties, **parameters) -> None:
         ReaderNode.__init__(self, properties=properties, **parameters)
         self.scan_plan = None
+        self.topn_order_by = parameters.get("topn_order_by")
+        self.topn_limit = parameters.get("topn_limit")
+        self.pushed_groups = parameters.get("pushed_groups")
+        self.pushed_aggregates = parameters.get("pushed_aggregates")
+        self.pushed_distinct = bool(parameters.get("pushed_distinct", False))
 
     @property
     def name(self) -> str:  # pragma: no cover

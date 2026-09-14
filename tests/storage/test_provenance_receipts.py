@@ -118,6 +118,31 @@ class _Catalog:
         raise TagNotFound(tag)
 
 
+class _RecordedDataFile:
+    """Stands in for a streaming data file: counts rows, hands back a FileEntry."""
+
+    def __init__(self, path):
+        self.path = path
+        self.rows = 0
+        self.uncompressed_size_in_bytes = 0
+
+    def write_row_group(self, morsel):
+        self.rows += len(morsel)
+        self.uncompressed_size_in_bytes += morsel.nbytes
+
+    def close(self):
+        return FileEntry(
+            file_path=self.path,
+            file_format="PARQUET",
+            record_count=self.rows,
+            file_size_in_bytes=1,
+            catalog_entry={"file_path": self.path, "record_count": self.rows},
+        )
+
+    def abort(self):
+        pass
+
+
 class _Connector(BaseConnector, Writable):
     """Reads through a real OpteryxTable; writes record what they were handed."""
 
@@ -150,13 +175,9 @@ class _Connector(BaseConnector, Writable):
             },
         )
 
-    def write_morsel(self, relation_name, morsel):
-        return FileEntry(
-            file_path=f"memory://{relation_name}/{len(_Connector.commits)}",
-            file_format="PARQUET",
-            record_count=len(morsel),
-            file_size_in_bytes=1,
-        )
+    def open_data_file_writer(self, relation_name, sorted_by=None, sorted_descending=False,
+                              write_profile="fast"):
+        return _RecordedDataFile(f"memory://{relation_name}/{len(_Connector.commits)}")
 
     def create_relation(self, relation_name, schema, author=None):
         pass

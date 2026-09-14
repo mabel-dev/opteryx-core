@@ -19,8 +19,16 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
     This is a pass-through binder - COMMENT nodes don't need schema resolution,
     but we do need to determine the connector for storage.
+
+    COMMENT ON names either kind, and the two kinds live in different places
+    for an externally-bound workspace: a view's text is in the opteryx catalog
+    entry, a table is in the data binding. So the store is asked first, and the
+    data binding answers for everything it does not hold as a view.
     """
+    from opteryx.connectors import TableType
     from opteryx.connectors import connector_factory
+    from opteryx.connectors import view_store_connector
+    from opteryx.connectors.capabilities import Eidetic
     from opteryx.connectors.capabilities import Writable
     from opteryx.exceptions import ReadOnlyConnectorError
     from opteryx.managers.permissions import can_perform_action
@@ -28,6 +36,12 @@ def visit_comment(self, node: Node, context: BindingContext) -> Tuple[Node, Bind
 
     # Get connector gateway (cached by prefix)
     node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
+
+    store = view_store_connector(node.object_name, telemetry=context.telemetry)
+    if store is not node.connector and isinstance(store, Eidetic):
+        if store.locate_object(node.object_name)[0] == TableType.View:
+            node.connector = store
+
     if not isinstance(node.connector, Writable):
         raise ReadOnlyConnectorError(
             f"connector for {node.object_name} does not support COMMENT ON"

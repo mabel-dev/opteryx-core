@@ -15,16 +15,17 @@ pinned to the selected files, sorted when the plan is sort-aware - so this node
 does only what the plan cannot: write the rewritten rows out, and swap them for
 the files they replace in ONE snapshot.
 
-Compaction is MERGE without the predicate, and this is deliberately the same
-shape as `merge.pyx`: buffer references, flush a whole batch as one file, and
-commit nothing until EOS. Every data file is durably written before any catalog
-mutation, so a failure before the commit leaves the relation completely
-untouched.
+Rows go through DataFileStream: row groups of streaming, target-sized files,
+never a file per batch - see that module for why, and for the production
+failure that made it so. What is particular to this sink: the ordering claim
+(the sort-aware plan's primary key), the "storage" write profile (bytes a
+compaction writes are read many times), and the whole-file retirement.
 
-⛔ OUTPUTS ARE REMOVED WHEN THE COMMIT REFUSES. The catalog raises rather than
-returning on a failed row-count invariant precisely so this node can clean up:
-only the writer knows which files it wrote. Getting this wrong is what leaked
-one orphaned output per timed-out pass under the previous implementation.
+Every data file is durably written before any catalog mutation, so a failure
+before the commit leaves the relation completely untouched. Outputs are
+removed when the commit refuses: only the writer knows their paths, and getting
+this wrong is what leaked one orphaned output per timed-out pass under the
+previous implementation.
 """
 
 from typing import Optional
@@ -43,20 +44,21 @@ class CompactionCommitNode(BasePlanNode):
         # commit if the relation has moved since, so a concurrent writer's work
         # is never erased by a pass that started before it landed.
         self.baseline_snapshot_id = parameters.get("baseline_snapshot_id")
-
-        self._file_entries = []
+        # The ordering claim written into every output row group - the primary
+        # sort column for a sort-aware plan, None for a brute one. Stamped by
+        # CompactionPlanningStrategy, which is the only thing that knows which
+        # rule fired.
+        self.sorted_by: Optional[str] = parameters.get("sorted_by")
         self.result: Optional[NonTabularResult] = None
 
-        self.coalesce_rows = min(
-            int(parameters.get("write_coalesce_rows", _MAX_ROWS_PER_ROW_GROUP)),
-            _MAX_ROWS_PER_ROW_GROUP,
+        self._stream = DataFileStream(
+            self.connector,
+            self.relation_name,
+            coalesce_rows=parameters.get("write_coalesce_rows"),
+            target_file_bytes=parameters.get("target_file_bytes"),
+            sorted_by=self.sorted_by,
+            write_profile="storage",
         )
-        # Rows AND projected arena bytes - see MorselBatcher. Rows alone is
-        # what failed here in production: a pass over wide string rows filled
-        # 262144 rows into one Morsel.combine and the concat refused with
-        # `total arena bytes exceed 4 GB`. No row threshold can see payload
-        # width, so no value of it was ever safe.
-        self._batcher = MorselBatcher(self.coalesce_rows)
 
     @property
     def name(self):  # pragma: no cover
@@ -73,70 +75,50 @@ class CompactionCommitNode(BasePlanNode):
         return resolve("external_user", self.properties.variables, None) or None
 
     def _push_impl(self, morsel):
-        if morsel is _EOS_SENTINEL:
-            self._flush_pending()
-
-            if not self.retired_files:
-                # Selection found nothing worth rewriting. A pass that did no
-                # work is a success, and committing a snapshot describing
-                # nothing would be a lie about what happened.
-                self.result = NonTabularResult(
-                    record_count=0, status=QueryStatus.SQL_SUCCESS
-                )
-                return
-
+        if morsel is not _EOS_SENTINEL:
             try:
-                self.connector.compaction_commit(
-                    self.relation_name,
-                    self._file_entries,
-                    self.retired_files,
-                    author=self._author,
-                    baseline_snapshot_id=self.baseline_snapshot_id,
-                )
+                self._stream.push(morsel)
             except Exception:
-                # The outputs are unreferenced by anything now, and only this
-                # node knows their paths. Remove them before the error leaves,
-                # then let it leave - a refused commit is a real failure and
-                # must not be reported as a quiet no-op.
-                self._delete_written_files()
+                self._stream.abandon()
                 raise
-
-            self.result = NonTabularResult(
-                record_count=len(self._file_entries), status=QueryStatus.SQL_SUCCESS
-            )
             return
 
-        self._consume(morsel)
+        try:
+            entries = self._stream.finish()
+        except Exception:
+            self._stream.abandon()
+            raise
 
-    def _consume(self, morsel):
-        """Buffer a morsel by REFERENCE, writing a whole batch at a time.
+        if not self.retired_files:
+            if entries:
+                # Rows arrived for a pass that retires nothing: the scan was
+                # not narrowed to the selection. Committing would duplicate
+                # every row; a quiet success would hide the planner bug.
+                self._stream.discard_outputs()
+                raise RuntimeError(
+                    f"Compaction Commit: {self.relation_name} wrote "
+                    f"{len(entries)} file(s) but retires none"
+                )
+            # Selection found nothing worth rewriting. A pass that did no
+            # work is a success, and committing a snapshot describing
+            # nothing would be a lie about what happened.
+            self.result = NonTabularResult(record_count=0, status=QueryStatus.SQL_SUCCESS)
+            return
 
-        References only, never an incremental concat per arrival: concatenating
-        into a live accumulator re-copies the growing buffer on every morsel,
-        which is quadratic in the number of morsels.
-        """
-        for batch in self._batcher.push(morsel):
-            self._write_batch(batch)
+        try:
+            self.connector.compaction_commit(
+                self.relation_name,
+                entries,
+                self.retired_files,
+                author=self._author,
+                baseline_snapshot_id=self.baseline_snapshot_id,
+            )
+        except Exception:
+            # The outputs are unreferenced by anything now, and only this
+            # node knows their paths. Remove them before the error leaves,
+            # then let it leave - a refused commit is a real failure and
+            # must not be reported as a quiet no-op.
+            self._stream.discard_outputs()
+            raise
 
-    def _flush_pending(self):
-        """Write whatever the batcher still holds, as one data file per batch."""
-        for batch in self._batcher.finish():
-            self._write_batch(batch)
-
-    def _write_batch(self, batch):
-        self._file_entries.append(self.connector.write_morsel(self.relation_name, batch))
-
-    def _delete_written_files(self):
-        """Best-effort removal of this pass's outputs after a refused commit.
-
-        Best-effort because the commit already failed and the original error is
-        the one worth raising; a failure to clean up must not replace it. What
-        survives here is an orphan the storage sweep can find, which is strictly
-        better than an orphan nobody knows about.
-        """
-        for entry in self._file_entries:
-            try:
-                self.connector.delete_data_file(self.relation_name, entry.file_path)
-            except Exception:  # noqa: BLE001 - storage boundary, see docstring
-                pass
-        self._file_entries = []
+        self.result = NonTabularResult(record_count=len(entries), status=QueryStatus.SQL_SUCCESS)

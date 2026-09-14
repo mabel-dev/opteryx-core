@@ -17,8 +17,16 @@ Plan time (this module, Python): resolve `<workspace>.<schema>.<table>` to a
 relation, describe its result columns through the native client (a Parse +
 Describe round trip — the exact OIDs and typmods the scan will stream), map
 them to `ColumnType`, estimate the row count from `pg_class`, and translate the
-optimizer's pushed predicates / LIMIT into the scan statement with `$n` bind
-parameters (never interpolated literals).
+optimizer's pushed predicates / LIMIT / top-N / aggregate / DISTINCT into the
+scan statement with `$n` bind parameters (never interpolated literals).
+
+Every pushed shape is rendered with the ENGINE's semantics spelled out where
+PostgreSQL's defaults differ: NULLS FIRST under ASC and NULLS LAST under DESC
+(draken sorts NULL below every value), `COLLATE "C"` on text sort keys and text
+MIN/MAX (draken compares bytes; the server would use the column's collation),
+and an explicit cast wherever the server's result type is not the type the
+binder bound the aggregate to. A shape that cannot be spelled that way is
+DECLINED by `can_push_*` and stays a local operator — never mistranslated.
 
 Execution (native): `PostgresReadNode` -> `NativePostgresScanSource`
 (src/cpp/engine/native_postgres_scan_source.hpp) streams the server's BINARY
@@ -44,8 +52,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
+from opteryx.connectors.capabilities.aggregate_pushable import AggregatePushable
+from opteryx.connectors.capabilities.distinct_pushable import DistinctPushable
 from opteryx.connectors.capabilities.limit_pushable import LimitPushable
 from opteryx.connectors.capabilities.predicate_pushable import PredicatePushable
+from opteryx.connectors.capabilities.topn_pushable import TopNPushable
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.exceptions import DatasetReadError
 from opteryx.exceptions import InvalidInternalStateError
@@ -132,6 +143,10 @@ class PostgresConnector(BaseConnector):
 
     supports_predicate_pushdown = True
     supports_limit_pushdown = True
+    supports_filtered_limit_pushdown = True
+    supports_topn_pushdown = True
+    supports_aggregate_pushdown = True
+    supports_distinct_pushdown = True
     # table_engine() needs the relation name as typed, for preserve_sql_case.
     requires_original_case = True
 
@@ -249,7 +264,9 @@ class PostgresConnector(BaseConnector):
         )
 
 
-class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
+class PostgresTable(
+    BaseTable, PredicatePushable, LimitPushable, TopNPushable, AggregatePushable, DistinctPushable
+):
     """Transient, per-query reader description for one PostgreSQL relation.
 
     Plan-time only: describes the relation, answers pushdown questions and
@@ -266,6 +283,13 @@ class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
 
     supports_predicate_pushdown = True
     supports_limit_pushdown = True
+    # `WHERE ... LIMIT` is one statement; the server applies them in order.
+    supports_filtered_limit_pushdown = True
+    # One statement, one cursor, one stream: the server's ORDER BY/GROUP BY/
+    # DISTINCT is the COMPLETE answer, which is what these three promise.
+    supports_topn_pushdown = True
+    supports_aggregate_pushdown = True
+    supports_distinct_pushdown = True
 
     # Translated to `column <op> $n`; each op has identical semantics on both
     # sides (Opteryx LIKE is case-sensitive, as PostgreSQL's is).
@@ -512,6 +536,39 @@ class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
                 return False
         return True
 
+    def _is_own_column(self, node) -> bool:
+        """A plain IDENTIFIER bound to one of this relation's own columns, of a
+        type the statement builder can render (PUSHABLE_TYPES)."""
+        if node is None or node.node_type != NodeType.IDENTIFIER:
+            return False
+        schema_column = node.schema_column
+        if schema_column is None or schema_column.name is None:
+            return False
+        if schema_column.name.lower() not in self._meta:
+            return False
+        return schema_column.category in self.PUSHABLE_TYPES
+
+    def can_push_topn(self, order_by) -> bool:
+        """Any number of keys, each a plain column of this relation. NULL order
+        and text collation are spelled explicitly by the renderer, so nothing
+        about the key's type beyond PUSHABLE_TYPES needs declining here."""
+        if not order_by:
+            return False
+        return all(self._is_own_column(expression) for expression, _ascending in order_by)
+
+    def can_push_aggregate(self, groups, aggregates) -> bool:
+        """The renderer is the gate (see `_remote_aggregate`): a shape is pushable
+        only if every group key is an own column and every aggregate has a remote
+        spelling whose result type IS the type the binder bound it to."""
+        if not all(self._is_own_column(group) for group in groups or []):
+            return False
+        return all(_remote_aggregate(self, aggregate) is not None for aggregate in aggregates or [])
+
+    def can_push_distinct(self, columns) -> bool:
+        if not columns:
+            return False
+        return all(self._is_own_column(column) for column in columns)
+
     # ---- execution is native ------------------------------------------------
 
     def read_dataset(self, **kwargs):
@@ -527,10 +584,36 @@ class PostgresTable(BaseTable, PredicatePushable, LimitPushable):
 
 
 @dataclass(frozen=True)
+class EmitColumn:
+    """One column the statement returns, as the native Source needs it: the
+    plan identity the morsel names it by, the result OID the server MUST report
+    (the Source refuses the stream otherwise), the DrakenType it is emitted as
+    and, for DECIMAL, the precision/scale the decoder rescales to."""
+
+    identity: bytes
+    oid: int
+    physical: int
+    precision: int
+    scale: int
+
+
+@dataclass(frozen=True)
 class ScanStatement:
     sql: str
     params: List[Optional[str]]
     zero_columns: bool
+    # Parallel to the statement's select list, in emit order. Empty for the
+    # zero-column (`SELECT 1`) shape.
+    emit: Tuple[EmitColumn, ...] = ()
+
+
+# Result-type OIDs the renderer casts TO. Everything else the statement returns
+# is a relation column's own OID (from the describe at bind time).
+_OID_INT8 = 20
+_OID_TEXT = 25
+_OID_FLOAT4 = 700
+_OID_FLOAT8 = 701
+_OID_BPCHAR = 1042  # char(n): blank-padded, never cast to text
 
 
 _COMPARISON_SQL = {
@@ -667,27 +750,258 @@ def _predicate_sql(table: PostgresTable, node, params: List[Optional[str]]) -> s
     raise NotSupportedError(f"cannot push a {node_type} predicate into a PostgreSQL scan")
 
 
+def _emit_for_column(table: PostgresTable, schema_column: SchemaColumn) -> EmitColumn:
+    """A relation column, emitted as the type the binder gave it, under the
+    OID the describe reported for it."""
+    return EmitColumn(
+        identity=schema_column.identity,
+        oid=table.column_oid(schema_column),
+        physical=schema_column.column_type.physical.value,
+        precision=table.column_decimal_precision(schema_column),
+        scale=table.column_decimal_scale(schema_column),
+    )
+
+
+def _is_text(schema_column: SchemaColumn) -> bool:
+    return schema_column.category == LogicalCategory.VARCHAR
+
+
+def _key_sql(table: PostgresTable, schema_column: SchemaColumn) -> str:
+    """A column as an ORDER BY / MIN / MAX operand. Text gets `COLLATE "C"` so
+    the server orders bytes the way draken does; without it the server's
+    top-N (or MIN/MAX) under the column's own collation is a different row."""
+    sql = _quote_identifier(table.pg_name(schema_column))
+    if _is_text(schema_column):
+        sql += ' COLLATE "C"'
+    return sql
+
+
+def _order_by_sql(table: PostgresTable, order_by) -> str:
+    """`order_by` is the scan's stamped spec: [(SchemaColumn, ascending), ...].
+
+    draken: NULL sorts below every value (draken/morsels/sort.hpp), so ASC is
+    NULLS FIRST and DESC is NULLS LAST. PostgreSQL's defaults are the inverse in
+    BOTH directions, so the null placement is always written out."""
+    parts = []
+    for schema_column, ascending in order_by:
+        key = _key_sql(table, schema_column)
+        parts.append(f"{key} ASC NULLS FIRST" if ascending else f"{key} DESC NULLS LAST")
+    return ", ".join(parts)
+
+
+# Aggregate operand categories with a PostgreSQL overload whose semantics match
+# the engine's. BOOL/DATE/TIMESTAMP SUM and AVG exist in the engine but not on
+# the server; BOOL MIN/MAX exist in neither direction that agrees.
+_MINMAX_CATEGORIES = {
+    LogicalCategory.INTEGER,
+    LogicalCategory.FLOAT,
+    LogicalCategory.DECIMAL,
+    LogicalCategory.DATE,
+    LogicalCategory.TIMESTAMP,
+    LogicalCategory.VARCHAR,
+}
+_SUM_CATEGORIES = {LogicalCategory.INTEGER, LogicalCategory.FLOAT, LogicalCategory.DECIMAL}
+
+
+def _remote_aggregate(table: PostgresTable, aggregate) -> Optional[Tuple[str, EmitColumn]]:
+    """The remote spelling of one AGGREGATOR node and the column it returns, or
+    None when it has no spelling with the engine's exact semantics.
+
+    This is BOTH the gate (`can_push_aggregate`) and the renderer, so the two
+    cannot disagree. The result type is never inferred here: the binder already
+    bound one (`aggregate.schema_column.column_type`), and the spelling must
+    produce EXACTLY that type on the wire — a cast is added where the server's
+    natural result type differs (SUM over integers is int8 on the engine, but
+    numeric on the server for int8 operands; AVG is FLOAT64 on the engine,
+    numeric on the server for integer/numeric operands). A bound type the
+    spelling cannot reproduce declines the aggregate rather than emitting a
+    column the Source would refuse or a value with different precision.
+    """
+    function = aggregate.value
+    bound = aggregate.schema_column
+    if bound is None or bound.identity is None or bound.column_type is None:
+        return None
+    result_type: ColumnType = bound.column_type
+    parameters = list(aggregate.parameters or [])
+    distinct = aggregate.duplicate_treatment == "Distinct"
+
+    def emit(oid: int, column_type: ColumnType) -> EmitColumn:
+        return EmitColumn(
+            identity=bound.identity,
+            oid=oid,
+            physical=column_type.physical.value,
+            precision=table.column_decimal_precision(bound),
+            scale=table.column_decimal_scale(bound),
+        )
+
+    if function == "COUNT":
+        if result_type.physical != DrakenType.INT64 or len(parameters) != 1:
+            return None
+        operand = parameters[0]
+        if operand.node_type == NodeType.WILDCARD:
+            # COUNT(DISTINCT *) is a whole-row dedup count; not spelled here.
+            if distinct:
+                return None
+            return "count(*)", emit(_OID_INT8, result_type)
+        if not table._is_own_column(operand):
+            return None
+        column = _quote_identifier(table.pg_name(operand.schema_column))
+        return (f"count(DISTINCT {column})" if distinct else f"count({column})"), emit(
+            _OID_INT8, result_type
+        )
+
+    # Everything below is a single plain-column operand with no DISTINCT. A
+    # FILTER (WHERE ...) clause reaches here folded into the operand expression,
+    # so it fails the plain-column test and is declined with it.
+    if distinct or len(parameters) != 1 or not table._is_own_column(parameters[0]):
+        return None
+    operand_column = parameters[0].schema_column
+    operand_category = operand_column.category
+    operand_oid = table.column_oid(operand_column)
+    column = _quote_identifier(table.pg_name(operand_column))
+
+    if function == "SUM":
+        if operand_category not in _SUM_CATEGORIES:
+            return None
+        if operand_category == LogicalCategory.INTEGER:
+            # The engine sums every integer width into INT64; the server returns
+            # int8 for int2/int4 and numeric for int8. `::int8` pins the type and
+            # turns an overflow into a server error rather than a widened value.
+            if result_type.physical != DrakenType.INT64:
+                return None
+            return f"sum({column})::int8", emit(_OID_INT8, result_type)
+        # FLOAT / DECIMAL pass the operand's type through on both sides; a
+        # numeric sum keeps the operand's scale, and the decoder's tier check is
+        # the overflow guard.
+        if result_type.physical != operand_column.column_type.physical:
+            return None
+        return f"sum({column})", emit(operand_oid, result_type)
+
+    if function == "AVG":
+        if operand_category not in _SUM_CATEGORIES:
+            return None
+        # The binder types AVG as FLOAT64 for integer/decimal operands and passes
+        # a float operand's width through. The server's avg is numeric for the
+        # first group and float8/float4 for the second; cast to the bound type.
+        if result_type.physical == DrakenType.FLOAT64:
+            return f"avg({column})::float8", emit(_OID_FLOAT8, result_type)
+        if result_type.physical == DrakenType.FLOAT32:
+            return f"avg({column})::float4", emit(_OID_FLOAT4, result_type)
+        return None
+
+    if function in ("MIN", "MAX"):
+        if operand_category not in _MINMAX_CATEGORIES:
+            return None
+        if result_type.physical != operand_column.column_type.physical:
+            return None
+        if _is_text(operand_column):
+            # Text takes COLLATE "C": the server's min/max under the column's
+            # collation is not the bytewise extreme draken would pick. The
+            # collated expression's type is not always the column's own (a `name`
+            # or a domain over it comes back as text), so the result is pinned to
+            # text and the plan expects text — the OID must follow the spelling,
+            # not the column.
+            if operand_oid == _OID_BPCHAR:
+                # char(n): a text cast strips the blank padding the scan keeps.
+                return None
+            return (
+                f"{function.lower()}({_key_sql(table, operand_column)})::text",
+                emit(_OID_TEXT, result_type),
+            )
+        return f"{function.lower()}({column})", emit(operand_oid, result_type)
+
+    # ANY_VALUE (server >= 16 only), the STDDEV/VAR family (different
+    # accumulation), MEDIAN/APPROX_*/CORR/ARRAY_AGG/CIDR_AGG (different
+    # algorithms or unordered results): no spelling with matching semantics.
+    return None
+
+
 def build_scan_statement(
-    table: PostgresTable, columns: list, predicates: Optional[list], limit: Optional[int]
+    table: PostgresTable,
+    columns: list,
+    predicates: Optional[list],
+    limit: Optional[int],
+    *,
+    order_by: Optional[list] = None,
+    topn_limit: Optional[int] = None,
+    groups: Optional[list] = None,
+    aggregates: Optional[list] = None,
+    distinct: bool = False,
 ) -> ScanStatement:
     """The statement the native Source runs for one scan.
 
     `columns` are the plan's projected LogicalColumns (emit order); an empty
-    projection (a bare COUNT(*)) selects a constant so the server still streams
-    one row per matching row and the Source emits zero-column morsels carrying
-    the count. `predicates` are the conditions the optimizer pushed — each one
-    passed `can_push` — and become `$n` parameters. `limit` is the pushed LIMIT.
+    projection (a bare `SELECT 1 FROM t`) selects a constant so the server still
+    streams one row per matching row and the Source emits zero-column morsels
+    carrying the count. `predicates` are the conditions the optimizer pushed —
+    each one passed `can_push` — and become `$n` parameters. `limit` is a pushed
+    LIMIT.
+
+    The keyword shapes are the ones the remote-pushdown strategies absorb into
+    the scan, each admitted by its `can_push_*` gate first:
+      * `order_by` + `topn_limit`: a HeapSort's spec, rendered ORDER BY ... LIMIT;
+      * `groups` + `aggregates`: an absorbed Aggregate — the select list becomes
+        the group keys followed by the aggregate spellings, and `columns` is not
+        consulted;
+      * `distinct`: an absorbed DISTINCT over `columns`.
+    The builder has NO fallback: a shape the gates admitted and this refuses is
+    an internal error, not a missed pushdown.
     """
     params: List[Optional[str]] = []
-    select_list = ", ".join(
-        _quote_identifier(table.pg_name(column.schema_column)) for column in columns
-    )
+    emit: List[EmitColumn] = []
+
+    if aggregates is not None:
+        if distinct:
+            raise InvalidInternalStateError("a PostgreSQL scan cannot carry both DISTINCT and an aggregate")
+        select_parts = []
+        for group in groups or []:
+            select_parts.append(_quote_identifier(table.pg_name(group.schema_column)))
+            emit.append(_emit_for_column(table, group.schema_column))
+        for aggregate in aggregates:
+            remote = _remote_aggregate(table, aggregate)
+            if remote is None:
+                raise InvalidInternalStateError(
+                    f"aggregate {aggregate.value} reached the PostgreSQL statement builder "
+                    "but has no remote spelling — can_push_aggregate should have declined it"
+                )
+            select_parts.append(remote[0])
+            emit.append(remote[1])
+        if not select_parts:
+            raise InvalidInternalStateError("an absorbed aggregate with no keys and no aggregates")
+        select_list = ", ".join(select_parts)
+    else:
+        select_list = ", ".join(
+            _quote_identifier(table.pg_name(column.schema_column)) for column in columns
+        )
+        emit = [_emit_for_column(table, column.schema_column) for column in columns]
+        if distinct:
+            if not columns:
+                raise InvalidInternalStateError("an absorbed DISTINCT over no columns")
+            select_list = "DISTINCT " + select_list
+
     sql = f"SELECT {select_list or '1'} FROM {table.qualified_name}"
     clauses = [_predicate_sql(table, predicate, params) for predicate in (predicates or [])]
     if clauses:
         sql += " WHERE " + " AND ".join(f"({clause})" for clause in clauses)
+    if aggregates is not None and groups:
+        sql += " GROUP BY " + ", ".join(
+            _quote_identifier(table.pg_name(group.schema_column)) for group in groups
+        )
+    if order_by:
+        if topn_limit is None:
+            raise InvalidInternalStateError("a pushed ORDER BY without its LIMIT reached the PostgreSQL scan")
+        sql += " ORDER BY " + _order_by_sql(table, order_by)
+    if topn_limit is not None:
+        if limit is not None:
+            raise InvalidInternalStateError("a PostgreSQL scan cannot carry both a LIMIT and a top-N")
+        limit = topn_limit
     if limit is not None:
         if int(limit) < 0:
             raise InvalidInternalStateError(f"negative LIMIT {limit} reached the PostgreSQL scan")
         sql += f" LIMIT {int(limit)}"
-    return ScanStatement(sql=sql, params=params, zero_columns=not columns)
+    return ScanStatement(
+        sql=sql,
+        params=params,
+        zero_columns=not emit,
+        emit=tuple(emit),
+    )

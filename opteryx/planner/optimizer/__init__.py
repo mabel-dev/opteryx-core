@@ -48,7 +48,9 @@ from opteryx.planner.optimizer.strategies import (
     CrossJoinFilterPushdownStrategy,
     DisjunctionSimplificationStrategy,
     DisjunctiveDomainPushdownStrategy,
+    AggregateScanPushdownStrategy,
     DistinctPushdownStrategy,
+    DistinctScanPushdownStrategy,
     FilterImpliedGroupKeyReductionStrategy,
     FunctionRewriteStrategy,
     GroupKeyReductionStrategy,
@@ -74,6 +76,7 @@ from opteryx.planner.optimizer.strategies import (
     ProjectionPushdownStrategy,
     RedundantCastEliminationStrategy,
     RedundantOperationsStrategy,
+    RedundantSortEliminationStrategy,
     SplitConjunctivePredicatesStrategy,
     StatisticsOnlyResponseStrategy,
     TimestampCastSinkStrategy,
@@ -96,6 +99,7 @@ __all__ = ["do_optimizer"]
 # own flag inline in should_i_run from before this table existed — listing them here
 # too is harmless (same flag, checked twice) and keeps this the complete registry.
 _STRATEGY_DISABLE_FLAGS = {
+    "AggregateScanPushdownStrategy": "disable_aggregate_scan_pushdown",
     "BooleanSimplificationStrategy": "disable_boolean_simplification",
     "CompactionPlanningStrategy": "disable_compaction_planning",
     "ConstantFoldingStrategy": "disable_constant_folding",
@@ -107,6 +111,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "DisjunctionSimplificationStrategy": "disable_disjunction_simplification",
     "DisjunctiveDomainPushdownStrategy": "disable_disjunctive_domain_pushdown",
     "DistinctPushdownStrategy": "disable_distinct_pushdown",
+    "DistinctScanPushdownStrategy": "disable_distinct_scan_pushdown",
     "FilterImpliedGroupKeyReductionStrategy": "disable_filter_implied_group_key_reduction",
     "FunctionRewriteStrategy": "disable_function_rewrite",
     "GroupKeyReductionStrategy": "disable_group_key_reduction",
@@ -132,6 +137,7 @@ _STRATEGY_DISABLE_FLAGS = {
     "ProjectionPushdownStrategy": "disable_projection_pushdown",
     "RedundantCastEliminationStrategy": "disable_redundant_cast_elimination",
     "RedundantOperationsStrategy": "disable_redundant_operations",
+    "RedundantSortEliminationStrategy": "disable_redundant_sort_elimination",
     "SplitConjunctivePredicatesStrategy": "disable_split_conjunctive_predicates",
     "StatisticsOnlyResponseStrategy": "disable_statistics_only_response",
     "TimestampCastSinkStrategy": "disable_timestamp_cast_sink",
@@ -164,6 +170,8 @@ _STRATEGIES_SKIPPED_ON_COMPACTION = frozenset(
         "LimitPushdownStrategy",
         "TopNScanPushdownStrategy",
         "TopNManifestPruningStrategy",
+        "AggregateScanPushdownStrategy",
+        "DistinctScanPushdownStrategy",
         "DistinctPushdownStrategy",
         "StatisticsOnlyResponseStrategy",
     }
@@ -286,9 +294,14 @@ class OptimizerVisitor:
             JoinRewriteStrategy(telemetry),
             JoinAlgorithmStrategy(telemetry),
             DistinctPushdownStrategy(telemetry),
+            # Drops a sort a later sort supersedes (a view's ORDER BY read by a
+            # query that orders again). Before OperatorFusionStrategy so the sort
+            # that SURVIVES is the one considered for Order+Limit fusion, and
+            # before RedundantOperationsStrategy strips the Subquery boundary
+            # nodes it walks through — it allows for them rather than needing
+            # them gone.
+            RedundantSortEliminationStrategy(telemetry),
             OperatorFusionStrategy(telemetry),
-            TopNScanPushdownStrategy(telemetry),  # WP-2: top-N spec onto scan feeding HeapSort
-            TopNManifestPruningStrategy(telemetry),  # prune files using topn spec + manifest min/max
             LimitPushdownStrategy(telemetry),
             LimitFilesPruningStrategy(telemetry),  # Prune files for LIMIT queries (after pushdown)
             #            EmptyTableStrategy(telemetry),
@@ -303,6 +316,15 @@ class OptimizerVisitor:
             # and after RedundantOperationsStrategy so Subquery boundary nodes
             # between two Projects are already gone.
             ProjectFusionStrategy(telemetry),
+            # The scan-absorbing pushdowns. All three need the operator to read
+            # DIRECTLY from the Scan, and the Project a SELECT list leaves between
+            # them and the Scan is only removed by RedundantOperations/ProjectFusion
+            # above — before that point the HeapSort is adjacent to a Scan only for
+            # `SELECT *`, and the top-N spec was never stamped on a real query.
+            TopNScanPushdownStrategy(telemetry),  # WP-2: top-N spec onto scan feeding HeapSort
+            TopNManifestPruningStrategy(telemetry),  # prune files using topn spec + manifest min/max
+            AggregateScanPushdownStrategy(telemetry),  # remote GROUP BY / aggregate, node removed
+            DistinctScanPushdownStrategy(telemetry),  # remote DISTINCT, node removed
             # After RedundantOperationsStrategy/ProjectFusionStrategy so the chain
             # between a ranking Window and its `WHERE rank <= K` filter is already
             # collapsed (no Subquery boundary, adjacent Projects fused) — fewer hops

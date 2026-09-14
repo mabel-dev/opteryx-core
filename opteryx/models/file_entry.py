@@ -111,6 +111,12 @@ class FileEntry:
     deleted_record_count: int = 0
     delete_file_path: Optional[str] = None
     delete_positions: Optional[Tuple[int, ...]] = None
+    # The producer-side manifest row for a file THIS session wrote, as the
+    # store's own entry dict (statistics built row group by row group as the
+    # file streamed out - see Writable.open_data_file_writer). A commit that
+    # takes entries registers the file from this and never reads it back.
+    # None for every FileEntry that came FROM a manifest rather than to one.
+    catalog_entry: Optional[dict] = None
     # Per-column distinct-value count, field_id-keyed, as (ndv, is_exact).
     #
     # The two halves are ONE value on purpose. An exact NDV (skene's

@@ -16,10 +16,9 @@
 """
 Insert Node
 
-Streaming sink: consumes morsels from a child sub-plan, coalesces them up to
-`write_coalesce_rows` (capped at one Parquet row group) before writing each
-batch as a single file into the target relation's folder, then commits a
-single snapshot when EOS is received.
+Streaming sink: consumes morsels from a child sub-plan, coalesces them into
+row groups of streaming, target-sized data files (DataFileStream - never a file
+per batch), then commits a single snapshot when EOS is received.
 """
 
 from typing import Generator, Optional
@@ -37,9 +36,6 @@ from opteryx.models import QueryProperties
 # group. That path only populates FileEntry bounds for single-row-group files,
 # so staying within one row group keeps catalog pruning working unchanged.
 # Move this together with rugo's default if that ever changes.
-_MAX_ROWS_PER_ROW_GROUP = 262144
-
-
 class InsertNode(BasePlanNode):
     def __init__(self, properties: QueryProperties, **parameters):
         BasePlanNode.__init__(self, properties=properties, **parameters)
@@ -76,21 +72,17 @@ class InsertNode(BasePlanNode):
         self.read_sources = parameters.get("read_sources")
         self.produced_by = parameters.get("produced_by")
 
-        self._file_entries = []
         self._total_rows = 0
         self.result: Optional[NonTabularResult] = None
 
-        # Coalescing buffer: collects references to arriving morsels (no data
-        # movement) and merges a whole batch in one bulk concat pass, written
-        # as a single file. The batcher owns BOTH ceilings - rows (so a file
-        # never spans more than one row group, which is what keeps FileEntry
-        # bounds populated) and projected string-arena bytes (so the concat
-        # itself cannot overflow the arena's uint32 offset).
-        self.coalesce_rows = min(
-            int(parameters.get("write_coalesce_rows", _MAX_ROWS_PER_ROW_GROUP)),
-            _MAX_ROWS_PER_ROW_GROUP,
+        # Rows become row groups of streaming, target-sized files - see
+        # DataFileStream for the shape and for why never a file per batch.
+        self._stream = DataFileStream(
+            self.connector,
+            self.relation_name,
+            coalesce_rows=parameters.get("write_coalesce_rows"),
+            target_file_bytes=parameters.get("target_file_bytes"),
         )
-        self._batcher = MorselBatcher(self.coalesce_rows)
 
     @property
     def name(self):
@@ -147,34 +139,43 @@ class InsertNode(BasePlanNode):
             return
 
         if morsel is _EOS_SENTINEL:
-            self._flush_pending()
+            try:
+                file_entries = self._stream.finish()
+            except Exception:
+                self._stream.abandon()
+                raise
             # All files are durably written before any catalog mutation - a
             # mid-query failure above this point leaves the target relation
             # completely untouched, whether this is a fresh create or a replace.
-            if self.is_replace:
-                self.connector.replace_relation(
-                    self.relation_name, self.target_schema, self._file_entries,
-                    author=self._author,
-                    commit_message=self._commit_message,
-                    read_sources=self.read_sources,
-                    produced_by=self.produced_by,
-                )
-            elif self.create_target:
-                self.connector.create_relation(
-                    self.relation_name, self.target_schema, author=self._author
-                )
-                self.connector.insert(
-                    self.relation_name, self._file_entries, author=self._author,
-                    commit_message=self._commit_message,
-                    read_sources=self.read_sources,
-                    produced_by=self.produced_by,
-                )
-            else:
-                self.connector.insert(
-                    self.relation_name, self._file_entries, author=self._author,
-                    read_sources=self.read_sources,
-                    produced_by=self.produced_by,
-                )
+            # A commit the store refuses removes the outputs before it raises.
+            try:
+                if self.is_replace:
+                    self.connector.replace_relation(
+                        self.relation_name, self.target_schema, file_entries,
+                        author=self._author,
+                        commit_message=self._commit_message,
+                        read_sources=self.read_sources,
+                        produced_by=self.produced_by,
+                    )
+                elif self.create_target:
+                    self.connector.create_relation(
+                        self.relation_name, self.target_schema, author=self._author
+                    )
+                    self.connector.insert(
+                        self.relation_name, file_entries, author=self._author,
+                        commit_message=self._commit_message,
+                        read_sources=self.read_sources,
+                        produced_by=self.produced_by,
+                    )
+                else:
+                    self.connector.insert(
+                        self.relation_name, file_entries, author=self._author,
+                        read_sources=self.read_sources,
+                        produced_by=self.produced_by,
+                    )
+            except Exception:
+                self._stream.discard_outputs()
+                raise
             if self.is_materialized_view:
                 # Registration happens after the data commit, in the same
                 # statement. If it fails the statement fails visibly: the
@@ -207,16 +208,11 @@ class InsertNode(BasePlanNode):
             morsel = self._align_morsel(morsel)
 
         self._total_rows += len(morsel)
-        for batch in self._batcher.push(morsel):
-            self._write_batch(batch)
-
-    def _flush_pending(self):
-        """Write whatever the batcher still holds, as one file per batch."""
-        for batch in self._batcher.finish():
-            self._write_batch(batch)
-
-    def _write_batch(self, batch):
-        self._file_entries.append(self.connector.write_morsel(self.relation_name, batch))
+        try:
+            self._stream.push(morsel)
+        except Exception:
+            self._stream.abandon()
+            raise
 
     def _align_morsel(self, morsel):
         """Reorder columns to target-schema order and rename to target names.

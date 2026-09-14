@@ -6,6 +6,7 @@
 from typing import Tuple
 
 from opteryx.exceptions import SqlError
+from opteryx.exceptions import md_table
 from opteryx.expression import NodeType
 from opteryx.models import LogicalColumn
 from opteryx.models import Node
@@ -239,7 +240,13 @@ def visit_show(self, node: Node, context: BindingContext) -> Tuple[Node, Binding
             f"{node.object_type.lower()} {node.object_name} ({action.lower()} required)"
         )
 
-    node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
+    if node.object_type == "VIEW":
+        # Read back from where CREATE VIEW wrote it - the view store, not the
+        # workspace's data binding. A MATERIALIZED VIEW is storage and stays on
+        # the data binding with the rest of the object types.
+        node.connector = _view_store(node.object_name, context)
+    else:
+        node.connector = connector_factory(node.object_name, telemetry=context.telemetry)
 
     # Every object type but VIEW is read back through the Writable capability -
     # the definition stores hang off it - so a connector without it cannot
@@ -335,23 +342,82 @@ def _view_output_schema(node, context: BindingContext):
     return RelationSchema(name=node.view_name, columns=columns)
 
 
+def _view_store(view_name: str, context: BindingContext):
+    """The connector that stores `view_name`'s definition.
+
+    A view is catalog text, not storage, so it lives in the opteryx catalog
+    entry whatever the workspace's DATA is bound to - see
+    `view_store_connector` for the ruling. For a workspace with no external
+    binding this is the same object `connector_factory` returns.
+    """
+    from opteryx.connectors import view_store_connector
+    from opteryx.connectors.capabilities import Eidetic
+    from opteryx.exceptions import ReadOnlyConnectorError
+
+    store = view_store_connector(view_name, telemetry=context.telemetry)
+    if not isinstance(store, Eidetic):
+        raise ReadOnlyConnectorError(
+            f"the catalog serving {md_table(view_name)} cannot store views"
+        )
+    if "variables" in dir(store):
+        store.variables = context.execution_context.variables
+    return store
+
+
+def _assert_name_free_in_source(view_name: str, store, context: BindingContext) -> None:
+    """Refuse a view name that a relation in the workspace's DATA binding holds.
+
+    The view store and the data binding are two catalogs that share one
+    namespace, and neither can see the other's names - so this is the only
+    place the collision can be caught. Left uncaught, the view would shadow the
+    source relation (the resolver probes views first) and make it unreachable.
+
+    Skipped when the store IS the data connector: one catalog can see its own
+    names, `create_view` already refuses there, and asking twice would put a
+    second round trip on every ordinary CREATE VIEW.
+    """
+    from opteryx.connectors import connector_factory
+    from opteryx.exceptions import SqlError
+    from opteryx.exceptions import compose
+
+    source = connector_factory(view_name, telemetry=context.telemetry)
+    if source is store:
+        return
+
+    existing_type, _ = source.locate_object(view_name)
+    if existing_type is None:
+        return
+
+    raise SqlError(
+        compose(
+            f"{md_table(view_name)} already names a relation in this workspace's data source",
+            "A view and a relation share one namespace, so a name identifies exactly one "
+            "of them",
+        )
+    )
+
+
 def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, BindingContext]:
     """
     Bind the CREATE VIEW node to determine which connector should handle
     storing the view definition.
 
-    This uses the same logic as visit_scan to determine the appropriate connector
-    based on the view name.
+    NOT the same connector visit_scan resolves: the definition goes to the
+    workspace's VIEW STORE (`_view_store`), which for an externally-bound
+    workspace is the opteryx catalog entry rather than the data source.
     """
-    from opteryx.connectors import connector_factory
     from opteryx.managers.permissions import can_perform_action
 
-    # Get connector gateway (cached by prefix)
-    node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
+    # The VIEW STORE, not the data binding: a view is catalog text and is held
+    # in the opteryx catalog entry even when the workspace's data lives
+    # elsewhere.
+    node.connector = _view_store(node.view_name, context)
 
     # Ensure this user can write to the view location
     if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
         raise PermissionError(f"User does not have permission to create view {node.view_name}")
+
+    _assert_name_free_in_source(node.view_name, node.connector, context)
 
     # Rendered HERE, not in the operator, so the text that is bound below and the
     # text that is stored are the same string by construction rather than by two
@@ -363,9 +429,6 @@ def visit_create_view(self, node: Node, context: BindingContext) -> Tuple[Node, 
     node.view_sql = sqloxide.ast_to_sql([{"Query": node.query}])[0]
     node.view_schema = _view_output_schema(node, context)
 
-    if "variables" in dir(node.connector):
-        node.connector.variables = context.execution_context.variables
-
     node.columns = []
     return node, context
 
@@ -375,14 +438,12 @@ def visit_alter_view(self, node: Node, context: BindingContext) -> Tuple[Node, B
     Bind the ALTER VIEW node to determine which connector should handle
     updating the view definition.
 
-    This uses the same logic as visit_scan to determine the appropriate connector
-    based on the view name.
+    The VIEW STORE, as CREATE VIEW uses - see `_view_store`.
     """
-    from opteryx.connectors import connector_factory
     from opteryx.managers.permissions import can_perform_action
 
-    # Get connector gateway (cached by prefix)
-    node.connector = connector_factory(node.view_name, telemetry=context.telemetry)
+    # The VIEW STORE - see visit_create_view.
+    node.connector = _view_store(node.view_name, context)
 
     # Ensure this user can write to the view location
     if not can_perform_action(context.execution_context, node.view_name, action="WRITE"):
@@ -398,9 +459,6 @@ def visit_alter_view(self, node: Node, context: BindingContext) -> Tuple[Node, B
     node.view_sql = sqloxide.ast_to_sql([{"Query": node.query}])[0]
     node.view_schema = _view_output_schema(node, context)
 
-    if "variables" in dir(node.connector):
-        node.connector.variables = context.execution_context.variables
-
     node.columns = []
     return node, context
 
@@ -413,15 +471,14 @@ def visit_drop_view(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
     Since DROP VIEW can operate on multiple views, we need to check permissions
     and determine connectors for each view.
     """
-    from opteryx.connectors import connector_factory
     from opteryx.managers.permissions import can_perform_action
 
     # Store connectors for each view to be dropped
     node.connectors = {}
 
     for view_name in node.view_names:
-        # Get connector gateway (cached by prefix)
-        connector = connector_factory(view_name, telemetry=context.telemetry)
+        # The VIEW STORE the definition was written to - see visit_create_view.
+        connector = _view_store(view_name, context)
 
         # WRITE, matching CREATE VIEW and ALTER VIEW: a view is text, and dropping
         # one destroys nothing that cannot be recreated from it, which is the
@@ -431,9 +488,6 @@ def visit_drop_view(self, node: Node, context: BindingContext) -> Tuple[Node, Bi
             raise PermissionError(
                 f"User does not have permission to drop view {view_name} (write required)"
             )
-
-        if "variables" in dir(connector):
-            connector.variables = context.execution_context.variables
 
         node.connectors[view_name] = connector
 

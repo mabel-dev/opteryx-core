@@ -641,6 +641,7 @@ class Features:
     # pipeline. All default False (every strategy enabled) — this changes no behaviour
     # until a specific one is set. See OptimizerVisitor._STRATEGY_DISABLE_FLAGS for the
     # strategy-class -> flag mapping this wires into.
+    disable_aggregate_scan_pushdown = get_bool("FEATURE_DISABLE_AGGREGATE_SCAN_PUSHDOWN", False)
     disable_boolean_simplification = get_bool("FEATURE_DISABLE_BOOLEAN_SIMPLIFICATION", False)
     disable_compaction_planning = get_bool("FEATURE_DISABLE_COMPACTION_PLANNING", False)
     disable_constant_folding = get_bool("FEATURE_DISABLE_CONSTANT_FOLDING", False)
@@ -652,6 +653,7 @@ class Features:
     disable_disjunction_simplification = get_bool("FEATURE_DISABLE_DISJUNCTION_SIMPLIFICATION", False)
     disable_disjunctive_domain_pushdown = get_bool("FEATURE_DISABLE_DISJUNCTIVE_DOMAIN_PUSHDOWN", False)
     disable_distinct_pushdown = get_bool("FEATURE_DISABLE_DISTINCT_PUSHDOWN", False)
+    disable_distinct_scan_pushdown = get_bool("FEATURE_DISABLE_DISTINCT_SCAN_PUSHDOWN", False)
     disable_filter_implied_group_key_reduction = get_bool("FEATURE_DISABLE_FILTER_IMPLIED_GROUP_KEY_REDUCTION", False)
     disable_function_rewrite = get_bool("FEATURE_DISABLE_FUNCTION_REWRITE", False)
     disable_group_key_reduction = get_bool("FEATURE_DISABLE_GROUP_KEY_REDUCTION", False)
@@ -676,6 +678,7 @@ class Features:
     disable_projection_pushdown = get_bool("FEATURE_DISABLE_PROJECTION_PUSHDOWN", False)
     disable_redundant_cast_elimination = get_bool("FEATURE_DISABLE_REDUNDANT_CAST_ELIMINATION", False)
     disable_redundant_operations = get_bool("FEATURE_DISABLE_REDUNDANT_OPERATIONS", False)
+    disable_redundant_sort_elimination = get_bool("FEATURE_DISABLE_REDUNDANT_SORT_ELIMINATION", False)
     disable_split_conjunctive_predicates = get_bool("FEATURE_DISABLE_SPLIT_CONJUNCTIVE_PREDICATES", False)
     disable_statistics_only_response = get_bool("FEATURE_DISABLE_STATISTICS_ONLY_RESPONSE", False)
     disable_timestamp_cast_sink = get_bool("FEATURE_DISABLE_TIMESTAMP_CAST_SINK", False)

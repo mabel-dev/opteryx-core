@@ -1,6 +1,7 @@
 """PostgresConnector end to end: bind a workspace to a live PostgreSQL server
 and run real queries through the engine — the native wire-protocol client,
-the plan-time describe, predicate/LIMIT pushdown into the statement, the
+the plan-time describe, predicate/LIMIT/top-N/aggregate/DISTINCT pushdown into
+the statement, the
 native Source decoding binary rows into morsels, and every refusal path.
 
 Needs a reachable server. The connection URL comes from, in order,
@@ -17,6 +18,7 @@ proof-of-concept driver and are not gated here.
 """
 
 import os
+import re
 import sys
 import urllib.parse
 
@@ -162,8 +164,8 @@ def _pushed_params(sql):
     captured = []
     original = postgres_connector.build_scan_statement
 
-    def _capture(table, columns, predicates, limit):
-        statement = original(table, columns, predicates, limit)
+    def _capture(table, columns, predicates, limit, **pushed):
+        statement = original(table, columns, predicates, limit, **pushed)
         captured.append(statement.params)
         return statement
 
@@ -285,6 +287,173 @@ def test_small_source_batches_lose_and_duplicate_nothing(monkeypatch):
     assert batched == reference
     total = _column(f"SELECT COUNT(*) FROM {WORKSPACE}.information_schema.columns", "COUNT(*)")[0]
     assert total == len(batched)
+
+
+# ---- remote pushdown: top-N, aggregate, DISTINCT, filtered LIMIT --------------------
+#
+# Every case below runs the query twice — with the strategy on and with its
+# FEATURE_DISABLE_* kill-switch — and the two must agree exactly (sorted where the
+# query has no ORDER BY). The kill-switch is the correctness oracle; EXPLAIN's
+# optimizer telemetry lines prove the pushdown actually happened.
+
+from opteryx import config as _config
+
+
+def _rows(sql):
+    rows = []
+    for morsel in _morsels(sql):
+        columns = [morsel.column(name).to_pylist() for name in morsel.column_names]
+        rows.extend(zip(*columns))
+    return rows
+
+
+def _rows_without(flag, sql):
+    setattr(_config.features, flag, True)
+    try:
+        return _rows(sql)
+    finally:
+        setattr(_config.features, flag, False)
+
+
+def test_topn_is_pushed_and_matches_the_unpushed_plan():
+    # A text key: the statement carries COLLATE "C" so the server's order is
+    # bytewise like draken's; NULLS LAST is spelled because DESC on the engine
+    # puts NULL last and the server's default DESC puts it first.
+    sql = (
+        f"SELECT column_name, ordinal_position FROM {WORKSPACE}.information_schema.columns "
+        "ORDER BY column_name DESC LIMIT 7"
+    )
+    pushed = _rows(sql)
+    assert len(pushed) == 7
+    assert pushed == _rows_without("disable_topn_scan_pushdown", sql)
+    text = _explain_text(sql)
+    assert "topn scan pushdown" in text
+    assert "Heap Sort" in text  # the local cut is retained
+
+
+def test_topn_multi_key_and_predicate_in_one_statement():
+    sql = (
+        f"SELECT column_name, table_schema, ordinal_position FROM {WORKSPACE}.information_schema.columns "
+        "WHERE table_schema = 'pg_catalog' ORDER BY ordinal_position DESC, column_name ASC LIMIT 5"
+    )
+    pushed = _rows(sql)
+    assert len(pushed) == 5 and all(row[1] == "pg_catalog" for row in pushed)
+    assert pushed == _rows_without("disable_topn_scan_pushdown", sql)
+    assert "topn scan pushdown" in _explain_text(sql)
+
+
+def test_topn_ascending_keeps_the_null_rows_first():
+    # pg_stat_database has one row with a NULL datname (the shared objects
+    # row). The engine sorts NULL below every value, so ASC LIMIT 1 IS that
+    # row — the server's default (NULLS LAST under ASC) would discard it.
+    sql = f"SELECT datname FROM {WORKSPACE}.pg_catalog.pg_stat_database ORDER BY datname ASC LIMIT 1"
+    assert _rows(sql) == [(None,)]
+    assert _rows(sql) == _rows_without("disable_topn_scan_pushdown", sql)
+    desc = f"SELECT datname FROM {WORKSPACE}.pg_catalog.pg_stat_database ORDER BY datname DESC LIMIT 1"
+    assert _rows(desc)[0][0] is not None
+    assert _rows(desc) == _rows_without("disable_topn_scan_pushdown", desc)
+
+
+def _operator_in_plan(text, name):
+    """An operator line of EXPLAIN's plan tree — not a strategy name in its
+    REWRITE TRACE (`DistinctScanPushdownStrategy` also starts with 'Distinct')."""
+    return re.search(rf"(?:^|─ ){name}\b", text, flags=re.MULTILINE) is not None
+
+
+def test_grouped_aggregate_is_answered_by_the_server():
+    sql = (
+        "SELECT table_schema, COUNT(*), MIN(table_name), MAX(table_name), "
+        f"COUNT(DISTINCT table_type), COUNT(table_name) FROM {WORKSPACE}.information_schema.tables "
+        "GROUP BY table_schema"
+    )
+    pushed = sorted(_rows(sql))
+    assert pushed and pushed == sorted(_rows_without("disable_aggregate_scan_pushdown", sql))
+    text = _explain_text(sql)
+    assert "aggregate scan pushdown" in text
+    assert not _operator_in_plan(text, r"(?:Grouped |Ungrouped )?Aggregate")  # removed, not retained
+
+
+def test_ungrouped_aggregates_including_sum_and_avg():
+    # information_schema.columns, not pg_stat_*: the statistics views are live
+    # counters and the two runs of the oracle would see different numbers.
+    # character_maximum_length is NULL for most rows — COUNT/MAX skip them.
+    sql = (
+        "SELECT COUNT(*), SUM(ordinal_position), COUNT(character_maximum_length), "
+        f"MAX(character_maximum_length), AVG(ordinal_position) FROM {WORKSPACE}.information_schema.columns"
+    )
+    pushed = _rows(sql)
+    local = _rows_without("disable_aggregate_scan_pushdown", sql)
+    assert len(pushed) == len(local) == 1
+    assert pushed[0][:4] == local[0][:4]
+    # AVG: the server averages exactly in numeric then rounds once to float8;
+    # the engine accumulates in double. Equal to well inside double precision.
+    assert abs(pushed[0][4] - local[0][4]) <= 1e-9 * max(1.0, abs(local[0][4]))
+    assert "aggregate scan pushdown" in _explain_text(sql)
+
+
+def test_aggregate_over_a_pushed_predicate_and_over_no_rows():
+    sql = (
+        f"SELECT COUNT(*), COUNT(table_name) FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_schema = 'pg_catalog'"
+    )
+    assert _rows(sql) == _rows_without("disable_aggregate_scan_pushdown", sql)
+    assert _rows(sql)[0][0] > 0
+    # Zero matching rows: one row out, COUNT 0, MIN/MAX NULL — both sides agree.
+    empty = (
+        f"SELECT COUNT(*), MIN(table_name), MAX(table_name) FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_schema = 'no_such_schema_xyz'"
+    )
+    assert _rows(empty) == [(0, None, None)]
+    assert _rows(empty) == _rows_without("disable_aggregate_scan_pushdown", empty)
+    grouped_empty = (
+        f"SELECT table_schema, COUNT(*) FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_schema = 'no_such_schema_xyz' GROUP BY table_schema"
+    )
+    assert _rows(grouped_empty) == []
+
+
+def test_no_aggregate_group_by_is_pushed():
+    sql = f"SELECT table_schema FROM {WORKSPACE}.information_schema.tables GROUP BY table_schema"
+    assert sorted(_rows(sql)) == sorted(_rows_without("disable_aggregate_scan_pushdown", sql))
+    assert "aggregate scan pushdown" in _explain_text(sql)
+
+
+def test_having_keeps_the_aggregate_local():
+    sql = (
+        f"SELECT table_schema, COUNT(*) FROM {WORKSPACE}.information_schema.tables "
+        "GROUP BY table_schema HAVING COUNT(*) > 1"
+    )
+    assert sorted(_rows(sql)) == sorted(_rows_without("disable_aggregate_scan_pushdown", sql))
+    assert "aggregate scan pushdown" not in _explain_text(sql)
+
+
+def test_unspellable_aggregate_keeps_the_aggregate_local():
+    # STDDEV accumulates differently on the two sides; declined, still answered.
+    sql = f"SELECT STDDEV(ordinal_position) FROM {WORKSPACE}.information_schema.columns"
+    assert _rows(sql) == _rows_without("disable_aggregate_scan_pushdown", sql)
+    assert "aggregate scan pushdown" not in _explain_text(sql)
+
+
+def test_distinct_is_pushed_and_matches():
+    sql = f"SELECT DISTINCT table_schema, table_type FROM {WORKSPACE}.information_schema.tables"
+    pushed = sorted(_rows(sql))
+    assert pushed == sorted(_rows_without("disable_distinct_scan_pushdown", sql))
+    assert len(pushed) == len(set(pushed))
+    text = _explain_text(sql)
+    assert "distinct scan pushdown" in text
+    assert not _operator_in_plan(text, "Distinction")
+
+
+def test_limit_over_a_pushed_predicate_is_pushed():
+    sql = (
+        f"SELECT table_schema, table_name FROM {WORKSPACE}.information_schema.tables "
+        "WHERE table_schema = 'pg_catalog' LIMIT 3"
+    )
+    rows = _rows(sql)
+    assert len(rows) == 3 and all(row[0] == "pg_catalog" for row in rows)
+    text = _explain_text(sql)
+    assert "limit pushdown" in text
+    assert "predicate pushdown into sc" in text
 
 
 def test_missing_relation_is_not_found():

@@ -52,8 +52,6 @@ from opteryx.models import QueryProperties
 
 # Kept in step with rugo's row-group default, exactly as InsertNode does - see
 # the note there for why a flushed file must not span more than one row group.
-_MAX_ROWS_PER_ROW_GROUP = 262144
-
 
 cdef class _MergeAddresses:
     """Owner for the statement's native address state.
@@ -99,7 +97,6 @@ class MergeNode(BasePlanNode):
         self.read_sources = parameters.get("read_sources")
         self.produced_by = parameters.get("produced_by")
 
-        self._file_entries = []
         # Every acted-on address lives in NATIVE state for the whole statement
         # (native_merge_sink.hpp) and becomes Python exactly once, at EOS. It
         # tracks MATCHED rather than merely retired rows, because a duplicate
@@ -109,15 +106,14 @@ class MergeNode(BasePlanNode):
         self._addresses = _MergeAddresses()
         self.result: Optional[NonTabularResult] = None
 
-        self.coalesce_rows = min(
-            int(parameters.get("write_coalesce_rows", _MAX_ROWS_PER_ROW_GROUP)),
-            _MAX_ROWS_PER_ROW_GROUP,
+        # Appended rows become row groups of streaming, target-sized files -
+        # see DataFileStream for the shape and for why never a file per batch.
+        self._stream = DataFileStream(
+            self.connector,
+            self.relation_name,
+            coalesce_rows=parameters.get("write_coalesce_rows"),
+            target_file_bytes=parameters.get("target_file_bytes"),
         )
-        # Rows AND projected arena bytes — see MorselBatcher. The row ceiling
-        # keeps every written file inside one row group (FileEntry bounds are
-        # only populated for single-row-group files); the byte ceiling keeps
-        # the batch's concat inside the string arena's uint32 offset.
-        self._batcher = MorselBatcher(self.coalesce_rows)
 
     @property
     def name(self):
@@ -140,13 +136,21 @@ class MergeNode(BasePlanNode):
 
     def _push_impl(self, morsel):
         if morsel is _EOS_SENTINEL:
-            self._flush_pending()
+            try:
+                file_entries = self._stream.finish()
+            except Exception:
+                self._stream.abandon()
+                raise
             # Every data file is durably written before any catalog mutation, so
             # a failure above this point leaves the target completely untouched.
             # Nothing is committed until here, which is also why the cardinality
             # check below can raise this late and still be safe.
-            delete_positions = self._collect_delete_positions()
-            if not self._file_entries and not delete_positions:
+            try:
+                delete_positions = self._collect_delete_positions()
+            except Exception:
+                self._stream.discard_outputs()
+                raise
+            if not file_entries and not delete_positions:
                 # Every row was NOOP - a feed that republished nothing changed.
                 # That is a successful merge that did no work, not a failure,
                 # and committing a snapshot describing nothing would be a lie
@@ -156,15 +160,20 @@ class MergeNode(BasePlanNode):
                     status=QueryStatus.SQL_SUCCESS,
                 )
                 return
-            self.connector.merge_commit(
-                self.relation_name,
-                self._file_entries,
-                delete_positions,
-                author=self._author,
-                operation=self.operation,
-                read_sources=self.read_sources,
-                produced_by=self.produced_by,
-            )
+            try:
+                self.connector.merge_commit(
+                    self.relation_name,
+                    file_entries,
+                    delete_positions,
+                    author=self._author,
+                    operation=self.operation,
+                    read_sources=self.read_sources,
+                    produced_by=self.produced_by,
+                )
+            except Exception:
+                # A refused commit leaves the outputs referenced by nothing.
+                self._stream.discard_outputs()
+                raise
             self.result = NonTabularResult(
                 record_count=self._acted_row_count(),
                 status=QueryStatus.SQL_SUCCESS,
@@ -212,8 +221,11 @@ class MergeNode(BasePlanNode):
         # substrate; `select` narrows to the target's own columns, dropping the
         # three control columns the sink has now consumed.
         rows = morsel.take(indices).select(morsel.column_names[:n_target])
-        for batch in self._batcher.push(rows):
-            self._write_batch(batch)
+        try:
+            self._stream.push(rows)
+        except Exception:
+            self._stream.abandon()
+            raise
 
     def _raise_split_error(self, int status):
         from opteryx.exceptions import InvalidInternalStateError
@@ -269,16 +281,3 @@ class MergeNode(BasePlanNode):
             ordinals = merge_retired_ordinals(deref(state.ptr), files[i])
             out[self.file_paths[files[i]]] = [ordinals[j] for j in range(ordinals.size())]
         return out
-
-    def _flush_pending(self):
-        """Write whatever the batcher still holds, as one file per batch.
-
-        References only until emit - one bulk concat per batch, never an
-        incremental concat per arrival (which re-copies the growing buffer
-        every time).
-        """
-        for batch in self._batcher.finish():
-            self._write_batch(batch)
-
-    def _write_batch(self, batch):
-        self._file_entries.append(self.connector.write_morsel(self.relation_name, batch))

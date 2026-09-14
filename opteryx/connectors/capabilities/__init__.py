@@ -3,18 +3,24 @@
 # See the License at http://www.apache.org/licenses/LICENSE-2.0
 # Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
+from opteryx.connectors.capabilities.aggregate_pushable import AggregatePushable
 from opteryx.connectors.capabilities.asynchronous import Asynchronous
 from opteryx.connectors.capabilities.diachronic import Diachronic
+from opteryx.connectors.capabilities.distinct_pushable import DistinctPushable
 from opteryx.connectors.capabilities.eidetic import Eidetic
 from opteryx.connectors.capabilities.limit_pushable import LimitPushable
 from opteryx.connectors.capabilities.predicate_pushable import PredicatePushable
+from opteryx.connectors.capabilities.topn_pushable import TopNPushable
 from opteryx.connectors.capabilities.writable import Writable
 
 __all__ = (
+    "AggregatePushable",
     "Asynchronous",
     "Diachronic",
+    "DistinctPushable",
     "Eidetic",
     "LimitPushable",
     "PredicatePushable",
+    "TopNPushable",
     "Writable",
 )

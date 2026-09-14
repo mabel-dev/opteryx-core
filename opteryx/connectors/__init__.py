@@ -41,9 +41,10 @@ question with a separate resolver - `set_workspace_settings_resolver` - read
 through `workspace_settings_connector`. The settings answer is always the
 opteryx catalog entry, whatever the data is bound to, and never needs a
 binding's stored credential. Workspace-scoped DDL (`ALTER WORKSPACE`, `DROP
-WORKSPACE`) asks the second question; everything else asks the first. Do not
-collapse them back into one call - see `set_workspace_settings_resolver` for
-what that cost last time.
+WORKSPACE`) asks the second question, and so do VIEWS - a view is catalog
+text, not storage, read through `view_store_connector`. Everything that
+creates or reads STORAGE asks the first. Do not collapse them back into one
+call - see `set_workspace_settings_resolver` for what that cost last time.
 
 Connector instances are cached per resolved key (the workspace/prefix, or
 "_default"/"_disk" for the shared fallbacks) and validated by a VERSION compare
@@ -194,6 +195,7 @@ __all__ = (
     "set_workspace_resolver",
     "set_workspace_settings_resolver",
     "workspace_settings_connector",
+    "view_store_connector",
     "Resolution",
     "TableType",
     # Legacy names (backward compatibility) - map to factories
@@ -320,11 +322,15 @@ def set_workspace_settings_resolver(resolver) -> None:
 def workspace_settings_connector(workspace_name: str, telemetry):
     """The connector that owns `workspace_name`'s settings and lifecycle.
 
-    For workspace-SCOPED statements only - `ALTER WORKSPACE`, `DROP
-    WORKSPACE`. Relation-scoped DDL keeps going through `connector_factory`,
-    and must: routing `CREATE TABLE` at a bound workspace's own metastore is
-    what makes that metastore refuse the write, which is what enforces the
-    rule that an externally-bound workspace never domiciles opteryx datasets.
+    For workspace-SCOPED statements - `ALTER WORKSPACE`, `DROP WORKSPACE` -
+    and, through `view_store_connector`, for VIEWS.
+
+    DDL that creates STORAGE keeps going through `connector_factory`, and
+    must: routing `CREATE TABLE` at a bound workspace's own metastore is what
+    makes that metastore refuse the write, which is what enforces the rule
+    that an externally-bound workspace never domiciles opteryx datasets. DDL
+    that creates catalog TEXT - a view - does not create storage and so is not
+    bound by that rule; see `view_store_connector` for the ruling.
 
     With no settings resolver installed this defers to `connector_factory`.
     That is not a fallback but the same answer arrived at cheaply: a
@@ -373,6 +379,46 @@ def workspace_settings_connector(workspace_name: str, telemetry):
         )
 
     return connector_factory(workspace_name, telemetry=telemetry)
+
+
+def view_store_connector(relation_name: str, telemetry):
+    """The connector that stores `relation_name`'s VIEW definition.
+
+    A view is SQL text. It domiciles no rows, so holding one in the opteryx
+    catalog entry for an externally-bound workspace does not make that
+    workspace domicile opteryx data - which is the whole of what the
+    "relation-scoped DDL goes through `connector_factory`" rule protects. The
+    line is therefore not relation-scoped vs workspace-scoped but:
+
+        DDL that creates STORAGE  -> connector_factory (the data binding)
+        DDL that creates catalog TEXT -> here (the opteryx catalog entry)
+
+    `CREATE TABLE`, `CTAS` and `INSERT` are unmoved and still refused by a
+    bound workspace's metastore.
+
+    Routed at the data binding instead, `CREATE VIEW aiven.public.v AS ...`
+    landed at a PostgreSQL server that we do not own: undroppable through our
+    own catalog's audit trail, `SHOW CREATE VIEW` answering with PostgreSQL's
+    normalised text rather than what the user typed, and a body that could
+    reference nothing outside that one database. `PostgresConnector` not being
+    Eidetic made that an AttributeError rather than a wrong answer, which is
+    the only reason it was ever visible.
+
+    With no settings resolver installed this is the SAME object
+    `connector_factory` returns, so a deployment without external bindings
+    sees no change at all.
+
+    Every view site - create, alter, drop, comment-on-view, `SHOW CREATE
+    VIEW`, and the resolver's view probe - must use this one accessor. A write
+    and a read that disagree about where views live lose the view.
+    """
+    workspace = relation_name.split(".", 1)[0]
+    if not _IDENTIFIER.match(workspace):
+        # Not a workspace-shaped name (a protocol path, a `$`-dataset). There
+        # is no catalog entry to hold a view for it; the data chain's answer is
+        # the only answer, and it will refuse the write on its own terms.
+        return connector_factory(relation_name, telemetry=telemetry)
+    return workspace_settings_connector(workspace, telemetry)
 
 
 def create_local_connector(**kwargs):

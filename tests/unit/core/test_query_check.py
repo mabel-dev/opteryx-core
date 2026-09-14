@@ -546,7 +546,12 @@ def test_resolve_relation_asks_the_catalog_once_per_ttl(monkeypatch):
             calls.append(relation)
             return ("dataset", f"handle-for-{relation}")
 
-    monkeypatch.setattr(views, "connector_factory", lambda relation, telemetry: _Connector())
+    # Both seams: the data binding and the view store are the same object for a
+    # workspace with no external binding, and resolve_relation compares them by
+    # identity to decide whether the store may answer with a dataset.
+    connector = _Connector()
+    monkeypatch.setattr(views, "connector_factory", lambda relation, telemetry: connector)
+    monkeypatch.setattr(views, "view_store_connector", lambda relation, telemetry: connector)
 
     cache = CatalogCache(ttl=60)
     for _ in range(5):
@@ -571,13 +576,17 @@ def test_resolve_relation_without_a_cache_asks_every_time():
             calls.append(relation)
             return ("dataset", "handle")
 
+    connector = _Connector()
     original = views.connector_factory
-    views.connector_factory = lambda relation, telemetry: _Connector()
+    original_store = views.view_store_connector
+    views.connector_factory = lambda relation, telemetry: connector
+    views.view_store_connector = lambda relation, telemetry: connector
     try:
         for _ in range(3):
             views.resolve_relation("space.planets", None)
     finally:
         views.connector_factory = original
+        views.view_store_connector = original_store
 
     assert len(calls) == 3
 

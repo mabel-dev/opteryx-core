@@ -139,14 +139,19 @@ class LimitPushdownStrategy(OptimizationStrategy):
         if targets and targets.isdisjoint({name for name in relation_names if name}):
             return None
 
-        if getattr(scan_node, "predicates", None):
+        connector = getattr(scan_node, "connector", None)
+        if getattr(scan_node, "predicates", None) and not (
+            connector and connector.supports_filtered_limit_pushdown
+        ):
             # A predicate has been pushed into this scan (predicate pushdown removes the
-            # Filter node from the plan, so it no longer acts as a barrier here). Limit
-            # pushdown must not apply on top of a predicate: the scan would cap rows read
-            # from source before filtering, changing which rows survive the LIMIT.
+            # Filter node from the plan, so it no longer acts as a barrier here). A LIMIT
+            # on top of it is only correct for a reader that counts the LIMIT against
+            # rows that SURVIVED the predicate — a SQL server running `WHERE ... LIMIT`
+            # in one statement, or the parquet reader whose decrement is on emitted
+            # rows. Any other reader would cap rows before filtering and change which
+            # rows survive, so the LIMIT stays above the scan.
             return False
 
-        connector = getattr(scan_node, "connector", None)
         if connector and connector.supports_limit_pushdown:
             current_limit = getattr(scan_node, "limit", None)
             scan_node.limit = (

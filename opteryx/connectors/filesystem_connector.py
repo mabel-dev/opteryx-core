@@ -11,7 +11,8 @@ from typing import Dict, Generator, Optional, Tuple
 
 from opteryx.connectors import TableType
 from opteryx.connectors.base.base_connector import BaseConnector, BaseTable
-from opteryx.connectors.capabilities import LimitPushable, PredicatePushable
+from opteryx.connectors.capabilities import LimitPushable, PredicatePushable, TopNPushable
+from opteryx.connectors.capabilities.topn_pushable import single_physical_column_topn
 from opteryx.exceptions import (
     InvalidInternalStateError,
     DataError,
@@ -54,7 +55,7 @@ _FOOTER_METADATA_CACHE: dict = {}
 _FOOTER_METADATA_CACHE_MAX = 256
 
 
-class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
+class FileSystemTable(BaseTable, PredicatePushable, LimitPushable, TopNPushable):
     """
     Transient table reader for filesystem-based datasets.
 
@@ -70,6 +71,15 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
     # only formats whose reader honors a pushed limit/predicate may accept one.
     supports_predicate_pushdown = True
     supports_limit_pushdown = True
+    # NOT filtered-limit pushable. ParquetReadNode's own decrement is on emitted
+    # (post-predicate) rows, but the scan is served by NativeParquetScanSource,
+    # whose `row_limit` counts rows as they are CLAIMED, before the reader-side
+    # predicate (native_parquet_scan_source.hpp, `row_limit`). Measured
+    # 2026-09-14: `WHERE followers > 100 LIMIT 5` returned 3 rows. Until the
+    # native source counts survivors, a LIMIT over a predicate stays above it.
+    supports_filtered_limit_pushdown = False
+    # ParquetReadNode consumes the single-key top-N spec (`topn_sort_name`).
+    supports_topn_pushdown = True
     supports_async = True
 
     # Until discovery runs, assume parquet (the discovery default for an empty
@@ -174,6 +184,9 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
             self.dataset = self.dataset.replace(".", OS_SEP)
 
         self._stats_lock = Lock()
+
+    def can_push_topn(self, order_by) -> bool:
+        return single_physical_column_topn(order_by)
 
     def can_push(self, operator, types: set = None) -> bool:
         """Format-aware predicate gate.
@@ -585,6 +598,8 @@ class FileSystemTable(BaseTable, PredicatePushable, LimitPushable):
         # (rugo tuples, gated by can_push below) but not limits.
         self.dataset_file_format = dataset_fmt
         self.supports_limit_pushdown = dataset_fmt == PARQUET
+        # Only ParquetReadNode reads the top-N stamp; skene/jsonl/csv ignore it.
+        self.supports_topn_pushdown = dataset_fmt == PARQUET
         if dataset_fmt == SKENE:
             # Per-instance, alongside the limit gate above and for the same reason:
             # one class fronts readers with genuinely different capabilities, and
@@ -974,6 +989,7 @@ class FileSystemConnector(BaseConnector):
     # Declare capabilities of FileSystemTable readers
     supports_predicate_pushdown = True
     supports_limit_pushdown = True
+    supports_topn_pushdown = True
 
     # Filesystem paths are case-sensitive on Linux/POSIX; the binder's generic
     # case-folding (`node.relation.lower()`) would otherwise silently point

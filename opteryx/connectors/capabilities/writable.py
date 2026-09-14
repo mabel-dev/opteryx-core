@@ -100,23 +100,52 @@ class Writable:
         """
         raise NotImplementedError
 
-    def write_morsel(self, relation_name: str, morsel) -> "FileEntry":
-        """Write a single morsel as one data file, wherever this connector's
-        relations live, and return a FileEntry describing it.
+    def open_data_file_writer(
+        self,
+        relation_name: str,
+        sorted_by: Optional[str] = None,
+        sorted_descending: bool = False,
+        write_profile: str = "fast",
+    ):
+        """Open ONE new data file for `relation_name`, to be written a row
+        group at a time and registered by a later commit.
 
-        Called once per morsel, before the relation is created/replaced in
-        the catalog (see `create_relation`/`replace_relation`) - a connector's
-        write target for this must not depend on the relation already being
-        registered there.
+        Called before the relation is created/replaced in the store (see
+        `create_relation`/`replace_relation`, deferred to EOS for atomicity) -
+        a connector's write target for this must not depend on the relation
+        already being registered there.
 
-        Args:
-            relation_name: Fully-qualified relation name
-            morsel: Draken Morsel to write
+        `write_profile` is "fast" (ingest and CTAS: the caller is waiting on
+        the write) or "storage" (a rewrite that is read many times, so it may
+        pay more at write time - OPTIMIZE).
 
-        Returns:
-            FileEntry describing the written file
+        The handle returned has:
+            write_row_group(morsel)      encode + stream one row group
+            uncompressed_size_in_bytes   running total, in the manifest's unit,
+                                         so a caller can roll files at a target
+            close() -> FileEntry         finish the file; the entry carries the
+                                         store's own manifest row in
+                                         `catalog_entry`, so the commit does
+                                         not read the file back
+            abort()                      discard the file; no object remains
+
+        `sorted_by` is the caller's claim that every row group it will write is
+        ordered on that column - written into the file for readers to trust,
+        never verified here. Pass it only when the rows really are sorted.
+
+        This is the ONLY way a sink writes data: the per-morsel `write_morsel`
+        it replaced wrote one file per call, so a stream of 262,144-row batches
+        through it was a stream of 262,144-row files - the shape OPTIMIZE
+        exists to remove. See operators/data_file_stream.
         """
-        raise NotImplementedError
+        raise NotImplementedError(f"{self.__class__.__name__} cannot stream data files")
+
+    def delete_data_file(self, relation_name: str, file_path: str) -> None:
+        """Remove one data file a sink of THIS session wrote and could not
+        commit - a refused commit or a failure mid-stream. Takes a path the
+        caller just wrote and removes it; deliberately not a general delete.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} cannot remove data files")
 
     def insert(
         self,

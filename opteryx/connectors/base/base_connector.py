@@ -38,6 +38,13 @@ class BaseConnector:
     supports_version_travel = False  # VERSION AS OF <snapshot id / PREVIOUS>
     supports_predicate_pushdown = False  # Filter pushdown to storage
     supports_limit_pushdown = False  # Limit pushdown to storage
+    # LIMIT pushed on top of a pushed predicate. Only a reader that counts the LIMIT
+    # against rows that SURVIVED the pushed predicate may set this; a reader that caps
+    # rows before filtering returns the wrong rows.
+    supports_filtered_limit_pushdown = False
+    supports_topn_pushdown = False  # ORDER BY ... LIMIT n honoured by the reader (see TopNPushable)
+    supports_aggregate_pushdown = False  # one read = the complete aggregate (see AggregatePushable)
+    supports_distinct_pushdown = False  # one read = deduplicated rows (see DistinctPushable)
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
     requires_execution_context = False  # table_engine() needs the caller's ExecutionContext (e.g. for row-level permission filtering)
@@ -126,6 +133,13 @@ class BaseTable:
     supports_version_travel = False  # VERSION AS OF <snapshot id / PREVIOUS>
     supports_predicate_pushdown = False  # Filter pushdown to storage
     supports_limit_pushdown = False  # Limit pushdown to storage
+    # LIMIT pushed on top of a pushed predicate. Only a reader that counts the LIMIT
+    # against rows that SURVIVED the pushed predicate may set this; a reader that caps
+    # rows before filtering returns the wrong rows.
+    supports_filtered_limit_pushdown = False
+    supports_topn_pushdown = False  # ORDER BY ... LIMIT n honoured by the reader (see TopNPushable)
+    supports_aggregate_pushdown = False  # one read = the complete aggregate (see AggregatePushable)
+    supports_distinct_pushdown = False  # one read = deduplicated rows (see DistinctPushable)
     supports_statistics = False  # Statistics gathering
     supports_async = False  # Asynchronous reads
 

@@ -20,6 +20,7 @@ from typing import Optional
 from typing import Tuple
 
 from opteryx.connectors import connector_factory
+from opteryx.connectors import view_store_connector
 from opteryx.connectors.capabilities.eidetic import ViewDefinition
 from opteryx.exceptions import DatasetNotFoundError
 from opteryx.utils import lru_cache_with_expiry
@@ -50,6 +51,15 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
     unchanged. Non-eidetic connectors (e.g. local filesystem) never look up
     views, so they return (None, None) and bind on the normal path.
 
+    A view lives in the workspace's VIEW STORE, which for an externally-bound
+    workspace is NOT the connector serving its data. When the two differ the
+    store is probed for a view and only a view: the data answer is the data
+    binding's to give, and a dataset document in the catalog entry of a bound
+    workspace would be one that workspace cannot domicile. That probe is a
+    catalog round trip a bound workspace did not pay before - accepted
+    (architect, 2026-09-14) so that a view means the same thing in every
+    workspace, rather than existing only where the catalog also serves data.
+
     `catalog_cache` is an OPT-IN, caller-owned `CatalogCache`. It caches the round
     trip above and nothing else: what goes in it is the raw `(kind, object)` the
     connector answered with, BEFORE a view is turned into a plan. Caching the plan
@@ -65,12 +75,20 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
 
     _cat0 = _cat_time.monotonic_ns()
     try:
-        connector = connector_factory(relation, telemetry)
-        if not connector.eidetic:
+        store = view_store_connector(relation, telemetry)
+        if not store.eidetic:
+            # Nowhere holds a view for this name (local filesystem, a virtual
+            # dataset): bind it on the normal path, no round trip.
             return None, None
-        resolver = getattr(connector, "get_relation", None)
+
+        # For a workspace with no external binding the store ALSO serves the
+        # data, and may answer with a dataset as well as a view. Where they
+        # differ, the data answer is the data binding's to give.
+        views_only = store is not connector_factory(relation, telemetry)
+
+        resolver = getattr(store, "get_relation", None)
         if resolver is None:
-            definition = _get_view_definition(relation, telemetry)
+            definition = _get_view_definition(relation, telemetry, store)
             return ("view", _view_plan_from_definition(definition)) if definition else (None, None)
         cached = None if catalog_cache is None else catalog_cache.get(relation)
         if cached is None:
@@ -80,7 +98,7 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
         kind, obj = cached
         if kind == "view":
             return "view", _view_plan_from_definition(obj)
-        if kind == "dataset":
+        if kind == "dataset" and not views_only:
             return "dataset", obj
         return None, None
     finally:
@@ -91,14 +109,18 @@ def resolve_relation(relation: str, telemetry, catalog_cache=None):
             telemetry.time_binding_catalog += _cat_time.monotonic_ns() - _cat0
 
 
-def _get_view_definition(view_name: str, telemetry) -> Optional[ViewDefinition]:
+def _get_view_definition(view_name: str, telemetry, store=None) -> Optional[ViewDefinition]:
     """Return the view definition for a view, or None if the name is not a view.
+
+    `store` is the view store the caller already resolved; resolved here when a
+    caller has none. It is NOT `connector_factory`'s answer for an externally
+    bound workspace - see `view_store_connector`.
 
     Only "this is not a view" is swallowed. A catalog that is unreachable, or a view
     whose definition is corrupt, raises — degrading those into None reports the relation
     as a missing dataset, which sends the user hunting for the wrong problem.
     """
-    connector = connector_factory(view_name, telemetry)
+    connector = store if store is not None else view_store_connector(view_name, telemetry)
     if not connector.eidetic:
         return None
     try:

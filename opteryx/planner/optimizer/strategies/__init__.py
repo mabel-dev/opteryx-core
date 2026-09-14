@@ -9,7 +9,9 @@ from .cross_join_chain_reorder import CrossJoinChainReorderStrategy
 from .cross_join_filter_pushdown import CrossJoinFilterPushdownStrategy
 from .disjunction_simplification import DisjunctionSimplificationStrategy
 from .disjunctive_domain_pushdown import DisjunctiveDomainPushdownStrategy
+from .aggregate_scan_pushdown import AggregateScanPushdownStrategy
 from .distinct_pushdown import DistinctPushdownStrategy
+from .distinct_scan_pushdown import DistinctScanPushdownStrategy
 from .hash_map_variant import HashMapVariantStrategy
 from .join_build_shape import JoinBuildShapeStrategy
 from .join_condition_hoist import JoinConditionHoistStrategy
@@ -35,6 +37,7 @@ from .projection_pushdown import ProjectionPushdownStrategy
 from .length_only_columns import LengthOnlyColumnStrategy
 from .redundant_cast import RedundantCastEliminationStrategy
 from .redundant_operators import RedundantOperationsStrategy
+from .redundant_sort import RedundantSortEliminationStrategy
 from .split_conjunctive_predicates import SplitConjunctivePredicatesStrategy
 from .statistics_only_response import StatisticsOnlyResponseStrategy
 from .timestamp_cast_sink import TimestampCastSinkStrategy
@@ -54,7 +57,9 @@ __all__ = [
     "CrossJoinFilterPushdownStrategy",
     "DisjunctionSimplificationStrategy",
     "DisjunctiveDomainPushdownStrategy",
+    "AggregateScanPushdownStrategy",
     "DistinctPushdownStrategy",
+    "DistinctScanPushdownStrategy",
     "HashMapVariantStrategy",
     "JoinBuildShapeStrategy",
     "JoinConditionHoistStrategy",
@@ -79,6 +84,7 @@ __all__ = [
     "LengthOnlyColumnStrategy",
     "RedundantCastEliminationStrategy",
     "RedundantOperationsStrategy",
+    "RedundantSortEliminationStrategy",
     "SplitConjunctivePredicatesStrategy",
     "StatisticsOnlyResponseStrategy",
     "TimestampCastSinkStrategy",

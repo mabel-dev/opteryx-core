@@ -274,7 +274,22 @@ def render_scan(node: LogicalPlanNode) -> str:
     )
     hints = f" WITH({','.join(node.hints)})" if node.hints else ""
     limit = f" LIMIT {node.limit}" if node.limit else ""
-    return f"{io_async}SCAN{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{limit}"
+    # Shapes absorbed into the scan by the remote-pushdown strategies. Rendered
+    # here so a plain EXPLAIN shows what the reader was asked to do, not only
+    # EXPLAIN ANALYZE's `remote_sql`.
+    pushed = ""
+    if node.pushed_aggregates is not None:
+        aggs = ", ".join(format_expression(a) for a in node.pushed_aggregates)
+        groups = ", ".join(format_expression(g) for g in (node.pushed_groups or []))
+        pushed += f" AGGREGATE [{aggs}]" + (f" GROUP BY [{groups}]" if groups else "")
+    if node.pushed_distinct:
+        pushed += " DISTINCT"
+    if node.topn_order_by and node.topn_limit:
+        order = ", ".join(
+            f"{sc.name}{'' if ascending else ' DESC'}" for sc, ascending in node.topn_order_by
+        )
+        pushed += f" ORDER BY [{order}] LIMIT {node.topn_limit}"
+    return f"{io_async}SCAN{connector}({node.relation}{alias}{date_range}{hints}){columns}{predicates}{pushed}{limit}"
 
 
 @register_render(LogicalPlanStepType.Set)

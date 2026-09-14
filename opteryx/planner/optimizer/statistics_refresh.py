@@ -707,12 +707,39 @@ def _scan_stats(
             # predicate makes the output count an estimate even at s == 1.0.
             base = base.as_estimate()
 
+    # An aggregate or DISTINCT absorbed INTO the scan (AggregateScanPushdown /
+    # DistinctScanPushdown remove the local node, so nothing above is left to
+    # apply _aggregate_stats / _distinct_stats) changes what this scan EMITS:
+    # one row for an ungrouped aggregate, one row per group otherwise. Without
+    # this the join above a pushed COUNT(*) is costed against the base table.
+    pushed_aggregates = getattr(node, "pushed_aggregates", None)
+    if pushed_aggregates is not None or getattr(node, "pushed_distinct", False):
+        keys = (
+            getattr(node, "pushed_groups", None)
+            if pushed_aggregates is not None
+            else getattr(node, "columns", None)
+        ) or []
+        key_ids = [k for k in (_column_identity(g) for g in keys) if k]
+        if not key_ids:
+            return _empty_stats(row_count=1, metric=True)
+        ndvs = [
+            base.columns[key].distinct_count if key in base.columns else None
+            for key in key_ids
+        ]
+        out_rows = estimate_group_by_cardinality(base.row_count, ndvs)
+        base = RelationStatistics(
+            columns=_cap_ndvs(base.columns, out_rows),
+            row_count_estimate=out_rows,
+            base_row_count=base.domain_row_count,
+        )
+
     # A LIMIT pushed INTO the scan (LimitPushdownStrategy removes the Limit
     # node once `connector.supports_limit_pushdown`, so there is no Limit node
     # left for _limit_stats to see) is still a hard cap on the rows this scan
-    # emits. Applied last: pushdown refuses to add a limit to a scan that
-    # already carries predicates, but the reverse order can happen, and
-    # min(filtered, limit) is the count either way.
+    # emits. Applied last, after the predicate narrowing above: a LIMIT may
+    # now sit on a scan that already carries predicates
+    # (supports_filtered_limit_pushdown), and min(filtered, limit) is the
+    # count either way.
     scan_limit = getattr(node, "limit", None)
     if scan_limit is not None and int(scan_limit) >= 0:
         capped_rows = min(int(base.row_count), int(scan_limit))

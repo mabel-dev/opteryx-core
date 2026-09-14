@@ -325,11 +325,210 @@ def test_table_declares_its_physical_reader_and_capabilities():
     assert table.scan_reader == "Postgres Reader"
     assert table.supports_predicate_pushdown is True
     assert table.supports_limit_pushdown is True
+    assert table.supports_filtered_limit_pushdown is True
+    assert table.supports_topn_pushdown is True
+    assert table.supports_aggregate_pushdown is True
+    assert table.supports_distinct_pushdown is True
     assert table.supports_diachronic is False
     assert table.supports_version_travel is False
     assert table.PUSHABLE_SCALAR_FUNCTIONS is False
     with pytest.raises(InvalidInternalStateError):
         table.read_dataset()
+
+
+# ---- remote pushdown shapes: top-N, aggregate, DISTINCT ---------------------------
+
+
+def _agg(function, operand, result_type, name="agg", distinct=False):
+    node = _Node(NodeType.AGGREGATOR, value=function)
+    node.parameters = [operand]
+    node.duplicate_treatment = "Distinct" if distinct else None
+    node.schema_column = SchemaColumn(
+        name=name, column_type=result_type, identity=mint_column_identity("planets", name)
+    )
+    return node
+
+
+def _wild():
+    return _Node(NodeType.WILDCARD)
+
+
+def _key(name, column_type):
+    """A stamped top-N key: the scan carries SchemaColumns, not expression nodes."""
+    return _typed_col(name, column_type).schema_column
+
+
+def _typed_col(name, column_type):
+    return _Node(
+        NodeType.IDENTIFIER,
+        value=name,
+        schema_column=SchemaColumn(
+            name=name, column_type=column_type, identity=mint_column_identity("planets", name)
+        ),
+    )
+
+
+def test_emit_describes_the_plain_projection():
+    statement = build_scan_statement(_table(), _projection("id", "mass"), None, None)
+    assert [(e.oid, e.physical) for e in statement.emit] == [
+        (23, _lt.INT64.physical.value),
+        (1700, _lt.INT64.physical.value),  # the fixture types every column INT64
+    ]
+    assert [e.precision for e in statement.emit] == [0, 0]
+
+
+def test_topn_renders_explicit_null_order_and_c_collation_for_text():
+    order_by = [(_key("mass", _lt.INT64), False), (_key("name", _lt.VARCHAR), True)]
+    statement = build_scan_statement(
+        _table(), _projection("id"), None, None, order_by=order_by, topn_limit=7
+    )
+    assert statement.sql == (
+        'SELECT "id" FROM "public"."planets" '
+        'ORDER BY "mass" DESC NULLS LAST, "name" COLLATE "C" ASC NULLS FIRST LIMIT 7'
+    )
+
+
+def test_topn_after_predicates_is_one_statement():
+    statement = build_scan_statement(
+        _table(), _projection("id"), [_cmp("Eq", _col("id"), _lit(1))], None,
+        order_by=[(_key("id", _lt.INT64), True)], topn_limit=3,
+    )
+    assert statement.sql.endswith('WHERE ("id" = $1) ORDER BY "id" ASC NULLS FIRST LIMIT 3')
+
+
+def test_topn_and_limit_together_is_an_internal_error():
+    with pytest.raises(InvalidInternalStateError):
+        build_scan_statement(
+            _table(), _projection("id"), None, 5,
+            order_by=[(_key("id", _lt.INT64), True)], topn_limit=3,
+        )
+
+
+def test_order_by_without_a_limit_is_an_internal_error():
+    with pytest.raises(InvalidInternalStateError):
+        build_scan_statement(
+            _table(), _projection("id"), None, None, order_by=[(_key("id", _lt.INT64), True)]
+        )
+
+
+def test_can_push_topn_requires_own_pushable_columns():
+    table = _table()
+    assert table.can_push_topn([(_typed_col("id", _lt.INT64), True)]) is True
+    assert table.can_push_topn([(_typed_col("id", _lt.INT64), True), (_typed_col("name", _lt.VARCHAR), False)]) is True
+    assert table.can_push_topn([(_typed_col("nope", _lt.INT64), True)]) is False
+    assert table.can_push_topn([(_lit(1), True)]) is False
+    assert table.can_push_topn([]) is False
+
+
+def test_grouped_aggregate_statement_and_emit():
+    groups = [_typed_col("id", _lt.INT64)]
+    aggregates = [
+        _agg("COUNT", _wild(), _lt.INT64, "count_star"),
+        _agg("SUM", _typed_col("mass", _lt.DECIMAL(6, 1)), _lt.DECIMAL(6, 1), "sum_mass"),
+        _agg("MIN", _typed_col("name", _lt.VARCHAR), _lt.VARCHAR, "min_name"),
+        _agg("AVG", _typed_col("id", _lt.INT32), _lt.FLOAT64, "avg_id"),
+    ]
+    table = _table()
+    assert table.can_push_aggregate(groups, aggregates) is True
+    statement = build_scan_statement(
+        table, [], [_cmp("Gt", _col("mass"), _lit(1))], None, groups=groups, aggregates=aggregates
+    )
+    assert statement.sql == (
+        'SELECT "id", count(*), sum("mass"), min("name" COLLATE "C")::text, avg("id")::float8 '
+        'FROM "public"."planets" WHERE ("mass" > $1) GROUP BY "id"'
+    )
+    assert statement.zero_columns is False
+    assert [e.oid for e in statement.emit] == [23, 20, 1700, 25, 701]
+    assert [e.identity for e in statement.emit] == [
+        groups[0].schema_column.identity,
+        *(a.schema_column.identity for a in aggregates),
+    ]
+    sum_emit = statement.emit[2]
+    assert (sum_emit.precision, sum_emit.scale) == (6, 1)
+
+
+def test_ungrouped_count_star_is_a_single_column_statement():
+    aggregates = [_agg("COUNT", _wild(), _lt.INT64)]
+    statement = build_scan_statement(_table(), [], None, None, groups=[], aggregates=aggregates)
+    assert statement.sql == 'SELECT count(*) FROM "public"."planets"'
+    assert statement.zero_columns is False
+    assert statement.emit[0].oid == 20
+
+
+def test_sum_over_integers_is_pinned_to_int8():
+    aggregates = [_agg("SUM", _typed_col("id", _lt.INT32), _lt.INT64)]
+    statement = build_scan_statement(_table(), [], None, None, groups=[], aggregates=aggregates)
+    assert statement.sql == 'SELECT sum("id")::int8 FROM "public"."planets"'
+
+
+def test_count_distinct_and_count_column():
+    aggregates = [
+        _agg("COUNT", _typed_col("name", _lt.VARCHAR), _lt.INT64, "c", distinct=True),
+        _agg("COUNT", _typed_col("name", _lt.VARCHAR), _lt.INT64, "d"),
+    ]
+    statement = build_scan_statement(_table(), [], None, None, groups=[], aggregates=aggregates)
+    assert statement.sql == 'SELECT count(DISTINCT "name"), count("name") FROM "public"."planets"'
+
+
+@pytest.mark.parametrize(
+    "aggregate",
+    [
+        _agg("SUM", _typed_col("name", _lt.VARCHAR), _lt.VARCHAR),  # no server overload
+        _agg("SUM", _typed_col("id", _lt.BOOLEAN), _lt.BOOLEAN),
+        _agg("MIN", _typed_col("id", _lt.BOOLEAN), _lt.BOOLEAN),
+        _agg("SUM", _typed_col("id", _lt.INT32), _lt.INT32),  # bound type is not what the wire returns
+        _agg("AVG", _typed_col("id", _lt.INT32), _lt.INT32),
+        _agg("SUM", _typed_col("id", _lt.INT64), _lt.INT64, distinct=True),  # SUM(DISTINCT)
+        _agg("COUNT", _wild(), _lt.INT64, distinct=True),  # COUNT(DISTINCT *)
+        _agg("STDDEV", _typed_col("id", _lt.INT64), _lt.FLOAT64),
+        _agg("ANY_VALUE", _typed_col("id", _lt.INT64), _lt.INT64),
+        _agg("MEDIAN", _typed_col("id", _lt.INT64), _lt.FLOAT64),
+        _agg("MAX", _typed_col("nope", _lt.INT64), _lt.INT64),  # not this relation's column
+        _agg("MAX", _lit(1), _lt.INT64),  # not a column at all
+    ],
+)
+def test_aggregates_without_an_exact_remote_spelling_are_declined(aggregate):
+    table = _table()
+    assert table.can_push_aggregate([], [aggregate]) is False
+    with pytest.raises(InvalidInternalStateError):
+        build_scan_statement(table, [], None, None, groups=[], aggregates=[aggregate])
+
+
+def test_text_min_max_over_char_n_is_declined():
+    table = _table()
+    table._meta["padded"] = ("padded", 1042, 14)
+    padded = _typed_col("padded", _lt.VARCHAR)
+    assert table.can_push_aggregate([], [_agg("MAX", padded, _lt.VARCHAR)]) is False
+    # ...but the column is still a fine DISTINCT / GROUP BY key and top-N key.
+    assert table.can_push_distinct([padded]) is True
+    assert table.can_push_topn([(padded, True)]) is True
+
+
+def test_group_key_must_be_an_own_column():
+    table = _table()
+    aggregates = [_agg("COUNT", _wild(), _lt.INT64)]
+    assert table.can_push_aggregate([_typed_col("nope", _lt.INT64)], aggregates) is False
+    assert table.can_push_aggregate([_lit(1)], aggregates) is False
+
+
+def test_distinct_statement():
+    table = _table()
+    columns = [_typed_col("id", _lt.INT64), _typed_col("name", _lt.VARCHAR)]
+    assert table.can_push_distinct(columns) is True
+    assert table.can_push_distinct([]) is False
+    statement = build_scan_statement(
+        table, columns, [_cmp("Eq", _col("id"), _lit(1))], None, distinct=True
+    )
+    assert statement.sql == 'SELECT DISTINCT "id", "name" FROM "public"."planets" WHERE ("id" = $1)'
+    assert [e.oid for e in statement.emit] == [23, 25]
+
+
+def test_distinct_and_aggregate_together_is_an_internal_error():
+    with pytest.raises(InvalidInternalStateError):
+        build_scan_statement(
+            _table(), _projection("id"), None, None,
+            groups=[], aggregates=[_agg("COUNT", _wild(), _lt.INT64)], distinct=True,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

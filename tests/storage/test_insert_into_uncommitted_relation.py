@@ -88,6 +88,41 @@ class _UncommittedCatalog:
         return _UncommittedDataset(identifier)
 
 
+class _StreamedDataFile:
+    """The same primitive the real connector uses, into memory rather than
+    object storage - so what the test reads back is what would be stored."""
+
+    def __init__(self, path, files_written):
+        from rugo.parquet import open_parquet_writer
+
+        self.path = path
+        self._files_written = files_written
+        self._buffer = bytearray()
+        self._writer = open_parquet_writer(self._buffer.extend, compression="zstd")
+        self.rows = 0
+        self.uncompressed_size_in_bytes = 0
+
+    def write_row_group(self, morsel):
+        self._writer.write_row_group(morsel)
+        self.rows += len(morsel)
+        self.uncompressed_size_in_bytes += morsel.nbytes
+
+    def close(self):
+        self._writer.close()
+        data = bytes(self._buffer)
+        self._files_written.append(data)
+        return FileEntry(
+            file_path=self.path,
+            file_format="PARQUET",
+            record_count=self.rows,
+            file_size_in_bytes=len(data),
+            catalog_entry={"file_path": self.path, "record_count": self.rows},
+        )
+
+    def abort(self):
+        self._writer = None
+
+
 class _UncommittedConnector(BaseConnector, Writable):
     """Catalog-shaped Writable connector over the snapshot-less dataset above.
 
@@ -114,18 +149,11 @@ class _UncommittedConnector(BaseConnector, Writable):
             telemetry=kwargs.get("telemetry"),
         )
 
-    def write_morsel(self, relation_name, morsel):
-        # The same primitive the real connector uses, into memory rather than
-        # object storage - so what the test reads back is what would be stored.
-        from rugo.parquet import write_parquet
-
-        data = write_parquet(morsel, compression="zstd")
-        _UncommittedConnector.files_written.append(data)
-        return FileEntry(
-            file_path=f"memory://{relation_name}/{len(_UncommittedConnector.files_written)}",
-            file_format="PARQUET",
-            record_count=len(morsel),
-            file_size_in_bytes=len(data),
+    def open_data_file_writer(self, relation_name, sorted_by=None, sorted_descending=False,
+                              write_profile="fast"):
+        return _StreamedDataFile(
+            f"memory://{relation_name}/{len(_UncommittedConnector.files_written) + 1}",
+            _UncommittedConnector.files_written,
         )
 
     def insert(self, relation_name, file_entries, author=None, commit_message=None, **kwargs):

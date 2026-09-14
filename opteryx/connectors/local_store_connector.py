@@ -1084,8 +1084,14 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
             telemetry=telemetry,
         )
 
-    def write_morsel(self, relation_name: str, morsel) -> FileEntry:
-        """Write a morsel as a parquet file into the relation's directory.
+    def open_data_file_writer(
+        self,
+        relation_name: str,
+        sorted_by: Optional[str] = None,
+        sorted_descending: bool = False,
+        write_profile: str = "fast",
+    ):
+        """Open one streaming parquet file in the relation's directory.
 
         Creates the directory if needed - this runs before create_relation/
         replace_relation (deferred to EOS for atomicity), so the relation's
@@ -1094,11 +1100,20 @@ class LocalStoreConnector(Eidetic, Writable, BaseConnector):
         relation_exists() and everything else, so this doesn't compromise
         atomicity - only a dataset.json write makes a relation "exist".
         """
-        from opteryx.connectors.parquet_io.parquet_writer import write_morsel as _write_morsel
+        from opteryx.connectors.parquet_io.parquet_writer import open_data_file_writer
 
         relation_dir = self._relation_dir(relation_name)
         os.makedirs(relation_dir, exist_ok=True)
-        return _write_morsel(morsel, relation_dir)
+        return open_data_file_writer(
+            relation_dir,
+            sorted_by=sorted_by,
+            sorted_descending=sorted_descending,
+            write_profile=write_profile,
+        )
+
+    def delete_data_file(self, relation_name: str, file_path: str) -> None:
+        """Remove one data file a sink of this session wrote and could not commit."""
+        os.remove(os.path.join(self._relation_dir(relation_name), file_path))
 
     def insert(
         self,

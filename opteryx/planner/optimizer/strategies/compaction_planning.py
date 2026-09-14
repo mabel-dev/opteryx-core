@@ -149,6 +149,12 @@ class CompactionPlanningStrategy(OptimizationStrategy):
 
             sink.retired_files = sorted(chosen)
             sink.baseline_snapshot_id = getattr(scan.connector, "snapshot_id", None)
+            # The ordering claim the sink writes into its output files. Only a
+            # sort-aware plan has one: its rows arrive through the Order node,
+            # so every row group is ordered on the primary key. A brute plan's
+            # rows arrive in whatever order the scan produced them, and
+            # claiming otherwise would hand readers a false hint.
+            sink.sorted_by = sort_column if selected.mode == "sort-aware" else None
             plan[nid] = sink
 
             if selected.mode == "brute":

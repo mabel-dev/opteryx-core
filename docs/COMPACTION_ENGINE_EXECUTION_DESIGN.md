@@ -365,6 +365,62 @@ step type, its physical mapping, its binder visitor, the operator action, and
 `Writable.optimize_relation` with its connector override. D-8 said we do not have
 two of them.
 
+## 6.3 Output sizing (2026-09-14)
+
+The 6.2 sink was WRONG in one respect, and production showed it: it batched to
+262,144 rows and called `write_morsel` per batch, and `write_morsel` writes one
+file per call. Every output file was one 262,144-row row group - below the
+512 MB sub-floor - so rule A selected them again the next night.
+`opteryx.test.pypi`'s compaction snapshot read "Compaction: 43 files -> 43
+files"; 42 files of exactly 262,144 rows sat in its manifest. A pass rewrote the
+same bytes into the same shape, nightly, converging on nothing.
+
+**Ratified: files are streamed, ~4 GB each, 262,144-row row groups.**
+
+| piece | where |
+|---|---|
+| the sink streams each batch as one row group and rolls files at `TARGET_SIZE_BYTES` (same unit selection measures in) | `compaction_commit.pyx` |
+| a streaming writer per file: rugo `open_parquet_writer` over the catalog's output stream, statistics folded in per row group | `Dataset.open_data_file_writer` / `DataFileWriter` (opteryx-catalog) |
+| the connector capability the sink calls | `Writable.open_data_file_writer`, `OpteryxConnector` |
+| GCS output streams: resumable upload in 32 MiB chunks once an object passes one chunk; smaller objects keep the single POST | `iops/gcs.py` `_GcsOutputStream` |
+| the commit takes the entries the writer built and never reads an output back | `Dataset.compaction_commit(entries=...)`, `FileEntry.catalog_entry` |
+| the sort-aware plan's primary key is written as the row groups' `sorted_by` claim | `CompactionPlanningStrategy` stamps `sink.sorted_by` |
+
+**Every writing sink streams (2026-09-14, same day).** INSERT, CTAS and MERGE
+wrote through the same per-batch `write_morsel` and manufactured the 262,144-row
+files OPTIMIZE then rewrote (gdelt_events: 11 of 21 files; github.events: 55 of
+193). The three sinks now share ONE `DataFileStream`
+(`operators/data_file_stream`): batches become row groups of a streaming file
+that rolls at `TARGET_SIZE_BYTES`; `write_morsel` is gone from the `Writable`
+contract and both connectors. INSERT/CTAS/MERGE write with the "fast" profile
+and no sort claim; OPTIMIZE writes "storage" with the sort-aware plan's key.
+`add_files`, `truncate_and_add_files` and `merge_commit` take `entries=` as
+`compaction_commit` does, so none of the four commits reads an output back. A
+refused commit or a failure mid-stream now removes the outputs for every sink,
+not only OPTIMIZE. The local store's writer folds INT64/FLOAT64 bounds per row
+group; its old single-row-group BOOL/UTF8 bounds are gone (no native kernel).
+
+Two things worth recording.
+
+**The commit's read-back is gone.** `compaction_commit(files=...)` downloaded
+every output and ran the full statistics decode on it - a third pass over every
+byte the pass wrote, and at 4 GB files a 4 GB `bytes` in one process. The same
+per-column kernels now run over each row group as it is written
+(`ParquetManifestEntryAccumulator`), and the bytes path runs through the same
+accumulator so there is one implementation. One statistic cannot be merged
+exactly across row groups without holding rows: the equi-width histogram needs
+the file-wide range before bucketing. The streaming writer buckets each row
+group at 256 fine bins over its own range and redistributes into the 32
+file-wide bins at close - totals, bounds and BOOL counts stay exact, bin
+placement can move by at most 1/256 of a row group's range. The bytes path
+keeps the exact form (it holds the file anyway), so its output is unchanged.
+
+**Deployment coupling.** The engine calls the four commits with `entries=` and
+`Dataset.open_data_file_writer`, which only the catalog at or after this change
+has. On an older catalog EVERY write statement (INSERT, CTAS, MERGE, OPTIMIZE)
+fails with a TypeError at commit - loudly, after the outputs are written and
+then removed by the sink's cleanup. Ship the catalog first.
+
 ### Still outstanding
 
 - `DatasetCompactor` is still in opteryx-catalog. Deleting it must land together
@@ -373,6 +429,17 @@ two of them.
 - No `maintenance_policy` reader, so the per-dataset delete-debt threshold
   override is ignored and every dataset gets the default.
 - The container change to 16 GiB and the sort peak-multiplier measurement (D-14).
+  Reading the sink: `SortSink.finalize` holds every input morsel while
+  `sort_morsels` gathers every output chunk, so input + one sorted copy is the
+  floor - 2x, before the batcher's combine and the encoded bytes. 1.62x is not
+  reachable with that shape; a merge over the already-sorted input files would
+  be, and is a separate decision.
+- The sort emits 131,072-row chunks and the batcher combines pairs into
+  262,144-row row groups: one full copy of every row that a 262,144-row sort
+  chunk for compaction plans would remove (`engine.hpp` hard-codes 131072).
+- Bloom filters are written for every eligible column but the reader's probe
+  is gated to local paths (`pool_reader.pyx` `_is_local_path`), so on GCS the
+  build is write-side cost with no consumer.
 
 ## 7. Failure and cleanup
 

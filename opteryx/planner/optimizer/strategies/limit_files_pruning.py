@@ -56,13 +56,15 @@ class LimitFilesPruningStrategy(OptimizationStrategy):
         """Visitor method - process each node."""
         if node.node_type == LogicalPlanStepType.Scan and node.limit is not None:
             if node.predicates:
-                # We only optimize when there are no filters.
-                # `node.predicates` covers only predicates the connector ACCEPTED,
-                # but a DECLINED one cannot reach here either: LimitPushdownStrategy
-                # refuses to push a LIMIT past a Filter node, so `node.limit` above
-                # is None whenever one survives. Verified 2026-08-21 on a declined
-                # disjunction. Same situation, and same "do not widen this guard"
-                # note, as TopNManifestPruningStrategy.
+                # We only optimize when there are no filters. This guard is what
+                # protects the file drop below: a LIMIT CAN now sit on a scan that
+                # absorbed a predicate (supports_filtered_limit_pushdown), and the
+                # record_count accumulation is unsound the moment any row of a
+                # file may be filtered out. A DECLINED predicate cannot reach here
+                # either: it stays as a Filter node, which LimitPushdownStrategy
+                # refuses to push a LIMIT past, so `node.limit` is None whenever
+                # one survives. Same "do not widen this guard" note as
+                # TopNManifestPruningStrategy.
                 return context
 
             limit_value = node.limit

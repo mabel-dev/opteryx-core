@@ -42,6 +42,31 @@ class _NoFilesystemTable(BaseTable):
         return self.schema, None
 
 
+class _RecordedDataFile:
+    """Stands in for a streaming data file: counts rows, hands back a FileEntry."""
+
+    def __init__(self, path):
+        self.path = path
+        self.rows = 0
+        self.uncompressed_size_in_bytes = 0
+
+    def write_row_group(self, morsel):
+        self.rows += len(morsel)
+        self.uncompressed_size_in_bytes += morsel.nbytes
+
+    def close(self):
+        return FileEntry(
+            file_path=self.path,
+            file_format="PARQUET",
+            record_count=self.rows,
+            file_size_in_bytes=1,
+            catalog_entry={"file_path": self.path, "record_count": self.rows},
+        )
+
+    def abort(self):
+        pass
+
+
 class _NoFilesystemConnector(BaseConnector, Writable):
     """Minimal in-memory catalog-shaped connector - like OpteryxConnector,
     relations live in a dict, not a filesystem directory."""
@@ -62,13 +87,9 @@ class _NoFilesystemConnector(BaseConnector, Writable):
         schema, _ = self._relations[name]
         return _NoFilesystemTable(schema)
 
-    def write_morsel(self, relation_name, morsel):
-        return FileEntry(
-            file_path=f"memory://{relation_name}/{id(morsel)}",
-            file_format="PARQUET",
-            record_count=len(morsel),
-            file_size_in_bytes=0,
-        )
+    def open_data_file_writer(self, relation_name, sorted_by=None, sorted_descending=False,
+                              write_profile="fast"):
+        return _RecordedDataFile(f"memory://{relation_name}/{id(self)}")
 
     def insert(self, relation_name, file_entries, author=None, **kwargs):
         self._relations[relation_name][1] += sum(fe.record_count for fe in file_entries)
