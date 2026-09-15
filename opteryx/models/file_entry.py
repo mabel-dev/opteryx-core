@@ -303,6 +303,26 @@ class FileEntry:
             catalog_null_counts = entry.get("null_counts")
             null_value_counts = _key_by_field_id(catalog_null_counts)
 
+            # "distinct_counts": the OPTIONAL, ESTIMATE-ONLY NDV column. It is
+            # empty for everything the catalog computes itself (that path has
+            # the `min_k_hashes` sketches, which merge across files where a
+            # count cannot) and absent entirely on manifests written before the
+            # column existed - both read as "not computed", never as "no
+            # distinct values".
+            #
+            # is_exact is False for every one of them and is NOT read from the
+            # manifest, because the format does not persist the flag. That is
+            # what keeps these out of `_exact_cardinality_from_footers`, whose
+            # answer a consumer may treat as a BOUND (it prunes files and
+            # answers DISTINCT without reading), and routes them instead to
+            # `estimate_range_cardinality`, which is costing-only by contract.
+            catalog_distinct_counts = _key_by_field_id(entry.get("distinct_counts"))
+            distinct_value_counts = (
+                {fid: (count, False) for fid, count in catalog_distinct_counts.items()}
+                if catalog_distinct_counts
+                else None
+            )
+
             # Raw positional-by-field_id lists, kept alongside the field_id-keyed
             # dict forms above — mirrors min_values/max_values, which are passed
             # through as both a dict (lower_bounds/upper_bounds) and the raw list.
@@ -329,6 +349,7 @@ class FileEntry:
             max_length_bounds = None
             histogram_bins = None
             null_value_counts = None
+            distinct_value_counts = None
             min_lengths = None
             max_lengths = None
             catalog_null_counts = None
@@ -373,6 +394,7 @@ class FileEntry:
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
             null_value_counts=null_value_counts,
+            distinct_value_counts=distinct_value_counts,
             column_uncompressed_sizes_in_bytes=column_uncompressed_sizes,
             min_values=min_values,
             max_values=max_values,

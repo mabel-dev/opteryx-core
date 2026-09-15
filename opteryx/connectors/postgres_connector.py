@@ -16,9 +16,11 @@ config={...})`), the way `create_gcs_mabel_connector` is bound, and there is no
 Plan time (this module, Python): resolve `<workspace>.<schema>.<table>` to a
 relation, describe its result columns through the native client (a Parse +
 Describe round trip — the exact OIDs and typmods the scan will stream), map
-them to `ColumnType`, estimate the row count from `pg_class`, and translate the
-optimizer's pushed predicates / LIMIT / top-N / aggregate / DISTINCT into the
-scan statement with `$n` bind parameters (never interpolated literals).
+them to `ColumnType`, read the row count from wherever the declared `dialect`
+keeps it (PostgreSQL's `pg_class.reltuples`, CockroachDB's `SHOW STATISTICS`),
+and translate the optimizer's pushed predicates / LIMIT / top-N / aggregate /
+DISTINCT into the scan statement with `$n` bind parameters (never interpolated
+literals).
 
 Every pushed shape is rendered with the ENGINE's semantics spelled out where
 PostgreSQL's defaults differ: NULLS FIRST under ASC and NULLS LAST under DESC
@@ -84,6 +86,16 @@ _DRAKEN_NULL_TAG = 101  # DRAKEN_NULL: "no mapping" from pg_draken_type_for_oid
 # than as a read error so the caller gets the dataset-not-found contract.
 _SQLSTATE_UNDEFINED_TABLE = "42P01"
 _SQLSTATE_INVALID_SCHEMA = "3F000"
+
+# Wire-compatible servers that are NOT PostgreSQL keep their statistics
+# somewhere else, so the row-count statement is chosen by the binding, not
+# sniffed from `version()` at plan time. A wrong guess here is not a wrong
+# answer, it is a silently fabricated estimate - which is exactly what this
+# dialect key exists to stop - so it is DECLARED, and an unknown spelling is
+# refused rather than defaulted.
+DIALECT_POSTGRES = "postgres"
+DIALECT_COCKROACH = "cockroach"
+_DIALECTS = (DIALECT_POSTGRES, DIALECT_COCKROACH)
 
 _TYPE_BY_PHYSICAL: Dict[int, ColumnType] = {
     column_type.physical.value: column_type
@@ -162,6 +174,7 @@ class PostgresConnector(BaseConnector):
         schema: str = "public",
         timeout_s: int = 30,
         preserve_sql_case: bool = False,
+        dialect: str = DIALECT_POSTGRES,
         gcs_bucket: Optional[str] = None,
         telemetry: Optional[QueryTelemetry] = None,
         prefix: Optional[str] = None,
@@ -171,7 +184,7 @@ class PostgresConnector(BaseConnector):
             raise ValueError(
                 f"PostgresConnector: unknown configuration keys {sorted(kwargs)}; "
                 "expected host, port, dbname, user, password, sslmode, schema, timeout_s, "
-                "preserve_sql_case, gcs_bucket"
+                "preserve_sql_case, dialect, gcs_bucket"
             )
         for label, value in (("host", host), ("dbname", dbname), ("user", user)):
             if not isinstance(value, str) or not value:
@@ -181,6 +194,10 @@ class PostgresConnector(BaseConnector):
         if sslmode not in ("disable", "require", "verify-full"):
             raise ValueError(
                 f"PostgresConnector: sslmode must be disable, require or verify-full (got '{sslmode}')"
+            )
+        if dialect not in _DIALECTS:
+            raise ValueError(
+                f"PostgresConnector: dialect must be one of {', '.join(_DIALECTS)} (got '{dialect}')"
             )
         self.connection_config: Dict[str, Any] = {
             "host": host,
@@ -193,6 +210,9 @@ class PostgresConnector(BaseConnector):
         }
         self.default_schema = schema
         self.preserve_sql_case = bool(preserve_sql_case)
+        # Which server this binding actually talks to. Governs where the row
+        # count is read from - see `PostgresTable._row_estimate`.
+        self.dialect = dialect
         # Where this deployment keeps workspace metadata. Not part of the
         # customer's binding - the deployment's resolver supplies it, the same
         # value it hands a native workspace - and its absence simply means no
@@ -421,9 +441,10 @@ class PostgresTable(
         `stats_are_authoritative` is FALSE, always. These numbers describe the
         server as it was at the last refresh and the server moves underneath
         them, so they may shape a plan and must never decide an answer - see
-        `Manifest.stats_are_authoritative`. A missing or unreadable manifest is
-        not an error: the relation simply plans with the row estimate alone,
-        exactly as it did before any of this existed.
+        `Manifest.stats_are_authoritative`. A relation with NO manifest is not an
+        error - it simply plans with the row estimate alone, exactly as it did
+        before any of this existed. A manifest that is there but cannot be read
+        IS an error and ends the query; see `_read_stats_manifest`.
         """
         schema = self.get_dataset_schema()
         return schema, self._read_stats_manifest(schema)
@@ -433,21 +454,50 @@ class PostgresTable(
         if path is None:
             return None
 
+        from opteryx.compiled.http_client import HttpStatusError
+        from opteryx.connectors.io_systems.gcs_filesystem import OpteryxGcsFileSystem
         from opteryx.models.manifest import Manifest
         from opteryx.models.manifest_io import read_manifest_file_entries
 
-        try:
-            from opteryx.connectors.io_systems.gcs_filesystem import OpteryxGcsFileSystem
+        filesystem = OpteryxGcsFileSystem(bucket=self.gateway.gcs_bucket)
 
-            filesystem = OpteryxGcsFileSystem(bucket=self.gateway.gcs_bucket)
-            with filesystem.open_input_file(path) as handle:
-                data = bytes(handle.memoryview)
-            file_entries, _ = read_manifest_file_entries(data)
-        except Exception:
-            # A relation whose statistics have never been refreshed, or a
-            # storage blip. Planning without them is the pre-existing behaviour,
-            # not a degraded one, so this must not fail the query.
+        # Is there a manifest at all? Asked as its own question, because the two
+        # answers are not the same kind of thing: "this relation's statistics
+        # have never been refreshed" is the ORDINARY state of a newly-bound
+        # relation and plans without hints exactly as it did before any of this
+        # existed, while a refused credential, an unreachable bucket or a
+        # corrupt file is a FAILURE and must be seen. Only a 404 is absence -
+        # the same rule `S3FileSystem.get_file_info` states, and for the same
+        # reason: an object that exists being reported absent is a lie the
+        # caller cannot see through. `HttpStatusError.status` is 0 for a
+        # transport-level failure that never got a response, so that re-raises
+        # here too.
+        #
+        # This used to be a bare `except Exception: return None` wrapped around
+        # the read, which made every one of those failures invisible and
+        # indistinguishable from "no statistics yet" (CLAUDE.md 9).
+        try:
+            filesystem.get_file_info(path)
+        except HttpStatusError as err:
+            if err.status != 404:
+                raise
             return None
+
+        # No guard around the read: the object was there a moment ago, so a
+        # failure now (it was deleted in between, the bytes are not a manifest,
+        # the credential expired) is a real failure and ends the query.
+        #
+        # `GcsFile` is NOT a context manager (no __enter__/__exit__), so the
+        # `with` this replaces raised TypeError on every call - which the bare
+        # except swallowed, making the manifest unreadable for every relation
+        # whatever the storage held. try/finally here is resource release, not
+        # error handling: nothing is caught.
+        handle = filesystem.open_input_file(path)
+        try:
+            data = bytes(handle.memoryview)
+        finally:
+            handle.close()
+        file_entries, _ = read_manifest_file_entries(data)
 
         if not file_entries:
             return None
@@ -462,16 +512,46 @@ class PostgresTable(
         )
 
     def _row_estimate(self, query_text) -> Optional[int]:
-        """pg_class.reltuples — the planner's own estimate, free to read. -1 (never
-        analysed) and 0 both mean 'unknown' here: a real zero would make the
-        estimator treat the relation as empty, which an unanalysed table is not."""
-        rows = query_text(
-            self.connection_config,
-            "SELECT c.reltuples::float8::text FROM pg_catalog.pg_class c "
-            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = $1 AND c.relname = $2",
-            [self.schema_name, self.table_name],
-        )
+        """The server's own row count for this relation, or None if it has none.
+
+        Free to read, and it is the ONLY measured number the cost estimator gets
+        for a relation whose rows live behind a socket: without it every leaf
+        plans at `_UNKNOWN_ROW_COUNT` (statistics_refresh) and the join order is
+        decided by a constant. Where it comes from depends on the server, which
+        is why the binding declares a `dialect`:
+
+        * PostgreSQL - `pg_class.reltuples`, the planner's own estimate. -1
+          (never analysed) and 0 both mean 'unknown' here: a real zero would
+          make the estimator treat the relation as empty, which an unanalysed
+          table is not.
+        * CockroachDB - `SHOW STATISTICS`, the most recent sample. CockroachDB
+          leaves `pg_class.reltuples` NULL for every relation (it keeps no
+          PostgreSQL-shaped catalog statistics at all, and `pg_stats` is empty),
+          so the PostgreSQL statement returns nothing there - measured against a
+          v26.2 cluster. Its own statistics are collected automatically and are
+          EXACT, not estimates. The relation is named inline because `SHOW
+          STATISTICS FOR TABLE` takes an identifier, not a bind parameter;
+          `qualified_name` is the same quoted, quote-escaped spelling every
+          other statement this class builds uses.
+
+        A relation the server holds no statistics for returns None, and the
+        planner is told nothing rather than told a guess.
+        """
+        if self.gateway.dialect == DIALECT_COCKROACH:
+            rows = query_text(
+                self.connection_config,
+                f"SELECT row_count::text FROM [SHOW STATISTICS FOR TABLE {self.qualified_name}] "
+                "ORDER BY created DESC LIMIT 1",
+                [],
+            )
+        else:
+            rows = query_text(
+                self.connection_config,
+                "SELECT c.reltuples::float8::text FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = $1 AND c.relname = $2",
+                [self.schema_name, self.table_name],
+            )
         if not rows or rows[0][0] is None:
             return None
         estimate = float(rows[0][0])

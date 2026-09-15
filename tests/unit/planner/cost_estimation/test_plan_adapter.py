@@ -44,15 +44,21 @@ class _Flag:
         features.enable_dpccp_join_planning = self.prev
 
 
-def _capture_graphs(sql):
-    """Run SQL with the strategy on; return every JoinGraph the adapter built."""
+def _capture_graphs(sql, reasons=None):
+    """Run SQL with the strategy on; return every JoinGraph the adapter built.
+
+    ``build_join_graph`` returns ``(graph, refusal)`` — the refusal names which
+    of its three declines fired. Pass a list as ``reasons`` to collect them.
+    """
     captured = []
     real_build = plan_adapter.build_join_graph
 
     def wrapped(plan, leaves, predicates):
-        graph = real_build(plan, leaves, predicates)
+        graph, refusal = real_build(plan, leaves, predicates)
         captured.append(graph)
-        return graph
+        if reasons is not None:
+            reasons.append(refusal)
+        return graph, refusal
 
     from opteryx.planner.optimizer.strategies import join_planning
 
@@ -90,9 +96,13 @@ def test_disconnected_predicates_yield_none():
          testdata.satellites c, testdata.satellites d
     WHERE a.id = b.id AND c.id = d.id LIMIT 1
     """
-    graphs = _capture_graphs(sql)
+    reasons = []
+    graphs = _capture_graphs(sql, reasons)
     assert graphs, "adapter should have been called"
     assert any(g is None for g in graphs)
+    # And it must say WHY it is None: a disconnected graph is not the same
+    # problem as a missing equi predicate or an unbacked leaf.
+    assert any(r is not None and "disconnected join graph" in r for r in reasons), reasons
 
 
 def test_edge_payload_preserves_predicate():

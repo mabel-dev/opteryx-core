@@ -154,8 +154,11 @@ private:
             }
         }
         g.rows_emitted += rows;
-        stats.rows_out.fetch_add(rows, std::memory_order_relaxed);
-        stats.calls.fetch_add(1, std::memory_order_relaxed);
+        // `stats.rows_out`/`stats.calls`/`stats.bytes_out` are NOT touched here:
+        // the driver already charges every Source for the morsel it returns
+        // (executor.hpp, the get_morsel bracket), so counting again made this
+        // scan - and only this scan, no other Source does it - report exactly
+        // twice the rows it emitted in EXPLAIN ANALYZE and telemetry.
         out = std::move(morsel);
         return SourceResult::HAVE_MORE;
     }

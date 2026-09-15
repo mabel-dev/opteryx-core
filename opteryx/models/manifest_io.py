@@ -46,6 +46,25 @@ _MANIFEST_COLUMNS = {
     "max_lengths": "ARRAY",
     "char_class_counts": "ARRAY",
     "char_total_bytes": "ARRAY",
+    # OPTIONAL, and ESTIMATE-ONLY. Positional per-field-id distinct-value
+    # counts, for a producer whose source publishes NDV as a number rather than
+    # as something mergeable (the control plane's PostgreSQL/CockroachDB stats
+    # refresh: `SHOW STATISTICS`' distinct_count, `pg_stats`' n_distinct).
+    #
+    # Appended LAST on purpose. A manifest written before this column existed
+    # simply does not carry it and must keep reading - see
+    # read_manifest_file_entries, which reads it through `.get` - so no stored
+    # manifest needs rewriting.
+    #
+    # The exactness flag of FileEntry.distinct_value_counts is deliberately NOT
+    # persisted: everything read back out of this column is marked
+    # is_exact=False. That is the safe direction - an exact count read back as
+    # an estimate loses an optimisation (it can no longer be a BOUND for
+    # _exact_cardinality_from_footers, so never prunes or answers a DISTINCT),
+    # where an estimate read back as exact would lose rows. Exact NDV travels
+    # by its own routes (parquet footer `column_stats`, skene's sketches), not
+    # through here.
+    "distinct_counts": "ARRAY",
 }
 
 # Columns whose whole-column native draken Vector the planner reduces with
@@ -86,6 +105,7 @@ def _manifest_column_types():
         "max_lengths": _lt.ARRAY(_lt.INT64),
         "char_class_counts": _lt.ARRAY(_lt.ARRAY(_lt.INT64)),
         "char_total_bytes": _lt.ARRAY(_lt.INT64),
+        "distinct_counts": _lt.ARRAY(_lt.INT64),
     }
 
 
@@ -235,6 +255,32 @@ def _histogram_bins_of(file_entry: FileEntry, histogram: Optional[List]) -> int:
     return widths.pop()
 
 
+def _distinct_counts_as_list(file_entry: FileEntry, schema) -> list:
+    """`file_entry.distinct_value_counts` as a dense positional list, or `[]`.
+
+    Position IS field id here, exactly as it is for `null_counts` and
+    `min_values` - `_file_entry_to_manifest_dict` writes `field_ids` as
+    `range(len(schema.columns))`, which is what makes the two the same number.
+    A column with no count holds None rather than being skipped: a gap would
+    shift every later column's count onto the wrong column.
+
+    `[]` when this file tracks no counts at all, which is the common case (the
+    parquet path carries NDV inside `column_stats` instead) and writes the
+    column empty, the way min_k_hashes/histogram_counts/char_class_counts are
+    written empty by producers that do not compute them.
+
+    The (count, is_exact) flag is DROPPED - see `distinct_counts` in
+    _MANIFEST_COLUMNS for why that is the safe direction.
+    """
+    counts = file_entry.distinct_value_counts
+    if not counts:
+        return []
+    return [
+        None if counts.get(position) is None else int(counts[position][0])
+        for position in range(len(schema.columns))
+    ]
+
+
 def _file_entry_to_manifest_dict(
     file_entry: FileEntry,
     schema,
@@ -261,6 +307,7 @@ def _file_entry_to_manifest_dict(
         "max_lengths": file_entry.max_lengths or [],
         "char_class_counts": char_class or [],
         "char_total_bytes": file_entry.char_total_bytes or [],
+        "distinct_counts": _distinct_counts_as_list(file_entry, schema),
     }
 
 
@@ -505,6 +552,11 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
         return [], native
 
     entries = []
+    # OPTIONAL COLUMN: a manifest written before `distinct_counts` existed does
+    # not carry it, and must keep reading rather than KeyError - no stored
+    # manifest is rewritten for this. Absent reads as "no counts anywhere",
+    # which is exactly what those manifests meant.
+    distinct_counts_column = columns.get("distinct_counts")
     for i in range(row_count):
         min_values = columns["min_values"][i] or []
         max_values = columns["max_values"][i] or []
@@ -525,6 +577,15 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
         # read. Both are carried, neither is derived at the call site.
         row_null_counts = columns["null_counts"][i] or []
         null_value_counts = {j: v for j, v in enumerate(row_null_counts) if v is not None} or None
+        # ESTIMATE-ONLY, always: `is_exact` is False for every count read back
+        # here, because this column does not persist the flag. That keeps these
+        # out of `_exact_cardinality_from_footers` (which requires the flag, and
+        # whose consumers may treat its answer as a BOUND) and routes them to
+        # `estimate_range_cardinality`, which is costing-only by contract.
+        row_distinct_counts = (distinct_counts_column[i] if distinct_counts_column else None) or []
+        distinct_value_counts = {
+            j: (v, False) for j, v in enumerate(row_distinct_counts) if v is not None
+        } or None
         entries.append(
             FileEntry(
                 file_path=columns["file_path"][i],
@@ -540,6 +601,7 @@ def read_manifest_file_entries(data: bytes) -> Tuple[List[FileEntry], dict]:
                 or None,
                 null_counts=row_null_counts or None,
                 null_value_counts=null_value_counts,
+                distinct_value_counts=distinct_value_counts,
                 min_lengths=min_lengths or None,
                 max_lengths=max_lengths or None,
                 min_length_bounds=min_length_bounds,

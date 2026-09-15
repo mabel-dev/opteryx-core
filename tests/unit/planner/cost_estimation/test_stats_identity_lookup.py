@@ -166,8 +166,8 @@ def test_join_graph_edges_receive_stats_ndv_and_null_fraction():
         _identifier("customer", c_cols["c_custkey"]),
     )
 
-    graph = plan_adapter.build_join_graph(plan, leaves, [predicate])
-    assert graph is not None, "graph construction itself must succeed"
+    graph, refusal = plan_adapter.build_join_graph(plan, leaves, [predicate])
+    assert graph is not None, f"graph construction itself must succeed: {refusal}"
     assert len(graph.edges) == 1
     left_key, right_key = graph.edges[0].equi_keys[0]
     assert left_key.ndv == 100_000
@@ -197,8 +197,8 @@ def test_self_join_sides_keep_their_own_statistics():
         _identifier("e2", e2_cols["manager_id"]),
     )
 
-    graph = plan_adapter.build_join_graph(plan, leaves, [predicate])
-    assert graph is not None
+    graph, refusal = plan_adapter.build_join_graph(plan, leaves, [predicate])
+    assert graph is not None, refusal
     left_key, right_key = graph.edges[0].equi_keys[0]
     # Each side's OWN stats — not a name-collapsed merge of the two.
     assert left_key.ndv == 50_000

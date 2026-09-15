@@ -305,6 +305,138 @@ def test_row_estimate_semantics():
     assert table._row_estimate(lambda config, sql, params: []) is None
 
 
+def test_row_estimate_statement_is_chosen_by_dialect():
+    """CockroachDB leaves pg_class.reltuples NULL for every relation, so the
+    PostgreSQL statement answers nothing there and every leaf plans at the
+    estimator's unknown-row-count stand-in. The binding declares which server
+    it is; the statement follows that declaration and nothing else."""
+    seen = []
+
+    def _capture(config, sql, params):
+        seen.append((sql, params))
+        return [["5"]]
+
+    postgres = _table()
+    assert postgres.gateway.dialect == "postgres"
+    assert postgres._row_estimate(_capture) == 5
+    assert "pg_catalog.pg_class" in seen[-1][0]
+    assert seen[-1][1] == ["public", "planets"]
+
+    cockroach = _table(dialect="cockroach")
+    assert cockroach._row_estimate(_capture) == 5
+    # The relation is named inline (SHOW STATISTICS takes an identifier, not a
+    # bind parameter), quoted the same way every other statement quotes it.
+    assert "SHOW STATISTICS FOR TABLE \"public\".\"planets\"" in seen[-1][0]
+    assert seen[-1][1] == []
+
+    # A relation the server holds no statistics for stays unknown - never a guess.
+    assert cockroach._row_estimate(lambda config, sql, params: []) is None
+
+
+# ---- statistics manifest ---------------------------------------------------------
+
+
+class _FakeHandle:
+    def __init__(self, data):
+        self._data = data
+        self.closed = False
+
+    @property
+    def memoryview(self):
+        return memoryview(self._data)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeGcs:
+    """Stands in for OpteryxGcsFileSystem. `stat` is what get_file_info does:
+    either None (the object is there) or an HttpStatusError to raise."""
+
+    last = None
+
+    def __init__(self, bucket=None, stat=None, data=b""):
+        self.bucket = bucket
+        self._stat = stat
+        self._data = data
+        self.handle = None
+        self.opened = None
+        _FakeGcs.last = self
+
+    def get_file_info(self, path):
+        if self._stat is not None:
+            raise self._stat
+        return object()
+
+    def open_input_file(self, path):
+        self.opened = path
+        self.handle = _FakeHandle(self._data)
+        return self.handle
+
+
+def _stats_table(monkeypatch, **fake_kwargs):
+    from opteryx.connectors.io_systems import gcs_filesystem
+
+    monkeypatch.setattr(
+        gcs_filesystem,
+        "OpteryxGcsFileSystem",
+        lambda **kwargs: _FakeGcs(**{**kwargs, **fake_kwargs}),
+    )
+    return _table(gcs_bucket="metadata-bucket")
+
+
+def test_no_manifest_location_reads_nothing():
+    """No bucket configured is not a failure and is not a read - the deployment
+    simply keeps no statistics for this binding."""
+    table = _table()
+    assert table.gateway.stats_manifest_path("public", "planets") is None
+    assert table._read_stats_manifest(None) is None
+
+
+def test_an_absent_manifest_is_not_an_error(monkeypatch):
+    """404: this relation's statistics have never been refreshed. The ordinary
+    state of a newly-bound relation - plan with the row estimate alone."""
+    from opteryx.compiled.http_client import HttpStatusError
+
+    table = _stats_table(monkeypatch, stat=HttpStatusError("HTTP 404: gone", 404))
+    assert table._read_stats_manifest(None) is None
+    assert _FakeGcs.last.opened is None  # never attempted the read
+
+
+@pytest.mark.parametrize("status", [403, 500, 0])
+def test_a_manifest_that_cannot_be_read_is_an_error(monkeypatch, status):
+    """A refused credential, a broken bucket, a transport failure that never got
+    a response (status 0) - none of these mean "no statistics". They used to be
+    swallowed by a bare `except Exception`, which made them invisible."""
+    from opteryx.compiled.http_client import HttpStatusError
+
+    table = _stats_table(monkeypatch, stat=HttpStatusError("HTTP boom", status))
+    with pytest.raises(HttpStatusError):
+        table._read_stats_manifest(None)
+
+
+def test_a_present_manifest_is_actually_read(monkeypatch):
+    """The read path runs and releases the handle. It could not before: GcsFile
+    is not a context manager, so the `with` that used to wrap this raised
+    TypeError on EVERY call and the bare except turned it into "no manifest" -
+    the manifest was unreadable for every relation, whatever storage held."""
+    from opteryx.models import manifest_io
+
+    seen = {}
+
+    def _fake_read(data):
+        seen["data"] = data
+        return [], None
+
+    monkeypatch.setattr(manifest_io, "read_manifest_file_entries", _fake_read)
+    table = _stats_table(monkeypatch, data=b"MANIFEST-BYTES")
+
+    assert table._read_stats_manifest(None) is None  # no entries -> no manifest
+    assert seen["data"] == b"MANIFEST-BYTES"
+    assert _FakeGcs.last.opened.endswith("/metadata/manifest-planets.parquet")
+    assert _FakeGcs.last.handle.closed is True
+
+
 # ---- connector config ------------------------------------------------------------
 
 
@@ -313,6 +445,8 @@ def test_connector_config_validation():
         PostgresConnector(host="h", dbname="d", user="u", password="p", bogus=1)
     with pytest.raises(ValueError, match="sslmode"):
         PostgresConnector(host="h", dbname="d", user="u", password="p", sslmode="prefer")
+    with pytest.raises(ValueError, match="dialect"):
+        PostgresConnector(host="h", dbname="d", user="u", password="p", dialect="mysql")
     with pytest.raises(ValueError, match="'host'"):
         PostgresConnector(host="", dbname="d", user="u", password="p")
     connector = PostgresConnector(host="h", dbname="d", user="u", password="secret", port="5433")

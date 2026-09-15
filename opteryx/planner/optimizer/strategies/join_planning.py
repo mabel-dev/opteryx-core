@@ -238,16 +238,17 @@ class JoinPlanningStrategy(OptimizationStrategy):
                 )
                 continue
 
-            graph = build_join_graph(plan, leaves, predicates)
+            graph, refusal = build_join_graph(plan, leaves, predicates)
             if graph is None:
-                # build_join_graph refuses for three reasons it does not currently
-                # distinguish: no cross-leaf equi predicate, a leaf with no row
-                # count, or a disconnected graph. The counts below narrow it.
+                # build_join_graph names WHICH of its three refusals fired — no
+                # cross-leaf equi predicate, a leaf with no real row count, or a
+                # disconnected graph. Recorded verbatim: collapsing them into one
+                # "no usable join graph" line is what made the 8-leaf Postgres Q8
+                # decline unreadable without a monkeypatch.
                 self.record_decision(
                     label,
-                    f"declined, no usable join graph: {len(leaves)} leaves,"
-                    f" {len(predicates)} predicate(s) above the chain"
-                    " (no equi edge, missing row statistics, or disconnected)",
+                    f"declined, {refusal}: {len(leaves)} leaves,"
+                    f" {len(predicates)} predicate(s) above the chain",
                 )
                 continue
 

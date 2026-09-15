@@ -374,22 +374,35 @@ def build_join_graph(
     plan: LogicalPlan,
     leaves: List[Any],
     predicates: List[Node],
-) -> Optional[JoinGraph]:
+) -> Tuple[Optional[JoinGraph], Optional[str]]:
     """Build a JoinGraph from a leaf list and the predicates above the chain.
 
     ``leaves`` are the ``_Leaf`` objects from
     ``cross_join_chain_reorder._gather_leaves`` — each carries
     ``subplan_id`` and ``rel_names``.
 
-    Returns None when the graph cannot be built (missing manifests, no
-    edges, or the graph would be disconnected — DPccp requires connectivity).
+    Returns ``(graph, None)`` on success, or ``(None, reason)`` when the graph
+    cannot be built. The reason is NOT cosmetic: this function refuses for
+    three causes that point at three different pieces of work —
+
+      * no cross-leaf equality predicate survived ``_classify_predicate`` /
+        the ``rel_to_leaf`` name mapping (a predicate whose identifier source
+        does not match any leaf's ``rel_names`` is silently unmappable, and
+        reads exactly like a query with no equi-joins),
+      * a leaf reported no real row count (``_leaf_row_count`` refuses a
+        fabricated ``_UNKNOWN_ROW_COUNT`` stand-in),
+      * the graph is disconnected — DPccp requires connectivity.
+
+    Collapsed into one message they are indistinguishable, and telling them
+    apart meant monkeypatching this function. The caller records the reason
+    verbatim; see ``join_planning.JoinPlanningStrategy.optimize``.
 
     Non-equi cross-leaf predicates and any predicate the adapter doesn't
     understand are left in place; the caller's existing Filter nodes
     continue to enforce them after the rewrite.
     """
     if not leaves:
-        return None
+        return None, "no leaves"
 
     rel_to_leaf: Dict[str, int] = {}
     for i, leaf in enumerate(leaves):
@@ -410,18 +423,52 @@ def build_join_graph(
         # ignored for graph building (the original Filter still enforces
         # them after the rewrite).
 
+    # Checked HERE rather than after the edge list is materialised: edges are
+    # built one-per-``cross_equi`` entry unconditionally, so "no edges" and
+    # "no cross-leaf equi predicate" are the same condition, and reporting it
+    # before the row-count refusal keeps the two causes independent.
+    #
+    # The leaf relation names go in the message because the commonest way to
+    # land here is NOT a genuinely cartesian query: ``rel_to_leaf`` is keyed on
+    # ``leaf.rel_names``, so a predicate whose identifier ``source`` spells the
+    # relation differently (a view alias, say) maps to no leaf and drops out
+    # silently. Printing both sides of that mapping makes the mismatch visible
+    # instead of inferable.
+    if not cross_equi:
+        unmapped = sorted(
+            {
+                src
+                for pred in predicates
+                for src in (
+                    _identifier_source(getattr(pred, "left", None)),
+                    _identifier_source(getattr(pred, "right", None)),
+                )
+                if src is not None and src not in rel_to_leaf
+            }
+        )
+        return None, (
+            f"no cross-leaf equality predicate: none related two different"
+            f" leaves by equality; leaf relations {sorted(rel_to_leaf)},"
+            f" predicate identifier sources matching no leaf {unmapped}"
+        )
+
     # Resolve scan nodes per leaf (relation -> scan).
     per_leaf_scans: List[Dict[str, Any]] = [
         _leaf_relation_to_scan(plan, leaf.subplan_id, leaf.rel_names) for leaf in leaves
     ]
 
-    # Build vertices.
+    # Build vertices. Every leaf that cannot report a REAL row count is named,
+    # not just the first one — a single unbacked leaf and a whole chain of them
+    # are different problems (one relation missing a manifest, versus a
+    # connector that reports no size at all), and the count is the tell.
     vertices: List[JoinVertex] = []
+    unbacked: List[str] = []
     for i, leaf in enumerate(leaves):
         rows = _leaf_row_count(plan, leaf.subplan_id)
-        if rows is None:
-            return None
         name = leaf.rel_names[0] if leaf.rel_names else f"leaf_{i}"
+        if rows is None:
+            unbacked.append(name)
+            continue
         vertices.append(
             JoinVertex(
                 id=i,
@@ -430,6 +477,13 @@ def build_join_graph(
                 payload=leaf,
                 base_row_count=_leaf_domain_row_count(plan, leaf.subplan_id),
             )
+        )
+
+    if unbacked:
+        return None, (
+            f"missing row statistics: {len(unbacked)} of {len(leaves)} leaves"
+            f" report no real row count {unbacked} — DPccp will not cost a tree"
+            f" from a fabricated size"
         )
 
     # Compute equivalence-set tdoms from all cross-equi predicates. When NDV is
@@ -496,10 +550,19 @@ def build_join_graph(
             )
         )
 
-    if not edges:
-        return None
+    # ``edges`` cannot be empty here: the ``not cross_equi`` refusal above
+    # covers the only way it could be, and this loop adds one edge per entry.
 
     graph = JoinGraph(vertices=vertices, edges=edges)
     if not graph.is_connected(graph.full_mask):
-        return None
-    return graph
+        components = graph.connected_components(graph.full_mask)
+        rendered = [
+            sorted(vertices[i].name for i in range(graph.n) if component >> i & 1)
+            for component in components
+        ]
+        return None, (
+            f"disconnected join graph: {graph.n} vertices, {len(edges)} edge(s)"
+            f" in {len(components)} components {rendered}; DPccp requires a"
+            f" connected graph"
+        )
+    return graph, None
