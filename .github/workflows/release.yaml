@@ -108,11 +108,12 @@ jobs:
       #
       #   1. ~60 .so / ~36MB — the Cython/C++ extensions plus the Rust-built
       #      opteryx.compute.
-      #   2. Four GENERATED .py modules, written by
-      #      build_common.write_draken_abi_modules() (called from setup.py) on
-      #      every build: the draken stamp and one consumer check per package
-      #      the wheel ships. They are not tracked in git, so a fresh checkout
-      #      does not have them — they exist only in a compiled tree.
+      #   2. Five GENERATED .py modules, written from setup.py on every build:
+      #      build_common.write_draken_abi_modules() writes the draken stamp and
+      #      one consumer check per package the wheel ships, and
+      #      build_common.write_rugo_build_identity() writes the rugo writer
+      #      identity. They are not tracked in git, so a fresh checkout does not
+      #      have them — they exist only in a compiled tree.
       #
       # If a new generated-at-build-time module ever appears, it must be added
       # here too. The `Verify the compiled tree imports` step in test-python is
@@ -132,6 +133,7 @@ jobs:
             draken/_abi_stamp.py
             opteryx/_draken_abi.py
             rugo/_draken_abi.py
+            rugo/_build_identity.py
             skene/_draken_abi.py
             !build/**
           if-no-files-found: error
@@ -193,8 +195,13 @@ jobs:
         with:
           name: compiled-tree
 
+      # Imports EVERY package that carries a generated-at-build-time module, not
+      # just opteryx: `import opteryx` alone does not pull in rugo (it arrives
+      # later, via opteryx.compiled.structures.column_stats inside the operator
+      # import chain), so a rugo module missing from the artifact sailed past
+      # this step and surfaced as a mid-suite ModuleNotFoundError instead.
       - name: Verify the compiled tree imports
-        run: python -c "import opteryx; print(opteryx.__version__)"
+        run: python -c "import draken, rugo, skene, opteryx; print(opteryx.__version__)"
 
       - name: ${{ matrix.name }}
         run: make ${{ matrix.target }}
